@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.44",
-    "@ai-sdk/react": "^3.0.88",
+    "@ai-sdk/react": "^3.0.107",
     "@assistant-ui/react": "^0.12.10",
     "@assistant-ui/react-ai-sdk": "^1.3.7",
     "@monaco-editor/react": "^4.7.0",
