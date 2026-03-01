@@ -25,7 +25,7 @@
   "type": "commonjs",
   "devDependencies": {
     "@playwright/test": "1.57.0",
-    "@types/node": "^25.0.3",
+    "@types/node": "^25.3.3",
     "dotenv": "^17.2.3"
   },
   "dependencies": {
