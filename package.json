@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-code": "^1.0.0",
-    "@playwright/mcp": "^0.0.28",
+    "@playwright/mcp": "^0.0.68",
     "playwright": "1.57.0",
     "playwright-core": "1.57.0",
     "undici-types": "^7.16.0"
