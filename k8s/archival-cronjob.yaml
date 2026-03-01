@@ -1,0 +1,52 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: archival-job
+  namespace: quorvex
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: archival
+            image: quorvex-backend:latest
+            imagePullPolicy: IfNotPresent
+            command: ["python", "-m", "orchestrator.services.archival", "--run-now"]
+            env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: quorvex-secrets
+                  key: database-url
+            - name: MINIO_ENDPOINT
+              value: "http://minio:9000"
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: quorvex-secrets
+                  key: minio-root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: quorvex-secrets
+                  key: minio-root-password
+            - name: MINIO_BUCKET
+              value: "playwright-backups"
+            - name: MINIO_BUCKET_ARTIFACTS
+              value: "playwright-artifacts"
+            volumeMounts:
+            - name: runs
+              mountPath: /app/runs
+            - name: backups
+              mountPath: /backups
+          restartPolicy: OnFailure
+          volumes:
+          - name: runs
+            persistentVolumeClaim:
+              claimName: runs-pvc
+          - name: backups
+            persistentVolumeClaim:
+              claimName: backup-pvc

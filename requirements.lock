@@ -1,0 +1,62 @@
+# Locked dependency versions for reproducible Docker builds.
+# Generated from orchestrator/requirements.txt with pinned versions.
+# To regenerate: make deps-lock
+
+# Core AI
+claude-agent-sdk==0.1.22
+
+# Utilities
+jsonschema==4.26.0
+python-dotenv==1.2.1
+black==25.12.0
+pytest==9.0.2
+pytest-asyncio==1.3.0
+Pillow==11.3.0
+
+# Web framework
+fastapi==0.128.0
+httpx==0.28.1
+uvicorn==0.40.0
+python-multipart==0.0.21
+starlette==0.50.0
+
+# Database
+sqlmodel==0.0.31
+SQLAlchemy==2.0.45
+psycopg2-binary==2.9.11
+alembic==1.18.3
+Mako==1.3.10
+greenlet==3.3.1
+
+# Memory and Coverage
+chromadb==1.4.0
+networkx==3.4.2
+openai==2.15.0
+anthropic==0.76.0
+
+# Authentication & Security
+passlib==1.7.4
+bcrypt==4.3.0
+python-jose==3.5.0
+cryptography==46.0.3
+PyJWT==2.10.1
+pydantic==2.11.10
+pydantic-settings>=2.0.0
+slowapi==0.1.9
+limits==5.6.0
+redis>=4.0.0
+
+# PDF Processing
+pdfplumber>=0.10.0
+pymupdf>=1.23.0
+
+# Scheduling
+APScheduler==3.11.2
+tzlocal==5.3.1
+
+# Storage & Backup
+minio>=7.2.0
+
+# Resilience
+tenacity==9.0.0
+circuitbreaker==2.0.0

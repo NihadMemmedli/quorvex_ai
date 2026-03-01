@@ -1,0 +1,33 @@
+[project]
+name = "playwright-agent-orchestrator"
+version = "1.0.0"
+requires-python = ">=3.10"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "E402",  # module-level import not at top of file (required by setup_claude_env() pattern)
+    "E711",  # comparison to None (SQLAlchemy filters use == None)
+    "E712",  # comparison to True/False (SQLAlchemy filters use == True)
+    "B008",  # do not perform function call in argument defaults (FastAPI Depends)
+    "B904",  # raise from within except (too noisy, not a bug)
+    "B905",  # zip without strict
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["orchestrator"]
+
+[tool.ruff.format]
+quote-style = "double"

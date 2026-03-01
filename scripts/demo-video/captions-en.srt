@@ -1,0 +1,112 @@
+1
+00:00:00,500 --> 00:00:03,500
+Writing a hundred test cases by hand
+takes weeks.
+
+2
+00:00:03,500 --> 00:00:06,000
+Watch this AI do it
+in thirty seconds.
+
+3
+00:00:06,500 --> 00:00:09,500
+Manual test writing is slow,
+error-prone, and doesn't scale.
+
+4
+00:00:09,500 --> 00:00:12,000
+This dashboard changes everything.
+
+5
+00:00:13,000 --> 00:00:15,500
+Point this AI at any web app.
+
+6
+00:00:15,500 --> 00:00:19,000
+It explores every page,
+discovers user flows,
+
+7
+00:00:19,000 --> 00:00:22,000
+and maps API endpoints —
+completely on its own.
+
+8
+00:00:22,000 --> 00:00:25,000
+No scripts, no setup —
+just a URL.
+
+9
+00:00:26,000 --> 00:00:30,000
+From exploration to production-ready
+Playwright tests — fully automated.
+
+10
+00:00:30,000 --> 00:00:34,000
+Requirements extraction,
+test generation,
+
+11
+00:00:34,000 --> 00:00:37,500
+and self-healing validation —
+all in one pipeline.
+
+12
+00:00:37,500 --> 00:00:41,000
+When a test breaks,
+the AI fixes it automatically.
+
+13
+00:00:42,000 --> 00:00:44,500
+Not just UI tests.
+
+14
+00:00:44,500 --> 00:00:47,500
+API testing from OpenAPI specs.
+
+15
+00:00:47,500 --> 00:00:50,500
+Load testing with real-time metrics.
+
+16
+00:00:50,500 --> 00:00:53,500
+Multi-tier security scanning.
+
+17
+00:00:53,500 --> 00:00:56,000
+Database quality checks.
+
+18
+00:00:56,000 --> 00:01:00,000
+Even LLM evaluation
+for your AI models.
+
+19
+00:01:01,000 --> 00:01:05,000
+CI/CD integration
+with GitHub and GitLab.
+
+20
+00:01:05,000 --> 00:01:08,000
+Full requirements traceability.
+
+21
+00:01:08,000 --> 00:01:11,000
+Regression reports.
+Cron scheduling.
+
+22
+00:01:11,000 --> 00:01:14,000
+Multi-project isolation.
+
+23
+00:01:15,000 --> 00:01:18,000
+AI-powered test automation.
+
+24
+00:01:18,000 --> 00:01:21,000
+From zero to full coverage.
+
+25
+00:01:21,000 --> 00:01:24,000
+Try it today.

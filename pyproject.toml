@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "playwright-agent"
+version = "1.0.0"
+description = "Natural language to Playwright test script converter"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+    "claude-agent-sdk==0.1.22",
+    "jsonschema==4.26.0",
+    "python-dotenv==1.2.1",
+    "black==25.12.0",
+    "pytest==9.0.2",
+    "pytest-asyncio==1.3.0",
+    "fastapi==0.128.0",
+    "uvicorn==0.40.0",
+    "sqlmodel==0.0.31",
+    "psycopg2-binary==2.9.11",
+    "alembic==1.18.3",
+    "minio>=7.2.0",
+]
+
+[project.scripts]
+playwright-agent = "orchestrator.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["orchestrator*"]

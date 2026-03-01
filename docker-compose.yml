@@ -1,0 +1,163 @@
+# Quorvex AI - Docker Compose Configuration
+#
+# Usage:
+#   docker-compose up -d          # Start all services
+#   docker-compose up -d db       # Start database only
+#   docker-compose down           # Stop all services
+#   docker-compose logs -f        # View logs
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '4.0'
+    container_name: quorvex-backend
+    shm_size: '2gb'
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./runs:/app/runs
+      - ./specs:/app/specs
+      - ./tests:/app/tests
+      - ./data:/app/data
+      - ./prds:/app/prds
+      - ./scripts:/app/scripts
+      # Mount code directories for hot-reload during development
+      - ./orchestrator:/app/orchestrator
+      - ./.claude:/app/.claude
+    environment:
+      # AI/LLM Configuration (from .env)
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - ANTHROPIC_AUTH_TOKENS=${ANTHROPIC_AUTH_TOKENS:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
+      - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-20250514}
+      # Memory System
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - MEMORY_ENABLED=${MEMORY_ENABLED:-true}
+      - CHROMADB_PERSIST_DIRECTORY=/app/data/chromadb
+      # Database (internal Docker network)
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/playwright_agent
+      # Redis (for K6 distributed mode when using --profile k6-workers)
+      - REDIS_URL=${REDIS_URL:-}
+      # Test Credentials (pass through from .env)
+      - LOGIN_USERNAME=${LOGIN_USERNAME:-}
+      - LOGIN_PASSWORD=${LOGIN_PASSWORD:-}
+      # Add your test credentials here:
+      # - MY_APP_USERNAME=${MY_APP_USERNAME:-}
+      # - MY_APP_PASSWORD=${MY_APP_PASSWORD:-}
+      - INVENTORY_EMAIL=${INVENTORY_EMAIL:-}
+      - INVENTORY_PASSWORD=${INVENTORY_PASSWORD:-}
+      - RESOURCE_NAME=${RESOURCE_NAME:-}
+      - RESOURCE_QUANTITY=${RESOURCE_QUANTITY:-}
+      - RESOURCE_CAPACITY=${RESOURCE_CAPACITY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: python -m uvicorn orchestrator.api.main:app --host 0.0.0.0 --port 8001 --reload
+    networks:
+      - playwright-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.dev
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+    container_name: quorvex-frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount source code for hot-reload during development
+      - ./web/src:/app/src
+      - ./web/public:/app/public
+    environment:
+      # Note: For browser access, this still uses localhost since the browser
+      # runs on the host machine, not inside Docker
+      - NEXT_PUBLIC_API_URL=http://localhost:8001
+      - WATCHPACK_POLLING=true
+    depends_on:
+      - backend
+    networks:
+      - playwright-network
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    container_name: quorvex-db-dev
+    ports:
+      - "5434:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=playwright_agent
+    volumes:
+      - postgres_data_dev:/var/lib/postgresql/data
+    networks:
+      - playwright-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d playwright_agent" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # Optional Redis for K6 distributed mode in development
+  redis:
+    image: redis:7-alpine
+    container_name: quorvex-redis-dev
+    ports:
+      - "6379:6379"
+    profiles:
+      - redis
+      - k6-workers
+    networks:
+      - playwright-network
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # K6 Load Test Worker (dev mode with auto-mounted code)
+  k6-workers:
+    build:
+      context: .
+      dockerfile: docker/k6-worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/playwright_agent
+      K6_TIMEOUT_SECONDS: ${K6_TIMEOUT_SECONDS:-3600}
+      K6_MAX_VUS: ${K6_MAX_VUS:-100}
+      # K6_WORKER_ID is auto-generated from container hostname
+    volumes:
+      # Mount code for hot-reload during development
+      - ./orchestrator:/app/orchestrator
+      - ./scripts:/app/scripts:ro
+      - ./runs:/app/runs
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    profiles:
+      - k6-workers
+    networks:
+      - playwright-network
+
+networks:
+  playwright-network:
+    driver: bridge
+
+volumes:
+  postgres_data_dev:

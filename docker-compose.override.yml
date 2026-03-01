@@ -1,0 +1,29 @@
+# Development override - mount source code for faster iteration
+# This file is auto-merged with docker-compose.yml when using `docker-compose up`
+#
+# Usage:
+#   - Make code changes to orchestrator/ or web/src/
+#   - Changes are picked up automatically (no restart needed for Python with --reload)
+#
+# Full commands:
+#   Start:   docker-compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.override.yml up -d
+#   Restart: docker-compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.override.yml restart backend
+#   Logs:    docker-compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.override.yml logs -f backend
+
+services:
+  backend:
+    # Override entrypoint to enable hot-reload
+    entrypoint: python -m uvicorn orchestrator.api.main:app --host 0.0.0.0 --port 8001 --reload
+    volumes:
+      # Mount source code for development
+      - ./orchestrator:/app/orchestrator
+      # Mount agent definitions
+      - ./.claude/agents:/app/.claude/agents
+      # Mount schemas
+      - ./schemas:/app/schemas
+
+  frontend:
+    # Mount frontend source for hot-reload
+    volumes:
+      - ./web/src:/app/src
+      - ./web/public:/app/public

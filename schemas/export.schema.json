@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Test Export Schema",
+  "description": "Schema for generated Playwright test code",
+  "type": "object",
+  "required": ["testFilePath", "code", "dependencies"],
+  "properties": {
+    "testFilePath": {
+      "type": "string",
+      "description": "Path where the test file should be saved"
+    },
+    "code": {
+      "type": "string",
+      "description": "Generated Playwright test code (TypeScript)"
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Required npm packages"
+    },
+    "notes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Notes about the generated code"
+    }
+  }
+}

@@ -1,0 +1,170 @@
+# Backend Deployment (Slim - no browsers)
+# FastAPI orchestrator that distributes tests to browser workers
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: quorvex
+  labels:
+    app.kubernetes.io/name: backend
+    app.kubernetes.io/component: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: quorvex-backend-slim:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8001
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: database-url
+        - name: ANTHROPIC_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: anthropic-token
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: anthropic-token
+        - name: ANTHROPIC_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: anthropic-base-url
+        - name: ANTHROPIC_DEFAULT_SONNET_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: anthropic-model
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: openai-api-key
+              optional: true
+        - name: JWT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: jwt-secret
+        - name: MINIO_ENDPOINT
+          value: "http://minio:9000"
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: minio-root-user
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: minio-root-password
+        - name: MINIO_BUCKET
+          value: "playwright-backups"
+        - name: SKILL_DIR
+          value: "/app/.claude/skills/playwright"
+        - name: SKILL_TIMEOUT
+          value: "30000"
+        - name: SLOW_MO
+          value: "0"
+        - name: AGENT_TIMEOUT_SECONDS
+          value: "1800"
+        - name: REDIS_URL
+          value: "redis://redis:6379/0"
+        - name: BROWSER_WORKERS_ENABLED
+          value: "true"
+        - name: PLAYWRIGHT_WORKERS
+          value: "4"
+        - name: DEFAULT_PARALLELISM
+          value: "4"
+        - name: REQUIRE_AUTH
+          value: "true"
+        - name: ALLOW_REGISTRATION
+          value: "false"
+        - name: LOG_LEVEL
+          value: "INFO"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "4"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        volumeMounts:
+        - name: runs
+          mountPath: /app/runs
+        - name: logs
+          mountPath: /app/logs
+        - name: specs
+          mountPath: /app/specs
+        - name: tests
+          mountPath: /app/tests
+        - name: test-results
+          mountPath: /app/test-results
+        - name: prds
+          mountPath: /app/prds
+        - name: data
+          mountPath: /app/data
+      volumes:
+      - name: runs
+        persistentVolumeClaim:
+          claimName: runs-pvc
+      - name: logs
+        persistentVolumeClaim:
+          claimName: logs-pvc
+      - name: specs
+        persistentVolumeClaim:
+          claimName: specs-pvc
+      - name: tests
+        persistentVolumeClaim:
+          claimName: tests-pvc
+      - name: test-results
+        persistentVolumeClaim:
+          claimName: test-results-pvc
+      - name: prds
+        persistentVolumeClaim:
+          claimName: prds-pvc
+      - name: data
+        persistentVolumeClaim:
+          claimName: data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: quorvex
+  labels:
+    app.kubernetes.io/name: backend
+spec:
+  selector:
+    app: backend
+  ports:
+  - port: 8001
+    targetPort: 8001
+  type: ClusterIP

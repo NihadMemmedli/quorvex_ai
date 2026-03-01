@@ -1,0 +1,94 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup-job
+  namespace: quorvex
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: backup
+            image: quorvex-backend:latest
+            imagePullPolicy: IfNotPresent
+            command: ["/bin/bash", "/scripts/full_backup.sh", "--daily"]
+            env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: quorvex-secrets
+                  key: database-url
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: quorvex-secrets
+                  key: postgres-password
+            - name: POSTGRES_HOST
+              value: "postgres"
+            - name: POSTGRES_USER
+              value: "playwright"
+            - name: POSTGRES_DB
+              value: "playwright_agent"
+            - name: BACKUP_DIR
+              value: "/backups"
+            - name: MINIO_ENDPOINT
+              value: "http://minio:9000"
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: quorvex-secrets
+                  key: minio-root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: quorvex-secrets
+                  key: minio-root-password
+            - name: MINIO_BUCKET
+              value: "playwright-backups"
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            - name: backups
+              mountPath: /backups
+            - name: specs
+              mountPath: /app/specs
+              readOnly: true
+            - name: tests
+              mountPath: /app/tests
+              readOnly: true
+            - name: prds
+              mountPath: /app/prds
+              readOnly: true
+            - name: data
+              mountPath: /app/data
+              readOnly: true
+            - name: runs
+              mountPath: /app/runs
+              readOnly: true
+          restartPolicy: OnFailure
+          volumes:
+          - name: scripts
+            configMap:
+              name: scripts-configmap
+              defaultMode: 0755
+          - name: backups
+            persistentVolumeClaim:
+              claimName: backup-pvc
+          - name: specs
+            persistentVolumeClaim:
+              claimName: specs-pvc
+          - name: tests
+            persistentVolumeClaim:
+              claimName: tests-pvc
+          - name: prds
+            persistentVolumeClaim:
+              claimName: prds-pvc
+          - name: data
+            persistentVolumeClaim:
+              claimName: data-pvc
+          - name: runs
+            persistentVolumeClaim:
+              claimName: runs-pvc

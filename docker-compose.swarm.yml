@@ -1,0 +1,155 @@
+# Docker Swarm deployment for simpler enterprise scaling
+# Deploy with: docker stack deploy -c docker-compose.swarm.yml quorvex
+
+services:
+  # Browser workers - scaled independently
+  browser-workers:
+    image: quorvex-worker:latest
+    build:
+      context: .
+      dockerfile: docker/browser-worker/Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      HEADLESS: "true"
+      PLAYWRIGHT_WORKERS: "1"
+    volumes:
+      - tests:/app/tests:ro
+      - specs:/app/specs:ro
+      - test_results:/app/test-results
+    deploy:
+      mode: replicated
+      replicas: 4
+      update_config:
+        parallelism: 2
+        delay: 10s
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    networks:
+      - playwright-net
+
+  # Slim backend - no browsers
+  backend:
+    image: quorvex-backend-slim:latest
+    build:
+      context: .
+      dockerfile: docker/backend-slim/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql://playwright:${POSTGRES_PASSWORD}@postgres:5432/playwright_agent
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN}
+      ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-3-sonnet-20240229}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      REDIS_URL: redis://redis:6379/0
+      BROWSER_WORKERS_ENABLED: "true"
+      PLAYWRIGHT_WORKERS: "4"
+      DEFAULT_PARALLELISM: "4"
+      REQUIRE_AUTH: "true"
+      ALLOW_REGISTRATION: "false"
+      LOG_LEVEL: "INFO"
+    volumes:
+      - runs:/app/runs
+      - logs:/app/logs
+      - specs:/app/specs
+      - tests:/app/tests
+      - test_results:/app/test-results
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+      resources:
+        limits:
+          memory: 4G
+          cpus: '4'
+        reservations:
+          memory: 1G
+          cpus: '1'
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - playwright-net
+
+  # Frontend
+  frontend:
+    image: quorvex-frontend:latest
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://backend:8001
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    depends_on:
+      - backend
+    networks:
+      - playwright-net
+
+  # Redis for job queue
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    networks:
+      - playwright-net
+
+  # PostgreSQL
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: playwright
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: playwright_agent
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+    networks:
+      - playwright-net
+
+networks:
+  playwright-net:
+    driver: overlay
+    attachable: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  runs:
+  logs:
+  specs:
+  tests:
+  test_results:

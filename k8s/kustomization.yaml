@@ -1,0 +1,44 @@
+# Kustomization for Quorvex Kubernetes deployment
+# Deploy with: kubectl apply -k k8s/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: quorvex
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secrets.yaml
+  - pvc.yaml
+  - redis.yaml
+  - postgres-deployment.yaml
+  - backend-deployment.yaml
+  - frontend-deployment.yaml
+  - browser-worker-deployment.yaml
+  - minio-deployment.yaml
+  - agent-worker-deployment.yaml
+  - k6-worker-deployment.yaml
+  - zap-deployment.yaml
+  - backup-cronjob.yaml
+  - archival-cronjob.yaml
+  - scripts-configmap.yaml
+  - ingress.yaml
+
+# Common labels applied to all resources
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: quorvex
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
+
+# Image customization (override in overlays)
+images:
+  - name: quorvex-worker
+    newName: your-registry/quorvex-worker
+    newTag: latest
+  - name: quorvex-backend-slim
+    newName: your-registry/quorvex-backend-slim
+    newTag: latest
+  - name: quorvex-frontend
+    newName: your-registry/quorvex-frontend
+    newTag: latest

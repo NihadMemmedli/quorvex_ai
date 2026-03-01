@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zap
+  namespace: quorvex
+  labels:
+    app.kubernetes.io/name: zap
+    app.kubernetes.io/component: security
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zap
+  template:
+    metadata:
+      labels:
+        app: zap
+    spec:
+      containers:
+      - name: zap
+        image: ghcr.io/zaproxy/zaproxy:stable
+        imagePullPolicy: IfNotPresent
+        command:
+          - zap.sh
+          - -daemon
+          - -host
+          - 0.0.0.0
+          - -port
+          - "8090"
+          - -config
+          - api.addrs.addr.name=.*
+          - -config
+          - api.addrs.addr.regex=true
+          - -config
+          - api.key=$(ZAP_API_KEY)
+        ports:
+        - containerPort: 8090
+          name: api
+        env:
+        - name: ZAP_PORT
+          value: "8090"
+        - name: ZAP_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: zap-api-key
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "0.5"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        readinessProbe:
+          httpGet:
+            path: /JSON/core/view/version/
+            port: 8090
+          initialDelaySeconds: 30
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zap
+  namespace: quorvex
+  labels:
+    app.kubernetes.io/name: zap
+spec:
+  selector:
+    app: zap
+  ports:
+  - port: 8090
+    targetPort: 8090
+    name: api

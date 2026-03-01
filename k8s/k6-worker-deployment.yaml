@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k6-workers
+  namespace: quorvex
+  labels:
+    app.kubernetes.io/name: k6-workers
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k6-workers
+  template:
+    metadata:
+      labels:
+        app: k6-workers
+    spec:
+      containers:
+      - name: k6-worker
+        image: quorvex-k6-worker:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: REDIS_URL
+          value: "redis://redis:6379/0"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: database-url
+        - name: K6_TIMEOUT_SECONDS
+          value: "3600"
+        - name: K6_MAX_VUS
+          value: "1000"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "0.5"
+          limits:
+            memory: "2Gi"
+            cpu: "4"
+        volumeMounts:
+        - name: runs
+          mountPath: /app/runs
+        - name: scripts
+          mountPath: /app/scripts
+      volumes:
+      - name: runs
+        persistentVolumeClaim:
+          claimName: runs-pvc
+      - name: scripts
+        configMap:
+          name: scripts-configmap
+          defaultMode: 0755

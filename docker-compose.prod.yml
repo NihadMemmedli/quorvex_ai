@@ -1,0 +1,862 @@
+services:
+  # ==========================================
+  # Browser Workers (Phase 2: Docker Isolation)
+  # ==========================================
+  # Isolated Playwright browser containers for parallel test execution.
+  # Each worker runs in its own container with crash isolation.
+  # Scale with: docker-compose up -d --scale browser-workers=8
+  browser-workers:
+    build:
+      context: .
+      dockerfile: docker/browser-worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      HEADLESS: "true"
+      PLAYWRIGHT_WORKERS: "1"
+      WORKER_ID: "worker-{{.Task.Slot}}"
+    volumes:
+      # Shared test files (read-only)
+      - ./tests:/app/tests:ro
+      - ./specs:/app/specs:ro
+      # Shared results (writable)
+      - test_results:/app/test-results
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      mode: replicated
+      replicas: ${BROWSER_WORKER_REPLICAS:-4}
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    shm_size: '1gb'
+    networks:
+      - playwright-network
+    healthcheck:
+      test: [ "CMD", "node", "-e", "console.log('ok')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - workers
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ==========================================
+  # Slim Backend (Phase 2: No Browsers)
+  # ==========================================
+  # Lightweight backend without Playwright browsers.
+  # Use this when browser-workers are enabled.
+  # Memory reduced from 24G to 4G.
+  backend-slim:
+    build:
+      context: .
+      dockerfile: docker/backend-slim/Dockerfile
+    restart: unless-stopped
+    # extra_hosts:
+    #   - "your-service.example.com:10.0.0.1"
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-playwright}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-playwright_agent}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:?Set ANTHROPIC_AUTH_TOKEN in .env}
+      ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:?Set ANTHROPIC_BASE_URL in .env.prod}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-20250514}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Browser workers mode (no local browsers)
+      BROWSER_WORKERS_ENABLED: "true"
+      HEADLESS: "true"
+      PLAYWRIGHT_WORKERS: ${PLAYWRIGHT_WORKERS:-4}
+      DEFAULT_PARALLELISM: ${DEFAULT_PARALLELISM:-4}
+      # Resource management
+      MAX_CONCURRENT_AGENTS: ${MAX_CONCURRENT_AGENTS:-8}
+      MAX_CONCURRENT_EXPLORATIONS: ${MAX_CONCURRENT_EXPLORATIONS:-5}
+      MAX_CONCURRENT_PRD: ${MAX_CONCURRENT_PRD:-3}
+      # Authentication
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      REQUIRE_AUTH: ${REQUIRE_AUTH:-true}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      # CORS
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      # Redis for job queue and rate limiting
+      REDIS_URL: redis://redis:6379/0
+      # Initial admin
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      # MinIO
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_BUCKET: ${MINIO_BUCKET:-playwright-backups}
+    # Note: Container starts as root to fix volume permissions, then drops to agent user via entrypoint
+    volumes:
+      - runs_data:/app/runs
+      - logs_data:/app/logs
+      - data_dir:/app/data
+      - test_results:/app/test-results
+      - ${SPECS_DIR:-./specs}:/app/specs
+      - ${PRDS_DIR:-./prds}:/app/prds
+      - ${TESTS_DIR:-./tests}:/app/tests
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 4G # Reduced from 24G (no browsers)
+          cpus: '4'
+        reservations:
+          memory: 1G
+          cpus: '1'
+    networks:
+      - playwright-network
+    profiles:
+      - workers
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  # Agent Worker (Phase 2: Use with browser-workers)
+  # Consumes tasks from Redis and executes them using remote browsers
+  agent-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: unless-stopped
+    command: python -m orchestrator.services.agent_worker
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-playwright}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-playwright_agent}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:?Set ANTHROPIC_AUTH_TOKEN in .env}
+      ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:?Set ANTHROPIC_BASE_URL in .env.prod}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-20250514}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Worker settings
+      AGENT_WORKER_ID: "agent-{{.Task.Slot}}"
+      BROWSER_WORKERS_ENABLED: "true"
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      # Dependencies
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_BUCKET: ${MINIO_BUCKET:-playwright-backups}
+      MINIO_BUCKET_ARTIFACTS: ${MINIO_BUCKET_ARTIFACTS:-playwright-artifacts}
+    volumes:
+      - runs_data:/app/runs
+      - logs_data:/app/logs
+      - data_dir:/app/data
+      - test_results:/app/test-results
+      - ${SPECS_DIR:-./specs}:/app/specs
+      - ${PRDS_DIR:-./prds}:/app/prds
+      - ${TESTS_DIR:-./tests}:/app/tests
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      browser-workers:
+        condition: service_healthy
+    deploy:
+      mode: replicated
+      replicas: ${AGENT_WORKER_REPLICAS:-2}
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+    networks:
+      - playwright-network
+    profiles:
+      - workers
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ==========================================
+  # Infrastructure Services
+  # ==========================================
+
+  # Redis - Required for distributed rate limiting and job queue in production
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --appendonly yes --appendfsync everysec --save 900 1 --save 300 10
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+    networks:
+      - playwright-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=1GB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - max_connections=100
+      - -c
+      - log_min_duration_statement=1000
+      - -c
+      - log_statement=ddl
+      - -c
+      - max_wal_size=1GB
+      - -c
+      - min_wal_size=200MB
+      - -c
+      - autovacuum_vacuum_scale_factor=0.05
+      - -c
+      - autovacuum_analyze_scale_factor=0.02
+      - -c
+      - autovacuum_naptime=30s
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-playwright}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-playwright_agent}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-playwright}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 4G # Increased for 20+ concurrent users
+          cpus: '4' # More CPU for connection handling
+        reservations:
+          memory: 1G # Higher baseline for connection pool
+          cpus: '1'
+    networks:
+      - playwright-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  # MinIO - Self-hosted S3-compatible object storage for backups
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000" # API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001" # Console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: [ "CMD", "mc", "ready", "local" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1'
+        reservations:
+          memory: 256M
+    networks:
+      - playwright-network
+
+  # Standard backend with VNC and browsers (default mode)
+  # Use: make prod-up (no profile needed)
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: unless-stopped
+    # dns:
+    #   - 8.8.8.8
+    #   - 8.8.4.4
+    # extra_hosts:
+    #   - "your-service.example.com:10.0.0.1"
+    ports:
+      - "8001:8001"
+      - "6080:6080" # VNC WebSocket (for live browser view)
+    profiles:
+      - standard # Only starts with default or --profile standard
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-playwright}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-playwright_agent}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:?Set ANTHROPIC_AUTH_TOKEN in .env}
+      ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:?Set ANTHROPIC_BASE_URL in .env.prod}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-20250514}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # VNC mode: headed browser on virtual display
+      # When VNC_ENABLED=true, browser runs headed on Xvfb display :99
+      # HEADLESS must be "false" for VNC to work (need visible browser)
+      VNC_ENABLED: ${VNC_ENABLED:-true}
+      DISPLAY: ":99"
+      HEADLESS: "false"
+      PLAYWRIGHT_HEADLESS: "false"
+      # Skill mode settings
+      SKILL_DIR: /app/.claude/skills/playwright
+      SKILL_TIMEOUT: ${SKILL_TIMEOUT:-30000}
+      SLOW_MO: ${SLOW_MO:-0}
+      # Parallel execution settings
+      # Note: When VNC enabled, parallelism is limited to 1 (single browser)
+      PARALLEL_MODE_ENABLED: ${PARALLEL_MODE_ENABLED:-true}
+      DEFAULT_PARALLELISM: ${DEFAULT_PARALLELISM:-4}
+      PLAYWRIGHT_WORKERS: ${PLAYWRIGHT_WORKERS:-4}
+      # Resource management - concurrent operation limits
+      MAX_CONCURRENT_AGENTS: ${MAX_CONCURRENT_AGENTS:-8}
+      MAX_CONCURRENT_EXPLORATIONS: ${MAX_CONCURRENT_EXPLORATIONS:-5}
+      MAX_CONCURRENT_PRD: ${MAX_CONCURRENT_PRD:-3}
+      # Resource timeouts (seconds) - used by agent_runner.py
+      AGENT_TIMEOUT_SECONDS: ${AGENT_TIMEOUT_SECONDS:-1800}
+      EXPLORATION_TIMEOUT_SECONDS: ${EXPLORATION_TIMEOUT_SECONDS:-1800}
+      PLANNER_TIMEOUT_SECONDS: ${PLANNER_TIMEOUT_SECONDS:-1800}
+      GENERATOR_TIMEOUT_SECONDS: ${GENERATOR_TIMEOUT_SECONDS:-1800}
+      # Authentication - REQUIRED
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      REQUIRE_AUTH: ${REQUIRE_AUTH:-true}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      # CORS - comma-separated list of allowed origins
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      # Redis for distributed rate limiting
+      REDIS_URL: redis://redis:6379/0
+      # Initial admin user (created on first startup only)
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      # MinIO configuration for storage health checks
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_BUCKET: ${MINIO_BUCKET:-playwright-backups}
+      MINIO_BUCKET_ARTIFACTS: ${MINIO_BUCKET_ARTIFACTS:-playwright-artifacts}
+      # Corporate proxy (for AI API calls through restricted networks)
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,db,redis,minio,backend,frontend}
+    # Note: Container starts as root to fix volume permissions, then drops to agent user via entrypoint
+    # supervisord manages user switching per-program (all programs run as agent)
+    # Use supervisord to manage VNC stack + uvicorn
+    command: [ "/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf" ]
+    # Increase shared memory for headed browser rendering
+    shm_size: '2gb'
+    volumes:
+      # Persist runs data
+      - runs_data:/app/runs
+      - logs_data:/app/logs
+      - data_dir:/app/data
+      # Test results for Playwright reports
+      - test_results:/app/test-results
+      # Specs directory (writable for PRD generation)
+      - ${SPECS_DIR:-./specs}:/app/specs
+      # PRDs directory for uploaded PRD documents
+      - ${PRDS_DIR:-./prds}:/app/prds
+      # Tests directory for generated test files
+      - ${TESTS_DIR:-./tests}:/app/tests
+      # Scripts directory for generated K6 load test scripts
+      - ${SCRIPTS_DIR:-./scripts}:/app/scripts
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 24G # Increased for 20+ concurrent users (supports ~20 browsers)
+          cpus: '8' # Parallel browser processes (adjust based on available cores)
+        reservations:
+          memory: 8G # Guarantee minimum memory for stability
+          cpus: '2' # Guarantee minimum CPU
+    networks:
+      - playwright-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        # Build-time env var for Next.js static generation
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8001}
+    restart: unless-stopped
+    # Note: In production with nginx, ports are exposed via nginx only
+    ports:
+      - "3000:3000"
+    environment:
+      # Runtime env var (for server-side rendering)
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8001}
+      # AI Assistant env vars (server-side only)
+      ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-}
+      INTERNAL_API_URL: http://backend:8001
+    # Note: Frontend works with either 'backend' (standard) or 'backend-slim' (workers)
+    # Both expose the same API on port 8001
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:3000" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - playwright-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # Nginx reverse proxy with TLS termination
+  # To use: place TLS certificates in ./nginx/certs/ and enable the 'nginx' profile
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - backend
+      - frontend
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:80/health || exit 0" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - nginx
+    networks:
+      - playwright-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # Legacy backup service - runs database-only backup (kept for compatibility)
+  backup:
+    image: postgres:15-alpine
+    restart: "no"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-playwright}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-playwright_agent}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION: "30"
+    volumes:
+      - ./scripts/backup.sh:/scripts/backup.sh:ro
+      - backup_data:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - playwright-network
+    entrypoint: /bin/sh
+    command: [ "-c", "/scripts/backup.sh --daily" ]
+    profiles:
+      - backup
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # Full backup service - backs up everything including specs, tests, PRDs, and syncs to MinIO
+  backup-full:
+    image: alpine:3.19
+    restart: "no"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-playwright}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-playwright_agent}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION: "${BACKUP_RETENTION:-30}"
+      ARCHIVE_RETENTION: "${ARCHIVE_RETENTION:-90}"
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_BUCKET: ${MINIO_BUCKET:-playwright-backups}
+      APP_DIR: /app
+    volumes:
+      - ./scripts/full_backup.sh:/scripts/full_backup.sh:ro
+      - backup_data:/backups
+      - ${SPECS_DIR:-./specs}:/app/specs:ro
+      - ${TESTS_DIR:-./tests}:/app/tests:ro
+      - ${PRDS_DIR:-./prds}:/app/prds:ro
+      - data_dir:/app/data:ro
+      - runs_data:/app/runs:ro
+      - runs_data:/app/runs:ro
+      - test_results:/app/test-results:ro
+      - ${SCRIPTS_DIR:-./scripts}:/app/scripts:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        # Install required tools
+        apk add --no-cache postgresql15-client bash coreutils jq gzip tar curl
+        # Download MinIO client
+        curl -sL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+        chmod +x /usr/local/bin/mc
+        # Run the full backup script
+        /bin/bash /scripts/full_backup.sh --daily
+    networks:
+      - playwright-network
+    profiles:
+      - backup-full
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # Scheduled backup + archival service - runs daily
+  # Uses backend image (has Python for archival + pg tools for backup)
+  backup-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-playwright}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-playwright_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-playwright}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-playwright_agent}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION: "${BACKUP_RETENTION:-30}"
+      ARCHIVE_RETENTION: "${ARCHIVE_RETENTION:-90}"
+      ARCHIVE_HOT_DAYS: "${ARCHIVE_HOT_DAYS:-30}"
+      ARCHIVE_TOTAL_DAYS: "${ARCHIVE_TOTAL_DAYS:-90}"
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_BUCKET: ${MINIO_BUCKET:-playwright-backups}
+      MINIO_BUCKET_ARTIFACTS: ${MINIO_BUCKET_ARTIFACTS:-playwright-artifacts}
+      APP_DIR: /app
+    volumes:
+      - ./scripts/full_backup.sh:/scripts/full_backup.sh:ro
+      - backup_data:/backups
+      - ${SPECS_DIR:-./specs}:/app/specs:ro
+      - ${TESTS_DIR:-./tests}:/app/tests:ro
+      - ${PRDS_DIR:-./prds}:/app/prds:ro
+      - data_dir:/app/data:ro
+      - runs_data:/app/runs
+      - runs_data:/app/runs
+      - test_results:/app/test-results:ro
+      - ${SCRIPTS_DIR:-./scripts}:/app/scripts:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - |
+        # Install cron and postgresql-client-15 (for pg_dump matching server v15)
+        apt-get update -qq && apt-get install -y -qq cron gnupg lsb-release > /dev/null 2>&1
+        echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+        curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg 2>/dev/null
+        apt-get update -qq && apt-get install -y -qq postgresql-client-15 > /dev/null 2>&1
+        # Setup cron jobs:
+        #   2 AM - Full backup (DB + specs + tests + PRDs) with MinIO sync
+        #   3 AM - Artifact archival (hot/warm/cold retention tiers)
+        (echo "0 2 * * * /bin/bash /scripts/full_backup.sh --daily >> /var/log/backup.log 2>&1"; \
+         echo "0 3 * * * cd /app && PYTHONPATH=/app python3 -m orchestrator.services.archival --run-now >> /var/log/archival.log 2>&1") | crontab -
+        echo "Backup & archival scheduler started:"
+        echo "  2 AM - Full backup with MinIO sync"
+        echo "  3 AM - Artifact archival (${ARCHIVE_HOT_DAYS:-30}d hot / ${ARCHIVE_TOTAL_DAYS:-90}d total)"
+        # Start cron daemon in foreground
+        cron -f
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks:
+      - playwright-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # Restore service - for disaster recovery
+  restore:
+    image: alpine:3.19
+    restart: "no"
+    entrypoint: ""
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-playwright}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-playwright_agent}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      BACKUP_DIR: /backups
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_BUCKET: ${MINIO_BUCKET:-playwright-backups}
+      APP_DIR: /app
+    volumes:
+      - ./scripts/restore.sh:/scripts/restore.sh:ro
+      - backup_data:/backups
+      - ${SPECS_DIR:-./specs}:/app/specs
+      - ${TESTS_DIR:-./tests}:/app/tests
+      - ${PRDS_DIR:-./prds}:/app/prds
+      - data_dir:/app/data
+      - runs_data:/app/runs
+      - runs_data:/app/runs
+      - test_results:/app/test-results
+      - ${SCRIPTS_DIR:-./scripts}:/app/scripts
+    depends_on:
+      db:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        # Install required tools
+        apk add --no-cache postgresql15-client bash coreutils jq gzip tar curl
+        # Download MinIO client
+        curl -sL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+        chmod +x /usr/local/bin/mc
+        echo "Restore service ready. Usage:"
+        echo "  docker-compose run restore bash /scripts/restore.sh --list"
+        echo "  docker-compose run restore bash /scripts/restore.sh --latest"
+        echo "  docker-compose run restore bash /scripts/restore.sh <timestamp>"
+        echo "  docker-compose run restore bash /scripts/restore.sh --from-minio <timestamp>"
+    networks:
+      - playwright-network
+    profiles:
+      - restore
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # Archival service - moves old run artifacts to MinIO based on retention policy
+  archival:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-playwright}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-playwright_agent}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      MINIO_BUCKET_ARTIFACTS: ${MINIO_BUCKET_ARTIFACTS:-playwright-artifacts}
+      ARCHIVE_HOT_DAYS: "${ARCHIVE_HOT_DAYS:-30}"
+      ARCHIVE_TOTAL_DAYS: "${ARCHIVE_TOTAL_DAYS:-90}"
+    volumes:
+      - runs_data:/app/runs
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: [ "python", "-m", "orchestrator.services.archival", "--run-now" ]
+    profiles:
+      - archival
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ==========================================
+  # K6 Load Test Workers (Opt-in)
+  # ==========================================
+  # Dedicated K6 load test containers for distributed execution.
+  # Opt-in via: make k6-workers-up
+  # Scale with: make k6-workers-scale N=3
+  # Does NOT affect existing commands (make prod-up, make prod-dev, etc.)
+  k6-workers:
+    build:
+      context: .
+      dockerfile: docker/k6-worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-playwright}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-playwright_agent}
+      K6_TIMEOUT_SECONDS: ${K6_TIMEOUT_SECONDS:-3600}
+      K6_MAX_VUS: ${K6_MAX_VUS:-1000}
+      # K6_WORKER_ID is auto-generated from container hostname
+      K6_LOG_TTL_SECONDS: ${K6_LOG_TTL_SECONDS:-7200}
+    volumes:
+      - ${SCRIPTS_DIR:-./scripts}:/app/scripts:ro
+      - runs_data:/app/runs
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    deploy:
+      mode: replicated
+      replicas: ${K6_WORKER_REPLICAS:-3}
+      resources:
+        limits:
+          memory: ${K6_WORKER_MEMORY_LIMIT:-2G}
+          cpus: '4'
+        reservations:
+          memory: 512M
+          cpus: '1'
+    networks:
+      - playwright-network
+    profiles:
+      - k6-workers
+    healthcheck:
+      test: [ "CMD", "python", "-c", "print('ok')" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  # ==========================================
+  # OWASP ZAP Security Scanner (Opt-in)
+  # ==========================================
+  # ZAP daemon for DAST security scanning.
+  # Opt-in via: docker compose --profile security up -d zap
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    restart: unless-stopped
+    command: >
+      zap.sh -daemon -host 0.0.0.0 -port 8090 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.key=${ZAP_API_KEY:-}
+    ports:
+      - "${ZAP_PORT:-8090}:8090"
+    environment:
+      ZAP_PORT: "8090"
+    networks:
+      - playwright-network
+    profiles:
+      - security
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8090/JSON/core/view/version/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
+  runs_data:
+  logs_data:
+  data_dir:
+  backup_data:
+  minio_data:
+  test_results:
+  redis_data:
+
+
+networks:
+  playwright-network:
+    driver: bridge

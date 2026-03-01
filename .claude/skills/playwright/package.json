@@ -1,0 +1,16 @@
+{
+  "name": "playwright-skill",
+  "version": "1.0.0",
+  "description": "Playwright skill for executing arbitrary browser automation scripts",
+  "type": "module",
+  "main": "run.js",
+  "scripts": {
+    "test": "node run.js --test"
+  },
+  "dependencies": {
+    "playwright": "^1.57.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

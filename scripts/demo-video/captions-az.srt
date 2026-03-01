@@ -1,0 +1,114 @@
+1
+00:00:00,500 --> 00:00:03,500
+Yüz test yazısını əllə yazmaq
+həftələr çəkir.
+
+2
+00:00:03,500 --> 00:00:06,000
+Bu süni intellektin bunu otuz
+saniyəyə necə etdiyinə baxın.
+
+3
+00:00:06,500 --> 00:00:09,500
+Əl ilə test yazmaq yavaş,
+səhvlərə meyilli və miqyaslanmır.
+
+4
+00:00:09,500 --> 00:00:12,000
+Bu panel hər şeyi dəyişir.
+
+5
+00:00:13,000 --> 00:00:15,500
+Bu süni intellekti istənilən
+veb tətbiqə yönəldin.
+
+6
+00:00:15,500 --> 00:00:19,000
+O, hər səhifəni araşdırır,
+istifadəçi axınlarını kəşf edir
+
+7
+00:00:19,000 --> 00:00:22,000
+və API nöqtələrini xəritələyir —
+tamamilə müstəqil şəkildə.
+
+8
+00:00:22,000 --> 00:00:25,000
+Skript yoxdur, quraşdırma yoxdur —
+sadəcə bir URL.
+
+9
+00:00:26,000 --> 00:00:30,000
+Kəşfiyyatdan istehsala hazır
+Playwright testlərinə — tam avtomatik.
+
+10
+00:00:30,000 --> 00:00:34,000
+Tələblərin çıxarılması,
+test generasiyası,
+
+11
+00:00:34,000 --> 00:00:37,500
+və özünü bərpa edən validasiya —
+hamısı bir boru kəmərində.
+
+12
+00:00:37,500 --> 00:00:41,000
+Test sınanda süni intellekt
+onu avtomatik düzəldir.
+
+13
+00:00:42,000 --> 00:00:44,500
+Yalnız UI testləri deyil.
+
+14
+00:00:44,500 --> 00:00:47,500
+OpenAPI spesifikasiyalarından
+API testləri.
+
+15
+00:00:47,500 --> 00:00:50,500
+Real vaxt metrikalı yük testləri.
+
+16
+00:00:50,500 --> 00:00:53,500
+Çoxsəviyyəli təhlükəsizlik skanı.
+
+17
+00:00:53,500 --> 00:00:56,000
+Verilənlər bazası keyfiyyət yoxlamaları.
+
+18
+00:00:56,000 --> 00:01:00,000
+Hətta süni intellekt modelləri üçün
+LLM qiymətləndirməsi.
+
+19
+00:01:01,000 --> 00:01:05,000
+GitHub və GitLab ilə
+CI/CD inteqrasiyası.
+
+20
+00:01:05,000 --> 00:01:08,000
+Tam tələb izlənməsi.
+
+21
+00:01:08,000 --> 00:01:11,000
+Reqressiya hesabatları.
+Cron planlaşdırma.
+
+22
+00:01:11,000 --> 00:01:14,000
+Çoxlayihəli izolyasiya.
+
+23
+00:01:15,000 --> 00:01:18,000
+Süni intellektlə test avtomatlaşdırması.
+
+24
+00:01:18,000 --> 00:01:21,000
+Sıfırdan tam əhatəyə.
+
+25
+00:01:21,000 --> 00:01:24,000
+Bu gün sınayın.

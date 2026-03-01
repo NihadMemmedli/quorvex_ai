@@ -1,0 +1,86 @@
+# Ingress for external access
+# Requires nginx-ingress controller: kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.8.2/deploy/static/provider/cloud/deploy.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: quorvex-ingress
+  namespace: quorvex
+  labels:
+    app.kubernetes.io/name: quorvex-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # Enable WebSocket support for VNC (if using headed backend)
+    nginx.ingress.kubernetes.io/websocket-services: "backend"
+    # SSL redirect (uncomment when using TLS)
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: quorvex.example.com  # Change to your domain
+    http:
+      paths:
+      # Frontend (dashboard)
+      - path: /minio
+        pathType: Prefix
+        backend:
+          service:
+            name: minio
+            port:
+              number: 9001
+      - path: /zap
+        pathType: Prefix
+        backend:
+          service:
+            name: zap
+            port:
+              number: 8090
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend
+            port:
+              number: 3000
+      # Backend API
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: backend
+            port:
+              number: 8001
+      - path: /auth
+        pathType: Prefix
+        backend:
+          service:
+            name: backend
+            port:
+              number: 8001
+      - path: /health
+        pathType: Prefix
+        backend:
+          service:
+            name: backend
+            port:
+              number: 8001
+      - path: /docs
+        pathType: Prefix
+        backend:
+          service:
+            name: backend
+            port:
+              number: 8001
+      - path: /openapi.json
+        pathType: Prefix
+        backend:
+          service:
+            name: backend
+            port:
+              number: 8001
+  # TLS configuration (uncomment and configure when ready)
+  # tls:
+  # - hosts:
+  #   - quorvex.example.com
+  #   secretName: quorvex-tls

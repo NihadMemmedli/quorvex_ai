@@ -1,0 +1,52 @@
+claude-agent-sdk==0.1.22
+jsonschema>=4.0.0
+python-dotenv>=1.0.0
+black
+pytest
+pytest-asyncio
+Pillow>=10.0.0
+fastapi
+httpx>=0.24.0
+uvicorn
+python-multipart
+sqlmodel
+psycopg2-binary
+alembic
+
+# Phase 1: Memory and Coverage dependencies
+chromadb>=0.4.0
+networkx>=3.0
+openai>=1.0.0
+anthropic>=0.18.0
+
+# Authentication & Security
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.0,<5.0.0  # Pin to 4.x for passlib compatibility
+python-jose[cryptography]>=3.3.0
+pydantic[email]>=2.0.0
+pydantic-settings>=2.0.0
+slowapi>=0.1.8
+redis>=4.0.0
+
+# PDF Processing (PRD feature)
+# pdfplumber for reliable PDF text extraction (no GPU required)
+pdfplumber>=0.10.0
+# PyMuPDF for fast PDF processing with images
+pymupdf>=1.23.0
+
+# Storage & Backup (Production data management)
+minio>=7.2.0
+
+# Database Testing (PostgreSQL introspection)
+asyncpg>=0.29.0
+
+# LLM Testing (AI/LLM evaluation)
+deepeval>=2.0.0
+tiktoken>=0.7.0
+
+# Scheduling (Cron-based regression runs)
+APScheduler>=3.10.0
+
+# Resilience (circuit breakers, retry logic)
+tenacity>=8.0.0
+circuitbreaker>=2.0.0

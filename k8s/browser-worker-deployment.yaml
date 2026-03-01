@@ -1,0 +1,127 @@
+# Browser Worker Deployment with Horizontal Pod Autoscaler
+# Isolated Playwright browser containers for parallel test execution
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: browser-workers
+  namespace: quorvex
+  labels:
+    app.kubernetes.io/name: browser-workers
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 4  # Initial replicas, HPA will scale this
+  selector:
+    matchLabels:
+      app: browser-worker
+  template:
+    metadata:
+      labels:
+        app: browser-worker
+    spec:
+      containers:
+      - name: playwright
+        image: quorvex-worker:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: REDIS_URL
+          value: "redis://redis:6379/0"
+        - name: HEADLESS
+          value: "true"
+        - name: PLAYWRIGHT_WORKERS
+          value: "1"
+        - name: WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "1"
+          limits:
+            memory: "2Gi"
+            cpu: "2"
+        readinessProbe:
+          exec:
+            command: ["node", "-e", "console.log('ok')"]
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          exec:
+            command: ["node", "-e", "console.log('ok')"]
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        volumeMounts:
+        - name: test-results
+          mountPath: /app/test-results
+        - name: tests
+          mountPath: /app/tests
+          readOnly: true
+        - name: specs
+          mountPath: /app/specs
+          readOnly: true
+        # Shared memory for Chromium
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: test-results
+        persistentVolumeClaim:
+          claimName: test-results-pvc
+      - name: tests
+        persistentVolumeClaim:
+          claimName: tests-pvc
+      - name: specs
+        persistentVolumeClaim:
+          claimName: specs-pvc
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 1Gi
+---
+# Horizontal Pod Autoscaler for browser workers
+# Scales based on CPU utilization and queue length
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: browser-workers-hpa
+  namespace: quorvex
+  labels:
+    app.kubernetes.io/name: browser-workers-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: browser-workers
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+  # Scale based on CPU usage
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  # Scale based on memory usage
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5 minutes before scaling down
+      policies:
+      - type: Percent
+        value: 25
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0  # Scale up immediately
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 4
+        periodSeconds: 15
+      selectPolicy: Max

@@ -1,0 +1,65 @@
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+
+# Log files
+*.log
+logs/
+
+# Data directories (should be volumes)
+data/
+runs/
+playwright-report/
+test-results/
+
+# Version control
+.git/
+.gitignore
+
+# Development files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# Node.js
+node_modules/
+.npm
+.yarn
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Next.js
+.next/
+out/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Claude/AI config (keep .claude/ for agent prompts and skills)
+# .claude/

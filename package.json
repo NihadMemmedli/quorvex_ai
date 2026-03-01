@@ -1,0 +1,46 @@
+{
+  "name": "quorvex-ai",
+  "version": "1.0.0",
+  "description": "Quorvex AI — Intelligent test automation platform that converts natural language specifications into production-ready Playwright tests.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "playwright",
+    "automation",
+    "testing",
+    "ai",
+    "agent",
+    "claude",
+    "nlp",
+    "test-generation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "1.57.0",
+    "@types/node": "^25.0.3",
+    "dotenv": "^17.2.3"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-code": "^1.0.0",
+    "@playwright/mcp": "^0.0.28",
+    "playwright": "1.57.0",
+    "playwright-core": "1.57.0",
+    "undici-types": "^7.16.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://gitlab.com/qaihub/qaihub-engine.git"
+  },
+  "bugs": {
+    "url": "https://gitlab.com/qaihub/qaihub-engine/issues"
+  },
+  "homepage": "https://gitlab.com/qaihub/qaihub-engine#readme"
+}

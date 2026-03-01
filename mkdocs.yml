@@ -1,0 +1,119 @@
+site_name: Quorvex AI
+site_description: AI-powered test automation platform that converts plain English into production-ready Playwright tests
+site_url: https://nihadmemmedli.github.io/quorvex_ai/
+repo_url: https://github.com/NihadMemmedli/quorvex_ai
+repo_name: NihadMemmedli/quorvex_ai
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+
+exclude_docs: |
+  /README.md
+  /.style-guide.md
+
+nav:
+  - Home:
+      - Overview: index.md
+  - Tutorials:
+      - Getting Started: tutorials/getting-started.md
+      - Your First API Test: tutorials/first-api-test.md
+      - App Exploration & Requirements: tutorials/first-exploration.md
+      - Dashboard Walkthrough: tutorials/dashboard-walkthrough.md
+      - CI/CD Setup: tutorials/ci-cd-setup.md
+  - How-to Guides:
+      - Test Specifications:
+          - Writing Specs: guides/writing-specs.md
+          - Pipeline Modes: guides/pipeline-modes.md
+          - PRD to Tests: guides/prd-to-tests.md
+      - Specialized Testing:
+          - API Testing: guides/api-testing.md
+          - Load Testing: guides/load-testing.md
+          - Security Testing: guides/security-testing.md
+          - Database Testing: guides/database-testing.md
+          - LLM Evaluation: guides/llm-testing.md
+      - Discovery & Coverage:
+          - Exploration & Requirements: guides/exploration-requirements.md
+          - Regression Batches: guides/regression-batches.md
+          - Scheduling Runs: guides/scheduling.md
+      - Integrations:
+          - TestRail, Jira & CI/CD: guides/integrations.md
+          - Credential Management: guides/credential-management.md
+      - Operations:
+          - Authentication & RBAC: guides/authentication.md
+          - Deployment: guides/deployment.md
+          - On-Premises Deployment: guides/company-deployment.md
+          - Disaster Recovery: guides/disaster-recovery.md
+          - Troubleshooting: guides/troubleshooting.md
+      - Development:
+          - Extending the System: guides/extending.md
+          - Contributing: guides/contributing.md
+  - Reference:
+      - CLI Reference: reference/cli.md
+      - Spec Format: reference/spec-format.md
+      - Pipeline Modes: reference/pipeline-modes.md
+      - Web Dashboard: reference/web-dashboard.md
+      - API Overview: reference/api-overview.md
+      - API Endpoints: reference/api-endpoints.md
+      - Environment Variables: reference/environment-variables.md
+      - Database Schema: reference/database-schema.md
+      - Makefile Commands: reference/makefile.md
+      - FAQ: reference/faq.md
+  - Explanation:
+      - System Architecture: explanation/system-overview.md
+      - Pipeline Architecture: explanation/pipeline-architecture.md
+      - Infrastructure & Scaling: explanation/infrastructure.md
+      - Memory & Coverage: explanation/memory-system.md
+      - Browser Pool & Concurrency: explanation/browser-pool.md
+      - Security Model: explanation/security-model.md
+  - Community:
+      - Roadmap: community/roadmap.md

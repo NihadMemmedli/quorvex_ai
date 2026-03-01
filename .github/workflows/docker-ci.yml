@@ -1,0 +1,43 @@
+name: Docker CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t quorvex-ai .
+
+      - name: Run Smoke Test (Self-Healing)
+        if: ${{ secrets.ANTHROPIC_AUTH_TOKEN != '' }}
+        env:
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com' }}
+          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ secrets.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-20250514' }}
+        run: |
+          mkdir -p runs
+          docker run --rm \
+            -e ANTHROPIC_AUTH_TOKEN \
+            -e ANTHROPIC_BASE_URL \
+            -e ANTHROPIC_DEFAULT_SONNET_MODEL \
+            -v ${{ github.workspace }}/runs:/app/runs \
+            quorvex-ai specs/smoke_healing.md
+
+      - name: Upload Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: runs/
+          retention-days: 7

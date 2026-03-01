@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp",
+        "--browser",
+        "chromium"
+      ]
+    },
+    "mermaid": {
+      "command": "mcp-mermaid"
+    }
+  }
+}

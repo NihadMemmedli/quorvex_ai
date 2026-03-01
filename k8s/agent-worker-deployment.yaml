@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-worker
+  namespace: quorvex
+  labels:
+    app.kubernetes.io/name: agent-worker
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: agent-worker
+  template:
+    metadata:
+      labels:
+        app: agent-worker
+    spec:
+      containers:
+      - name: agent-worker
+        image: quorvex-backend:latest
+        imagePullPolicy: IfNotPresent
+        command: ["python", "-m", "orchestrator.services.agent_worker"]
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: database-url
+        - name: ANTHROPIC_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: anthropic-token
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: anthropic-token
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: openai-api-key
+              optional: true
+        - name: REDIS_URL
+          value: "redis://redis:6379/0"
+        - name: HEADLESS
+          value: "true"
+        - name: AGENT_WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: MINIO_ENDPOINT
+          value: "http://minio:9000"
+        - name: MINIO_ROOT_USER
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: minio-root-user
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: quorvex-secrets
+              key: minio-root-password
+        - name: MINIO_BUCKET
+          value: "playwright-backups"
+        - name: SKILL_DIR
+          value: "/app/.claude/skills/playwright"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        volumeMounts:
+        - name: runs
+          mountPath: /app/runs
+        - name: logs
+          mountPath: /app/logs
+        - name: specs
+          mountPath: /app/specs
+        - name: tests
+          mountPath: /app/tests
+        - name: test-results
+          mountPath: /app/test-results
+        - name: prds
+          mountPath: /app/prds
+        - name: data
+          mountPath: /app/data
+        # Shared memory for Chromium
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: runs
+        persistentVolumeClaim:
+          claimName: runs-pvc
+      - name: logs
+        persistentVolumeClaim:
+          claimName: logs-pvc
+      - name: specs
+        persistentVolumeClaim:
+          claimName: specs-pvc
+      - name: tests
+        persistentVolumeClaim:
+          claimName: tests-pvc
+      - name: test-results
+        persistentVolumeClaim:
+          claimName: test-results-pvc
+      - name: prds
+        persistentVolumeClaim:
+          claimName: prds-pvc
+      - name: data
+        persistentVolumeClaim:
+          claimName: data-pvc
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 1Gi

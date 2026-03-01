@@ -1,0 +1,58 @@
+# Development override - mount local code for hot reload
+# Usage: make prod-dev (starts with code mounting + auto-reload)
+
+services:
+  backend:
+    volumes:
+      # Mount local code (overrides built-in code)
+      - ./orchestrator:/app/orchestrator:ro
+      - ./.mcp.json:/app/.mcp.json:ro
+      - ./.claude:/app/.claude:ro
+      - ./package.json:/app/package.json:ro
+      - ./scripts:/app/scripts
+      # Mount updated supervisord config (includes agent_worker)
+      - ./supervisord.conf:/etc/supervisor/conf.d/supervisord.conf:ro
+      # Keep these from prod (writable)
+      - runs_data:/app/runs
+      - logs_data:/app/logs
+      - data_dir:/app/data
+      - test_results:/app/test-results
+      - ${SPECS_DIR:-./specs}:/app/specs
+      - ${PRDS_DIR:-./prds}:/app/prds
+      - ${TESTS_DIR:-./tests}:/app/tests
+    # Enable auto-reload on code changes
+    command: ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+    environment:
+      # Inherit all from prod, but enable reload
+      UVICORN_RELOAD: "true"
+
+  frontend:
+    volumes:
+      # Mount local web code for Next.js hot reload
+      - ./web/src:/app/src:ro
+      - ./web/public:/app/public:ro
+      # Mount env file for AI assistant config
+      - ./web/.env.local:/app/.env.local:ro
+    # Use next dev for hot reload with mounted source files
+    command: ["npm", "run", "dev"]
+    environment:
+      # Enable Next.js development mode features
+      NODE_ENV: development
+      # Increase Node.js heap for large page compilation in dev mode
+      NODE_OPTIONS: "--max-old-space-size=2048"
+      # AI Assistant env vars (server-side only, passed from root .env.prod)
+      ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-}
+      INTERNAL_API_URL: http://backend:8001
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+volumes:
+  runs_data:
+  logs_data:
+  data_dir:
+  test_results:

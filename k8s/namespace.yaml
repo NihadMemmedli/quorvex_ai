@@ -1,0 +1,8 @@
+# Kubernetes namespace for Quorvex test automation
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: quorvex
+  labels:
+    app.kubernetes.io/name: quorvex
+    app.kubernetes.io/component: namespace

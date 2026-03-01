@@ -1,0 +1,145 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Test Plan Schema",
+  "description": "Schema for structured test plans generated from natural language specifications",
+  "type": "object",
+  "required": [
+    "testName",
+    "steps"
+  ],
+  "properties": {
+    "testName": {
+      "type": "string",
+      "description": "Name of the test"
+    },
+    "description": {
+      "type": "string",
+      "description": "What this test validates"
+    },
+    "baseUrl": {
+      "type": "string",
+      "description": "Base URL for the test (if applicable)"
+    },
+    "steps": {
+      "type": "array",
+      "description": "Test steps in execution order",
+      "items": {
+        "type": "object",
+        "required": [
+          "stepNumber",
+          "action",
+          "description"
+        ],
+        "properties": {
+          "stepNumber": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Step number (1-indexed)"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "navigate",
+              "click",
+              "fill",
+              "select",
+              "check",
+              "uncheck",
+              "wait",
+              "assert",
+              "screenshot"
+            ],
+            "description": "Type of action to perform"
+          },
+          "target": {
+            "oneOf": [
+              {
+                "type": "string",
+                "description": "URL for navigate action, or simple selector"
+              },
+              {
+                "type": "object",
+                "description": "Structured element target",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "role",
+                      "text",
+                      "label",
+                      "placeholder",
+                      "selector"
+                    ],
+                    "description": "Selector type"
+                  },
+                  "value": {
+                    "type": "string",
+                    "description": "Selector value"
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "Additional name attribute (for roles)"
+                  }
+                },
+                "required": [
+                  "type",
+                  "value"
+                ]
+              }
+            ],
+            "description": "Target of the action (URL or element selector)"
+          },
+          "value": {
+            "type": "string",
+            "description": "Value to enter (for fill/select actions)"
+          },
+          "assertion": {
+            "type": "object",
+            "description": "Assertion details (for assert actions)",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "visible",
+                  "text",
+                  "value",
+                  "count",
+                  "attribute",
+                  "url"
+                ],
+                "description": "Type of assertion"
+              },
+              "expected": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  }
+                ],
+                "description": "Expected value"
+              }
+            },
+            "required": [
+              "type",
+              "expected"
+            ]
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable description of the step"
+          }
+        }
+      }
+    },
+    "reusableContext": {
+      "type": "object",
+      "description": "Context for reused automation selectors",
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,193 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Coverage Report Schema",
+  "description": "Schema for test coverage analysis reports",
+  "type": "object",
+  "required": ["url", "coverage_summary"],
+  "properties": {
+    "url": {
+      "type": "string",
+      "description": "URL that was analyzed"
+    },
+    "page_title": {
+      "type": "string",
+      "description": "Title of the analyzed page"
+    },
+    "analyzed_at": {
+      "type": "string",
+      "description": "ISO timestamp of when analysis was performed"
+    },
+    "analysis_method": {
+      "type": "string",
+      "enum": ["browser_discovery", "spec_analysis"],
+      "description": "Method used for analysis"
+    },
+    "discovered_elements": {
+      "type": "array",
+      "description": "List of elements discovered on the page",
+      "items": {
+        "type": "object",
+        "properties": {
+          "element_type": {
+            "type": "string",
+            "enum": ["button", "input", "link", "select", "checkbox", "radio", "textarea", "table", "form", "modal", "other"],
+            "description": "Type of element"
+          },
+          "selector": {
+            "type": "object",
+            "description": "Selector information",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["role", "text", "label", "placeholder", "selector"]
+              },
+              "value": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          "text": {
+            "type": "string",
+            "description": "Visible text content of the element"
+          },
+          "is_tested": {
+            "type": "boolean",
+            "description": "Whether the element has test coverage"
+          },
+          "test_coverage": {
+            "type": "string",
+            "enum": ["none", "partial", "complete"],
+            "description": "Level of test coverage"
+          },
+          "attributes": {
+            "type": "object",
+            "description": "Additional HTML attributes"
+          }
+        }
+      }
+    },
+    "coverage_summary": {
+      "type": "object",
+      "description": "Summary of coverage statistics",
+      "required": ["total_elements", "tested_elements", "coverage_percentage"],
+      "properties": {
+        "total_elements": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total number of elements discovered"
+        },
+        "tested_elements": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of elements with test coverage"
+        },
+        "coverage_percentage": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Coverage percentage"
+        },
+        "breakdown": {
+          "type": "object",
+          "description": "Coverage breakdown by element type",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "tested": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "coverage": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              }
+            }
+          }
+        }
+      }
+    },
+    "coverage_gaps": {
+      "type": "array",
+      "description": "List of identified coverage gaps",
+      "items": {
+        "type": "object",
+        "required": ["type", "description"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["untested_element", "untested_flow", "missing_scenario", "missing_edge_case", "orphan_page"],
+            "description": "Type of coverage gap"
+          },
+          "element_type": {
+            "type": "string",
+            "description": "Element type (for untested_element gaps)"
+          },
+          "description": {
+            "type": "string",
+            "description": "Description of the gap"
+          },
+          "priority": {
+            "type": "string",
+            "enum": ["low", "medium", "high", "critical"],
+            "description": "Priority level"
+          },
+          "suggested_test": {
+            "type": "string",
+            "description": "Suggested test to cover the gap"
+          },
+          "url": {
+            "type": "string",
+            "description": "URL where gap exists (if applicable)"
+          },
+          "selector": {
+            "type": "object",
+            "description": "Selector information (for element gaps)"
+          }
+        }
+      }
+    },
+    "suggested_tests": {
+      "type": "array",
+      "description": "List of suggested test cases",
+      "items": {
+        "type": "object",
+        "required": ["description", "category"],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Test description"
+          },
+          "category": {
+            "type": "string",
+            "enum": ["happy_path", "negative_testing", "edge_case", "security", "accessibility", "performance"],
+            "description": "Test category"
+          },
+          "priority": {
+            "type": "string",
+            "enum": ["low", "medium", "high", "critical"],
+            "description": "Priority level"
+          },
+          "steps": {
+            "type": "array",
+            "description": "Test steps",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expected_outcome": {
+            "type": "string",
+            "description": "Expected test outcome"
+          }
+        }
+      }
+    }
+  }
+}

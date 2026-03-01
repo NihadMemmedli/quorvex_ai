@@ -1,0 +1,33 @@
+# ConfigMap for non-sensitive configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quorvex-config
+  namespace: quorvex
+  labels:
+    app.kubernetes.io/name: quorvex-config
+data:
+  # API URL for frontend
+  api-url: "http://backend:8001"
+
+  # Anthropic configuration
+  anthropic-base-url: "https://api.anthropic.com"
+  anthropic-model: "claude-3-sonnet-20240229"
+
+  # Database configuration
+  postgres-db: "playwright_agent"
+
+  # Worker configuration
+  playwright-workers: "4"
+  default-parallelism: "4"
+  browser-worker-replicas: "4"
+
+  # Resource limits
+  max-concurrent-agents: "8"
+  max-concurrent-explorations: "5"
+  max-concurrent-prd: "3"
+
+  # Timeouts (minutes)
+  agent-timeout-minutes: "60"
+  exploration-timeout-minutes: "30"
+  prd-timeout-minutes: "10"

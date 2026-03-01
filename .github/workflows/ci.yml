@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  python-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./orchestrator
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    - name: Install linting tools
+      run: pip install ruff
+
+    - name: Lint with Ruff
+      run: |
+        ruff check .
+        ruff format --check .
+
+    - name: Run Tests
+      env:
+        JWT_SECRET_KEY: test-secret-key-for-ci
+        REQUIRE_AUTH: "false"
+        DATABASE_URL: "sqlite:///./test.db"
+      # Only run non-integration tests (exclude tests requiring external services)
+      run: |
+        pip install pytest pytest-asyncio
+        if [ -d "tests" ]; then pytest tests -v -m "not integration" --ignore=tests/integration; else echo "No tests directory found"; fi
+
+  node-checks:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Node.js 20
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: Install web dependencies
+      run: cd web && npm ci
+
+    - name: Type check frontend
+      run: cd web && npx tsc --noEmit

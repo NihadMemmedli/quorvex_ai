@@ -1,0 +1,118 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Claude Code
+.claude/settings.local.json
+
+# Test outputs
+/runs/
+/test-results/
+
+# Generated specs and tests
+/specs/generated/
+/tests/apps/
+/tests/generated/
+
+*.png
+!docs/assets/*.png
+
+# Environment
+.env
+.env.local
+.env.prod
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+*.log
+
+# Project Specific
+marketing/
+.playwright-mcp/
+
+# Demo video outputs
+scripts/demo-video/output/
+
+# Playwright MCP temp files
+healer_result.json
+healer-result.json
+.claude/settings.json
+.claude/settings.local.json
+.claude/memory/
+
+
+# Node
+node_modules/
+
+# Data
+data/
+
+# PDF
+pdf/
+
+# Generated Data and DB
+prds/
+test.db
+web/.next/
+web/out/
+
+# MkDocs build output
+site/
+
+# Sensitive files
+.env.prod
+*.pem
+*.key
+*.crt
+nginx/certs/
+backups/
+*.sql
+*.dump
+
+# Secrets and credentials
+.secrets/
+credentials.json
+service-account*.json
+*.p12
+*.pfx
+
+# ChromaDB data
+data/chromadb/
+
+# MinIO data
+minio_data/
+
+# Docker volumes
+postgres_data/
+
+# Logs
+logs/
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+
+# Pre-commit
+.pre-commit-config.yaml.bak
+.secrets.baseline
