@@ -32,11 +32,6 @@
 ---
 
 Quorvex AI transforms natural language test specifications into validated, self-healing Playwright tests. Point an AI agent at your application, describe what to test in plain English, and get production-ready TypeScript test code that actually passes. When tests break due to UI changes, the self-healing pipeline automatically detects and fixes selector failures -- no manual maintenance required.
-
-<p align="center">
-  <img src="docs/assets/demo.gif?v=2" alt="Quorvex AI Demo" width="800">
-</p>
-
 ### Why Quorvex AI?
 
 - **Stop writing Playwright boilerplate** -- Describe tests in plain English, get production-ready TypeScript. No more wrestling with selectors, waits, and page objects by hand.
