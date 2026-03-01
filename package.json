@@ -18,9 +18,16 @@
     "agent",
     "claude",
     "nlp",
-    "test-generation"
+    "test-generation",
+    "self-healing",
+    "typescript",
+    "llm",
+    "nextjs",
+    "fastapi",
+    "load-testing",
+    "security-testing"
   ],
-  "author": "",
+  "author": "Nihad Mammadli",
   "license": "MIT",
   "type": "commonjs",
   "devDependencies": {
@@ -37,10 +44,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://gitlab.com/qaihub/qaihub-engine.git"
+    "url": "git+https://github.com/NihadMemmedli/quorvex_ai.git"
   },
   "bugs": {
-    "url": "https://gitlab.com/qaihub/qaihub-engine/issues"
+    "url": "https://github.com/NihadMemmedli/quorvex_ai/issues"
   },
-  "homepage": "https://gitlab.com/qaihub/qaihub-engine#readme"
+  "homepage": "https://nihadmemmedli.github.io/quorvex_ai/"
 }

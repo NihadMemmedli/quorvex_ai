@@ -1,10 +1,14 @@
 <p align="center">
   <h1 align="center">Quorvex AI</h1>
   <p align="center">
-    <strong>AI-Powered Test Automation Platform</strong>
+    <strong>Write tests in plain English. AI handles the rest.</strong>
   </p>
   <p align="center">
     Write tests in plain English. Get production-ready Playwright code automatically.
+  </p>
+  <p align="center">
+    <a href="https://github.com/NihadMemmedli/quorvex_ai/stargazers"><img src="https://img.shields.io/github/stars/NihadMemmedli/quorvex_ai?style=social" alt="GitHub Stars"></a>
+    <a href="https://github.com/NihadMemmedli/quorvex_ai/network/members"><img src="https://img.shields.io/github/forks/NihadMemmedli/quorvex_ai?style=social" alt="GitHub Forks"></a>
   </p>
   <p align="center">
     <a href="https://github.com/NihadMemmedli/quorvex_ai/actions/workflows/ci.yml"><img src="https://github.com/NihadMemmedli/quorvex_ai/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -14,6 +18,7 @@
     <a href="https://playwright.dev/"><img src="https://img.shields.io/badge/Playwright-45ba4b.svg?logo=playwright&logoColor=white" alt="Playwright"></a>
     <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-009688.svg?logo=fastapi&logoColor=white" alt="FastAPI"></a>
     <a href="https://nextjs.org/"><img src="https://img.shields.io/badge/Next.js-black.svg?logo=next.js&logoColor=white" alt="Next.js"></a>
+    <a href="https://github.com/NihadMemmedli/quorvex_ai/commits/main"><img src="https://img.shields.io/github/last-commit/NihadMemmedli/quorvex_ai" alt="Last Commit"></a>
     <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
   </p>
   <p align="center">
@@ -28,8 +33,30 @@
 
 Quorvex AI transforms natural language test specifications into validated, self-healing Playwright tests. Point an AI agent at your application, describe what to test in plain English, and get production-ready TypeScript test code that actually passes. When tests break due to UI changes, the self-healing pipeline automatically detects and fixes selector failures -- no manual maintenance required.
 
+### Why Quorvex AI?
+
+- **Stop writing Playwright boilerplate** -- Describe tests in plain English, get production-ready TypeScript. No more wrestling with selectors, waits, and page objects by hand.
+- **Tests that fix themselves** -- The self-healing pipeline detects broken selectors and repairs them automatically. UI changes no longer mean hours of test maintenance.
+- **Beyond UI testing** -- Load testing, security scanning, API testing, database quality checks, and LLM evaluation -- all in one platform, all driven by AI.
+
 ![Dashboard Screenshot](docs/assets/dashboard-screenshot.png)
 *Web dashboard for managing specs, monitoring execution trends, and analyzing test results.*
+
+---
+
+## How Quorvex AI Compares
+
+| Feature | Quorvex AI | TestRigor | Mabl | Playwright (raw) | Cypress |
+|---|---|---|---|---|---|
+| Natural language → code | ✅ | ✅ (no-code) | ✅ (no-code) | ❌ | ❌ |
+| Self-healing | ✅ (3 modes) | ✅ | ✅ | ❌ | ❌ |
+| Open source | ✅ (MIT) | ❌ | ❌ | ✅ | ✅ |
+| Self-hosted | ✅ | ❌ | ❌ | ✅ | ✅ |
+| Load testing | ✅ (K6) | ❌ | ❌ | ❌ | ❌ |
+| Security testing | ✅ (ZAP+Nuclei) | ❌ | ❌ | ❌ | ❌ |
+| LLM evaluation | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Database testing | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Price | Free | $450+/mo | $500+/mo | Free | Free |
 
 ---
 
@@ -68,8 +95,15 @@ Quorvex AI transforms natural language test specifications into validated, self-
 
 Quorvex AI uses a multi-stage pipeline where an AI agent actively interacts with your application through a real browser at every step:
 
-```
-Markdown Spec --> Plan --> Generate --> Validate --> Heal (if needed)
+```mermaid
+graph LR
+    A["📝 Markdown Spec"] --> B["🔍 Plan"]
+    B --> C["⚡ Generate"]
+    C --> D["✅ Validate"]
+    D --> E{"Pass?"}
+    E -->|Yes| F["🎉 Done"]
+    E -->|No| G["🔧 Heal"]
+    G --> D
 ```
 
 1. **Plan** -- The AI reads your spec and explores the target application to build an execution plan
@@ -501,6 +535,16 @@ To report a vulnerability, please see [SECURITY.md](SECURITY.md). Do **not** ope
 - [GitHub Discussions](https://github.com/NihadMemmedli/quorvex_ai/discussions) -- Questions, ideas, and showcase
 - [Contributing Guide](CONTRIBUTING.md) -- How to get involved
 - [Changelog](CHANGELOG.md) -- Release history
+
+---
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=NihadMemmedli/quorvex_ai&type=Date)](https://star-history.com/#NihadMemmedli/quorvex_ai&Date)
+
+---
+
+If you find Quorvex AI useful, please consider giving it a ⭐ on GitHub — it helps others discover the project!
 
 ---
 

@@ -9,6 +9,8 @@ description = "Natural language to Playwright test script converter"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
+authors = [{name = "Nihad Mammadli"}]
+keywords = ["playwright", "test-automation", "ai", "self-healing", "natural-language", "testing", "llm", "fastapi", "load-testing", "security-testing"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
@@ -27,6 +29,12 @@ dependencies = [
     "alembic==1.18.3",
     "minio>=7.2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/NihadMemmedli/quorvex_ai"
+Repository = "https://github.com/NihadMemmedli/quorvex_ai"
+Documentation = "https://nihadmemmedli.github.io/quorvex_ai/"
+Changelog = "https://github.com/NihadMemmedli/quorvex_ai/blob/main/CHANGELOG.md"
 
 [project.scripts]
 playwright-agent = "orchestrator.cli:main"
