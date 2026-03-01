@@ -21,7 +21,7 @@ anthropic>=0.18.0
 
 # Authentication & Security
 passlib[bcrypt]>=1.7.4
-bcrypt>=4.0.0,<5.0.0  # Pin to 4.x for passlib compatibility
+bcrypt>=4.0.0,<6.0.0  # Pin to 4.x for passlib compatibility
 python-jose[cryptography]>=3.3.0
 pydantic[email]>=2.0.0
 pydantic-settings>=2.0.0
