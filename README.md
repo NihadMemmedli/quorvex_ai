@@ -38,6 +38,12 @@ Quorvex AI transforms natural language test specifications into validated, self-
 - **Tests that fix themselves** -- The self-healing pipeline detects broken selectors and repairs them automatically. UI changes no longer mean hours of test maintenance.
 - **Beyond UI testing** -- Load testing, security scanning, API testing, database quality checks, and LLM evaluation -- all in one platform, all driven by AI.
 
+### Why Quorvex AI?
+
+- **Stop writing Playwright boilerplate** -- Describe tests in plain English, get production-ready TypeScript. No more wrestling with selectors, waits, and page objects by hand.
+- **Tests that fix themselves** -- The self-healing pipeline detects broken selectors and repairs them automatically. UI changes no longer mean hours of test maintenance.
+- **Beyond UI testing** -- Load testing, security scanning, API testing, database quality checks, and LLM evaluation -- all in one platform, all driven by AI.
+
 ![Dashboard Screenshot](docs/assets/dashboard-screenshot.png)
 *Web dashboard for managing specs, monitoring execution trends, and analyzing test results.*
 

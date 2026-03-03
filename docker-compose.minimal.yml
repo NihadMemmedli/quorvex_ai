@@ -1,0 +1,84 @@
+# Quorvex AI - Minimal Docker Compose Configuration
+#
+# This minimal setup uses SQLite instead of PostgreSQL and skips Redis,
+# MinIO, and VNC. Perfect for trying out the platform quickly without
+# running the full production stack.
+#
+# Usage:
+#   docker-compose -f docker-compose.minimal.yml up -d
+#   docker-compose -f docker-compose.minimal.yml down
+#   docker-compose -f docker-compose.minimal.yml logs -f
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+    container_name: quorvex-backend-minimal
+    shm_size: '1gb'
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./runs:/app/runs
+      - ./specs:/app/specs
+      - ./tests:/app/tests
+      - ./data:/app/data
+      - ./prds:/app/prds
+      - ./scripts:/app/scripts
+      - ./orchestrator:/app/orchestrator
+    environment:
+      # AI/LLM Configuration (from .env)
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - ANTHROPIC_AUTH_TOKENS=${ANTHROPIC_AUTH_TOKENS:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
+      - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-20250514}
+      # Memory System
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - MEMORY_ENABLED=${MEMORY_ENABLED:-false}
+      # Use SQLite instead of PostgreSQL
+      - DATABASE_URL=sqlite:////app/data/quorvex.db
+      # Test Credentials (pass through from .env)
+      - LOGIN_USERNAME=${LOGIN_USERNAME:-}
+      - LOGIN_PASSWORD=${LOGIN_PASSWORD:-}
+      - INVENTORY_EMAIL=${INVENTORY_EMAIL:-}
+      - INVENTORY_PASSWORD=${INVENTORY_PASSWORD:-}
+      - RESOURCE_NAME=${RESOURCE_NAME:-}
+      - RESOURCE_QUANTITY=${RESOURCE_QUANTITY:-}
+      - RESOURCE_CAPACITY=${RESOURCE_CAPACITY:-}
+    entrypoint: python -m uvicorn orchestrator.api.main:app --host 0.0.0.0 --port 8001 --reload
+    networks:
+      - minimal-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.dev
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    container_name: quorvex-frontend-minimal
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./web/src:/app/src
+      - ./web/public:/app/public
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8001
+      - WATCHPACK_POLLING=true
+    depends_on:
+      - backend
+    networks:
+      - minimal-network
+    restart: unless-stopped
+
+networks:
+  minimal-network:
+    driver: bridge
