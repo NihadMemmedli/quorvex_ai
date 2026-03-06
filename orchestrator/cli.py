@@ -7,11 +7,14 @@ Entry point for natural language test generation.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 def run_command(
@@ -71,6 +74,250 @@ def print_output(result: subprocess.CompletedProcess):
     """Print stdout and safe stderr from process result."""
     if result.stderr and "cancel scope" not in result.stderr:
         print(f"STDERR: {result.stderr}", file=sys.stderr)
+
+
+INCLUDE_PATTERN = re.compile(r'@include\s+"([^"]+)"')
+URL_PATTERNS = [
+    r'Navigate to\s+(https?://[^\s\'"]+)',
+    r'Go to\s+(https?://[^\s\'"]+)',
+    r'Open\s+(https?://[^\s\'"]+)',
+    r'##\s+Base\s+URL:\s*(https?://[^\s\'"]+)',
+    r'Base\s+URL:\s*(https?://[^\s\'"]+)',
+    r'URL:\s*(https?://[^\s\'"]+)',
+    r'Target URL:\s*(https?://[^\s\'"]+)',
+    r'(?:POST|GET|PUT|PATCH|DELETE)\s+(https?://[^\s\'"]+)',
+    r'(https?://[^\s\'"]+)',
+]
+
+
+def _resolve_include_path(ref_path: str, base_dir: Path) -> Path | None:
+    """Resolve a template include path using the same lookup order as runtime pipeline."""
+    candidates = [
+        base_dir / ref_path,
+        Path(ref_path),
+        Path("specs") / ref_path,
+        Path("specs/templates") / Path(ref_path).name,
+    ]
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _expand_spec_includes(
+    spec_path: Path,
+    missing_includes: list[str],
+    include_cycles: list[str],
+    stack: list[Path] | None = None,
+) -> str:
+    """
+    Resolve @include directives recursively and collect include validation issues.
+
+    Returns expanded markdown content (best effort, unresolved includes are replaced with comments).
+    """
+    stack = stack or []
+    resolved = spec_path.resolve()
+
+    if resolved in stack:
+        cycle = " -> ".join(str(p) for p in [*stack, resolved])
+        include_cycles.append(cycle)
+        return f"<!-- INCLUDE CYCLE DETECTED: {cycle} -->"
+
+    stack.append(resolved)
+    try:
+        content = spec_path.read_text()
+    except Exception as exc:
+        missing_includes.append(f"{spec_path}: unreadable include source ({exc})")
+        stack.pop()
+        return ""
+
+    expanded_lines = []
+    for line in content.split("\n"):
+        match = INCLUDE_PATTERN.search(line)
+        if not match:
+            expanded_lines.append(line)
+            continue
+
+        ref_path = match.group(1).strip()
+        target_file = _resolve_include_path(ref_path, spec_path.parent)
+        if not target_file:
+            missing_includes.append(f"{spec_path}: include not found -> {ref_path}")
+            expanded_lines.append(f"<!-- MISSING INCLUDE: {ref_path} -->")
+            continue
+
+        expanded_content = _expand_spec_includes(
+            target_file,
+            missing_includes=missing_includes,
+            include_cycles=include_cycles,
+            stack=stack,
+        )
+        expanded_lines.append(f"\n# --- Included from {ref_path} ---")
+        expanded_lines.append(expanded_content)
+        expanded_lines.append("# --- End Include ---\n")
+
+    stack.pop()
+    return "\n".join(expanded_lines)
+
+
+def _extract_target_url(spec_content: str) -> str | None:
+    """Extract the first target URL from markdown content using pipeline-compatible patterns."""
+    for pattern in URL_PATTERNS:
+        match = re.search(pattern, spec_content, re.IGNORECASE)
+        if match:
+            return match.group(1).rstrip(".")
+    return None
+
+
+def _check_url_reachable(url: str, timeout_seconds: int = 10) -> tuple[bool, str]:
+    """Check whether a target URL is reachable (HEAD first, then GET fallback)."""
+    methods = ["HEAD", "GET"]
+    last_error = "Unknown error"
+
+    for method in methods:
+        try:
+            request = Request(url, method=method, headers={"User-Agent": "quorvex-ai-validator"})
+            with urlopen(request, timeout=timeout_seconds) as response:
+                status = getattr(response, "status", 200)
+                if 200 <= status < 400:
+                    return True, f"{method} {status}"
+                last_error = f"HTTP {status}"
+        except HTTPError as exc:
+            # Common for servers that disallow HEAD requests.
+            if method == "HEAD" and exc.code in (400, 403, 405, 501):
+                last_error = f"HEAD not allowed ({exc.code}), retrying with GET"
+                continue
+            last_error = f"HTTP {exc.code}"
+        except URLError as exc:
+            reason = str(exc.reason) if hasattr(exc, "reason") else str(exc)
+            last_error = reason
+        except Exception as exc:
+            last_error = str(exc)
+
+    return False, last_error
+
+
+def _validate_spec_precheck(spec_file: Path, timeout_seconds: int = 10) -> dict:
+    """
+    Validate a spec without running execution pipeline.
+
+    Checks:
+    1. Parseability/spec structure
+    2. @include references
+    3. Target URL extraction + reachability
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    missing_includes: list[str] = []
+    include_cycles: list[str] = []
+
+    try:
+        from orchestrator.utils.spec_detector import SpecDetector
+        from orchestrator.utils.spec_parser import parse_spec_file
+    except ImportError:
+        from utils.spec_detector import SpecDetector
+        from utils.spec_parser import parse_spec_file
+
+    # Format and parse checks.
+    spec_type = "unknown"
+    test_count = 0
+    total_steps = 0
+    try:
+        info = SpecDetector.get_spec_info(spec_file)
+        spec_type = info.get("type", "unknown")
+        test_count = int(info.get("test_count", 0))
+
+        parsed_cases = parse_spec_file(spec_file)
+        total_steps = sum(len(case.steps) for case in parsed_cases)
+        if not parsed_cases:
+            errors.append("No test cases could be parsed from spec.")
+        if total_steps == 0:
+            errors.append("No numbered test steps found in spec.")
+    except Exception as exc:
+        errors.append(f"Spec format parsing failed: {exc}")
+
+    # Include validation + include-aware URL extraction.
+    expanded_content = _expand_spec_includes(
+        spec_file,
+        missing_includes=missing_includes,
+        include_cycles=include_cycles,
+    )
+    if missing_includes:
+        errors.extend(missing_includes)
+    if include_cycles:
+        errors.extend([f"Include cycle detected: {cycle}" for cycle in include_cycles])
+
+    target_url = _extract_target_url(expanded_content)
+    url_reachable = False
+    url_status = "No target URL found in spec."
+
+    if target_url:
+        url_reachable, url_status = _check_url_reachable(target_url, timeout_seconds=timeout_seconds)
+        if not url_reachable:
+            errors.append(f"Target URL is not reachable: {target_url} ({url_status})")
+    else:
+        errors.append("No target URL found (e.g. 'Navigate to https://...').")
+
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "spec_type": spec_type,
+        "test_count": test_count,
+        "total_steps": total_steps,
+        "missing_includes": missing_includes,
+        "include_cycles": include_cycles,
+        "target_url": target_url,
+        "url_reachable": url_reachable,
+        "url_status": url_status,
+    }
+
+
+def _run_validate_only(spec_file: Path, timeout_seconds: int = 10) -> bool:
+    """Run dry-run spec validation and print a human-readable report."""
+    result = _validate_spec_precheck(spec_file, timeout_seconds=timeout_seconds)
+
+    print("=" * 80)
+    print("🧪 SPEC VALIDATION (DRY RUN)")
+    print("=" * 80)
+    print(f"   Spec: {spec_file}")
+    print(f"   Type: {result['spec_type']}")
+    print(f"   Tests detected: {result['test_count']}")
+    print(f"   Total steps: {result['total_steps']}")
+    print()
+
+    include_ok = not result["missing_includes"] and not result["include_cycles"]
+    print(f"{'✅' if include_ok else '❌'} Include validation")
+    if result["missing_includes"]:
+        for item in result["missing_includes"]:
+            print(f"   - {item}")
+    if result["include_cycles"]:
+        for item in result["include_cycles"]:
+            print(f"   - cycle: {item}")
+    if include_ok:
+        print("   All @include references resolved successfully.")
+    print()
+
+    print(f"{'✅' if result['target_url'] else '❌'} Target URL extraction")
+    if result["target_url"]:
+        print(f"   URL: {result['target_url']}")
+    else:
+        print("   No URL found.")
+    print()
+
+    print(f"{'✅' if result['url_reachable'] else '❌'} Target URL reachability")
+    print(f"   Status: {result['url_status']}")
+    print()
+
+    print(f"{'✅' if result['ok'] else '❌'} Overall result")
+    if result["ok"]:
+        print("   Validation passed. Safe to run full pipeline.")
+    else:
+        print("   Validation failed:")
+        for err in result["errors"]:
+            print(f"   - {err}")
+    print("=" * 80)
+
+    return bool(result["ok"])
 
 
 def _show_memory_stats(project_id: str = None):
@@ -286,6 +533,23 @@ def main():
     )
     parser.add_argument("--split-output-dir", help="Output directory for split specs (default: <spec-name>-tests/)")
     parser.add_argument("--memory-stats", action="store_true", help="Show memory system statistics and exit")
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Validate spec only: check format, template includes, and target URL reachability (no pipeline run). Useful for CI.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Alias for --validate-only.",
+    )
+    parser.add_argument(
+        "--validate-timeout",
+        type=int,
+        default=10,
+        metavar="SECONDS",
+        help="Timeout in seconds for URL reachability check when using --validate-only (default: 10)",
+    )
 
     # === AI-POWERED EXPLORATION & RTM ===
     parser.add_argument("--explore", metavar="URL", help="Start AI-powered exploration of a web application")
@@ -703,6 +967,11 @@ def main():
     if not spec_file.exists():
         print(f"❌ Input file not found: {spec_path}")
         sys.exit(1)
+
+    # --- VALIDATE ONLY (DRY RUN) ---
+    if args.validate_only or args.dry_run:
+        ok = _run_validate_only(spec_file, timeout_seconds=args.validate_timeout)
+        sys.exit(0 if ok else 1)
 
     # --- OPENAPI/SWAGGER IMPORT ---
     if args.api_tests:

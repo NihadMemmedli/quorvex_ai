@@ -231,6 +231,11 @@ Before submitting a PR, verify:
    ```bash
    python orchestrator/cli.py specs/your-test.md
    ```
+5. **If you added or changed a spec**: Validate it without running the full pipeline (checks format, `@include` references, and target URL reachability):
+   ```bash
+   python orchestrator/cli.py specs/your-test.md --validate-only
+   # or: --dry-run (alias). Use --validate-timeout N for a longer URL check timeout.
+   ```
 
 ---
 
@@ -298,7 +303,7 @@ New to the project? Look for issues labeled:
 
 Good starting points:
 
-1. **Add a test spec** -- Write a new markdown spec in `specs/` for a common testing scenario
+1. **Add a test spec** -- Write a new markdown spec in `specs/` for a common testing scenario. Validate it with `python orchestrator/cli.py specs/your-spec.md --validate-only` before running the full pipeline.
 2. **Improve error messages** -- Find a confusing error and make it more descriptive
 3. **Add a troubleshooting entry** -- Document a problem you encountered and its solution
 4. **Fix a typo** -- Documentation improvements are always welcome
@@ -312,6 +317,8 @@ The CI pipeline runs on every pull request:
 - **Linting**: `ruff check` (Python) and `next lint` (frontend)
 - **Unit tests**: `pytest tests/ -v`
 - **Build check**: Frontend build verification
+
+You can use **spec validation** as a fast pre-check (no API keys or browser required): run the CLI with `--validate-only` (or `--dry-run`) on a spec to verify format, template includes, and target URL reachability. Exit code 0 means validation passed; 1 means failed. Useful in CI before running the full pipeline.
 
 ### External Contributors
 
