@@ -49,19 +49,36 @@ Quorvex AI transforms natural language test specifications into validated, self-
 
 ---
 
+## Try It Instantly
+
+No local setup required -- open a fully configured development environment in your browser:
+
+[![Open in Gitpod](https://gitpod.io/button/open-in-gitpod.svg)](https://gitpod.io/#https://github.com/NihadMemmedli/quorvex_ai)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/NihadMemmedli/quorvex_ai?quickstart=1)
+
+---
+
 ## How Quorvex AI Compares
 
-| Feature | Quorvex AI | TestRigor | Mabl | Playwright (raw) | Cypress |
+| Feature | Quorvex AI | Shortest | Octomind | testRigor | MS Playwright Agents |
 |---|---|---|---|---|---|
-| Natural language → code | ✅ | ✅ (no-code) | ✅ (no-code) | ❌ | ❌ |
-| Self-healing | ✅ (3 modes) | ✅ | ✅ | ❌ | ❌ |
-| Open source | ✅ (MIT) | ❌ | ❌ | ✅ | ✅ |
-| Self-hosted | ✅ | ❌ | ❌ | ✅ | ✅ |
+| Natural language input | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Stable code output | ✅ | ❌ (runtime AI) | ✅ | ❌ (proprietary) | ✅ |
+| Self-healing | ✅ (3 modes) | ❌ | ✅ | ✅ | ✅ |
+| Web dashboard | ✅ | ❌ | ✅ | ✅ | ❌ |
+| CLI mode | ✅ | ✅ | ❌ | ❌ | ✅ (VS Code) |
+| API testing | ✅ (OpenAPI) | ❌ | ❌ | Partial | ❌ |
 | Load testing | ✅ (K6) | ❌ | ❌ | ❌ | ❌ |
 | Security testing | ✅ (ZAP+Nuclei) | ❌ | ❌ | ❌ | ❌ |
-| LLM evaluation | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Database testing | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Price | Free | $450+/mo | $500+/mo | Free | Free |
+| LLM evaluation | ✅ | ❌ | ❌ | ❌ | ❌ |
+| PRD to tests | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Self-hosted | ✅ | ✅ | ❌ | ❌ | ✅ |
+| Open source | ✅ (MIT) | ✅ | Freemium | ❌ ($450+/mo) | ✅ |
+
+> **Generate once, run forever** -- Unlike tools that burn AI tokens on every test run, Quorvex AI outputs stable Playwright code. Subsequent runs execute natively with zero AI cost.
+
+[Detailed comparisons](docs/comparisons/index.md) | [Why we built this](docs/comparisons/why-we-built-this.md)
 
 ---
 
@@ -524,6 +541,8 @@ For more diagnostics, see [docs/troubleshooting.md](docs/troubleshooting.md).
 
 We welcome contributions of all kinds. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, architecture overview, code style, and the pull request process.
 
+New to the project? Check out the [Good First Issues](docs/community/good-first-issues.md) list for curated tasks suitable for newcomers.
+
 Please read our [Code of Conduct](CODE_OF_CONDUCT.md) before participating.
 
 ---
@@ -539,7 +558,15 @@ To report a vulnerability, please see [SECURITY.md](SECURITY.md). Do **not** ope
 - [GitHub Issues](https://github.com/NihadMemmedli/quorvex_ai/issues) -- Bug reports and feature requests
 - [GitHub Discussions](https://github.com/NihadMemmedli/quorvex_ai/discussions) -- Questions, ideas, and showcase
 - [Contributing Guide](CONTRIBUTING.md) -- How to get involved
+- [Good First Issues](docs/community/good-first-issues.md) -- Curated tasks for new contributors
+- [Roadmap](docs/community/roadmap.md) -- Current and planned features
 - [Changelog](CHANGELOG.md) -- Release history
+
+### Contributors
+
+<a href="https://github.com/NihadMemmedli/quorvex_ai/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=NihadMemmedli/quorvex_ai" alt="Contributors" />
+</a>
 
 ---
 

@@ -1,0 +1,29 @@
+{
+  "name": "Quorvex AI",
+  "image": "mcr.microsoft.com/devcontainers/python:3.10",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "20" },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {}
+  },
+  "postCreateCommand": "cp .env.example .env && make setup",
+  "postStartCommand": "make dev",
+  "forwardPorts": [3000, 8001],
+  "portsAttributes": {
+    "3000": { "label": "Frontend", "onAutoForward": "openPreview" },
+    "8001": { "label": "Backend API", "onAutoForward": "silent" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-playwright.playwright",
+        "bradlc.vscode-tailwindcss",
+        "dbaeumer.vscode-eslint",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "./orchestrator/venv/bin/python"
+      }
+    }
+  }
+}
