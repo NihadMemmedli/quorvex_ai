@@ -1,0 +1,76 @@
+<svg width="1280" height="640" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1e293b;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#3b82f6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8b5cf6;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="640" fill="url(#bg)" rx="0"/>
+
+  <!-- Decorative grid dots -->
+  <pattern id="dots" x="0" y="0" width="40" height="40" patternUnits="userSpaceOnUse">
+    <circle cx="20" cy="20" r="1" fill="#334155" opacity="0.5"/>
+  </pattern>
+  <rect width="1280" height="640" fill="url(#dots)"/>
+
+  <!-- Accent bar top -->
+  <rect x="0" y="0" width="1280" height="4" fill="url(#accent)"/>
+
+  <!-- Main title -->
+  <text x="640" y="220" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="72" font-weight="800" fill="#f8fafc" text-anchor="middle" letter-spacing="-2">
+    Quorvex AI
+  </text>
+
+  <!-- Tagline -->
+  <text x="640" y="290" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="28" font-weight="400" fill="#94a3b8" text-anchor="middle">
+    Write tests in plain English. AI handles the rest.
+  </text>
+
+  <!-- Feature pills -->
+  <!-- Pill 1: Self-Healing -->
+  <rect x="180" y="340" width="200" height="40" rx="20" fill="#1e3a5f" stroke="#3b82f6" stroke-width="1"/>
+  <text x="280" y="366" font-family="system-ui, sans-serif" font-size="15" font-weight="600" fill="#60a5fa" text-anchor="middle">Self-Healing Tests</text>
+
+  <!-- Pill 2: Load Testing -->
+  <rect x="410" y="340" width="180" height="40" rx="20" fill="#1e3a5f" stroke="#3b82f6" stroke-width="1"/>
+  <text x="500" y="366" font-family="system-ui, sans-serif" font-size="15" font-weight="600" fill="#60a5fa" text-anchor="middle">Load Testing</text>
+
+  <!-- Pill 3: Security -->
+  <rect x="620" y="340" width="200" height="40" rx="20" fill="#1e3a5f" stroke="#3b82f6" stroke-width="1"/>
+  <text x="720" y="366" font-family="system-ui, sans-serif" font-size="15" font-weight="600" fill="#60a5fa" text-anchor="middle">Security Scanning</text>
+
+  <!-- Pill 4: API Testing -->
+  <rect x="850" y="340" width="180" height="40" rx="20" fill="#1e3a5f" stroke="#3b82f6" stroke-width="1"/>
+  <text x="940" y="366" font-family="system-ui, sans-serif" font-size="15" font-weight="600" fill="#60a5fa" text-anchor="middle">API Testing</text>
+
+  <!-- Code snippet preview -->
+  <rect x="280" y="420" width="720" height="140" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+
+  <!-- Terminal dots -->
+  <circle cx="304" cy="444" r="6" fill="#ff5f56"/>
+  <circle cx="324" cy="444" r="6" fill="#ffbd2e"/>
+  <circle cx="344" cy="444" r="6" fill="#27c93f"/>
+
+  <!-- Code line 1 -->
+  <text x="304" y="480" font-family="'SF Mono', 'Fira Code', 'Cascadia Code', monospace" font-size="14" fill="#7c8aaa">## Steps</text>
+
+  <!-- Code line 2 -->
+  <text x="304" y="502" font-family="'SF Mono', 'Fira Code', 'Cascadia Code', monospace" font-size="14" fill="#c9d1d9">1. Navigate to https://myapp.com/login</text>
+
+  <!-- Code line 3 -->
+  <text x="304" y="524" font-family="'SF Mono', 'Fira Code', 'Cascadia Code', monospace" font-size="14" fill="#c9d1d9">2. Enter "user@test.com" into the email field</text>
+
+  <!-- Code line 4 -->
+  <text x="304" y="546" font-family="'SF Mono', 'Fira Code', 'Cascadia Code', monospace" font-size="14" fill="#27c93f">3. Verify the dashboard loads ✓</text>
+
+  <!-- Bottom badges -->
+  <text x="640" y="610" font-family="system-ui, sans-serif" font-size="16" fill="#64748b" text-anchor="middle">
+    Open Source · MIT Licensed · Self-Hosted · Playwright
+  </text>
+</svg>
