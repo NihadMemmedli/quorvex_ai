@@ -1,4 +1,4 @@
-claude-agent-sdk==0.1.22
+claude-agent-sdk==0.1.48
 jsonschema>=4.0.0
 python-dotenv>=1.0.0
 black
