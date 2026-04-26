@@ -41,7 +41,7 @@ minio>=7.2.0
 asyncpg>=0.29.0
 
 # LLM Testing (AI/LLM evaluation)
-deepeval>=2.0.0
+deepeval>=3.9.8
 tiktoken>=0.7.0
 
 # Scheduling (Cron-based regression runs)
