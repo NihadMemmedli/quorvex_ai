@@ -47,6 +47,13 @@ export function FeatureWorkspace({
     onEditRequirement,
     onDeleteRequirement,
 }: FeatureWorkspaceProps) {
+    // --- CRUD State ---
+    const [editingIndex, setEditingIndex] = useState<number | null>(null);
+    const [editText, setEditText] = useState('');
+    const [isAdding, setIsAdding] = useState(false);
+    const [newReqText, setNewReqText] = useState('');
+    const [isSaving, setIsSaving] = useState(false);
+
     // --- Empty State ---
     if (!feature) {
         return (
@@ -97,13 +104,6 @@ export function FeatureWorkspace({
         generationResult?.status === 'running' || generationResult?.status === 'pending';
     const currentStage = generationResult?.stage;
     const stageMessage = generationResult?.message;
-
-    // --- CRUD State ---
-    const [editingIndex, setEditingIndex] = useState<number | null>(null);
-    const [editText, setEditText] = useState('');
-    const [isAdding, setIsAdding] = useState(false);
-    const [newReqText, setNewReqText] = useState('');
-    const [isSaving, setIsSaving] = useState(false);
 
     const handleGenerate = async () => {
         await onGenerate(feature.name);

@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
-import { Home, FileText, Play, Settings, BarChart2, ClipboardList, FlaskConical, Layers, Compass, CheckSquare, Users, Shield, Zap, Activity, Database, BrainCircuit, TrendingUp, Clock, GitBranch, ChevronRight, MessageSquare, Search, Command, Brain, Bot, FolderOpen, PieChart, Rocket } from 'lucide-react';
+import { Home, FileText, Play, Settings, BarChart2, ClipboardList, FlaskConical, Layers, Compass, CheckSquare, Users, Shield, Zap, Activity, Database, BrainCircuit, TrendingUp, Clock, GitBranch, ChevronRight, MessageSquare, Search, Command, Brain, Bot, FolderOpen, PieChart, Rocket, Workflow } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
@@ -24,6 +24,7 @@ interface NavGroup {
 
 const topLinks: NavItem[] = [
     { href: '/', label: 'Overview', icon: Home },
+    { href: '/workflow', label: 'AI Workflows', icon: Workflow },
     { href: '/dashboard', label: 'Reporting', icon: BarChart2 },
     { href: '/assistant', label: 'AI Assistant', icon: MessageSquare },
     { href: '/projects', label: 'Projects', icon: FolderOpen },

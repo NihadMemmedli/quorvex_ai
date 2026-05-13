@@ -18,6 +18,8 @@ Redis key layout:
     playwright:k6:heartbeat:<id> - heartbeat key with 120s TTL
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging

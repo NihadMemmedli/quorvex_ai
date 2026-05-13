@@ -1169,16 +1169,36 @@ async def get_resource_status():
 async def get_agent_queue_status():
     """Get current agent queue status.
 
-    Returns detailed information about browser slot usage for agents
-    from the unified browser pool.
+    Returns Redis-backed agent queue metrics when queue mode is active.
+    Browser pool status is included only as auxiliary capacity context.
     """
+    try:
+        from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
+
+        if REDIS_AVAILABLE and should_use_agent_queue():
+            queue = get_agent_queue()
+            await queue.connect()
+            metrics = await queue.get_metrics()
+            health = await queue.get_worker_health()
+            return {
+                "mode": "redis",
+                "active": metrics.get("running", 0),
+                "queued": metrics.get("queue_length", 0),
+                "workers_alive": metrics.get("workers_alive", 0),
+                "stale_running": metrics.get("stale_running", 0),
+                "oldest_queued_age_seconds": metrics.get("oldest_queued_age_seconds"),
+                "by_status": metrics.get("by_status", {}),
+                "worker_health": health,
+            }
+    except Exception as exc:
+        logger.warning(f"Failed to read Redis agent queue status: {exc}")
+
     pool = BROWSER_POOL or await get_browser_pool()
     status = await pool.get_status()
-
-    # Filter to show agent-specific info
     agent_running = status["by_type"].get("agent", 0)
 
     return {
+        "mode": "browser_pool",
         "active": agent_running,
         "max": status["max_browsers"],
         "queued": status["queued"],
@@ -3084,6 +3104,7 @@ def list_runs(
                 stage_started_at=stage_started_at,
                 stage_message=r.stage_message,
                 healing_attempt=r.healing_attempt,
+                agentic_summary=r.agentic_summary,
             )
         )
 
@@ -3121,6 +3142,7 @@ def get_run(
             "status": run_db.status,
             "spec_name": run_db.spec_name,
             "test_name": run_db.test_name,
+            "agentic_summary": run_db.agentic_summary,
             "note": "Files missing",
         }
 
@@ -3131,7 +3153,12 @@ def get_run(
     export_file = run_dir / "export.json"
     validation_file = run_dir / "validation.json"
 
-    data = {"id": id, "spec_name": run_db.spec_name, "test_name": run_db.test_name}
+    data = {
+        "id": id,
+        "spec_name": run_db.spec_name,
+        "test_name": run_db.test_name,
+        "agentic_summary": run_db.agentic_summary,
+    }
 
     # Check runtime status if not completed
     if run_db.status in ["running", "pending"] and not is_process_active(id):
@@ -3226,6 +3253,12 @@ class ProgressUpdate(BaseModel):
     healing_attempt: int | None = None
 
 
+class AgenticSummaryUpdate(BaseModel):
+    """Request model for updating compact agentic QA summary."""
+
+    summary: dict[str, Any]
+
+
 @app.post("/runs/{id}/progress")
 def update_run_progress(id: str, update: ProgressUpdate, session: Session = Depends(get_session)):
     """Update run progress - called by CLI to report stage transitions.
@@ -3255,6 +3288,24 @@ def update_run_progress(id: str, update: ProgressUpdate, session: Session = Depe
     logger.debug(f"Progress update for {id}: stage={update.stage}, message={update.message}")
 
     return {"status": "updated", "run_id": id, "current_stage": run.current_stage, "stage_message": run.stage_message}
+
+
+@app.post("/runs/{id}/agentic-summary")
+def update_run_agentic_summary(id: str, update: AgenticSummaryUpdate, session: Session = Depends(get_session)):
+    """Update compact Agentic QA summary for a run.
+
+    Full artifacts remain on disk in the run directory; this endpoint stores a
+    small query-friendly summary for list/detail views.
+    """
+    run = session.get(DBTestRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    run.agentic_summary = update.summary
+    session.add(run)
+    session.commit()
+
+    return {"status": "updated", "run_id": id, "agentic_summary": run.agentic_summary}
 
 
 @app.get("/runs/{id}/log/stream")
@@ -4761,6 +4812,9 @@ def stop_run(
     if run:
         if run.status in ["passed", "failed", "stopped", "cancelled", "error"]:
             return {"status": "already_completed", "id": id, "current_status": run.status}
+
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
 
     return {"status": "not_running", "message": "Run is not currently active or queued"}
 

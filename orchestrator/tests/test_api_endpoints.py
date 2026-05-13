@@ -13,7 +13,9 @@ Run with: JWT_SECRET_KEY=test pytest orchestrator/tests/test_api_endpoints.py -v
 
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -25,6 +27,7 @@ os.environ.setdefault("REQUIRE_AUTH", "false")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from fastapi.testclient import TestClient
+from sqlmodel import Session
 
 
 @pytest.fixture(scope="module")
@@ -115,6 +118,47 @@ class TestRunEndpoints:
         response = client.post("/runs/nonexistent-run-id/stop")
         assert response.status_code == 404
 
+    def test_update_agentic_summary_and_get_run(self, client):
+        """POST /runs/{id}/agentic-summary should persist compact summary."""
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import TestRun as DBTestRun
+
+        run_id = f"agentic-summary-{uuid4()}"
+        summary = {
+            "schema_version": "1.0",
+            "design": {"flake_risk": "high"},
+            "critic": {"issue_count": 2},
+            "diagnosis": {"category": "timing", "heal_allowed": True},
+            "stability": {"status": "stable", "total_runs": 2},
+        }
+
+        with Session(engine) as session:
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="agentic-summary-test.md",
+                    status="passed",
+                    created_at=datetime.utcnow(),
+                    test_name="agentic-summary-test.md",
+                )
+            )
+            session.commit()
+
+        try:
+            response = client.post(f"/runs/{run_id}/agentic-summary", json={"summary": summary})
+            assert response.status_code == 200
+            assert response.json()["agentic_summary"]["design"]["flake_risk"] == "high"
+
+            detail_response = client.get(f"/runs/{run_id}")
+            assert detail_response.status_code == 200
+            assert detail_response.json()["agentic_summary"]["stability"]["status"] == "stable"
+        finally:
+            with Session(engine) as session:
+                run = session.get(DBTestRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
+
 
 class TestSpecEndpoints:
     """Test spec-related endpoints."""
@@ -129,7 +173,9 @@ class TestSpecEndpoints:
         response = client.get("/specs/list")
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
+        assert isinstance(data, dict)
+        assert "items" in data
+        assert isinstance(data["items"], list)
 
     def test_list_specs_with_project_filter(self, client):
         """GET /specs/list with project_id filter should work."""
@@ -180,7 +226,8 @@ class TestProjectEndpoints:
         response = client.get("/projects")
         assert response.status_code == 200
         data = response.json()
-        assert "items" in data or isinstance(data, list)
+        assert "projects" in data
+        assert isinstance(data["projects"], list)
 
     def test_get_default_project(self, client):
         """GET /projects/default should return the default project."""
@@ -233,13 +280,13 @@ class TestDashboardEndpoints:
     """Test dashboard endpoints."""
 
     def test_dashboard_stats(self, client):
-        """GET /dashboard/stats should return statistics."""
-        response = client.get("/dashboard/stats")
+        """GET /dashboard should return statistics."""
+        response = client.get("/dashboard")
         assert response.status_code == 200
 
     def test_dashboard_stats_with_project(self, client):
-        """GET /dashboard/stats with project filter should work."""
-        response = client.get("/dashboard/stats?project_id=default")
+        """GET /dashboard with project filter should work."""
+        response = client.get("/dashboard?project_id=default")
         assert response.status_code == 200
 
 

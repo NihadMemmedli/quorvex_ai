@@ -50,6 +50,9 @@ class TestRun(SQLModel, table=True):
     # Test type: "browser" (default), "api", or "mixed"
     test_type: str | None = Field(default="browser")
 
+    # Compact summary of agentic QA artifacts. Full artifacts stay in run directory.
+    agentic_summary: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+
     # We can store heavy JSONs as text/jsonb if needed, or stick to file for big logs.
     # For now, let's keep metadata in DB.
 

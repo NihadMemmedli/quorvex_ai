@@ -35,17 +35,19 @@ class MemoryManager:
         """
         self.config = get_config()
 
-        # Set project for isolation BEFORE initializing stores
+        effective_project = project_id or self.config.project_id or "default"
+        self.project_id = effective_project
+
+        # Keep the legacy global config in sync for callers that still use it,
+        # but pass project_id explicitly to stores so this manager does not rely
+        # on mutable global state for isolation.
         if project_id:
             set_project(project_id)
             self.config.project_id = project_id
-
-        effective_project = project_id or self.config.project_id or "default"
         print(f"[Memory] Initializing for project: {effective_project}")
 
-        # Initialize stores AFTER project is set
-        self.vector_store: VectorStore = get_vector_store()
-        # self.graph_store is now a property
+        self.vector_store: VectorStore = get_vector_store(project_id=effective_project)
+        self._graph_store: GraphStore = get_graph_store(project_id=effective_project)
 
         # Log initial stats
         try:
@@ -56,8 +58,8 @@ class MemoryManager:
 
     @property
     def graph_store(self) -> GraphStore:
-        """Get the current graph store instance"""
-        return get_graph_store()
+        """Get the graph store for this manager's project context."""
+        return self._graph_store
 
     # ========== Test Pattern Methods ==========
 
@@ -469,7 +471,7 @@ class MemoryManager:
 
     def suggest_test_ideas(self, context: dict[str, Any], max_suggestions: int = 10) -> list[dict[str, Any]]:
         """
-        Suggest new test ideas based on coverage gaps and patterns.
+        Suggest new test ideas based on generated ideas, coverage gaps, and patterns.
 
         Args:
             context: Context information (url, feature, etc.)
@@ -480,8 +482,35 @@ class MemoryManager:
         """
         suggestions = []
 
+        # First return first-class generated ideas, if available.
+        generated_ideas = self.get_test_ideas(
+            url=context.get("url"),
+            feature=context.get("feature"),
+            max_results=max_suggestions,
+        )
+        for idea in generated_ideas:
+            suggestions.append(
+                {
+                    "description": idea.get("description", ""),
+                    "type": idea.get("category", "coverage"),
+                    "priority": idea.get("priority", "medium"),
+                    "gap": None,
+                    "title": idea.get("title"),
+                    "source_flow": ", ".join(idea.get("source_flows", [])[:3]) or None,
+                    "source_requirement": ", ".join(idea.get("source_requirements", [])[:3]) or None,
+                    "source_api_endpoint": ", ".join(idea.get("source_api_endpoints", [])[:3]) or None,
+                    "suggested_steps": idea.get("suggested_steps", []),
+                    "expected_outcomes": idea.get("expected_outcomes", []),
+                    "spec_readiness": idea.get("spec_readiness", "ready"),
+                    "confidence": idea.get("confidence", 0.6),
+                }
+            )
+
+        if len(suggestions) >= max_suggestions:
+            return suggestions[:max_suggestions]
+
         # Get coverage gaps
-        gaps = self.get_coverage_gaps(url=context.get("url"), max_results=max_suggestions)
+        gaps = self.get_coverage_gaps(url=context.get("url"), max_results=max_suggestions - len(suggestions))
 
         for gap in gaps:
             if gap["type"] == "untested_element":
@@ -509,6 +538,60 @@ class MemoryManager:
 
         return suggestions[:max_suggestions]
 
+    def get_test_ideas(
+        self,
+        url: str | None = None,
+        feature: str | None = None,
+        max_results: int = 10,
+        source_session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Retrieve generated test ideas from memory.
+
+        Args:
+            url: Optional URL text to bias semantic search
+            feature: Optional feature/title text to bias semantic search
+            max_results: Maximum number of ideas
+            source_session_id: Optional exact source exploration session filter
+
+        Returns:
+            List of normalized generated test ideas
+        """
+        filters = {"source_session_id": source_session_id} if source_session_id else None
+        query = " ".join(part for part in [feature, url] if part)
+
+        if query:
+            raw_ideas = self.vector_store.search_test_ideas(query=query, n_results=max_results, filters=filters)
+        else:
+            raw_ideas = self.vector_store.get_all_test_ideas(filters=filters)
+
+        ideas = []
+        for raw in raw_ideas[:max_results]:
+            metadata = raw.get("metadata", {}) or {}
+            try:
+                confidence = float(metadata.get("confidence", 0.6) or 0.6)
+            except (TypeError, ValueError):
+                confidence = 0.6
+            idea = {
+                "id": raw.get("id"),
+                "title": metadata.get("title") or raw.get("document") or "Generated test idea",
+                "description": raw.get("document") or metadata.get("description", ""),
+                "category": metadata.get("category", "coverage"),
+                "priority": metadata.get("priority", "medium"),
+                "source_session_id": metadata.get("source_session_id"),
+                "source_flows": self._metadata_list(metadata.get("source_flows")),
+                "source_requirements": self._metadata_list(metadata.get("source_requirements")),
+                "source_api_endpoints": self._metadata_list(metadata.get("source_api_endpoints")),
+                "suggested_steps": self._metadata_list(metadata.get("suggested_steps")),
+                "expected_outcomes": self._metadata_list(metadata.get("expected_outcomes")),
+                "spec_readiness": metadata.get("spec_readiness", "ready"),
+                "confidence": confidence,
+                "generated_by": metadata.get("generated_by"),
+            }
+            ideas.append(idea)
+
+        return ideas
+
     def store_test_idea(
         self, description: str, priority: str = "medium", category: str = "coverage", metadata: dict[str, Any] = None
     ) -> str:
@@ -526,17 +609,51 @@ class MemoryManager:
         """
         idea_id = hashlib.md5(f"{description}:{category}".encode()).hexdigest()
 
-        idea_metadata = {
-            "priority": priority,
-            "category": category,
-            "created_at": datetime.now().isoformat(),
-            "status": "suggested",
-            **(metadata or {}),
-        }
+        idea_metadata = self._sanitize_metadata(
+            {
+                "priority": priority,
+                "category": category,
+                "created_at": datetime.now().isoformat(),
+                "status": "suggested",
+                **(metadata or {}),
+            }
+        )
 
         self.vector_store.add_test_idea(idea_id=idea_id, description=description, metadata=idea_metadata)
 
         return idea_id
+
+    @staticmethod
+    def _sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+        """Convert metadata to ChromaDB-supported primitive values."""
+        sanitized: dict[str, Any] = {}
+        for key, value in metadata.items():
+            if value is None:
+                continue
+            if isinstance(value, (str, int, float, bool)):
+                sanitized[key] = value
+            else:
+                sanitized[key] = json.dumps(value)
+        return sanitized or {"_placeholder": True}
+
+    @staticmethod
+    def _metadata_list(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [str(item) for item in parsed]
+            except json.JSONDecodeError:
+                pass
+            return [stripped]
+        return [str(value)]
 
     # ========== Graph Query Methods ==========
 
@@ -637,10 +754,11 @@ def get_memory_manager(project_id: str | None = None, force_refresh: bool = Fals
         MemoryManager instance
     """
     global _memory_manager
+    requested_project_id = project_id or "default"
     if (
         _memory_manager is None
         or force_refresh
-        or (_memory_manager.config.project_id != project_id and project_id is not None)
+        or _memory_manager.config.project_id != requested_project_id
     ):
-        _memory_manager = MemoryManager(project_id=project_id)
+        _memory_manager = MemoryManager(project_id=requested_project_id)
     return _memory_manager

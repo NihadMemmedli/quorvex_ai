@@ -8,6 +8,7 @@ Supports three authentication modes:
 """
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,10 @@ class AuthHandler:
         Args:
             storage_dir: Directory to store session data
         """
-        self.storage_dir = storage_dir or Path("orchestrator/sessions")
+        default_storage_dir = Path(os.getenv("AUTH_SESSIONS_DIR", "/app/data/auth_sessions"))
+        if not default_storage_dir.is_absolute():
+            default_storage_dir = Path.cwd() / default_storage_dir
+        self.storage_dir = storage_dir or default_storage_dir
         self.storage_dir.mkdir(parents=True, exist_ok=True)
 
     async def authenticate(self, agent, auth_config: dict[str, Any], base_url: str) -> dict[str, Any]:

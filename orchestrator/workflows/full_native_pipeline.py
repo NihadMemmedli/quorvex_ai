@@ -37,6 +37,13 @@ if config_dir:
 from utils.browser_cleanup import cleanup_orphaned_browsers
 from utils.progress_reporter import extract_run_id_from_path, init_progress_reporter, report_progress
 from utils.spec_detector import SpecDetector, SpecType
+from workflows.agentic_quality import (
+    FailureTriageAgent,
+    StabilityVerifier,
+    TestCriticAgent,
+    TestDesignAgent,
+    build_agentic_summary,
+)
 from workflows.native_api_generator import NativeApiGenerator
 from workflows.native_api_healer import NativeApiHealer
 from workflows.native_generator import NativeGenerator
@@ -76,6 +83,10 @@ class FullNativePipeline:
         self.native_healer = NativeHealer()
         self.api_generator = NativeApiGenerator()
         self.api_healer = NativeApiHealer()
+        self.test_design_agent = TestDesignAgent()
+        self.test_critic_agent = TestCriticAgent()
+        self.failure_triage_agent = FailureTriageAgent()
+        self.stability_verifier = StabilityVerifier()
 
     def _load_project_credentials(self):
         """Load project credentials into os.environ.
@@ -242,10 +253,32 @@ class FullNativePipeline:
 
                 if result.passed:
                     logger.info("Test PASSED!")
+                    stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+                    if stability_result:
+                        return stability_result
                     (run_dir / "status.txt").write_text("passed")
+                    self._publish_agentic_summary(run_dir)
                     return {"success": True, "test_path": str(test_path), "attempts": 0, "stage": "completed"}
 
                 logger.error(f"Test FAILED: {result.error_summary}")
+                diagnosis = self._run_failure_triage(
+                    test_path=test_path,
+                    run_dir=run_dir,
+                    result=result,
+                    design=None,
+                    critic=None,
+                )
+                if not diagnosis.get("heal_allowed", True):
+                    logger.error("Failure triage marked this failure as non-healable; skipping healing")
+                    (run_dir / "status.txt").write_text("failed")
+                    self._publish_agentic_summary(run_dir)
+                    return {
+                        "success": False,
+                        "test_path": str(test_path),
+                        "attempts": 0,
+                        "stage": "triage_blocked_healing",
+                        "diagnosis": diagnosis,
+                    }
 
                 # Stage 4: Healing
                 if hybrid_healing:
@@ -258,7 +291,7 @@ class FullNativePipeline:
                     )
                 else:
                     return await self._native_healing(
-                        test_path=test_path, run_dir=run_dir, browser=browser, result=result
+                        test_path=test_path, run_dir=run_dir, browser=browser, result=result, diagnosis=diagnosis
                     )
             except Exception as e:
                 error_msg = f"Healing-only pipeline crashed: {e}"
@@ -275,6 +308,7 @@ class FullNativePipeline:
             (run_dir / "status.txt").write_text("running")
 
             # Stage 1: Native Planning with browser exploration
+            plan_path: Path | None = None
             if not skip_planning:
                 logger.info("Stage 1: Native Planning (browser exploration)...")
                 report_progress("planning", "Exploring application structure...")
@@ -297,6 +331,18 @@ class FullNativePipeline:
                 # Safety-net: clean up any orphaned browsers from planner stage
                 cleanup_orphaned_browsers()
 
+            logger.info("Agentic quality: analyzing test design...")
+            report_progress("planning", "Analyzing test design and flake risk...")
+            design = self.test_design_agent.analyze(
+                spec_content=resolved_spec_content,
+                target_url=target_url,
+                credentials=credentials,
+                plan_path=plan_path,
+                run_dir=run_dir,
+            )
+            design_context = self.test_design_agent.condensed_context(design)
+            self._publish_agentic_summary(run_dir)
+
             # Stage 2: Native Generation with live browser
             logger.info("Stage 2: Native Generation (live browser)...")
             report_progress("generating", "Creating test code with live browser...")
@@ -306,7 +352,10 @@ class FullNativePipeline:
             resolved_spec_path = run_dir / "spec_resolved.md"
             original_spec_name = spec_file.stem  # e.g., "12-create-trip-with-minimal-information"
             test_path = await self._run_native_generator(
-                spec_path=str(resolved_spec_path), target_url=target_url, output_name=original_spec_name
+                spec_path=str(resolved_spec_path),
+                target_url=target_url,
+                output_name=original_spec_name,
+                design_context=design_context,
             )
 
             if not test_path or not test_path.exists():
@@ -336,6 +385,11 @@ class FullNativePipeline:
 
             logger.info(f"Test generated: {test_path}")
 
+            logger.info("Agentic quality: reviewing generated test...")
+            report_progress("generating", "Reviewing generated test for flake risks...")
+            critic = self.test_critic_agent.review(test_path=test_path, design=design, run_dir=run_dir)
+            self._publish_agentic_summary(run_dir)
+
             # Create export.json for dashboard
             export_data = {
                 "testFilePath": str(test_path),
@@ -356,10 +410,32 @@ class FullNativePipeline:
 
             if result.passed:
                 logger.info("Test PASSED on first run!")
+                stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+                if stability_result:
+                    return stability_result
                 (run_dir / "status.txt").write_text("passed")
+                self._publish_agentic_summary(run_dir)
                 return {"success": True, "test_path": str(test_path), "attempts": 0, "stage": "completed"}
 
             logger.error(f"Test FAILED: {result.error_summary}")
+            diagnosis = self._run_failure_triage(
+                test_path=test_path,
+                run_dir=run_dir,
+                result=result,
+                design=design,
+                critic=critic,
+            )
+            if not diagnosis.get("heal_allowed", True):
+                logger.error("Failure triage marked this failure as non-healable; skipping healing")
+                (run_dir / "status.txt").write_text("failed")
+                self._publish_agentic_summary(run_dir)
+                return {
+                    "success": False,
+                    "test_path": str(test_path),
+                    "attempts": 0,
+                    "stage": "triage_blocked_healing",
+                    "diagnosis": diagnosis,
+                }
 
             # Stage 4: Healing
             if hybrid_healing:
@@ -372,7 +448,7 @@ class FullNativePipeline:
                 )
             else:
                 healing_result = await self._native_healing(
-                    test_path=test_path, run_dir=run_dir, browser=browser, result=result
+                    test_path=test_path, run_dir=run_dir, browser=browser, result=result, diagnosis=diagnosis
                 )
 
             # Safety-net: clean up any orphaned browsers from healing stage
@@ -443,7 +519,11 @@ class FullNativePipeline:
             return None
 
     async def _run_native_generator(
-        self, spec_path: str, target_url: str, output_name: str | None = None
+        self,
+        spec_path: str,
+        target_url: str,
+        output_name: str | None = None,
+        design_context: str | None = None,
     ) -> Path | None:
         """Run native generator to create test code.
 
@@ -454,20 +534,97 @@ class FullNativePipeline:
         """
         try:
             test_path = await self.native_generator.generate_test(
-                spec_path=spec_path, target_url=target_url, output_name=output_name
+                spec_path=spec_path,
+                target_url=target_url,
+                output_name=output_name,
+                design_context=design_context,
             )
             return test_path
         except Exception as e:
             logger.error(f"Native generator error: {e}")
             return None
 
-    async def _native_healing(self, test_path: Path, run_dir: Path, browser: str, result: TestResult) -> dict:
+    def _run_failure_triage(
+        self,
+        *,
+        test_path: Path,
+        run_dir: Path,
+        result: TestResult,
+        design: dict | None,
+        critic: dict | None,
+    ) -> dict:
+        """Create failure_diagnosis.json and publish compact run summary."""
+        report_progress("healing", "Classifying failure before healing...")
+        diagnosis = self.failure_triage_agent.diagnose(
+            test_path=test_path,
+            error_output=result.output,
+            design=design,
+            critic=critic,
+            run_dir=run_dir,
+        )
+        self._publish_agentic_summary(run_dir)
+        return diagnosis
+
+    def _run_stability_gate(self, *, test_path: Path, run_dir: Path, browser: str) -> dict | None:
+        """Verify a passing test remains stable across additional reruns."""
+        report_progress("testing", "Verifying test stability...")
+        stability = self.stability_verifier.verify(
+            test_file=str(test_path),
+            output_dir=str(run_dir),
+            browser=browser,
+            run_test=self._run_test,
+        )
+        self._publish_agentic_summary(run_dir)
+        if stability.get("status") == "flaky":
+            logger.error("Stability verification failed; marking run as flaky/failed")
+            (run_dir / "status.txt").write_text("failed")
+            validation_result = {
+                "status": "failed",
+                "mode": "stability_verifier",
+                "testFile": str(test_path),
+                "browser": browser,
+                "message": "Test passed initially but failed stability verification",
+                "stability": stability,
+            }
+            (run_dir / "validation.json").write_text(json.dumps(validation_result, indent=2))
+            self._publish_agentic_summary(run_dir)
+            return {"success": False, "test_path": str(test_path), "attempts": 0, "stage": "stability_failed"}
+        return None
+
+    def _publish_agentic_summary(self, run_dir: Path) -> dict:
+        """Persist compact agentic summary locally and send it to API when available."""
+        summary = build_agentic_summary(run_dir)
+        try:
+            (run_dir / "agentic_summary.json").write_text(json.dumps(summary, indent=2))
+        except Exception as e:
+            logger.warning(f"Failed to write agentic_summary.json: {e}")
+
+        try:
+            from utils.progress_reporter import get_progress_reporter
+
+            reporter = get_progress_reporter()
+            if reporter and hasattr(reporter, "report_agentic_summary"):
+                reporter.report_agentic_summary(summary)
+        except Exception as e:
+            logger.debug(f"Agentic summary API update skipped: {e}")
+
+        return summary
+
+    async def _native_healing(
+        self,
+        test_path: Path,
+        run_dir: Path,
+        browser: str,
+        result: TestResult,
+        diagnosis: dict | None = None,
+    ) -> dict:
         """Native healing: up to 3 attempts with test_run and diagnostic tools."""
         logger.info("Stage 4: Native Healing (up to 3 attempts)...")
         report_progress("healing", "Starting native healing...", healing_attempt=1)
 
         max_attempts = 3
         error_log = result.output
+        diagnosis_context = self.failure_triage_agent.condensed_context(diagnosis)
 
         for attempt in range(1, max_attempts + 1):
             logger.info(f"Healing attempt {attempt}/{max_attempts}...")
@@ -478,6 +635,7 @@ class FullNativePipeline:
                     str(test_path),
                     error_log,
                     timeout_seconds=int(os.environ.get("HEALER_ATTEMPT_TIMEOUT_SECONDS", "600")),
+                    diagnosis_context=diagnosis_context,
                 )
 
                 if fixed_code:
@@ -486,6 +644,10 @@ class FullNativePipeline:
 
                     if result.passed:
                         logger.info(f"Healed Test PASSED (after {attempt} attempt(s))!")
+                        stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+                        if stability_result:
+                            stability_result["attempts"] = attempt
+                            return stability_result
                         (run_dir / "status.txt").write_text("passed")
 
                         validation_result = {
@@ -497,6 +659,7 @@ class FullNativePipeline:
                             "message": f"Test healed after {attempt} attempts",
                         }
                         (run_dir / "validation.json").write_text(json.dumps(validation_result, indent=2))
+                        self._publish_agentic_summary(run_dir)
 
                         return {"success": True, "test_path": str(test_path), "attempts": attempt, "stage": "healed"}
                     else:
@@ -525,6 +688,7 @@ class FullNativePipeline:
             "message": f"Failed after {max_attempts} native healing attempts",
         }
         (run_dir / "validation.json").write_text(json.dumps(validation_result, indent=2))
+        self._publish_agentic_summary(run_dir)
 
         return {"success": False, "test_path": str(test_path), "attempts": max_attempts, "stage": "healing_exhausted"}
 
@@ -708,7 +872,12 @@ class FullNativePipeline:
         )
 
         if result.get("status") == "success":
+            stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+            if stability_result:
+                stability_result["attempts"] = result.get("iterations", 0)
+                return stability_result
             (run_dir / "status.txt").write_text("passed")
+            self._publish_agentic_summary(run_dir)
             return {
                 "success": True,
                 "test_path": str(test_path),
@@ -718,6 +887,7 @@ class FullNativePipeline:
             }
         else:
             (run_dir / "status.txt").write_text("failed")
+            self._publish_agentic_summary(run_dir)
             return {
                 "success": False,
                 "test_path": str(test_path),

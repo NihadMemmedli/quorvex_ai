@@ -17,18 +17,18 @@ from chromadb.utils import embedding_functions
 from .config import get_config
 from .embeddings import get_embedding_client
 
-# Global ChromaDB client singleton (shared across all VectorStore instances)
-_chroma_client: chromadb.PersistentClient | None = None
+# Global ChromaDB clients keyed by persist directory.
+_chroma_clients: dict[str, chromadb.PersistentClient] = {}
 
 
 def _get_chroma_client(persist_directory: str) -> chromadb.PersistentClient:
-    """Get or create the global ChromaDB client"""
-    global _chroma_client
-    if _chroma_client is None:
-        _chroma_client = chromadb.PersistentClient(
-            path=str(persist_directory), settings=Settings(anonymized_telemetry=False, allow_reset=True)
+    """Get or create a ChromaDB client for a persist directory."""
+    resolved_directory = str(Path(persist_directory).resolve())
+    if resolved_directory not in _chroma_clients:
+        _chroma_clients[resolved_directory] = chromadb.PersistentClient(
+            path=resolved_directory, settings=Settings(anonymized_telemetry=False, allow_reset=True)
         )
-    return _chroma_client
+    return _chroma_clients[resolved_directory]
 
 
 class VectorStore:
@@ -41,7 +41,7 @@ class VectorStore:
     COLLECTION_PRD_CHUNKS = "prd_chunks"
     COLLECTION_SIMILAR_TESTS = "similar_tests"
 
-    def __init__(self, persist_directory: str | None = None):
+    def __init__(self, persist_directory: str | None = None, project_id: str | None = None):
         """
         Initialize the vector store.
 
@@ -52,6 +52,7 @@ class VectorStore:
 
         # Use configured persist directory
         self.persist_directory = persist_directory or config.persist_directory
+        self.project_id = project_id if project_id is not None else config.project_id
         Path(self.persist_directory).mkdir(parents=True, exist_ok=True)
 
         # Use global ChromaDB client singleton
@@ -71,9 +72,13 @@ class VectorStore:
         self.embedding_function = OpenAIEmbeddingFunction(self.embedding_client)
 
     def _get_collection_name(self, base_name: str) -> str:
-        """Get collection name with project isolation - always uses current global config"""
-        config = get_config()  # Get fresh config to handle project_id changes
-        return config.get_collection_name(base_name)
+        """Get collection name with project isolation from this store instance."""
+        config = get_config()
+        parts = [config.collection_prefix]
+        if self.project_id:
+            parts.append(self.project_id)
+        parts.append(base_name)
+        return "_".join(parts)
 
     def get_or_create_collection(self, name: str):
         """
@@ -165,6 +170,63 @@ class VectorStore:
         collection.add(ids=[idea_id], documents=[description], metadatas=[metadata])
 
         return idea_id
+
+    def get_all_test_ideas(self, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """
+        Get all stored test ideas with optional metadata filtering.
+
+        Args:
+            filters: Optional metadata filters
+
+        Returns:
+            List of stored test ideas
+        """
+        collection = self.get_or_create_collection(self.COLLECTION_TEST_IDEAS)
+        results = collection.get(where=filters, include=["documents", "metadatas"])
+
+        ideas = []
+        if results["ids"]:
+            for i, idea_id in enumerate(results["ids"]):
+                ideas.append(
+                    {
+                        "id": idea_id,
+                        "document": results["documents"][i] if results["documents"] else None,
+                        "metadata": results["metadatas"][i] if results["metadatas"] else {},
+                    }
+                )
+
+        return ideas
+
+    def search_test_ideas(
+        self, query: str, n_results: int = 10, filters: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """
+        Search stored test ideas.
+
+        Args:
+            query: Search query text
+            n_results: Number of results to return
+            filters: Optional metadata filters
+
+        Returns:
+            List of matching test ideas
+        """
+        collection = self.get_or_create_collection(self.COLLECTION_TEST_IDEAS)
+        results = collection.query(query_texts=[query], n_results=n_results, where=filters)
+
+        ideas = []
+        if results["ids"] and results["ids"][0]:
+            for i, idea_id in enumerate(results["ids"][0]):
+                ideas.append(
+                    {
+                        "id": idea_id,
+                        "document": results["documents"][0][i],
+                        "metadata": results["metadatas"][0][i],
+                        "distance": results["distances"][0][i] if "distances" in results else None,
+                    }
+                )
+
+        return ideas
 
     def search_similar_patterns(
         self, query: str, n_results: int = 5, filters: dict[str, Any] | None = None
@@ -405,13 +467,20 @@ class VectorStore:
         return hits
 
 
-# Global vector store instance
+# Global vector store instances keyed by persist directory and project.
 _vector_store: VectorStore | None = None
+_vector_stores: dict[tuple[str, str | None], VectorStore] = {}
 
 
-def get_vector_store() -> VectorStore:
-    """Get the global vector store instance"""
+def get_vector_store(project_id: str | None = None) -> VectorStore:
+    """Get a vector store instance for an explicit project context."""
     global _vector_store
-    if _vector_store is None:
-        _vector_store = VectorStore()
-    return _vector_store
+    config = get_config()
+    effective_project_id = project_id if project_id is not None else config.project_id
+    key = (str(Path(config.persist_directory).resolve()), effective_project_id)
+    store = _vector_stores.get(key)
+    if store is None:
+        store = VectorStore(project_id=effective_project_id)
+        _vector_stores[key] = store
+    _vector_store = store
+    return store

@@ -453,7 +453,10 @@ echo "done" > {done_file}
                 "ANTHROPIC_AUTH_TOKEN",
                 "ANTHROPIC_AUTH_TOKENS",
                 "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
                 "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_MODEL",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
                 "ANTHROPIC_DEFAULT_SONNET_MODEL",
             ]
             env_vars = {k: os.environ[k] for k in api_env_keys if os.environ.get(k)}

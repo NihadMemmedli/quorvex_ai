@@ -1,4 +1,4 @@
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
@@ -48,6 +48,7 @@ class TestRun(BaseModel):
     stage_started_at: str | None = None  # When current stage started (ISO format)
     stage_message: str | None = None  # Detailed stage status message
     healing_attempt: int | None = None  # Current healing attempt number
+    agentic_summary: dict[str, Any] | None = None  # Compact Agentic QA artifact summary
 
 
 class CreateSpecRequest(BaseModel):

@@ -6,6 +6,32 @@ import { backendFetch } from '@/lib/ai/backend-client';
 
 export const maxDuration = 120;
 
+function extractLatestUserText(messages: any[]): string {
+  const latestUser = [...messages].reverse().find((m) => m?.role === 'user');
+  if (!latestUser) return '';
+  if (typeof latestUser.content === 'string') return latestUser.content;
+  if (Array.isArray(latestUser.parts)) {
+    return latestUser.parts
+      .map((part: any) => part?.type === 'text' ? part.text : '')
+      .filter(Boolean)
+      .join('\n');
+  }
+  return '';
+}
+
+function textToUIMessageResponse(text: string) {
+  const stream = createUIMessageStream({
+    execute({ writer }) {
+      const id = 'text-1';
+      writer.write({ type: 'text-start', id });
+      writer.write({ type: 'text-delta', id, delta: text });
+      writer.write({ type: 'text-end', id });
+    },
+  });
+
+  return createUIMessageStreamResponse({ stream });
+}
+
 /** Extract a user-friendly message from various error shapes */
 function extractUserMessage(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error);
@@ -108,15 +134,39 @@ export async function POST(req: Request) {
     return new Response('Missing messages', { status: 400 });
   }
 
+  const hasApiKey = Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+  const hasClaudeCodeOAuth = Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN);
+  if (!hasApiKey && hasClaudeCodeOAuth) {
+    const prompt = extractLatestUserText(messages);
+    const claudeCodeRes = await backendFetch<{ text: string }>('/chat/claude-code', {
+      method: 'POST',
+      authToken,
+      timeoutMs: 115000,
+      body: {
+        prompt,
+        system_prompt: systemPrompt,
+        timeout_seconds: 110,
+      },
+    });
+
+    if (!claudeCodeRes.ok || !claudeCodeRes.data?.text) {
+      return textToUIMessageResponse(claudeCodeRes.error || 'Claude Code chat failed.');
+    }
+
+    return textToUIMessageResponse(claudeCodeRes.data.text);
+  }
+
   const tools = createAssistantTools(authToken, projectId);
 
   try {
     const modelMessages = await convertToModelMessages(messages);
 
     // Enable extended thinking for models that support it
-    const supportsThinking = MODEL_ID.includes('claude-4') ||
+    const supportsThinking = process.env.ANTHROPIC_ENABLE_CHAT_THINKING === 'true' && (
+      MODEL_ID.includes('claude-4') ||
       MODEL_ID.includes('claude-sonnet-4') ||
-      MODEL_ID.includes('claude-opus-4');
+      MODEL_ID.includes('claude-opus-4')
+    );
 
     // Use multi-key provider
     const { provider, slot } = getActiveProvider();
@@ -125,12 +175,13 @@ export async function POST(req: Request) {
       model: provider(MODEL_ID),
       system: systemPrompt,
       messages: modelMessages,
+      maxOutputTokens: 2048,
       tools,
       stopWhen: stepCountIs(25),
       ...(supportsThinking && {
         providerOptions: {
           anthropic: {
-            thinking: { type: 'enabled', budgetTokens: 10000 },
+            thinking: { type: 'enabled', budgetTokens: 1024 },
           },
         },
       }),
@@ -162,20 +213,23 @@ export async function POST(req: Request) {
         console.warn('[chat/route] Rate limit hit, retrying with next key');
         const { provider: retryProvider, slot: retrySlot } = getActiveProvider();
         const modelMessages = await convertToModelMessages(messages);
-        const supportsThinking = MODEL_ID.includes('claude-4') ||
+        const supportsThinking = process.env.ANTHROPIC_ENABLE_CHAT_THINKING === 'true' && (
+          MODEL_ID.includes('claude-4') ||
           MODEL_ID.includes('claude-sonnet-4') ||
-          MODEL_ID.includes('claude-opus-4');
+          MODEL_ID.includes('claude-opus-4')
+        );
 
         const retryResult = streamText({
           model: retryProvider(MODEL_ID),
           system: systemPrompt,
           messages: modelMessages,
+          maxOutputTokens: 2048,
           tools,
           stopWhen: stepCountIs(25),
           ...(supportsThinking && {
             providerOptions: {
               anthropic: {
-                thinking: { type: 'enabled', budgetTokens: 10000 },
+                    thinking: { type: 'enabled', budgetTokens: 1024 },
               },
             },
           }),

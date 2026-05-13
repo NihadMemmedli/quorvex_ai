@@ -63,7 +63,11 @@ class AppSettings(BaseSettings):
 
     # --- AI/LLM ---
     anthropic_auth_token: str = ""
+    anthropic_api_key: str = ""
+    claude_code_oauth_token: str = ""
     anthropic_base_url: str = ""
+    anthropic_model: str = ""
+    anthropic_default_opus_model: str = ""
     anthropic_default_sonnet_model: str = ""
     openai_api_key: str | None = None
 
@@ -183,8 +187,8 @@ class AppSettings(BaseSettings):
         if self.jwt_secret_key == "dev-secret-key-change-in-production":
             warnings.append("JWT_SECRET_KEY is using default value - CHANGE IN PRODUCTION")
 
-        if not self.anthropic_auth_token:
-            warnings.append("ANTHROPIC_AUTH_TOKEN not set - AI features will not work")
+        if not (self.anthropic_auth_token or self.anthropic_api_key or self.claude_code_oauth_token):
+            warnings.append("Claude auth not set - AI features will not work")
 
         for w in warnings:
             logger.warning(f"Config: {w}")

@@ -29,6 +29,7 @@ config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 if config_dir:
     os.chdir(config_dir)
 
+from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
 from orchestrator.memory import get_memory_manager
 from orchestrator.utils.agent_runner import AgentRunner, build_allowed_tools, get_default_timeout
 from orchestrator.utils.string_utils import slugify
@@ -258,7 +259,14 @@ After creating the test plan:
 Start the test plan with:
 # Test Plan: {feature_name}
 """
-        return prompt
+        metadata = build_prompt_metadata(
+            prompt_id="native_planner.hybrid",
+            version="2026-05-13.1",
+            stage="test_planning",
+            schema_name="playwright_test_plan.v1",
+            rendered_prompt=prompt,
+        )
+        return attach_prompt_metadata(prompt, metadata)
 
     # Playwright MCP tools matching .claude/agents/playwright-test-planner.md
     PLANNER_MCP_TOOLS = [

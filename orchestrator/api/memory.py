@@ -12,7 +12,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +70,14 @@ class TestSuggestion(BaseModel):
     type: str
     priority: str
     gap: dict[str, Any] | None = None
+    title: str | None = None
+    source_flow: str | None = None
+    source_requirement: str | None = None
+    source_api_endpoint: str | None = None
+    suggested_steps: list[str] = Field(default_factory=list)
+    expected_outcomes: list[str] = Field(default_factory=list)
+    spec_readiness: str | None = None
+    confidence: float | None = None
 
 
 class SelectorInfo(BaseModel):
@@ -302,6 +310,14 @@ async def get_test_suggestions(
                     type=suggestion.get("type", "coverage"),
                     priority=suggestion.get("priority", "medium"),
                     gap=suggestion.get("gap"),
+                    title=suggestion.get("title"),
+                    source_flow=suggestion.get("source_flow"),
+                    source_requirement=suggestion.get("source_requirement"),
+                    source_api_endpoint=suggestion.get("source_api_endpoint"),
+                    suggested_steps=suggestion.get("suggested_steps", []),
+                    expected_outcomes=suggestion.get("expected_outcomes", []),
+                    spec_readiness=suggestion.get("spec_readiness"),
+                    confidence=suggestion.get("confidence"),
                 )
             )
 

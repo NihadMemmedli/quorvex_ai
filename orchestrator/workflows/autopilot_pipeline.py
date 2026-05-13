@@ -1,12 +1,13 @@
 """
 Auto Pilot Pipeline - Autonomous End-to-End Test Engineering
 
-State machine orchestrator that runs 5 phases sequentially:
+State machine orchestrator that runs 6 phases sequentially:
 1. Exploration   - Discover app structure (one session per entry URL)
 2. Requirements  - Extract requirements from exploration data
-3. Spec Generation - Generate test specs from requirements (priority-ordered)
-4. Test Generation - Generate and validate test code (parallel, browser pool bounded)
-5. Reporting     - Generate RTM and coverage report
+3. Test Ideas    - Prioritize traceable, spec-ready test ideas
+4. Spec Generation - Generate test specs from test ideas (priority-ordered)
+5. Test Generation - Generate and validate test code (parallel, browser pool bounded)
+6. Reporting     - Generate RTM and coverage report
 
 The pipeline pauses at strategic checkpoints (between phases) to ask the user
 questions via the question system. If the user does not answer within the
@@ -34,8 +35,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlmodel import Session, select
+
+from orchestrator.ai.validation import (
+    is_valid_flow,
+    is_valid_issue,
+    is_valid_transition,
+    should_gate_exploration,
+    validate_exploration_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,19 +83,21 @@ class AutoPilotPipeline:
     """
     Auto Pilot: Autonomous end-to-end test engineering pipeline.
 
-    Runs 5 phases sequentially:
+    Runs 6 phases sequentially:
     1. Exploration     - Discover app structure (one session per URL)
     2. Requirements    - Extract requirements from exploration data
-    3. Spec Generation - Generate test specs from requirements (priority-ordered)
-    4. Test Generation - Generate and validate test code (parallel, browser pool bounded)
-    5. Reporting       - Generate RTM and coverage report
+    3. Test Ideas      - Generate traceable test ideas from requirements/exploration
+    4. Spec Generation - Generate test specs from test ideas (priority-ordered)
+    5. Test Generation - Generate and validate test code (parallel, browser pool bounded)
+    6. Reporting       - Generate RTM and coverage report
     """
 
     PHASES = [
         ("exploration", 0.25),
         ("requirements", 0.10),
-        ("spec_generation", 0.20),
-        ("test_generation", 0.35),
+        ("test_ideas", 0.10),
+        ("spec_generation", 0.18),
+        ("test_generation", 0.32),
         ("reporting", 0.10),
     ]
 
@@ -99,6 +111,7 @@ class AutoPilotPipeline:
         self._current_question_id: int | None = None
         self._config: AutoPilotConfig | None = None
         self._test_tasks: dict[int, asyncio.Task] = {}
+        self._checkpoint_answers: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Public control methods
@@ -177,6 +190,7 @@ class AutoPilotPipeline:
         phase_runners = [
             ("exploration", self._run_exploration_phase),
             ("requirements", self._run_requirements_phase),
+            ("test_ideas", self._run_test_ideas_phase),
             ("spec_generation", self._run_spec_generation_phase),
             ("test_generation", self._run_test_generation_phase),
             ("reporting", self._run_reporting_phase),
@@ -260,67 +274,94 @@ class AutoPilotPipeline:
 
     async def _run_exploration_phase(self, config: AutoPilotConfig, phase_id: int) -> dict[str, Any]:
         """Explore each entry URL to discover app structure."""
-        from orchestrator.services.browser_pool import OperationType, get_browser_pool
-        from orchestrator.services.load_test_lock import check_system_available
-        from orchestrator.workflows.app_explorer import AppExplorer, ExplorationConfig
-
         exploration_ids: list[str] = []
+        exploration_quality: list[dict[str, Any]] = []
+        exploration_quality_by_session: dict[str, dict[str, Any]] = {}
         total_pages = 0
         total_flows = 0
 
-        for idx, url in enumerate(config.entry_urls):
-            if self._cancelled.is_set():
-                break
+        async def run_pass(pass_label: str, max_interactions: int, strategy: str, start_index: int = 0):
+            nonlocal total_pages, total_flows
+            for idx, url in enumerate(config.entry_urls):
+                if self._cancelled.is_set():
+                    break
 
-            self._update_phase_step(
-                phase_id,
-                f"Exploring URL {idx + 1}/{len(config.entry_urls)}: {url}",
-                items_total=len(config.entry_urls),
-                items_completed=idx,
-            )
+                display_idx = start_index + idx
+                self._update_phase_step(
+                    phase_id,
+                    f"Exploring URL {idx + 1}/{len(config.entry_urls)} ({pass_label}): {url}",
+                    items_total=len(config.entry_urls),
+                    items_completed=idx,
+                )
 
-            explore_config = ExplorationConfig(
-                entry_url=url,
-                max_interactions=config.max_interactions,
-                max_depth=config.max_depth,
-                strategy=config.strategy,
-                timeout_minutes=config.timeout_minutes,
-                credentials=config.credentials,
-                login_url=config.login_url,
-                additional_instructions=config.instructions,
-            )
-
-            explore_session_id = f"{self.session_id}_explore_{idx}_{datetime.now().strftime('%H%M%S')}"
-
-            # Block if a load test is running
-            await check_system_available("autopilot_exploration")
-
-            pool = await get_browser_pool()
-            async with pool.browser_slot(
-                request_id=f"autopilot_{explore_session_id}",
-                operation_type=OperationType.AUTOPILOT,
-                description=f"AutoPilot exploration: {url}",
-            ) as acquired:
-                if not acquired:
-                    logger.warning(f"Failed to acquire browser slot for exploration of {url}")
+                result = await self._explore_url(
+                    config=config,
+                    url=url,
+                    url_index=display_idx,
+                    pass_label=pass_label,
+                    max_interactions=max_interactions,
+                    strategy=strategy,
+                )
+                if not result:
                     continue
 
-                explorer = AppExplorer(project_id=config.project_id)
-                result = await explorer.explore(explore_config, explore_session_id)
+                exploration_ids.append(result.session_id)
+                exploration_quality.append(result.quality_summary or {})
+                exploration_quality_by_session[result.session_id] = {
+                    "quality": result.quality_summary or {},
+                    "validation": result.validation_summary or {},
+                    "provenance_source": result.provenance_source,
+                    "quality_score": result.quality_score,
+                }
+                total_pages += result.pages_discovered
+                total_flows += len(result.flows)
 
-                # Store exploration data in the exploration store (same as exploration.py)
-                self._store_exploration_results(explore_session_id, result, config.project_id)
+                logger.info(
+                    "Exploration %s for %s done: %s pages, %s flows",
+                    pass_label,
+                    url,
+                    result.pages_discovered,
+                    len(result.flows),
+                )
 
-            exploration_ids.append(explore_session_id)
-            total_pages += result.pages_discovered
-            total_flows += len(result.flows)
+        await run_pass("initial", config.max_interactions, config.strategy)
 
-            logger.info(f"Exploration {idx + 1} done: {result.pages_discovered} pages, {len(result.flows)} flows")
+        auto_retried = False
+        if exploration_ids and self._is_weak_exploration(total_pages, total_flows):
+            auto_retried = True
+            retry_interactions = min(200, max(config.max_interactions * 2, config.max_interactions + 50, 100))
+            logger.info(
+                "Exploration evidence is weak (%s pages, %s flows); retrying with %s interactions",
+                total_pages,
+                total_flows,
+                retry_interactions,
+            )
+            self._update_phase_step(
+                phase_id,
+                "Exploration found limited evidence; retrying with more interactions",
+                items_total=len(config.entry_urls),
+                items_completed=0,
+            )
+            await run_pass("auto_retry", retry_interactions, "breadth_first", start_index=len(exploration_ids))
 
-        # Persist exploration session IDs on the AutoPilotSession
         self._update_session_list("exploration_session_ids", exploration_ids)
         self._update_session_field("total_pages_discovered", total_pages)
         self._update_session_field("total_flows_discovered", total_flows)
+        self._merge_session_config(
+            {
+                "ai_quality": {
+                    "exploration": {
+                        "sessions": exploration_quality,
+                        "min_quality_score": min(
+                            [q.get("quality_score", 0) for q in exploration_quality if q] or [0]
+                        ),
+                        "fallback_used": any(q.get("fallback_used") for q in exploration_quality if q),
+                        "degraded_mode": any(q.get("degraded_mode") for q in exploration_quality if q),
+                        "by_session": exploration_quality_by_session,
+                    }
+                }
+            }
+        )
 
         self._update_phase_step(
             phase_id,
@@ -331,8 +372,100 @@ class AutoPilotPipeline:
 
         # Ask question after first exploration if reactive_mode
         if config.reactive_mode and exploration_ids:
-            flow_names = self._get_discovered_flow_names(exploration_ids, config.project_id)
-            await self._ask_question_and_wait(
+            answer = await self._ask_exploration_checkpoint(
+                config=config,
+                exploration_ids=exploration_ids,
+                total_pages=total_pages,
+                total_flows=total_flows,
+            )
+            if "re-explore" in answer.lower() or "reexplore" in answer.lower():
+                retry_interactions = min(200, max(config.max_interactions * 2, config.max_interactions + 50, 100))
+                await run_pass("user_reexplore", retry_interactions, "breadth_first", start_index=len(exploration_ids))
+                self._update_session_list("exploration_session_ids", exploration_ids)
+                self._update_session_field("total_pages_discovered", total_pages)
+                self._update_session_field("total_flows_discovered", total_flows)
+                if config.reactive_mode:
+                    await self._ask_exploration_checkpoint(
+                        config=config,
+                        exploration_ids=exploration_ids,
+                        total_pages=total_pages,
+                        total_flows=total_flows,
+                    )
+
+        self._merge_session_config(
+            {
+                "ai_quality": {
+                    "exploration": {
+                        "by_session": exploration_quality_by_session,
+                    }
+                }
+            }
+        )
+
+        return {
+            "status": "completed",
+            "exploration_ids": exploration_ids,
+            "total_pages": total_pages,
+            "total_flows": total_flows,
+            "auto_retried": auto_retried,
+            "fallback_ready": self._is_weak_exploration(total_pages, total_flows),
+            "quality": exploration_quality,
+        }
+
+    async def _explore_url(
+        self,
+        config: AutoPilotConfig,
+        url: str,
+        url_index: int,
+        pass_label: str,
+        max_interactions: int,
+        strategy: str,
+    ):
+        """Run one stored exploration attempt for one URL."""
+        from orchestrator.services.browser_pool import OperationType, get_browser_pool
+        from orchestrator.services.load_test_lock import check_system_available
+        from orchestrator.workflows.app_explorer import AppExplorer, ExplorationConfig
+
+        explore_config = ExplorationConfig(
+            entry_url=url,
+            max_interactions=max_interactions,
+            max_depth=config.max_depth,
+            strategy=strategy,
+            timeout_minutes=config.timeout_minutes,
+            credentials=config.credentials,
+            login_url=config.login_url,
+            additional_instructions=config.instructions,
+        )
+
+        safe_label = re.sub(r"[^a-zA-Z0-9_]+", "_", pass_label).strip("_") or "pass"
+        explore_session_id = f"{self.session_id}_explore_{url_index}_{safe_label}_{datetime.now().strftime('%H%M%S')}"
+
+        await check_system_available("autopilot_exploration")
+
+        pool = await get_browser_pool()
+        async with pool.browser_slot(
+            request_id=f"autopilot_{explore_session_id}",
+            operation_type=OperationType.AUTOPILOT,
+            description=f"AutoPilot exploration: {url}",
+        ) as acquired:
+            if not acquired:
+                logger.warning(f"Failed to acquire browser slot for exploration of {url}")
+                return None
+
+            explorer = AppExplorer(project_id=config.project_id)
+            result = await explorer.explore(explore_config, explore_session_id)
+            self._store_exploration_results(explore_session_id, result, config.project_id)
+            return result
+
+    async def _ask_exploration_checkpoint(
+        self,
+        config: AutoPilotConfig,
+        exploration_ids: list[str],
+        total_pages: int,
+        total_flows: int,
+    ) -> str:
+        flow_names = self._get_discovered_flow_names(exploration_ids, config.project_id)
+        return await self._ask_question_and_wait(
                 phase_name="exploration",
                 question_type="review_exploration",
                 question_text=(
@@ -355,12 +488,9 @@ class AutoPilotPipeline:
                 default_answer="Proceed with all discovered flows",
             )
 
-        return {
-            "status": "completed",
-            "exploration_ids": exploration_ids,
-            "total_pages": total_pages,
-            "total_flows": total_flows,
-        }
+    def _is_weak_exploration(self, total_pages: int, total_flows: int) -> bool:
+        """Return True when exploration evidence is too thin for normal generation."""
+        return total_flows == 0
 
     # ------------------------------------------------------------------
     # Phase 2: Requirements
@@ -374,6 +504,28 @@ class AutoPilotPipeline:
         if not exploration_ids:
             logger.warning("No exploration sessions found, skipping requirements phase")
             return {"status": "skipped", "reason": "no_explorations"}
+        usable_exploration_ids = self._filter_exploration_ids_by_quality(exploration_ids)
+        if not usable_exploration_ids:
+            logger.warning("No reliable exploration sessions found, skipping requirements phase")
+            self._merge_session_config(
+                {
+                    "ai_quality": {
+                        "requirements": {
+                            "gated": True,
+                            "reason": "no_reliable_exploration_sessions",
+                            "input_exploration_ids": exploration_ids,
+                        }
+                    }
+                }
+            )
+            return {"status": "skipped", "reason": "quality_gate", "input_exploration_ids": exploration_ids}
+        if len(usable_exploration_ids) != len(exploration_ids):
+            logger.info(
+                "Quality gate filtered explorations for requirements: %s -> %s",
+                exploration_ids,
+                usable_exploration_ids,
+            )
+            exploration_ids = usable_exploration_ids
 
         generator = RequirementsGenerator(project_id=config.project_id)
         all_requirements = []
@@ -396,8 +548,6 @@ class AutoPilotPipeline:
             except Exception as e:
                 logger.warning(f"Requirements generation failed for {explore_id}: {e}")
 
-        # Create AutoPilotSpecTask records for each requirement
-        self._create_spec_tasks_from_requirements(all_requirements)
         self._update_session_field("total_requirements_generated", len(all_requirements))
 
         self._update_phase_step(
@@ -422,7 +572,7 @@ class AutoPilotPipeline:
                     f"{sum(1 for r in all_requirements if r.priority == 'high')} high, "
                     f"{sum(1 for r in all_requirements if r.priority == 'medium')} medium, "
                     f"{sum(1 for r in all_requirements if r.priority == 'low')} low. "
-                    f"Proceed with spec generation?"
+                    f"Proceed with test idea generation?"
                 ),
                 context={
                     "total": len(all_requirements),
@@ -442,7 +592,113 @@ class AutoPilotPipeline:
         }
 
     # ------------------------------------------------------------------
-    # Phase 3: Spec Generation
+    # Phase 3: Test Ideas
+    # ------------------------------------------------------------------
+
+    async def _run_test_ideas_phase(self, config: AutoPilotConfig, phase_id: int) -> dict[str, Any]:
+        """Generate traceable test ideas and create spec tasks from them."""
+        from orchestrator.workflows.test_idea_generator import TestIdeaGenerator
+
+        exploration_ids = self._get_session_exploration_ids()
+        if not exploration_ids:
+            logger.warning("No exploration sessions found, skipping test idea phase")
+            return {"status": "skipped", "reason": "no_explorations"}
+        usable_exploration_ids = self._filter_exploration_ids_by_quality(exploration_ids)
+        if not usable_exploration_ids:
+            logger.warning("No reliable exploration sessions found, skipping test idea phase")
+            self._merge_session_config(
+                {
+                    "ai_quality": {
+                        "test_ideas": {
+                            "gated": True,
+                            "reason": "no_reliable_exploration_sessions",
+                            "input_exploration_ids": exploration_ids,
+                        }
+                    }
+                }
+            )
+            return {"status": "skipped", "reason": "quality_gate", "input_exploration_ids": exploration_ids}
+        if len(usable_exploration_ids) != len(exploration_ids):
+            logger.info(
+                "Quality gate filtered explorations for test ideas: %s -> %s",
+                exploration_ids,
+                usable_exploration_ids,
+            )
+            exploration_ids = usable_exploration_ids
+
+        generator = TestIdeaGenerator(project_id=config.project_id)
+        all_ideas = []
+
+        for idx, explore_id in enumerate(exploration_ids):
+            if self._cancelled.is_set():
+                break
+
+            self._update_phase_step(
+                phase_id,
+                f"Generating test ideas from exploration {idx + 1}/{len(exploration_ids)}",
+                items_total=len(exploration_ids),
+                items_completed=idx,
+            )
+
+            try:
+                result = await generator.generate_from_exploration(explore_id)
+                all_ideas.extend(result.ideas)
+                logger.info(f"Generated {result.total_ideas} test ideas from exploration {explore_id}")
+            except Exception as e:
+                logger.warning(f"Test idea generation failed for {explore_id}: {e}")
+
+        if all_ideas:
+            self._create_spec_tasks_from_test_ideas(all_ideas)
+        elif not self._has_spec_tasks():
+            from orchestrator.memory.exploration_store import get_exploration_store
+
+            store = get_exploration_store(project_id=config.project_id)
+            requirements = [
+                req for req in store.get_requirements() if req.source_session_id in set(exploration_ids)
+            ]
+            self._create_spec_tasks_from_requirements(requirements)
+
+        self._update_phase_step(
+            phase_id,
+            "Test idea generation complete",
+            items_total=len(exploration_ids),
+            items_completed=len(exploration_ids),
+        )
+
+        if config.reactive_mode and all_ideas:
+            idea_preview = [
+                {"title": idea.title, "priority": idea.priority, "readiness": idea.spec_readiness}
+                for idea in all_ideas[:20]
+            ]
+            await self._ask_question_and_wait(
+                phase_name="test_ideas",
+                question_type="review_test_ideas",
+                question_text=(
+                    f"Generated {len(all_ideas)} test ideas. "
+                    f"Priority breakdown: "
+                    f"{sum(1 for i in all_ideas if i.priority == 'critical')} critical, "
+                    f"{sum(1 for i in all_ideas if i.priority == 'high')} high, "
+                    f"{sum(1 for i in all_ideas if i.priority == 'medium')} medium, "
+                    f"{sum(1 for i in all_ideas if i.priority == 'low')} low. "
+                    f"Proceed with spec generation?"
+                ),
+                context={"total": len(all_ideas), "test_ideas_preview": idea_preview},
+                suggested_answers=[
+                    "Proceed with all ready ideas",
+                    "Focus on critical and high only",
+                    "Skip ideas that need test data",
+                ],
+                default_answer="Proceed with all ready ideas",
+            )
+
+        return {
+            "status": "completed",
+            "total_test_ideas": len(all_ideas),
+            "spec_tasks_created": self._count_spec_tasks(),
+        }
+
+    # ------------------------------------------------------------------
+    # Phase 4: Spec Generation
     # ------------------------------------------------------------------
 
     async def _run_spec_generation_phase(self, config: AutoPilotConfig, phase_id: int) -> dict[str, Any]:
@@ -460,7 +716,7 @@ class AutoPilotPipeline:
             tasks = db.exec(stmt).all()
 
         # Sort by priority (critical first)
-        threshold_level = PRIORITY_ORDER.get(config.priority_threshold, 3)
+        threshold_level = PRIORITY_ORDER.get(self._effective_priority_threshold(config), 3)
         tasks = [t for t in tasks if PRIORITY_ORDER.get(t.priority, 3) <= threshold_level]
         tasks.sort(key=lambda t: PRIORITY_ORDER.get(t.priority, 3))
 
@@ -468,8 +724,30 @@ class AutoPilotPipeline:
         tasks = tasks[: config.max_specs]
 
         if not tasks:
-            logger.warning("No spec tasks to generate")
-            return {"status": "skipped", "reason": "no_tasks"}
+            logger.warning("No spec tasks to generate; creating fallback tasks from exploration evidence")
+            self._create_fallback_spec_tasks_from_exploration(config)
+            with Session(engine) as db:
+                stmt = (
+                    select(AutoPilotSpecTask)
+                    .where(AutoPilotSpecTask.session_id == self.session_id)
+                    .where(AutoPilotSpecTask.status.in_(["pending", "failed"]))
+                )
+                tasks = db.exec(stmt).all()
+            threshold_level = PRIORITY_ORDER.get(self._effective_priority_threshold(config), 3)
+            tasks = [t for t in tasks if PRIORITY_ORDER.get(t.priority, 3) <= threshold_level]
+            tasks.sort(key=lambda t: PRIORITY_ORDER.get(t.priority, 3))
+            tasks = tasks[: config.max_specs]
+
+        if not tasks:
+            logger.warning("Fallback spec task creation produced no tasks; creating entry-page smoke task")
+            self._create_entry_page_spec_task(config)
+            with Session(engine) as db:
+                stmt = (
+                    select(AutoPilotSpecTask)
+                    .where(AutoPilotSpecTask.session_id == self.session_id)
+                    .where(AutoPilotSpecTask.status.in_(["pending", "failed"]))
+                )
+                tasks = db.exec(stmt).all()[: config.max_specs]
 
         specs_generated = 0
         specs_dir = Path("specs") / "autopilot" / self.session_id
@@ -506,6 +784,9 @@ class AutoPilotPipeline:
             items_completed=len(tasks),
         )
 
+        if specs_generated == 0:
+            raise RuntimeError("Spec generation produced 0 specs")
+
         return {
             "status": "completed",
             "specs_generated": specs_generated,
@@ -513,7 +794,7 @@ class AutoPilotPipeline:
         }
 
     # ------------------------------------------------------------------
-    # Phase 4: Test Generation
+    # Phase 5: Test Generation
     # ------------------------------------------------------------------
 
     async def _run_test_generation_phase(self, config: AutoPilotConfig, phase_id: int) -> dict[str, Any]:
@@ -536,7 +817,7 @@ class AutoPilotPipeline:
 
         if not spec_tasks:
             logger.warning("No completed spec tasks for test generation")
-            return {"status": "skipped", "reason": "no_specs"}
+            raise RuntimeError("No completed specs are available for test generation")
 
         # Create test tasks for spec tasks that do not already have one
         test_tasks = self._create_test_tasks(spec_tasks)
@@ -661,7 +942,7 @@ class AutoPilotPipeline:
         }
 
     # ------------------------------------------------------------------
-    # Phase 5: Reporting
+    # Phase 6: Reporting
     # ------------------------------------------------------------------
 
     async def _run_reporting_phase(self, config: AutoPilotConfig, phase_id: int) -> dict[str, Any]:
@@ -731,7 +1012,7 @@ class AutoPilotPipeline:
         context: dict,
         suggested_answers: list[str],
         default_answer: str,
-    ):
+    ) -> str:
         """Pause pipeline, create question, wait for answer or timeout."""
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import AutoPilotQuestion
@@ -766,8 +1047,16 @@ class AutoPilotPipeline:
         except asyncio.TimeoutError:
             self._auto_continue_question(question.id, default_answer)
 
+        resolved_answer = default_answer
+        with Session(engine) as db:
+            resolved = db.get(AutoPilotQuestion, question.id)
+            if resolved and resolved.answer_text:
+                resolved_answer = resolved.answer_text
+
+        self._checkpoint_answers[question_type] = resolved_answer
         self._current_question_id = None
         self._update_session_status("running")
+        return resolved_answer
 
     def _auto_continue_question(self, question_id: int, default_answer: str):
         """Mark a question as auto-continued with the default answer."""
@@ -838,6 +1127,26 @@ class AutoPilotPipeline:
                 db.add(session)
                 db.commit()
 
+    def _merge_session_config(self, patch: dict[str, Any]):
+        """Merge diagnostic data into AutoPilotSession.config_json."""
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSession
+
+        def deep_merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+            for key, value in incoming.items():
+                if isinstance(value, dict) and isinstance(base.get(key), dict):
+                    base[key] = deep_merge(base[key], value)
+                else:
+                    base[key] = value
+            return base
+
+        with Session(engine) as db:
+            session = db.get(AutoPilotSession, self.session_id)
+            if session:
+                session.config = deep_merge(session.config or {}, patch)
+                db.add(session)
+                db.commit()
+
     def _update_overall_progress(self, progress: float):
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import AutoPilotSession
@@ -882,6 +1191,49 @@ class AutoPilotPipeline:
             if session:
                 return session.exploration_session_ids
         return []
+
+    def _get_session_config(self) -> dict[str, Any]:
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSession
+
+        with Session(engine) as db:
+            session = db.get(AutoPilotSession, self.session_id)
+            if session:
+                return session.config or {}
+        return {}
+
+    def _filter_exploration_ids_by_quality(self, exploration_ids: list[str]) -> list[str]:
+        """Return exploration IDs that are reliable enough for downstream generation."""
+        config = self._get_session_config()
+        by_session = (
+            config.get("ai_quality", {})
+            .get("exploration", {})
+            .get("by_session", {})
+        )
+        if not by_session:
+            return exploration_ids
+
+        usable: list[str] = []
+        gated: dict[str, str] = {}
+        for exploration_id in exploration_ids:
+            summary = by_session.get(exploration_id)
+            if not summary:
+                usable.append(exploration_id)
+                continue
+            gated_out, reason = should_gate_exploration(
+                summary.get("quality"),
+                summary.get("validation"),
+                min_quality_score=50,
+                allow_fallback=False,
+            )
+            if gated_out:
+                gated[exploration_id] = reason or "quality_gate"
+            else:
+                usable.append(exploration_id)
+
+        if gated:
+            self._merge_session_config({"ai_quality": {"gated_explorations": gated}})
+        return usable
 
     # ------------------------------------------------------------------
     # Phase record helpers
@@ -960,7 +1312,7 @@ class AutoPilotPipeline:
         items_completed: int = 0,
     ):
         from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AutoPilotPhase
+        from orchestrator.api.models_db import AutoPilotPhase, AutoPilotSession
 
         with Session(engine) as db:
             phase = db.get(AutoPilotPhase, phase_id)
@@ -971,6 +1323,10 @@ class AutoPilotPipeline:
                 if items_total > 0:
                     phase.progress = items_completed / items_total
                 db.add(phase)
+                session = db.get(AutoPilotSession, self.session_id)
+                if session:
+                    session.current_phase_progress = phase.progress
+                    db.add(session)
                 db.commit()
 
     # ------------------------------------------------------------------
@@ -995,6 +1351,14 @@ class AutoPilotPipeline:
             )
 
         # Update status and counts
+        validation_summary = validate_exploration_result(result)
+        if not validation_summary.get("valid", True):
+            logger.warning(
+                "Exploration %s has invalid records before persistence: %s",
+                session_id,
+                validation_summary.get("invalid_records", []),
+            )
+
         store.update_session_status(session_id, result.status, result.error_message)
         store.update_session_counts(
             session_id,
@@ -1006,6 +1370,10 @@ class AutoPilotPipeline:
 
         # Store transitions
         for t in result.transitions:
+            valid, invalid_reason = is_valid_transition(t)
+            if not valid:
+                logger.warning(f"Skipping invalid transition {t.sequence}: {invalid_reason}")
+                continue
             try:
                 store.store_transition(
                     session_id=session_id,
@@ -1025,22 +1393,38 @@ class AutoPilotPipeline:
                 logger.warning(f"Failed to store transition {t.sequence}: {te}")
 
         # Store flows
-        for flow in result.flows:
+        stored_flows = 0
+        for idx, flow in enumerate(result.flows, 1):
+            valid, invalid_reason = is_valid_flow(flow)
+            if not valid:
+                logger.warning(f"Skipping invalid flow '{flow.name}': {invalid_reason}")
+                continue
             try:
+                normalized_steps = self._normalize_flow_steps(flow.steps)
+                flow_name = self._normalize_flow_name(flow.name, flow.category, flow.start_url, flow.end_url, idx)
+                flow_category = self._normalize_flow_category(flow.category)
                 store.store_flow(
                     session_id=session_id,
-                    flow_name=flow.name,
-                    flow_category=flow.category,
-                    start_url=flow.start_url,
-                    end_url=flow.end_url,
-                    step_count=len(flow.steps),
+                    flow_name=flow_name,
+                    flow_category=flow_category,
+                    start_url=flow.start_url or result.entry_url,
+                    end_url=flow.end_url or flow.start_url or result.entry_url,
+                    step_count=len(normalized_steps),
                     is_success_path=flow.is_success_path,
+                    description=flow.outcome,
                     preconditions=flow.preconditions,
                     postconditions=flow.postconditions,
-                    steps=flow.steps,
+                    steps=normalized_steps,
                 )
+                stored_flows += 1
             except Exception as fe:
                 logger.warning(f"Failed to store flow '{flow.name}': {fe}")
+        if result.flows and stored_flows == 0:
+            logger.error(
+                "Exploration produced %s flows but none were persisted for %s",
+                len(result.flows),
+                session_id,
+            )
 
         # Store API endpoints
         for endpoint in result.api_endpoints:
@@ -1058,6 +1442,25 @@ class AutoPilotPipeline:
             except Exception as ae:
                 logger.warning(f"Failed to store API endpoint {endpoint.get('url')}: {ae}")
 
+        # Store issues
+        for issue in getattr(result, "issues", []) or []:
+            valid, invalid_reason = is_valid_issue(issue)
+            if not valid:
+                logger.warning(f"Skipping invalid issue '{issue.issue_type}': {invalid_reason}")
+                continue
+            try:
+                store.store_issue(
+                    session_id=session_id,
+                    issue_type=issue.issue_type,
+                    severity=issue.severity,
+                    url=issue.url,
+                    description=issue.description,
+                    element=issue.element,
+                    evidence=issue.evidence,
+                )
+            except Exception as ie:
+                logger.warning(f"Failed to store issue '{issue.issue_type}': {ie}")
+
     def _get_discovered_flow_names(self, exploration_ids: list[str], project_id: str) -> list[str]:
         """Get flow names from completed explorations."""
         from orchestrator.memory.exploration_store import get_exploration_store
@@ -1066,13 +1469,173 @@ class AutoPilotPipeline:
         names = []
         for eid in exploration_ids:
             flows = store.get_session_flows(eid)
-            for f in flows:
-                names.append(f.flow_name)
+            if flows:
+                for idx, f in enumerate(flows, 1):
+                    names.append(self._normalize_flow_name(f.flow_name, f.flow_category, f.start_url, f.end_url, idx))
+                continue
+
+            for idx, flow in enumerate(self._load_flow_artifacts(eid), 1):
+                names.append(
+                    self._normalize_flow_name(
+                        flow.get("name") or flow.get("title"),
+                        flow.get("category"),
+                        flow.get("startUrl") or flow.get("start_url") or flow.get("entry_point"),
+                        flow.get("endUrl") or flow.get("end_url") or flow.get("exit_point"),
+                        idx,
+                    )
+                )
         return names
+
+    def _normalize_flow_steps(self, raw_steps: Any) -> list[dict[str, Any]]:
+        """Normalize agent-emitted flow steps before DB persistence."""
+        steps: list[dict[str, Any]] = []
+        if not isinstance(raw_steps, list):
+            return steps
+
+        for step in raw_steps:
+            if isinstance(step, dict):
+                action = (
+                    step.get("action")
+                    or step.get("actionType")
+                    or step.get("action_type")
+                    or step.get("type")
+                    or "step"
+                )
+                element = (
+                    step.get("element")
+                    or step.get("elementName")
+                    or step.get("element_name")
+                    or step.get("description")
+                    or step.get("actionDescription")
+                    or step.get("action_description")
+                    or action
+                )
+                steps.append(
+                    {
+                        "action": str(action),
+                        "element": str(element),
+                        "ref": step.get("ref") or step.get("elementRef") or step.get("element_ref"),
+                        "role": step.get("role") or step.get("elementRole") or step.get("element_role"),
+                        "value": step.get("value"),
+                    }
+                )
+            elif step is not None:
+                steps.append({"action": "step", "element": str(step)})
+
+        return steps
+
+    def _normalize_flow_category(self, category: Any) -> str:
+        value = str(category or "navigation").strip().lower()
+        value = re.sub(r"[^a-z0-9_]+", "_", value).strip("_")
+        return value or "navigation"
+
+    def _normalize_flow_name(
+        self,
+        name: Any,
+        category: Any,
+        start_url: Any,
+        end_url: Any,
+        index: int,
+    ) -> str:
+        raw = str(name or "").strip()
+        if re.search(r"[A-Za-z0-9]", raw):
+            return raw[:160]
+
+        url = str(end_url or start_url or "").strip()
+        path = urlparse(url).path.strip("/") if url else ""
+        label = path.replace("/", " / ") if path else "application"
+        category_label = self._normalize_flow_category(category).replace("_", " ").title()
+        return f"{category_label} Flow {index}: {label}"[:160]
+
+    def _load_flow_artifacts(self, exploration_session_id: str) -> list[dict[str, Any]]:
+        """Load flow artifacts when DB records are missing or from older sessions."""
+        candidates = [
+            Path("runs") / "explorations" / exploration_session_id / "flows.json",
+            Path("runs") / exploration_session_id / "flows.json",
+            Path("/app/runs/explorations") / exploration_session_id / "flows.json",
+            Path("/app/runs") / exploration_session_id / "flows.json",
+        ]
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                raw = json.loads(path.read_text())
+                data = raw.get("flows", raw) if isinstance(raw, dict) else raw
+                return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+            except Exception as exc:
+                logger.warning(f"Failed to load flow artifacts from {path}: {exc}")
+                return []
+        return []
 
     # ------------------------------------------------------------------
     # Spec task helpers
     # ------------------------------------------------------------------
+
+    def _effective_priority_threshold(self, config: AutoPilotConfig) -> str:
+        """Apply checkpoint focus answers on top of the configured threshold."""
+        answer_text = " ".join(
+            str(self._checkpoint_answers.get(key, "")).lower()
+            for key in ("review_requirements", "review_test_ideas")
+        )
+        if "critical" in answer_text and "high" in answer_text:
+            return "high"
+        if "skip low" in answer_text:
+            return "medium"
+        return config.priority_threshold
+
+    def _create_fallback_spec_tasks_from_exploration(self, config: AutoPilotConfig) -> None:
+        """Create deterministic spec tasks directly from exploration evidence."""
+        from orchestrator.memory.exploration_store import get_exploration_store
+
+        store = get_exploration_store(project_id=config.project_id)
+        exploration_ids = self._get_session_exploration_ids()
+
+        created = 0
+        for eid in exploration_ids:
+            flows = store.get_session_flows(eid)
+            if flows:
+                for flow in flows:
+                    priority = "high" if flow.flow_category in {"authentication", "crud", "form_submission"} else "medium"
+                    if self._create_spec_task_if_missing(flow.flow_name, priority):
+                        created += 1
+                continue
+
+            transitions = store.get_session_transitions(eid)
+            for idx, transition in enumerate(transitions[:10], 1):
+                title = f"Validate discovered {transition.action_type.replace('_', ' ')} path {idx}"
+                if self._create_spec_task_if_missing(title, "medium"):
+                    created += 1
+
+        if created == 0:
+            self._create_entry_page_spec_task(config)
+
+    def _create_entry_page_spec_task(self, config: AutoPilotConfig) -> None:
+        title = "Validate application entry page availability"
+        self._create_spec_task_if_missing(title, "medium")
+
+    def _create_spec_task_if_missing(self, title: str, priority: str) -> bool:
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSpecTask
+
+        normalized_title = (title or "Validate application behavior").strip()[:200]
+        with Session(engine) as db:
+            existing = db.exec(
+                select(AutoPilotSpecTask)
+                .where(AutoPilotSpecTask.session_id == self.session_id)
+                .where(AutoPilotSpecTask.requirement_title == normalized_title)
+            ).first()
+            if existing:
+                return False
+            db.add(
+                AutoPilotSpecTask(
+                    session_id=self.session_id,
+                    requirement_title=normalized_title,
+                    priority=priority if priority in PRIORITY_ORDER else "medium",
+                    status="pending",
+                )
+            )
+            db.commit()
+            return True
 
     def _create_spec_tasks_from_requirements(self, requirements):
         """Create AutoPilotSpecTask records for each requirement."""
@@ -1080,16 +1643,74 @@ class AutoPilotPipeline:
         from orchestrator.api.models_db import AutoPilotSpecTask
 
         with Session(engine) as db:
+            existing_titles = set(
+                db.exec(
+                    select(AutoPilotSpecTask.requirement_title).where(
+                        AutoPilotSpecTask.session_id == self.session_id
+                    )
+                ).all()
+            )
             for req in requirements:
+                if req.title in existing_titles:
+                    continue
                 task = AutoPilotSpecTask(
                     session_id=self.session_id,
-                    requirement_id=None,  # Could link via req_code lookup
+                    requirement_id=getattr(req, "id", None),
                     requirement_title=req.title,
                     priority=req.priority,
                     status="pending",
                 )
                 db.add(task)
+                existing_titles.add(req.title)
             db.commit()
+
+    def _create_spec_tasks_from_test_ideas(self, test_ideas):
+        """Create AutoPilotSpecTask records for generated test ideas."""
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSpecTask
+
+        with Session(engine) as db:
+            existing_titles = set(
+                db.exec(
+                    select(AutoPilotSpecTask.requirement_title).where(
+                        AutoPilotSpecTask.session_id == self.session_id
+                    )
+                ).all()
+            )
+            for idea in test_ideas:
+                if idea.title in existing_titles:
+                    continue
+                requirement_id = self._lookup_requirement_id_for_test_idea(idea)
+                task = AutoPilotSpecTask(
+                    session_id=self.session_id,
+                    requirement_id=requirement_id,
+                    requirement_title=idea.title,
+                    priority=idea.priority,
+                    status="pending",
+                )
+                db.add(task)
+                existing_titles.add(idea.title)
+            db.commit()
+
+    def _has_spec_tasks(self) -> bool:
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSpecTask
+
+        with Session(engine) as db:
+            stmt = select(AutoPilotSpecTask).where(AutoPilotSpecTask.session_id == self.session_id).limit(1)
+            return db.exec(stmt).first() is not None
+
+    def _count_spec_tasks(self) -> int:
+        from sqlalchemy import func
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSpecTask
+
+        with Session(engine) as db:
+            stmt = select(func.count()).select_from(AutoPilotSpecTask).where(
+                AutoPilotSpecTask.session_id == self.session_id
+            )
+            return int(db.exec(stmt).one())
 
     def _update_spec_task(
         self,
@@ -1133,11 +1754,15 @@ class AutoPilotPipeline:
         # Look up requirement details from the store
         requirements = store.get_requirements()
         req = None
-        if task.requirement_title:
+        if getattr(task, "requirement_id", None):
+            req = next((r for r in requirements if r.id == task.requirement_id), None)
+        if not req and task.requirement_title:
             req = next(
                 (r for r in requirements if r.title == task.requirement_title),
                 None,
             )
+
+        idea = self._get_test_idea_for_task(task.requirement_title, config.project_id) if task.requirement_title else None
 
         # Build spec content
         title = task.requirement_title or "Unnamed Test"
@@ -1154,7 +1779,18 @@ class AutoPilotPipeline:
         steps = []
         expected_outcomes = []
 
-        if req:
+        if idea:
+            description_lines.append(idea.get("description") or f"Test idea: {title}")
+            steps = list(idea.get("suggested_steps") or [])
+            expected_outcomes = list(idea.get("expected_outcomes") or [])
+            source_requirements = idea.get("source_requirements") or []
+            if source_requirements:
+                description_lines.append(f"Source requirement(s): {', '.join(source_requirements[:5])}")
+            source_flows = idea.get("source_flows") or []
+            if source_flows:
+                description_lines.append(f"Source flow(s): {', '.join(source_flows[:5])}")
+
+        if req and not idea:
             description_lines.append(req.description or f"Test for: {req.title}")
 
             # Try to find matching flow for step details
@@ -1214,6 +1850,37 @@ class AutoPilotPipeline:
         spec_path.write_text(spec_content)
         logger.info(f"Generated spec: {spec_path}")
         return spec_path
+
+    def _get_test_idea_for_task(self, title: str, project_id: str) -> dict[str, Any] | None:
+        """Look up a generated test idea by exact title."""
+        try:
+            from orchestrator.memory.manager import get_memory_manager
+
+            manager = get_memory_manager(project_id=project_id)
+            for idea in manager.get_test_ideas(feature=title, max_results=10):
+                if (idea.get("title") or "").strip().lower() == title.strip().lower():
+                    return idea
+        except Exception as exc:
+            logger.debug(f"Unable to load generated test idea for '{title}': {exc}")
+        return None
+
+    def _lookup_requirement_id_for_test_idea(self, idea) -> int | None:
+        """Resolve a generated test idea to its strongest upstream requirement."""
+        if not getattr(idea, "source_requirements", None):
+            return None
+        try:
+            from orchestrator.memory.exploration_store import get_exploration_store
+
+            project_id = self._config.project_id if self._config else self.project_id
+            store = get_exploration_store(project_id=project_id)
+            requirements = store.get_requirements()
+            source_keys = {str(item).strip().lower() for item in idea.source_requirements if str(item).strip()}
+            for req in requirements:
+                if req.req_code.lower() in source_keys or req.title.strip().lower() in source_keys:
+                    return req.id
+        except Exception as exc:
+            logger.debug(f"Unable to resolve requirement for test idea '{getattr(idea, 'title', '')}': {exc}")
+        return None
 
     # ------------------------------------------------------------------
     # Test task helpers

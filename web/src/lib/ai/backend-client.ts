@@ -11,6 +11,7 @@ interface BackendRequestOptions {
   headers?: Record<string, string>;
   authToken?: string;
   projectId?: string;
+  timeoutMs?: number;
 }
 
 export interface BackendResponse<T = unknown> {
@@ -24,7 +25,7 @@ export async function backendFetch<T = unknown>(
   path: string,
   options: BackendRequestOptions = {}
 ): Promise<BackendResponse<T>> {
-  const { method = 'GET', body, headers = {}, authToken, projectId } = options;
+  const { method = 'GET', body, headers = {}, authToken, projectId, timeoutMs = 30000 } = options;
 
   const url = `${INTERNAL_API_URL}${path.startsWith('/') ? '' : '/'}${path}`;
 
@@ -46,7 +47,7 @@ export async function backendFetch<T = unknown>(
       method,
       headers: requestHeaders,
       body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(30000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     if (!response.ok) {

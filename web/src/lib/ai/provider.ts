@@ -10,8 +10,8 @@ function normalizeBaseURL(url?: string): string | undefined {
   const trimmed = url.replace(/\/+$/, '');
   // If it already ends with /v1, use as-is
   if (trimmed.endsWith('/v1')) return trimmed;
-  // Standard Anthropic API doesn't need modification
-  if (trimmed.includes('api.anthropic.com')) return trimmed;
+  // Standard Anthropic API uses /v1 as the API root.
+  if (trimmed.includes('api.anthropic.com')) return `${trimmed}/v1`;
   // For proxies (OpenRouter, custom, etc.), append /v1
   return `${trimmed}/v1`;
 }
@@ -87,9 +87,10 @@ export function reportRateLimit(slot?: KeySlot) {
 export function getActiveProvider() {
   const slot = getAvailableSlot();
   const apiKey = slot?.token || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
+  const authToken = apiKey ? '' : process.env.CLAUDE_CODE_OAUTH_TOKEN || '';
 
   const provider = createAnthropic({
-    apiKey,
+    ...(apiKey ? { apiKey } : { authToken }),
     baseURL: normalizeBaseURL(process.env.ANTHROPIC_BASE_URL),
   });
 
@@ -101,8 +102,16 @@ export function getActiveProvider() {
  * Uses the first available key from the rotation pool.
  */
 export const anthropicProvider = createAnthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '',
+  ...(
+    process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN
+      ? { apiKey: process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '' }
+      : { authToken: process.env.CLAUDE_CODE_OAUTH_TOKEN || '' }
+  ),
   baseURL: normalizeBaseURL(process.env.ANTHROPIC_BASE_URL),
 });
 
-export const MODEL_ID = process.env.ANTHROPIC_MODEL || process.env.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-5-20250929';
+export const MODEL_ID =
+  process.env.ANTHROPIC_CHAT_MODEL ||
+  process.env.ANTHROPIC_DEFAULT_SONNET_MODEL ||
+  process.env.ANTHROPIC_MODEL ||
+  'claude-sonnet-4-6';

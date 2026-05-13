@@ -8,6 +8,7 @@ to report their progress to the backend API for real-time UI updates.
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 # Try to import requests, but don't fail if not available
 try:
@@ -115,6 +116,34 @@ class ProgressReporter:
             else:
                 message = f"Ralph healing attempt {attempt}..."
         return self.report("healing", message, healing_attempt=attempt)
+
+    def report_agentic_summary(self, summary: dict[str, Any]) -> bool:
+        """Report compact agentic QA summary to the backend API."""
+        if not self._enabled:
+            return False
+
+        try:
+            response = requests.post(
+                f"{self.api_url}/runs/{self.run_id}/agentic-summary",
+                json={"summary": summary},
+                timeout=5,
+            )
+
+            if response.status_code == 200:
+                logger.debug("Agentic summary reported")
+                return True
+
+            logger.warning(f"Failed to report agentic summary: {response.status_code}")
+            return False
+        except requests.exceptions.Timeout:
+            logger.warning("Agentic summary report timed out")
+            return False
+        except requests.exceptions.ConnectionError:
+            logger.debug("Backend not available for agentic summary reporting")
+            return False
+        except Exception as e:
+            logger.warning(f"Error reporting agentic summary: {e}")
+            return False
 
 
 # Global convenience function

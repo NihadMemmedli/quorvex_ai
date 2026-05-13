@@ -13,6 +13,8 @@ The worker runs as a separate supervisord program, giving it a clean process
 environment without uvicorn's event loop modifications.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -66,6 +68,8 @@ class AgentTask:
     operation_type: str | None = None
     cwd: str | None = None  # Working directory for CLI execution
     env_vars: dict[str, str] | None = None  # API credentials to pass to worker
+    allowed_tools: list[str] | None = None  # Claude allowed tools for this task
+    telemetry: dict[str, Any] = field(default_factory=dict)  # Structured execution diagnostics
 
     def to_dict(self) -> dict:
         """Convert to dictionary for Redis storage."""
@@ -85,6 +89,8 @@ class AgentTask:
             "operation_type": self.operation_type,
             "cwd": self.cwd,
             "env_vars": self.env_vars,
+            "allowed_tools": self.allowed_tools,
+            "telemetry": self.telemetry,
         }
 
     @classmethod
@@ -106,6 +112,8 @@ class AgentTask:
             operation_type=data.get("operation_type"),
             cwd=data.get("cwd"),
             env_vars=data.get("env_vars"),
+            allowed_tools=data.get("allowed_tools"),
+            telemetry=data.get("telemetry") or {},
         )
 
 
@@ -204,6 +212,7 @@ class AgentQueue:
         operation_type: str | None = None,
         cwd: str | None = None,
         env_vars: dict[str, str] | None = None,
+        allowed_tools: list[str] | None = None,
     ) -> str:
         """
         Add an agent task to the queue.
@@ -216,6 +225,7 @@ class AgentQueue:
             operation_type: Type of operation (exploration, prd, etc.)
             cwd: Working directory for CLI execution (defaults to project root)
             env_vars: API credentials to pass to worker process
+            allowed_tools: Claude allowed tools for this task
 
         Returns:
             Task ID for tracking
@@ -231,6 +241,7 @@ class AgentQueue:
             operation_type=operation_type,
             cwd=cwd,
             env_vars=env_vars,
+            allowed_tools=allowed_tools,
         )
 
         # Atomic store + enqueue
@@ -546,6 +557,7 @@ class AgentQueue:
         result: str,
         success: bool = True,
         error: str | None = None,
+        telemetry: dict[str, Any] | None = None,
     ) -> None:
         """
         Submit result for a completed task.
@@ -574,6 +586,8 @@ class AgentQueue:
             task.completed_at = datetime.utcnow()
             task.result = result
             task.error = error
+            if telemetry:
+                task.telemetry = telemetry
 
             # Atomic state transition with retry
             for attempt in range(1, 4):
@@ -616,11 +630,36 @@ class AgentQueue:
         return await redis.scard(self.RUNNING_KEY)
 
     async def get_metrics(self) -> dict:
-        """Get queue metrics."""
+        """Get Redis-backed agent queue metrics."""
+        redis = await self._ensure_connected()
+        all_tasks = await redis.hgetall(self.TASKS_KEY)
+        by_status: dict[str, int] = {}
+        oldest_queued_age_seconds: float | None = None
+        stale_running = 0
+        now = datetime.utcnow()
+
+        for task_id, task_data_str in all_tasks.items():
+            try:
+                task = AgentTask.from_dict(json.loads(task_data_str))
+            except Exception:
+                continue
+
+            by_status[task.status.value] = by_status.get(task.status.value, 0) + 1
+
+            if task.status == AgentTaskStatus.QUEUED:
+                age = (now - task.created_at).total_seconds()
+                if oldest_queued_age_seconds is None or age > oldest_queued_age_seconds:
+                    oldest_queued_age_seconds = age
+            elif task.status == AgentTaskStatus.RUNNING and not await self.check_heartbeat(task_id):
+                stale_running += 1
+
         return {
             "queue_length": await self.queue_length(),
             "running": await self.running_count(),
             "workers_alive": await self.worker_count(),
+            "by_status": by_status,
+            "stale_running": stale_running,
+            "oldest_queued_age_seconds": oldest_queued_age_seconds,
         }
 
     async def get_worker_health(self) -> dict:
@@ -654,7 +693,7 @@ class AgentQueue:
                 "error": str(e),
             }
 
-    async def cleanup_orphaned_tasks(self) -> int:
+    async def cleanup_orphaned_tasks(self, grace_seconds: int = 15) -> int:
         """Clean up all 'running' tasks on startup.
 
         Called during application startup to clear tasks orphaned by a
@@ -669,11 +708,18 @@ class AgentQueue:
         running_ids = await redis.smembers(self.RUNNING_KEY)
         cleaned = 0
 
+        now = datetime.utcnow()
         for task_id in running_ids:
             task = await self.get_task(task_id)
             if task and task.status == AgentTaskStatus.RUNNING:
+                if await self.check_heartbeat(task_id, max_stale_seconds=120):
+                    logger.info(f"Skipping running task {task_id}: heartbeat is still fresh")
+                    continue
+                if task.started_at and (now - task.started_at).total_seconds() < grace_seconds:
+                    logger.info(f"Skipping newly-started running task {task_id}: within startup grace period")
+                    continue
                 task.status = AgentTaskStatus.FAILED
-                task.completed_at = datetime.utcnow()
+                task.completed_at = now
                 task.error = "Orphaned task cleaned up on startup — previous worker died"
                 await redis.hset(self.TASKS_KEY, task_id, json.dumps(task.to_dict()))
                 await redis.srem(self.RUNNING_KEY, task_id)

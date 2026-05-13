@@ -21,7 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Add orchestrator to path
+# Add both project root and orchestrator package dir for package and standalone execution.
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Load Claude credentials and SDK
@@ -32,7 +33,8 @@ setup_claude_env()
 import logging
 
 from memory.exploration_store import get_exploration_store
-from utils.agent_runner import AgentRunner
+from orchestrator.ai.context import SOURCE_FALLBACK, SOURCE_OBSERVED, ContextBundle
+from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -103,11 +105,6 @@ class RequirementsGenerator:
         logger.info(f"   Source Session: {exploration_session_id}")
         logger.info("")
 
-        # Pre-flight check: Verify AI credentials
-        anthropic_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        if not anthropic_token:
-            raise RuntimeError("ANTHROPIC_AUTH_TOKEN not set. Configure AI credentials in .env file or settings.")
-
         # Load exploration data
         session = self.store.get_session(exploration_session_id)
         if not session:
@@ -134,7 +131,17 @@ class RequirementsGenerator:
         # Generate requirements using AI
         logger.info("Generating requirements with AI analysis...")
 
-        requirements = await self._generate_requirements_with_ai(exploration_summary)
+        try:
+            requirements = await self._generate_requirements_with_ai(exploration_summary)
+        except Exception as exc:
+            logger.warning(f"AI requirements generation failed, using flow-based fallback: {exc}")
+            requirements = self._generate_fallback_requirements(exploration_summary)
+
+        if not requirements:
+            logger.warning("AI requirements generation returned 0 requirements, using flow-based fallback")
+            requirements = self._generate_fallback_requirements(exploration_summary)
+
+        self._assign_requirement_codes(requirements)
 
         # Store requirements
         logger.info(f"Storing {len(requirements)} requirements...")
@@ -233,7 +240,16 @@ class RequirementsGenerator:
         # Generate requirements using AI
         logger.info("Generating requirements with AI analysis...")
 
-        requirements = await self._generate_requirements_with_ai(exploration_summary)
+        try:
+            requirements = await self._generate_requirements_with_ai(exploration_summary)
+        except Exception as exc:
+            logger.warning(f"AI requirements generation failed, using flow-based fallback: {exc}")
+            requirements = self._generate_fallback_requirements(exploration_summary)
+
+        if not requirements:
+            requirements = self._generate_fallback_requirements(exploration_summary)
+
+        self._assign_requirement_codes(requirements)
 
         # Calculate statistics
         by_category = {}
@@ -288,6 +304,8 @@ class RequirementsGenerator:
                     "steps": [{"action": s.action_type, "element": s.element_name, "value": s.value} for s in steps],
                 }
             )
+        if not flow_summaries:
+            flow_summaries = self._load_flow_artifacts(session.id)
 
         # Summarize API endpoints
         endpoint_summaries = []
@@ -295,6 +313,8 @@ class RequirementsGenerator:
             endpoint_summaries.append(
                 {"method": e.method, "url": e.url, "status": e.response_status, "triggered_by": e.triggered_by_action}
             )
+
+        quality = self._load_exploration_quality(session.id)
 
         return {
             "entry_url": session.entry_url,
@@ -304,12 +324,40 @@ class RequirementsGenerator:
             "transitions": transition_summaries,
             "flows": flow_summaries,
             "api_endpoints": endpoint_summaries,
+            "quality": quality,
         }
 
     async def _generate_requirements_with_ai(self, exploration_summary: dict[str, Any]) -> list[GeneratedRequirement]:
         """Use AI to generate requirements from exploration data."""
 
+        anthropic_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        if not anthropic_token:
+            raise RuntimeError("ANTHROPIC_AUTH_TOKEN not set")
+
+        source_type = SOURCE_OBSERVED
+        if exploration_summary.get("quality", {}).get("fallback_used"):
+            source_type = SOURCE_FALLBACK
+
+        context = ContextBundle(stage="requirements_generation")
+        context.add(
+            "exploration_summary",
+            exploration_summary,
+            source_type=source_type,
+            confidence=(exploration_summary.get("quality", {}).get("quality_score", 100) or 100) / 100,
+            notes="Exploration evidence is labeled so inferred/fallback data is not treated as browser-verified.",
+        )
+
         prompt = f"""You are a Requirements Analyst AI. Analyze the following application exploration data and generate functional requirements.
+
+## Context Provenance
+```json
+{json.dumps(context.to_dict(), indent=2)}
+```
+
+Rules:
+- Treat source_type=observed as browser-verified evidence.
+- Treat source_type=fallback or inferred as weaker evidence and avoid inventing specific behavior not directly supported.
+- If evidence is weak, generate availability/navigation requirements instead of detailed feature requirements.
 
 ## Exploration Data
 
@@ -397,11 +445,21 @@ Assign priority based on:
 
 Generate the requirements now:
 """
+        metadata = build_prompt_metadata(
+            prompt_id="requirements_generator.from_exploration",
+            version="2026-05-13.1",
+            stage="requirements_generation",
+            schema_name="requirements.v1",
+            rendered_prompt=prompt,
+        )
+        prompt = attach_prompt_metadata(prompt, metadata)
 
         logger.info("   Calling AI for requirements analysis...")
 
         # Use AgentRunner which automatically routes through Redis agent queue
         # when running inside uvicorn (avoids subprocess I/O hang)
+        from utils.agent_runner import AgentRunner
+
         runner = AgentRunner(
             timeout_seconds=300,  # 5 min timeout for requirements analysis
             allowed_tools=[],  # No tools needed for analysis
@@ -432,12 +490,241 @@ Generate the requirements now:
                 f"Response preview ({len(result_text)} chars):\n{preview}"
             )
 
-        # Reassign requirement codes using the store to avoid collisions
-        # across sessions (AI always starts at REQ-001)
-        for req in requirements:
-            req.req_code = self.store.get_next_requirement_code()
+        return requirements
+
+    def _assign_requirement_codes(self, requirements: list[GeneratedRequirement]) -> None:
+        """Assign sequential requirement codes without duplicating within a batch."""
+        if not requirements:
+            return
+
+        next_code = self.store.get_next_requirement_code()
+        try:
+            prefix, raw_num = next_code.split("-", 1)
+            start = int(raw_num)
+        except (ValueError, AttributeError):
+            prefix = "REQ"
+            start = 1
+
+        for offset, req in enumerate(requirements):
+            req.req_code = f"{prefix}-{start + offset:03d}"
+
+    def _generate_fallback_requirements(self, exploration_summary: dict[str, Any]) -> list[GeneratedRequirement]:
+        """Generate basic requirements directly from discovered flows when AI is unavailable."""
+        requirements: list[GeneratedRequirement] = []
+        flows = exploration_summary.get("flows", []) or []
+        endpoints = exploration_summary.get("api_endpoints", []) or []
+
+        if not flows and exploration_summary.get("transitions"):
+            flows = self._flows_from_transitions(exploration_summary)
+        if not flows and exploration_summary.get("flows_discovered", 0) > 0:
+            flows = [self._count_based_flow(exploration_summary)]
+        if not flows and (exploration_summary.get("pages_discovered", 0) > 0 or exploration_summary.get("entry_url")):
+            flows = [self._page_based_flow(exploration_summary)]
+
+        for idx, flow in enumerate(flows, 1):
+            name = flow.get("name") or f"Discovered Flow {idx}"
+            category = flow.get("category") or "navigation"
+            if category not in {
+                "authentication",
+                "authorization",
+                "navigation",
+                "crud",
+                "form_submission",
+                "search",
+                "display",
+                "integration",
+                "error_handling",
+                "other",
+            }:
+                category = "other"
+
+            is_success = bool(flow.get("is_success_path", True))
+            priority = "high" if is_success and category in {"authentication", "crud", "form_submission"} else "medium"
+            if not is_success:
+                priority = "medium"
+
+            criteria = []
+            for postcondition in flow.get("postconditions") or []:
+                criteria.append(str(postcondition))
+            if flow.get("description"):
+                criteria.append(str(flow["description"]))
+            if not criteria:
+                criteria = [
+                    f"User can complete the {name} flow",
+                    "The system reaches the expected end state without errors",
+                ]
+            if not is_success:
+                criteria.append("The system presents a clear validation or error response")
+
+            source_endpoints = [
+                e.get("url")
+                for e in endpoints
+                if e.get("url") and (not e.get("triggered_by") or name.lower() in str(e.get("triggered_by")).lower())
+            ][:5]
+
+            requirements.append(
+                GeneratedRequirement(
+                    req_code=f"REQ-{idx:03d}",
+                    title=name,
+                    description=flow.get("description") or f"The system shall support the {name} user flow.",
+                    category=category,
+                    priority=priority,
+                    acceptance_criteria=criteria[:8],
+                    source_flows=[name],
+                    source_elements=self._source_elements(flow.get("steps", [])),
+                    source_api_endpoints=source_endpoints,
+                )
+            )
 
         return requirements
+
+    def _load_flow_artifacts(self, exploration_session_id: str) -> list[dict[str, Any]]:
+        """Load flows.json when DB flow rows are unavailable."""
+        candidates = [
+            Path("runs") / "explorations" / exploration_session_id / "flows.json",
+            Path("runs") / exploration_session_id / "flows.json",
+            Path("/app/runs/explorations") / exploration_session_id / "flows.json",
+            Path("/app/runs") / exploration_session_id / "flows.json",
+        ]
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                raw = json.loads(path.read_text())
+                data = raw.get("flows", raw) if isinstance(raw, dict) else raw
+                if not isinstance(data, list):
+                    return []
+                return [self._normalize_artifact_flow(item, idx) for idx, item in enumerate(data, 1) if isinstance(item, dict)]
+            except Exception as exc:
+                logger.warning(f"Failed to load flow artifacts from {path}: {exc}")
+                return []
+        return []
+
+    def _load_exploration_quality(self, exploration_session_id: str) -> dict[str, Any]:
+        """Load exploration quality summary from saved artifacts when available."""
+        candidates = [
+            Path("runs") / "explorations" / exploration_session_id / "summary.json",
+            Path("runs") / exploration_session_id / "summary.json",
+            Path("/app/runs/explorations") / exploration_session_id / "summary.json",
+            Path("/app/runs") / exploration_session_id / "summary.json",
+        ]
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                summary = json.loads(path.read_text())
+                return summary.get("quality") or {
+                    "quality_score": summary.get("qualityScore"),
+                    "source_type": summary.get("sourceType"),
+                }
+            except Exception as exc:
+                logger.debug(f"Failed to load exploration quality from {path}: {exc}")
+                return {}
+        return {}
+
+    def _normalize_artifact_flow(self, flow: dict[str, Any], index: int) -> dict[str, Any]:
+        name = flow.get("name") or flow.get("title") or f"Discovered Flow {index}"
+        return {
+            "name": name,
+            "category": flow.get("category") or "navigation",
+            "description": flow.get("description") or flow.get("outcome") or flow.get("happy_path"),
+            "start_url": flow.get("startUrl") or flow.get("start_url") or flow.get("entry_point") or "",
+            "end_url": flow.get("endUrl") or flow.get("end_url") or flow.get("exit_point") or "",
+            "step_count": flow.get("step_count") or flow.get("steps_count") or len(flow.get("steps") or []),
+            "is_success_path": flow.get("isSuccessPath", flow.get("is_success_path", True)),
+            "preconditions": flow.get("preconditions") or [],
+            "postconditions": flow.get("postconditions") or [],
+            "steps": self._normalize_steps(flow.get("steps") or flow.get("pages") or []),
+        }
+
+    def _normalize_steps(self, raw_steps: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_steps, list):
+            return []
+        steps: list[dict[str, Any]] = []
+        for step in raw_steps:
+            if isinstance(step, dict):
+                action = step.get("action") or step.get("actionType") or step.get("action_type") or step.get("type") or "step"
+                element = (
+                    step.get("element")
+                    or step.get("elementName")
+                    or step.get("element_name")
+                    or step.get("description")
+                    or step.get("actionDescription")
+                    or step.get("action_description")
+                    or action
+                )
+                steps.append({"action": str(action), "element": str(element), "value": step.get("value")})
+            elif step is not None:
+                steps.append({"action": "step", "element": str(step)})
+        return steps
+
+    def _source_elements(self, steps: Any) -> list[str]:
+        elements: list[str] = []
+        for step in self._normalize_steps(steps):
+            element = step.get("element")
+            if element:
+                elements.append(str(element))
+        return elements[:10]
+
+    def _flows_from_transitions(self, exploration_summary: dict[str, Any]) -> list[dict[str, Any]]:
+        flows: list[dict[str, Any]] = []
+        for idx, transition in enumerate(exploration_summary.get("transitions", [])[:20], 1):
+            before_url = transition.get("before_url") or exploration_summary.get("entry_url", "")
+            after_url = transition.get("after_url") or before_url
+            action = transition.get("action") or "navigate"
+            element = transition.get("element") or "discovered element"
+            title = f"{str(action).replace('_', ' ').title()} flow {idx}"
+            flows.append(
+                {
+                    "name": title,
+                    "category": "navigation",
+                    "description": transition.get("changes") or f"User can complete {title}.",
+                    "start_url": before_url,
+                    "end_url": after_url,
+                    "is_success_path": transition.get("transition_type") != "error",
+                    "postconditions": [transition.get("changes")] if transition.get("changes") else [],
+                    "steps": [{"action": action, "element": element}],
+                }
+            )
+        return flows
+
+    def _count_based_flow(self, exploration_summary: dict[str, Any]) -> dict[str, Any]:
+        entry_url = exploration_summary.get("entry_url") or "the application"
+        flow_count = exploration_summary.get("flows_discovered", 0)
+        page_count = exploration_summary.get("pages_discovered", 0)
+        return {
+            "name": "Discovered application journeys",
+            "category": "navigation",
+            "description": (
+                f"Exploration discovered {flow_count} user journeys across {page_count} pages, "
+                "but detailed flow rows were unavailable."
+            ),
+            "start_url": entry_url,
+            "end_url": entry_url,
+            "is_success_path": True,
+            "postconditions": ["Discovered journeys remain reachable without unexpected errors"],
+            "steps": [{"action": "navigate", "element": entry_url}],
+        }
+
+    def _page_based_flow(self, exploration_summary: dict[str, Any]) -> dict[str, Any]:
+        entry_url = exploration_summary.get("entry_url") or "the application"
+        page_count = exploration_summary.get("pages_discovered", 0)
+        return {
+            "name": "Application availability and primary page access",
+            "category": "navigation",
+            "description": (
+                f"Exploration reached {entry_url}"
+                + (f" and discovered {page_count} page(s)." if page_count else ".")
+            ),
+            "start_url": entry_url,
+            "end_url": entry_url,
+            "is_success_path": True,
+            "postconditions": [
+                "The application entry page is reachable",
+                "The page renders without a blocking application error",
+            ],
+            "steps": [{"action": "navigate", "element": entry_url}],
+        }
 
     def _parse_requirements_response(self, response_text: str) -> list[GeneratedRequirement]:
         """Parse requirements from AI response using robust JSON extraction."""

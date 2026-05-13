@@ -25,6 +25,12 @@ services:
     environment:
       # Inherit all from prod, but enable reload
       UVICORN_RELOAD: "true"
+      HOME: /home/agent
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-4-7}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-6}
+      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-claude-sonnet-4-6}
+      ANTHROPIC_ENABLE_CHAT_THINKING: ${ANTHROPIC_ENABLE_CHAT_THINKING:-false}
 
   frontend:
     volumes:
@@ -43,8 +49,11 @@ services:
       # AI Assistant env vars (server-side only, passed from root .env.prod)
       ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN:-}
       ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
+      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-claude-sonnet-4-6}
+      ANTHROPIC_ENABLE_CHAT_THINKING: ${ANTHROPIC_ENABLE_CHAT_THINKING:-false}
       INTERNAL_API_URL: http://backend:8001
     deploy:
       resources:

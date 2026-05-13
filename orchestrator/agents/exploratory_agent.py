@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -350,8 +351,13 @@ Step 4: Return JSON summary when done"""
         elapsed = time.time() - self.state.start_time
         run_id = config.get("run_id")
 
-        # Get memory manager for persistence
-        memory_manager = get_memory_manager(project_id=config.get("project_id"))
+        memory_manager = None
+        memory_enabled = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
+        if memory_enabled and os.getenv("OPENAI_API_KEY"):
+            try:
+                memory_manager = get_memory_manager(project_id=config.get("project_id"))
+            except Exception as e:
+                print(f"⚠️ Memory unavailable, continuing without persistence: {e}")
 
         parsed_data = {}
         action_trace = []
@@ -510,120 +516,122 @@ Step 4: Return JSON summary when done"""
             }
 
         # --- PERSISTENCE TO MEMORY ---
-        try:
-            print(f"💾 Starting persistence for project: {config.get('project_id')}")
-
-            # 1. Store discovered elements AND Pages
+        if memory_manager is None:
+            print("ℹ️ Memory persistence skipped (MEMORY_ENABLED=false or OPENAI_API_KEY not set)")
+        else:
             try:
-                # We need to track the current page to link elements to it
-                current_page_url = config.get("url")  # Start with initial URL
-                current_page_id = hashlib.md5(current_page_url.encode()).hexdigest()
+                print(f"💾 Starting persistence for project: {config.get('project_id')}")
 
-                # Ensure start page exists
-                memory_manager.graph_store.add_page(current_page_id, current_page_url)
+                # 1. Store discovered elements AND Pages
+                try:
+                    # We need to track the current page to link elements to it
+                    current_page_url = config.get("url")  # Start with initial URL
+                    current_page_id = hashlib.md5(current_page_url.encode()).hexdigest()
 
-                for _action_idx, action in enumerate(action_trace):
-                    act_type = action.get("action", "").lower()
-                    target = action.get("target", "")
+                    # Ensure start page exists
+                    memory_manager.graph_store.add_page(current_page_id, current_page_url)
 
-                    if not target or target == "unknown":
-                        continue
+                    for _action_idx, action in enumerate(action_trace):
+                        act_type = action.get("action", "").lower()
+                        target = action.get("target", "")
 
-                    if act_type == "navigate":
-                        # This action IS a page visit
-                        new_page_url = target
-                        new_page_id = hashlib.md5(new_page_url.encode()).hexdigest()
-                        memory_manager.graph_store.add_page(new_page_id, new_page_url)
+                        if not target or target == "unknown":
+                            continue
 
-                        memory_manager.graph_store.add_navigation(
-                            from_page=current_page_id,
-                            to_page=new_page_id,
-                            trigger="navigation",
-                            metadata={"step": action.get("step")},
+                        if act_type == "navigate":
+                            # This action IS a page visit
+                            new_page_url = target
+                            new_page_id = hashlib.md5(new_page_url.encode()).hexdigest()
+                            memory_manager.graph_store.add_page(new_page_id, new_page_url)
+
+                            memory_manager.graph_store.add_navigation(
+                                from_page=current_page_id,
+                                to_page=new_page_id,
+                                trigger="navigation",
+                                metadata={"step": action.get("step")},
+                            )
+
+                            current_page_url = new_page_url
+                            current_page_id = new_page_id
+
+                        elif act_type in ["click", "fill", "select", "check", "uncheck"]:
+                            # Create a pseudo-selector
+                            selector = {"type": "text_or_selector", "value": target}
+
+                            element_id = memory_manager.store_discovered_element(
+                                url=current_page_url,
+                                element_type="interactive_element",
+                                selector=selector,
+                                text=target,
+                                page_id=current_page_id,
+                            )
+
+                            memory_manager.record_element_tested(
+                                element_id, test_name=f"Exploratory Run {run_id or 'Manual'}"
+                            )
+
+                    # 1b. Robustly store ALL pages mentioned in discovered flows
+                    # This catches pages that were visited but didn't have explicit "Navigate" actions in the trace
+                    for flow in discovered_flows:
+                        pages = flow.get("pages", [])
+                        for page_url in pages:
+                            if page_url and len(page_url) > 1:
+                                pid = hashlib.md5(page_url.encode()).hexdigest()
+                                memory_manager.graph_store.add_page(pid, page_url)
+                except Exception as e:
+                    print(f"⚠️ Error storing elements/pages: {e}")
+
+                # 2. Store Discovered Flows
+                try:
+                    for flow in discovered_flows:
+                        flow_pages = flow.get("pages", [])
+
+                        memory_manager.store_discovered_flow(
+                            title=flow.get("title", "Untitled Flow"),
+                            steps=action_trace,
+                            happy_path=flow.get("happy_path"),
+                            pages=flow_pages,
+                            metadata=flow,
                         )
 
-                        current_page_url = new_page_url
-                        current_page_id = new_page_id
-
-                    elif act_type in ["click", "fill", "select", "check", "uncheck"]:
-                        # Create a pseudo-selector
-                        selector = {"type": "text_or_selector", "value": target}
-
-                        element_id = memory_manager.store_discovered_element(
-                            url=current_page_url,
-                            element_type="interactive_element",
-                            selector=selector,
-                            text=target,
-                            page_id=current_page_id,
+                        memory_manager.store_test_idea(
+                            description=f"Automated Flow: {flow.get('title')}", category="discovered_flow", metadata=flow
                         )
+                except Exception as e:
+                    print(f"⚠️ Error storing flows: {e}")
 
-                        memory_manager.record_element_tested(
-                            element_id, test_name=f"Exploratory Run {run_id or 'Manual'}"
+                # 3. Store Test Patterns
+                try:
+                    test_name = f"Exploratory Test: {config.get('project_id')}"
+                    for action in action_trace:
+                        outcome = action.get("outcome", "").lower()
+                        if outcome in ["failed", "error"]:
+                            continue
+
+                        target = action.get("target", "")
+                        if not target or len(target) < 2:
+                            continue
+
+                        memory_manager.store_test_pattern(
+                            test_name=test_name,
+                            step_number=action.get("step", 0),
+                            action=action.get("action", ""),
+                            target=target,
+                            selector={"type": "exploratory", "value": target},
+                            success=True,
+                            duration_ms=0,
                         )
+                except Exception as e:
+                    print(f"⚠️ Error storing patterns: {e}")
 
-                # 1b. Robustly store ALL pages mentioned in discovered flows
-                # This catches pages that were visited but didn't have explicit "Navigate" actions in the trace
-                for flow in discovered_flows:
-                    pages = flow.get("pages", [])
-                    for page_url in pages:
-                        if page_url and len(page_url) > 1:
-                            pid = hashlib.md5(page_url.encode()).hexdigest()
-                            memory_manager.graph_store.add_page(pid, page_url)
-            except Exception as e:
-                print(f"⚠️ Error storing elements/pages: {e}")
-
-            # 2. Store Discovered Flows
-            try:
-                for flow in discovered_flows:
-                    flow_pages = flow.get("pages", [])
-
-                    memory_manager.store_discovered_flow(
-                        title=flow.get("title", "Untitled Flow"),
-                        steps=action_trace,
-                        happy_path=flow.get("happy_path"),
-                        pages=flow_pages,
-                        metadata=flow,
-                    )
-
-                    memory_manager.store_test_idea(
-                        description=f"Automated Flow: {flow.get('title')}", category="discovered_flow", metadata=flow
-                    )
-            except Exception as e:
-                print(f"⚠️ Error storing flows: {e}")
-
-            # 3. Store Test Patterns
-            try:
-                test_name = f"Exploratory Test: {config.get('project_id')}"
-                for action in action_trace:
-                    outcome = action.get("outcome", "").lower()
-                    if outcome in ["failed", "error"]:
-                        continue
-
-                    target = action.get("target", "")
-                    if not target or len(target) < 2:
-                        continue
-
-                    memory_manager.store_test_pattern(
-                        test_name=test_name,
-                        step_number=action.get("step", 0),
-                        action=action.get("action", ""),
-                        target=target,
-                        selector={"type": "exploratory", "value": target},
-                        success=True,
-                        duration_ms=0,
-                    )
-            except Exception as e:
-                print(f"⚠️ Error storing patterns: {e}")
-
-        except Exception as mem_err:
-            print(f"⚠️ Critical Memory persistence failure: {mem_err}")
-        finally:
-            # CRITICAL: Save graph changes to disk ALWAYS
-            try:
-                memory_manager.graph_store.save()
-                print(f"💾 Persisted graph data: {len(action_trace)} actions, {len(discovered_flows)} flows")
-            except Exception as save_err:
-                print(f"❌ Failed to save graph to disk: {save_err}")
+            except Exception as mem_err:
+                print(f"⚠️ Critical Memory persistence failure: {mem_err}")
+            finally:
+                try:
+                    memory_manager.graph_store.save()
+                    print(f"💾 Persisted graph data: {len(action_trace)} actions, {len(discovered_flows)} flows")
+                except Exception as save_err:
+                    print(f"❌ Failed to save graph to disk: {save_err}")
 
         # --- Final Response Construction ---
         response_data = parsed_data if not parsing_failed else {}
