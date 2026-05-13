@@ -403,7 +403,7 @@ async def check_requirements_health():
     Check health of requirements generation system.
 
     Verifies:
-    - ANTHROPIC_AUTH_TOKEN is set
+    - Claude authentication is configured
     - OPENAI_API_KEY is set (for embeddings)
     - Database is connected
     - Claude SDK can be imported
@@ -412,10 +412,16 @@ async def check_requirements_health():
 
     errors = []
 
-    # Check Anthropic token
-    anthropic_token_set = bool(os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    # Check Claude auth. Claude Code subscription auth in Docker uses
+    # CLAUDE_CODE_OAUTH_TOKEN; direct Anthropic API calls still use
+    # ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY.
+    anthropic_token_set = bool(
+        os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+    )
     if not anthropic_token_set:
-        errors.append("ANTHROPIC_AUTH_TOKEN not set - AI generation will fail")
+        errors.append("Claude auth not set - AI generation will fail")
 
     # Check OpenAI key (for embeddings)
     openai_token_set = bool(os.environ.get("OPENAI_API_KEY"))

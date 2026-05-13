@@ -54,6 +54,12 @@ class BulkSaveMessagesRequest(BaseModel):
     messages: list[SaveMessageRequest]
 
 
+class ClaudeCodeChatRequest(BaseModel):
+    prompt: str
+    system_prompt: str | None = None
+    timeout_seconds: int = 120
+
+
 class UpdateContentJsonRequest(BaseModel):
     content_json: str
 
@@ -65,6 +71,38 @@ class SubmitFeedbackRequest(BaseModel):
 
 
 # ---------- Conversations ----------
+
+
+@router.post("/claude-code")
+async def claude_code_chat(request: ClaudeCodeChatRequest):
+    """Run a lightweight assistant turn through Claude Code/AgentRunner.
+
+    This supports Docker/dev setups authenticated with CLAUDE_CODE_OAUTH_TOKEN,
+    where direct API-key based frontend SDK calls are not available.
+    """
+    try:
+        from orchestrator.utils.agent_runner import AgentRunner
+    except ImportError:
+        from utils.agent_runner import AgentRunner
+
+    prompt = request.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
+
+    if request.system_prompt:
+        prompt = f"{request.system_prompt.strip()}\n\nUser request:\n{prompt}"
+
+    runner = AgentRunner(
+        timeout_seconds=min(max(request.timeout_seconds, 10), 180),
+        allowed_tools=[],
+        log_tools=False,
+    )
+    result = await runner.run(prompt)
+
+    if not result.success:
+        raise HTTPException(status_code=502, detail=result.error or "Claude Code chat failed")
+
+    return {"text": (result.output or "").strip()}
 
 
 @router.get("/conversations")

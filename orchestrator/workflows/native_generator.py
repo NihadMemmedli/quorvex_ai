@@ -56,7 +56,11 @@ class NativeGenerator:
         self.tests_dir.mkdir(parents=True, exist_ok=True)
 
     async def generate_test(
-        self, spec_path: str, target_url: str | None = None, output_name: str | None = None
+        self,
+        spec_path: str,
+        target_url: str | None = None,
+        output_name: str | None = None,
+        design_context: str | None = None,
     ) -> Path:
         """
         Generate a Playwright test from a markdown spec.
@@ -90,6 +94,7 @@ class NativeGenerator:
             spec_name=spec_name,
             output_path=str(output_path),
             target_url=target_url,
+            design_context=design_context,
         )
 
         # Invoke the Generator Agent
@@ -125,7 +130,13 @@ class NativeGenerator:
         return placeholders
 
     def _build_generator_prompt(
-        self, spec_path: str, spec_content: str, spec_name: str, output_path: str, target_url: str | None
+        self,
+        spec_path: str,
+        spec_content: str,
+        spec_name: str,
+        output_path: str,
+        target_url: str | None,
+        design_context: str | None = None,
     ) -> str:
         """Build prompt matching the playwright-test-generator agent format."""
 
@@ -154,6 +165,16 @@ In the generated code, use `process.env.VAR_NAME!` instead of hardcoding.
 {chr(10).join(cred_lines)}
 """
 
+        design_section = ""
+        if design_context:
+            design_section = f"""
+
+## Agentic Test Design Guidance
+Use this design guidance to reduce flaky output. Treat it as advisory context from the planning quality gate:
+
+{design_context}
+"""
+
         prompt = f"""You are the Playwright Test Generator.
 
 Context: User wants to generate automated tests from the following test plan.
@@ -163,6 +184,7 @@ Context: User wants to generate automated tests from the following test plan.
 <seed-file>tests/seed.spec.ts</seed-file>
 {url_section}
 {credentials_section}
+{design_section}
 <spec-content file="{spec_path}">
 {spec_content}
 </spec-content>

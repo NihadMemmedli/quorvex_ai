@@ -75,6 +75,7 @@ class NativeHealer:
         test_file: str,
         error_log: str | None = None,
         timeout_seconds: int | None = None,
+        diagnosis_context: str | None = None,
     ) -> str | None:
         """
         Attempt to heal a failing test.
@@ -95,7 +96,12 @@ class NativeHealer:
         logger.info(f"Healing test: {test_file}")
 
         # Build prompt for the Healer agent
-        prompt = self._build_healer_prompt(test_file=test_file, test_content=test_content, error_log=error_log)
+        prompt = self._build_healer_prompt(
+            test_file=test_file,
+            test_content=test_content,
+            error_log=error_log,
+            diagnosis_context=diagnosis_context,
+        )
 
         # Invoke the Healer Agent
         logger.info("Invoking Playwright Healer Agent...")
@@ -121,7 +127,13 @@ class NativeHealer:
         logger.warning("Healing completed but no changes detected")
         return None
 
-    def _build_healer_prompt(self, test_file: str, test_content: str, error_log: str | None) -> str:
+    def _build_healer_prompt(
+        self,
+        test_file: str,
+        test_content: str,
+        error_log: str | None,
+        diagnosis_context: str | None = None,
+    ) -> str:
         """Build prompt for the playwright-test-healer agent."""
 
         error_section = ""
@@ -131,6 +143,15 @@ class NativeHealer:
 ```
 {error_log[:5000]}
 ```
+"""
+
+        diagnosis_section = ""
+        if diagnosis_context:
+            diagnosis_section = f"""
+## Failure Triage Context
+Use this diagnosis to focus your investigation. If your live debugging contradicts it, prefer the live evidence and explain the correction in your final response.
+
+{diagnosis_context}
 """
 
         prompt = f"""You are the Playwright Test Healer.
@@ -144,6 +165,7 @@ class NativeHealer:
 ```
 
 {error_section}
+{diagnosis_section}
 
 ## Your Workflow
 

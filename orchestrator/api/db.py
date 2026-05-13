@@ -215,6 +215,13 @@ def _run_migrations():
                 conn.execute(text("ALTER TABLE testrun ADD COLUMN test_type VARCHAR DEFAULT 'browser'"))
                 logger.info("Added column: testrun.test_type")
 
+            if "agentic_summary" not in existing_columns:
+                if db_type == "postgresql":
+                    conn.execute(text("ALTER TABLE testrun ADD COLUMN agentic_summary JSONB"))
+                else:
+                    conn.execute(text("ALTER TABLE testrun ADD COLUMN agentic_summary JSON"))
+                logger.info("Added column: testrun.agentic_summary")
+
         # Create regression_batches table if it doesn't exist
         if "regression_batches" not in inspector.get_table_names():
             if db_type == "postgresql":

@@ -24,6 +24,8 @@ Usage:
             await queue.submit_result(job["id"], result)
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging

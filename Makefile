@@ -405,8 +405,10 @@ check-env:
 		. .env 2>/dev/null; \
 		if [ -n "$$ANTHROPIC_AUTH_TOKEN" ] && [ "$$ANTHROPIC_AUTH_TOKEN" != "your-token-here" ]; then \
 			echo "  + ANTHROPIC_AUTH_TOKEN is configured"; \
+		elif [ -n "$$CLAUDE_CODE_OAUTH_TOKEN" ]; then \
+			echo "  + CLAUDE_CODE_OAUTH_TOKEN is configured"; \
 		else \
-			echo "  ! ANTHROPIC_AUTH_TOKEN not configured"; \
+			echo "  ! Claude auth not configured"; \
 		fi; \
 		if [ -n "$$ANTHROPIC_BASE_URL" ]; then \
 			echo "  + ANTHROPIC_BASE_URL: $$ANTHROPIC_BASE_URL"; \
@@ -960,4 +962,3 @@ upgrade:
 	@echo "  2. git checkout <tag>    (revert code)"
 	@echo "  3. make prod-build       (rebuild old images)"
 	@echo "  4. make prod-up          (restart with old code)"
-

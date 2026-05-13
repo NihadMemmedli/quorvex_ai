@@ -74,6 +74,12 @@ def get_config() -> MemoryConfig:
     global _config
     if _config is None:
         _config = MemoryConfig()
+    else:
+        env_persist_directory = os.getenv("CHROMADB_PERSIST_DIRECTORY")
+        if env_persist_directory and env_persist_directory != _config.persist_directory:
+            project_id = _config.project_id
+            _config = MemoryConfig()
+            _config.project_id = project_id
     return _config
 
 

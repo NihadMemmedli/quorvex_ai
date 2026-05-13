@@ -13,6 +13,8 @@ The worker runs as a separate supervisord program, giving it a clean process
 environment without uvicorn's event loop modifications.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging

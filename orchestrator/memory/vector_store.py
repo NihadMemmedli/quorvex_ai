@@ -17,18 +17,18 @@ from chromadb.utils import embedding_functions
 from .config import get_config
 from .embeddings import get_embedding_client
 
-# Global ChromaDB client singleton (shared across all VectorStore instances)
-_chroma_client: chromadb.PersistentClient | None = None
+# Global ChromaDB clients keyed by persist directory.
+_chroma_clients: dict[str, chromadb.PersistentClient] = {}
 
 
 def _get_chroma_client(persist_directory: str) -> chromadb.PersistentClient:
-    """Get or create the global ChromaDB client"""
-    global _chroma_client
-    if _chroma_client is None:
-        _chroma_client = chromadb.PersistentClient(
-            path=str(persist_directory), settings=Settings(anonymized_telemetry=False, allow_reset=True)
+    """Get or create a ChromaDB client for a persist directory."""
+    resolved_directory = str(Path(persist_directory).resolve())
+    if resolved_directory not in _chroma_clients:
+        _chroma_clients[resolved_directory] = chromadb.PersistentClient(
+            path=resolved_directory, settings=Settings(anonymized_telemetry=False, allow_reset=True)
         )
-    return _chroma_client
+    return _chroma_clients[resolved_directory]
 
 
 class VectorStore:
@@ -412,6 +412,7 @@ _vector_store: VectorStore | None = None
 def get_vector_store() -> VectorStore:
     """Get the global vector store instance"""
     global _vector_store
-    if _vector_store is None:
+    config = get_config()
+    if _vector_store is None or Path(_vector_store.persist_directory).resolve() != Path(config.persist_directory).resolve():
         _vector_store = VectorStore()
     return _vector_store
