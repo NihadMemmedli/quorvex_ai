@@ -814,6 +814,7 @@ const LlmAnalyticsToolUI = makeAssistantToolUI({
 const phaseLabels: Record<string, string> = {
   exploration: 'Exploration',
   requirements: 'Requirements',
+  test_ideas: 'Test Ideas',
   spec_generation: 'Spec Generation',
   test_generation: 'Test Generation',
   reporting: 'Reporting',

@@ -3,7 +3,7 @@ Auto Pilot API Router
 
 Provides endpoints for controlling and monitoring end-to-end Auto Pilot
 pipeline sessions that orchestrate: exploration -> requirements ->
-spec generation -> test generation -> reporting.
+test ideas -> spec generation -> test generation -> reporting.
 
 Background Task Management:
 - Running pipelines tracked in-memory with asyncio.Tasks
@@ -49,9 +49,10 @@ _running_pipelines: dict[str, tuple[asyncio.Task, Any, str]] = {}
 PHASE_DEFINITIONS = [
     ("exploration", 0),
     ("requirements", 1),
-    ("spec_generation", 2),
-    ("test_generation", 3),
-    ("reporting", 4),
+    ("test_ideas", 2),
+    ("spec_generation", 3),
+    ("test_generation", 4),
+    ("reporting", 5),
 ]
 
 
@@ -391,7 +392,7 @@ async def start_autopilot(
     """
     Start a new Auto Pilot pipeline session.
 
-    Runs exploration, requirements extraction, spec generation,
+    Runs exploration, requirements extraction, test idea generation, spec generation,
     test generation, and reporting in sequence as background tasks.
     Use GET /autopilot/{session_id} to poll progress.
     """
@@ -455,7 +456,7 @@ async def start_autopilot(
         db.add(ap_session)
         db.flush()  # Ensure session row exists before inserting phases (FK constraint)
 
-        # Create the 5 phase records
+        # Create phase records
         for phase_name, phase_order in PHASE_DEFINITIONS:
             phase = AutoPilotPhase(
                 session_id=session_id,

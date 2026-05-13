@@ -1169,16 +1169,36 @@ async def get_resource_status():
 async def get_agent_queue_status():
     """Get current agent queue status.
 
-    Returns detailed information about browser slot usage for agents
-    from the unified browser pool.
+    Returns Redis-backed agent queue metrics when queue mode is active.
+    Browser pool status is included only as auxiliary capacity context.
     """
+    try:
+        from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
+
+        if REDIS_AVAILABLE and should_use_agent_queue():
+            queue = get_agent_queue()
+            await queue.connect()
+            metrics = await queue.get_metrics()
+            health = await queue.get_worker_health()
+            return {
+                "mode": "redis",
+                "active": metrics.get("running", 0),
+                "queued": metrics.get("queue_length", 0),
+                "workers_alive": metrics.get("workers_alive", 0),
+                "stale_running": metrics.get("stale_running", 0),
+                "oldest_queued_age_seconds": metrics.get("oldest_queued_age_seconds"),
+                "by_status": metrics.get("by_status", {}),
+                "worker_health": health,
+            }
+    except Exception as exc:
+        logger.warning(f"Failed to read Redis agent queue status: {exc}")
+
     pool = BROWSER_POOL or await get_browser_pool()
     status = await pool.get_status()
-
-    # Filter to show agent-specific info
     agent_running = status["by_type"].get("agent", 0)
 
     return {
+        "mode": "browser_pool",
         "active": agent_running,
         "max": status["max_browsers"],
         "queued": status["queued"],

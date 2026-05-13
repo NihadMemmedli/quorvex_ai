@@ -18,7 +18,7 @@ from .config import get_config
 class GraphStore:
     """Interface to NetworkX for application structure storage"""
 
-    def __init__(self, persist_file: str | None = None):
+    def __init__(self, persist_file: str | None = None, project_id: str | None = None):
         """
         Initialize the graph store.
 
@@ -26,12 +26,13 @@ class GraphStore:
             persist_file: File path to persist graph data
         """
         self.config = get_config()
+        self.project_id = project_id if project_id is not None else self.config.project_id
 
         # Set up persistence file
         if persist_file is None:
             persist_dir = Path(self.config.persist_directory) / "graphs"
             persist_dir.mkdir(parents=True, exist_ok=True)
-            project_suffix = f"_{self.config.project_id}" if self.config.project_id else ""
+            project_suffix = f"_{self.project_id}" if self.project_id else ""
             persist_file = persist_dir / f"application{project_suffix}.json"
 
         self.persist_file = Path(persist_file)
@@ -400,12 +401,12 @@ class GraphStore:
         return str(dot)
 
 
-# Global graph store instance
-# Global graph store instance
+# Global graph store instances keyed by persist file/project.
 _graph_store: GraphStore | None = None
+_graph_stores: dict[tuple[str, str | None], GraphStore] = {}
 
 
-def get_graph_store(force_refresh: bool = False) -> GraphStore:
+def get_graph_store(project_id: str | None = None, force_refresh: bool = False) -> GraphStore:
     """
     Get the global graph store instance.
 
@@ -413,38 +414,29 @@ def get_graph_store(force_refresh: bool = False) -> GraphStore:
     """
     global _graph_store
     config = get_config()
+    effective_project_id = project_id if project_id is not None else config.project_id
+    persist_dir = Path(config.persist_directory) / "graphs"
+    project_suffix = f"_{effective_project_id}" if effective_project_id else ""
+    expected_file = persist_dir / f"application{project_suffix}.json"
+    key = (str(expected_file.resolve()), effective_project_id)
 
-    # Check if we need to reload (force refresh or project mismatch)
-    reload_needed = False
-
-    if _graph_store is None:
-        reload_needed = True
-    elif force_refresh:
-        reload_needed = True
-    else:
-        # Check if current store file matches current project
-        # This is a heuristic: check if the configured path matches the store's path
-        # Re-calculating expected path:
-        persist_dir = Path(config.persist_directory) / "graphs"
-        project_suffix = f"_{config.project_id}" if config.project_id else ""
-        expected_file = persist_dir / f"application{project_suffix}.json"
-
-        if _graph_store.persist_file != expected_file:
-            reload_needed = True
-
-    if reload_needed:
-        _graph_store = GraphStore()
+    if force_refresh or key not in _graph_stores:
+        _graph_stores[key] = GraphStore(project_id=effective_project_id)
+        _graph_store = _graph_stores[key]
         return _graph_store
 
     # Check if file has changed on disk since load
-    if _graph_store and _graph_store.persist_file.exists():
+    store = _graph_stores[key]
+    if store.persist_file.exists():
         try:
-            current_mtime = _graph_store.persist_file.stat().st_mtime
-            if current_mtime > _graph_store.last_loaded_at:
-                print(f"🔄 Graph file changed on disk, reloading: {_graph_store.persist_file.name}")
-                _graph_store = GraphStore()
+            current_mtime = store.persist_file.stat().st_mtime
+            if current_mtime > store.last_loaded_at:
+                print(f"Graph file changed on disk, reloading: {store.persist_file.name}")
+                store = GraphStore(project_id=effective_project_id)
+                _graph_stores[key] = store
         except Exception:
             # Ignore errors checking mtime (e.g. file deleted)
             pass
 
-    return _graph_store
+    _graph_store = store
+    return store

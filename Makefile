@@ -1,4 +1,4 @@
-.PHONY: setup setup-skills dev run clean help docker-up docker-down docker-build check-env logs stop \
+.PHONY: setup setup-skills start restart dev run clean help docker-up docker-down docker-build check-env logs stop \
         prod-up prod-down prod-down-safe prod-restart prod-logs prod-build prod-build-no-cache prod-status prod-dev \
         backup backup-full backup-status restore-list restore restore-from-minio \
         archival archival-dry-run storage-health minio-console \
@@ -20,6 +20,9 @@ help:
 	@echo "  Setup & Run:"
 	@echo "    make setup          - Install dependencies and setup environment"
 	@echo "    make setup-skills   - Install Playwright skill dependencies"
+	@echo "    make start          - Start the dashboard stack (Docker prod-dev mode)"
+	@echo "    make stop           - Stop the dashboard stack and local dev processes"
+	@echo "    make restart        - Restart the dashboard stack"
 	@echo "    make dev            - Start the UI and Backend server (development)"
 	@echo "    make run SPEC=...   - Run a specific test spec"
 	@echo "    make run-skill S=.. - Run a Playwright skill script"
@@ -34,7 +37,7 @@ help:
 	@echo "    make prod-dev       - Start prod with local code (no rebuild needed!)"
 	@echo "    make prod-down      - Stop production services"
 	@echo "    make prod-down-safe - Stop with backup first (recommended)"
-	@echo "    make prod-restart   - Restart backend (picks up code changes)"
+	@echo "    make prod-restart   - Restart app services (picks up mounted code changes)"
 	@echo "    make prod-logs      - Tail production logs"
 	@echo "    make prod-build     - Rebuild production images (with cache)"
 	@echo "    make prod-build-no-cache - Rebuild without cache (force fresh)"
@@ -146,6 +149,21 @@ run-skill:
 	fi
 	@source venv/bin/activate && python orchestrator/cli.py --run-skill "$(S)"
 
+# Docker compose command for dev. Override if needed, e.g. DOCKER_COMPOSE=docker-compose.
+DOCKER_COMPOSE ?= docker compose
+
+# Common production docker-compose commands
+PROD_COMPOSE = docker compose --env-file .env.prod -f docker-compose.prod.yml
+APP_COMPOSE = $(PROD_COMPOSE) -f docker-compose.dev-override.yml
+
+start:
+	@$(MAKE) prod-dev
+
+restart:
+	@echo "Restarting dashboard stack..."
+	@$(MAKE) stop
+	@$(MAKE) start
+
 dev:
 	@./start-ui.sh
 
@@ -164,9 +182,6 @@ load-test:
 		exit 1; \
 	fi
 	@source venv/bin/activate && python orchestrator/workflows/load_test_runner.py --spec "$(SPEC)"
-
-# Docker compose command for dev (docker-compose v1 for backwards compat)
-DOCKER_COMPOSE ?= docker-compose
 
 # ==========================================
 # DOCKER
@@ -213,9 +228,6 @@ dev-k6-workers-logs:
 # DOCKER (PRODUCTION)
 # ==========================================
 
-# Common production docker-compose command
-PROD_COMPOSE = docker compose --env-file .env.prod -f docker-compose.prod.yml
-
 prod-up:
 	@echo "Starting production services (standard mode with VNC + nginx)..."
 	@$(PROD_COMPOSE) --profile standard --profile nginx up -d
@@ -242,7 +254,7 @@ prod-dev:
 	@echo "This mounts your local ./orchestrator and ./web/src directories."
 	@echo "Code changes will be reflected automatically (uvicorn --reload)."
 	@echo ""
-	@$(PROD_COMPOSE) -f docker-compose.dev-override.yml --profile standard up -d
+	@$(APP_COMPOSE) --profile standard up -d
 	@echo ""
 	@echo "Development mode started:"
 	@echo "  Dashboard:     http://localhost:3000"
@@ -270,9 +282,9 @@ prod-down-safe:
 	@echo "=== Safe shutdown complete ==="
 
 prod-restart:
-	@echo "Restarting backend (picking up code changes)..."
-	@$(PROD_COMPOSE) --profile standard restart backend || $(PROD_COMPOSE) --profile workers restart backend-slim
-	@echo "Backend restarted."
+	@echo "Restarting app services (picking up mounted code changes)..."
+	@$(APP_COMPOSE) --profile standard restart backend frontend || $(PROD_COMPOSE) --profile workers restart backend-slim frontend
+	@echo "App services restarted."
 
 prod-logs:
 	@$(PROD_COMPOSE) logs -f backend frontend
@@ -497,7 +509,11 @@ logs:
 
 stop:
 	@echo "Stopping services gracefully..."
-	@# First try graceful shutdown (SIGTERM) - allows cleanup
+	@# Stop Docker stacks first so Docker-owned port forwarders are not killed directly.
+	@-$(APP_COMPOSE) --profile standard --profile nginx --profile workers --profile k6-workers --profile security down --remove-orphans --timeout 30 2>/dev/null || true
+	@-$(PROD_COMPOSE) --profile standard --profile nginx --profile workers --profile k6-workers --profile security down --remove-orphans --timeout 30 2>/dev/null || true
+	@-$(DOCKER_COMPOSE) --profile redis --profile k6-workers down --remove-orphans --timeout 30 2>/dev/null || true
+	@# Then stop any remaining local processes started by start-ui.sh.
 	@-lsof -ti :8001 | xargs kill -15 2>/dev/null || true
 	@-lsof -ti :3000 | xargs kill -15 2>/dev/null || true
 	@echo "  Waiting for graceful shutdown..."
@@ -505,8 +521,6 @@ stop:
 	@# Force kill only if still running (SIGKILL)
 	@-lsof -ti :8001 | xargs kill -9 2>/dev/null || true
 	@-lsof -ti :3000 | xargs kill -9 2>/dev/null || true
-	@# Stop any Docker containers gracefully
-	@-$(DOCKER_COMPOSE) down 2>/dev/null || true
 	@echo "Services stopped."
 
 clean:

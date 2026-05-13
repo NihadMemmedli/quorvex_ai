@@ -22,10 +22,13 @@ import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
-# Add orchestrator to path
+# Add both project root and orchestrator package dir for package and standalone execution.
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Use run-specific config directory if set (for parallel execution isolation)
@@ -42,6 +45,9 @@ setup_claude_env()
 
 import logging
 
+from orchestrator.ai.context import SOURCE_OBSERVED
+from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
+from orchestrator.ai.validation import assess_exploration_quality, validate_exploration_result
 from utils.agent_runner import AgentRunner, build_allowed_tools, get_default_timeout
 from utils.json_utils import extract_json_from_markdown
 
@@ -125,6 +131,11 @@ class ExplorationResult:
     elements_discovered: int = 0
     error_message: str | None = None
     duration_seconds: int = 0
+    provenance_source: str = SOURCE_OBSERVED
+    quality_score: int = 0
+    quality_summary: dict[str, Any] = field(default_factory=dict)
+    validation_summary: dict[str, Any] = field(default_factory=dict)
+    prompt_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class AppExplorer:
@@ -139,6 +150,8 @@ class AppExplorer:
         self.project_id = project_id
         self.on_task_enqueued = on_task_enqueued
         self.output_dir = self._ensure_output_dir()
+        self._last_prompt_metadata: dict[str, Any] = {}
+        self._last_agent_stats: dict[str, Any] = {}
 
     def _ensure_output_dir(self) -> Path:
         """Ensure output directory exists with fallback paths.
@@ -224,6 +237,8 @@ class AppExplorer:
         try:
             # Build the exploration prompt
             prompt = self._build_exploration_prompt(config)
+            if self._last_prompt_metadata:
+                (session_dir / "prompt_metadata.json").write_text(json.dumps(self._last_prompt_metadata, indent=2))
 
             # Invoke the explorer agent
             logger.info("Starting AI Explorer Agent...")
@@ -245,9 +260,38 @@ class AppExplorer:
             result = self._parse_exploration_output(
                 raw_output=raw_output, session_id=session_id, entry_url=config.entry_url
             )
+            used_deterministic_fallback = False
+
+            if self._is_unverified_agent_output(raw_output):
+                logger.warning(
+                    "   Explorer output says browser interaction was unavailable; "
+                    "discarding agent prose and running deterministic HTTP fallback."
+                )
+                result = await self._run_http_fallback_exploration(
+                    config=config,
+                    session_id=session_id,
+                    reason="agent_reported_browser_tools_unavailable",
+                )
+                used_deterministic_fallback = True
+
+            if (
+                not used_deterministic_fallback
+                and result.status == "failed"
+                and not result.transitions
+                and not result.flows
+            ):
+                logger.warning("   No structured exploration data parsed; running deterministic HTTP fallback.")
+                result = await self._run_http_fallback_exploration(
+                    config=config,
+                    session_id=session_id,
+                    reason="no_structured_agent_output",
+                )
+                used_deterministic_fallback = bool(result.transitions or result.flows)
 
             # AI-powered JSON recovery when regex parsing found zero objects
             if (
+                not used_deterministic_fallback
+                and
                 result.status == "failed"
                 and not result.transitions
                 and not result.flows
@@ -271,7 +315,7 @@ class AppExplorer:
 
             # Run AI flow synthesis pass if too few flows relative to transitions
             min_expected = max(1, len(result.transitions) // 5)
-            if len(result.transitions) >= 1 and len(result.flows) < min_expected:
+            if not used_deterministic_fallback and len(result.transitions) >= 1 and len(result.flows) < min_expected:
                 logger.info(
                     f"   Running AI flow synthesis pass "
                     f"({len(result.flows)} flows from {len(result.transitions)} transitions)..."
@@ -303,7 +347,13 @@ class AppExplorer:
 
             # Text-based flow synthesis fallback: when no transitions were parsed
             # but raw output is substantial, use AI to extract flows from prose
-            if len(result.flows) == 0 and len(result.transitions) == 0 and raw_output and len(raw_output) > 2000:
+            if (
+                not used_deterministic_fallback
+                and len(result.flows) == 0
+                and len(result.transitions) == 0
+                and raw_output
+                and len(raw_output) > 2000
+            ):
                 logger.info(
                     "   No structured transitions found — attempting text-based flow synthesis from raw output..."
                 )
@@ -318,6 +368,18 @@ class AppExplorer:
                         result.error_message = (
                             f"No structured JSON parsed, but text synthesis recovered {len(text_flows)} flows."
                         )
+
+            validation_summary = validate_exploration_result(result)
+            quality_summary = assess_exploration_quality(
+                result,
+                fallback_used=used_deterministic_fallback,
+                verified_tool_calls=int(self._last_agent_stats.get("tool_calls", 0) or 0),
+            )
+            result.validation_summary = validation_summary
+            result.quality_summary = quality_summary
+            result.quality_score = int(quality_summary["quality_score"])
+            result.provenance_source = quality_summary["source_type"]
+            result.prompt_metadata = self._last_prompt_metadata
 
             # Calculate duration
             end_time = datetime.now()
@@ -780,7 +842,15 @@ visit your queued URLs before exploring the current page further.
 
 {self._build_rules_section(api_explorer_prompt is not None)}
 """
-        return prompt
+        metadata = build_prompt_metadata(
+            prompt_id=f"app_explorer.{config.strategy}",
+            version="2026-05-13.1",
+            stage="exploration",
+            schema_name="exploration_records.v1",
+            rendered_prompt=prompt,
+        )
+        self._last_prompt_metadata = metadata.to_dict()
+        return attach_prompt_metadata(prompt, metadata)
 
     async def _run_explorer_agent(self, prompt: str, session_dir: Path) -> str:
         """Run the exploration agent and capture output using AgentRunner."""
@@ -851,7 +921,7 @@ visit your queued URLs before exploring the current page further.
             runner = AgentRunner(
                 timeout_seconds=timeout,
                 allowed_tools=build_allowed_tools(
-                    ["Glob", "Grep", "Read", "LS"],
+                    [],
                     EXPLORER_MCP_TOOLS,
                 ),
                 log_tools=True,
@@ -861,6 +931,13 @@ visit your queued URLs before exploring the current page further.
             )
 
             result = await runner.run(prompt)
+            self._last_agent_stats = {
+                "messages_received": result.messages_received,
+                "text_blocks_received": result.text_blocks_received,
+                "tool_calls": len(result.tool_calls),
+                "duration_seconds": result.duration_seconds,
+                "timed_out": result.timed_out,
+            }
 
             # Log diagnostics
             logger.info(
@@ -897,6 +974,235 @@ visit your queued URLs before exploring the current page further.
             # Always restore CWD
             os.chdir(original_cwd)
             logger.info(f"   CWD restored to: {original_cwd}")
+
+    def _is_unverified_agent_output(self, raw_output: str | None) -> bool:
+        """Detect agent output that explicitly admits it was not live browser exploration."""
+        if not raw_output:
+            return False
+        lowered = raw_output.lower()
+        indicators = [
+            "browser interaction tools are not available",
+            "browser tools are not available",
+            "don't have browser tools",
+            "do not have browser tools",
+            "without live browser interaction",
+            "not freshly verified",
+            "prior exploration knowledge",
+            "constructed the output from prior",
+            "based on well-known",
+            "based on stable information",
+        ]
+        return any(indicator in lowered for indicator in indicators)
+
+    async def _run_http_fallback_exploration(
+        self,
+        config: ExplorationConfig,
+        session_id: str,
+        reason: str,
+    ) -> ExplorationResult:
+        """Deterministic fallback that discovers reachable pages without AI browser tools.
+
+        This is intentionally conservative: it records only HTTP-observed pages
+        and generic navigation flows between known portal routes. It prevents
+        unverified LLM prose from being treated as exploration truth while still
+        keeping the downstream Auto Pilot pipeline moving.
+        """
+        try:
+            import httpx
+        except ImportError as exc:
+            return ExplorationResult(
+                session_id=session_id,
+                entry_url=config.entry_url,
+                status="failed",
+                error_message=f"HTTP fallback unavailable: {exc}",
+            )
+
+        parsed_entry = urlparse(config.entry_url)
+        origin = f"{parsed_entry.scheme}://{parsed_entry.netloc}"
+        entry_path = parsed_entry.path or "/"
+
+        candidate_paths = [
+            entry_path,
+            "/",
+            "/serviceCategories",
+            "/lifeEvents",
+            "/allServices",
+            "/services",
+            "/news",
+            "/entities",
+            "/login",
+            "/cabinet",
+        ]
+        if config.login_url:
+            login = urlparse(config.login_url)
+            candidate_paths.append(login.path or config.login_url)
+
+        seen_paths: set[str] = set()
+        urls: list[str] = []
+        for path in candidate_paths:
+            if not path:
+                continue
+            url = path if path.startswith(("http://", "https://")) else urljoin(origin, path)
+            normalized = url.rstrip("/") or url
+            if normalized in seen_paths:
+                continue
+            if any(re.search(pattern, url) for pattern in config.exclude_patterns):
+                continue
+            seen_paths.add(normalized)
+            urls.append(url)
+
+        max_pages = max(1, min(len(urls), max(config.max_interactions, 3), 10))
+        urls = urls[:max_pages]
+
+        transitions: list[TransitionRecord] = []
+        flows: list[FlowRecord] = []
+        issues: list[IssueRecord] = []
+        api_endpoints: list[dict[str, Any]] = []
+        pages_seen: set[str] = set()
+        element_count = 0
+
+        async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=20) as client:
+            for index, url in enumerate(urls, start=1):
+                before_url = "about:blank" if index == 1 else config.entry_url
+                try:
+                    response = await client.get(url)
+                except Exception as exc:
+                    issues.append(
+                        IssueRecord(
+                            issue_type="error_page",
+                            severity="medium",
+                            url=url,
+                            description=f"HTTP fallback could not fetch page: {exc}",
+                            evidence=type(exc).__name__,
+                        )
+                    )
+                    continue
+
+                final_url = str(response.url)
+                page_type = self._infer_page_type(final_url)
+                key_elements = self._extract_http_key_elements(response.text)
+                element_count += len(key_elements)
+                pages_seen.add(final_url)
+
+                if response.status_code >= 400:
+                    issues.append(
+                        IssueRecord(
+                            issue_type="error_page",
+                            severity="medium" if response.status_code < 500 else "high",
+                            url=final_url,
+                            description=f"HTTP fallback received status {response.status_code}",
+                            evidence=f"HTTP {response.status_code}",
+                        )
+                    )
+                    continue
+
+                transition = TransitionRecord(
+                    sequence=len(transitions) + 1,
+                    action_type="navigate",
+                    action_element={"role": "page", "name": self._friendly_page_name(final_url)},
+                    action_value=url,
+                    before_url=before_url,
+                    before_page_type="blank" if index == 1 else self._infer_page_type(before_url),
+                    before_elements=[],
+                    after_url=final_url,
+                    after_page_type=page_type,
+                    after_elements=key_elements,
+                    transition_type="navigation",
+                    api_calls=[],
+                    changes_description=f"Fetched page via deterministic HTTP fallback ({reason})",
+                )
+                transitions.append(transition)
+
+                flows.append(
+                    FlowRecord(
+                        name=f"{self._friendly_page_name(final_url)} Browse",
+                        category="navigation" if page_type != "login" else "authentication",
+                        steps=[
+                            {"action": "navigate", "element": "URL", "value": url},
+                            {"action": "observe", "element": self._friendly_page_name(final_url)},
+                        ],
+                        start_url=url,
+                        end_url=final_url,
+                        outcome=f"Page returned HTTP {response.status_code} and rendered as {page_type}",
+                        is_success_path=response.status_code < 400,
+                        preconditions=[],
+                        postconditions=[f"{page_type} page reachable"],
+                    )
+                )
+
+        result = ExplorationResult(
+            session_id=session_id,
+            entry_url=config.entry_url,
+            status="completed" if transitions else "failed",
+            transitions=self._deduplicate_transitions(transitions),
+            flows=self._deduplicate_flows(flows),
+            api_endpoints=api_endpoints,
+            issues=issues,
+            pages_discovered=len(pages_seen),
+            elements_discovered=element_count,
+            error_message=None if transitions else "Deterministic HTTP fallback found no reachable pages",
+        )
+        logger.info(
+            "   HTTP fallback discovered %s pages, %s flows, %s issues",
+            result.pages_discovered,
+            len(result.flows),
+            len(result.issues),
+        )
+        return result
+
+    def _infer_page_type(self, url: str) -> str:
+        path = urlparse(url).path.strip("/").lower()
+        if not path:
+            return "homepage"
+        if "login" in path:
+            return "login"
+        if "cabinet" in path:
+            return "protected_area"
+        if "life" in path:
+            return "life_events"
+        if "servicecategories" in path:
+            return "service_categories"
+        if "service" in path:
+            return "services"
+        if "news" in path:
+            return "news"
+        if "entities" in path:
+            return "entities"
+        return path.replace("/", "_") or "page"
+
+    def _friendly_page_name(self, url: str) -> str:
+        page_type = self._infer_page_type(url)
+        return page_type.replace("_", " ").title()
+
+    def _extract_http_key_elements(self, html: str) -> list[str]:
+        class ElementCounter(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.counts = {"link": 0, "button": 0, "input": 0, "form": 0}
+
+            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
+                if tag == "a":
+                    self.counts["link"] += 1
+                elif tag == "button":
+                    self.counts["button"] += 1
+                elif tag == "input":
+                    self.counts["input"] += 1
+                elif tag == "form":
+                    self.counts["form"] += 1
+
+        parser = ElementCounter()
+        try:
+            parser.feed(html or "")
+        except Exception:
+            return ["HTML document"]
+
+        elements = ["HTML document"]
+        for label, count in parser.counts.items():
+            if count:
+                elements.append(f"{count} {label}{'' if count == 1 else 's'}")
+        if "__NEXT_DATA__" in html:
+            elements.append("Next.js data payload")
+        return elements
 
     def _deduplicate_flows(self, flows: list[FlowRecord]) -> list[FlowRecord]:
         """Deduplicate flows by normalized (name, start_url, end_url) tuple. Keeps first occurrence."""
@@ -1483,7 +1789,7 @@ Return ONLY a JSON array of flow objects. No other text.
                 timeout_seconds=120,
                 allowed_tools=[],  # No tools needed - pure text analysis
                 log_tools=False,
-                session_dir=session_dir,
+                session_dir=None,
             )
 
             result = await runner.run(prompt)
@@ -1599,7 +1905,7 @@ Return ONLY a JSON array of flow objects. No other text.
                 timeout_seconds=120,
                 allowed_tools=[],
                 log_tools=False,
-                session_dir=session_dir,
+                session_dir=None,
             )
 
             result = await runner.run(prompt)
@@ -1729,7 +2035,7 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
                     timeout_seconds=180,
                     allowed_tools=[],  # Pure text analysis
                     log_tools=False,
-                    session_dir=session_dir,
+                    session_dir=None,
                 )
 
                 result = await runner.run(prompt)
@@ -1908,6 +2214,8 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
             transitions_data.append(
                 {
                     "sequence": t.sequence,
+                    "sourceType": result.provenance_source,
+                    "confidence": result.quality_score / 100 if result.quality_score else 0,
                     "action": {"type": t.action_type, "element": t.action_element, "value": t.action_value},
                     "before": {"url": t.before_url, "pageType": t.before_page_type, "keyElements": t.before_elements},
                     "after": {"url": t.after_url, "pageType": t.after_page_type, "keyElements": t.after_elements},
@@ -1924,6 +2232,8 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
             flows_data.append(
                 {
                     "name": f.name,
+                    "sourceType": result.provenance_source,
+                    "confidence": result.quality_score / 100 if result.quality_score else 0,
                     "category": f.category,
                     "steps": f.steps,
                     "startUrl": f.start_url,
@@ -1967,6 +2277,11 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
             "elementsDiscovered": result.elements_discovered,
             "durationSeconds": result.duration_seconds,
             "errorMessage": result.error_message,
+            "sourceType": result.provenance_source,
+            "qualityScore": result.quality_score,
+            "quality": result.quality_summary,
+            "validation": result.validation_summary,
+            "prompt": result.prompt_metadata,
         }
         (session_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 

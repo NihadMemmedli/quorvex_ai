@@ -74,6 +74,10 @@ class AgentWorker:
         # Live progress tracking (updated by reader thread, read by heartbeat loop)
         self._progress_lock = threading.Lock()
         self._current_progress = {"tool_calls": 0, "last_tool": "", "chars": 0, "interactions": 0}
+        self._process_lock = threading.Lock()
+        self._running_processes: dict[str, subprocess.Popen] = {}
+        self._cancelled_task_ids: set[str] = set()
+        self._last_execution_telemetry: dict[str, object] = {}
 
         # Setup environment
         setup_claude_env()
@@ -97,41 +101,41 @@ class AgentWorker:
         except Exception as e:
             logger.warning(f"API key rotator init failed (non-fatal): {e}")
 
-        # Clean up orphaned "running" tasks from previous container/process
-        try:
-            orphaned = await self.queue.cleanup_orphaned_tasks()
-            if orphaned:
-                logger.info(f"Startup: cleaned {orphaned} orphaned tasks from previous run")
-        except Exception as e:
-            logger.warning(f"Startup cleanup failed (non-fatal): {e}")
-
         self.running = True
+        worker_heartbeat = asyncio.create_task(self._worker_heartbeat_loop())
         consecutive_empty = 0
 
-        while self.running:
+        try:
+            while self.running:
+                try:
+                    # Refresh once here as well so the first heartbeat is not delayed.
+                    await self.queue.update_worker_heartbeat(self.worker_id)
+
+                    # Dequeue task (blocking for up to 10 seconds)
+                    task = await self.queue.dequeue_task(timeout=10)
+
+                    if task:
+                        consecutive_empty = 0
+                        logger.info(f"Processing task {task.id} (type={task.agent_type}, op={task.operation_type})")
+                        await self._execute_task(task)
+                    else:
+                        consecutive_empty += 1
+                        if consecutive_empty % 30 == 0:  # Log every 5 minutes
+                            metrics = await self.queue.get_metrics()
+                            logger.debug(f"Queue idle, metrics: {metrics}")
+
+                except asyncio.CancelledError:
+                    logger.info("Worker cancelled")
+                    break
+                except Exception as e:
+                    logger.error(f"Worker error: {e}", exc_info=True)
+                    await asyncio.sleep(5)  # Back off on error
+        finally:
+            worker_heartbeat.cancel()
             try:
-                # Refresh worker-level heartbeat each iteration (~10s)
-                await self.queue.update_worker_heartbeat(self.worker_id)
-
-                # Dequeue task (blocking for up to 10 seconds)
-                task = await self.queue.dequeue_task(timeout=10)
-
-                if task:
-                    consecutive_empty = 0
-                    logger.info(f"Processing task {task.id} (type={task.agent_type}, op={task.operation_type})")
-                    await self._execute_task(task)
-                else:
-                    consecutive_empty += 1
-                    if consecutive_empty % 30 == 0:  # Log every 5 minutes
-                        metrics = await self.queue.get_metrics()
-                        logger.debug(f"Queue idle, metrics: {metrics}")
-
+                await worker_heartbeat
             except asyncio.CancelledError:
-                logger.info("Worker cancelled")
-                break
-            except Exception as e:
-                logger.error(f"Worker error: {e}", exc_info=True)
-                await asyncio.sleep(5)  # Back off on error
+                pass
 
         await self.queue.disconnect()
         logger.info("Worker stopped")
@@ -151,13 +155,58 @@ class AgentWorker:
         except asyncio.CancelledError:
             pass
 
+    async def _worker_heartbeat_loop(self, interval: int = 10):
+        """Keep the worker-level heartbeat fresh even while a long task is running."""
+        try:
+            while True:
+                await self.queue.update_worker_heartbeat(self.worker_id)
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            pass
+
+    async def _cancel_monitor_loop(self, task_id: str, interval: float = 1.0):
+        """Terminate the active CLI process when the Redis cancel flag is set."""
+        try:
+            while True:
+                if await self.queue.is_cancelled(task_id):
+                    logger.info(f"Task {task_id} cancellation detected; terminating Claude CLI process")
+                    with self._process_lock:
+                        proc = self._running_processes.get(task_id)
+                        self._cancelled_task_ids.add(task_id)
+
+                    if proc and proc.poll() is None:
+                        import signal
+
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                        except (ProcessLookupError, OSError):
+                            try:
+                                proc.terminate()
+                            except (ProcessLookupError, OSError):
+                                pass
+                        await asyncio.sleep(3)
+                        if proc.poll() is None:
+                            try:
+                                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                            except (ProcessLookupError, OSError):
+                                try:
+                                    proc.kill()
+                                except (ProcessLookupError, OSError):
+                                    pass
+                    return
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            pass
+
     async def _execute_task(self, task: AgentTask):
         """Execute an agent task using the Claude CLI with 429 retry and key rotation."""
         # Reset progress tracking for this task
         with self._progress_lock:
             self._current_progress = {"tool_calls": 0, "last_tool": "", "chars": 0, "interactions": 0}
+            self._last_execution_telemetry = {}
         # Start heartbeat to signal we're alive
         heartbeat = asyncio.create_task(self._heartbeat_loop(task.id))
+        cancel_monitor = asyncio.create_task(self._cancel_monitor_loop(task.id))
         # Send initial heartbeat immediately
         await self.queue.update_heartbeat(task.id, progress=dict(self._current_progress))
 
@@ -196,28 +245,38 @@ class AgentWorker:
                             self._current_progress = {"tool_calls": 0, "last_tool": "", "chars": 0, "interactions": 0}
 
                     result = await self._run_claude_cli(
+                        task_id=task.id,
                         prompt=task.prompt,
                         system_prompt=task.system_prompt,
                         timeout_seconds=task.timeout_seconds,
                         cwd=task_cwd,
+                        allowed_tools=task.allowed_tools,
                     )
 
                     # Success — report and submit
                     if slot:
                         rotator.report_success(slot)
-                    await self.queue.submit_result(task.id, result, success=True)
+                    telemetry = self._build_task_telemetry(task, attempt)
+                    await self.queue.submit_result(task.id, result, success=True, telemetry=telemetry)
                     _result_submitted = True
                     return
 
                 except asyncio.TimeoutError as e:
                     # Timeouts are not retryable
                     logger.error(f"Task {task.id} timed out: {e}")
-                    await self.queue.submit_result(task.id, "", success=False, error=str(e))
+                    telemetry = self._build_task_telemetry(task, attempt, error_type="timeout")
+                    await self.queue.submit_result(task.id, "", success=False, error=str(e), telemetry=telemetry)
                     _result_submitted = True
                     return
 
                 except RuntimeError as e:
                     error_str = str(e)
+                    if "cancelled" in error_str.lower():
+                        logger.info(f"Task {task.id} cancelled during execution")
+                        telemetry = self._build_task_telemetry(task, attempt, error_type="cancelled")
+                        await self.queue.submit_result(task.id, "", success=False, error="Task cancelled", telemetry=telemetry)
+                        _result_submitted = True
+                        return
                     if is_rate_limit_error(error_str) and attempt < max_retries:
                         retry_after = parse_retry_after(error_str)
                         wait_seconds = min(retry_after or 30, 120)
@@ -247,25 +306,37 @@ class AgentWorker:
                     else:
                         # Non-429 RuntimeError or final attempt — fail
                         logger.error(f"Task {task.id} failed: {e}", exc_info=True)
-                        await self.queue.submit_result(task.id, "", success=False, error=error_str)
+                        telemetry = self._build_task_telemetry(task, attempt, error_type="runtime_error")
+                        await self.queue.submit_result(task.id, "", success=False, error=error_str, telemetry=telemetry)
                         _result_submitted = True
                         return
 
                 except Exception as e:
                     # Any other exception — fail immediately
                     logger.error(f"Task {task.id} failed: {e}", exc_info=True)
-                    await self.queue.submit_result(task.id, "", success=False, error=str(e))
+                    telemetry = self._build_task_telemetry(task, attempt, error_type=type(e).__name__)
+                    await self.queue.submit_result(task.id, "", success=False, error=str(e), telemetry=telemetry)
                     _result_submitted = True
                     return
 
             # Exhausted all retries (shouldn't normally reach here)
+            telemetry = self._build_task_telemetry(task, max_retries, error_type="rate_limit_exhausted")
             await self.queue.submit_result(
-                task.id, "", success=False, error=f"Exhausted {max_retries} retries due to rate limiting"
+                task.id,
+                "",
+                success=False,
+                error=f"Exhausted {max_retries} retries due to rate limiting",
+                telemetry=telemetry,
             )
             _result_submitted = True
 
         finally:
+            cancel_monitor.cancel()
             heartbeat.cancel()
+            try:
+                await cancel_monitor
+            except asyncio.CancelledError:
+                pass
             try:
                 await heartbeat
             except asyncio.CancelledError:
@@ -286,12 +357,43 @@ class AgentWorker:
             if saved_env:
                 logger.debug(f"Restored {len(saved_env)} env var(s) after task {task.id}")
 
+    def _build_task_telemetry(
+        self,
+        task: AgentTask,
+        attempt: int,
+        error_type: str | None = None,
+    ) -> dict[str, object]:
+        """Build compact task telemetry from live progress and CLI stream stats."""
+        with self._progress_lock:
+            progress = dict(self._current_progress)
+            execution = dict(self._last_execution_telemetry)
+        telemetry: dict[str, object] = {
+            "worker_id": self.worker_id,
+            "attempt": attempt,
+            "agent_type": task.agent_type,
+            "operation_type": task.operation_type,
+            "timeout_seconds": task.timeout_seconds,
+            "tool_calls": int(progress.get("tool_calls", 0) or 0),
+            "interactions": int(progress.get("interactions", 0) or 0),
+            "last_tool": progress.get("last_tool", ""),
+            "chars": int(progress.get("chars", 0) or 0),
+            "allowed_tools_count": len(task.allowed_tools or []),
+            **execution,
+        }
+        if error_type:
+            telemetry["error_type"] = error_type
+        if task.started_at:
+            telemetry["duration_seconds"] = (time.time() - task.started_at.timestamp())
+        return telemetry
+
     async def _run_claude_cli(
         self,
+        task_id: str,
         prompt: str,
         system_prompt: str = None,
         timeout_seconds: int = 1800,
         cwd: str = None,
+        allowed_tools: list[str] | None = None,
     ) -> str:
         """Run Claude CLI and capture output."""
         loop = asyncio.get_event_loop()
@@ -302,20 +404,24 @@ class AgentWorker:
         result = await loop.run_in_executor(
             None,
             self._run_cli_sync,
+            task_id,
             prompt,
             system_prompt,
             timeout_seconds,
             effective_cwd,
+            allowed_tools,
         )
 
         return result
 
     def _run_cli_sync(
         self,
+        task_id: str,
         prompt: str,
         system_prompt: str = None,
         timeout_seconds: int = 1800,
         cwd: str = None,
+        allowed_tools: list[str] | None = None,
     ) -> str:
         """Synchronous CLI execution using subprocess with direct PIPE capture."""
         import signal
@@ -351,10 +457,21 @@ class AgentWorker:
         logger.info(f"[CLI]   CWD: {effective_cwd}")
         logger.info(f"[CLI]   UID: {os.getuid()}, EUID: {os.geteuid()}")
         logger.info(f"[CLI]   HOME: {env.get('HOME', 'not set')}")
+        effective_allowed_tools = ["*"] if allowed_tools is None else allowed_tools
+        logger.info(f"[CLI]   Allowed tools: {effective_allowed_tools}")
 
         start_time = time.time()
         output_chunks = []
         last_logged_chunks = 0
+        stream_stats = {
+            "stream_events": 0,
+            "assistant_messages": 0,
+            "system_messages": 0,
+            "result_events": 0,
+            "text_blocks": 0,
+            "parse_errors": 0,
+            "exit_code": None,
+        }
 
         # Build CLI command
         cli_args = [
@@ -364,16 +481,27 @@ class AgentWorker:
             "--verbose",
             "--system-prompt",
             "",
-            "--allowedTools",
-            "*",
-            "--permission-mode",
-            "bypassPermissions",
-            "--setting-sources",
-            "project",
-            "--print",
-            "--",
-            full_prompt,
         ]
+        if effective_allowed_tools != ["*"]:
+            # --allowedTools controls permissions, while --tools controls which
+            # tools are actually available. Keep them in sync so agents cannot
+            # route around a restricted tool list through Agent/Task delegation.
+            cli_args.extend(["--tools", ",".join(effective_allowed_tools)])
+        cli_args.extend(["--allowedTools", ",".join(effective_allowed_tools)])
+        mcp_config_path = Path(effective_cwd) / ".mcp.json"
+        if mcp_config_path.exists():
+            cli_args.extend(["--mcp-config", str(mcp_config_path), "--strict-mcp-config"])
+        cli_args.extend(
+            [
+                "--permission-mode",
+                "bypassPermissions",
+                "--setting-sources",
+                "project",
+                "--print",
+                "--",
+                full_prompt,
+            ]
+        )
 
         proc = None
         try:
@@ -387,6 +515,9 @@ class AgentWorker:
                 stderr=subprocess.STDOUT,  # Merge stderr into stdout
                 start_new_session=True,  # New session (similar to setsid)
             )
+            with self._process_lock:
+                self._running_processes[task_id] = proc
+                self._cancelled_task_ids.discard(task_id)
             logger.info(f"[CLI] Process started: PID={proc.pid}")
 
             # Read output with timeout using threads
@@ -401,9 +532,19 @@ class AgentWorker:
                             if stripped and stripped.startswith("{"):
                                 try:
                                     evt = json.loads(stripped)
+                                    stream_stats["stream_events"] += 1
+                                    evt_type = evt.get("type")
+                                    if evt_type == "assistant":
+                                        stream_stats["assistant_messages"] += 1
+                                    elif evt_type == "system":
+                                        stream_stats["system_messages"] += 1
+                                    elif evt_type == "result":
+                                        stream_stats["result_events"] += 1
                                     with self._progress_lock:
                                         if evt.get("type") == "assistant":
                                             for item in evt.get("message", {}).get("content", []):
+                                                if item.get("type") == "text":
+                                                    stream_stats["text_blocks"] += 1
                                                 if item.get("type") == "tool_use":
                                                     tool_name = item.get("name", "")
                                                     self._current_progress["tool_calls"] += 1
@@ -418,6 +559,7 @@ class AgentWorker:
                                                         self._current_progress["interactions"] += 1
                                         self._current_progress["chars"] = sum(len(c) for c in output_chunks)
                                 except (json.JSONDecodeError, TypeError):
+                                    stream_stats["parse_errors"] += 1
                                     pass
                 except Exception as e:
                     logger.error(f"[CLI] Read error: {e}")
@@ -442,6 +584,8 @@ class AgentWorker:
 
                 poll_result = proc.poll()
                 if poll_result is not None:
+                    if task_id in self._cancelled_task_ids:
+                        logger.info(f"[CLI] Process for task {task_id} exited after cancellation")
                     # Process finished - give reader thread time to finish
                     reader_thread.join(timeout=15.0)
                     if reader_thread.is_alive():
@@ -478,11 +622,26 @@ class AgentWorker:
                     except Exception:
                         pass
             raise
+        finally:
+            with self._process_lock:
+                self._running_processes.pop(task_id, None)
 
         raw_output = "".join(output_chunks)
         elapsed = time.time() - start_time
         exit_code = proc.returncode if proc else None
+        stream_stats["exit_code"] = exit_code
         logger.info(f"[CLI] Completed in {elapsed:.1f}s, exit_code={exit_code}, collected {len(raw_output)} chars")
+
+        with self._progress_lock:
+            self._last_execution_telemetry = {
+                **stream_stats,
+                "raw_output_chars": len(raw_output),
+                "cli_elapsed_seconds": elapsed,
+            }
+
+        if task_id in self._cancelled_task_ids:
+            self._cancelled_task_ids.discard(task_id)
+            raise RuntimeError("Task cancelled")
 
         # Log non-zero exit codes with output context
         if exit_code is not None and exit_code != 0:

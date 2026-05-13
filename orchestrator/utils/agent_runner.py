@@ -181,7 +181,7 @@ class AgentRunner:
             on_task_enqueued: Optional callback fired with task_id when queued (for progress tracking)
         """
         self.timeout_seconds = timeout_seconds
-        self.allowed_tools = allowed_tools or ["*"]
+        self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
         self.log_tools = log_tools
         self.on_tool_use = on_tool_use
         self.session_dir = session_dir
@@ -524,6 +524,7 @@ class AgentRunner:
                 operation_type="run",
                 cwd=os.getcwd(),
                 env_vars=self._collect_api_env_vars(),
+                allowed_tools=self.allowed_tools,
             )
 
             logger.info(f"Task enqueued: {task_id}, waiting for result...")
@@ -553,6 +554,8 @@ class AgentRunner:
                 poll_interval=0.5,
                 on_progress=_on_progress,
             )
+            completed_task = await queue.get_task(task_id)
+            telemetry = completed_task.telemetry if completed_task else {}
 
             duration = (datetime.now() - start_time).total_seconds()
             result_len = len(result) if result else 0
@@ -570,7 +573,7 @@ class AgentRunner:
 
             # Save debug output if session_dir provided
             if self.session_dir:
-                self._save_debug_output(result, [], 1)
+                self._save_debug_output(result, [], int(telemetry.get("assistant_messages", 1) or 1))
 
             output = result or ""
             stripped_output = output.strip()
@@ -582,6 +585,22 @@ class AgentRunner:
                 marker in stripped_output.lower() for marker in ("error", "failed", "exception", "traceback")
             )
 
+            tool_call_count = int(telemetry.get("tool_calls", 0) or 0)
+            synthetic_tool_calls = [
+                ToolCall(
+                    name=str(telemetry.get("last_tool") or "queue_tool_call"),
+                    timestamp=start_time,
+                    success=True,
+                )
+                for _ in range(tool_call_count)
+            ]
+            messages_received = int(
+                telemetry.get("assistant_messages")
+                or telemetry.get("stream_events")
+                or 1
+            )
+            text_blocks_received = int(telemetry.get("text_blocks") or (1 if has_output else 0))
+
             if has_error_markers:
                 logger.warning(
                     f"Short output appears to be an error message ({len(stripped_output)} chars): "
@@ -592,9 +611,9 @@ class AgentRunner:
                     output=output,
                     error=f"Agent returned error-like output: {stripped_output[:200]}",
                     duration_seconds=duration,
-                    tool_calls=[],
-                    messages_received=1,
-                    text_blocks_received=1,
+                    tool_calls=synthetic_tool_calls,
+                    messages_received=messages_received,
+                    text_blocks_received=text_blocks_received,
                 )
 
             if is_short:
@@ -607,9 +626,9 @@ class AgentRunner:
                 output=output,
                 error=None if has_output else "Agent queue returned empty result — worker may have failed",
                 duration_seconds=duration,
-                tool_calls=[],  # Tool calls not tracked in queue mode
-                messages_received=1,
-                text_blocks_received=1 if has_output else 0,
+                tool_calls=synthetic_tool_calls,
+                messages_received=messages_received,
+                text_blocks_received=text_blocks_received,
             )
 
         except asyncio.TimeoutError:

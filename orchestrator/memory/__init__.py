@@ -14,7 +14,6 @@ including:
 from .config import MemoryConfig
 from .exploration_store import ExplorationStore, get_exploration_store
 from .graph_store import GraphStore
-from .manager import MemoryManager, get_memory_manager
 
 __all__ = [
     "MemoryManager",
@@ -25,3 +24,15 @@ __all__ = [
     "get_exploration_store",
 ]
 __version__ = "0.1.0"
+
+
+def __getattr__(name):
+    if name in {"MemoryManager", "get_memory_manager"}:
+        from .manager import MemoryManager, get_memory_manager
+
+        return {"MemoryManager": MemoryManager, "get_memory_manager": get_memory_manager}[name]
+    if name in {"vector_store", "graph_store", "manager", "config"}:
+        import importlib
+
+        return importlib.import_module(f"{__name__}.{name}")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
