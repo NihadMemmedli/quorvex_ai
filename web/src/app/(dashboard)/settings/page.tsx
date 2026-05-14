@@ -58,6 +58,7 @@ export default function SettingsPage() {
     });
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
+    const [testingConnection, setTestingConnection] = useState(false);
     const [savingExecution, setSavingExecution] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
     const [showApiKey, setShowApiKey] = useState(false);
@@ -395,7 +396,10 @@ export default function SettingsPage() {
             const data = await res.json();
 
             if (res.ok) {
-                setMessage({ type: 'success', text: 'Settings saved successfully!' });
+                if (data.settings) {
+                    setSettings(prev => ({ ...prev, ...data.settings }));
+                }
+                setMessage({ type: 'success', text: data.message || 'Settings saved and applied.' });
                 setTimeout(() => setMessage(null), 3000);
             } else {
                 throw new Error(data.detail || 'Failed to save settings');
@@ -404,6 +408,52 @@ export default function SettingsPage() {
             setMessage({ type: 'error', text: err.message });
         } finally {
             setSaving(false);
+        }
+    };
+
+    const handleTestConnection = async () => {
+        setTestingConnection(true);
+        setMessage(null);
+
+        try {
+            const saveRes = await fetch(`${API_BASE}/settings`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(settings)
+            });
+            const saveData = await saveRes.json();
+            if (!saveRes.ok) {
+                throw new Error(saveData.detail || 'Failed to apply settings before testing');
+            }
+            if (saveData.settings) {
+                setSettings(prev => ({ ...prev, ...saveData.settings }));
+            }
+
+            const testRes = await fetch(`${API_BASE}/settings/test-connection`, {
+                method: 'POST',
+            });
+            const testData = await testRes.json();
+            if (!testRes.ok) {
+                throw new Error(testData.detail || 'Connection test failed');
+            }
+
+            const suffix = typeof testData.latency_ms === 'number' ? ` (${testData.latency_ms}ms)` : '';
+            if (testData.ok) {
+                setMessage({
+                    type: 'success',
+                    text: `Settings saved and connection verified for ${testData.model_name}.${suffix}`,
+                });
+            } else {
+                setMessage({
+                    type: 'error',
+                    text: testData.message || 'Connection test failed',
+                });
+            }
+        } catch (err: any) {
+            setMessage({ type: 'error', text: err.message || 'Connection test failed' });
+        } finally {
+            setTestingConnection(false);
+            setTimeout(() => setMessage(null), 6000);
         }
     };
 
@@ -1030,7 +1080,7 @@ export default function SettingsPage() {
                         </button>
                     </div>
                     <p className="helper-text">
-                        Stored locally in project .env file
+                        Applied immediately and persisted to the project .env file.
                     </p>
                 </div>
 
@@ -1061,7 +1111,7 @@ export default function SettingsPage() {
                 </div>
 
                 <div className="form-group">
-                    <label className="label">Default Model</label>
+                    <label className="label">Active Agent Model</label>
                     <div className="input-group">
                         <div className="input-icon">
                             <Box size={18} />
@@ -1086,17 +1136,45 @@ export default function SettingsPage() {
                             <code>microsoft/phi-3-mini-128k-instruct:free</code>
                         </p>
                     )}
+                    {settings.llm_provider !== 'openrouter' && (
+                        <p className="helper-text" style={{ marginTop: '0.5rem' }}>
+                            Used by browser agents and mirrored to the Claude model env vars.
+                        </p>
+                    )}
                 </div>
 
-                <div style={{ paddingTop: '1.5rem', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'flex-end' }}>
+                <div style={{ paddingTop: '1.5rem', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', flexWrap: 'wrap' }}>
+                    <button
+                        type="button"
+                        className="btn btn-secondary"
+                        disabled={saving || testingConnection}
+                        onClick={handleTestConnection}
+                        style={{
+                            minWidth: '150px',
+                            justifyContent: 'center',
+                            opacity: saving || testingConnection ? 0.7 : 1
+                        }}
+                    >
+                        {testingConnection ? (
+                            <>
+                                <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
+                                Testing...
+                            </>
+                        ) : (
+                            <>
+                                <Zap size={18} />
+                                Test Connection
+                            </>
+                        )}
+                    </button>
                     <button
                         type="submit"
                         className="btn btn-primary"
-                        disabled={saving}
+                        disabled={saving || testingConnection}
                         style={{
                             minWidth: '140px',
                             justifyContent: 'center',
-                            opacity: saving ? 0.7 : 1
+                            opacity: saving || testingConnection ? 0.7 : 1
                         }}
                     >
                         {saving ? (

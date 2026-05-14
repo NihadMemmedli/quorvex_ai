@@ -200,7 +200,7 @@ export default function WorkflowPage() {
           {loading ? (
             <div style={{ padding: '2rem', color: 'var(--text-secondary)' }}>Loading workflows...</div>
           ) : sessions.length === 0 ? (
-            <EmptyState title="No AI workflow runs" description="Start Auto Pilot to discover flows, generate specs, and run tests." icon={Rocket} />
+            <EmptyState title="No AI workflow runs" description="Start Auto Pilot to discover flows, generate specs, and run tests." icon={<Rocket size={28} />} />
           ) : (
             <div>
               {sessions.map(session => {

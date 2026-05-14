@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.ai.context import SOURCE_FALLBACK, SOURCE_OBSERVED, ContextBundle
 from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
-from orchestrator.ai.validation import assess_exploration_quality, should_gate_exploration, validate_exploration_result
+from orchestrator.ai.validation import assess_exploration_quality, is_valid_flow, should_gate_exploration, validate_exploration_result
 
 
 def test_prompt_metadata_is_stable_and_attached():
@@ -49,6 +49,8 @@ class FlowStub:
     name: str
     start_url: str = ""
     end_url: str = ""
+    category: str = ""
+    steps: list[dict | str] | None = None
 
 
 @dataclass
@@ -80,6 +82,26 @@ def test_exploration_validation_reports_invalid_records():
     assert summary["valid_counts"]["transitions"] == 1
     assert summary["valid_counts"]["flows"] == 1
     assert {issue["record_type"] for issue in summary["invalid_records"]} == {"transition", "flow"}
+
+
+def test_flow_validation_allows_nonstandard_categories():
+    valid, reason = is_valid_flow(
+        FlowStub(
+            name="Search Within Entities",
+            start_url="https://my.gov.az/en/entities",
+            category="information-retrieval",
+        )
+    )
+
+    assert valid is True
+    assert reason is None
+
+
+def test_flow_validation_still_rejects_structural_errors():
+    valid, reason = is_valid_flow(FlowStub(name="Broken", start_url="https://example.com", steps="click login"))
+
+    assert valid is False
+    assert reason == "steps must be a list"
 
 
 def test_quality_score_marks_fallback_as_degraded():

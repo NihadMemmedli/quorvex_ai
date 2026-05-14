@@ -837,10 +837,31 @@ const AutoPilotStatusToolUI = makeAssistantToolUI({
     const session = (data.session || {}) as Record<string, unknown>;
     const phases = (data.phases || []) as Array<Record<string, unknown>>;
     const pendingQuestions = (data.pendingQuestions || []) as Array<Record<string, unknown>>;
+    const specTasks = (data.specTasks || []) as Array<Record<string, unknown>>;
+    const testTasks = (data.testTasks || []) as Array<Record<string, unknown>>;
 
     const status = String(session.status || 'unknown');
-    const progress = typeof session.progress_pct === 'number' ? session.progress_pct : 0;
-    const stats = (session.stats || {}) as Record<string, unknown>;
+    const progress = typeof session.overall_progress === 'number'
+      ? session.overall_progress
+      : typeof session.progress_pct === 'number'
+        ? session.progress_pct
+        : 0;
+    const stats = (session.stats || {
+      pages: session.total_pages_discovered,
+      flows: session.total_flows_discovered,
+      requirements: session.total_requirements_generated,
+      specs: session.total_specs_generated,
+      tests: session.total_tests_generated,
+      passed: session.total_tests_passed,
+      failed: session.total_tests_failed,
+    }) as Record<string, unknown>;
+    const summarizeStatus = (items: Array<Record<string, unknown>>) => items.reduce<Record<string, number>>((acc, item) => {
+      const s = String(item.status || 'unknown');
+      acc[s] = (acc[s] || 0) + 1;
+      return acc;
+    }, {});
+    const specSummary = summarizeStatus(specTasks);
+    const testSummary = summarizeStatus(testTasks);
 
     const statusBadgeColor = status === 'completed' ? '#10b981'
       : status === 'running' ? '#f59e0b'
@@ -941,6 +962,32 @@ const AutoPilotStatusToolUI = makeAssistantToolUI({
           </div>
         )}
 
+        {(specTasks.length > 0 || testTasks.length > 0) && (
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+            gap: '0.5rem',
+            marginBottom: '0.75rem',
+          }}>
+            {specTasks.length > 0 && (
+              <div style={{ padding: '0.5rem', background: 'rgba(255,255,255,0.04)', borderRadius: '6px' }}>
+                <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>Spec tasks</div>
+                <div style={{ fontSize: '0.8rem' }}>
+                  {Object.entries(specSummary).map(([k, v]) => `${k}: ${v}`).join(' · ')}
+                </div>
+              </div>
+            )}
+            {testTasks.length > 0 && (
+              <div style={{ padding: '0.5rem', background: 'rgba(255,255,255,0.04)', borderRadius: '6px' }}>
+                <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>Test tasks</div>
+                <div style={{ fontSize: '0.8rem' }}>
+                  {Object.entries(testSummary).map(([k, v]) => `${k}: ${v}`).join(' · ')}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Pending questions callout */}
         {Array.isArray(pendingQuestions) && pendingQuestions.length > 0 && (
           <div style={{
@@ -990,8 +1037,10 @@ const toolPageMap: Record<string, string> = {
   getSpecList: '/specs',
   listTestSpecs: '/specs',
   updateTestSpec: '/specs',
+  startDiscoveryExploration: '/exploration',
   listSpecTemplates: '/specs',
   getExplorationSessions: '/exploration',
+  startExplorerAgent: '/exploration',
   getRequirements: '/requirements',
   getRtmCoverage: '/requirements',
   getRTMSummary: '/requirements',
@@ -1001,6 +1050,11 @@ const toolPageMap: Record<string, string> = {
   getFailureClassification: '/analytics',
   getRunLogs: '/runs',
   healFailedRun: '/runs',
+  stopRun: '/runs',
+  stopAllJobs: '/runs',
+  clearQueue: '/runs',
+  startExploration: '/exploration',
+  stopExploration: '/exploration',
   getLlmProviders: '/llm-testing',
   getLlmTestRuns: '/llm-testing',
   getLlmAnalytics: '/llm-testing',
@@ -1019,6 +1073,14 @@ const toolPageMap: Record<string, string> = {
   getLoadTestDashboard: '/load-testing',
   getLoadTestTrends: '/load-testing',
   analyzeLoadTestRun: '/load-testing',
+  stopLoadTestRun: '/load-testing',
+  forceUnlockLoadTesting: '/load-testing',
+  createLoadSpec: '/load-testing',
+  updateLoadSpec: '/load-testing',
+  deleteLoadSpec: '/load-testing',
+  generateLoadScript: '/load-testing',
+  runLoadTest: '/load-testing',
+  runLoadTestFromSpec: '/load-testing',
   getLoadTestSystemLimits: '/load-testing',
   // Security testing tools
   analyzeSecurityRun: '/security-testing',
@@ -1037,6 +1099,13 @@ const toolPageMap: Record<string, string> = {
   getDbSchemaAnalysis: '/database-testing',
   getDbChecks: '/database-testing',
   suggestDbFixes: '/database-testing',
+  createApiSpec: '/api-testing',
+  updateApiSpec: '/api-testing',
+  deleteApiSpec: '/api-testing',
+  generateApiTest: '/api-testing',
+  runApiTest: '/api-testing',
+  runApiTestDirect: '/api-testing',
+  generateApiEdgeCases: '/api-testing',
   // Memory tools
   searchMemory: '/memory',
   getProvenSelectors: '/memory',
@@ -1049,7 +1118,10 @@ const toolPageMap: Record<string, string> = {
   // Auto Pilot tools
   startAutoPilot: '/autopilot',
   getAutoPilotStatus: '/autopilot',
+  pauseAutoPilot: '/autopilot',
+  resumeAutoPilot: '/autopilot',
   answerAutoPilotQuestion: '/autopilot',
+  stopAutoPilotTestTask: '/autopilot',
   cancelAutoPilot: '/autopilot',
   listAutoPilotSessions: '/autopilot',
 };
@@ -1069,15 +1141,35 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
   const displayArgs = Object.entries(args || {}).filter(
     ([k]) => !k.startsWith('_')
   );
+  const displayValue = (key: string, val: unknown): string => {
+    if (/password|token|secret|credential/i.test(key)) return val ? '[redacted]' : '';
+    if (key === 'credentials' && val && typeof val === 'object') return '[redacted]';
+    const text = typeof val === 'string' ? val : JSON.stringify(val) ?? '';
+    return text.length > 500 ? `${text.slice(0, 500)}...` : text;
+  };
 
   const handleApprove = async () => {
     setStatus('executing');
     try {
       const enrichedArgs = { ...args, _projectId: currentProject?.id };
-      const res = await fetchWithAuth('/api/chat/execute-tool', {
+      const pendingRes = await fetchWithAuth('/api/chat/pending-action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ toolName, args: enrichedArgs }),
+      });
+      const pendingData = await pendingRes.json();
+      if (!pendingRes.ok || !pendingData.actionToken) {
+        const errorResult = { error: pendingData.error || 'Approval failed' };
+        addResult(errorResult);
+        if (toolCallId) persistToolResult(toolCallId, toolName, errorResult);
+        setStatus('done');
+        return;
+      }
+
+      const res = await fetchWithAuth('/api/chat/execute-tool', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ actionToken: pendingData.actionToken }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -1145,7 +1237,7 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
           {displayArgs.map(([key, val]) => (
             <div key={key} style={{ marginBottom: '0.15rem' }}>
               <span style={{ color: 'var(--text-secondary)' }}>{key}:</span>{' '}
-              <span>{typeof val === 'string' ? val : JSON.stringify(val)}</span>
+              <span>{displayValue(key, val)}</span>
             </div>
           ))}
         </div>
@@ -1798,6 +1890,8 @@ const toolFollowUps: Record<string, string[]> = {
   getLoadTestDashboard: ['Compare load test runs', 'Show system limits', 'Analyze a run'],
   getLoadTestTrends: ['Compare runs', 'Show dashboard', 'View system limits'],
   analyzeLoadTestRun: ['Compare with another run', 'Show trends', 'View system limits'],
+  stopLoadTestRun: ['Show load test dashboard', 'View system limits', 'List recent load runs'],
+  forceUnlockLoadTesting: ['Show system limits', 'Show load test dashboard'],
   getLoadTestSystemLimits: ['Show load test dashboard', 'Run a load test', 'View trends'],
   analyzeSecurityRun: ['Triage a finding', 'Compare scans', 'View findings summary'],
   triageSecurityFinding: ['Show security findings', 'Analyze the scan', 'Compare scans'],
@@ -1812,6 +1906,9 @@ const toolFollowUps: Record<string, string[]> = {
   getDbSchemaAnalysis: ['View failed checks', 'Suggest fixes', 'Run data quality checks'],
   getDbChecks: ['Suggest fixes', 'View schema analysis', 'Dashboard stats'],
   suggestDbFixes: ['View checks', 'Schema analysis', 'Dashboard stats'],
+  generateApiTest: ['Check API job status', 'Run API test', 'Show API specs'],
+  runApiTest: ['Check API run history', 'Show API specs'],
+  generateApiEdgeCases: ['Check API job status', 'Show API specs'],
   analyzeFailures: ['Show specific failure details', 'Heal failing tests', 'View flaky tests'],
   fullHealthCheck: ['Analyze failures', 'View security posture', 'Check RTM gaps'],
   securityAudit: ['Triage a finding', 'Run a new scan', 'Analyze specific scan'],
@@ -1827,8 +1924,11 @@ const toolFollowUps: Record<string, string[]> = {
   triggerSecurityScan: ['Check scan findings', 'View security summary', 'Analyze scan results'],
   // Auto Pilot
   startAutoPilot: ['Check Auto Pilot status', 'List all Auto Pilot sessions', 'View Auto Pilot dashboard'],
-  getAutoPilotStatus: ['Answer a pending question', 'Cancel Auto Pilot', 'Check status again later'],
+  getAutoPilotStatus: ['Answer a pending question', 'Pause Auto Pilot', 'Check status again later'],
+  pauseAutoPilot: ['Resume Auto Pilot', 'Check Auto Pilot status', 'View Auto Pilot dashboard'],
+  resumeAutoPilot: ['Check Auto Pilot status', 'View Auto Pilot dashboard'],
   answerAutoPilotQuestion: ['Check Auto Pilot status', 'View Auto Pilot dashboard'],
+  stopAutoPilotTestTask: ['Check Auto Pilot status', 'View Auto Pilot dashboard'],
   cancelAutoPilot: ['List Auto Pilot sessions', 'Start a new Auto Pilot'],
   listAutoPilotSessions: ['Check status of a session', 'Start a new Auto Pilot', 'View Auto Pilot dashboard'],
 };
@@ -1927,6 +2027,8 @@ const slashCommands: Array<{ command: string; label: string; description: string
   { command: '/run', label: 'Run Tests', description: 'Run a test spec', prompt: 'Run the test spec: ' },
   { command: '/status', label: 'Dashboard Status', description: 'Show dashboard stats', prompt: 'Show me the current dashboard stats and test status' },
   { command: '/explore', label: 'Start Exploration', description: 'Explore a web app', prompt: 'Start a new AI exploration of ' },
+  { command: '/autopilot', label: 'Auto Pilot', description: 'Control Auto Pilot', prompt: 'Show my Auto Pilot sessions and pending work' },
+  { command: '/stop', label: 'Stop Work', description: 'Stop a run or session', prompt: 'Help me stop a running job or session' },
   { command: '/trends', label: 'Pass Rate Trends', description: 'Show test trends', prompt: 'Show me the pass rate trends for the last 7 days' },
   { command: '/security', label: 'Security Findings', description: 'View security scan results', prompt: 'Show me the latest security findings' },
   { command: '/coverage', label: 'RTM Coverage', description: 'Check test coverage', prompt: 'Show me the RTM coverage summary' },

@@ -330,9 +330,13 @@ class RequirementsGenerator:
     async def _generate_requirements_with_ai(self, exploration_summary: dict[str, Any]) -> list[GeneratedRequirement]:
         """Use AI to generate requirements from exploration data."""
 
-        anthropic_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        anthropic_token = (
+            os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        )
         if not anthropic_token:
-            raise RuntimeError("ANTHROPIC_AUTH_TOKEN not set")
+            raise RuntimeError("No AI credential configured")
 
         source_type = SOURCE_OBSERVED
         if exploration_summary.get("quality", {}).get("fallback_used"):

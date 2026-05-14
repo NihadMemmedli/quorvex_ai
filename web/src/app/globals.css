@@ -1178,10 +1178,20 @@ input::placeholder {
   to { opacity: 1; transform: translateX(-50%) scale(1); }
 }
 
+.cmdk-dialog {
+  position: fixed;
+  top: min(14vh, 112px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(720px, calc(100vw - 32px));
+  z-index: 9999;
+  animation: cmdkFadeIn 0.15s ease-out;
+}
+
 .cmdk-root {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 8px;
   overflow: hidden;
   box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
 }
@@ -1196,6 +1206,7 @@ input::placeholder {
 
 .cmdk-input {
   flex: 1;
+  min-width: 0;
   background: none;
   border: none;
   outline: none;
@@ -1210,7 +1221,7 @@ input::placeholder {
 }
 
 .cmdk-list {
-  max-height: 360px;
+  max-height: min(620px, calc(100vh - 220px));
   overflow-y: auto;
   padding: 0.5rem;
   scrollbar-width: thin;
@@ -1242,6 +1253,7 @@ input::placeholder {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+  min-height: 42px;
   padding: 0.55rem 0.75rem;
   border-radius: var(--radius);
   cursor: pointer;
@@ -1259,6 +1271,31 @@ input::placeholder {
   background: var(--surface-hover);
 }
 
+.cmdk-item-main {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.cmdk-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmdk-item-meta {
+  flex-shrink: 0;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
 .cmdk-item-icon {
   width: 28px;
   height: 28px;
@@ -1271,13 +1308,37 @@ input::placeholder {
   flex-shrink: 0;
 }
 
+.cmdk-badge-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex-shrink: 0;
+  max-width: 48%;
+}
+
 .cmdk-badge {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 0.7rem;
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
   background: var(--surface-hover);
   color: var(--text-secondary);
   text-transform: capitalize;
+}
+
+.cmdk-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 1rem;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
 }
 
 .cmdk-footer {
@@ -1306,6 +1367,35 @@ input::placeholder {
   border: 1px solid var(--border);
   font-family: var(--font-mono);
   line-height: 1;
+}
+
+@media (max-width: 640px) {
+  .cmdk-dialog {
+    top: 10px;
+    width: calc(100vw - 20px);
+  }
+
+  .cmdk-list {
+    max-height: calc(100vh - 146px);
+  }
+
+  .cmdk-input-wrapper {
+    padding: 0.75rem;
+    gap: 0.5rem;
+  }
+
+  .cmdk-footer,
+  .cmdk-kbd {
+    display: none;
+  }
+
+  .cmdk-badge-row {
+    max-width: 36%;
+  }
+
+  .cmdk-badge {
+    max-width: 110px;
+  }
 }
 
 /* Hide chat bubble on small screens */

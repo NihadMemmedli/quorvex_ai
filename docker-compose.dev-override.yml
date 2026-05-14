@@ -58,7 +58,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G
 
 volumes:
   runs_data:

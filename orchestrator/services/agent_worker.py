@@ -73,7 +73,7 @@ class AgentWorker:
         self.cwd = str(project_root)
         # Live progress tracking (updated by reader thread, read by heartbeat loop)
         self._progress_lock = threading.Lock()
-        self._current_progress = {"tool_calls": 0, "last_tool": "", "chars": 0, "interactions": 0}
+        self._current_progress = self._empty_progress()
         self._process_lock = threading.Lock()
         self._running_processes: dict[str, subprocess.Popen] = {}
         self._cancelled_task_ids: set[str] = set()
@@ -81,6 +81,17 @@ class AgentWorker:
 
         # Setup environment
         setup_claude_env()
+
+    @staticmethod
+    def _empty_progress() -> dict[str, object]:
+        return {
+            "tool_calls": 0,
+            "browser_tool_calls": 0,
+            "last_tool": "",
+            "tool_names": [],
+            "chars": 0,
+            "interactions": 0,
+        }
 
     async def start(self):
         """Start the worker loop."""
@@ -202,7 +213,7 @@ class AgentWorker:
         """Execute an agent task using the Claude CLI with 429 retry and key rotation."""
         # Reset progress tracking for this task
         with self._progress_lock:
-            self._current_progress = {"tool_calls": 0, "last_tool": "", "chars": 0, "interactions": 0}
+            self._current_progress = self._empty_progress()
             self._last_execution_telemetry = {}
         # Start heartbeat to signal we're alive
         heartbeat = asyncio.create_task(self._heartbeat_loop(task.id))
@@ -242,7 +253,7 @@ class AgentWorker:
                     # Reset progress on retry
                     if attempt > 1:
                         with self._progress_lock:
-                            self._current_progress = {"tool_calls": 0, "last_tool": "", "chars": 0, "interactions": 0}
+                            self._current_progress = self._empty_progress()
 
                     result = await self._run_claude_cli(
                         task_id=task.id,
@@ -251,6 +262,13 @@ class AgentWorker:
                         timeout_seconds=task.timeout_seconds,
                         cwd=task_cwd,
                         allowed_tools=task.allowed_tools,
+                        tools=task.tools,
+                        disallowed_tools=task.disallowed_tools,
+                        permission_mode=task.permission_mode,
+                        strict_mcp_config=task.strict_mcp_config,
+                        max_budget_usd=task.max_budget_usd,
+                        task_budget=task.task_budget,
+                        include_hook_events=task.include_hook_events,
                     )
 
                     # Success — report and submit
@@ -292,15 +310,14 @@ class AgentWorker:
                         )
                         # Surface retry state in heartbeat so frontend can show it
                         with self._progress_lock:
-                            self._current_progress = {
-                                "tool_calls": 0,
-                                "last_tool": "",
-                                "chars": 0,
-                                "interactions": 0,
-                                "retry_attempt": attempt + 1,
-                                "retry_reason": "rate_limited",
-                                "retry_wait_seconds": wait_seconds,
-                            }
+                            self._current_progress = self._empty_progress()
+                            self._current_progress.update(
+                                {
+                                    "retry_attempt": attempt + 1,
+                                    "retry_reason": "rate_limited",
+                                    "retry_wait_seconds": wait_seconds,
+                                }
+                            )
                         await asyncio.sleep(wait_seconds)
                         continue  # retry with rotated key
                     else:
@@ -374,10 +391,13 @@ class AgentWorker:
             "operation_type": task.operation_type,
             "timeout_seconds": task.timeout_seconds,
             "tool_calls": int(progress.get("tool_calls", 0) or 0),
+            "browser_tool_calls": int(progress.get("browser_tool_calls", 0) or 0),
             "interactions": int(progress.get("interactions", 0) or 0),
             "last_tool": progress.get("last_tool", ""),
+            "tool_names": progress.get("tool_names", []),
             "chars": int(progress.get("chars", 0) or 0),
             "allowed_tools_count": len(task.allowed_tools or []),
+            "tools_count": len(task.tools) if isinstance(task.tools, list) else None,
             **execution,
         }
         if error_type:
@@ -394,6 +414,13 @@ class AgentWorker:
         timeout_seconds: int = 1800,
         cwd: str = None,
         allowed_tools: list[str] | None = None,
+        tools: list[str] | dict[str, str] | None = None,
+        disallowed_tools: list[str] | None = None,
+        permission_mode: str | None = None,
+        strict_mcp_config: bool = True,
+        max_budget_usd: float | None = None,
+        task_budget: dict[str, int] | None = None,
+        include_hook_events: bool = False,
     ) -> str:
         """Run Claude CLI and capture output."""
         loop = asyncio.get_event_loop()
@@ -410,6 +437,13 @@ class AgentWorker:
             timeout_seconds,
             effective_cwd,
             allowed_tools,
+            tools,
+            disallowed_tools,
+            permission_mode,
+            strict_mcp_config,
+            max_budget_usd,
+            task_budget,
+            include_hook_events,
         )
 
         return result
@@ -422,6 +456,13 @@ class AgentWorker:
         timeout_seconds: int = 1800,
         cwd: str = None,
         allowed_tools: list[str] | None = None,
+        tools: list[str] | dict[str, str] | None = None,
+        disallowed_tools: list[str] | None = None,
+        permission_mode: str | None = None,
+        strict_mcp_config: bool = True,
+        max_budget_usd: float | None = None,
+        task_budget: dict[str, int] | None = None,
+        include_hook_events: bool = False,
     ) -> str:
         """Synchronous CLI execution using subprocess with direct PIPE capture."""
         import signal
@@ -458,7 +499,10 @@ class AgentWorker:
         logger.info(f"[CLI]   UID: {os.getuid()}, EUID: {os.geteuid()}")
         logger.info(f"[CLI]   HOME: {env.get('HOME', 'not set')}")
         effective_allowed_tools = ["*"] if allowed_tools is None else allowed_tools
+        effective_permission_mode = permission_mode or ("dontAsk" if tools == [] else "bypassPermissions")
         logger.info(f"[CLI]   Allowed tools: {effective_allowed_tools}")
+        logger.info(f"[CLI]   Tools: {tools}")
+        logger.info(f"[CLI]   Permission mode: {effective_permission_mode}")
 
         start_time = time.time()
         output_chunks = []
@@ -469,6 +513,11 @@ class AgentWorker:
             "system_messages": 0,
             "result_events": 0,
             "text_blocks": 0,
+            "hook_events": 0,
+            "api_error_status": None,
+            "stop_reason": None,
+            "session_id": None,
+            "total_cost_usd": None,
             "parse_errors": 0,
             "exit_code": None,
         }
@@ -482,19 +531,40 @@ class AgentWorker:
             "--system-prompt",
             "",
         ]
-        if effective_allowed_tools != ["*"]:
-            # --allowedTools controls permissions, while --tools controls which
-            # tools are actually available. Keep them in sync so agents cannot
-            # route around a restricted tool list through Agent/Task delegation.
-            cli_args.extend(["--tools", ",".join(effective_allowed_tools)])
-        cli_args.extend(["--allowedTools", ",".join(effective_allowed_tools)])
+        if tools is not None:
+            if isinstance(tools, list):
+                cli_args.extend(["--tools", ",".join(tools)])
+            elif isinstance(tools, dict) and tools.get("preset") == "claude_code":
+                cli_args.extend(["--tools", "default"])
+        if effective_allowed_tools:
+            cli_args.extend(["--allowedTools", ",".join(effective_allowed_tools)])
+        if disallowed_tools:
+            cli_args.extend(["--disallowedTools", ",".join(disallowed_tools)])
+        if max_budget_usd is not None:
+            cli_args.extend(["--max-budget-usd", str(max_budget_usd)])
+        if task_budget is not None and task_budget.get("total") is not None:
+            cli_args.extend(["--task-budget", str(task_budget["total"])])
+
         mcp_config_path = Path(effective_cwd) / ".mcp.json"
+        requested_tool_names = []
+        for tool_source in (effective_allowed_tools, tools if isinstance(tools, list) else []):
+            requested_tool_names.extend(str(tool) for tool in tool_source)
         if mcp_config_path.exists():
-            cli_args.extend(["--mcp-config", str(mcp_config_path), "--strict-mcp-config"])
+            self._validate_mcp_config(mcp_config_path, requested_tool_names)
+            cli_args.extend(["--mcp-config", str(mcp_config_path)])
+            if strict_mcp_config:
+                cli_args.append("--strict-mcp-config")
+        elif any(str(tool).startswith("mcp__") for tool in requested_tool_names):
+            raise RuntimeError(
+                f"MCP tools were requested but no .mcp.json exists in {effective_cwd}. "
+                "Create a per-run MCP config before enqueueing the task."
+            )
+        if include_hook_events:
+            cli_args.append("--include-hook-events")
         cli_args.extend(
             [
                 "--permission-mode",
-                "bypassPermissions",
+                effective_permission_mode,
                 "--setting-sources",
                 "project",
                 "--print",
@@ -540,6 +610,12 @@ class AgentWorker:
                                         stream_stats["system_messages"] += 1
                                     elif evt_type == "result":
                                         stream_stats["result_events"] += 1
+                                        stream_stats["api_error_status"] = evt.get("api_error_status")
+                                        stream_stats["stop_reason"] = evt.get("stop_reason")
+                                        stream_stats["session_id"] = evt.get("session_id")
+                                        stream_stats["total_cost_usd"] = evt.get("total_cost_usd")
+                                    elif evt_type == "hook_event":
+                                        stream_stats["hook_events"] += 1
                                     with self._progress_lock:
                                         if evt.get("type") == "assistant":
                                             for item in evt.get("message", {}).get("content", []):
@@ -549,12 +625,17 @@ class AgentWorker:
                                                     tool_name = item.get("name", "")
                                                     self._current_progress["tool_calls"] += 1
                                                     self._current_progress["last_tool"] = tool_name
+                                                    tool_names = self._current_progress.setdefault("tool_names", [])
+                                                    if isinstance(tool_names, list) and len(tool_names) < 200:
+                                                        tool_names.append(tool_name)
                                                     # Strip MCP prefix: mcp__playwright-test__browser_click → browser_click
                                                     short_name = (
                                                         tool_name.rsplit("__", 1)[-1]
                                                         if "__" in tool_name
                                                         else tool_name
                                                     )
+                                                    if tool_name.startswith("mcp__") and short_name.startswith("browser_"):
+                                                        self._current_progress["browser_tool_calls"] += 1
                                                     if short_name in INTERACTION_TOOLS:
                                                         self._current_progress["interactions"] += 1
                                         self._current_progress["chars"] = sum(len(c) for c in output_chunks)
@@ -656,6 +737,43 @@ class AgentWorker:
 
         return self._parse_cli_output(raw_output)
 
+    def _validate_mcp_config(self, mcp_config_path: Path, allowed_tools: list[str]) -> None:
+        """Validate queued-worker MCP config before launching Claude CLI."""
+        if not any(str(tool).startswith("mcp__") for tool in allowed_tools):
+            return
+
+        try:
+            config = json.loads(mcp_config_path.read_text())
+        except Exception as exc:
+            raise RuntimeError(f"Invalid MCP config at {mcp_config_path}: {exc}") from exc
+
+        servers = config.get("mcpServers") or {}
+        if not isinstance(servers, dict) or not servers:
+            raise RuntimeError(f"MCP config at {mcp_config_path} does not define any mcpServers")
+
+        configured_prefixes = {f"mcp__{name}__" for name in servers}
+        requested_prefixes = set()
+        for tool in allowed_tools:
+            parts = str(tool).split("__", 2)
+            if len(parts) >= 3 and parts[0] == "mcp":
+                requested_prefixes.add(f"mcp__{parts[1]}__")
+        missing_prefixes = sorted(requested_prefixes - configured_prefixes)
+        if missing_prefixes:
+            raise RuntimeError(
+                f"Allowed MCP tools do not match configured MCP servers in {mcp_config_path}. "
+                f"Missing prefixes: {', '.join(missing_prefixes)}; configured: {', '.join(sorted(configured_prefixes))}"
+            )
+
+        for server_name, server in servers.items():
+            command = (server or {}).get("command")
+            if not command:
+                raise RuntimeError(f"MCP server '{server_name}' in {mcp_config_path} has no command")
+            if os.path.isabs(command) and not Path(command).exists():
+                raise RuntimeError(
+                    f"MCP server '{server_name}' command does not exist: {command}. "
+                    "Install dependencies or set PLAYWRIGHT_MCP_COMMAND."
+                )
+
     def _parse_cli_output(self, raw_output: str) -> str:
         """Parse stream-json output from Claude CLI."""
         result_text = ""
@@ -673,9 +791,11 @@ class AgentWorker:
                 if msg_type == "result":
                     result_text = data.get("result", "")
                     is_error = data.get("is_error", False)
+                    api_error_status = data.get("api_error_status")
                     logger.info(f"[CLI] Got result ({len(result_text)} chars), is_error={is_error}")
                     if is_error:
-                        raise RuntimeError(f"CLI returned error: {result_text[:2000]}")
+                        status_suffix = f" (status {api_error_status})" if api_error_status else ""
+                        raise RuntimeError(f"CLI returned error{status_suffix}: {result_text[:2000]}")
 
                 elif msg_type == "assistant":
                     message = data.get("message", {})

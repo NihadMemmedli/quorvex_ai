@@ -402,6 +402,143 @@ def clear_all_processes() -> dict[str, subprocess.Popen]:
         return old
 
 
+def _strip_ansi(text: str) -> str:
+    """Remove terminal color/control sequences from stored runner output."""
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def _iter_playwright_specs(suite: dict[str, Any]):
+    """Yield specs from a nested Playwright JSON suite tree."""
+    for spec in suite.get("specs") or []:
+        if isinstance(spec, dict):
+            yield spec
+    for child in suite.get("suites") or []:
+        if isinstance(child, dict):
+            yield from _iter_playwright_specs(child)
+
+
+def _build_log_from_playwright_results(results: dict[str, Any]) -> str:
+    """Build a readable execution log from Playwright's JSON reporter output."""
+    lines: list[str] = []
+    stats = results.get("stats") or {}
+    if stats:
+        lines.append("Playwright result summary")
+        for key in ("expected", "unexpected", "flaky", "skipped", "duration"):
+            if key in stats:
+                lines.append(f"{key}: {stats[key]}")
+        lines.append("")
+
+    for suite in results.get("suites") or []:
+        if not isinstance(suite, dict):
+            continue
+        for spec in _iter_playwright_specs(suite):
+            title = spec.get("title") or "Untitled test"
+            file_name = spec.get("file") or suite.get("file") or ""
+            lines.append(f"Test: {title}")
+            if file_name:
+                lines.append(f"File: {file_name}")
+            lines.append(f"Status: {'passed' if spec.get('ok') else 'failed'}")
+
+            for test in spec.get("tests") or []:
+                if not isinstance(test, dict):
+                    continue
+                project = test.get("projectName") or test.get("projectId")
+                if project:
+                    lines.append(f"Project: {project}")
+                for result in test.get("results") or []:
+                    if not isinstance(result, dict):
+                        continue
+                    status = result.get("status")
+                    duration = result.get("duration")
+                    if status or duration is not None:
+                        duration_text = f" ({duration}ms)" if duration is not None else ""
+                        lines.append(f"Result: {status or 'unknown'}{duration_text}")
+
+                    error = result.get("error") or {}
+                    if isinstance(error, dict) and error:
+                        message = error.get("message")
+                        if message:
+                            lines.append("")
+                            lines.append(_strip_ansi(str(message)).strip())
+                        snippet = error.get("snippet")
+                        if snippet:
+                            lines.append("")
+                            lines.append("Code frame:")
+                            lines.append(_strip_ansi(str(snippet)).rstrip())
+
+                    for attachment in result.get("attachments") or []:
+                        if not isinstance(attachment, dict):
+                            continue
+                        name = attachment.get("name")
+                        path = attachment.get("path")
+                        if name and path:
+                            lines.append(f"Attachment: {name} ({path})")
+            lines.append("")
+
+    for error in results.get("errors") or []:
+        if isinstance(error, dict) and error.get("message"):
+            lines.append("Global error:")
+            lines.append(_strip_ansi(str(error["message"])).strip())
+            lines.append("")
+
+    return "\n".join(line for line in lines).strip()
+
+
+def _build_fallback_run_log(run_dir: Path) -> str | None:
+    """Return a useful log when native runs did not write execution.log."""
+    sections: list[str] = []
+
+    status_file = run_dir / "status.txt"
+    if status_file.exists():
+        status = status_file.read_text(errors="replace").strip()
+        if status:
+            sections.append(f"Status\n{status}")
+
+    results_file = run_dir / "test-results.json"
+    if results_file.exists():
+        try:
+            results = json.loads(results_file.read_text(errors="replace"))
+            if isinstance(results, dict):
+                log = _build_log_from_playwright_results(results)
+                if log:
+                    sections.append(log)
+        except Exception as exc:
+            sections.append(f"Unable to parse test-results.json: {exc}")
+
+    diagnosis_file = run_dir / "failure_diagnosis.json"
+    if diagnosis_file.exists():
+        try:
+            diagnosis = json.loads(diagnosis_file.read_text(errors="replace"))
+            if isinstance(diagnosis, dict):
+                details = []
+                for key in ("category", "confidence", "root_cause", "recommended_action"):
+                    if diagnosis.get(key) is not None:
+                        details.append(f"{key}: {diagnosis[key]}")
+                evidence = diagnosis.get("evidence")
+                if evidence:
+                    details.append(f"evidence: {evidence}")
+                if details:
+                    sections.append("Failure diagnosis\n" + "\n".join(details))
+        except Exception as exc:
+            sections.append(f"Unable to parse failure_diagnosis.json: {exc}")
+
+    context_files = sorted((run_dir / "test-results").glob("**/error-context.md"))
+    if context_files:
+        context_sections = []
+        for context_file in context_files[:3]:
+            try:
+                context_sections.append(
+                    f"### {context_file.relative_to(run_dir)}\n"
+                    + context_file.read_text(errors="replace").strip()
+                )
+            except Exception:
+                continue
+        if context_sections:
+            sections.append("Error context\n" + "\n\n".join(context_sections))
+
+    return "\n\n".join(sections).strip() or None
+
+
 # Process manager for persistent tracking and graceful termination
 PROCESS_MANAGER: ProcessManager | None = None
 
@@ -3201,6 +3338,10 @@ def get_run(
     execution_log = run_dir / "execution.log"
     if execution_log.exists():
         data["log"] = execution_log.read_text()
+    else:
+        fallback_log = _build_fallback_run_log(run_dir)
+        if fallback_log:
+            data["log"] = fallback_log
 
     artifacts = []
     for f in run_dir.glob("**/*"):
@@ -5889,7 +6030,7 @@ async def generate_flow_spec(
             spec_content = None
             filename = None
 
-            for category in ["happy_path", "edge_cases"]:
+            for category in ["happy_path", "negative", "edge_case", "edge_cases", "accessibility", "regression"]:
                 if category in spec_data["specs"] and spec_data["specs"][category]:
                     for fname, content in spec_data["specs"][category].items():
                         spec_content = content
@@ -6039,16 +6180,24 @@ def _build_single_flow_prompt(flow: dict[str, Any], base_url: str) -> str:
 
     return f"""You are a Test Specification Generator.
 
-Generate a COMPREHENSIVE .md test spec for the following discovered user flow.
+Generate COMPREHENSIVE individual .md E2E scenario specs for the following discovered user flow.
 
 {flow_desc}
 {prereq_section}
 {produces_section}
 
 REQUIREMENTS:
-1. Follow this EXACT format:
+1. Return one runnable spec per scenario. Use balanced E2E coverage where evidence supports it:
+   - happy path
+   - navigation/state transition
+   - negative/error
+   - edge case
+   - accessibility
+   - responsive/mobile or critical console-error regression
+
+2. Follow this EXACT spec format for each file:
    ```markdown
-   # Test: [Feature Name]
+   # Test: [Feature Name] - [Scenario Name]
 
    ## Description
    [Brief description of what this tests]
@@ -6075,7 +6224,7 @@ REQUIREMENTS:
    - [Any test data requirements]
    ```
 
-2. CRITICAL RULES:
+3. CRITICAL RULES:
    - **ALWAYS include Prerequisites section** - even if minimal
    - **Setup steps come FIRST** in the Steps section
    - Parse the happy_path description into specific, actionable steps
@@ -6084,16 +6233,20 @@ REQUIREMENTS:
    - Use placeholders `{{{{VAR_NAME}}}}` for secrets/passwords
    - If authentication is required, include login steps at the beginning
    - If data requirements exist, mention them in Prerequisites
+   - Do not invent unsupported business behavior; if evidence is thin, use conservative page/journey checks
 
 OUTPUT FORMAT (return ONLY JSON):
 ```json
 {{
   "specs": {{
     "happy_path": {{
-      "{flow_title.lower().replace(" ", "_").replace("/", "_")}.md": "# Test: {flow_title}\\n\\n## Description\\n...\\n\\n## Prerequisites\\n...\\n\\n## Steps\\n..."
+      "tc-001-{flow_title.lower().replace(" ", "_").replace("/", "_")}-happy-path.md": "# Test: {flow_title} - Happy Path\\n\\n## Description\\n...\\n\\n## Prerequisites\\n...\\n\\n## Steps\\n..."
+    }},
+    "edge_case": {{
+      "tc-002-{flow_title.lower().replace(" ", "_").replace("/", "_")}-edge-case.md": "# Test: {flow_title} - Edge Case\\n\\n## Description\\n..."
     }}
   }},
-  "summary": "Generated test spec for {flow_title}"
+  "summary": "Generated individual E2E scenario specs for {flow_title}"
 }}
 ```
 
@@ -6104,6 +6257,8 @@ def _generate_fallback_spec(flow: dict[str, Any], base_url: str) -> tuple[str, s
     """Generate a basic spec as fallback when agent fails."""
     import re
 
+    from orchestrator.workflows.spec_scenario_builder import render_scenario_markdown, scenario_from_requirement
+
     flow_title = flow.get("title", "Unnamed Flow")
     happy_path = flow.get("happy_path", "")
     pages = flow.get("pages", [])
@@ -6113,47 +6268,38 @@ def _generate_fallback_spec(flow: dict[str, Any], base_url: str) -> tuple[str, s
     # Get prerequisites (if analyzed)
     prerequisites = flow.get("prerequisites", {})
 
-    # Build prerequisites section
-    prereq_lines = []
+    preconditions = []
     if prerequisites:
         auth = prerequisites.get("authentication", {})
         if auth.get("required"):
-            prereq_lines.append(f"- Authentication: Required ({auth.get('user_type', 'standard user')})")
+            preconditions.append(f"Authentication required ({auth.get('user_type', 'standard user')})")
         else:
-            prereq_lines.append("- Authentication: Not required")
+            preconditions.append("Authentication not required")
 
         data_reqs = prerequisites.get("data_requirements", [])
         if data_reqs:
             for req in data_reqs:
-                prereq_lines.append(f"- Data: {req.get('description', req.get('entity', 'unknown'))}")
+                preconditions.append(f"Data: {req.get('description', req.get('entity', 'unknown'))}")
 
         prior_flows = prerequisites.get("prior_flows", [])
         if prior_flows:
-            prereq_lines.append(f"- Prior flows: {', '.join(prior_flows)}")
-
-    if not prereq_lines:
-        prereq_lines.append("- None identified")
-
-    prereq_text = chr(10).join(prereq_lines)
+            preconditions.append(f"Prior flows: {', '.join(prior_flows)}")
 
     # Parse happy path into steps
     steps = []
-    step_num = 1
 
     # Add setup steps from prerequisites first
     setup_steps = prerequisites.get("setup_steps", [])
     for setup_step in setup_steps:
-        steps.append(f"{step_num}. {setup_step}")
-        step_num += 1
+        steps.append(str(setup_step))
 
     # Entry point (only if no setup steps included navigation)
     if not any("navigate" in s.lower() for s in setup_steps):
         if entry:
-            steps.append(f"{step_num}. Navigate to {{{{BASE_URL}}}}{entry}")
-            step_num += 1
+            destination = entry if str(entry).startswith(("http://", "https://")) else f"{{{{BASE_URL}}}}{entry}"
+            steps.append(f"Navigate to {destination}")
         elif pages:
-            steps.append(f"{step_num}. Navigate to {pages[0]}")
-            step_num += 1
+            steps.append(f"Navigate to {pages[0]}")
 
     # Parse happy path description for actionable steps
     if happy_path:
@@ -6165,42 +6311,43 @@ def _generate_fallback_spec(flow: dict[str, Any], base_url: str) -> tuple[str, s
                 # Convert to imperative form
                 if not action.startswith(("Navigate", "Click", "Fill", "Verify", "Check", "Select", "Assert")):
                     # Just add the action as-is
-                    steps.append(f"{step_num}. {action}")
-                    step_num += 1
+                    steps.append(action)
 
     # Exit point
     if exit_point:
-        steps.append(f"{step_num}. Verify arrival at {{{{BASE_URL}}}}{exit_point}")
+        destination = (
+            exit_point
+            if str(exit_point).startswith(("http://", "https://"))
+            else f"{{{{BASE_URL}}}}{exit_point}"
+        )
+        steps.append(f"Verify arrival at {destination}")
     else:
-        steps.append(f"{step_num}. Verify successful completion")
+        steps.append("Verify successful completion")
 
-    # Build spec content
-    spec_content = f"""# Test: {flow_title}
-
-## Description
-{happy_path}
-
-## Prerequisites
-{prereq_text}
-
-## Steps
-{chr(10).join(steps)}
-
-## Expected Outcome
-- User successfully completes the {flow_title}
-- All pages load correctly
-- No errors are displayed
-
-## Test Data
-- Base URL: {{{{BASE_URL}}}}
-"""
-
-    # Add edge cases if available
     edge_cases = flow.get("edge_cases", [])
+    expected = [
+        f"User successfully completes the {flow_title}",
+        "All pages load correctly",
+        "No blocking errors are displayed",
+    ]
     if edge_cases:
-        spec_content += "\n## Edge Cases\n"
-        for case in edge_cases[:5]:
-            spec_content += f"- {case}\n"
+        expected.append("Known edge cases are handled safely or documented for separate coverage")
+
+    scenario = scenario_from_requirement(
+        title=flow_title,
+        description=happy_path or f"Validate the {flow_title} flow.",
+        target_url=entry or base_url,
+        flow_steps=steps,
+        acceptance_criteria=expected,
+        category="happy_path",
+        priority="medium",
+        source_flows=[flow_title],
+    )
+    scenario.preconditions = preconditions or ["Fresh browser session"]
+    scenario.test_data.append("Base URL: {{BASE_URL}}")
+    if edge_cases:
+        scenario.test_data.extend(f"Edge case to cover separately: {case}" for case in edge_cases[:5])
+    spec_content = render_scenario_markdown(scenario)
 
     # Generate filename
     safe_name = re.sub(r"[^\w\s-]", "", flow_title)

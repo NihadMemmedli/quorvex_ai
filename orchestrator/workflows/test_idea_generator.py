@@ -201,8 +201,12 @@ class TestIdeaGenerator:
 
     async def _generate_with_ai(self, summary: dict[str, Any]) -> list[GeneratedTestIdea]:
         """Call the agent and parse generated ideas. Returns [] on recoverable failure."""
-        if not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-            logger.info("ANTHROPIC_AUTH_TOKEN not set; using deterministic test idea fallback")
+        if not (
+            os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            or os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        ):
+            logger.info("No AI credential configured; using deterministic test idea fallback")
             return []
 
         source_type = SOURCE_OBSERVED
@@ -369,6 +373,74 @@ Output format:
                 )
             )
 
+            if not matching_flow_names:
+                entry_url = summary.get("entry_url", "the application")
+                source_requirement = req.get("code") or title
+                ideas.extend(
+                    [
+                        GeneratedTestIdea(
+                            title=f"Validate {title} has no critical console errors",
+                            description=(
+                                f"Checks runtime stability for {title} without assuming unsupported "
+                                "business behavior."
+                            ),
+                            category="regression",
+                            priority=priority,
+                            source_requirements=[source_requirement],
+                            suggested_steps=[
+                                f"Navigate to {entry_url}",
+                                "Wait for the page to finish loading",
+                                "Observe browser console messages",
+                                "Verify no critical JavaScript runtime errors are present",
+                            ],
+                            expected_outcomes=[
+                                "No uncaught JavaScript exception blocks the page",
+                                "The page remains interactive after load",
+                            ],
+                            spec_readiness="ready",
+                            confidence=0.4,
+                        ),
+                        GeneratedTestIdea(
+                            title=f"Validate {title} accessibility basics",
+                            description=f"Checks basic accessible structure for {title}.",
+                            category="accessibility",
+                            priority=priority,
+                            source_requirements=[source_requirement],
+                            suggested_steps=[
+                                f"Navigate to {entry_url}",
+                                "Take a browser snapshot",
+                                "Verify visible interactive elements have readable labels or accessible names",
+                                "Verify keyboard focus can move through visible interactive elements",
+                            ],
+                            expected_outcomes=[
+                                "Visible controls expose accessible labels",
+                                "Keyboard focus is not trapped on page load",
+                            ],
+                            spec_readiness="ready",
+                            confidence=0.35,
+                        ),
+                        GeneratedTestIdea(
+                            title=f"Validate {title} mobile rendering",
+                            description=f"Checks responsive rendering for {title}.",
+                            category="edge_case",
+                            priority=priority,
+                            source_requirements=[source_requirement],
+                            suggested_steps=[
+                                "Set viewport to a mobile size",
+                                f"Navigate to {entry_url}",
+                                "Wait for the page to finish loading",
+                                "Verify the primary content is visible without horizontal overflow",
+                            ],
+                            expected_outcomes=[
+                                "Primary content remains visible on mobile",
+                                "No major layout overlap blocks interaction",
+                            ],
+                            spec_readiness="ready",
+                            confidence=0.35,
+                        ),
+                    ]
+                )
+
             criteria_text = " ".join(req.get("acceptance_criteria") or []).lower()
             if any(token in criteria_text for token in ("invalid", "error", "empty", "required", "validation")):
                 ideas.append(
@@ -483,20 +555,80 @@ Output format:
 
         if not ideas and (summary.get("pages_discovered", 0) > 0 or summary.get("entry_url")):
             entry_url = summary.get("entry_url") or "the application"
-            ideas.append(
-                GeneratedTestIdea(
-                    title="Validate application entry page availability",
-                    description="Validates that the explored application entry point is reachable and renders.",
-                    category="coverage",
-                    priority="medium",
-                    suggested_steps=[f"Navigate to {entry_url}", "Verify the page renders without a blocking error"],
-                    expected_outcomes=[
-                        "The application entry page is reachable",
-                        "No critical browser or application error blocks the page",
-                    ],
-                    spec_readiness="ready",
-                    confidence=0.4,
-                )
+            ideas.extend(
+                [
+                    GeneratedTestIdea(
+                        title="Validate application entry page availability",
+                        description="Validates that the explored application entry point is reachable and renders.",
+                        category="coverage",
+                        priority="medium",
+                        suggested_steps=[
+                            f"Navigate to {entry_url}",
+                            "Wait for the page to finish loading",
+                            "Verify the page renders without a blocking error",
+                        ],
+                        expected_outcomes=[
+                            "The application entry page is reachable",
+                            "No 404, access-denied, blank page, or blocking application error is shown",
+                        ],
+                        spec_readiness="ready",
+                        confidence=0.45,
+                    ),
+                    GeneratedTestIdea(
+                        title="Validate entry page has no critical console errors",
+                        description="Checks runtime stability without assuming unsupported business behavior.",
+                        category="regression",
+                        priority="medium",
+                        suggested_steps=[
+                            f"Navigate to {entry_url}",
+                            "Wait for the page to finish loading",
+                            "Observe browser console messages",
+                            "Verify no critical JavaScript runtime errors are present",
+                        ],
+                        expected_outcomes=[
+                            "No uncaught JavaScript exception blocks the page",
+                            "The page remains interactive after load",
+                        ],
+                        spec_readiness="ready",
+                        confidence=0.4,
+                    ),
+                    GeneratedTestIdea(
+                        title="Validate entry page accessibility basics",
+                        description="Checks basic accessible structure from page-level evidence.",
+                        category="accessibility",
+                        priority="medium",
+                        suggested_steps=[
+                            f"Navigate to {entry_url}",
+                            "Take a browser snapshot",
+                            "Verify visible interactive elements have readable labels or accessible names",
+                            "Verify keyboard focus can move through visible interactive elements",
+                        ],
+                        expected_outcomes=[
+                            "Visible controls expose accessible labels",
+                            "Keyboard focus is not trapped on page load",
+                        ],
+                        spec_readiness="ready",
+                        confidence=0.35,
+                    ),
+                    GeneratedTestIdea(
+                        title="Validate entry page mobile rendering",
+                        description="Checks responsive rendering from page-level evidence.",
+                        category="edge_case",
+                        priority="medium",
+                        suggested_steps=[
+                            "Set viewport to a mobile size",
+                            f"Navigate to {entry_url}",
+                            "Wait for the page to finish loading",
+                            "Verify the primary content is visible without horizontal overflow",
+                        ],
+                        expected_outcomes=[
+                            "Primary content remains visible on mobile",
+                            "No major layout overlap blocks interaction",
+                        ],
+                        spec_readiness="ready",
+                        confidence=0.35,
+                    ),
+                ]
             )
 
         return self._dedupe(ideas)

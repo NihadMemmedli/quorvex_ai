@@ -29,6 +29,7 @@ State Machine:
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from urllib.parse import urlparse
 
 from sqlmodel import Session, select
 
+from orchestrator.ai.context import SOURCE_OBSERVED
 from orchestrator.ai.validation import (
     is_valid_flow,
     is_valid_issue,
@@ -133,8 +135,12 @@ class AutoPilotPipeline:
             logger.warning(f"Test task {task_id} not found or already done in session {self.session_id}")
 
     def pause(self):
-        """Pause the pipeline at the next checkpoint."""
+        """Hard-pause the pipeline and cancel tracked test-generation tasks."""
         self._paused.clear()
+        for task_id, task in list(self._test_tasks.items()):
+            if not task.done():
+                task.cancel()
+                logger.info(f"Paused Auto Pilot by cancelling test task {task_id} in session {self.session_id}")
 
     def resume(self):
         """Resume a paused pipeline."""
@@ -231,6 +237,8 @@ class AutoPilotPipeline:
             try:
                 result = await runner(config, phase_record_id)
                 summary["phases"][phase_name] = result
+                if not self._phase_has_resumable_output(phase_name, result):
+                    raise RuntimeError(self._phase_output_error(phase_name, result))
 
                 # Mark phase completed
                 self._complete_phase_record(phase_record_id, result)
@@ -241,6 +249,13 @@ class AutoPilotPipeline:
                 logger.info(f"Phase {phase_name} completed: {result.get('status', 'ok')}")
 
             except asyncio.CancelledError:
+                if not self._paused.is_set() and not self._cancelled.is_set():
+                    self._update_phase_step(phase_record_id, "Paused by user")
+                    self._update_session_status("paused")
+                    summary["status"] = "paused"
+                    summary["paused_phase"] = phase_name
+                    return summary
+
                 self._fail_phase_record(phase_record_id, "Cancelled")
                 self._update_session_status("cancelled")
                 summary["status"] = "cancelled"
@@ -355,7 +370,6 @@ class AutoPilotPipeline:
                         "min_quality_score": min(
                             [q.get("quality_score", 0) for q in exploration_quality if q] or [0]
                         ),
-                        "fallback_used": any(q.get("fallback_used") for q in exploration_quality if q),
                         "degraded_mode": any(q.get("degraded_mode") for q in exploration_quality if q),
                         "by_session": exploration_quality_by_session,
                     }
@@ -408,7 +422,6 @@ class AutoPilotPipeline:
             "total_pages": total_pages,
             "total_flows": total_flows,
             "auto_retried": auto_retried,
-            "fallback_ready": self._is_weak_exploration(total_pages, total_flows),
             "quality": exploration_quality,
         }
 
@@ -455,6 +468,11 @@ class AutoPilotPipeline:
             explorer = AppExplorer(project_id=config.project_id)
             result = await explorer.explore(explore_config, explore_session_id)
             self._store_exploration_results(explore_session_id, result, config.project_id)
+            if result.status != "completed" or not (result.transitions or result.flows or result.api_endpoints):
+                raise RuntimeError(
+                    result.error_message
+                    or "Explorer did not produce verified browser exploration records"
+                )
             return result
 
     async def _ask_exploration_checkpoint(
@@ -647,15 +665,13 @@ class AutoPilotPipeline:
             except Exception as e:
                 logger.warning(f"Test idea generation failed for {explore_id}: {e}")
 
+        requirements = self._get_requirements_for_explorations(config.project_id, exploration_ids)
+        expected_spec_tasks = self._count_unique_requirement_targets(requirements)
         if all_ideas:
             self._create_spec_tasks_from_test_ideas(all_ideas)
+            if requirements and self._count_spec_tasks() < expected_spec_tasks:
+                self._create_spec_tasks_from_requirements(requirements)
         elif not self._has_spec_tasks():
-            from orchestrator.memory.exploration_store import get_exploration_store
-
-            store = get_exploration_store(project_id=config.project_id)
-            requirements = [
-                req for req in store.get_requirements() if req.source_session_id in set(exploration_ids)
-            ]
             self._create_spec_tasks_from_requirements(requirements)
 
         self._update_phase_step(
@@ -695,6 +711,8 @@ class AutoPilotPipeline:
             "status": "completed",
             "total_test_ideas": len(all_ideas),
             "spec_tasks_created": self._count_spec_tasks(),
+            "requirements_considered": len(requirements),
+            "expected_min_spec_tasks": expected_spec_tasks,
         }
 
     # ------------------------------------------------------------------
@@ -703,51 +721,31 @@ class AutoPilotPipeline:
 
     async def _run_spec_generation_phase(self, config: AutoPilotConfig, phase_id: int) -> dict[str, Any]:
         """Generate test spec markdown files from requirements, one at a time."""
-        from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AutoPilotSpecTask
+        candidate_tasks = self._load_open_spec_tasks()
 
-        # Load spec tasks sorted by priority
-        with Session(engine) as db:
-            stmt = (
-                select(AutoPilotSpecTask)
-                .where(AutoPilotSpecTask.session_id == self.session_id)
-                .where(AutoPilotSpecTask.status.in_(["pending", "failed"]))
-            )
-            tasks = db.exec(stmt).all()
-
-        # Sort by priority (critical first)
-        threshold_level = PRIORITY_ORDER.get(self._effective_priority_threshold(config), 3)
-        tasks = [t for t in tasks if PRIORITY_ORDER.get(t.priority, 3) <= threshold_level]
-        tasks.sort(key=lambda t: PRIORITY_ORDER.get(t.priority, 3))
-
-        # Enforce max_specs limit
-        tasks = tasks[: config.max_specs]
-
-        if not tasks:
+        if not candidate_tasks:
             logger.warning("No spec tasks to generate; creating fallback tasks from exploration evidence")
             self._create_fallback_spec_tasks_from_exploration(config)
-            with Session(engine) as db:
-                stmt = (
-                    select(AutoPilotSpecTask)
-                    .where(AutoPilotSpecTask.session_id == self.session_id)
-                    .where(AutoPilotSpecTask.status.in_(["pending", "failed"]))
-                )
-                tasks = db.exec(stmt).all()
-            threshold_level = PRIORITY_ORDER.get(self._effective_priority_threshold(config), 3)
-            tasks = [t for t in tasks if PRIORITY_ORDER.get(t.priority, 3) <= threshold_level]
-            tasks.sort(key=lambda t: PRIORITY_ORDER.get(t.priority, 3))
-            tasks = tasks[: config.max_specs]
+            candidate_tasks = self._load_open_spec_tasks()
 
-        if not tasks:
+        if not candidate_tasks:
             logger.warning("Fallback spec task creation produced no tasks; creating entry-page smoke task")
             self._create_entry_page_spec_task(config)
-            with Session(engine) as db:
-                stmt = (
-                    select(AutoPilotSpecTask)
-                    .where(AutoPilotSpecTask.session_id == self.session_id)
-                    .where(AutoPilotSpecTask.status.in_(["pending", "failed"]))
-                )
-                tasks = db.exec(stmt).all()[: config.max_specs]
+            candidate_tasks = self._load_open_spec_tasks()
+
+        threshold = self._effective_priority_threshold(config)
+        threshold_level = PRIORITY_ORDER.get(threshold, 3)
+        eligible_tasks = [
+            t for t in candidate_tasks
+            if PRIORITY_ORDER.get(t.priority, 3) <= threshold_level
+        ]
+        filtered_tasks = [
+            t for t in candidate_tasks
+            if PRIORITY_ORDER.get(t.priority, 3) > threshold_level
+        ]
+        eligible_tasks.sort(key=lambda t: PRIORITY_ORDER.get(t.priority, 3))
+        tasks = eligible_tasks[: config.max_specs]
+        skipped_due_to_limit = eligible_tasks[config.max_specs:]
 
         specs_generated = 0
         specs_dir = Path("specs") / "autopilot" / self.session_id
@@ -784,13 +782,35 @@ class AutoPilotPipeline:
             items_completed=len(tasks),
         )
 
+        if filtered_tasks:
+            self._skip_spec_tasks(
+                [task.id for task in filtered_tasks if task.id is not None],
+                f"Skipped by priority threshold '{threshold}'",
+            )
+        if skipped_due_to_limit:
+            self._skip_spec_tasks(
+                [task.id for task in skipped_due_to_limit if task.id is not None],
+                f"Skipped by max_specs limit ({config.max_specs})",
+            )
+
+        remaining_pending = self._count_pending_spec_tasks()
+        failed_selected = len(tasks) - specs_generated
+
         if specs_generated == 0:
             raise RuntimeError("Spec generation produced 0 specs")
+        if failed_selected > 0:
+            raise RuntimeError(f"Spec generation produced {specs_generated}/{len(tasks)} selected specs")
 
         return {
             "status": "completed",
             "specs_generated": specs_generated,
             "total_tasks": len(tasks),
+            "failed_selected_tasks": failed_selected,
+            "eligible_tasks": len(eligible_tasks),
+            "filtered_by_priority": len(filtered_tasks),
+            "skipped_due_to_max_specs": len(skipped_due_to_limit),
+            "remaining_pending_tasks": remaining_pending,
+            "priority_threshold": threshold,
         }
 
     # ------------------------------------------------------------------
@@ -829,15 +849,17 @@ class AutoPilotPipeline:
         passed_count = 0
         failed_count = 0
 
-        async def _generate_one(test_task_id: int, spec_path: str, spec_name: str):
+        async def _generate_one(test_task_id: int, spec_path: str, spec_name: str, run_id: str):
             nonlocal passed_count, failed_count
 
             async with semaphore:
                 if self._cancelled.is_set():
                     return
+                await self._wait_if_paused()
 
                 # Block if a load test is running
                 await check_system_available("autopilot_test_generation")
+                await self._wait_if_paused()
 
                 pool = await get_browser_pool()
                 request_id = f"autopilot_test_{test_task_id}_{uuid.uuid4().hex[:6]}"
@@ -855,24 +877,44 @@ class AutoPilotPipeline:
                         )
                         failed_count += 1
                         return
+                    await self._wait_if_paused()
 
-                    self._update_test_task(test_task_id, "running")
+                    generation_mode = (
+                        "conservative_smoke"
+                        if self._should_use_conservative_test_generation(spec_path)
+                        else "native_e2e"
+                    )
+                    self._update_test_task(
+                        test_task_id,
+                        "running",
+                        current_stage=generation_mode,
+                    )
 
                     # Create run directory
-                    run_dir = Path("runs") / "autopilot" / self.session_id / Path(spec_name).stem
+                    run_dir = Path("runs") / run_id
                     run_dir.mkdir(parents=True, exist_ok=True)
 
                     pipeline = FullNativePipeline(project_id=config.project_id)
                     try:
-                        result = await pipeline.run(
-                            spec_path=spec_path,
-                            run_dir=run_dir,
-                            browser="chromium",
-                            hybrid_healing=config.hybrid_healing,
-                        )
+                        if generation_mode == "conservative_smoke":
+                            result = self._run_conservative_test_generation(
+                                pipeline=pipeline,
+                                spec_path=spec_path,
+                                run_dir=run_dir,
+                                browser="chromium",
+                            )
+                        else:
+                            result = await pipeline.run(
+                                spec_path=spec_path,
+                                run_dir=run_dir,
+                                browser="chromium",
+                                hybrid_healing=config.hybrid_healing,
+                            )
 
                         success = result.get("success", False)
                         test_path = result.get("test_path")
+                        result_stage = result.get("stage") or generation_mode
+                        healing_attempt = int(result.get("attempts") or 0)
 
                         if success:
                             self._update_test_task(
@@ -880,20 +922,28 @@ class AutoPilotPipeline:
                                 "passed",
                                 passed=True,
                                 test_path=test_path,
+                                current_stage=result_stage,
+                                healing_attempt=healing_attempt,
                             )
                             passed_count += 1
                         else:
+                            error_message = self._extract_task_error_summary(run_dir, result)
                             self._update_test_task(
                                 test_task_id,
                                 "failed",
                                 passed=False,
                                 test_path=test_path,
-                                error_summary=result.get("error", "Test failed")[:500],
+                                current_stage=result_stage,
+                                error_summary=error_message,
+                                healing_attempt=healing_attempt,
                             )
                             failed_count += 1
 
                         results[test_task_id] = result
 
+                    except asyncio.CancelledError:
+                        logger.info(f"Auto Pilot test task {test_task_id} paused/cancelled")
+                        raise
                     except Exception as e:
                         logger.error(
                             f"Test generation failed for {spec_name}: {e}",
@@ -902,6 +952,7 @@ class AutoPilotPipeline:
                         self._update_test_task(
                             test_task_id,
                             "error",
+                            current_stage="exception",
                             error_summary=str(e)[:500],
                         )
                         failed_count += 1
@@ -916,14 +967,19 @@ class AutoPilotPipeline:
                 )
 
         # Launch all test generations concurrently (bounded by semaphore + pool)
-        for tt_id, spec_path, spec_name in test_tasks:
-            t = asyncio.create_task(_generate_one(tt_id, spec_path, spec_name))
+        for tt_id, spec_path, spec_name, run_id in test_tasks:
+            t = asyncio.create_task(_generate_one(tt_id, spec_path, spec_name, run_id))
             self._test_tasks[tt_id] = t
 
         await asyncio.gather(*self._test_tasks.values(), return_exceptions=True)
         self._test_tasks.clear()  # Clean up references
 
-        self._update_session_field("total_tests_generated", total)
+        task_counts = self._count_test_task_statuses()
+        total_generated = task_counts["passed"] + task_counts["failed"] + task_counts["error"]
+        passed_count = task_counts["passed"]
+        failed_count = task_counts["failed"] + task_counts["error"]
+
+        self._update_session_field("total_tests_generated", total_generated)
         self._update_session_field("total_tests_passed", passed_count)
         self._update_session_field("total_tests_failed", failed_count)
 
@@ -936,10 +992,190 @@ class AutoPilotPipeline:
 
         return {
             "status": "completed",
-            "total": total,
+            "total": total_generated,
             "passed": passed_count,
             "failed": failed_count,
         }
+
+    def _should_use_conservative_test_generation(self, spec_path: str | None = None) -> bool:
+        """Use deterministic smoke tests only when exploration evidence is weak."""
+        config = self._get_session_config()
+        exploration_quality = config.get("ai_quality", {}).get("exploration", {})
+        weak_evidence = bool(exploration_quality.get("degraded_mode"))
+        if not weak_evidence:
+            return False
+        if not spec_path:
+            return True
+        return not self._spec_has_actionable_e2e_steps(spec_path)
+
+    def _spec_has_actionable_e2e_steps(self, spec_path: str) -> bool:
+        """Return True when a spec asks for more than a page-load smoke check."""
+        try:
+            content = Path(spec_path).read_text()
+        except Exception:
+            return False
+
+        steps_section = self._extract_markdown_section(content, "Steps").lower()
+        if not steps_section.strip():
+            return False
+
+        actionable_terms = [
+            "click",
+            "fill",
+            "enter",
+            "submit",
+            "select",
+            "search",
+            "filter",
+            "login",
+            "authenticated",
+            "unauthenticated",
+            "redirect",
+            "navigate sequentially",
+            "after each navigation",
+            "keyboard",
+            "focus",
+            "viewport",
+            "console",
+            "accessibility",
+            "snapshot",
+        ]
+        if any(term in steps_section for term in actionable_terms):
+            return True
+
+        numbered_steps = [
+            line.strip()
+            for line in steps_section.splitlines()
+            if re.match(r"^\d+\.\s+", line.strip())
+        ]
+        smoke_terms = (
+            "navigate to ",
+            "wait for the page",
+            "verify the response status",
+            "verify the page renders",
+            "verify page renders",
+            "verify the page is reachable",
+            "verify the page renders without",
+        )
+        non_smoke_steps = [
+            step for step in numbered_steps
+            if not any(term in step for term in smoke_terms)
+        ]
+        return bool(non_smoke_steps)
+
+    def _extract_markdown_section(self, content: str, heading: str) -> str:
+        pattern = rf"^##\s+{re.escape(heading)}\s*$"
+        lines = content.splitlines()
+        start = None
+        for idx, line in enumerate(lines):
+            if re.match(pattern, line.strip(), flags=re.IGNORECASE):
+                start = idx + 1
+                break
+        if start is None:
+            return ""
+        end = len(lines)
+        for idx in range(start, len(lines)):
+            if lines[idx].startswith("## "):
+                end = idx
+                break
+        return "\n".join(lines[start:end])
+
+    def _run_conservative_test_generation(self, pipeline, spec_path: str, run_dir: Path, browser: str) -> dict[str, Any]:
+        """Generate and run a deterministic reachability test for weak/fallback evidence."""
+        spec_file = Path(spec_path)
+        spec_content = spec_file.read_text()
+        target_url = self._extract_first_url(spec_content)
+        if not target_url:
+            return {"success": False, "error": "No target URL found in spec", "stage": "conservative_generation"}
+
+        title = self._extract_spec_title(spec_content, spec_file.stem)
+        tests_dir = Path("tests") / "generated"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        output_stem = self._sanitize_test_filename(f"{self.session_id}-{spec_file.stem}")
+        test_path = tests_dir / f"{output_stem}.spec.ts"
+        test_path.write_text(self._render_conservative_playwright_test(title, target_url))
+
+        export_data = {
+            "testFilePath": str(test_path),
+            "code": test_path.read_text(),
+            "dependencies": ["@playwright/test"],
+            "notes": ["Generated deterministically for fallback Auto Pilot evidence"],
+        }
+        (run_dir / "export.json").write_text(json.dumps(export_data, indent=2))
+
+        result = pipeline._run_test(str(test_path), str(run_dir), browser)
+        if result.passed:
+            (run_dir / "status.txt").write_text("passed")
+            return {"success": True, "test_path": str(test_path), "attempts": 0, "stage": "conservative_completed"}
+
+        (run_dir / "status.txt").write_text("failed")
+        return {
+            "success": False,
+            "test_path": str(test_path),
+            "error": result.error_summary or result.output[:500],
+            "attempts": 0,
+            "stage": "conservative_failed",
+        }
+
+    def _extract_task_error_summary(self, run_dir: Path, result: dict[str, Any]) -> str:
+        """Prefer persisted pipeline diagnostics over a generic failure string."""
+        pipeline_error = run_dir / "pipeline_error.json"
+        if pipeline_error.exists():
+            try:
+                data = json.loads(pipeline_error.read_text())
+                error = data.get("error") or data.get("error_tail")
+                stage = data.get("stage")
+                if error and stage:
+                    return f"{stage}: {error}"[:1000]
+                if error:
+                    return str(error)[:1000]
+            except Exception as exc:
+                logger.debug(f"Unable to read pipeline error for {run_dir}: {exc}")
+
+        validation = run_dir / "validation.json"
+        if validation.exists():
+            try:
+                data = json.loads(validation.read_text())
+                message = data.get("message") or data.get("error") or data.get("status")
+                if message:
+                    return str(message)[:1000]
+            except Exception as exc:
+                logger.debug(f"Unable to read validation error for {run_dir}: {exc}")
+
+        return str(result.get("error") or "Test failed")[:1000]
+
+    def _extract_first_url(self, text: str) -> str | None:
+        match = re.search(r"https?://[^\s<>)\]}\"']+", text)
+        return match.group(0).rstrip(".,;:") if match else None
+
+    def _extract_spec_title(self, spec_content: str, fallback: str) -> str:
+        for line in spec_content.splitlines():
+            if line.startswith("# Test:"):
+                return line.replace("# Test:", "", 1).strip() or fallback
+        return fallback.replace("-", " ").title()
+
+    def _sanitize_test_filename(self, value: str) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9_-]+", "-", value).strip("-").lower()
+        return safe[:120] or "autopilot-test"
+
+    def _render_conservative_playwright_test(self, title: str, target_url: str) -> str:
+        suite = json.dumps(title)
+        url = json.dumps(target_url)
+        return f"""import {{ test, expect }} from '@playwright/test';
+
+test.describe({suite}, () => {{
+  test('page is reachable and renders content', async ({{ page }}) => {{
+    const response = await page.goto({url}, {{ waitUntil: 'domcontentloaded', timeout: 60000 }});
+
+    expect(response, 'navigation response should exist').not.toBeNull();
+    expect(response!.status(), 'page should not return a server error').toBeLessThan(500);
+    await expect(page.locator('body')).toBeVisible();
+
+    const bodyText = (await page.locator('body').innerText()).trim();
+    expect(bodyText.length, 'page should render visible text').toBeGreaterThan(0);
+  }});
+}});
+"""
 
     # ------------------------------------------------------------------
     # Phase 6: Reporting
@@ -973,7 +1209,11 @@ class AutoPilotPipeline:
                 rtm_gen = RtmGenerator(project_id=config.project_id)
                 rtm_result = await rtm_gen.generate_rtm(
                     specs_paths=spec_paths,
-                    use_ai_matching=True,
+                    use_ai_matching=bool(
+                        os.environ.get("ANTHROPIC_AUTH_TOKEN")
+                        or os.environ.get("ANTHROPIC_API_KEY")
+                        or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+                    ),
                 )
                 coverage_pct = rtm_result.coverage_percentage
                 rtm_mappings = len(rtm_result.mappings)
@@ -1165,8 +1405,56 @@ class AutoPilotPipeline:
         with Session(engine) as db:
             session = db.get(AutoPilotSession, self.session_id)
             if session:
-                return session.phases_completed
+                completed = session.phases_completed
+                valid = [phase for phase in completed if self._completed_phase_still_valid(phase)]
+                if valid != completed:
+                    session.phases_completed = valid
+                    db.add(session)
+                    db.commit()
+                return valid
         return []
+
+    def _phase_has_resumable_output(self, phase_name: str, result: dict) -> bool:
+        """Guard phase completion against empty state that blocks downstream work."""
+        status = result.get("status")
+        if phase_name == "exploration":
+            return bool(result.get("exploration_ids")) and (
+                int(result.get("total_pages") or 0) > 0
+                or int(result.get("total_flows") or 0) > 0
+            )
+        if phase_name == "test_ideas":
+            expected = int(result.get("expected_min_spec_tasks") or 0)
+            actual = self._count_spec_tasks()
+            return actual >= expected if expected > 0 else actual > 0
+        if phase_name == "spec_generation":
+            return (
+                int(result.get("specs_generated") or 0) > 0
+                and int(result.get("remaining_pending_tasks") or 0) == 0
+            )
+        if status == "skipped" and phase_name in {"requirements", "test_generation"}:
+            return False
+        return True
+
+    def _phase_output_error(self, phase_name: str, result: dict) -> str:
+        if phase_name == "exploration":
+            return "Exploration produced no persisted pages or sessions"
+        if phase_name == "test_ideas":
+            return "Test idea generation did not produce enough spec tasks for discovered unique requirements"
+        if phase_name == "spec_generation":
+            return "Spec generation produced 0 specs"
+        return f"{phase_name.replace('_', ' ').title()} did not produce resumable output: {result.get('reason', 'empty output')}"
+
+    def _completed_phase_still_valid(self, phase_name: str) -> bool:
+        """Validate completed checkpoints before skipping them on resume."""
+        if phase_name == "exploration":
+            return bool(self._get_session_exploration_ids())
+        if phase_name == "test_ideas":
+            return self._has_spec_tasks()
+        if phase_name == "spec_generation":
+            return self._count_completed_spec_tasks() > 0 and self._count_pending_spec_tasks() == 0
+        if phase_name == "test_generation":
+            return self._count_terminal_test_tasks() > 0
+        return True
 
     def _add_completed_phase(self, phase_name: str):
         from orchestrator.api.db import engine
@@ -1226,14 +1514,46 @@ class AutoPilotPipeline:
                 min_quality_score=50,
                 allow_fallback=False,
             )
+            if gated_out and self._is_legacy_category_validation_only(summary):
+                logger.info(
+                    "Allowing exploration %s through quality gate; validation failures are legacy category labels only",
+                    exploration_id,
+                )
+                usable.append(exploration_id)
+                continue
             if gated_out:
                 gated[exploration_id] = reason or "quality_gate"
             else:
                 usable.append(exploration_id)
 
-        if gated:
-            self._merge_session_config({"ai_quality": {"gated_explorations": gated}})
+        self._merge_session_config({"ai_quality": {"gated_explorations": gated}})
         return usable
+
+    def _is_legacy_category_validation_only(self, summary: dict[str, Any]) -> bool:
+        """Allow old runs where validation failed only on now-accepted flow categories."""
+        validation = summary.get("validation") or {}
+        if validation.get("valid", True):
+            return False
+
+        invalid_records = validation.get("invalid_records") or []
+        if not invalid_records:
+            return False
+
+        if not all(
+            issue.get("record_type") == "flow" and str(issue.get("message", "")).startswith("invalid category ")
+            for issue in invalid_records
+        ):
+            return False
+
+        quality = summary.get("quality") or {}
+        if quality.get("source_type") != SOURCE_OBSERVED:
+            return False
+
+        try:
+            score = int(quality.get("quality_score", 0))
+        except (TypeError, ValueError):
+            score = 0
+        return score >= 50
 
     # ------------------------------------------------------------------
     # Phase record helpers
@@ -1259,7 +1579,9 @@ class AutoPilotPipeline:
             if existing:
                 existing.status = "running"
                 existing.started_at = datetime.utcnow()
+                existing.completed_at = None
                 existing.error_message = None
+                existing.progress = 0.0
                 db.add(existing)
                 db.commit()
                 db.refresh(existing)
@@ -1337,6 +1659,12 @@ class AutoPilotPipeline:
         """Store exploration results in the exploration store, mirroring
         the pattern from orchestrator/api/exploration.py."""
         from orchestrator.memory.exploration_store import get_exploration_store
+        from orchestrator.workflows.spec_scenario_builder import (
+            render_scenario_markdown,
+            sanitize_filename,
+            scenario_from_requirement,
+            scenario_from_test_idea,
+        )
 
         store = get_exploration_store(project_id=project_id)
 
@@ -1613,6 +1941,31 @@ class AutoPilotPipeline:
         title = "Validate application entry page availability"
         self._create_spec_task_if_missing(title, "medium")
 
+    def _get_requirements_for_explorations(self, project_id: str, exploration_ids: list[str]):
+        """Load requirements produced from this Auto Pilot run's explorations."""
+        from orchestrator.memory.exploration_store import get_exploration_store
+
+        store = get_exploration_store(project_id=project_id)
+        exploration_id_set = set(exploration_ids)
+        return [
+            req for req in store.get_requirements()
+            if req.source_session_id in exploration_id_set
+        ]
+
+    def _normalized_spec_task_key(self, title: str | None) -> str:
+        """Normalize requirement and idea titles for duplicate avoidance."""
+        key = re.sub(r"\s+", " ", (title or "").strip().lower())
+        key = re.sub(r"^(validate|verify|test|check)\s+", "", key)
+        return key
+
+    def _count_unique_requirement_targets(self, requirements) -> int:
+        """Count distinct requirement behaviors, not duplicate requirement rows."""
+        return len({
+            self._normalized_spec_task_key(getattr(req, "title", None))
+            for req in requirements
+            if self._normalized_spec_task_key(getattr(req, "title", None))
+        })
+
     def _create_spec_task_if_missing(self, title: str, priority: str) -> bool:
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import AutoPilotSpecTask
@@ -1637,32 +1990,168 @@ class AutoPilotPipeline:
             db.commit()
             return True
 
-    def _create_spec_tasks_from_requirements(self, requirements):
+    def _create_spec_tasks_from_requirements(self, requirements) -> int:
         """Create AutoPilotSpecTask records for each requirement."""
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import AutoPilotSpecTask
 
+        created = 0
         with Session(engine) as db:
-            existing_titles = set(
-                db.exec(
-                    select(AutoPilotSpecTask.requirement_title).where(
-                        AutoPilotSpecTask.session_id == self.session_id
-                    )
-                ).all()
-            )
+            existing_tasks = db.exec(
+                select(AutoPilotSpecTask).where(
+                    AutoPilotSpecTask.session_id == self.session_id
+                )
+            ).all()
+            existing_requirement_ids = {
+                task.requirement_id for task in existing_tasks if task.requirement_id is not None
+            }
+            existing_titles = {
+                self._normalized_spec_task_key(task.requirement_title)
+                for task in existing_tasks
+            }
             for req in requirements:
-                if req.title in existing_titles:
+                req_id = getattr(req, "id", None)
+                key = self._normalized_spec_task_key(req.title)
+                if (req_id is not None and req_id in existing_requirement_ids) or key in existing_titles:
                     continue
                 task = AutoPilotSpecTask(
                     session_id=self.session_id,
-                    requirement_id=getattr(req, "id", None),
+                    requirement_id=req_id,
                     requirement_title=req.title,
                     priority=req.priority,
                     status="pending",
                 )
                 db.add(task)
-                existing_titles.add(req.title)
+                existing_titles.add(key)
+                if req_id is not None:
+                    existing_requirement_ids.add(req_id)
+                created += 1
             db.commit()
+        return created
+
+    def _create_spec_tasks_from_test_ideas(self, test_ideas) -> int:
+        """Create AutoPilotSpecTask records for generated test ideas."""
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSpecTask
+
+        created = 0
+        with Session(engine) as db:
+            existing_tasks = db.exec(
+                select(AutoPilotSpecTask).where(
+                    AutoPilotSpecTask.session_id == self.session_id
+                )
+            ).all()
+            existing_titles = {
+                self._normalized_spec_task_key(task.requirement_title)
+                for task in existing_tasks
+            }
+            for idea in test_ideas:
+                requirement_id = self._lookup_requirement_id_for_test_idea(idea)
+                key = self._normalized_spec_task_key(idea.title)
+                if key in existing_titles:
+                    continue
+                task = AutoPilotSpecTask(
+                    session_id=self.session_id,
+                    requirement_id=requirement_id,
+                    requirement_title=idea.title,
+                    priority=idea.priority,
+                    status="pending",
+                )
+                db.add(task)
+                existing_titles.add(key)
+                created += 1
+            db.commit()
+        return created
+
+    def _has_spec_tasks(self) -> bool:
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSpecTask
+
+        with Session(engine) as db:
+            stmt = select(AutoPilotSpecTask).where(AutoPilotSpecTask.session_id == self.session_id).limit(1)
+            return db.exec(stmt).first() is not None
+
+    def _count_spec_tasks(self) -> int:
+        from sqlalchemy import func
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSpecTask
+
+        with Session(engine) as db:
+            stmt = select(func.count()).select_from(AutoPilotSpecTask).where(
+                AutoPilotSpecTask.session_id == self.session_id
+            )
+            return int(db.exec(stmt).one())
+
+    def _count_completed_spec_tasks(self) -> int:
+        from sqlalchemy import func
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSpecTask
+
+        with Session(engine) as db:
+            stmt = (
+                select(func.count())
+                .select_from(AutoPilotSpecTask)
+                .where(AutoPilotSpecTask.session_id == self.session_id)
+                .where(AutoPilotSpecTask.status == "completed")
+                .where(AutoPilotSpecTask.spec_path.isnot(None))
+            )
+            return int(db.exec(stmt).one())
+
+    def _count_pending_spec_tasks(self) -> int:
+        from sqlalchemy import func
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSpecTask
+
+        with Session(engine) as db:
+            stmt = (
+                select(func.count())
+                .select_from(AutoPilotSpecTask)
+                .where(AutoPilotSpecTask.session_id == self.session_id)
+                .where(AutoPilotSpecTask.status == "pending")
+            )
+            return int(db.exec(stmt).one())
+
+    def _load_open_spec_tasks(self):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSpecTask
+
+        with Session(engine) as db:
+            stmt = (
+                select(AutoPilotSpecTask)
+                .where(AutoPilotSpecTask.session_id == self.session_id)
+                .where(AutoPilotSpecTask.status.in_(["pending", "failed"]))
+            )
+            return db.exec(stmt).all()
+
+    def _count_terminal_test_tasks(self) -> int:
+        from sqlalchemy import func
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotTestTask
+
+        with Session(engine) as db:
+            stmt = (
+                select(func.count())
+                .select_from(AutoPilotTestTask)
+                .where(AutoPilotTestTask.session_id == self.session_id)
+                .where(AutoPilotTestTask.status.in_(["passed", "failed", "error", "skipped"]))
+            )
+            return int(db.exec(stmt).one())
+
+    def _count_test_task_statuses(self) -> dict[str, int]:
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotTestTask
+
+        counts = {"passed": 0, "failed": 0, "error": 0, "skipped": 0, "pending": 0, "running": 0, "paused": 0}
+        with Session(engine) as db:
+            stmt = select(AutoPilotTestTask).where(AutoPilotTestTask.session_id == self.session_id)
+            for task in db.exec(stmt).all():
+                status = task.status if task.status in counts else "error"
+                counts[status] += 1
+        return counts
 
     def _create_spec_tasks_from_test_ideas(self, test_ideas):
         """Create AutoPilotSpecTask records for generated test ideas."""
@@ -1736,6 +2225,27 @@ class AutoPilotPipeline:
                 db.add(task)
                 db.commit()
 
+    def _skip_spec_tasks(self, task_ids: list[int], reason: str):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSpecTask
+
+        if not task_ids:
+            return
+
+        with Session(engine) as db:
+            stmt = (
+                select(AutoPilotSpecTask)
+                .where(AutoPilotSpecTask.id.in_(task_ids))
+                .where(AutoPilotSpecTask.session_id == self.session_id)
+                .where(AutoPilotSpecTask.status.in_(["pending", "failed"]))
+            )
+            for task in db.exec(stmt).all():
+                task.status = "skipped"
+                task.error_message = reason[:1000]
+                task.completed_at = datetime.utcnow()
+                db.add(task)
+            db.commit()
+
     def _generate_spec_from_task(
         self,
         task,
@@ -1748,6 +2258,12 @@ class AutoPilotPipeline:
         from the exploration store), and the exploration context.
         """
         from orchestrator.memory.exploration_store import get_exploration_store
+        from orchestrator.workflows.spec_scenario_builder import (
+            render_scenario_markdown,
+            sanitize_filename,
+            scenario_from_requirement,
+            scenario_from_test_idea,
+        )
 
         store = get_exploration_store(project_id=config.project_id)
 
@@ -1762,37 +2278,24 @@ class AutoPilotPipeline:
                 None,
             )
 
-        idea = self._get_test_idea_for_task(task.requirement_title, config.project_id) if task.requirement_title else None
+        idea = (
+            self._get_test_idea_for_task(task.requirement_title, config.project_id)
+            if task.requirement_title
+            else None
+        )
 
-        # Build spec content
         title = task.requirement_title or "Unnamed Test"
-        safe_name = re.sub(r"[^\w\s-]", "", title.lower())
-        safe_name = re.sub(r"[\s]+", "-", safe_name.strip())[:60]
-        spec_filename = f"{safe_name}.md"
+        safe_name = sanitize_filename(title)[:60]
+        task_suffix = getattr(task, "id", None) or uuid.uuid4().hex[:8]
+        spec_filename = f"{safe_name}-{task_suffix}.md"
         spec_path = specs_dir / spec_filename
 
         # Determine target URL from exploration sessions
         target_url = config.entry_urls[0] if config.entry_urls else "https://example.com"
 
-        # Build steps from requirement and exploration data
-        description_lines = []
-        steps = []
-        expected_outcomes = []
-
         if idea:
-            description_lines.append(idea.get("description") or f"Test idea: {title}")
-            steps = list(idea.get("suggested_steps") or [])
-            expected_outcomes = list(idea.get("expected_outcomes") or [])
-            source_requirements = idea.get("source_requirements") or []
-            if source_requirements:
-                description_lines.append(f"Source requirement(s): {', '.join(source_requirements[:5])}")
-            source_flows = idea.get("source_flows") or []
-            if source_flows:
-                description_lines.append(f"Source flow(s): {', '.join(source_flows[:5])}")
-
-        if req and not idea:
-            description_lines.append(req.description or f"Test for: {req.title}")
-
+            scenario = scenario_from_test_idea(idea, target_url=target_url, fallback_title=title)
+        elif req:
             # Try to find matching flow for step details
             exploration_ids = self._get_session_exploration_ids()
             matching_flow = None
@@ -1806,50 +2309,85 @@ class AutoPilotPipeline:
                 if matching_flow:
                     break
 
+            flow_steps = []
+            source_flows = []
             if matching_flow:
                 target_url = matching_flow.start_url or target_url
-                flow_steps = store.get_flow_steps(matching_flow.id)
-                for fs in flow_steps:
+                source_flows.append(matching_flow.flow_name)
+                for fs in store.get_flow_steps(matching_flow.id):
                     if fs.value is not None:
-                        steps.append(
+                        flow_steps.append(
                             f'{fs.action_type.capitalize()} "{fs.value}" into the {fs.element_name or "field"}'
                         )
                     else:
-                        steps.append(f"{fs.action_type.capitalize()} the {fs.element_name or 'element'}")
+                        flow_steps.append(f"{fs.action_type.capitalize()} the {fs.element_name or 'element'}")
 
-            # Acceptance criteria become expected outcomes
-            if req.acceptance_criteria:
-                expected_outcomes = list(req.acceptance_criteria)
+            scenario = scenario_from_requirement(
+                title=req.title,
+                description=req.description or f"Test for: {req.title}",
+                target_url=target_url,
+                acceptance_criteria=list(req.acceptance_criteria or []),
+                flow_steps=flow_steps,
+                priority=req.priority,
+                category=req.category,
+                source_flows=source_flows,
+            )
         else:
-            description_lines.append(f"Automated test for: {title}")
+            scenario = scenario_from_requirement(
+                title=title,
+                description=f"Automated test for: {title}",
+                target_url=target_url,
+                flow_steps=[f"Verify {title}"],
+            )
 
-        # Fallback steps if none derived from flow
-        if not steps:
-            steps = [f"Navigate to {target_url}", f"Verify {title}"]
-
-        if not expected_outcomes:
-            expected_outcomes = [f"{title} works as expected"]
-
-        # Build markdown
-        spec_content = f"# Test: {title}\n\n"
-        spec_content += "## Description\n"
-        spec_content += "\n".join(description_lines) + "\n\n"
-        spec_content += "## Steps\n"
-        # Always start with navigation
-        if not any("navigate" in s.lower() for s in steps):
-            spec_content += f"1. Navigate to {target_url}\n"
-            for i, step in enumerate(steps, 2):
-                spec_content += f"{i}. {step}\n"
-        else:
-            for i, step in enumerate(steps, 1):
-                spec_content += f"{i}. {step}\n"
-        spec_content += "\n## Expected Outcome\n"
-        for outcome in expected_outcomes:
-            spec_content += f"- {outcome}\n"
-
-        spec_path.write_text(spec_content)
+        spec_path.write_text(render_scenario_markdown(scenario))
+        has_richer_source = self._source_has_richer_e2e_evidence(
+            idea,
+            locals().get("flow_steps", []),
+        )
+        if has_richer_source and not self._spec_has_actionable_e2e_steps(str(spec_path)):
+            raise ValueError(
+                f"Generated spec for '{title}' collapsed richer source evidence into a smoke check"
+            )
         logger.info(f"Generated spec: {spec_path}")
         return spec_path
+
+    def _source_has_richer_e2e_evidence(self, idea: dict[str, Any] | None, flow_steps: list[str] | None) -> bool:
+        """Return True when upstream evidence should produce a real E2E scenario."""
+        if idea:
+            combined = " ".join(
+                str(item)
+                for item in (
+                    list(idea.get("suggested_steps") or [])
+                    + list(idea.get("expected_outcomes") or [])
+                    + list(idea.get("source_flows") or [])
+                )
+            ).lower()
+            if any(
+                term in combined
+                for term in (
+                    "click",
+                    "fill",
+                    "enter",
+                    "submit",
+                    "select",
+                    "search",
+                    "filter",
+                    "login",
+                    "redirect",
+                    "keyboard",
+                    "viewport",
+                    "console",
+                    "accessibility",
+                )
+            ):
+                return True
+
+        combined_steps = " ".join(flow_steps or []).lower()
+        return any(
+            term in combined_steps
+            for term in ("click", "fill", "enter", "submit", "select", "search", "filter")
+        )
 
     def _get_test_idea_for_task(self, title: str, project_id: str) -> dict[str, Any] | None:
         """Look up a generated test idea by exact title."""
@@ -1900,23 +2438,34 @@ class AutoPilotPipeline:
                     select(AutoPilotTestTask)
                     .where(AutoPilotTestTask.session_id == self.session_id)
                     .where(AutoPilotTestTask.spec_task_id == st.id)
+                    .order_by(AutoPilotTestTask.id)
                 )
-                existing = db.exec(stmt).first()
+                existing_tasks = db.exec(stmt).all()
+                existing = existing_tasks[0] if existing_tasks else None
+
+                for duplicate in existing_tasks[1:]:
+                    if duplicate.status not in ("passed", "skipped"):
+                        duplicate.status = "skipped"
+                        duplicate.error_summary = "Duplicate test task superseded by canonical task"
+                        duplicate.completed_at = datetime.utcnow()
+                        db.add(duplicate)
 
                 if existing and existing.status in ("passed",):
                     # Already passed, skip
                     continue
 
-                if existing and existing.status in ("pending", "failed", "error"):
+                if existing and existing.status in ("pending", "running", "paused", "failed", "error", "skipped"):
                     # Re-attempt
                     existing.status = "pending"
                     existing.error_summary = None
                     existing.started_at = None
                     existing.completed_at = None
+                    existing.passed = None
+                    existing.run_id = existing.run_id or self._build_test_run_id(existing.id or st.id, st.spec_name or st.spec_path)
                     db.add(existing)
                     db.commit()
                     db.refresh(existing)
-                    result_tuples.append((existing.id, st.spec_path, st.spec_name or Path(st.spec_path).stem))
+                    result_tuples.append((existing.id, st.spec_path, st.spec_name or Path(st.spec_path).stem, existing.run_id))
                     continue
 
                 # Create new test task
@@ -1930,9 +2479,45 @@ class AutoPilotPipeline:
                 db.add(tt)
                 db.commit()
                 db.refresh(tt)
-                result_tuples.append((tt.id, st.spec_path, tt.spec_name or "unknown"))
+                tt.run_id = self._build_test_run_id(tt.id, tt.spec_name or st.spec_path)
+                db.add(tt)
+                db.commit()
+                db.refresh(tt)
+                result_tuples.append((tt.id, st.spec_path, tt.spec_name or "unknown", tt.run_id))
 
         return result_tuples
+
+    def _build_test_run_id(self, task_id: int | None, spec_name: str | None) -> str:
+        safe_spec = self._sanitize_test_filename(spec_name or "test")
+        return f"{self.session_id}-task-{task_id or 'new'}-{safe_spec}"[:160]
+
+    def _ensure_test_run_record(self, db: Session, task) -> None:
+        from orchestrator.api.models_db import TestRun
+
+        if not task.run_id:
+            return
+        run = db.get(TestRun, task.run_id)
+        if not run:
+            run = TestRun(
+                id=task.run_id,
+                spec_name=task.spec_name or task.spec_path or f"autopilot-task-{task.id}",
+                test_name=task.spec_name,
+                status=task.status,
+                project_id=self.project_id,
+                browser="chromium",
+                test_type="browser",
+            )
+        run.spec_name = task.spec_name or run.spec_name
+        run.test_name = task.spec_name or run.test_name
+        run.status = task.status
+        run.current_stage = task.current_stage
+        run.stage_message = task.error_summary or task.current_stage
+        run.error_message = task.error_summary if task.status in ("failed", "error") else None
+        run.healing_attempt = task.healing_attempt
+        run.started_at = task.started_at or run.started_at
+        if task.status in ("passed", "failed", "error", "paused", "cancelled", "skipped"):
+            run.completed_at = task.completed_at
+        db.add(run)
 
     def _update_test_task(
         self,
@@ -1940,7 +2525,9 @@ class AutoPilotPipeline:
         status: str,
         passed: bool = None,
         test_path: str = None,
+        current_stage: str = None,
         error_summary: str = None,
+        healing_attempt: int | None = None,
     ):
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import AutoPilotTestTask
@@ -1948,16 +2535,24 @@ class AutoPilotPipeline:
         with Session(engine) as db:
             task = db.get(AutoPilotTestTask, task_id)
             if task:
+                if task.status == "paused" and status != "pending":
+                    logger.info(f"Skipping stale update for paused Auto Pilot test task {task_id}: {status}")
+                    return
                 task.status = status
                 if passed is not None:
                     task.passed = passed
                 if test_path:
                     task.test_path = test_path
+                if current_stage:
+                    task.current_stage = current_stage[:100]
                 if error_summary:
                     task.error_summary = error_summary[:1000]
+                if healing_attempt is not None:
+                    task.healing_attempt = healing_attempt
                 if status == "running":
                     task.started_at = datetime.utcnow()
-                if status in ("passed", "failed", "error"):
+                if status in ("passed", "failed", "error", "paused"):
                     task.completed_at = datetime.utcnow()
                 db.add(task)
+                self._ensure_test_run_record(db, task)
                 db.commit()

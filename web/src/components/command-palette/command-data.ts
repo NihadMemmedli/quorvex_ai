@@ -2,6 +2,7 @@ import {
     Home, FileText, Play, Settings, BarChart2, ClipboardList, FlaskConical,
     Compass, CheckSquare, Users, Shield, Zap, Activity, Database, BrainCircuit,
     TrendingUp, Clock, GitBranch, MessageSquare, Plus, Search, Upload, Layers,
+    Workflow, FolderOpen, Rocket, PieChart, Brain, Bot,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
@@ -71,19 +72,24 @@ export const quickActions: CommandItem[] = [
 export const navigationItems: CommandItem[] = [
     // Top-level
     { id: 'nav-overview', label: 'Overview', icon: Home, href: '/', keywords: ['home', 'overview', 'dashboard', 'main'], category: 'navigation', group: 'General' },
+    { id: 'nav-workflow', label: 'AI Workflows', icon: Workflow, href: '/workflow', keywords: ['ai', 'workflow', 'workflows', 'automation', 'pipeline'], category: 'navigation', group: 'General' },
     { id: 'nav-reporting', label: 'Reporting', icon: BarChart2, href: '/dashboard', keywords: ['reporting', 'report', 'charts', 'data'], category: 'navigation', group: 'General' },
     { id: 'nav-assistant', label: 'AI Assistant', icon: MessageSquare, href: '/assistant', keywords: ['ai', 'assistant', 'chat'], category: 'navigation', group: 'General' },
+    { id: 'nav-projects', label: 'Projects', icon: FolderOpen, href: '/projects', keywords: ['projects', 'project', 'workspace'], category: 'navigation', group: 'General' },
 
     // Test Management
     { id: 'nav-prd', label: 'PRD', icon: ClipboardList, href: '/prd', keywords: ['prd', 'product', 'requirements', 'document'], category: 'navigation', group: 'Test Management' },
     { id: 'nav-specs', label: 'Test Specs', icon: FileText, href: '/specs', keywords: ['specs', 'specifications', 'test', 'cases'], category: 'navigation', group: 'Test Management' },
+    { id: 'nav-templates', label: 'Templates', icon: FileText, href: '/templates', keywords: ['templates', 'template', 'reusable', 'spec'], category: 'navigation', group: 'Test Management' },
     { id: 'nav-runs', label: 'Test Runs', icon: Play, href: '/runs', keywords: ['runs', 'execution', 'results', 'test'], category: 'navigation', group: 'Test Management' },
     { id: 'nav-regression', label: 'Regression', icon: FlaskConical, href: '/regression', keywords: ['regression', 'suite', 'batch'], category: 'navigation', group: 'Test Management' },
     { id: 'nav-batches', label: 'Batch Reports', icon: Layers, href: '/regression/batches', keywords: ['batch', 'reports', 'regression'], category: 'navigation', group: 'Test Management' },
 
     // Discovery
+    { id: 'nav-autopilot', label: 'Auto Pilot', icon: Rocket, href: '/autopilot', keywords: ['auto', 'autopilot', 'pilot', 'agent', 'automatic'], category: 'navigation', group: 'Discovery' },
     { id: 'nav-exploration', label: 'Discovery', icon: Compass, href: '/exploration', keywords: ['discovery', 'exploration', 'explore', 'crawl'], category: 'navigation', group: 'Discovery' },
     { id: 'nav-requirements', label: 'Requirements', icon: CheckSquare, href: '/requirements', keywords: ['requirements', 'req', 'rtm', 'traceability'], category: 'navigation', group: 'Discovery' },
+    { id: 'nav-coverage', label: 'Coverage', icon: PieChart, href: '/coverage', keywords: ['coverage', 'traceability', 'gaps', 'quality'], category: 'navigation', group: 'Discovery' },
 
     // Specialized Testing
     { id: 'nav-api-testing', label: 'API Testing', icon: Zap, href: '/api-testing', keywords: ['api', 'rest', 'http', 'endpoint'], category: 'navigation', group: 'Specialized Testing' },
@@ -96,6 +102,8 @@ export const navigationItems: CommandItem[] = [
     { id: 'nav-analytics', label: 'Analytics', icon: TrendingUp, href: '/analytics', keywords: ['analytics', 'trends', 'flake', 'insights'], category: 'navigation', group: 'Operations' },
     { id: 'nav-schedules', label: 'Schedules', icon: Clock, href: '/schedules', keywords: ['schedule', 'cron', 'timer', 'recurring'], category: 'navigation', group: 'Operations' },
     { id: 'nav-cicd', label: 'CI/CD', icon: GitBranch, href: '/ci-cd', keywords: ['cicd', 'ci', 'cd', 'pipeline', 'github', 'gitlab'], category: 'navigation', group: 'Operations' },
+    { id: 'nav-memory', label: 'Memory', icon: Brain, href: '/memory', keywords: ['memory', 'semantic', 'patterns', 'knowledge'], category: 'navigation', group: 'Operations' },
+    { id: 'nav-agents', label: 'Agents', icon: Bot, href: '/agents', keywords: ['agents', 'agent', 'worker', 'automation'], category: 'navigation', group: 'Operations' },
 
     // Settings
     { id: 'nav-settings', label: 'Settings', icon: Settings, href: '/settings', keywords: ['settings', 'config', 'preferences'], category: 'navigation', group: 'Settings' },

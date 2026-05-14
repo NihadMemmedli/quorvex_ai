@@ -48,9 +48,6 @@ def is_valid_flow(record: Any) -> tuple[bool, str | None]:
         return False, "missing name"
     if not _has_text(getattr(record, "start_url", None)) and not _has_text(getattr(record, "end_url", None)):
         return False, "missing start_url/end_url"
-    category = getattr(record, "category", None)
-    if category and str(category).strip().lower() not in VALID_FLOW_CATEGORIES:
-        return False, f"invalid category {category}"
     steps = getattr(record, "steps", None)
     if steps is not None:
         if not isinstance(steps, list):

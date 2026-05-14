@@ -257,6 +257,19 @@ class AppExplorer:
             # Parse the exploration output
             logger.info("Processing exploration results...")
 
+            successful_browser_tool_calls = int(self._last_agent_stats.get("successful_browser_tool_calls", 0) or 0)
+            if successful_browser_tool_calls <= 0:
+                raise RuntimeError(
+                    "Explorer did not perform successful live browser exploration. "
+                    "Check Playwright MCP startup, allowed tools, and agent configuration."
+                )
+
+            if self._is_unverified_agent_output(raw_output):
+                raise RuntimeError(
+                    "Explorer output says live browser tools were unavailable, so no verified exploration "
+                    "results can be used. Check Playwright MCP/agent configuration."
+                )
+
             result = self._parse_exploration_output(
                 raw_output=raw_output, session_id=session_id, entry_url=config.entry_url
             )
@@ -288,17 +301,14 @@ class AppExplorer:
                 )
                 used_deterministic_fallback = bool(result.transitions or result.flows)
 
-            # AI-powered JSON recovery when regex parsing found zero objects
             if (
                 not used_deterministic_fallback
                 and
                 result.status == "failed"
                 and not result.transitions
                 and not result.flows
-                and raw_output
-                and len(raw_output) > 500
             ):
-                logger.info("   Initial parsing found zero JSON — attempting AI-powered recovery...")
+                logger.info("   No structured exploration data parsed — attempting AI-powered recovery...")
                 recovered_objects = await self._run_ai_json_recovery(raw_output, session_dir)
                 if recovered_objects:
                     result = self._parse_exploration_output(
@@ -345,11 +355,10 @@ class AppExplorer:
                         logger.info(f"   Synthesized {len(new_flows)} additional flows")
                         result.flows.extend(new_flows)
 
-            # Text-based flow synthesis fallback: when no transitions were parsed
-            # but raw output is substantial, use AI to extract flows from prose
+            # Text-based flow synthesis from verified live-browser output.
+            # This is only reached after successful browser tool calls above.
             if (
-                not used_deterministic_fallback
-                and len(result.flows) == 0
+                len(result.flows) == 0
                 and len(result.transitions) == 0
                 and raw_output
                 and len(raw_output) > 2000
@@ -369,12 +378,19 @@ class AppExplorer:
                             f"No structured JSON parsed, but text synthesis recovered {len(text_flows)} flows."
                         )
 
+            if result.status == "failed" and not result.transitions and not result.flows:
+                raise RuntimeError(
+                    result.error_message
+                    or "Explorer produced no structured transitions or flows from live browser exploration."
+                )
+
             validation_summary = validate_exploration_result(result)
             quality_summary = assess_exploration_quality(
                 result,
-                fallback_used=used_deterministic_fallback,
-                verified_tool_calls=int(self._last_agent_stats.get("tool_calls", 0) or 0),
+                fallback_used=False,
+                verified_tool_calls=successful_browser_tool_calls,
             )
+            quality_summary.pop("fallback_used", None)
             result.validation_summary = validation_summary
             result.quality_summary = quality_summary
             result.quality_score = int(quality_summary["quality_score"])
@@ -859,17 +875,32 @@ visit your queued URLs before exploring the current page further.
 
         logger.info(f"   Timeout: {timeout}s ({timeout // 60} minutes)")
 
-        # Create per-session MCP config for browser isolation
-        # This mirrors the pattern from main.py:3948-3968 for test runs
+        # Create per-session MCP config for browser isolation.
+        # Use a schema-correct Playwright MCP package. Older 0.0.28 builds expose
+        # connected MCP servers with invalid/empty tool schemas, which makes
+        # Claude silently lose access to browser tools.
         headless = os.environ.get("HEADLESS", "true").lower() != "false"
-        mcp_args = ["@playwright/mcp", "--browser", "chromium"]
+        mcp_server = self._build_playwright_mcp_server_config()
+        mcp_args = list(mcp_server["args"])
         if headless:
             mcp_args.append("--headless")
 
-        mcp_config = {"mcpServers": {"playwright-test": {"command": "npx", "args": mcp_args}}}
+        mcp_config = {
+            "mcpServers": {
+                "playwright-test": {
+                    "command": mcp_server["command"],
+                    "args": mcp_args,
+                }
+            }
+        }
         mcp_config_path = session_dir / ".mcp.json"
         mcp_config_path.write_text(json.dumps(mcp_config, indent=2))
-        logger.info(f"   Created MCP config (headless={headless}): {mcp_config_path}")
+        logger.info(
+            "   Created MCP config (headless=%s, command=%s): %s",
+            headless,
+            mcp_server["command"],
+            mcp_config_path,
+        )
 
         # Copy .claude/ agents directory for isolation
         import shutil
@@ -931,10 +962,18 @@ visit your queued URLs before exploring the current page further.
             )
 
             result = await runner.run(prompt)
+            browser_tool_calls = [
+                call
+                for call in result.tool_calls
+                if call.name.startswith("mcp__") and "__browser_" in call.name
+            ]
+            successful_browser_tool_calls = sum(1 for call in browser_tool_calls if call.success)
             self._last_agent_stats = {
                 "messages_received": result.messages_received,
                 "text_blocks_received": result.text_blocks_received,
                 "tool_calls": len(result.tool_calls),
+                "browser_tool_calls": len(browser_tool_calls),
+                "successful_browser_tool_calls": successful_browser_tool_calls,
                 "duration_seconds": result.duration_seconds,
                 "timed_out": result.timed_out,
             }
@@ -942,7 +981,8 @@ visit your queued URLs before exploring the current page further.
             # Log diagnostics
             logger.info(
                 f"   Agent stats: {result.messages_received} messages, "
-                f"{len(result.tool_calls)} tool calls, "
+                f"{len(result.tool_calls)} tool calls "
+                f"({successful_browser_tool_calls}/{len(browser_tool_calls)} successful browser), "
                 f"{result.duration_seconds:.1f}s"
             )
 
@@ -975,6 +1015,57 @@ visit your queued URLs before exploring the current page further.
             os.chdir(original_cwd)
             logger.info(f"   CWD restored to: {original_cwd}")
 
+    def _build_playwright_mcp_server_config(self) -> dict[str, Any]:
+        """Return a reliable Playwright MCP server command.
+
+        The local node_modules binary is used only when it is new enough to expose
+        valid JSON schemas for tools. Environment overrides keep Docker/custom
+        installs configurable.
+        """
+        override = os.environ.get("PLAYWRIGHT_MCP_COMMAND")
+        if override:
+            args = os.environ.get("PLAYWRIGHT_MCP_ARGS", "--browser chromium").split()
+            return {"command": override, "args": args}
+
+        project_root = Path(__file__).resolve().parent.parent.parent
+        local_bins = [
+            project_root / "node_modules" / ".bin" / "playwright-mcp",
+            project_root / "node_modules" / ".bin" / "mcp-server-playwright",
+        ]
+        local_pkg = project_root / "node_modules" / "@playwright" / "mcp" / "package.json"
+        min_version = os.environ.get("PLAYWRIGHT_MCP_MIN_VERSION", "0.0.75")
+        if self._is_package_version_at_least(local_pkg, min_version):
+            for local_bin in local_bins:
+                if local_bin.exists():
+                    return {"command": str(local_bin), "args": ["--browser", "chromium"]}
+
+        package = os.environ.get("PLAYWRIGHT_MCP_PACKAGE", f"@playwright/mcp@{min_version}")
+        return {"command": "npx", "args": ["-y", package, "--browser", "chromium"]}
+
+    @staticmethod
+    def _is_package_version_at_least(package_json: Path, minimum: str) -> bool:
+        """Return whether package_json declares a semver version >= minimum."""
+        if not package_json.exists():
+            return False
+        try:
+            package = json.loads(package_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+
+        def parse(version: str) -> tuple[int, int, int]:
+            core = str(version).split("-", 1)[0]
+            parts = []
+            for part in core.split(".")[:3]:
+                try:
+                    parts.append(int(part))
+                except ValueError:
+                    parts.append(0)
+            while len(parts) < 3:
+                parts.append(0)
+            return tuple(parts)  # type: ignore[return-value]
+
+        return parse(str(package.get("version", "0.0.0"))) >= parse(minimum)
+
     def _is_unverified_agent_output(self, raw_output: str | None) -> bool:
         """Detect agent output that explicitly admits it was not live browser exploration."""
         if not raw_output:
@@ -993,216 +1084,6 @@ visit your queued URLs before exploring the current page further.
             "based on stable information",
         ]
         return any(indicator in lowered for indicator in indicators)
-
-    async def _run_http_fallback_exploration(
-        self,
-        config: ExplorationConfig,
-        session_id: str,
-        reason: str,
-    ) -> ExplorationResult:
-        """Deterministic fallback that discovers reachable pages without AI browser tools.
-
-        This is intentionally conservative: it records only HTTP-observed pages
-        and generic navigation flows between known portal routes. It prevents
-        unverified LLM prose from being treated as exploration truth while still
-        keeping the downstream Auto Pilot pipeline moving.
-        """
-        try:
-            import httpx
-        except ImportError as exc:
-            return ExplorationResult(
-                session_id=session_id,
-                entry_url=config.entry_url,
-                status="failed",
-                error_message=f"HTTP fallback unavailable: {exc}",
-            )
-
-        parsed_entry = urlparse(config.entry_url)
-        origin = f"{parsed_entry.scheme}://{parsed_entry.netloc}"
-        entry_path = parsed_entry.path or "/"
-
-        candidate_paths = [
-            entry_path,
-            "/",
-            "/serviceCategories",
-            "/lifeEvents",
-            "/allServices",
-            "/services",
-            "/news",
-            "/entities",
-            "/login",
-            "/cabinet",
-        ]
-        if config.login_url:
-            login = urlparse(config.login_url)
-            candidate_paths.append(login.path or config.login_url)
-
-        seen_paths: set[str] = set()
-        urls: list[str] = []
-        for path in candidate_paths:
-            if not path:
-                continue
-            url = path if path.startswith(("http://", "https://")) else urljoin(origin, path)
-            normalized = url.rstrip("/") or url
-            if normalized in seen_paths:
-                continue
-            if any(re.search(pattern, url) for pattern in config.exclude_patterns):
-                continue
-            seen_paths.add(normalized)
-            urls.append(url)
-
-        max_pages = max(1, min(len(urls), max(config.max_interactions, 3), 10))
-        urls = urls[:max_pages]
-
-        transitions: list[TransitionRecord] = []
-        flows: list[FlowRecord] = []
-        issues: list[IssueRecord] = []
-        api_endpoints: list[dict[str, Any]] = []
-        pages_seen: set[str] = set()
-        element_count = 0
-
-        async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=20) as client:
-            for index, url in enumerate(urls, start=1):
-                before_url = "about:blank" if index == 1 else config.entry_url
-                try:
-                    response = await client.get(url)
-                except Exception as exc:
-                    issues.append(
-                        IssueRecord(
-                            issue_type="error_page",
-                            severity="medium",
-                            url=url,
-                            description=f"HTTP fallback could not fetch page: {exc}",
-                            evidence=type(exc).__name__,
-                        )
-                    )
-                    continue
-
-                final_url = str(response.url)
-                page_type = self._infer_page_type(final_url)
-                key_elements = self._extract_http_key_elements(response.text)
-                element_count += len(key_elements)
-                pages_seen.add(final_url)
-
-                if response.status_code >= 400:
-                    issues.append(
-                        IssueRecord(
-                            issue_type="error_page",
-                            severity="medium" if response.status_code < 500 else "high",
-                            url=final_url,
-                            description=f"HTTP fallback received status {response.status_code}",
-                            evidence=f"HTTP {response.status_code}",
-                        )
-                    )
-                    continue
-
-                transition = TransitionRecord(
-                    sequence=len(transitions) + 1,
-                    action_type="navigate",
-                    action_element={"role": "page", "name": self._friendly_page_name(final_url)},
-                    action_value=url,
-                    before_url=before_url,
-                    before_page_type="blank" if index == 1 else self._infer_page_type(before_url),
-                    before_elements=[],
-                    after_url=final_url,
-                    after_page_type=page_type,
-                    after_elements=key_elements,
-                    transition_type="navigation",
-                    api_calls=[],
-                    changes_description=f"Fetched page via deterministic HTTP fallback ({reason})",
-                )
-                transitions.append(transition)
-
-                flows.append(
-                    FlowRecord(
-                        name=f"{self._friendly_page_name(final_url)} Browse",
-                        category="navigation" if page_type != "login" else "authentication",
-                        steps=[
-                            {"action": "navigate", "element": "URL", "value": url},
-                            {"action": "observe", "element": self._friendly_page_name(final_url)},
-                        ],
-                        start_url=url,
-                        end_url=final_url,
-                        outcome=f"Page returned HTTP {response.status_code} and rendered as {page_type}",
-                        is_success_path=response.status_code < 400,
-                        preconditions=[],
-                        postconditions=[f"{page_type} page reachable"],
-                    )
-                )
-
-        result = ExplorationResult(
-            session_id=session_id,
-            entry_url=config.entry_url,
-            status="completed" if transitions else "failed",
-            transitions=self._deduplicate_transitions(transitions),
-            flows=self._deduplicate_flows(flows),
-            api_endpoints=api_endpoints,
-            issues=issues,
-            pages_discovered=len(pages_seen),
-            elements_discovered=element_count,
-            error_message=None if transitions else "Deterministic HTTP fallback found no reachable pages",
-        )
-        logger.info(
-            "   HTTP fallback discovered %s pages, %s flows, %s issues",
-            result.pages_discovered,
-            len(result.flows),
-            len(result.issues),
-        )
-        return result
-
-    def _infer_page_type(self, url: str) -> str:
-        path = urlparse(url).path.strip("/").lower()
-        if not path:
-            return "homepage"
-        if "login" in path:
-            return "login"
-        if "cabinet" in path:
-            return "protected_area"
-        if "life" in path:
-            return "life_events"
-        if "servicecategories" in path:
-            return "service_categories"
-        if "service" in path:
-            return "services"
-        if "news" in path:
-            return "news"
-        if "entities" in path:
-            return "entities"
-        return path.replace("/", "_") or "page"
-
-    def _friendly_page_name(self, url: str) -> str:
-        page_type = self._infer_page_type(url)
-        return page_type.replace("_", " ").title()
-
-    def _extract_http_key_elements(self, html: str) -> list[str]:
-        class ElementCounter(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.counts = {"link": 0, "button": 0, "input": 0, "form": 0}
-
-            def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
-                if tag == "a":
-                    self.counts["link"] += 1
-                elif tag == "button":
-                    self.counts["button"] += 1
-                elif tag == "input":
-                    self.counts["input"] += 1
-                elif tag == "form":
-                    self.counts["form"] += 1
-
-        parser = ElementCounter()
-        try:
-            parser.feed(html or "")
-        except Exception:
-            return ["HTML document"]
-
-        elements = ["HTML document"]
-        for label, count in parser.counts.items():
-            if count:
-                elements.append(f"{count} {label}{'' if count == 1 else 's'}")
-        if "__NEXT_DATA__" in html:
-            elements.append("Next.js data payload")
-        return elements
 
     def _deduplicate_flows(self, flows: list[FlowRecord]) -> list[FlowRecord]:
         """Deduplicate flows by normalized (name, start_url, end_url) tuple. Keeps first occurrence."""
@@ -1443,9 +1324,9 @@ visit your queued URLs before exploring the current page further.
                     transitions.append(transition)
 
                     # Track pages
-                    if before.get("url"):
+                    if before.get("url") and before["url"] != "about:blank":
                         pages_seen.add(before["url"])
-                    if after.get("url"):
+                    if after.get("url") and after["url"] != "about:blank":
                         pages_seen.add(after["url"])
 
                     # Extract API endpoints - prefer richApiCalls for detailed data
@@ -1551,23 +1432,6 @@ visit your queued URLs before exploring the current page further.
                         element=(t.action_element or {}).get("name"),
                     )
                 )
-
-        # URL text mining fallback: extract URLs from prose text matching entry domain
-        try:
-            from urllib.parse import urlparse
-
-            entry_domain = urlparse(entry_url).netloc
-            if entry_domain:
-                url_pattern = re.compile(r'https?://[^\s<>"\')\]]+', re.IGNORECASE)
-                for url_match in url_pattern.finditer(raw_output):
-                    found_url = url_match.group(0).rstrip(".,;:")
-                    try:
-                        if urlparse(found_url).netloc == entry_domain:
-                            pages_seen.add(found_url)
-                    except Exception:
-                        continue
-        except Exception:
-            pass
 
         # Deduplicate flows and transitions
         flows = self._deduplicate_flows(flows)

@@ -1,4 +1,5 @@
 .PHONY: setup setup-skills start restart dev run clean help docker-up docker-down docker-build check-env logs stop \
+        autopilot-stable-up autopilot-stable-down autopilot-dev-up autopilot-status autopilot-logs \
         prod-up prod-down prod-down-safe prod-restart prod-logs prod-build prod-build-no-cache prod-status prod-dev \
         backup backup-full backup-status restore-list restore restore-from-minio \
         archival archival-dry-run storage-health minio-console \
@@ -42,6 +43,13 @@ help:
 	@echo "    make prod-build     - Rebuild production images (with cache)"
 	@echo "    make prod-build-no-cache - Rebuild without cache (force fresh)"
 	@echo "    make prod-status    - Show status of all services"
+	@echo ""
+	@echo "  Auto Pilot local runtime:"
+	@echo "    make autopilot-stable-up   - Start stable local Auto Pilot stack"
+	@echo "    make autopilot-stable-down - Stop stable local Auto Pilot stack"
+	@echo "    make autopilot-dev-up      - Start Auto Pilot dev stack with hot reload"
+	@echo "    make autopilot-status      - Show Auto Pilot stack status and memory"
+	@echo "    make autopilot-logs        - Tail Auto Pilot backend/frontend logs"
 	@echo ""
 	@echo "  Backup & Recovery:"
 	@echo "    make backup         - Run database-only backup"
@@ -155,6 +163,8 @@ DOCKER_COMPOSE ?= docker compose
 # Common production docker-compose commands
 PROD_COMPOSE = docker compose --env-file .env.prod -f docker-compose.prod.yml
 APP_COMPOSE = $(PROD_COMPOSE) -f docker-compose.dev-override.yml
+AUTOPILOT_STABLE_COMPOSE = $(PROD_COMPOSE) -f docker-compose.autopilot-stable.yml
+BUILDX_CONFIG ?= /tmp/quorvex-buildx
 
 start:
 	@$(MAKE) prod-dev
@@ -313,6 +323,53 @@ prod-status:
 	@echo "Health checks:"
 	@curl -s http://localhost:8001/health 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "  Backend: Not responding"
 	@echo ""
+
+# ==========================================
+# AUTO PILOT LOCAL RUNTIME
+# ==========================================
+
+autopilot-stable-up:
+	@if [ ! -f ".env.prod" ]; then \
+		echo "No .env.prod file found. Creating from .env.prod.example..."; \
+		cp .env.prod.example .env.prod; \
+		echo "Created .env.prod — edit it with your API credentials."; \
+		echo ""; \
+	fi
+	@echo "Starting stable local Auto Pilot stack..."
+	@echo ""
+	@echo "Docker Desktop memory: set at least 12GB, recommended 16GB."
+	@echo "This mode disables backend reload, uses headless browser execution, raises frontend memory to 4G, and lowers local agent concurrency."
+	@echo ""
+	@mkdir -p $(BUILDX_CONFIG)
+	@BUILDX_CONFIG=$(BUILDX_CONFIG) $(AUTOPILOT_STABLE_COMPOSE) --profile standard up -d --build
+	@echo ""
+	@echo "Stable Auto Pilot mode started:"
+	@echo "  Dashboard: http://localhost:3000"
+	@echo "  API:       http://localhost:8001"
+	@echo "  Health:    make autopilot-status"
+
+autopilot-stable-down:
+	@echo "Stopping stable local Auto Pilot stack..."
+	@$(AUTOPILOT_STABLE_COMPOSE) --profile standard down --remove-orphans --timeout 30
+	@echo "Stable Auto Pilot stack stopped."
+
+autopilot-dev-up:
+	@echo "Starting Auto Pilot dev stack with hot reload..."
+	@$(MAKE) prod-dev
+
+autopilot-status:
+	@echo "Auto Pilot service status:"
+	@echo ""
+	@$(AUTOPILOT_STABLE_COMPOSE) --profile standard ps
+	@echo ""
+	@echo "Container memory:"
+	@docker stats --no-stream --format 'table {{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.CPUPerc}}' | grep -E 'NAME|quorvex_ai|quorvex-' || true
+	@echo ""
+	@echo "Health:"
+	@curl -s http://localhost:8001/health 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "  Backend: Not responding"
+
+autopilot-logs:
+	@$(AUTOPILOT_STABLE_COMPOSE) logs -f backend frontend
 
 # ==========================================
 # BACKUP & RECOVERY

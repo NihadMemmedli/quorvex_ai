@@ -84,6 +84,9 @@ class NativeGenerator:
 
         # Determine output path
         output_path = self.tests_dir / f"{spec_name}.spec.ts"
+        if output_path.exists():
+            logger.info(f"Removing stale generated test before regeneration: {output_path}")
+            output_path.unlink()
 
         logger.info(f"Generating test from: {spec_path}")
         logger.info(f"   Output: {output_path}")

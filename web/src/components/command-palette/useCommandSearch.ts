@@ -9,8 +9,12 @@ export interface SearchResult {
     id: string;
     label: string;
     href: string;
-    type: 'spec' | 'run' | 'requirement';
+    type: 'spec' | 'run' | 'requirement' | 'batch' | 'exploration';
     subtitle?: string;
+}
+
+function specHref(name: string): string {
+    return `/specs/${name.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 export function useCommandSearch(query: string) {
@@ -24,13 +28,13 @@ export function useCommandSearch(query: string) {
         const encoded = encodeURIComponent(q);
 
         const fetches = [
-            fetchWithAuth(`${API_BASE}/specs?search=${encoded}${projectParam}`, { signal })
-                .then(r => r.ok ? r.json() : [])
-                .then((data: any[]) =>
-                    (Array.isArray(data) ? data : []).slice(0, 5).map((s: any) => ({
-                        id: `spec-${s.name || s.path}`,
-                        label: s.name || s.path,
-                        href: `/specs/${encodeURIComponent(s.path || s.name)}`,
+            fetchWithAuth(`${API_BASE}/specs/list?search=${encoded}&limit=5${projectParam}`, { signal })
+                .then(r => r.ok ? r.json() : { items: [] })
+                .then((data: any) =>
+                    (Array.isArray(data?.items) ? data.items : []).slice(0, 5).map((s: any) => ({
+                        id: `spec-${s.name}`,
+                        label: s.name,
+                        href: specHref(s.name),
                         type: 'spec' as const,
                         subtitle: s.spec_type || 'spec',
                     }))
@@ -65,6 +69,24 @@ export function useCommandSearch(query: string) {
                     )
                     .catch(() => [] as SearchResult[])
                 : Promise.resolve([] as SearchResult[]),
+
+            fetchWithAuth(`${API_BASE}/search-entities?q=${encoded}${projectParam}&limit=8`, { signal })
+                .then(r => r.ok ? r.json() : { entities: [] })
+                .then((data: any) =>
+                    (Array.isArray(data?.entities) ? data.entities : [])
+                        .filter((entity: any) => entity.type === 'batch' || entity.type === 'exploration')
+                        .slice(0, 4)
+                        .map((entity: any) => ({
+                            id: `${entity.type}-${entity.id}`,
+                            label: entity.label || entity.id,
+                            href: entity.type === 'batch'
+                                ? `/regression/batches/${encodeURIComponent(entity.id)}`
+                                : '/exploration',
+                            type: entity.type as 'batch' | 'exploration',
+                            subtitle: entity.description,
+                        }))
+                )
+                .catch(() => [] as SearchResult[]),
         ];
 
         const settled = await Promise.allSettled(fetches);
@@ -74,6 +96,7 @@ export function useCommandSearch(query: string) {
 
     useEffect(() => {
         if (query.length < 2) {
+            abortRef.current?.abort();
             setResults([]);
             setIsSearching(false);
             return;
@@ -85,8 +108,9 @@ export function useCommandSearch(query: string) {
         if (abortRef.current) {
             abortRef.current.abort();
         }
-        abortRef.current = new AbortController();
-        const signal = abortRef.current.signal;
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const signal = controller.signal;
 
         const timer = setTimeout(async () => {
             try {
@@ -105,6 +129,7 @@ export function useCommandSearch(query: string) {
 
         return () => {
             clearTimeout(timer);
+            controller.abort();
         };
     }, [query, search]);
 

@@ -1,6 +1,10 @@
 import sys
 import types
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -14,7 +18,16 @@ sys.modules.setdefault("memory.exploration_store", exploration_store_stub)
 
 from orchestrator.workflows.requirements_generator import RequirementsGenerator as _RequirementsGenerator
 from orchestrator.workflows.autopilot_pipeline import AutoPilotPipeline as _AutoPilotPipeline
+from orchestrator.ai.context import SOURCE_OBSERVED
+from orchestrator.workflows.app_explorer import AppExplorer as _AppExplorer
+from orchestrator.workflows.app_explorer import ExplorationConfig as _ExplorationConfig
+from orchestrator.workflows.spec_scenario_builder import (
+    conservative_page_scenarios,
+    render_scenario_markdown,
+    scenario_from_test_idea,
+)
 from orchestrator.workflows.test_idea_generator import TestIdeaGenerator as _TestIdeaGenerator
+from orchestrator.utils.agent_runner import AgentRunner as _AgentRunner
 
 
 def test_parse_response_normalizes_valid_ai_output():
@@ -89,6 +102,30 @@ def test_fallback_ideas_use_requirements_and_flow_steps():
     assert ideas[0].source_requirements == ["REQ-001"]
     assert "Fill user@example.com in Email input" in ideas[0].suggested_steps
     assert ideas[1].category == "negative"
+
+
+def test_requirement_without_flow_gets_conservative_companion_ideas():
+    generator = object.__new__(_TestIdeaGenerator)
+    ideas = generator._fallback_ideas(
+        {
+            "entry_url": "https://example.com/lifeEvents",
+            "requirements": [
+                {
+                    "code": "REQ-010",
+                    "title": "Life Events page reachable",
+                    "description": "Page returned HTTP 200 and rendered as life_events.",
+                    "priority": "medium",
+                    "acceptance_criteria": ["Life events page reachable"],
+                }
+            ],
+            "flows": [],
+            "issues": [],
+        }
+    )
+
+    assert [idea.category for idea in ideas] == ["happy_path", "regression", "accessibility", "edge_case"]
+    assert all("Life Events page reachable" in idea.title for idea in ideas)
+    assert ideas[1].suggested_steps[0] == "Navigate to https://example.com/lifeEvents"
 
 
 def test_requirements_fallback_creates_requirement_per_flow():
@@ -213,9 +250,56 @@ def test_test_idea_fallback_creates_entry_page_smoke_idea_without_flows():
         }
     )
 
-    assert len(ideas) == 1
+    assert len(ideas) == 4
     assert ideas[0].title == "Validate application entry page availability"
     assert ideas[0].suggested_steps[0] == "Navigate to https://example.com"
+    assert {idea.category for idea in ideas} == {"coverage", "regression", "accessibility", "edge_case"}
+
+
+def test_scenario_builder_renders_runnable_spec_from_test_idea():
+    scenario = scenario_from_test_idea(
+        {
+            "title": "Login accepts valid credentials",
+            "description": "Validate the primary login path.",
+            "category": "happy_path",
+            "priority": "critical",
+            "source_flows": ["User Login"],
+            "source_requirements": ["REQ-001"],
+            "source_api_endpoints": ["/api/auth/login"],
+            "suggested_steps": ["Enter valid credentials", "Click the Login button"],
+            "expected_outcomes": ["Dashboard is visible"],
+            "spec_readiness": "needs_auth",
+        },
+        target_url="https://example.com/login",
+        fallback_title="Login",
+    )
+
+    markdown = render_scenario_markdown(scenario, scenario_id="TC-001")
+
+    assert "# Test: Login accepts valid credentials" in markdown
+    assert "## Prerequisites" in markdown
+    assert "Authenticated user credentials are available" in markdown
+    assert "1. Navigate to https://example.com/login" in markdown
+    assert "- Dashboard is visible" in markdown
+    assert "Observed API endpoint(s): /api/auth/login" in markdown
+
+
+def test_conservative_page_scenarios_do_not_invent_business_behavior():
+    scenarios = conservative_page_scenarios(
+        title="Life Events",
+        target_url="https://my.gov.az/lifeEvents",
+        max_scenarios=4,
+    )
+
+    assert [scenario.category for scenario in scenarios] == [
+        "happy_path",
+        "regression",
+        "accessibility",
+        "edge_case",
+    ]
+    combined_steps = " ".join(step for scenario in scenarios for step in scenario.steps)
+    assert "life event application" not in combined_steps.lower()
+    assert "Navigate to https://my.gov.az/lifeEvents" in combined_steps
 
 
 def test_autopilot_effective_priority_threshold_honors_checkpoint_answers():
@@ -226,6 +310,425 @@ def test_autopilot_effective_priority_threshold_honors_checkpoint_answers():
         priority_threshold = "low"
 
     assert pipeline._effective_priority_threshold(Config()) == "high"
+
+
+def test_autopilot_chat_style_priority_guidance_does_not_leave_medium_tasks_pending(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    pipeline = object.__new__(_AutoPilotPipeline)
+    pipeline.session_id = "autopilot_unit"
+    pipeline._checkpoint_answers = {}
+    pipeline._cancelled = SimpleNamespace(is_set=lambda: False)
+
+    tasks = [
+        SimpleNamespace(id=1, priority="high", requirement_title="Validate Login Browse"),
+        SimpleNamespace(id=2, priority="medium", requirement_title="Validate Entities Browse"),
+        SimpleNamespace(id=3, priority="medium", requirement_title="Validate Services Browse"),
+    ]
+    statuses = {task.id: "pending" for task in tasks}
+    skipped: list[int] = []
+
+    pipeline._load_open_spec_tasks = lambda: tasks
+    pipeline._generate_spec_from_task = lambda task, _specs_dir, _config: Path(f"{task.requirement_title}.md")
+    pipeline._update_spec_task = lambda task_id, status, spec_path=None, error=None: statuses.__setitem__(task_id, status)
+    pipeline._skip_spec_tasks = lambda task_ids, _reason: (skipped.extend(task_ids), [statuses.__setitem__(tid, "skipped") for tid in task_ids])
+    pipeline._count_pending_spec_tasks = lambda: sum(1 for status in statuses.values() if status == "pending")
+    pipeline._update_session_field = lambda *_args, **_kwargs: None
+    pipeline._update_phase_step = lambda *_args, **_kwargs: None
+
+    class Config:
+        priority_threshold = "high"
+        max_specs = 50
+
+    result = asyncio.run(pipeline._run_spec_generation_phase(Config(), phase_id=1))
+
+    assert result["specs_generated"] == 1
+    assert result["filtered_by_priority"] == 2
+    assert result["remaining_pending_tasks"] == 0
+    assert skipped == [2, 3]
+    assert statuses == {1: "completed", 2: "skipped", 3: "skipped"}
+
+
+def test_autopilot_unique_spec_filenames_include_task_id(monkeypatch, tmp_path):
+    pipeline = object.__new__(_AutoPilotPipeline)
+    pipeline.session_id = "autopilot_unit"
+    pipeline._get_session_exploration_ids = lambda: []
+    pipeline._get_test_idea_for_task = lambda *_args, **_kwargs: None
+
+    class Store:
+        def get_requirements(self):
+            return []
+
+    monkeypatch.setattr(
+        "orchestrator.memory.exploration_store.get_exploration_store",
+        lambda **_kwargs: Store(),
+    )
+
+    class Config:
+        project_id = "default"
+        entry_urls = ["https://example.com"]
+
+    long_title = "Validate " + ("shared service discovery title " * 5)
+    first = SimpleNamespace(id=101, requirement_id=None, requirement_title=long_title)
+    second = SimpleNamespace(id=102, requirement_id=None, requirement_title=long_title)
+
+    first_path = pipeline._generate_spec_from_task(first, tmp_path, Config())
+    second_path = pipeline._generate_spec_from_task(second, tmp_path, Config())
+
+    assert first_path != second_path
+    assert first_path.name.endswith("-101.md")
+    assert second_path.name.endswith("-102.md")
+
+
+def test_autopilot_expected_spec_tasks_deduplicates_requirement_titles():
+    pipeline = object.__new__(_AutoPilotPipeline)
+    requirements = [
+        SimpleNamespace(title="Service Categories Browse"),
+        SimpleNamespace(title="Service Categories Browse"),
+        SimpleNamespace(title="Validate Homepage Browse"),
+        SimpleNamespace(title="Homepage Browse"),
+    ]
+
+    assert pipeline._count_unique_requirement_targets(requirements) == 2
+
+
+def test_autopilot_spec_tasks_keep_distinct_ideas_for_same_requirement(monkeypatch):
+    pipeline = object.__new__(_AutoPilotPipeline)
+    pipeline.session_id = "autopilot_unit"
+    pipeline._lookup_requirement_id_for_test_idea = lambda _idea: 42
+    added = []
+
+    class ExecResult:
+        def all(self):
+            return []
+
+    class FakeSession:
+        def __init__(self, _engine):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def exec(self, _stmt):
+            return ExecResult()
+
+        def add(self, value):
+            added.append(value)
+
+        def commit(self):
+            pass
+
+    monkeypatch.setattr("orchestrator.workflows.autopilot_pipeline.Session", FakeSession)
+
+    created = pipeline._create_spec_tasks_from_test_ideas(
+        [
+            SimpleNamespace(title="Validate login success", priority="critical"),
+            SimpleNamespace(title="Reject invalid login", priority="high"),
+        ]
+    )
+
+    assert created == 2
+    assert [task.requirement_title for task in added] == [
+        "Validate login success",
+        "Reject invalid login",
+    ]
+    assert {task.requirement_id for task in added} == {42}
+
+
+def test_autopilot_uses_native_generation_for_actionable_weak_evidence_spec(tmp_path):
+    pipeline = object.__new__(_AutoPilotPipeline)
+    pipeline._get_session_config = lambda: {
+        "ai_quality": {"exploration": {"degraded_mode": True}}
+    }
+    spec_path = tmp_path / "login.md"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "# Test: Login redirect",
+                "",
+                "## Steps",
+                "1. Navigate to https://example.com/login",
+                "2. Fill user@example.com into the email field",
+                "3. Click the Login button",
+                "",
+                "## Expected Outcome",
+                "- Dashboard is visible",
+            ]
+        )
+    )
+
+    assert pipeline._spec_has_actionable_e2e_steps(str(spec_path))
+    assert not pipeline._should_use_conservative_test_generation(str(spec_path))
+
+
+def test_autopilot_uses_smoke_generation_for_page_load_only_weak_evidence_spec(tmp_path):
+    pipeline = object.__new__(_AutoPilotPipeline)
+    pipeline._get_session_config = lambda: {
+        "ai_quality": {"exploration": {"degraded_mode": True}}
+    }
+    spec_path = tmp_path / "reachable.md"
+    spec_path.write_text(
+        "\n".join(
+            [
+                "# Test: Page reachable",
+                "",
+                "## Steps",
+                "1. Navigate to https://example.com",
+                "2. Wait for the page to finish loading",
+                "3. Verify the response status is 200",
+                "4. Verify the page renders without server errors",
+            ]
+        )
+    )
+
+    assert not pipeline._spec_has_actionable_e2e_steps(str(spec_path))
+    assert pipeline._should_use_conservative_test_generation(str(spec_path))
+
+
+@pytest.mark.asyncio
+async def test_explorer_rejects_unverified_output_without_fallback(tmp_path, monkeypatch):
+    explorer = _AppExplorer(project_id="test")
+    explorer.output_dir = tmp_path
+
+    async def fake_run(_prompt, _session_dir):
+        explorer._last_agent_stats = {
+            "tool_calls": 1,
+            "browser_tool_calls": 1,
+            "successful_browser_tool_calls": 1,
+        }
+        return "I do not have browser tools, so this is based on prior exploration knowledge."
+
+    monkeypatch.setattr(explorer, "_run_explorer_agent", fake_run)
+
+    result = await explorer.explore(
+        _ExplorationConfig(entry_url="https://example.com/custom-start"),
+        "session_unverified",
+    )
+
+    assert result.status == "failed"
+    assert result.pages_discovered == 0
+    assert result.flows == []
+    assert "live browser tools were unavailable" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_explorer_rejects_output_without_successful_browser_tools(tmp_path, monkeypatch):
+    explorer = _AppExplorer(project_id="test")
+    explorer.output_dir = tmp_path
+
+    async def fake_run(_prompt, _session_dir):
+        explorer._last_agent_stats = {
+            "tool_calls": 0,
+            "browser_tool_calls": 0,
+            "successful_browser_tool_calls": 0,
+        }
+        return """
+```json
+{"flow": {"name": "Static Browse", "category": "navigation", "steps": [{"action": "navigate"}], "startUrl": "/", "endUrl": "/", "outcome": "Done", "isSuccessPath": true}}
+```
+"""
+
+    monkeypatch.setattr(explorer, "_run_explorer_agent", fake_run)
+
+    result = await explorer.explore(
+        _ExplorationConfig(entry_url="https://example.com/custom-start"),
+        "session_no_tools",
+    )
+
+    assert result.status == "failed"
+    assert "did not perform successful live browser exploration" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_explorer_accepts_verified_browser_output(tmp_path, monkeypatch):
+    explorer = _AppExplorer(project_id="test")
+    explorer.output_dir = tmp_path
+
+    async def fake_run(_prompt, _session_dir):
+        explorer._last_agent_stats = {
+            "tool_calls": 2,
+            "browser_tool_calls": 2,
+            "successful_browser_tool_calls": 2,
+        }
+        return """
+```json
+{"transition": {"sequence": 1, "action": {"type": "navigate", "element": {"role": "page", "name": "Custom"}, "value": "https://example.com/custom-start"}, "before": {"url": "about:blank", "pageType": "blank", "keyElements": []}, "after": {"url": "https://example.com/custom-start", "pageType": "content", "keyElements": ["Custom page"]}, "transitionType": "navigation", "apiCalls": []}}
+```
+```json
+{"flow": {"name": "Custom Start Browse", "category": "navigation", "steps": [{"action": "navigate", "element": "URL", "value": "https://example.com/custom-start"}], "startUrl": "https://example.com/custom-start", "endUrl": "https://example.com/custom-start", "outcome": "Custom page opened", "isSuccessPath": true}}
+```
+```json
+{"summary": {"pagesDiscovered": 1, "flowsDiscovered": 1, "elementsInteracted": 1, "apiEndpointsFound": 0, "issuesFound": 0, "status": "completed"}}
+```
+"""
+
+    monkeypatch.setattr(explorer, "_run_explorer_agent", fake_run)
+
+    result = await explorer.explore(
+        _ExplorationConfig(entry_url="https://example.com/custom-start"),
+        "session_verified",
+    )
+
+    assert result.status == "completed"
+    assert result.pages_discovered == 1
+    assert [flow.name for flow in result.flows] == ["Custom Start Browse"]
+    assert result.quality_summary["source_type"] == SOURCE_OBSERVED
+    assert "fallback_used" not in result.quality_summary
+
+
+def test_autopilot_phase_output_guards_empty_spec_generation():
+    pipeline = object.__new__(_AutoPilotPipeline)
+
+    assert pipeline._phase_has_resumable_output("spec_generation", {"specs_generated": 1})
+    assert not pipeline._phase_has_resumable_output("spec_generation", {"specs_generated": 0})
+    assert not pipeline._phase_has_resumable_output("exploration", {"exploration_ids": ["static"], "total_pages": 0, "total_flows": 0})
+    assert pipeline._phase_has_resumable_output("exploration", {"exploration_ids": ["observed"], "total_pages": 1, "total_flows": 0})
+    assert pipeline._phase_output_error("spec_generation", {}) == "Spec generation produced 0 specs"
+
+
+def test_autopilot_allows_legacy_category_only_validation_failure():
+    pipeline = object.__new__(_AutoPilotPipeline)
+    summary = {
+        "quality": {"quality_score": 78, "source_type": SOURCE_OBSERVED},
+        "validation": {
+            "valid": False,
+            "invalid_records": [
+                {"record_type": "flow", "index": 2, "message": "invalid category information-retrieval"},
+                {"record_type": "flow", "index": 3, "message": "invalid category static-content"},
+            ],
+        },
+    }
+
+    assert pipeline._is_legacy_category_validation_only(summary)
+
+
+def test_autopilot_does_not_allow_legacy_category_override_for_fallback():
+    pipeline = object.__new__(_AutoPilotPipeline)
+    summary = {
+        "quality": {"quality_score": 78, "source_type": "fallback"},
+        "validation": {
+            "valid": False,
+            "invalid_records": [
+                {"record_type": "flow", "index": 2, "message": "invalid category information-retrieval"},
+            ],
+        },
+    }
+
+    assert not pipeline._is_legacy_category_validation_only(summary)
+
+
+def test_agent_runner_fails_fast_when_mcp_config_missing(tmp_path):
+    runner = _AgentRunner(
+        allowed_tools=["mcp__playwright-test__browser_navigate"],
+        session_dir=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="no .mcp.json exists"):
+        runner._validate_mcp_config_for_allowed_tools(tmp_path)
+
+
+def test_agent_runner_accepts_matching_local_mcp_config(tmp_path):
+    mcp_command = tmp_path / "mcp-server-playwright"
+    mcp_command.write_text("#!/bin/sh\n")
+    (tmp_path / ".mcp.json").write_text(
+        """
+{
+  "mcpServers": {
+    "playwright-test": {
+      "command": "%s",
+      "args": ["--browser", "chromium"]
+    }
+  }
+}
+"""
+        % str(mcp_command)
+    )
+    runner = _AgentRunner(
+        allowed_tools=["mcp__playwright-test__browser_navigate"],
+        session_dir=tmp_path,
+    )
+
+    runner._validate_mcp_config_for_allowed_tools(tmp_path)
+
+
+def test_agent_runner_disables_tools_for_explicit_no_tool_calls():
+    runner = _AgentRunner(allowed_tools=[], log_tools=False)
+
+    assert runner._effective_tools() == []
+    assert runner._effective_permission_mode() == "dontAsk"
+
+    kwargs = runner._claude_options_kwargs()
+    assert kwargs["tools"] == []
+    assert kwargs["allowed_tools"] == []
+    assert kwargs["permission_mode"] == "dontAsk"
+
+
+def test_agent_runner_uses_allowed_tools_as_availability_list():
+    tools = ["Glob", "Grep", "Read", "LS", "mcp__playwright-test__browser_snapshot"]
+    runner = _AgentRunner(allowed_tools=tools, log_tools=False)
+
+    assert runner._effective_tools() == tools
+    assert runner._effective_permission_mode() == "bypassPermissions"
+
+
+def test_agent_runner_attaches_strict_local_mcp_config(tmp_path, monkeypatch):
+    mcp_command = tmp_path / "mcp-server-playwright"
+    mcp_command.write_text("#!/bin/sh\n")
+    (tmp_path / ".mcp.json").write_text(
+        """
+{
+  "mcpServers": {
+    "playwright-test": {
+      "command": "%s"
+    }
+  }
+}
+"""
+        % str(mcp_command)
+    )
+    monkeypatch.chdir(tmp_path)
+
+    runner = _AgentRunner(
+        allowed_tools=["mcp__playwright-test__browser_snapshot"],
+        log_tools=False,
+    )
+
+    kwargs = runner._claude_options_kwargs()
+    assert kwargs["mcp_servers"] == tmp_path / ".mcp.json"
+    assert kwargs["strict_mcp_config"] is True
+
+
+def test_autopilot_resume_metadata_allows_failed_phase_retry(monkeypatch):
+    pytest.importorskip("slowapi")
+    from orchestrator.api import autopilot as _autopilot_api
+    from orchestrator.api.models_db import AutoPilotSession as _AutoPilotSession
+
+    monkeypatch.setattr(_autopilot_api, "_get_failed_phase", lambda _session, _session_id: "spec_generation")
+    _autopilot_api._running_pipelines.clear()
+    session = _AutoPilotSession(id="autopilot_test", status="failed", current_phase="spec_generation")
+
+    can_resume, reason, failed_phase = _autopilot_api._get_resume_metadata(session, session=object())
+
+    assert can_resume is True
+    assert failed_phase == "spec_generation"
+    assert "spec generation" in reason
+
+
+def test_autopilot_resume_metadata_rejects_completed_session(monkeypatch):
+    pytest.importorskip("slowapi")
+    from orchestrator.api import autopilot as _autopilot_api
+    from orchestrator.api.models_db import AutoPilotSession as _AutoPilotSession
+
+    monkeypatch.setattr(_autopilot_api, "_get_failed_phase", lambda _session, _session_id: None)
+    session = _AutoPilotSession(id="autopilot_done", status="completed")
+
+    can_resume, reason, failed_phase = _autopilot_api._get_resume_metadata(session, session=object())
+
+    assert can_resume is False
+    assert reason is None
+    assert failed_phase is None
 
 
 def test_normalize_idea_bounds_untrusted_fields():

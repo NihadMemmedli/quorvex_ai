@@ -69,6 +69,13 @@ class AgentTask:
     cwd: str | None = None  # Working directory for CLI execution
     env_vars: dict[str, str] | None = None  # API credentials to pass to worker
     allowed_tools: list[str] | None = None  # Claude allowed tools for this task
+    tools: list[str] | dict[str, str] | None = None  # Base available tool set
+    disallowed_tools: list[str] | None = None  # Claude tools hidden from this task
+    permission_mode: str | None = None  # Claude permission mode
+    strict_mcp_config: bool = True  # Use only task-local MCP config when present
+    max_budget_usd: float | None = None  # Optional spend cap
+    task_budget: dict[str, int] | None = None  # Optional token budget
+    include_hook_events: bool = False  # Stream hook lifecycle events
     telemetry: dict[str, Any] = field(default_factory=dict)  # Structured execution diagnostics
 
     def to_dict(self) -> dict:
@@ -90,6 +97,13 @@ class AgentTask:
             "cwd": self.cwd,
             "env_vars": self.env_vars,
             "allowed_tools": self.allowed_tools,
+            "tools": self.tools,
+            "disallowed_tools": self.disallowed_tools,
+            "permission_mode": self.permission_mode,
+            "strict_mcp_config": self.strict_mcp_config,
+            "max_budget_usd": self.max_budget_usd,
+            "task_budget": self.task_budget,
+            "include_hook_events": self.include_hook_events,
             "telemetry": self.telemetry,
         }
 
@@ -113,6 +127,13 @@ class AgentTask:
             cwd=data.get("cwd"),
             env_vars=data.get("env_vars"),
             allowed_tools=data.get("allowed_tools"),
+            tools=data.get("tools"),
+            disallowed_tools=data.get("disallowed_tools"),
+            permission_mode=data.get("permission_mode"),
+            strict_mcp_config=data.get("strict_mcp_config", True),
+            max_budget_usd=data.get("max_budget_usd"),
+            task_budget=data.get("task_budget"),
+            include_hook_events=bool(data.get("include_hook_events", False)),
             telemetry=data.get("telemetry") or {},
         )
 
@@ -213,6 +234,13 @@ class AgentQueue:
         cwd: str | None = None,
         env_vars: dict[str, str] | None = None,
         allowed_tools: list[str] | None = None,
+        tools: list[str] | dict[str, str] | None = None,
+        disallowed_tools: list[str] | None = None,
+        permission_mode: str | None = None,
+        strict_mcp_config: bool = True,
+        max_budget_usd: float | None = None,
+        task_budget: dict[str, int] | None = None,
+        include_hook_events: bool = False,
     ) -> str:
         """
         Add an agent task to the queue.
@@ -226,6 +254,13 @@ class AgentQueue:
             cwd: Working directory for CLI execution (defaults to project root)
             env_vars: API credentials to pass to worker process
             allowed_tools: Claude allowed tools for this task
+            tools: Base tool availability set
+            disallowed_tools: Tools hidden from this task
+            permission_mode: Claude permission mode
+            strict_mcp_config: Whether to isolate MCP config to the run-local file
+            max_budget_usd: Optional spend cap
+            task_budget: Optional token budget
+            include_hook_events: Whether hook events should be emitted
 
         Returns:
             Task ID for tracking
@@ -242,6 +277,13 @@ class AgentQueue:
             cwd=cwd,
             env_vars=env_vars,
             allowed_tools=allowed_tools,
+            tools=tools,
+            disallowed_tools=disallowed_tools,
+            permission_mode=permission_mode,
+            strict_mcp_config=strict_mcp_config,
+            max_budget_usd=max_budget_usd,
+            task_budget=task_budget,
+            include_hook_events=include_hook_events,
         )
 
         # Atomic store + enqueue

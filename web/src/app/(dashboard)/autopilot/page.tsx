@@ -38,6 +38,9 @@ interface AutoPilotSession {
     completed_at: string | null;
     instructions: string | null;
     config: Record<string, any>;
+    can_resume: boolean;
+    resume_reason: string | null;
+    failed_phase: string | null;
 }
 
 interface Phase {
@@ -91,16 +94,36 @@ interface TestTask {
     session_id: string;
     spec_task_id: number | null;
     spec_name: string | null;
+    spec_path: string | null;
     run_id: string | null;
     status: string;
     current_stage: string | null;
+    generation_mode: string | null;
     healing_attempt: number;
     test_path: string | null;
     passed: boolean | null;
     error_summary: string | null;
+    artifact_count: number;
+    log_available: boolean;
     created_at: string;
     started_at: string | null;
     completed_at: string | null;
+}
+
+interface TestTaskArtifact {
+    name: string;
+    path: string;
+    type: string;
+}
+
+interface TestTaskDetail extends TestTask {
+    run_dir: string | null;
+    pipeline_error: Record<string, any> | null;
+    agentic_summary: Record<string, any> | null;
+    validation: Record<string, any> | null;
+    artifacts: TestTaskArtifact[];
+    report_url: string | null;
+    log_excerpt: string | null;
 }
 
 // ============ STATUS COLORS ============
@@ -196,6 +219,46 @@ function getStatusStyle(status: string): { bg: string; color: string } {
 function progressPercent(value: number | null | undefined): number {
     const numeric = typeof value === 'number' && Number.isFinite(value) ? value : 0;
     return Math.max(0, Math.min(100, numeric <= 1 ? numeric * 100 : numeric));
+}
+
+async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 15000): Promise<T> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) {
+            let detail = `${res.status} ${res.statusText}`;
+            try {
+                const data = await res.json();
+                detail = data.detail || data.error || detail;
+            } catch {
+                // Keep HTTP status when the body is not JSON.
+            }
+            throw new Error(detail);
+        }
+        return await res.json();
+    } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+            throw new Error('Request timed out. The backend may be busy with an Auto Pilot or agent task.');
+        }
+        throw err;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function isFailedTestTask(task: TestTask): boolean {
+    return task.passed === false || task.status === 'failed' || task.status === 'error';
+}
+
+function taskFailureReason(task: TestTask): string {
+    if (isFailedTestTask(task)) {
+        return task.error_summary || 'No failure reason reported';
+    }
+    if (task.status === 'paused') {
+        return task.error_summary || 'Paused by user';
+    }
+    return '-';
 }
 
 // ============ INLINE STYLE CONSTANTS ============
@@ -331,7 +394,7 @@ const autoPilotStyles = `
 
     .autopilot-statusbar {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
         gap: 0.75rem;
         margin-bottom: 1rem;
     }
@@ -450,6 +513,270 @@ const StatusBadge = ({ status }: { status: string }) => {
     );
 };
 
+interface TaskDetailDialogProps {
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
+    selectedTask: TestTaskDetail | null;
+    loading: boolean;
+    error: string | null;
+}
+
+function TaskDetailDialog({
+    open,
+    onOpenChange,
+    selectedTask,
+    loading,
+    error,
+}: TaskDetailDialogProps) {
+    if (!open) return null;
+
+    return (
+        <div
+            role="presentation"
+            onMouseDown={() => onOpenChange(false)}
+            style={{
+                position: 'fixed',
+                inset: 0,
+                zIndex: 10000,
+                background: 'rgba(0, 0, 0, 0.82)',
+                backdropFilter: 'blur(4px)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '1.5rem',
+            }}
+        >
+            <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="autopilot-task-detail-title"
+                onMouseDown={(event) => event.stopPropagation()}
+                style={{
+                    width: 'min(56rem, 100%)',
+                    maxHeight: '85vh',
+                    overflowY: 'auto',
+                    background: dark.panel,
+                    border: `1px solid ${dark.borderStrong}`,
+                    borderRadius: '8px',
+                    boxShadow: '0 24px 80px rgba(0, 0, 0, 0.55)',
+                    color: dark.text,
+                    padding: '1.5rem',
+                    position: 'relative',
+                }}
+            >
+                <button
+                    type="button"
+                    onClick={() => onOpenChange(false)}
+                    aria-label="Close task details"
+                    style={{
+                        position: 'absolute',
+                        top: '0.85rem',
+                        right: '0.85rem',
+                        border: `1px solid ${dark.borderStrong}`,
+                        background: dark.panelAlt,
+                        color: dark.textSecondary,
+                        borderRadius: '6px',
+                        padding: '0.25rem 0.5rem',
+                        fontSize: '0.75rem',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                    }}
+                >
+                    Close
+                </button>
+
+                <div style={{ marginBottom: '1rem', paddingRight: '4rem' }}>
+                    <h2
+                        id="autopilot-task-detail-title"
+                        style={{ color: dark.text, fontSize: '1.05rem', fontWeight: 800, margin: 0 }}
+                    >
+                        Test Task Details
+                    </h2>
+                    <div style={{ color: dark.textMuted, fontSize: '0.82rem', marginTop: '0.3rem' }}>
+                        {selectedTask?.spec_name || 'Auto Pilot test generation task'}
+                    </div>
+                </div>
+
+                {!selectedTask ? (
+                    <div style={{ color: dark.textMuted, fontSize: '0.85rem' }}>No task selected.</div>
+                ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                        {error && (
+                            <div style={{
+                                border: `1px solid ${dark.dangerBorder}`,
+                                borderRadius: '8px',
+                                background: dark.dangerSoft,
+                                color: dark.danger,
+                                padding: '0.75rem',
+                                fontSize: '0.82rem',
+                                fontWeight: 600,
+                            }}>
+                                {error}
+                            </div>
+                        )}
+
+                        <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+                            gap: '0.75rem',
+                        }}>
+                            {[
+                                ['Status', <StatusBadge key="status" status={selectedTask.passed === true ? 'passed' : selectedTask.passed === false ? 'failed' : selectedTask.status} />],
+                                ['Mode', selectedTask.generation_mode === 'conservative_smoke' ? 'Smoke' : selectedTask.generation_mode === 'native_e2e' ? 'Native E2E' : '-'],
+                                ['Stage', selectedTask.current_stage?.replace('_', ' ') || '-'],
+                                ['Healing', selectedTask.healing_attempt > 0 ? `${selectedTask.healing_attempt} attempt${selectedTask.healing_attempt > 1 ? 's' : ''}` : '-'],
+                                ['Duration', formatDuration(selectedTask.started_at, selectedTask.completed_at)],
+                            ].map(([label, value]) => (
+                                <div key={String(label)} style={{
+                                    border: `1px solid ${dark.border}`,
+                                    borderRadius: '8px',
+                                    padding: '0.75rem',
+                                    background: dark.panelAlt,
+                                }}>
+                                    <div style={{
+                                        color: dark.textMuted,
+                                        fontSize: '0.68rem',
+                                        fontWeight: 700,
+                                        marginBottom: '0.35rem',
+                                        textTransform: 'uppercase',
+                                    }}>
+                                        {label}
+                                    </div>
+                                    <div style={{ color: dark.textSecondary, fontSize: '0.82rem' }}>{value}</div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            {selectedTask.run_id && (
+                                <a href={`/runs/${encodeURIComponent(selectedTask.run_id)}`} style={secondaryButtonStyle}>
+                                    <FileText size={14} />
+                                    View Run
+                                </a>
+                            )}
+                            {selectedTask.report_url && (
+                                <a href={`${API_BASE}${selectedTask.report_url}`} target="_blank" rel="noreferrer" style={secondaryButtonStyle}>
+                                    <FileText size={14} />
+                                    Report
+                                </a>
+                            )}
+                        </div>
+
+                        <div>
+                            <div style={{ color: dark.text, fontSize: '0.85rem', fontWeight: 700, marginBottom: '0.4rem' }}>
+                                Reason
+                            </div>
+                            <pre style={{
+                                whiteSpace: 'pre-wrap',
+                                wordBreak: 'break-word',
+                                margin: 0,
+                                border: `1px solid ${dark.border}`,
+                                borderRadius: '8px',
+                                background: dark.panelAlt,
+                                color: isFailedTestTask(selectedTask) ? dark.danger : dark.textSecondary,
+                                padding: '0.75rem',
+                                fontSize: '0.78rem',
+                                lineHeight: 1.5,
+                            }}>
+                                {taskFailureReason(selectedTask)}
+                            </pre>
+                        </div>
+
+                        {selectedTask.pipeline_error && (
+                            <div>
+                                <div style={{ color: dark.text, fontSize: '0.85rem', fontWeight: 700, marginBottom: '0.4rem' }}>
+                                    Pipeline Error
+                                </div>
+                                <pre style={{
+                                    whiteSpace: 'pre-wrap',
+                                    wordBreak: 'break-word',
+                                    margin: 0,
+                                    border: `1px solid ${dark.border}`,
+                                    borderRadius: '8px',
+                                    background: dark.panelAlt,
+                                    color: dark.textSecondary,
+                                    padding: '0.75rem',
+                                    fontSize: '0.72rem',
+                                    lineHeight: 1.45,
+                                    maxHeight: '12rem',
+                                    overflow: 'auto',
+                                }}>
+                                    {JSON.stringify(selectedTask.pipeline_error, null, 2)}
+                                </pre>
+                            </div>
+                        )}
+
+                        <div>
+                            <div style={{ color: dark.text, fontSize: '0.85rem', fontWeight: 700, marginBottom: '0.4rem' }}>
+                                Logs
+                            </div>
+                            {loading ? (
+                                <div style={{ color: dark.textMuted, fontSize: '0.82rem' }}>Loading task details...</div>
+                            ) : selectedTask.log_excerpt ? (
+                                <pre style={{
+                                    whiteSpace: 'pre-wrap',
+                                    wordBreak: 'break-word',
+                                    margin: 0,
+                                    border: `1px solid ${dark.border}`,
+                                    borderRadius: '8px',
+                                    background: '#050914',
+                                    color: dark.textSecondary,
+                                    padding: '0.75rem',
+                                    fontSize: '0.72rem',
+                                    lineHeight: 1.45,
+                                    maxHeight: '16rem',
+                                    overflow: 'auto',
+                                }}>
+                                    {selectedTask.log_excerpt}
+                                </pre>
+                            ) : (
+                                <div style={{
+                                    border: `1px solid ${dark.border}`,
+                                    borderRadius: '8px',
+                                    background: dark.panelAlt,
+                                    color: dark.textMuted,
+                                    padding: '0.75rem',
+                                    fontSize: '0.82rem',
+                                }}>
+                                    Run logs unavailable for this task.
+                                </div>
+                            )}
+                        </div>
+
+                        <div>
+                            <div style={{ color: dark.text, fontSize: '0.85rem', fontWeight: 700, marginBottom: '0.4rem' }}>
+                                Artifacts
+                            </div>
+                            {selectedTask.artifacts.length > 0 ? (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                                    {selectedTask.artifacts.slice(0, 12).map(artifact => (
+                                        <a
+                                            key={`${artifact.path}-${artifact.name}`}
+                                            href={`${API_BASE}${artifact.path}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            style={{
+                                                color: dark.primary,
+                                                fontSize: '0.78rem',
+                                                textDecoration: 'none',
+                                                fontFamily: 'monospace',
+                                            }}
+                                        >
+                                            {artifact.name}
+                                        </a>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div style={{ color: dark.textMuted, fontSize: '0.82rem' }}>No artifacts reported.</div>
+                            )}
+                        </div>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
 // ============ MAIN COMPONENT ============
 
 export default function AutoPilotPage() {
@@ -466,6 +793,11 @@ export default function AutoPilotPage() {
     const [loading, setLoading] = useState(true);
     const [starting, setStarting] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [selectedTask, setSelectedTask] = useState<TestTaskDetail | null>(null);
+    const [taskDetailOpen, setTaskDetailOpen] = useState(false);
+    const [taskDetailLoading, setTaskDetailLoading] = useState(false);
+    const [taskDetailError, setTaskDetailError] = useState<string | null>(null);
 
     // Form state
     const [formUrls, setFormUrls] = useState('');
@@ -483,6 +815,8 @@ export default function AutoPilotPage() {
     // Question answer state
     const [customAnswer, setCustomAnswer] = useState('');
     const [answeringQuestionId, setAnsweringQuestionId] = useState<number | null>(null);
+    const [submittedQuestionIds, setSubmittedQuestionIds] = useState<Set<number>>(() => new Set());
+    const submittedQuestionIdsRef = useRef<Set<number>>(new Set());
 
     // Countdown timer ref
     const countdownRef = useRef<NodeJS.Timeout | null>(null);
@@ -496,13 +830,12 @@ export default function AutoPilotPage() {
             ? `?project_id=${encodeURIComponent(currentProject.id)}`
             : '';
         try {
-            const res = await fetch(`${API_BASE}/autopilot/sessions${projectParam}`);
-            if (res.ok) {
-                const data = await res.json();
-                setSessions(Array.isArray(data) ? data : data.sessions || []);
-            }
+            const data = await fetchJsonWithTimeout<AutoPilotSession[] | { sessions?: AutoPilotSession[] }>(`${API_BASE}/autopilot/sessions${projectParam}`);
+            setSessions(Array.isArray(data) ? data : data.sessions || []);
+            setLoadError(null);
         } catch (err) {
             console.error('Failed to fetch autopilot sessions:', err);
+            setLoadError(err instanceof Error ? err.message : 'Failed to load Auto Pilot sessions');
         } finally {
             setLoading(false);
         }
@@ -510,36 +843,23 @@ export default function AutoPilotPage() {
 
     const fetchSessionDetail = useCallback(async (sessionId: string) => {
         try {
-            const [sessionRes, phasesRes, questionsRes, specTasksRes, testTasksRes] = await Promise.all([
-                fetch(`${API_BASE}/autopilot/${sessionId}`),
-                fetch(`${API_BASE}/autopilot/${sessionId}/phases`),
-                fetch(`${API_BASE}/autopilot/${sessionId}/questions`),
-                fetch(`${API_BASE}/autopilot/${sessionId}/spec-tasks`),
-                fetch(`${API_BASE}/autopilot/${sessionId}/test-tasks`),
+            const [sessionData, phasesData, questionsData, specTasksData, testTasksData] = await Promise.all([
+                fetchJsonWithTimeout<AutoPilotSession>(`${API_BASE}/autopilot/${sessionId}`),
+                fetchJsonWithTimeout<Phase[] | { phases?: Phase[] }>(`${API_BASE}/autopilot/${sessionId}/phases`),
+                fetchJsonWithTimeout<Question[] | { questions?: Question[] }>(`${API_BASE}/autopilot/${sessionId}/questions`),
+                fetchJsonWithTimeout<SpecTask[] | { tasks?: SpecTask[] }>(`${API_BASE}/autopilot/${sessionId}/spec-tasks`),
+                fetchJsonWithTimeout<TestTask[] | { tasks?: TestTask[] }>(`${API_BASE}/autopilot/${sessionId}/test-tasks`),
             ]);
 
-            if (sessionRes.ok) {
-                const data = await sessionRes.json();
-                setSession(data);
-            }
-            if (phasesRes.ok) {
-                const data = await phasesRes.json();
-                setPhases(Array.isArray(data) ? data : data.phases || []);
-            }
-            if (questionsRes.ok) {
-                const data = await questionsRes.json();
-                setQuestions(Array.isArray(data) ? data : data.questions || []);
-            }
-            if (specTasksRes.ok) {
-                const data = await specTasksRes.json();
-                setSpecTasks(Array.isArray(data) ? data : data.tasks || []);
-            }
-            if (testTasksRes.ok) {
-                const data = await testTasksRes.json();
-                setTestTasks(Array.isArray(data) ? data : data.tasks || []);
-            }
+            setSession(sessionData);
+            setPhases(Array.isArray(phasesData) ? phasesData : phasesData.phases || []);
+            setQuestions(Array.isArray(questionsData) ? questionsData : questionsData.questions || []);
+            setSpecTasks(Array.isArray(specTasksData) ? specTasksData : specTasksData.tasks || []);
+            setTestTasks(Array.isArray(testTasksData) ? testTasksData : testTasksData.tasks || []);
+            setLoadError(null);
         } catch (err) {
             console.error('Failed to fetch session detail:', err);
+            setLoadError(err instanceof Error ? err.message : 'Failed to load Auto Pilot session details');
         }
     }, []);
 
@@ -563,6 +883,12 @@ export default function AutoPilotPage() {
         const interval = setInterval(() => fetchSessionDetail(activeSessionId), pollMs);
         return () => clearInterval(interval);
     }, [activeSessionId, sessionStatus, fetchSessionDetail]);
+
+    useEffect(() => {
+        submittedQuestionIdsRef.current.clear();
+        setSubmittedQuestionIds(new Set());
+        setAnsweringQuestionId(null);
+    }, [activeSessionId]);
 
     // Countdown timer for auto-continue questions
     useEffect(() => {
@@ -652,7 +978,14 @@ export default function AutoPilotPage() {
 
     const answerQuestion = async (questionId: number, answer: string) => {
         if (!activeSessionId) return;
+        if (answeringQuestionId === questionId || submittedQuestionIdsRef.current.has(questionId)) return;
+        submittedQuestionIdsRef.current.add(questionId);
         setAnsweringQuestionId(questionId);
+        setSubmittedQuestionIds(prev => {
+            const next = new Set(prev);
+            next.add(questionId);
+            return next;
+        });
         try {
             const res = await fetch(`${API_BASE}/autopilot/${activeSessionId}/answer`, {
                 method: 'POST',
@@ -664,10 +997,22 @@ export default function AutoPilotPage() {
                 fetchSessionDetail(activeSessionId);
             } else {
                 const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-                alert(`Failed to submit answer: ${err.detail}`);
+                submittedQuestionIdsRef.current.delete(questionId);
+                setSubmittedQuestionIds(prev => {
+                    const next = new Set(prev);
+                    next.delete(questionId);
+                    return next;
+                });
+                toast.error(err.detail || 'Failed to submit answer');
             }
         } catch (e) {
-            alert(`Failed to submit answer: ${e instanceof Error ? e.message : 'Network error'}`);
+            submittedQuestionIdsRef.current.delete(questionId);
+            setSubmittedQuestionIds(prev => {
+                const next = new Set(prev);
+                next.delete(questionId);
+                return next;
+            });
+            toast.error(`Failed to submit answer: ${e instanceof Error ? e.message : 'Network error'}`);
         } finally {
             setAnsweringQuestionId(null);
         }
@@ -676,20 +1021,34 @@ export default function AutoPilotPage() {
     const pauseSession = async () => {
         if (!activeSessionId) return;
         try {
-            await fetch(`${API_BASE}/autopilot/${activeSessionId}/pause`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/autopilot/${activeSessionId}/pause`, { method: 'POST' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                toast.error(data.detail || 'Failed to pause');
+                return;
+            }
+            toast.success('Auto Pilot paused');
             fetchSessionDetail(activeSessionId);
         } catch (e) {
             console.error('Failed to pause:', e);
+            toast.error('Failed to pause');
         }
     };
 
     const resumeSession = async () => {
         if (!activeSessionId) return;
         try {
-            await fetch(`${API_BASE}/autopilot/${activeSessionId}/resume`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/autopilot/${activeSessionId}/resume`, { method: 'POST' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                toast.error(data.detail || 'Failed to resume');
+                return;
+            }
+            toast.success('Auto Pilot resumed');
             fetchSessionDetail(activeSessionId);
         } catch (e) {
             console.error('Failed to resume:', e);
+            toast.error('Failed to resume');
         }
     };
 
@@ -723,6 +1082,49 @@ export default function AutoPilotPage() {
         }
     };
 
+    const openTaskDetails = async (task: TestTask) => {
+        if (!activeSessionId) return;
+        setTaskDetailOpen(true);
+        setTaskDetailLoading(true);
+        setTaskDetailError(null);
+        setSelectedTask({
+            ...task,
+            run_dir: null,
+            pipeline_error: null,
+            agentic_summary: null,
+            validation: null,
+            artifacts: [],
+            report_url: null,
+            log_excerpt: null,
+        });
+
+        try {
+            const res = await fetch(`${API_BASE}/autopilot/${activeSessionId}/test-tasks/${task.id}`);
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                const message = data.detail || 'Failed to load task details';
+                setTaskDetailError(message);
+                toast.error(message);
+                return;
+            }
+            setSelectedTask(await res.json());
+        } catch (e) {
+            const message = `Failed to load task details: ${e instanceof Error ? e.message : 'Network error'}`;
+            setTaskDetailError(message);
+            toast.error(message);
+        } finally {
+            setTaskDetailLoading(false);
+        }
+    };
+
+    const setTaskDetailDialogOpen = (open: boolean) => {
+        setTaskDetailOpen(open);
+        if (!open) {
+            setTaskDetailError(null);
+            setTaskDetailLoading(false);
+        }
+    };
+
     const viewSession = (s: AutoPilotSession) => {
         setActiveSessionId(s.id);
         setSession(s);
@@ -730,6 +1132,9 @@ export default function AutoPilotPage() {
         setQuestions([]);
         setSpecTasks([]);
         setTestTasks([]);
+        setSelectedTask(null);
+        setTaskDetailOpen(false);
+        setTaskDetailError(null);
     };
 
     const backToList = () => {
@@ -881,8 +1286,9 @@ export default function AutoPilotPage() {
 
     // -- Question Panel --
     const renderQuestionPanel = () => {
-        const pendingQuestion = questions.find(q => q.status === 'pending');
+        const pendingQuestion = questions.find(q => q.status === 'pending' && !submittedQuestionIds.has(q.id));
         if (!pendingQuestion || session?.status !== 'awaiting_input') return null;
+        const isSubmittingAnswer = answeringQuestionId === pendingQuestion.id || submittedQuestionIds.has(pendingQuestion.id);
 
         return (
             <div style={{
@@ -936,7 +1342,7 @@ export default function AutoPilotPage() {
                             <button
                                 key={i}
                                 onClick={() => answerQuestion(pendingQuestion.id, answer)}
-                                disabled={answeringQuestionId === pendingQuestion.id}
+                                disabled={isSubmittingAnswer}
                                 style={{
                                     padding: '0.5rem 1rem',
                                     borderRadius: '8px',
@@ -945,9 +1351,9 @@ export default function AutoPilotPage() {
                                     color: dark.warning,
                                     fontSize: '0.8rem',
                                     fontWeight: 500,
-                                    cursor: 'pointer',
+                                    cursor: isSubmittingAnswer ? 'not-allowed' : 'pointer',
                                     transition: 'background-color 0.15s, border-color 0.15s, color 0.15s',
-                                    opacity: answeringQuestionId === pendingQuestion.id ? 0.5 : 1,
+                                    opacity: isSubmittingAnswer ? 0.5 : 1,
                                 }}
                             >
                                 {answer}
@@ -962,8 +1368,9 @@ export default function AutoPilotPage() {
                         placeholder="Type a custom answer..."
                         value={customAnswer}
                         onChange={e => setCustomAnswer(e.target.value)}
+                        disabled={isSubmittingAnswer}
                         onKeyDown={e => {
-                            if (e.key === 'Enter' && customAnswer.trim()) {
+                            if (e.key === 'Enter' && customAnswer.trim() && !isSubmittingAnswer) {
                                 answerQuestion(pendingQuestion.id, customAnswer.trim());
                             }
                         }}
@@ -975,11 +1382,11 @@ export default function AutoPilotPage() {
                     />
                     <button
                         onClick={() => {
-                            if (customAnswer.trim()) {
+                            if (customAnswer.trim() && !isSubmittingAnswer) {
                                 answerQuestion(pendingQuestion.id, customAnswer.trim());
                             }
                         }}
-                        disabled={!customAnswer.trim() || answeringQuestionId === pendingQuestion.id}
+                        disabled={!customAnswer.trim() || isSubmittingAnswer}
                         style={{
                             padding: '0.5rem 1rem',
                             borderRadius: '8px',
@@ -988,11 +1395,11 @@ export default function AutoPilotPage() {
                             color: '#ffffff',
                             fontWeight: 600,
                             fontSize: '0.8rem',
-                            cursor: 'pointer',
-                            opacity: !customAnswer.trim() || answeringQuestionId === pendingQuestion.id ? 0.5 : 1,
+                            cursor: !customAnswer.trim() || isSubmittingAnswer ? 'not-allowed' : 'pointer',
+                            opacity: !customAnswer.trim() || isSubmittingAnswer ? 0.5 : 1,
                         }}
                     >
-                        {answeringQuestionId === pendingQuestion.id ? (
+                        {isSubmittingAnswer ? (
                             <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
                         ) : 'Submit'}
                     </button>
@@ -1231,7 +1638,7 @@ export default function AutoPilotPage() {
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
                         <thead>
                             <tr style={{ borderBottom: `1px solid ${dark.border}` }}>
-                                {['Spec Name', 'Status', 'Stage', 'Healing', 'Duration', 'Actions'].map(h => (
+                                {['Spec Name', 'Status', 'Reason', 'Mode', 'Stage', 'Artifact', 'Healing', 'Duration', 'Actions'].map(h => (
                                     <th key={h} style={tableHeaderStyle}>
                                         {h}
                                     </th>
@@ -1258,10 +1665,48 @@ export default function AutoPilotPage() {
                                     <td style={{
                                         padding: '0.6rem 1rem',
                                         fontSize: '0.75rem',
+                                        color: isFailedTestTask(task) ? dark.danger : task.status === 'paused' ? dark.warning : dark.textFaint,
+                                        maxWidth: '18rem',
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        whiteSpace: 'nowrap',
+                                    }} title={taskFailureReason(task)}>
+                                        {taskFailureReason(task)}
+                                    </td>
+                                    <td style={{ padding: '0.6rem 1rem' }}>
+                                        {task.generation_mode ? (
+                                            <span style={{
+                                                padding: '0.15rem 0.5rem',
+                                                borderRadius: '9999px',
+                                                fontSize: '0.7rem',
+                                                fontWeight: 600,
+                                                background: task.generation_mode === 'conservative_smoke' ? dark.warningSoft : dark.successSoft,
+                                                color: task.generation_mode === 'conservative_smoke' ? dark.warning : dark.success,
+                                                whiteSpace: 'nowrap',
+                                            }}>
+                                                {task.generation_mode === 'conservative_smoke' ? 'Smoke' : 'Native E2E'}
+                                            </span>
+                                        ) : '-'}
+                                    </td>
+                                    <td style={{
+                                        padding: '0.6rem 1rem',
+                                        fontSize: '0.75rem',
                                         color: dark.textMuted,
                                         textTransform: 'capitalize',
                                     }}>
                                         {task.current_stage?.replace('_', ' ') || '-'}
+                                    </td>
+                                    <td style={{
+                                        padding: '0.6rem 1rem',
+                                        fontFamily: 'monospace',
+                                        fontSize: '0.7rem',
+                                        color: task.test_path ? dark.textSecondary : dark.textFaint,
+                                        maxWidth: '16rem',
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        whiteSpace: 'nowrap',
+                                    }} title={task.test_path || undefined}>
+                                        {task.test_path ? task.test_path.split('/').pop() : '-'}
                                     </td>
                                     <td style={{
                                         padding: '0.6rem 1rem',
@@ -1278,6 +1723,30 @@ export default function AutoPilotPage() {
                                         {formatDuration(task.started_at, task.completed_at)}
                                     </td>
                                     <td style={{ padding: '0.6rem 1rem' }}>
+                                        <div style={{ display: 'flex', gap: '0.45rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                                            <button
+                                                type="button"
+                                                onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    openTaskDetails(task);
+                                                }}
+                                                style={{
+                                                    padding: '0.2rem 0.5rem',
+                                                    borderRadius: '4px',
+                                                    border: `1px solid ${dark.borderStrong}`,
+                                                    background: dark.neutralSoft,
+                                                    color: dark.textSecondary,
+                                                    cursor: 'pointer',
+                                                    fontSize: '0.7rem',
+                                                    fontWeight: 600,
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: '0.25rem',
+                                                }}
+                                            >
+                                                <FileText size={12} />
+                                                Details
+                                            </button>
                                         {(task.status === 'running' || task.status === 'pending') && (
                                             <button
                                                 onClick={() => stopTestTask(task.id)}
@@ -1301,6 +1770,7 @@ export default function AutoPilotPage() {
                                                 Stop
                                             </button>
                                         )}
+                                        </div>
                                     </td>
                                 </tr>
                             ))}
@@ -1721,11 +2191,37 @@ export default function AutoPilotPage() {
         );
     }
 
+    if (loadError && sessions.length === 0 && !session) {
+        return (
+            <PageLayout tier="wide" style={{ paddingBottom: '4rem' }}>
+                <style>{autoPilotStyles}</style>
+                <div className="autopilot-page" style={workspaceStyle}>
+                    <AutoPilotHeader
+                        title="Auto Pilot"
+                        subtitle="End-to-end automated pipeline: explore, generate requirements, create test specs, and run tests."
+                    />
+                    <EmptyState
+                        icon={<AlertTriangle size={28} />}
+                        title="Auto Pilot data did not load"
+                        description={loadError}
+                        action={
+                            <button onClick={fetchSessions} style={primaryButtonStyle}>
+                                <RefreshCw size={16} />
+                                Retry
+                            </button>
+                        }
+                    />
+                </div>
+            </PageLayout>
+        );
+    }
+
     // ============ ACTIVE SESSION VIEW ============
     if (activeSessionId && session) {
         const isRunning = session.status === 'running';
         const isPaused = session.status === 'paused';
         const isAwaitingInput = session.status === 'awaiting_input';
+        const canResume = session.can_resume && !isRunning;
         const isActive = isRunning || isPaused || isAwaitingInput;
 
         return (
@@ -1746,13 +2242,14 @@ export default function AutoPilotPage() {
                                     Pause
                                 </button>
                             )}
-                            {isPaused && (
+                            {canResume && (
                                 <button
                                     onClick={resumeSession}
                                     style={primaryButtonStyle}
+                                    title={session.resume_reason || 'Resume Auto Pilot'}
                                 >
                                     <Play size={16} />
-                                    Resume
+                                    {session.status === 'failed' ? 'Retry Phase' : 'Resume'}
                                 </button>
                             )}
                             {isActive && (
@@ -1782,6 +2279,7 @@ export default function AutoPilotPage() {
                             { label: 'Started', value: formatTimeAgo(session.started_at) },
                             { label: 'Duration', value: formatDuration(session.started_at, session.completed_at) },
                             { label: 'Overall progress', value: `${Math.round(progressPercent(session.overall_progress))}%` },
+                            ...(session.failed_phase ? [{ label: 'Failed phase', value: PHASE_LABELS[session.failed_phase] || session.failed_phase }] : []),
                         ].map(item => (
                             <div key={item.label} style={{ ...cardStyle, padding: '0.85rem 1rem' }}>
                                 <div style={{
@@ -1812,6 +2310,57 @@ export default function AutoPilotPage() {
                             fontWeight: 600,
                         }}>
                             {session.error_message}
+                            {session.can_resume && session.resume_reason && (
+                                <div style={{ marginTop: '0.4rem', color: dark.textSecondary, fontWeight: 500 }}>
+                                    {session.resume_reason}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {isPaused && (
+                        <div className="animate-in stagger-1" style={{
+                            ...cardStyle,
+                            marginBottom: '1rem',
+                            border: `1px solid ${dark.warningBorder}`,
+                            background: dark.warningSoft,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '1rem',
+                            flexWrap: 'wrap',
+                        }}>
+                            <div>
+                                <div style={{
+                                    color: dark.warning,
+                                    fontSize: '0.9rem',
+                                    fontWeight: 800,
+                                    marginBottom: '0.25rem',
+                                }}>
+                                    Auto Pilot paused
+                                </div>
+                                <div style={{ color: dark.textSecondary, fontSize: '0.82rem' }}>
+                                    {session.resume_reason || 'The pipeline is paused and can be resumed.'}
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <button
+                                    onClick={resumeSession}
+                                    disabled={!session.can_resume}
+                                    style={{
+                                        ...primaryButtonStyle,
+                                        opacity: session.can_resume ? 1 : 0.55,
+                                        cursor: session.can_resume ? 'pointer' : 'not-allowed',
+                                    }}
+                                >
+                                    <Play size={16} />
+                                    Resume
+                                </button>
+                                <button onClick={cancelSession} style={dangerButtonStyle}>
+                                    <Square size={14} />
+                                    Cancel
+                                </button>
+                            </div>
                         </div>
                     )}
 
@@ -1885,6 +2434,13 @@ export default function AutoPilotPage() {
                         </div>
                     </div>
                 )}
+                    <TaskDetailDialog
+                        open={taskDetailOpen}
+                        onOpenChange={setTaskDetailDialogOpen}
+                        selectedTask={selectedTask}
+                        loading={taskDetailLoading}
+                        error={taskDetailError}
+                    />
                 </div>
             </PageLayout>
         );
@@ -1908,6 +2464,29 @@ export default function AutoPilotPage() {
                     </button>
                 }
                 />
+
+                {loadError && (
+                    <div style={{
+                        ...cardStyle,
+                        marginBottom: '1rem',
+                        borderColor: dark.dangerBorder,
+                        background: dark.dangerSoft,
+                        color: dark.danger,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '1rem',
+                    }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <AlertTriangle size={16} />
+                            {loadError}
+                        </span>
+                        <button onClick={fetchSessions} style={secondaryButtonStyle}>
+                            <RefreshCw size={14} />
+                            Retry
+                        </button>
+                    </div>
+                )}
 
             {/* Start Form */}
                 <div className="animate-in stagger-2">

@@ -70,7 +70,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G
           cpus: '2.0'
     container_name: quorvex-frontend
     ports:
@@ -84,6 +84,7 @@ services:
       # runs on the host machine, not inside Docker
       - NEXT_PUBLIC_API_URL=http://localhost:8001
       - WATCHPACK_POLLING=true
+      - NODE_OPTIONS=--max-old-space-size=2048
     depends_on:
       - backend
     networks:

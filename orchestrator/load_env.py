@@ -65,9 +65,17 @@ def setup_claude_env():
             if slot:
                 rotator.activate_key(slot)
 
+    active_model = (
+        os.environ.get("ANTHROPIC_MODEL")
+        or os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+        or os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "")
+    )
+
     # Return the key AI-related env vars for logging purposes
     return {
         "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
+        "ANTHROPIC_MODEL": active_model,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL", ""),
         "ANTHROPIC_DEFAULT_SONNET_MODEL": os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", ""),
         "ANTHROPIC_AUTH_TOKEN": "***" if os.environ.get("ANTHROPIC_AUTH_TOKEN") else "",
     }

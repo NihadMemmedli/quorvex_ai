@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { Command } from 'cmdk';
-import { Search, Clock, Zap, ArrowRight, FileText, Play, CheckSquare, Loader2 } from 'lucide-react';
+import { Search, Clock, Zap, ArrowRight, FileText, Play, CheckSquare, Loader2, Layers, Compass } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCommandPalette } from './CommandPaletteProvider';
 import { useRecentPages } from './useRecentPages';
@@ -14,6 +14,8 @@ const typeIcons: Record<string, typeof FileText> = {
     spec: FileText,
     run: Play,
     requirement: CheckSquare,
+    batch: Layers,
+    exploration: Compass,
 };
 
 export function CommandPalette() {
@@ -21,6 +23,8 @@ export function CommandPalette() {
     const { user } = useAuth();
     const router = useRouter();
     const [query, setQuery] = useState('');
+    const trimmedQuery = query.trim();
+    const hasQuery = trimmedQuery.length > 0;
     const { recentPages } = useRecentPages();
     const { results: searchResults, isSearching } = useCommandSearch(query);
     const inputRef = useRef<HTMLInputElement>(null);
@@ -84,6 +88,15 @@ export function CommandPalette() {
         return groups;
     }, [filteredNavigation]);
 
+    const navGroupEntries = Object.entries(navGroups);
+    const showRecent = !hasQuery && recentPages.length > 0;
+    const hasVisibleResults =
+        filteredQuickActions.length > 0 ||
+        navGroupEntries.length > 0 ||
+        filteredAdmin.length > 0 ||
+        searchResults.length > 0 ||
+        showRecent;
+
     if (!isOpen) return null;
 
     return (
@@ -102,16 +115,10 @@ export function CommandPalette() {
 
             {/* Dialog */}
             <div
-                style={{
-                    position: 'fixed',
-                    top: '20%',
-                    left: '50%',
-                    transform: 'translateX(-50%)',
-                    width: '100%',
-                    maxWidth: '560px',
-                    zIndex: 9999,
-                    animation: 'cmdkFadeIn 0.15s ease-out',
-                }}
+                className="cmdk-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-label="Global search"
             >
                 <Command
                     label="Command palette"
@@ -127,6 +134,7 @@ export function CommandPalette() {
                             placeholder="Search pages, specs, runs, or actions..."
                             value={query}
                             onValueChange={setQuery}
+                            aria-label="Search pages, specs, runs, or actions"
                         />
                         {isSearching && <Loader2 size={16} style={{ color: 'var(--text-secondary)', animation: 'spin 1s linear infinite' }} />}
                         <kbd className="cmdk-kbd">ESC</kbd>
@@ -134,12 +142,8 @@ export function CommandPalette() {
 
                     {/* Results */}
                     <Command.List className="cmdk-list">
-                        <Command.Empty className="cmdk-empty">
-                            No results found.
-                        </Command.Empty>
-
                         {/* Quick Actions */}
-                        {filteredQuickActions.length > 0 && (
+                        {!hasQuery && filteredQuickActions.length > 0 && (
                             <Command.Group heading="Quick Actions" className="cmdk-group">
                                 {filteredQuickActions.map(item => (
                                     <Command.Item
@@ -148,11 +152,11 @@ export function CommandPalette() {
                                         onSelect={() => handleSelect(item)}
                                         className="cmdk-item"
                                     >
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flex: 1 }}>
+                                        <div className="cmdk-item-main">
                                             <div className="cmdk-item-icon" style={{ background: 'rgba(59, 130, 246, 0.1)', color: 'var(--primary)' }}>
                                                 <item.icon size={16} />
                                             </div>
-                                            <span>{item.label}</span>
+                                            <span className="cmdk-item-label">{item.label}</span>
                                         </div>
                                         <Zap size={14} style={{ color: 'var(--text-secondary)', opacity: 0.5 }} />
                                     </Command.Item>
@@ -161,7 +165,7 @@ export function CommandPalette() {
                         )}
 
                         {/* Recent Pages */}
-                        {!query && recentPages.length > 0 && (
+                        {showRecent && (
                             <Command.Group heading="Recent" className="cmdk-group">
                                 {recentPages.slice(0, 5).map(page => (
                                     <Command.Item
@@ -170,15 +174,59 @@ export function CommandPalette() {
                                         onSelect={() => handleSelect({ href: page.href })}
                                         className="cmdk-item"
                                     >
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flex: 1 }}>
+                                        <div className="cmdk-item-main">
                                             <div className="cmdk-item-icon">
                                                 <Clock size={16} />
                                             </div>
-                                            <span>{page.label}</span>
+                                            <span className="cmdk-item-label">{page.label}</span>
                                         </div>
-                                        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                        <span className="cmdk-item-meta">
                                             {page.href}
                                         </span>
+                                    </Command.Item>
+                                ))}
+                            </Command.Group>
+                        )}
+
+                        {/* Navigation */}
+                        {navGroupEntries.map(([group, items]) => (
+                            <Command.Group key={group} heading={group} className="cmdk-group">
+                                {items.map(item => (
+                                    <Command.Item
+                                        key={item.id}
+                                        value={item.id}
+                                        onSelect={() => handleSelect(item)}
+                                        className="cmdk-item"
+                                    >
+                                        <div className="cmdk-item-main">
+                                            <div className="cmdk-item-icon">
+                                                <item.icon size={16} />
+                                            </div>
+                                            <span className="cmdk-item-label">{item.label}</span>
+                                        </div>
+                                        <ArrowRight size={14} style={{ color: 'var(--text-secondary)', opacity: 0.3, flexShrink: 0 }} />
+                                    </Command.Item>
+                                ))}
+                            </Command.Group>
+                        ))}
+
+                        {/* Matching Actions */}
+                        {hasQuery && filteredQuickActions.length > 0 && (
+                            <Command.Group heading="Actions" className="cmdk-group">
+                                {filteredQuickActions.map(item => (
+                                    <Command.Item
+                                        key={item.id}
+                                        value={item.id}
+                                        onSelect={() => handleSelect(item)}
+                                        className="cmdk-item"
+                                    >
+                                        <div className="cmdk-item-main">
+                                            <div className="cmdk-item-icon" style={{ background: 'rgba(59, 130, 246, 0.1)', color: 'var(--primary)' }}>
+                                                <item.icon size={16} />
+                                            </div>
+                                            <span className="cmdk-item-label">{item.label}</span>
+                                        </div>
+                                        <Zap size={14} style={{ color: 'var(--text-secondary)', opacity: 0.5, flexShrink: 0 }} />
                                     </Command.Item>
                                 ))}
                             </Command.Group>
@@ -196,15 +244,15 @@ export function CommandPalette() {
                                             onSelect={() => handleSelect(result)}
                                             className="cmdk-item"
                                         >
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flex: 1, minWidth: 0 }}>
+                                            <div className="cmdk-item-main">
                                                 <div className="cmdk-item-icon">
                                                     <Icon size={16} />
                                                 </div>
-                                                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                <span className="cmdk-item-label">
                                                     {result.label}
                                                 </span>
                                             </div>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+                                            <div className="cmdk-badge-row">
                                                 {result.subtitle && (
                                                     <span className="cmdk-badge">{result.subtitle}</span>
                                                 )}
@@ -216,28 +264,6 @@ export function CommandPalette() {
                             </Command.Group>
                         )}
 
-                        {/* Navigation */}
-                        {Object.entries(navGroups).map(([group, items]) => (
-                            <Command.Group key={group} heading={group} className="cmdk-group">
-                                {items.map(item => (
-                                    <Command.Item
-                                        key={item.id}
-                                        value={item.id}
-                                        onSelect={() => handleSelect(item)}
-                                        className="cmdk-item"
-                                    >
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flex: 1 }}>
-                                            <div className="cmdk-item-icon">
-                                                <item.icon size={16} />
-                                            </div>
-                                            <span>{item.label}</span>
-                                        </div>
-                                        <ArrowRight size={14} style={{ color: 'var(--text-secondary)', opacity: 0.3 }} />
-                                    </Command.Item>
-                                ))}
-                            </Command.Group>
-                        ))}
-
                         {/* Admin */}
                         {filteredAdmin.length > 0 && (
                             <Command.Group heading="Admin" className="cmdk-group">
@@ -248,15 +274,30 @@ export function CommandPalette() {
                                         onSelect={() => handleSelect(item)}
                                         className="cmdk-item"
                                     >
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flex: 1 }}>
+                                        <div className="cmdk-item-main">
                                             <div className="cmdk-item-icon" style={{ background: 'rgba(245, 158, 11, 0.1)', color: '#f59e0b' }}>
                                                 <item.icon size={16} />
                                             </div>
-                                            <span style={{ color: '#f59e0b' }}>{item.label}</span>
+                                            <span className="cmdk-item-label" style={{ color: '#f59e0b' }}>{item.label}</span>
                                         </div>
                                     </Command.Item>
                                 ))}
                             </Command.Group>
+                        )}
+
+                        {isSearching && (
+                            <div className="cmdk-loading" role="status">
+                                <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} />
+                                Searching specs, runs, requirements, batches...
+                            </div>
+                        )}
+
+                        {!isSearching && !hasVisibleResults && (
+                            <div className="cmdk-empty">
+                                {trimmedQuery.length === 1
+                                    ? 'Keep typing to search project entities.'
+                                    : `No results for "${trimmedQuery}".`}
+                            </div>
                         )}
                     </Command.List>
 

@@ -82,6 +82,9 @@ class NativeApiGenerator:
 
         # Determine output path
         output_path = self.tests_dir / f"{spec_name}.api.spec.ts"
+        if output_path.exists():
+            logger.info(f"Removing stale generated API test before regeneration: {output_path}")
+            output_path.unlink()
 
         logger.info(f"Generating API test from: {spec_path}")
         logger.info(f"   Output: {output_path}")
