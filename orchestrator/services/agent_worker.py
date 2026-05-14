@@ -73,10 +73,25 @@ class AgentWorker:
         self.cwd = str(project_root)
         # Live progress tracking (updated by reader thread, read by heartbeat loop)
         self._progress_lock = threading.Lock()
-        self._current_progress = {"tool_calls": 0, "last_tool": "", "chars": 0, "interactions": 0}
+        self._current_progress = self._empty_progress()
+        self._process_lock = threading.Lock()
+        self._running_processes: dict[str, subprocess.Popen] = {}
+        self._cancelled_task_ids: set[str] = set()
+        self._last_execution_telemetry: dict[str, object] = {}
 
         # Setup environment
         setup_claude_env()
+
+    @staticmethod
+    def _empty_progress() -> dict[str, object]:
+        return {
+            "tool_calls": 0,
+            "browser_tool_calls": 0,
+            "last_tool": "",
+            "tool_names": [],
+            "chars": 0,
+            "interactions": 0,
+        }
 
     async def start(self):
         """Start the worker loop."""
@@ -97,41 +112,41 @@ class AgentWorker:
         except Exception as e:
             logger.warning(f"API key rotator init failed (non-fatal): {e}")
 
-        # Clean up orphaned "running" tasks from previous container/process
-        try:
-            orphaned = await self.queue.cleanup_orphaned_tasks()
-            if orphaned:
-                logger.info(f"Startup: cleaned {orphaned} orphaned tasks from previous run")
-        except Exception as e:
-            logger.warning(f"Startup cleanup failed (non-fatal): {e}")
-
         self.running = True
+        worker_heartbeat = asyncio.create_task(self._worker_heartbeat_loop())
         consecutive_empty = 0
 
-        while self.running:
+        try:
+            while self.running:
+                try:
+                    # Refresh once here as well so the first heartbeat is not delayed.
+                    await self.queue.update_worker_heartbeat(self.worker_id)
+
+                    # Dequeue task (blocking for up to 10 seconds)
+                    task = await self.queue.dequeue_task(timeout=10)
+
+                    if task:
+                        consecutive_empty = 0
+                        logger.info(f"Processing task {task.id} (type={task.agent_type}, op={task.operation_type})")
+                        await self._execute_task(task)
+                    else:
+                        consecutive_empty += 1
+                        if consecutive_empty % 30 == 0:  # Log every 5 minutes
+                            metrics = await self.queue.get_metrics()
+                            logger.debug(f"Queue idle, metrics: {metrics}")
+
+                except asyncio.CancelledError:
+                    logger.info("Worker cancelled")
+                    break
+                except Exception as e:
+                    logger.error(f"Worker error: {e}", exc_info=True)
+                    await asyncio.sleep(5)  # Back off on error
+        finally:
+            worker_heartbeat.cancel()
             try:
-                # Refresh worker-level heartbeat each iteration (~10s)
-                await self.queue.update_worker_heartbeat(self.worker_id)
-
-                # Dequeue task (blocking for up to 10 seconds)
-                task = await self.queue.dequeue_task(timeout=10)
-
-                if task:
-                    consecutive_empty = 0
-                    logger.info(f"Processing task {task.id} (type={task.agent_type}, op={task.operation_type})")
-                    await self._execute_task(task)
-                else:
-                    consecutive_empty += 1
-                    if consecutive_empty % 30 == 0:  # Log every 5 minutes
-                        metrics = await self.queue.get_metrics()
-                        logger.debug(f"Queue idle, metrics: {metrics}")
-
+                await worker_heartbeat
             except asyncio.CancelledError:
-                logger.info("Worker cancelled")
-                break
-            except Exception as e:
-                logger.error(f"Worker error: {e}", exc_info=True)
-                await asyncio.sleep(5)  # Back off on error
+                pass
 
         await self.queue.disconnect()
         logger.info("Worker stopped")
@@ -151,13 +166,58 @@ class AgentWorker:
         except asyncio.CancelledError:
             pass
 
+    async def _worker_heartbeat_loop(self, interval: int = 10):
+        """Keep the worker-level heartbeat fresh even while a long task is running."""
+        try:
+            while True:
+                await self.queue.update_worker_heartbeat(self.worker_id)
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            pass
+
+    async def _cancel_monitor_loop(self, task_id: str, interval: float = 1.0):
+        """Terminate the active CLI process when the Redis cancel flag is set."""
+        try:
+            while True:
+                if await self.queue.is_cancelled(task_id):
+                    logger.info(f"Task {task_id} cancellation detected; terminating Claude CLI process")
+                    with self._process_lock:
+                        proc = self._running_processes.get(task_id)
+                        self._cancelled_task_ids.add(task_id)
+
+                    if proc and proc.poll() is None:
+                        import signal
+
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                        except (ProcessLookupError, OSError):
+                            try:
+                                proc.terminate()
+                            except (ProcessLookupError, OSError):
+                                pass
+                        await asyncio.sleep(3)
+                        if proc.poll() is None:
+                            try:
+                                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                            except (ProcessLookupError, OSError):
+                                try:
+                                    proc.kill()
+                                except (ProcessLookupError, OSError):
+                                    pass
+                    return
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            pass
+
     async def _execute_task(self, task: AgentTask):
         """Execute an agent task using the Claude CLI with 429 retry and key rotation."""
         # Reset progress tracking for this task
         with self._progress_lock:
-            self._current_progress = {"tool_calls": 0, "last_tool": "", "chars": 0, "interactions": 0}
+            self._current_progress = self._empty_progress()
+            self._last_execution_telemetry = {}
         # Start heartbeat to signal we're alive
         heartbeat = asyncio.create_task(self._heartbeat_loop(task.id))
+        cancel_monitor = asyncio.create_task(self._cancel_monitor_loop(task.id))
         # Send initial heartbeat immediately
         await self.queue.update_heartbeat(task.id, progress=dict(self._current_progress))
 
@@ -193,31 +253,48 @@ class AgentWorker:
                     # Reset progress on retry
                     if attempt > 1:
                         with self._progress_lock:
-                            self._current_progress = {"tool_calls": 0, "last_tool": "", "chars": 0, "interactions": 0}
+                            self._current_progress = self._empty_progress()
 
                     result = await self._run_claude_cli(
+                        task_id=task.id,
                         prompt=task.prompt,
                         system_prompt=task.system_prompt,
                         timeout_seconds=task.timeout_seconds,
                         cwd=task_cwd,
+                        allowed_tools=task.allowed_tools,
+                        tools=task.tools,
+                        disallowed_tools=task.disallowed_tools,
+                        permission_mode=task.permission_mode,
+                        strict_mcp_config=task.strict_mcp_config,
+                        max_budget_usd=task.max_budget_usd,
+                        task_budget=task.task_budget,
+                        include_hook_events=task.include_hook_events,
                     )
 
                     # Success — report and submit
                     if slot:
                         rotator.report_success(slot)
-                    await self.queue.submit_result(task.id, result, success=True)
+                    telemetry = self._build_task_telemetry(task, attempt)
+                    await self.queue.submit_result(task.id, result, success=True, telemetry=telemetry)
                     _result_submitted = True
                     return
 
                 except asyncio.TimeoutError as e:
                     # Timeouts are not retryable
                     logger.error(f"Task {task.id} timed out: {e}")
-                    await self.queue.submit_result(task.id, "", success=False, error=str(e))
+                    telemetry = self._build_task_telemetry(task, attempt, error_type="timeout")
+                    await self.queue.submit_result(task.id, "", success=False, error=str(e), telemetry=telemetry)
                     _result_submitted = True
                     return
 
                 except RuntimeError as e:
                     error_str = str(e)
+                    if "cancelled" in error_str.lower():
+                        logger.info(f"Task {task.id} cancelled during execution")
+                        telemetry = self._build_task_telemetry(task, attempt, error_type="cancelled")
+                        await self.queue.submit_result(task.id, "", success=False, error="Task cancelled", telemetry=telemetry)
+                        _result_submitted = True
+                        return
                     if is_rate_limit_error(error_str) and attempt < max_retries:
                         retry_after = parse_retry_after(error_str)
                         wait_seconds = min(retry_after or 30, 120)
@@ -233,39 +310,50 @@ class AgentWorker:
                         )
                         # Surface retry state in heartbeat so frontend can show it
                         with self._progress_lock:
-                            self._current_progress = {
-                                "tool_calls": 0,
-                                "last_tool": "",
-                                "chars": 0,
-                                "interactions": 0,
-                                "retry_attempt": attempt + 1,
-                                "retry_reason": "rate_limited",
-                                "retry_wait_seconds": wait_seconds,
-                            }
+                            self._current_progress = self._empty_progress()
+                            self._current_progress.update(
+                                {
+                                    "retry_attempt": attempt + 1,
+                                    "retry_reason": "rate_limited",
+                                    "retry_wait_seconds": wait_seconds,
+                                }
+                            )
                         await asyncio.sleep(wait_seconds)
                         continue  # retry with rotated key
                     else:
                         # Non-429 RuntimeError or final attempt — fail
                         logger.error(f"Task {task.id} failed: {e}", exc_info=True)
-                        await self.queue.submit_result(task.id, "", success=False, error=error_str)
+                        telemetry = self._build_task_telemetry(task, attempt, error_type="runtime_error")
+                        await self.queue.submit_result(task.id, "", success=False, error=error_str, telemetry=telemetry)
                         _result_submitted = True
                         return
 
                 except Exception as e:
                     # Any other exception — fail immediately
                     logger.error(f"Task {task.id} failed: {e}", exc_info=True)
-                    await self.queue.submit_result(task.id, "", success=False, error=str(e))
+                    telemetry = self._build_task_telemetry(task, attempt, error_type=type(e).__name__)
+                    await self.queue.submit_result(task.id, "", success=False, error=str(e), telemetry=telemetry)
                     _result_submitted = True
                     return
 
             # Exhausted all retries (shouldn't normally reach here)
+            telemetry = self._build_task_telemetry(task, max_retries, error_type="rate_limit_exhausted")
             await self.queue.submit_result(
-                task.id, "", success=False, error=f"Exhausted {max_retries} retries due to rate limiting"
+                task.id,
+                "",
+                success=False,
+                error=f"Exhausted {max_retries} retries due to rate limiting",
+                telemetry=telemetry,
             )
             _result_submitted = True
 
         finally:
+            cancel_monitor.cancel()
             heartbeat.cancel()
+            try:
+                await cancel_monitor
+            except asyncio.CancelledError:
+                pass
             try:
                 await heartbeat
             except asyncio.CancelledError:
@@ -286,12 +374,53 @@ class AgentWorker:
             if saved_env:
                 logger.debug(f"Restored {len(saved_env)} env var(s) after task {task.id}")
 
+    def _build_task_telemetry(
+        self,
+        task: AgentTask,
+        attempt: int,
+        error_type: str | None = None,
+    ) -> dict[str, object]:
+        """Build compact task telemetry from live progress and CLI stream stats."""
+        with self._progress_lock:
+            progress = dict(self._current_progress)
+            execution = dict(self._last_execution_telemetry)
+        telemetry: dict[str, object] = {
+            "worker_id": self.worker_id,
+            "attempt": attempt,
+            "agent_type": task.agent_type,
+            "operation_type": task.operation_type,
+            "timeout_seconds": task.timeout_seconds,
+            "tool_calls": int(progress.get("tool_calls", 0) or 0),
+            "browser_tool_calls": int(progress.get("browser_tool_calls", 0) or 0),
+            "interactions": int(progress.get("interactions", 0) or 0),
+            "last_tool": progress.get("last_tool", ""),
+            "tool_names": progress.get("tool_names", []),
+            "chars": int(progress.get("chars", 0) or 0),
+            "allowed_tools_count": len(task.allowed_tools or []),
+            "tools_count": len(task.tools) if isinstance(task.tools, list) else None,
+            **execution,
+        }
+        if error_type:
+            telemetry["error_type"] = error_type
+        if task.started_at:
+            telemetry["duration_seconds"] = (time.time() - task.started_at.timestamp())
+        return telemetry
+
     async def _run_claude_cli(
         self,
+        task_id: str,
         prompt: str,
         system_prompt: str = None,
         timeout_seconds: int = 1800,
         cwd: str = None,
+        allowed_tools: list[str] | None = None,
+        tools: list[str] | dict[str, str] | None = None,
+        disallowed_tools: list[str] | None = None,
+        permission_mode: str | None = None,
+        strict_mcp_config: bool = True,
+        max_budget_usd: float | None = None,
+        task_budget: dict[str, int] | None = None,
+        include_hook_events: bool = False,
     ) -> str:
         """Run Claude CLI and capture output."""
         loop = asyncio.get_event_loop()
@@ -302,20 +431,38 @@ class AgentWorker:
         result = await loop.run_in_executor(
             None,
             self._run_cli_sync,
+            task_id,
             prompt,
             system_prompt,
             timeout_seconds,
             effective_cwd,
+            allowed_tools,
+            tools,
+            disallowed_tools,
+            permission_mode,
+            strict_mcp_config,
+            max_budget_usd,
+            task_budget,
+            include_hook_events,
         )
 
         return result
 
     def _run_cli_sync(
         self,
+        task_id: str,
         prompt: str,
         system_prompt: str = None,
         timeout_seconds: int = 1800,
         cwd: str = None,
+        allowed_tools: list[str] | None = None,
+        tools: list[str] | dict[str, str] | None = None,
+        disallowed_tools: list[str] | None = None,
+        permission_mode: str | None = None,
+        strict_mcp_config: bool = True,
+        max_budget_usd: float | None = None,
+        task_budget: dict[str, int] | None = None,
+        include_hook_events: bool = False,
     ) -> str:
         """Synchronous CLI execution using subprocess with direct PIPE capture."""
         import signal
@@ -351,10 +498,29 @@ class AgentWorker:
         logger.info(f"[CLI]   CWD: {effective_cwd}")
         logger.info(f"[CLI]   UID: {os.getuid()}, EUID: {os.geteuid()}")
         logger.info(f"[CLI]   HOME: {env.get('HOME', 'not set')}")
+        effective_allowed_tools = ["*"] if allowed_tools is None else allowed_tools
+        effective_permission_mode = permission_mode or ("dontAsk" if tools == [] else "bypassPermissions")
+        logger.info(f"[CLI]   Allowed tools: {effective_allowed_tools}")
+        logger.info(f"[CLI]   Tools: {tools}")
+        logger.info(f"[CLI]   Permission mode: {effective_permission_mode}")
 
         start_time = time.time()
         output_chunks = []
         last_logged_chunks = 0
+        stream_stats = {
+            "stream_events": 0,
+            "assistant_messages": 0,
+            "system_messages": 0,
+            "result_events": 0,
+            "text_blocks": 0,
+            "hook_events": 0,
+            "api_error_status": None,
+            "stop_reason": None,
+            "session_id": None,
+            "total_cost_usd": None,
+            "parse_errors": 0,
+            "exit_code": None,
+        }
 
         # Build CLI command
         cli_args = [
@@ -364,16 +530,48 @@ class AgentWorker:
             "--verbose",
             "--system-prompt",
             "",
-            "--allowedTools",
-            "*",
-            "--permission-mode",
-            "bypassPermissions",
-            "--setting-sources",
-            "project",
-            "--print",
-            "--",
-            full_prompt,
         ]
+        if tools is not None:
+            if isinstance(tools, list):
+                cli_args.extend(["--tools", ",".join(tools)])
+            elif isinstance(tools, dict) and tools.get("preset") == "claude_code":
+                cli_args.extend(["--tools", "default"])
+        if effective_allowed_tools:
+            cli_args.extend(["--allowedTools", ",".join(effective_allowed_tools)])
+        if disallowed_tools:
+            cli_args.extend(["--disallowedTools", ",".join(disallowed_tools)])
+        if max_budget_usd is not None:
+            cli_args.extend(["--max-budget-usd", str(max_budget_usd)])
+        if task_budget is not None and task_budget.get("total") is not None:
+            cli_args.extend(["--task-budget", str(task_budget["total"])])
+
+        mcp_config_path = Path(effective_cwd) / ".mcp.json"
+        requested_tool_names = []
+        for tool_source in (effective_allowed_tools, tools if isinstance(tools, list) else []):
+            requested_tool_names.extend(str(tool) for tool in tool_source)
+        if mcp_config_path.exists():
+            self._validate_mcp_config(mcp_config_path, requested_tool_names)
+            cli_args.extend(["--mcp-config", str(mcp_config_path)])
+            if strict_mcp_config:
+                cli_args.append("--strict-mcp-config")
+        elif any(str(tool).startswith("mcp__") for tool in requested_tool_names):
+            raise RuntimeError(
+                f"MCP tools were requested but no .mcp.json exists in {effective_cwd}. "
+                "Create a per-run MCP config before enqueueing the task."
+            )
+        if include_hook_events:
+            cli_args.append("--include-hook-events")
+        cli_args.extend(
+            [
+                "--permission-mode",
+                effective_permission_mode,
+                "--setting-sources",
+                "project",
+                "--print",
+                "--",
+                full_prompt,
+            ]
+        )
 
         proc = None
         try:
@@ -387,6 +585,9 @@ class AgentWorker:
                 stderr=subprocess.STDOUT,  # Merge stderr into stdout
                 start_new_session=True,  # New session (similar to setsid)
             )
+            with self._process_lock:
+                self._running_processes[task_id] = proc
+                self._cancelled_task_ids.discard(task_id)
             logger.info(f"[CLI] Process started: PID={proc.pid}")
 
             # Read output with timeout using threads
@@ -401,23 +602,45 @@ class AgentWorker:
                             if stripped and stripped.startswith("{"):
                                 try:
                                     evt = json.loads(stripped)
+                                    stream_stats["stream_events"] += 1
+                                    evt_type = evt.get("type")
+                                    if evt_type == "assistant":
+                                        stream_stats["assistant_messages"] += 1
+                                    elif evt_type == "system":
+                                        stream_stats["system_messages"] += 1
+                                    elif evt_type == "result":
+                                        stream_stats["result_events"] += 1
+                                        stream_stats["api_error_status"] = evt.get("api_error_status")
+                                        stream_stats["stop_reason"] = evt.get("stop_reason")
+                                        stream_stats["session_id"] = evt.get("session_id")
+                                        stream_stats["total_cost_usd"] = evt.get("total_cost_usd")
+                                    elif evt_type == "hook_event":
+                                        stream_stats["hook_events"] += 1
                                     with self._progress_lock:
                                         if evt.get("type") == "assistant":
                                             for item in evt.get("message", {}).get("content", []):
+                                                if item.get("type") == "text":
+                                                    stream_stats["text_blocks"] += 1
                                                 if item.get("type") == "tool_use":
                                                     tool_name = item.get("name", "")
                                                     self._current_progress["tool_calls"] += 1
                                                     self._current_progress["last_tool"] = tool_name
+                                                    tool_names = self._current_progress.setdefault("tool_names", [])
+                                                    if isinstance(tool_names, list) and len(tool_names) < 200:
+                                                        tool_names.append(tool_name)
                                                     # Strip MCP prefix: mcp__playwright-test__browser_click → browser_click
                                                     short_name = (
                                                         tool_name.rsplit("__", 1)[-1]
                                                         if "__" in tool_name
                                                         else tool_name
                                                     )
+                                                    if tool_name.startswith("mcp__") and short_name.startswith("browser_"):
+                                                        self._current_progress["browser_tool_calls"] += 1
                                                     if short_name in INTERACTION_TOOLS:
                                                         self._current_progress["interactions"] += 1
                                         self._current_progress["chars"] = sum(len(c) for c in output_chunks)
                                 except (json.JSONDecodeError, TypeError):
+                                    stream_stats["parse_errors"] += 1
                                     pass
                 except Exception as e:
                     logger.error(f"[CLI] Read error: {e}")
@@ -442,6 +665,8 @@ class AgentWorker:
 
                 poll_result = proc.poll()
                 if poll_result is not None:
+                    if task_id in self._cancelled_task_ids:
+                        logger.info(f"[CLI] Process for task {task_id} exited after cancellation")
                     # Process finished - give reader thread time to finish
                     reader_thread.join(timeout=15.0)
                     if reader_thread.is_alive():
@@ -478,11 +703,26 @@ class AgentWorker:
                     except Exception:
                         pass
             raise
+        finally:
+            with self._process_lock:
+                self._running_processes.pop(task_id, None)
 
         raw_output = "".join(output_chunks)
         elapsed = time.time() - start_time
         exit_code = proc.returncode if proc else None
+        stream_stats["exit_code"] = exit_code
         logger.info(f"[CLI] Completed in {elapsed:.1f}s, exit_code={exit_code}, collected {len(raw_output)} chars")
+
+        with self._progress_lock:
+            self._last_execution_telemetry = {
+                **stream_stats,
+                "raw_output_chars": len(raw_output),
+                "cli_elapsed_seconds": elapsed,
+            }
+
+        if task_id in self._cancelled_task_ids:
+            self._cancelled_task_ids.discard(task_id)
+            raise RuntimeError("Task cancelled")
 
         # Log non-zero exit codes with output context
         if exit_code is not None and exit_code != 0:
@@ -496,6 +736,43 @@ class AgentWorker:
             logger.debug(f"[CLI] First 2000 chars:\n{raw_output[:2000]}")
 
         return self._parse_cli_output(raw_output)
+
+    def _validate_mcp_config(self, mcp_config_path: Path, allowed_tools: list[str]) -> None:
+        """Validate queued-worker MCP config before launching Claude CLI."""
+        if not any(str(tool).startswith("mcp__") for tool in allowed_tools):
+            return
+
+        try:
+            config = json.loads(mcp_config_path.read_text())
+        except Exception as exc:
+            raise RuntimeError(f"Invalid MCP config at {mcp_config_path}: {exc}") from exc
+
+        servers = config.get("mcpServers") or {}
+        if not isinstance(servers, dict) or not servers:
+            raise RuntimeError(f"MCP config at {mcp_config_path} does not define any mcpServers")
+
+        configured_prefixes = {f"mcp__{name}__" for name in servers}
+        requested_prefixes = set()
+        for tool in allowed_tools:
+            parts = str(tool).split("__", 2)
+            if len(parts) >= 3 and parts[0] == "mcp":
+                requested_prefixes.add(f"mcp__{parts[1]}__")
+        missing_prefixes = sorted(requested_prefixes - configured_prefixes)
+        if missing_prefixes:
+            raise RuntimeError(
+                f"Allowed MCP tools do not match configured MCP servers in {mcp_config_path}. "
+                f"Missing prefixes: {', '.join(missing_prefixes)}; configured: {', '.join(sorted(configured_prefixes))}"
+            )
+
+        for server_name, server in servers.items():
+            command = (server or {}).get("command")
+            if not command:
+                raise RuntimeError(f"MCP server '{server_name}' in {mcp_config_path} has no command")
+            if os.path.isabs(command) and not Path(command).exists():
+                raise RuntimeError(
+                    f"MCP server '{server_name}' command does not exist: {command}. "
+                    "Install dependencies or set PLAYWRIGHT_MCP_COMMAND."
+                )
 
     def _parse_cli_output(self, raw_output: str) -> str:
         """Parse stream-json output from Claude CLI."""
@@ -514,9 +791,11 @@ class AgentWorker:
                 if msg_type == "result":
                     result_text = data.get("result", "")
                     is_error = data.get("is_error", False)
+                    api_error_status = data.get("api_error_status")
                     logger.info(f"[CLI] Got result ({len(result_text)} chars), is_error={is_error}")
                     if is_error:
-                        raise RuntimeError(f"CLI returned error: {result_text[:2000]}")
+                        status_suffix = f" (status {api_error_status})" if api_error_status else ""
+                        raise RuntimeError(f"CLI returned error{status_suffix}: {result_text[:2000]}")
 
                 elif msg_type == "assistant":
                     message = data.get("message", {})

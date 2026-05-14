@@ -34,27 +34,38 @@ Instructions: {instructions}
 GOAL:
 1. Navigate to the URL.
 2. Understand the page's purpose.
-3. Generate a high-quality Markdown Test Specification (like the examples in specs/ directory).
+3. Generate high-quality Markdown E2E Test Specifications (like the richer examples in specs/ directory).
 
 REQUIREMENTS:
-- The spec must use standard steps: Navigate, Click, Fill, Assert.
-- Use placeholders `{{{{VAR_NAME}}}}` for secrets (like passwords).
+- Prefer individual runnable scenario specs. If multiple scenarios are needed, return one markdown spec per scenario in the JSON `specs` object.
+- Generate balanced E2E coverage where evidence supports it: happy path, navigation/state transition, negative/error, edge case, accessibility, responsive/mobile, and critical console-error checks.
+- Do not invent unsupported business behavior. If evidence is thin, use conservative page/journey checks only.
+- The spec must use standard steps: Navigate, Click, Fill, Assert, Select, Check, Wait.
+- Use placeholders `{{{{VAR_NAME}}}}` for secrets.
 - Structure:
   # Test: [Title]
   ## Description
   ...
+  ## Prerequisites
+  ...
   ## Steps
   1. ...
   2. ...
+  ## Expected Outcome
+  - ...
 
 Step 1: Navigate to {url} to understand the page.
-Step 2: Generate the markdown spec.
+Step 2: Generate the markdown spec(s).
 
 Return the result as JSON:
 ```json
 {{
   "spec_title": "...",
   "spec_content": "# Test: ... (full markdown content)...",
+  "specs": {{
+    "tc-001-scenario-name.md": "# Test: ...",
+    "tc-002-scenario-name.md": "# Test: ..."
+  }},
   "summary": "Generated spec for login page."
 }}
 ```
@@ -94,19 +105,25 @@ EXPLORATION RESULTS:
 {exploration_summary}
 
 YOUR TASK:
-Generate COMPREHENSIVE .md test specs for all discovered flows.
+Generate COMPREHENSIVE individual .md E2E scenario specs for all discovered flows.
 
 REQUIREMENTS:
-1. Create SEPARATE specs for:
-   - HAPPY PATH tests: Each major user flow working correctly
-   - EDGE CASE tests: Boundary conditions, negative scenarios
+1. Create SEPARATE runnable specs, one file per scenario:
+   - Happy path: each major user flow working correctly
+   - Navigation/state transition: multi-page or state-changing paths
+   - Negative/error: invalid, missing, unauthorized, failed, or empty states
+   - Edge case: boundary values, unusual input, responsive/mobile
+   - Accessibility/runtime regression: accessible labels, keyboard focus, console errors
 
 2. Each spec should follow this structure:
    ```markdown
-   # Test: [Feature Name] - [Happy Path / Edge Cases]
+   # Test: [Feature Name] - [Scenario Name]
 
    ## Description
    [Brief description of what this tests]
+
+   ## Prerequisites
+   [Required auth/data/state, or Fresh browser session]
 
    ## Steps
    1. Navigate to [URL]
@@ -120,28 +137,28 @@ REQUIREMENTS:
    ```
 
 3. IMPORTANT:
-   - Focus on MULTI-PAGE flows (not single page tests)
+   - Prefer MULTI-PAGE flows when observed, but do not invent unsupported business behavior
+   - If evidence is thin, generate conservative page/journey checks only
    - Use standard step format: Navigate, Click, Fill, Assert, Select, Check, etc.
    - Use placeholders `{{{{VAR_NAME}}}}` for secrets/passwords
-   - Include both happy path and edge case scenarios
-
-4. For happy paths: Test the complete successful user journey
-5. For edge cases: Test boundary values, empty fields, invalid inputs, etc.
+   - Include specific URLs and element descriptions based on the exploration evidence
+   - Do not return summary-only output
 
 OUTPUT FORMAT (return ONLY JSON):
 ```json
 {{
   "specs": {{
     "happy_path": {{
-      "[filename].md": "Full spec content here...",
-      "[another_filename].md": "Full spec content here..."
+      "tc-001-user-can-complete-primary-flow.md": "Full spec content here..."
     }},
-    "edge_cases": {{
-      "[filename].md": "Full spec content here...",
-      "[another_filename].md": "Full spec content here..."
+    "negative": {{
+      "tc-002-invalid-input-is-rejected.md": "Full spec content here..."
+    }},
+    "accessibility": {{
+      "tc-003-primary-controls-have-accessible-names.md": "Full spec content here..."
     }}
   }},
-  "summary": "Generated X happy path specs and Y edge case specs covering Z flows",
+  "summary": "Generated X individual E2E scenario specs covering Z flows",
   "total_specs": 0,
   "flows_covered": ["Flow 1", "Flow 2"]
 }}

@@ -29,6 +29,7 @@ config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 if config_dir:
     os.chdir(config_dir)
 
+from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
 from orchestrator.memory import get_memory_manager
 from orchestrator.utils.agent_runner import AgentRunner, build_allowed_tools, get_default_timeout
 from orchestrator.utils.string_utils import slugify
@@ -232,20 +233,31 @@ The following requirements were extracted from the Product Requirements Document
 {prd_context}
 
 ## Output Requirements
-Create a comprehensive test plan that covers:
+Create balanced E2E scenario specs for "{feature_name}". Prefer 6-12 scenarios when the evidence supports it. Each scenario must be specific enough to run through the existing markdown-to-Playwright pipeline.
 
-1. **Happy Path Tests** - Normal user flows that should work
-2. **Edge Cases** - Boundary conditions and unusual inputs
-3. **Error Scenarios** - What happens when things go wrong
-4. **Accessibility** - Basic accessibility checks if applicable
+Cover these categories where evidence exists:
+1. **Happy Path** - Normal user journeys that should work
+2. **Navigation/State Transitions** - Multi-page or state-changing paths
+3. **Negative/Error Scenarios** - Invalid, missing, unauthorized, or failed states
+4. **Edge Cases** - Boundary conditions and unusual inputs
+5. **Accessibility** - Keyboard and accessible-name checks
+6. **Responsive/Runtime Regression** - Mobile viewport and critical console-error checks
+7. **API-backed Assertions** - Only when API/network evidence was observed
 
-## Test Plan Format
-Each test case should include:
-- **Test ID**: TC-XXX format
-- **Description**: What is being tested
-- **Preconditions**: Required state before test (including login)
-- **Steps**: Numbered action steps with ACTUAL SELECTORS if discovered
-- **Expected Result**: What should happen
+## Evidence Rules
+- Do not invent unsupported business behavior.
+- If evidence is thin, generate conservative page/journey checks: reachability, no blocking errors, accessibility basics, responsive rendering, and stable navigation.
+- Use observed selectors, text, URLs, and API endpoints when available.
+- Mark auth or data needs in Preconditions instead of hardcoding secrets.
+
+## Test Spec Format
+Return a split-ready plan with TC-XXX sections. Every TC must be independently runnable after splitting:
+- `### TC-XXX: [Scenario Name]`
+- `**Description:** ...`
+- `**Preconditions:** ...`
+- `**Steps:**` numbered action steps with ACTUAL SELECTORS if discovered
+- `**Expected Result:**` concrete assertions or observable outcomes
+- `**Test Data:**` optional placeholders and URLs
 
 ## Save the Plan
 After creating the test plan:
@@ -253,12 +265,19 @@ After creating the test plan:
 2. ALSO output the COMPLETE test plan as text in your response (not just a summary)
 3. Call `browser_close` to close the browser before finishing
 
-**CRITICAL**: Your final text response MUST contain the full test plan with all TC-XXX test cases, steps, and expected results. Do NOT output just a summary like "I created 24 test cases" - output the actual test cases themselves.
+**CRITICAL**: Your final text response MUST contain the full test plan with all TC-XXX test cases, steps, and expected results. Do NOT output just a summary like "I created 24 test cases". Do NOT create a single shallow spec with only "Navigate" and "Verify".
 
 Start the test plan with:
 # Test Plan: {feature_name}
 """
-        return prompt
+        metadata = build_prompt_metadata(
+            prompt_id="native_planner.hybrid",
+            version="2026-05-13.1",
+            stage="test_planning",
+            schema_name="playwright_test_plan.v1",
+            rendered_prompt=prompt,
+        )
+        return attach_prompt_metadata(prompt, metadata)
 
     # Playwright MCP tools matching .claude/agents/playwright-test-planner.md
     PLANNER_MCP_TOOLS = [

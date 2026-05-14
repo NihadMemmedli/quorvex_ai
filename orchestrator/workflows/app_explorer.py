@@ -25,7 +25,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# Add orchestrator to path
+# Add both project root and orchestrator package dir for package and standalone execution.
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Use run-specific config directory if set (for parallel execution isolation)
@@ -42,6 +43,9 @@ setup_claude_env()
 
 import logging
 
+from orchestrator.ai.context import SOURCE_OBSERVED
+from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
+from orchestrator.ai.validation import assess_exploration_quality, validate_exploration_result
 from utils.agent_runner import AgentRunner, build_allowed_tools, get_default_timeout
 from utils.json_utils import extract_json_from_markdown
 
@@ -125,6 +129,11 @@ class ExplorationResult:
     elements_discovered: int = 0
     error_message: str | None = None
     duration_seconds: int = 0
+    provenance_source: str = SOURCE_OBSERVED
+    quality_score: int = 0
+    quality_summary: dict[str, Any] = field(default_factory=dict)
+    validation_summary: dict[str, Any] = field(default_factory=dict)
+    prompt_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class AppExplorer:
@@ -139,6 +148,8 @@ class AppExplorer:
         self.project_id = project_id
         self.on_task_enqueued = on_task_enqueued
         self.output_dir = self._ensure_output_dir()
+        self._last_prompt_metadata: dict[str, Any] = {}
+        self._last_agent_stats: dict[str, Any] = {}
 
     def _ensure_output_dir(self) -> Path:
         """Ensure output directory exists with fallback paths.
@@ -224,6 +235,8 @@ class AppExplorer:
         try:
             # Build the exploration prompt
             prompt = self._build_exploration_prompt(config)
+            if self._last_prompt_metadata:
+                (session_dir / "prompt_metadata.json").write_text(json.dumps(self._last_prompt_metadata, indent=2))
 
             # Invoke the explorer agent
             logger.info("Starting AI Explorer Agent...")
@@ -242,19 +255,29 @@ class AppExplorer:
             # Parse the exploration output
             logger.info("Processing exploration results...")
 
+            successful_browser_tool_calls = int(self._last_agent_stats.get("successful_browser_tool_calls", 0) or 0)
+            if successful_browser_tool_calls <= 0:
+                raise RuntimeError(
+                    "Explorer did not perform successful live browser exploration. "
+                    "Check Playwright MCP startup, allowed tools, and agent configuration."
+                )
+
+            if self._is_unverified_agent_output(raw_output):
+                raise RuntimeError(
+                    "Explorer output says live browser tools were unavailable, so no verified exploration "
+                    "results can be used. Check Playwright MCP/agent configuration."
+                )
+
             result = self._parse_exploration_output(
                 raw_output=raw_output, session_id=session_id, entry_url=config.entry_url
             )
 
-            # AI-powered JSON recovery when regex parsing found zero objects
             if (
                 result.status == "failed"
                 and not result.transitions
                 and not result.flows
-                and raw_output
-                and len(raw_output) > 500
             ):
-                logger.info("   Initial parsing found zero JSON — attempting AI-powered recovery...")
+                logger.info("   No structured exploration data parsed — attempting AI-powered recovery...")
                 recovered_objects = await self._run_ai_json_recovery(raw_output, session_dir)
                 if recovered_objects:
                     result = self._parse_exploration_output(
@@ -301,9 +324,14 @@ class AppExplorer:
                         logger.info(f"   Synthesized {len(new_flows)} additional flows")
                         result.flows.extend(new_flows)
 
-            # Text-based flow synthesis fallback: when no transitions were parsed
-            # but raw output is substantial, use AI to extract flows from prose
-            if len(result.flows) == 0 and len(result.transitions) == 0 and raw_output and len(raw_output) > 2000:
+            # Text-based flow synthesis from verified live-browser output.
+            # This is only reached after successful browser tool calls above.
+            if (
+                len(result.flows) == 0
+                and len(result.transitions) == 0
+                and raw_output
+                and len(raw_output) > 2000
+            ):
                 logger.info(
                     "   No structured transitions found — attempting text-based flow synthesis from raw output..."
                 )
@@ -318,6 +346,25 @@ class AppExplorer:
                         result.error_message = (
                             f"No structured JSON parsed, but text synthesis recovered {len(text_flows)} flows."
                         )
+
+            if result.status == "failed" and not result.transitions and not result.flows:
+                raise RuntimeError(
+                    result.error_message
+                    or "Explorer produced no structured transitions or flows from live browser exploration."
+                )
+
+            validation_summary = validate_exploration_result(result)
+            quality_summary = assess_exploration_quality(
+                result,
+                fallback_used=False,
+                verified_tool_calls=successful_browser_tool_calls,
+            )
+            quality_summary.pop("fallback_used", None)
+            result.validation_summary = validation_summary
+            result.quality_summary = quality_summary
+            result.quality_score = int(quality_summary["quality_score"])
+            result.provenance_source = quality_summary["source_type"]
+            result.prompt_metadata = self._last_prompt_metadata
 
             # Calculate duration
             end_time = datetime.now()
@@ -780,7 +827,15 @@ visit your queued URLs before exploring the current page further.
 
 {self._build_rules_section(api_explorer_prompt is not None)}
 """
-        return prompt
+        metadata = build_prompt_metadata(
+            prompt_id=f"app_explorer.{config.strategy}",
+            version="2026-05-13.1",
+            stage="exploration",
+            schema_name="exploration_records.v1",
+            rendered_prompt=prompt,
+        )
+        self._last_prompt_metadata = metadata.to_dict()
+        return attach_prompt_metadata(prompt, metadata)
 
     async def _run_explorer_agent(self, prompt: str, session_dir: Path) -> str:
         """Run the exploration agent and capture output using AgentRunner."""
@@ -789,17 +844,32 @@ visit your queued URLs before exploring the current page further.
 
         logger.info(f"   Timeout: {timeout}s ({timeout // 60} minutes)")
 
-        # Create per-session MCP config for browser isolation
-        # This mirrors the pattern from main.py:3948-3968 for test runs
+        # Create per-session MCP config for browser isolation.
+        # Use a schema-correct Playwright MCP package. Older 0.0.28 builds expose
+        # connected MCP servers with invalid/empty tool schemas, which makes
+        # Claude silently lose access to browser tools.
         headless = os.environ.get("HEADLESS", "true").lower() != "false"
-        mcp_args = ["@playwright/mcp", "--browser", "chromium"]
+        mcp_server = self._build_playwright_mcp_server_config()
+        mcp_args = list(mcp_server["args"])
         if headless:
             mcp_args.append("--headless")
 
-        mcp_config = {"mcpServers": {"playwright-test": {"command": "npx", "args": mcp_args}}}
+        mcp_config = {
+            "mcpServers": {
+                "playwright-test": {
+                    "command": mcp_server["command"],
+                    "args": mcp_args,
+                }
+            }
+        }
         mcp_config_path = session_dir / ".mcp.json"
         mcp_config_path.write_text(json.dumps(mcp_config, indent=2))
-        logger.info(f"   Created MCP config (headless={headless}): {mcp_config_path}")
+        logger.info(
+            "   Created MCP config (headless=%s, command=%s): %s",
+            headless,
+            mcp_server["command"],
+            mcp_config_path,
+        )
 
         # Copy .claude/ agents directory for isolation
         import shutil
@@ -851,7 +921,7 @@ visit your queued URLs before exploring the current page further.
             runner = AgentRunner(
                 timeout_seconds=timeout,
                 allowed_tools=build_allowed_tools(
-                    ["Glob", "Grep", "Read", "LS"],
+                    [],
                     EXPLORER_MCP_TOOLS,
                 ),
                 log_tools=True,
@@ -861,11 +931,27 @@ visit your queued URLs before exploring the current page further.
             )
 
             result = await runner.run(prompt)
+            browser_tool_calls = [
+                call
+                for call in result.tool_calls
+                if call.name.startswith("mcp__") and "__browser_" in call.name
+            ]
+            successful_browser_tool_calls = sum(1 for call in browser_tool_calls if call.success)
+            self._last_agent_stats = {
+                "messages_received": result.messages_received,
+                "text_blocks_received": result.text_blocks_received,
+                "tool_calls": len(result.tool_calls),
+                "browser_tool_calls": len(browser_tool_calls),
+                "successful_browser_tool_calls": successful_browser_tool_calls,
+                "duration_seconds": result.duration_seconds,
+                "timed_out": result.timed_out,
+            }
 
             # Log diagnostics
             logger.info(
                 f"   Agent stats: {result.messages_received} messages, "
-                f"{len(result.tool_calls)} tool calls, "
+                f"{len(result.tool_calls)} tool calls "
+                f"({successful_browser_tool_calls}/{len(browser_tool_calls)} successful browser), "
                 f"{result.duration_seconds:.1f}s"
             )
 
@@ -897,6 +983,76 @@ visit your queued URLs before exploring the current page further.
             # Always restore CWD
             os.chdir(original_cwd)
             logger.info(f"   CWD restored to: {original_cwd}")
+
+    def _build_playwright_mcp_server_config(self) -> dict[str, Any]:
+        """Return a reliable Playwright MCP server command.
+
+        The local node_modules binary is used only when it is new enough to expose
+        valid JSON schemas for tools. Environment overrides keep Docker/custom
+        installs configurable.
+        """
+        override = os.environ.get("PLAYWRIGHT_MCP_COMMAND")
+        if override:
+            args = os.environ.get("PLAYWRIGHT_MCP_ARGS", "--browser chromium").split()
+            return {"command": override, "args": args}
+
+        project_root = Path(__file__).resolve().parent.parent.parent
+        local_bins = [
+            project_root / "node_modules" / ".bin" / "playwright-mcp",
+            project_root / "node_modules" / ".bin" / "mcp-server-playwright",
+        ]
+        local_pkg = project_root / "node_modules" / "@playwright" / "mcp" / "package.json"
+        min_version = os.environ.get("PLAYWRIGHT_MCP_MIN_VERSION", "0.0.75")
+        if self._is_package_version_at_least(local_pkg, min_version):
+            for local_bin in local_bins:
+                if local_bin.exists():
+                    return {"command": str(local_bin), "args": ["--browser", "chromium"]}
+
+        package = os.environ.get("PLAYWRIGHT_MCP_PACKAGE", f"@playwright/mcp@{min_version}")
+        return {"command": "npx", "args": ["-y", package, "--browser", "chromium"]}
+
+    @staticmethod
+    def _is_package_version_at_least(package_json: Path, minimum: str) -> bool:
+        """Return whether package_json declares a semver version >= minimum."""
+        if not package_json.exists():
+            return False
+        try:
+            package = json.loads(package_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            return False
+
+        def parse(version: str) -> tuple[int, int, int]:
+            core = str(version).split("-", 1)[0]
+            parts = []
+            for part in core.split(".")[:3]:
+                try:
+                    parts.append(int(part))
+                except ValueError:
+                    parts.append(0)
+            while len(parts) < 3:
+                parts.append(0)
+            return tuple(parts)  # type: ignore[return-value]
+
+        return parse(str(package.get("version", "0.0.0"))) >= parse(minimum)
+
+    def _is_unverified_agent_output(self, raw_output: str | None) -> bool:
+        """Detect agent output that explicitly admits it was not live browser exploration."""
+        if not raw_output:
+            return False
+        lowered = raw_output.lower()
+        indicators = [
+            "browser interaction tools are not available",
+            "browser tools are not available",
+            "don't have browser tools",
+            "do not have browser tools",
+            "without live browser interaction",
+            "not freshly verified",
+            "prior exploration knowledge",
+            "constructed the output from prior",
+            "based on well-known",
+            "based on stable information",
+        ]
+        return any(indicator in lowered for indicator in indicators)
 
     def _deduplicate_flows(self, flows: list[FlowRecord]) -> list[FlowRecord]:
         """Deduplicate flows by normalized (name, start_url, end_url) tuple. Keeps first occurrence."""
@@ -1137,9 +1293,9 @@ visit your queued URLs before exploring the current page further.
                     transitions.append(transition)
 
                     # Track pages
-                    if before.get("url"):
+                    if before.get("url") and before["url"] != "about:blank":
                         pages_seen.add(before["url"])
-                    if after.get("url"):
+                    if after.get("url") and after["url"] != "about:blank":
                         pages_seen.add(after["url"])
 
                     # Extract API endpoints - prefer richApiCalls for detailed data
@@ -1245,23 +1401,6 @@ visit your queued URLs before exploring the current page further.
                         element=(t.action_element or {}).get("name"),
                     )
                 )
-
-        # URL text mining fallback: extract URLs from prose text matching entry domain
-        try:
-            from urllib.parse import urlparse
-
-            entry_domain = urlparse(entry_url).netloc
-            if entry_domain:
-                url_pattern = re.compile(r'https?://[^\s<>"\')\]]+', re.IGNORECASE)
-                for url_match in url_pattern.finditer(raw_output):
-                    found_url = url_match.group(0).rstrip(".,;:")
-                    try:
-                        if urlparse(found_url).netloc == entry_domain:
-                            pages_seen.add(found_url)
-                    except Exception:
-                        continue
-        except Exception:
-            pass
 
         # Deduplicate flows and transitions
         flows = self._deduplicate_flows(flows)
@@ -1483,7 +1622,7 @@ Return ONLY a JSON array of flow objects. No other text.
                 timeout_seconds=120,
                 allowed_tools=[],  # No tools needed - pure text analysis
                 log_tools=False,
-                session_dir=session_dir,
+                session_dir=None,
             )
 
             result = await runner.run(prompt)
@@ -1599,7 +1738,7 @@ Return ONLY a JSON array of flow objects. No other text.
                 timeout_seconds=120,
                 allowed_tools=[],
                 log_tools=False,
-                session_dir=session_dir,
+                session_dir=None,
             )
 
             result = await runner.run(prompt)
@@ -1729,7 +1868,7 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
                     timeout_seconds=180,
                     allowed_tools=[],  # Pure text analysis
                     log_tools=False,
-                    session_dir=session_dir,
+                    session_dir=None,
                 )
 
                 result = await runner.run(prompt)
@@ -1908,6 +2047,8 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
             transitions_data.append(
                 {
                     "sequence": t.sequence,
+                    "sourceType": result.provenance_source,
+                    "confidence": result.quality_score / 100 if result.quality_score else 0,
                     "action": {"type": t.action_type, "element": t.action_element, "value": t.action_value},
                     "before": {"url": t.before_url, "pageType": t.before_page_type, "keyElements": t.before_elements},
                     "after": {"url": t.after_url, "pageType": t.after_page_type, "keyElements": t.after_elements},
@@ -1924,6 +2065,8 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
             flows_data.append(
                 {
                     "name": f.name,
+                    "sourceType": result.provenance_source,
+                    "confidence": result.quality_score / 100 if result.quality_score else 0,
                     "category": f.category,
                     "steps": f.steps,
                     "startUrl": f.start_url,
@@ -1967,6 +2110,11 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
             "elementsDiscovered": result.elements_discovered,
             "durationSeconds": result.duration_seconds,
             "errorMessage": result.error_message,
+            "sourceType": result.provenance_source,
+            "qualityScore": result.quality_score,
+            "quality": result.quality_summary,
+            "validation": result.validation_summary,
+            "prompt": result.prompt_metadata,
         }
         (session_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 

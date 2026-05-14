@@ -26,7 +26,7 @@ certifi==2026.1.4
 cffi==2.0.0
 charset-normalizer==3.4.4
 chromadb==1.4.0
-claude-agent-sdk==0.1.22
+claude-agent-sdk==0.1.81
 click==8.3.1
 coloredlogs==15.0.1
 colorlog==6.10.1

@@ -14,6 +14,12 @@ from typing import Any
 
 # Import using absolute path (sys.path is set in base_agent.py)
 from utils.json_utils import extract_json_from_markdown
+from workflows.spec_scenario_builder import (
+    E2EScenario,
+    conservative_page_scenarios,
+    scenario_from_requirement,
+    write_scenarios,
+)
 
 from .base_agent import BaseAgent
 
@@ -140,46 +146,74 @@ class SpecSynthesisAgent(BaseAgent):
 
         Generates specs based on exploration results using Python logic.
         """
-        action_trace = exploration_results.get("action_trace", [])
-
-        specs = {"happy_path": {}, "edge_cases": {}}
-
+        scenarios: list[E2EScenario] = []
         flows_covered = []
 
-        # Generate specs for each discovered flow
         for flow in discovered_flows:
             flow_name = flow.get("title", flow.get("name", "Unknown Flow"))
             flows_covered.append(flow_name)
+            steps = [str(step) for step in flow.get("steps", []) if str(step).strip()]
+            pages = [str(page) for page in flow.get("pages", []) if str(page).strip()]
+            if not steps and pages:
+                steps = [f"Navigate to {page}" for page in pages]
 
-            # Sanitize filename
-            safe_name = self._sanitize_filename(flow_name)
+            scenarios.append(
+                scenario_from_requirement(
+                    title=f"{flow_name} happy path",
+                    description=flow.get("happy_path") or f"Validate the successful {flow_name} journey.",
+                    target_url=flow.get("entry_point") or base_url,
+                    flow_steps=steps,
+                    acceptance_criteria=[
+                        f"User successfully completes the {flow_name}",
+                        "No blocking errors are displayed",
+                    ],
+                    category="happy_path",
+                    priority="high" if flow.get("complexity") == "high" else "medium",
+                    source_flows=[flow_name],
+                )
+            )
 
-            # Happy path spec
-            happy_spec = self._generate_happy_path_spec(flow, base_url, action_trace)
-            happy_filename = f"{safe_name}_happy_path.md"
-            specs["happy_path"][happy_filename] = happy_spec
-
-            # Edge cases spec
             edge_cases = flow.get("edge_cases", [])
-            if edge_cases:
-                edge_spec = self._generate_edge_cases_spec(flow, base_url, action_trace)
-                edge_filename = f"{safe_name}_edge_cases.md"
-                specs["edge_cases"][edge_filename] = edge_spec
+            for edge_case in edge_cases[:4]:
+                scenarios.append(
+                    E2EScenario(
+                        title=f"{flow_name} handles {edge_case}",
+                        description=f"Validate edge-case handling for {flow_name}: {edge_case}.",
+                        category="edge_case",
+                        priority="medium",
+                        preconditions=["Fresh browser session", "Required data for the flow is available"],
+                        steps=[
+                            f"Navigate to {flow.get('entry_point') or base_url}",
+                            f"Start the {flow_name} flow",
+                            f"Exercise edge case: {edge_case}",
+                            "Attempt to continue or submit the flow",
+                        ],
+                        expected_outcomes=[
+                            "The application handles the edge case without crashing",
+                            "A clear validation, empty state, or safe fallback is shown when applicable",
+                        ],
+                        test_data=[f"Target URL: {flow.get('entry_point') or base_url}"],
+                        source_notes=[f"Source flow: {flow_name}"],
+                    )
+                )
 
-        # Save specs and register in DB
-        saved_specs = {}
-        for category, files in specs.items():
-            saved_specs[category] = {}
-            for filename, content in files.items():
-                filepath = output_dir / filename
-                filepath.write_text(content)
-                saved_specs[category][filename] = str(filepath)
+        if not scenarios:
+            scenarios = conservative_page_scenarios(
+                title="Application entry page",
+                target_url=base_url or exploration_results.get("url") or "the application",
+                max_scenarios=4,
+            )
 
-                # Register spec in database with project association
-                self._register_spec_in_db(filepath, project_id)
+        generated_files = write_scenarios(scenarios[:12], output_dir)
+
+        saved_specs: dict[str, dict[str, str]] = {}
+        for scenario, filepath in zip(scenarios, generated_files, strict=False):
+            category = scenario.category or "coverage"
+            saved_specs.setdefault(category, {})[filepath.name] = str(filepath)
+            self._register_spec_in_db(filepath, project_id)
 
         return {
-            "summary": f"Generated {len(saved_specs.get('happy_path', {}))} happy path specs and {len(saved_specs.get('edge_cases', {}))} edge case specs",
+            "summary": f"Generated {len(generated_files)} individual E2E scenario specs",
             "specs": saved_specs,
             "total_specs": sum(len(v) for v in saved_specs.values()),
             "flows_covered": flows_covered,
@@ -315,19 +349,25 @@ HAPPY PATHS FOUND: {", ".join(happy_paths) if happy_paths else "None"}
 EDGE CASES FOUND: {", ".join(edge_cases) if edge_cases else "None"}
 
 YOUR TASK:
-Generate COMPREHENSIVE .md test specs for all discovered flows.
+Generate COMPREHENSIVE individual .md E2E scenario specs for all discovered flows.
 
 REQUIREMENTS:
-1. Create SEPARATE specs for:
-   - HAPPY PATH tests: Each major user flow working correctly
-   - EDGE CASE tests: Boundary conditions, negative scenarios
+1. Create SEPARATE runnable specs, one file per scenario:
+   - Happy path: each major user flow working correctly
+   - Navigation/state transition: multi-page or state-changing paths
+   - Negative/error: invalid, missing, unauthorized, failed, or empty states
+   - Edge case: boundary values, unusual input, responsive/mobile
+   - Accessibility/runtime regression: accessible labels, keyboard focus, console errors
 
 2. Each spec must follow this EXACT format:
    ```markdown
-   # Test: [Feature Name] - [Happy Path / Edge Cases]
+   # Test: [Feature Name] - [Scenario Name]
 
    ## Description
    [Brief description of what this tests]
+
+   ## Prerequisites
+   [Required auth/data/state, or Fresh browser session]
 
    ## Steps
    1. Navigate to [URL]
@@ -344,29 +384,29 @@ REQUIREMENTS:
    ```
 
 3. IMPORTANT:
-   - Focus on MULTI-PAGE flows (not single page tests)
+   - Prefer MULTI-PAGE flows when observed, but do not invent unsupported business behavior
+   - If evidence is thin, generate conservative page/journey checks only
    - Use standard step format: Navigate, Click, Fill, Assert, Select, Check
    - Use placeholders `{{{{VAR_NAME}}}}` for secrets/passwords
    - Include specific URLs and element descriptions
    - Make specs actionable and clear
-
-4. For happy paths: Test the complete successful user journey
-5. For edge cases: Test boundary values, empty fields, invalid inputs, etc.
+   - Do not return summary-only output
 
 OUTPUT FORMAT (return ONLY JSON):
 ```json
 {{
   "specs": {{
     "happy_path": {{
-      "checkout_happy_path.md": "# Test: Checkout - Happy Path\\n\\n## Description\\n...",
-      "user_registration.md": "# Test: User Registration\\n\\n..."
+      "tc-001-checkout-happy-path.md": "# Test: Checkout - Happy Path\\n\\n## Description\\n..."
     }},
-    "edge_cases": {{
-      "checkout_edge_cases.md": "# Test: Checkout - Edge Cases\\n\\n...",
-      "form_validation.md": "# Test: Form Validation\\n\\n..."
+    "negative": {{
+      "tc-002-checkout-invalid-payment.md": "# Test: Checkout - Invalid Payment\\n\\n..."
+    }},
+    "accessibility": {{
+      "tc-003-checkout-accessible-controls.md": "# Test: Checkout - Accessible Controls\\n\\n..."
     }}
   }},
-  "summary": "Generated X happy path specs and Y edge case specs",
+  "summary": "Generated X individual E2E scenario specs",
   "flows_covered": ["Flow 1", "Flow 2"],
   "total_specs": 0
 }}

@@ -112,6 +112,6 @@ export const anthropicProvider = createAnthropic({
 
 export const MODEL_ID =
   process.env.ANTHROPIC_CHAT_MODEL ||
-  process.env.ANTHROPIC_DEFAULT_SONNET_MODEL ||
   process.env.ANTHROPIC_MODEL ||
+  process.env.ANTHROPIC_DEFAULT_SONNET_MODEL ||
   'claude-sonnet-4-6';

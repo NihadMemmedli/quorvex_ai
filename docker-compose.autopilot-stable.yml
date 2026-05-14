@@ -1,0 +1,40 @@
+# Stable local runtime for trying Auto Pilot end-to-end.
+#
+# Use this when validating Auto Pilot behavior. It disables backend hot reload,
+# raises frontend memory, and lowers local AI/browser concurrency so page loads
+# remain responsive while agents are running.
+
+services:
+  backend:
+    environment:
+      UVICORN_RELOAD: "false"
+      HEADLESS: "true"
+      PLAYWRIGHT_HEADLESS: "true"
+      VNC_ENABLED: "false"
+      DEFAULT_PARALLELISM: ${AUTOPILOT_DEFAULT_PARALLELISM:-2}
+      PLAYWRIGHT_WORKERS: ${AUTOPILOT_PLAYWRIGHT_WORKERS:-1}
+      MAX_CONCURRENT_AGENTS: ${AUTOPILOT_MAX_CONCURRENT_AGENTS:-2}
+      MAX_CONCURRENT_EXPLORATIONS: ${AUTOPILOT_MAX_CONCURRENT_EXPLORATIONS:-1}
+      MAX_CONCURRENT_PRD: ${AUTOPILOT_MAX_CONCURRENT_PRD:-1}
+    deploy:
+      resources:
+        limits:
+          memory: 12G
+          cpus: "8"
+        reservations:
+          memory: 4G
+          cpus: "2"
+
+  frontend:
+    environment:
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-4o-mini}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      NODE_OPTIONS: "--max-old-space-size=2048"
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G

@@ -265,6 +265,308 @@ class TestExecutionSettings:
         assert response.status_code in (200, 422)
 
 
+class TestAISettings:
+    """Test runtime AI settings endpoints."""
+
+    def test_update_settings_applies_runtime_env_and_clears_multi_key_rotation(self, client, tmp_path, monkeypatch):
+        """POST /settings should persist and immediately apply the selected AI settings."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "ANTHROPIC_AUTH_TOKEN=old-key",
+                    "ANTHROPIC_API_KEY=old-key",
+                    "ANTHROPIC_AUTH_TOKENS=old-key,backup-key",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL=old-model",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL=old-model",
+                    "ANTHROPIC_MODEL=old-model",
+                    "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "old-key")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "old-key")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKENS", "old-key,backup-key")
+
+        class FakeRotator:
+            initialized = False
+
+            def initialize(self):
+                self.initialized = True
+
+        fake_rotator = FakeRotator()
+        monkeypatch.setattr(
+            "orchestrator.services.api_key_rotator.get_api_key_rotator",
+            lambda: fake_rotator,
+        )
+
+        response = client.post(
+            "/settings",
+            json={
+                "llm_provider": "anthropic",
+                "api_key": "new-key-123456",
+                "base_url": "https://api.anthropic.com/",
+                "model_name": "claude-test-model",
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["message"] == "Settings saved and applied."
+        assert data["settings"]["api_key"] == "new-******3456"
+        assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "new-key-123456"
+        assert os.environ["ANTHROPIC_API_KEY"] == "new-key-123456"
+        assert "ANTHROPIC_AUTH_TOKENS" not in os.environ
+        assert os.environ["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-test-model"
+        assert os.environ["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "claude-test-model"
+        assert os.environ["ANTHROPIC_MODEL"] == "claude-test-model"
+        assert fake_rotator.initialized is True
+
+        env_vars = settings_api._read_env_file()
+        assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "new-key-123456"
+        assert env_vars["ANTHROPIC_API_KEY"] == "new-key-123456"
+        assert env_vars["ANTHROPIC_AUTH_TOKENS"] == ""
+        assert env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-test-model"
+        assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "claude-test-model"
+        assert env_vars["ANTHROPIC_MODEL"] == "claude-test-model"
+
+    def test_agent_runner_refreshes_runtime_ai_settings(self, tmp_path, monkeypatch):
+        """Backend agent workflows should use the same active AI settings as chat/settings."""
+        from orchestrator.api import settings as settings_api
+        from orchestrator.utils.agent_runner import AgentRunner
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "ANTHROPIC_AUTH_TOKEN=runner-key",
+                    "ANTHROPIC_API_KEY=runner-key",
+                    "ANTHROPIC_MODEL=runner-model",
+                    "ANTHROPIC_BASE_URL=https://proxy.example.com",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+
+        AgentRunner._apply_active_ai_settings()
+
+        assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "runner-key"
+        assert os.environ["ANTHROPIC_API_KEY"] == "runner-key"
+        assert os.environ["ANTHROPIC_MODEL"] == "runner-model"
+        assert os.environ["ANTHROPIC_BASE_URL"] == "https://proxy.example.com"
+
+    def test_update_settings_masked_api_key_preserves_existing_secret(self, client, tmp_path, monkeypatch):
+        """Submitting a masked key should not overwrite the real stored key."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "ANTHROPIC_AUTH_TOKEN=real-existing-key",
+                    "ANTHROPIC_API_KEY=real-existing-key",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL=old-model",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL=old-model",
+                    "ANTHROPIC_MODEL=old-model",
+                    "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "real-existing-key")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "real-existing-key")
+
+        response = client.post(
+            "/settings",
+            json={
+                "llm_provider": "anthropic",
+                "api_key": "real*********key",
+                "base_url": "https://api.anthropic.com",
+                "model_name": "new-model",
+            },
+        )
+
+        assert response.status_code == 200
+        env_vars = settings_api._read_env_file()
+        assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "real-existing-key"
+        assert env_vars["ANTHROPIC_API_KEY"] == "real-existing-key"
+        assert env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "new-model"
+        assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "new-model"
+        assert env_vars["ANTHROPIC_MODEL"] == "new-model"
+        assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "real-existing-key"
+        assert os.environ["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "new-model"
+        assert os.environ["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "new-model"
+        assert os.environ["ANTHROPIC_MODEL"] == "new-model"
+
+    def test_settings_test_connection_uses_active_runtime_settings(self, client, tmp_path, monkeypatch):
+        """POST /settings/test-connection should make a minimal provider request without exposing keys."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "ANTHROPIC_AUTH_TOKEN=test-secret-key",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-test-model",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-test-model",
+                    "ANTHROPIC_MODEL=claude-test-model",
+                    "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+
+        calls = []
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"ok":true}'
+
+        class FakeClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers, json):
+                calls.append({"url": url, "headers": headers, "json": json})
+                return FakeResponse()
+
+        monkeypatch.setattr(settings_api.httpx, "AsyncClient", FakeClient)
+
+        response = client.post("/settings/test-connection")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["model_name"] == "claude-test-model"
+        assert data["base_url"] == "https://api.anthropic.com"
+        assert data["message"] == "Connection successful."
+        assert calls[0]["url"] == "https://api.anthropic.com/v1/messages"
+        assert calls[0]["headers"]["x-api-key"] == "test-secret-key"
+        assert calls[0]["json"]["model"] == "claude-test-model"
+
+    def test_settings_test_connection_uses_claude_code_when_api_key_missing(self, client, tmp_path, monkeypatch):
+        """POST /settings/test-connection should support local Claude Code subscription auth."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "ANTHROPIC_AUTH_TOKEN=",
+                    "ANTHROPIC_API_KEY=",
+                    "CLAUDE_CODE_OAUTH_TOKEN=",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-sonnet-4-6",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6",
+                    "ANTHROPIC_MODEL=claude-sonnet-4-6",
+                    "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKENS", raising=False)
+
+        runner_calls = []
+
+        class FakeResult:
+            success = True
+            error = None
+
+        class FakeRunner:
+            def __init__(self, timeout_seconds, allowed_tools, log_tools):
+                runner_calls.append(
+                    {
+                        "timeout_seconds": timeout_seconds,
+                        "allowed_tools": allowed_tools,
+                        "log_tools": log_tools,
+                    }
+                )
+
+            async def run(self, prompt, timeout_override=None):
+                runner_calls.append({"prompt": prompt, "timeout_override": timeout_override})
+                return FakeResult()
+
+        monkeypatch.setattr("orchestrator.utils.agent_runner.AgentRunner", FakeRunner)
+
+        response = client.post("/settings/test-connection")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["model_name"] == "claude-sonnet-4-6"
+        assert data["message"] == "Claude Code connection successful."
+        assert runner_calls[0]["allowed_tools"] == []
+        assert runner_calls[1]["timeout_override"] == 30
+
+    def test_get_settings_prefers_active_agent_model_over_sonnet_default(self, client, tmp_path, monkeypatch):
+        """GET /settings should display the actual agent model override when present."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "ANTHROPIC_AUTH_TOKEN=test-secret-key",
+                    "ANTHROPIC_MODEL=claude-opus-4-7",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-7",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6",
+                    "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+
+        response = client.get("/settings")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model_name"] == "claude-opus-4-7"
+
+    def test_get_settings_falls_back_to_opus_before_sonnet_default(self, client, tmp_path, monkeypatch):
+        """GET /settings should prefer the Opus default over Sonnet when no active override exists."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "ANTHROPIC_AUTH_TOKEN=test-secret-key",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-7",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6",
+                    "ANTHROPIC_BASE_URL=https://api.anthropic.com",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+
+        response = client.get("/settings")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model_name"] == "claude-opus-4-7"
+
+
 class TestQueueEndpoints:
     """Test queue-related endpoints."""
 

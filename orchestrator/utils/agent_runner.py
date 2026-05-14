@@ -11,6 +11,7 @@ all workflows (exploration, planning, generation, etc.) with:
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -145,6 +146,11 @@ class AgentResult:
     messages_received: int = 0
     text_blocks_received: int = 0
     timed_out: bool = False
+    api_error_status: int | None = None
+    stop_reason: str | None = None
+    session_id: str | None = None
+    total_cost_usd: float | None = None
+    hook_events_received: int = 0
 
 
 class AgentRunner:
@@ -164,6 +170,13 @@ class AgentRunner:
         self,
         timeout_seconds: int = 1800,
         allowed_tools: list[str] | None = None,
+        tools: list[str] | dict[str, str] | None = None,
+        disallowed_tools: list[str] | None = None,
+        permission_mode: str | None = None,
+        strict_mcp_config: bool = True,
+        max_budget_usd: float | None = None,
+        task_budget: dict[str, int] | None = None,
+        include_hook_events: bool = False,
         log_tools: bool = True,
         on_tool_use: Callable[[str, dict], None] | None = None,
         session_dir: Path | None = None,
@@ -174,18 +187,159 @@ class AgentRunner:
 
         Args:
             timeout_seconds: Maximum time to wait for agent completion (default 30 min)
-            allowed_tools: List of allowed tool patterns (default ["*"])
+            allowed_tools: Tools auto-approved without prompting (default ["*"] for back-compat)
+            tools: Base set of tools available to Claude. If omitted, explicit
+                allowed_tools lists are also used as the availability list.
+            disallowed_tools: Tools hidden from the model even if otherwise available
+            permission_mode: Claude permission mode. Defaults to "dontAsk" for
+                no-tool calls and "bypassPermissions" otherwise.
+            strict_mcp_config: Use only the run-local MCP config when one is present
+            max_budget_usd: Optional per-run spend cap passed to Claude Code
+            task_budget: Optional token budget, e.g. {"total": 50000}
+            include_hook_events: Include hook lifecycle events in the SDK stream
             log_tools: Whether to log tool invocations to console
             on_tool_use: Optional callback when a tool is used
             session_dir: Optional directory to save debug output
             on_task_enqueued: Optional callback fired with task_id when queued (for progress tracking)
         """
         self.timeout_seconds = timeout_seconds
-        self.allowed_tools = allowed_tools or ["*"]
+        self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
+        self.tools = tools
+        self.disallowed_tools = disallowed_tools or []
+        self.permission_mode = permission_mode
+        self.strict_mcp_config = strict_mcp_config
+        self.max_budget_usd = max_budget_usd
+        self.task_budget = task_budget
+        self.include_hook_events = include_hook_events
         self.log_tools = log_tools
         self.on_tool_use = on_tool_use
         self.session_dir = session_dir
         self.on_task_enqueued = on_task_enqueued
+
+    def _effective_tools(self) -> list[str] | dict[str, str] | None:
+        """Build the SDK/CLI tool availability set.
+
+        Newer Claude Agent SDKs distinguish tools that are available from tools
+        that are pre-approved. Most of this codebase historically used
+        allowed_tools for both, so preserve that meaning for explicit lists.
+        """
+        if self.tools is not None:
+            return self.tools
+        if self.allowed_tools == []:
+            return []
+        if "*" in self.allowed_tools:
+            return None
+        return list(self.allowed_tools)
+
+    def _effective_permission_mode(self) -> str:
+        if self.permission_mode:
+            return self.permission_mode
+        if self._effective_tools() == []:
+            return "dontAsk"
+        return "bypassPermissions"
+
+    def _requested_mcp_tools(self) -> list[str]:
+        requested: list[str] = []
+        for source in (self.allowed_tools, self._effective_tools()):
+            if isinstance(source, list):
+                requested.extend(str(tool) for tool in source if str(tool).startswith("mcp__"))
+        return requested
+
+    def _should_attach_mcp_config(self, cwd: Path | None = None) -> bool:
+        base_dir = cwd or Path.cwd()
+        if not (base_dir / ".mcp.json").exists():
+            return False
+        return "*" in self.allowed_tools or bool(self._requested_mcp_tools())
+
+    def _claude_options_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "allowed_tools": self.allowed_tools,
+            "setting_sources": ["project"],
+            "permission_mode": self._effective_permission_mode(),
+        }
+
+        tools = self._effective_tools()
+        if tools is not None:
+            kwargs["tools"] = tools
+        if self.disallowed_tools:
+            kwargs["disallowed_tools"] = self.disallowed_tools
+        if self.max_budget_usd is not None:
+            kwargs["max_budget_usd"] = self.max_budget_usd
+        if self.task_budget is not None:
+            kwargs["task_budget"] = self.task_budget
+        if self.include_hook_events:
+            kwargs["include_hook_events"] = True
+
+        if self._should_attach_mcp_config():
+            kwargs["mcp_servers"] = Path.cwd() / ".mcp.json"
+            kwargs["strict_mcp_config"] = self.strict_mcp_config
+
+        return kwargs
+
+    @staticmethod
+    def _apply_active_ai_settings() -> None:
+        """Apply the runtime AI settings before invoking the SDK.
+
+        The Settings UI persists the selected provider/model/key into .env and
+        applies it to the API process. Long-running workflows and queued workers
+        may start after that process state changes, so refresh the env aliases
+        here before every agent call.
+        """
+        try:
+            from orchestrator.api import settings as settings_api
+
+            env_vars = settings_api._read_env_file()
+            settings_api._apply_runtime_settings(env_vars)
+        except Exception as exc:
+            logger.debug(f"Unable to refresh active AI settings for agent runner: {exc}")
+
+    def _validate_mcp_config_for_allowed_tools(self, cwd: Path | None = None) -> None:
+        """Fail fast when MCP tools are requested but no matching server is configured."""
+        mcp_tools = self._requested_mcp_tools()
+        if not mcp_tools:
+            return
+
+        base_dir = cwd or Path.cwd()
+        mcp_path = base_dir / ".mcp.json"
+        if not mcp_path.exists():
+            raise RuntimeError(
+                f"MCP tools were requested but no .mcp.json exists in {base_dir}. "
+                "Create a per-run MCP config before invoking the agent."
+            )
+
+        try:
+            config = json.loads(mcp_path.read_text())
+        except Exception as exc:
+            raise RuntimeError(f"Invalid MCP config at {mcp_path}: {exc}") from exc
+
+        servers = config.get("mcpServers") or {}
+        if not isinstance(servers, dict) or not servers:
+            raise RuntimeError(f"MCP config at {mcp_path} does not define any mcpServers")
+
+        configured_prefixes = {f"mcp__{name}__" for name in servers}
+        missing_prefixes = sorted(
+            {
+                tool.split("__", 2)[0] + "__" + tool.split("__", 2)[1] + "__"
+                for tool in mcp_tools
+                if len(tool.split("__", 2)) >= 3
+            }
+            - configured_prefixes
+        )
+        if missing_prefixes:
+            raise RuntimeError(
+                f"Allowed MCP tools do not match configured MCP servers in {mcp_path}. "
+                f"Missing prefixes: {', '.join(missing_prefixes)}; configured: {', '.join(sorted(configured_prefixes))}"
+            )
+
+        for server_name, server in servers.items():
+            command = (server or {}).get("command")
+            if not command:
+                raise RuntimeError(f"MCP server '{server_name}' in {mcp_path} has no command")
+            if os.path.isabs(command) and not Path(command).exists():
+                raise RuntimeError(
+                    f"MCP server '{server_name}' command does not exist: {command}. "
+                    "Install dependencies or set PLAYWRIGHT_MCP_COMMAND."
+                )
 
     async def run(
         self,
@@ -204,6 +358,8 @@ class AgentRunner:
         """
         timeout = timeout_override or self.timeout_seconds
         start_time = datetime.now()
+        self._apply_active_ai_settings()
+        self._validate_mcp_config_for_allowed_tools()
 
         # First, try agent queue if Redis is available
         # This offloads execution to a separate worker process outside uvicorn
@@ -220,8 +376,14 @@ class AgentRunner:
         tool_calls: list[ToolCall] = []
         messages_received = 0
         text_blocks_received = 0
+        hook_events_received = 0
+        api_error_status: int | None = None
+        stop_reason: str | None = None
+        session_id: str | None = None
+        total_cost_usd: float | None = None
         current_tool_start: datetime | None = None
         current_tool_name: str | None = None
+        current_tool_input: dict[str, Any] | None = None
 
         # Snapshot child PIDs before query for orphan cleanup
         pre_query_pids = snapshot_child_pids()
@@ -231,15 +393,12 @@ class AgentRunner:
             # Wrap the query in a timeout
             async def _run_query():
                 nonlocal messages_received, text_blocks_received, result_parts
-                nonlocal tool_calls, current_tool_start, current_tool_name
+                nonlocal tool_calls, current_tool_start, current_tool_name, current_tool_input
+                nonlocal hook_events_received, api_error_status, stop_reason, session_id, total_cost_usd
 
                 async for message in query(
                     prompt=prompt,
-                    options=ClaudeAgentOptions(
-                        allowed_tools=self.allowed_tools,
-                        setting_sources=["project"],
-                        permission_mode="bypassPermissions",
-                    ),
+                    options=ClaudeAgentOptions(**self._claude_options_kwargs()),
                 ):
                     messages_received += 1
 
@@ -260,6 +419,9 @@ class AgentRunner:
 
                     # Handle tool use
                     if hasattr(message, "type"):
+                        if message.type == "hook_event":
+                            hook_events_received += 1
+
                         if message.type == "tool_use":
                             tool_name = getattr(message, "name", "unknown")
                             current_tool_name = tool_name
@@ -322,6 +484,19 @@ class AgentRunner:
                     if hasattr(message, "result"):
                         result_parts.append(message.result)
 
+                    message_api_error_status = getattr(message, "api_error_status", None)
+                    if message_api_error_status is not None:
+                        api_error_status = message_api_error_status
+                    message_stop_reason = getattr(message, "stop_reason", None)
+                    if message_stop_reason is not None:
+                        stop_reason = message_stop_reason
+                    message_session_id = getattr(message, "session_id", None)
+                    if message_session_id is not None:
+                        session_id = message_session_id
+                    message_total_cost_usd = getattr(message, "total_cost_usd", None)
+                    if message_total_cost_usd is not None:
+                        total_cost_usd = message_total_cost_usd
+
                     # Periodic progress logging
                     if messages_received > 0 and messages_received % 25 == 0:
                         total_chars = sum(len(p) for p in result_parts)
@@ -371,6 +546,11 @@ class AgentRunner:
                         tool_calls.clear()
                         messages_received = 0
                         text_blocks_received = 0
+                        hook_events_received = 0
+                        api_error_status = None
+                        stop_reason = None
+                        session_id = None
+                        total_cost_usd = None
                         continue
                     raise  # Non-429 error or no more keys — propagate
 
@@ -391,6 +571,11 @@ class AgentRunner:
                 tool_calls=tool_calls,
                 messages_received=messages_received,
                 text_blocks_received=text_blocks_received,
+                api_error_status=api_error_status,
+                stop_reason=stop_reason,
+                session_id=session_id,
+                total_cost_usd=total_cost_usd,
+                hook_events_received=hook_events_received,
             )
 
         except asyncio.TimeoutError:
@@ -408,6 +593,11 @@ class AgentRunner:
                 messages_received=messages_received,
                 text_blocks_received=text_blocks_received,
                 timed_out=True,
+                api_error_status=api_error_status,
+                stop_reason=stop_reason,
+                session_id=session_id,
+                total_cost_usd=total_cost_usd,
+                hook_events_received=hook_events_received,
             )
 
         except Exception as e:
@@ -432,6 +622,11 @@ class AgentRunner:
                     tool_calls=tool_calls,
                     messages_received=messages_received,
                     text_blocks_received=text_blocks_received,
+                    api_error_status=api_error_status,
+                    stop_reason=stop_reason,
+                    session_id=session_id,
+                    total_cost_usd=total_cost_usd,
+                    hook_events_received=hook_events_received,
                 )
             else:
                 # Actual error
@@ -446,6 +641,11 @@ class AgentRunner:
                     tool_calls=tool_calls,
                     messages_received=messages_received,
                     text_blocks_received=text_blocks_received,
+                    api_error_status=api_error_status,
+                    stop_reason=stop_reason,
+                    session_id=session_id,
+                    total_cost_usd=total_cost_usd,
+                    hook_events_received=hook_events_received,
                 )
 
         finally:
@@ -524,6 +724,14 @@ class AgentRunner:
                 operation_type="run",
                 cwd=os.getcwd(),
                 env_vars=self._collect_api_env_vars(),
+                allowed_tools=self.allowed_tools,
+                tools=self._effective_tools(),
+                disallowed_tools=self.disallowed_tools,
+                permission_mode=self._effective_permission_mode(),
+                strict_mcp_config=self.strict_mcp_config,
+                max_budget_usd=self.max_budget_usd,
+                task_budget=self.task_budget,
+                include_hook_events=self.include_hook_events,
             )
 
             logger.info(f"Task enqueued: {task_id}, waiting for result...")
@@ -553,6 +761,8 @@ class AgentRunner:
                 poll_interval=0.5,
                 on_progress=_on_progress,
             )
+            completed_task = await queue.get_task(task_id)
+            telemetry = completed_task.telemetry if completed_task else {}
 
             duration = (datetime.now() - start_time).total_seconds()
             result_len = len(result) if result else 0
@@ -568,10 +778,6 @@ class AgentRunner:
 
             print(f"   ✅ Agent completed via queue ({duration:.1f}s)", flush=True)
 
-            # Save debug output if session_dir provided
-            if self.session_dir:
-                self._save_debug_output(result, [], 1)
-
             output = result or ""
             stripped_output = output.strip()
             has_output = bool(stripped_output)
@@ -581,6 +787,49 @@ class AgentRunner:
             has_error_markers = is_short and any(
                 marker in stripped_output.lower() for marker in ("error", "failed", "exception", "traceback")
             )
+
+            tool_call_count = int(telemetry.get("tool_calls", 0) or 0)
+            tool_names = telemetry.get("tool_names") or []
+            if not isinstance(tool_names, list):
+                tool_names = []
+            browser_tool_count = int(telemetry.get("browser_tool_calls", 0) or 0)
+            if len(tool_names) < tool_call_count:
+                tool_names = [
+                    *[str(name) for name in tool_names],
+                    *([str(telemetry.get("last_tool") or "queue_tool_call")] * (tool_call_count - len(tool_names))),
+                ]
+            if not tool_names and browser_tool_count > 0:
+                tool_names = ["mcp__playwright-test__browser_tool"] * browser_tool_count
+            synthetic_tool_calls = [
+                ToolCall(
+                    name=str(name),
+                    timestamp=start_time,
+                    success=True,
+                )
+                for name in tool_names[:tool_call_count or len(tool_names)]
+            ]
+            messages_received = int(
+                telemetry.get("assistant_messages")
+                or telemetry.get("stream_events")
+                or 1
+            )
+            text_blocks_received = int(telemetry.get("text_blocks") or (1 if has_output else 0))
+            api_error_status = telemetry.get("api_error_status")
+            if api_error_status is not None:
+                try:
+                    api_error_status = int(api_error_status)
+                except (TypeError, ValueError):
+                    api_error_status = None
+            hook_events_received = int(telemetry.get("hook_events", 0) or 0)
+            total_cost_usd = telemetry.get("total_cost_usd")
+            try:
+                total_cost_usd = float(total_cost_usd) if total_cost_usd is not None else None
+            except (TypeError, ValueError):
+                total_cost_usd = None
+
+            # Save debug output if session_dir provided
+            if self.session_dir:
+                self._save_debug_output(output, synthetic_tool_calls, messages_received)
 
             if has_error_markers:
                 logger.warning(
@@ -592,9 +841,14 @@ class AgentRunner:
                     output=output,
                     error=f"Agent returned error-like output: {stripped_output[:200]}",
                     duration_seconds=duration,
-                    tool_calls=[],
-                    messages_received=1,
-                    text_blocks_received=1,
+                    tool_calls=synthetic_tool_calls,
+                    messages_received=messages_received,
+                    text_blocks_received=text_blocks_received,
+                    api_error_status=api_error_status,
+                    stop_reason=str(telemetry.get("stop_reason")) if telemetry.get("stop_reason") else None,
+                    session_id=str(telemetry.get("session_id")) if telemetry.get("session_id") else None,
+                    total_cost_usd=total_cost_usd,
+                    hook_events_received=hook_events_received,
                 )
 
             if is_short:
@@ -607,9 +861,14 @@ class AgentRunner:
                 output=output,
                 error=None if has_output else "Agent queue returned empty result — worker may have failed",
                 duration_seconds=duration,
-                tool_calls=[],  # Tool calls not tracked in queue mode
-                messages_received=1,
-                text_blocks_received=1 if has_output else 0,
+                tool_calls=synthetic_tool_calls,
+                messages_received=messages_received,
+                text_blocks_received=text_blocks_received,
+                api_error_status=api_error_status,
+                stop_reason=str(telemetry.get("stop_reason")) if telemetry.get("stop_reason") else None,
+                session_id=str(telemetry.get("session_id")) if telemetry.get("session_id") else None,
+                total_cost_usd=total_cost_usd,
+                hook_events_received=hook_events_received,
             )
 
         except asyncio.TimeoutError:

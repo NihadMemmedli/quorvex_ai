@@ -6,128 +6,50 @@ type ToolResult = Record<string, unknown> | null;
 
 // ===== Mutating tool execution configs (used by proxy route for HitL approval) =====
 
-export const MUTATING_TOOL_CONFIGS: Record<string, {
-  label: string;
-  method: string;
-  getPath: (args: Record<string, unknown>) => string;
-  getBody?: (args: Record<string, unknown>, projectId?: string) => Record<string, unknown>;
-}> = {
-  runTestSpec: {
-    label: 'Run Test Spec',
-    method: 'POST',
-    getPath: () => '/runs',
-    getBody: (args, pid) => ({ spec_name: args.specName, project_id: pid }),
-  },
-  startExploration: {
-    label: 'Start Exploration',
-    method: 'POST',
-    getPath: () => '/exploration/start',
-    getBody: (args, pid) => ({ entry_url: args.url, project_id: pid, max_interactions: args.maxInteractions ?? 50 }),
-  },
-  generateRequirements: {
-    label: 'Generate Requirements',
-    method: 'POST',
-    getPath: (args) => `/requirements/generate?project_id=${args._projectId || 'default'}`,
-    getBody: (args) => ({ exploration_session_id: args.sessionId }),
-  },
-  createTestSpec: {
-    label: 'Create Test Spec',
-    method: 'POST',
-    getPath: () => '/specs',
-    getBody: (args, pid) => ({ name: args.specName, content: args.content, project_id: pid }),
-  },
-  runRegressionBatch: {
-    label: 'Run Regression Batch',
-    method: 'POST',
-    getPath: () => '/runs/bulk',
-    getBody: (args, pid) => ({ spec_names: args.specNames, project_id: pid }),
-  },
-  triggerSecurityScan: {
-    label: 'Trigger Security Scan',
-    method: 'POST',
-    getPath: () => '/security-testing/scan/quick',
-    getBody: (args, pid) => ({ target_url: args.url, project_id: pid }),
-  },
-  retryFailedRun: {
-    label: 'Retry Failed Run',
-    method: 'POST',
-    getPath: () => '/runs',
-    getBody: (args, pid) => ({ spec_name: args.specName, project_id: pid }),
-  },
-  updateTestSpec: {
-    label: 'Update Test Spec',
-    method: 'PUT',
-    getPath: (args) => `/specs/${encodeURIComponent(String(args.specName))}`,
-    getBody: (args) => ({ content: args.content, reason: args.reason }),
-  },
-  healFailedRun: {
-    label: 'Heal Failed Run',
-    method: 'POST',
-    getPath: () => '/runs',
-    getBody: (args) => ({ spec_name: args.specName, hybrid_mode: args.useHybridHealing }),
-  },
-  triggerScheduleNow: {
-    label: 'Trigger Schedule Now',
-    method: 'POST',
-    getPath: (args) => `/scheduling/${args._projectId || 'default'}/schedules/${args.scheduleId}/run-now`,
-  },
-  rerunFailedTests: {
-    label: 'Rerun Failed Tests',
-    method: 'POST',
-    getPath: (args) => `/regression/batches/${args.batchId}/rerun-failed`,
-  },
-  analyzeLoadTestRun: {
-    label: 'Analyze Load Test Run',
-    method: 'POST',
-    getPath: (args) => `/load-testing/runs/${args.runId}/analyze`,
-  },
-  analyzeSecurityRun: {
-    label: 'Analyze Security Run',
-    method: 'POST',
-    getPath: (args) => `/security-testing/analyze/${args.runId}`,
-  },
-  triageSecurityFinding: {
-    label: 'Triage Security Finding',
-    method: 'PATCH',
-    getPath: (args) => `/security-testing/findings/${args.findingId}/status`,
-    getBody: (args) => ({ status: args.status, notes: args.notes }),
-  },
-  suggestLlmSpecImprovements: {
-    label: 'Suggest LLM Spec Improvements',
-    method: 'POST',
-    getPath: (args) => `/llm-testing/specs/${encodeURIComponent(String(args.specName))}/suggest-improvements`,
-  },
-  suggestDbFixes: {
-    label: 'Suggest DB Fixes',
-    method: 'POST',
-    getPath: (args) => `/database-testing/suggest/${args.runId}`,
-  },
-  startAutoPilot: {
-    label: 'Start Auto Pilot',
-    method: 'POST',
-    getPath: () => '/autopilot/start',
-    getBody: (args, pid) => ({
-      entry_urls: args.urls,
-      project_id: pid || 'default',
-      instructions: args.instructions || undefined,
-      max_interactions: args.maxInteractions ?? 50,
-      reactive_mode: true,
-    }),
-  },
-  answerAutoPilotQuestion: {
-    label: 'Answer Auto Pilot Question',
-    method: 'POST',
-    getPath: (args) => `/autopilot/${args.sessionId}/answer`,
-    getBody: (args) => ({
-      question_id: args.questionId,
-      answer_text: args.answer,
-    }),
-  },
-  cancelAutoPilot: {
-    label: 'Cancel Auto Pilot',
-    method: 'POST',
-    getPath: (args) => `/autopilot/${args.sessionId}/cancel`,
-  },
+export const MUTATING_TOOL_CONFIGS: Record<string, { label: string }> = {
+  runTestSpec: { label: 'Run Test Spec' },
+  startDiscoveryExploration: { label: 'Start Discovery Exploration' },
+  startExploration: { label: 'Start Exploration' },
+  startExplorerAgent: { label: 'Start Explorer Agent' },
+  stopExploration: { label: 'Stop Exploration' },
+  generateRequirements: { label: 'Generate Requirements' },
+  createTestSpec: { label: 'Create Test Spec' },
+  updateTestSpec: { label: 'Update Test Spec' },
+  runRegressionBatch: { label: 'Run Regression Batch' },
+  stopRun: { label: 'Stop Test Run' },
+  stopAllJobs: { label: 'Stop All Jobs' },
+  clearQueue: { label: 'Clear Queue' },
+  triggerSecurityScan: { label: 'Trigger Security Scan' },
+  retryFailedRun: { label: 'Retry Failed Run' },
+  healFailedRun: { label: 'Heal Failed Run' },
+  triggerScheduleNow: { label: 'Trigger Schedule Now' },
+  rerunFailedTests: { label: 'Rerun Failed Tests' },
+  analyzeLoadTestRun: { label: 'Analyze Load Test Run' },
+  stopLoadTestRun: { label: 'Stop Load Test Run' },
+  forceUnlockLoadTesting: { label: 'Force Unlock Load Testing' },
+  createLoadSpec: { label: 'Create Load Spec' },
+  updateLoadSpec: { label: 'Update Load Spec' },
+  deleteLoadSpec: { label: 'Delete Load Spec' },
+  generateLoadScript: { label: 'Generate Load Script' },
+  runLoadTest: { label: 'Run Load Test' },
+  runLoadTestFromSpec: { label: 'Run Load Test From Spec' },
+  analyzeSecurityRun: { label: 'Analyze Security Run' },
+  triageSecurityFinding: { label: 'Triage Security Finding' },
+  suggestLlmSpecImprovements: { label: 'Suggest LLM Spec Improvements' },
+  suggestDbFixes: { label: 'Suggest DB Fixes' },
+  createApiSpec: { label: 'Create API Spec' },
+  updateApiSpec: { label: 'Update API Spec' },
+  deleteApiSpec: { label: 'Delete API Spec' },
+  generateApiTest: { label: 'Generate API Test' },
+  runApiTest: { label: 'Run API Test' },
+  runApiTestDirect: { label: 'Run Generated API Test' },
+  generateApiEdgeCases: { label: 'Generate API Edge Cases' },
+  startAutoPilot: { label: 'Start Auto Pilot' },
+  pauseAutoPilot: { label: 'Pause Auto Pilot' },
+  resumeAutoPilot: { label: 'Resume Auto Pilot' },
+  answerAutoPilotQuestion: { label: 'Answer Auto Pilot Question' },
+  stopAutoPilotTestTask: { label: 'Stop Auto Pilot Test Task' },
+  cancelAutoPilot: { label: 'Cancel Auto Pilot' },
 };
 
 export const MUTATING_TOOL_NAMES = new Set(Object.keys(MUTATING_TOOL_CONFIGS));
@@ -423,6 +345,56 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       inputSchema: z.object({
         url: z.string().describe('The URL to explore'),
         maxInteractions: z.number().optional().default(50).describe('Maximum interactions during exploration'),
+        strategy: z.string().optional().default('goal_directed').describe('Exploration strategy'),
+        maxDepth: z.number().optional().default(10).describe('Maximum navigation depth'),
+        timeoutMinutes: z.number().optional().default(30).describe('Exploration timeout in minutes'),
+        loginUrl: z.string().optional().describe('Optional login URL'),
+        username: z.string().optional().describe('Optional login username'),
+        password: z.string().optional().describe('Optional login password'),
+        excludePatterns: z.array(z.string()).optional().describe('URL patterns to avoid'),
+        focusAreas: z.array(z.string()).optional().describe('Specific features or areas to focus on'),
+        instructions: z.string().optional().describe('Additional instructions for the exploration agent'),
+      }),
+    }),
+
+    startDiscoveryExploration: tool({
+      description: 'Start a Discovery "New Exploration" session for a web application URL. Use this for Discovery Sessions, New Exploration, or legacy exploration requests, not for the Explorer Agent tab.',
+      inputSchema: z.object({
+        url: z.string().describe('The URL to explore'),
+        maxInteractions: z.number().optional().default(50).describe('Maximum interactions during exploration'),
+        strategy: z.string().optional().default('goal_directed').describe('Exploration strategy'),
+        maxDepth: z.number().optional().default(10).describe('Maximum navigation depth'),
+        timeoutMinutes: z.number().optional().default(30).describe('Exploration timeout in minutes'),
+        loginUrl: z.string().optional().describe('Optional login URL'),
+        username: z.string().optional().describe('Optional login username'),
+        password: z.string().optional().describe('Optional login password'),
+        excludePatterns: z.array(z.string()).optional().describe('URL patterns to avoid'),
+        focusAreas: z.array(z.string()).optional().describe('Specific features or areas to focus on'),
+        instructions: z.string().optional().describe('Additional instructions for the discovery exploration'),
+      }),
+    }),
+
+    startExplorerAgent: tool({
+      description: 'Start the enhanced Discovery Explorer Agent tab run for deeper autonomous exploration, flow discovery, prerequisites analysis, and later spec generation. Use this when the user says Explorer Agent or asks to run the agent from Discovery.',
+      inputSchema: z.object({
+        url: z.string().describe('The URL to explore'),
+        timeLimitMinutes: z.number().optional().default(15).describe('Explorer Agent time limit in minutes'),
+        instructions: z.string().optional().describe('Additional instructions for the Explorer Agent'),
+        loginUrl: z.string().optional().describe('Optional login URL for credential auth'),
+        username: z.string().optional().describe('Optional login username'),
+        password: z.string().optional().describe('Optional login password'),
+        sessionId: z.string().optional().describe('Optional saved auth session ID'),
+        authType: z.enum(['none', 'credentials', 'session']).optional().default('none').describe('Authentication mode'),
+        testData: z.record(z.unknown()).optional().describe('Optional structured test data'),
+        focusAreas: z.array(z.string()).optional().describe('Specific features or areas to focus on'),
+        excludedPatterns: z.array(z.string()).optional().describe('URL patterns to avoid'),
+      }),
+    }),
+
+    stopExploration: tool({
+      description: 'Stop a running or queued exploration session.',
+      inputSchema: z.object({
+        sessionId: z.string().describe('The exploration session ID to stop'),
       }),
     }),
 
@@ -470,6 +442,26 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       execute: async ({ runId }): Promise<ToolResult> => {
         return fetchTool(`/runs/${runId}`);
       },
+    }),
+
+    stopRun: tool({
+      description: 'Stop a queued or running test run.',
+      inputSchema: z.object({
+        runId: z.string().describe('The test run ID to stop'),
+      }),
+    }),
+
+    stopAllJobs: tool({
+      description: 'Emergency stop for all running test processes, Auto Pilot sessions, explorations, and queued work.',
+      inputSchema: z.object({}),
+    }),
+
+    clearQueue: tool({
+      description: 'Clear stuck queued and orphaned running entries from the test execution queue.',
+      inputSchema: z.object({
+        includeQueued: z.boolean().optional().default(true).describe('Clear queued entries'),
+        includeRunning: z.boolean().optional().default(true).describe('Clear orphaned running entries'),
+      }),
     }),
 
     navigateToPage: tool({
@@ -690,6 +682,67 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       }),
     }),
 
+    stopLoadTestRun: tool({
+      description: 'Stop a running load test and release its execution lock.',
+      inputSchema: z.object({
+        runId: z.string().describe('The load test run ID to stop'),
+      }),
+    }),
+
+    forceUnlockLoadTesting: tool({
+      description: 'Force-release a stuck load testing lock. Use only when no legitimate load test is still running.',
+      inputSchema: z.object({}),
+    }),
+
+    createLoadSpec: tool({
+      description: 'Create a new load test specification.',
+      inputSchema: z.object({
+        specName: z.string().describe('The load spec name'),
+        content: z.string().describe('Markdown load test spec content'),
+      }),
+    }),
+
+    updateLoadSpec: tool({
+      description: 'Update an existing load test specification.',
+      inputSchema: z.object({
+        specName: z.string().describe('The load spec file name'),
+        content: z.string().describe('New markdown content'),
+      }),
+    }),
+
+    deleteLoadSpec: tool({
+      description: 'Delete a load test specification.',
+      inputSchema: z.object({
+        specName: z.string().describe('The load spec file name to delete'),
+      }),
+    }),
+
+    generateLoadScript: tool({
+      description: 'Generate a K6 load test script from a load test spec.',
+      inputSchema: z.object({
+        specName: z.string().describe('The load spec file name'),
+      }),
+    }),
+
+    runLoadTest: tool({
+      description: 'Run an existing K6 script.',
+      inputSchema: z.object({
+        scriptPath: z.string().describe('Relative K6 script path'),
+        specName: z.string().optional().describe('Optional related load spec name'),
+        vus: z.number().optional().describe('Virtual users'),
+        duration: z.string().optional().describe('Run duration, e.g. 2m or 30s'),
+      }),
+    }),
+
+    runLoadTestFromSpec: tool({
+      description: 'Run a load test from a load spec that already has a generated script.',
+      inputSchema: z.object({
+        specName: z.string().describe('The load spec file name'),
+        vus: z.number().optional().describe('Virtual users'),
+        duration: z.string().optional().describe('Run duration, e.g. 2m or 30s'),
+      }),
+    }),
+
     getLoadTestSystemLimits: tool({
       description: 'Get current load testing system limits — max VUs, max duration, worker status, and resource caps.',
       inputSchema: z.object({}),
@@ -831,6 +884,58 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       }),
     }),
 
+    createApiSpec: tool({
+      description: 'Create a new API test specification.',
+      inputSchema: z.object({
+        specName: z.string().describe('The API spec name'),
+        content: z.string().describe('Markdown API spec content'),
+      }),
+    }),
+
+    updateApiSpec: tool({
+      description: 'Update an existing API test specification.',
+      inputSchema: z.object({
+        specName: z.string().describe('The API spec file name'),
+        content: z.string().describe('New markdown content'),
+      }),
+    }),
+
+    deleteApiSpec: tool({
+      description: 'Delete an API test specification.',
+      inputSchema: z.object({
+        specName: z.string().describe('The API spec file name to delete'),
+      }),
+    }),
+
+    generateApiTest: tool({
+      description: 'Generate a Playwright API test from an API spec.',
+      inputSchema: z.object({
+        specName: z.string().describe('The API spec file name'),
+      }),
+    }),
+
+    runApiTest: tool({
+      description: 'Run an API spec through the generate, run, and heal pipeline.',
+      inputSchema: z.object({
+        specPath: z.string().describe('Relative API spec path'),
+      }),
+    }),
+
+    runApiTestDirect: tool({
+      description: 'Run an already generated API test directly.',
+      inputSchema: z.object({
+        testPath: z.string().describe('Relative generated test path'),
+        specName: z.string().describe('Related API spec name'),
+      }),
+    }),
+
+    generateApiEdgeCases: tool({
+      description: 'Generate API edge case and security tests from an API spec.',
+      inputSchema: z.object({
+        specPath: z.string().describe('Relative API spec path'),
+      }),
+    }),
+
     // ===== Auto Pilot Tools =====
 
     startAutoPilot: tool({
@@ -839,22 +944,62 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         urls: z.array(z.string()).min(1).describe('Entry URLs to explore'),
         instructions: z.string().optional().describe('Optional instructions to guide the pipeline (e.g., focus areas, login credentials)'),
         maxInteractions: z.number().optional().default(50).describe('Max browser interactions during exploration (1-200)'),
+        loginUrl: z.string().optional().describe('Optional login URL'),
+        username: z.string().optional().describe('Optional login username'),
+        password: z.string().optional().describe('Optional login password'),
+        strategy: z.string().optional().default('goal_directed').describe('Pipeline exploration strategy'),
+        maxDepth: z.number().optional().default(10).describe('Maximum exploration depth'),
+        timeoutMinutes: z.number().optional().default(30).describe('Pipeline timeout in minutes'),
+        reactiveMode: z.boolean().optional().default(true).describe('Ask checkpoint questions during the run'),
+        autoContinueHours: z.number().optional().default(24).describe('Hours before checkpoint auto-continue'),
+        priorityThreshold: z.enum(['low', 'medium', 'high', 'critical']).optional().default('low').describe('Minimum requirement priority to generate specs for'),
+        maxSpecs: z.number().optional().default(50).describe('Maximum specs to generate'),
+        parallelGeneration: z.number().optional().default(2).describe('Parallel test generation workers'),
+        hybridHealing: z.boolean().optional().default(false).describe('Use hybrid healing during test generation'),
       }),
     }),
 
     getAutoPilotStatus: tool({
-      description: 'Get the current status of an Auto Pilot session including phase progress, stats, and any pending checkpoint questions that need user input.',
+      description: 'Get the current status of an Auto Pilot session including phase progress, stats, questions, generated spec tasks, and test generation tasks.',
       inputSchema: z.object({
         sessionId: z.string().describe('The Auto Pilot session ID'),
+        includeTasks: z.boolean().optional().default(true).describe('Include spec and test task details'),
       }),
-      execute: async ({ sessionId }): Promise<ToolResult> => {
-        const [session, phases, questions] = await Promise.all([
+      execute: async ({ sessionId, includeTasks }): Promise<ToolResult> => {
+        const baseCalls: Promise<ToolResult>[] = [
           fetchTool(`/autopilot/${sessionId}`),
           fetchTool(`/autopilot/${sessionId}/phases`),
-          fetchTool(`/autopilot/${sessionId}/questions?status=pending`),
-        ]);
-        return { session, phases, pendingQuestions: questions } as ToolResult;
+          fetchTool(`/autopilot/${sessionId}/questions`),
+        ];
+        if (includeTasks ?? true) {
+          baseCalls.push(fetchTool(`/autopilot/${sessionId}/spec-tasks`));
+          baseCalls.push(fetchTool(`/autopilot/${sessionId}/test-tasks`));
+        }
+        const [session, phases, questions, specTasks, testTasks] = await Promise.all(baseCalls);
+        const questionList = Array.isArray(questions) ? questions : [];
+        return {
+          session,
+          phases,
+          questions,
+          pendingQuestions: questionList.filter((q: any) => q.status === 'pending'),
+          specTasks: specTasks || [],
+          testTasks: testTasks || [],
+        } as ToolResult;
       },
+    }),
+
+    pauseAutoPilot: tool({
+      description: 'Pause a running Auto Pilot session. The pipeline finishes its current atomic operation and waits.',
+      inputSchema: z.object({
+        sessionId: z.string().describe('The Auto Pilot session ID to pause'),
+      }),
+    }),
+
+    resumeAutoPilot: tool({
+      description: 'Resume or retry a resumable Auto Pilot session.',
+      inputSchema: z.object({
+        sessionId: z.string().describe('The Auto Pilot session ID to resume'),
+      }),
     }),
 
     answerAutoPilotQuestion: tool({
@@ -863,6 +1008,14 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         sessionId: z.string().describe('The Auto Pilot session ID'),
         questionId: z.number().describe('The question ID to answer'),
         answer: z.string().describe('The answer text'),
+      }),
+    }),
+
+    stopAutoPilotTestTask: tool({
+      description: 'Stop an individual test generation task within an Auto Pilot session.',
+      inputSchema: z.object({
+        sessionId: z.string().describe('The Auto Pilot session ID'),
+        taskId: z.number().describe('The Auto Pilot test task ID to stop'),
       }),
     }),
 

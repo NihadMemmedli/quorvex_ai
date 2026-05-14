@@ -3,7 +3,7 @@ Auto Pilot API Router
 
 Provides endpoints for controlling and monitoring end-to-end Auto Pilot
 pipeline sessions that orchestrate: exploration -> requirements ->
-spec generation -> test generation -> reporting.
+test ideas -> spec generation -> test generation -> reporting.
 
 Background Task Management:
 - Running pipelines tracked in-memory with asyncio.Tasks
@@ -13,8 +13,10 @@ Background Task Management:
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -29,6 +31,7 @@ from .models_db import (
     AutoPilotSession,
     AutoPilotSpecTask,
     AutoPilotTestTask,
+    TestRun,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,9 +52,10 @@ _running_pipelines: dict[str, tuple[asyncio.Task, Any, str]] = {}
 PHASE_DEFINITIONS = [
     ("exploration", 0),
     ("requirements", 1),
-    ("spec_generation", 2),
-    ("test_generation", 3),
-    ("reporting", 4),
+    ("test_ideas", 2),
+    ("spec_generation", 3),
+    ("test_generation", 4),
+    ("reporting", 5),
 ]
 
 
@@ -104,6 +108,9 @@ class AutoPilotSessionResponse(BaseModel):
     completed_at: datetime | None
     instructions: str | None
     config: dict
+    can_resume: bool = False
+    resume_reason: str | None = None
+    failed_phase: str | None = None
 
 
 class AutoPilotPhaseResponse(BaseModel):
@@ -172,19 +179,46 @@ class TestTaskResponse(BaseModel):
     session_id: str
     spec_task_id: int | None
     spec_name: str | None
+    spec_path: str | None = None
     run_id: str | None
     status: str
     current_stage: str | None
+    generation_mode: str | None
     healing_attempt: int
     test_path: str | None
     passed: bool | None
     error_summary: str | None
+    artifact_count: int = 0
+    log_available: bool = False
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
 
 
+class TestTaskArtifactResponse(BaseModel):
+    """Artifact metadata for an Auto Pilot test task."""
+
+    name: str
+    path: str
+    type: str
+
+
+class TestTaskDetailResponse(TestTaskResponse):
+    """Detailed response model for a test generation task."""
+
+    run_dir: str | None = None
+    pipeline_error: dict[str, Any] | None = None
+    agentic_summary: dict[str, Any] | None = None
+    validation: dict[str, Any] | None = None
+    artifacts: list[TestTaskArtifactResponse] = Field(default_factory=list)
+    report_url: str | None = None
+    log_excerpt: str | None = None
+
+
 # ========== Helper Functions ==========
+
+
+RUNS_DIR = Path("runs")
 
 
 def _get_user_key(user, request: Request) -> str:
@@ -208,8 +242,117 @@ def _count_user_active_sessions(user_key: str) -> int:
     return sum(1 for _, (task, _, uk) in _running_pipelines.items() if uk == user_key and not task.done())
 
 
-def _session_to_response(ap_session: AutoPilotSession) -> AutoPilotSessionResponse:
+def _safe_read_json(path: Path) -> dict[str, Any] | None:
+    """Read a JSON artifact, returning None when it is absent or invalid."""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {"value": data}
+    except Exception as exc:
+        logger.debug(f"Unable to read JSON artifact {path}: {exc}")
+        return None
+
+
+def _fallback_task_run_dir(task: AutoPilotTestTask) -> Path | None:
+    if task.run_id:
+        return RUNS_DIR / task.run_id
+    if task.spec_name:
+        return RUNS_DIR / "autopilot" / task.session_id / Path(task.spec_name).stem
+    return None
+
+
+def _collect_task_artifacts(run_dir: Path | None) -> list[TestTaskArtifactResponse]:
+    if not run_dir or not run_dir.exists():
+        return []
+
+    artifacts: list[TestTaskArtifactResponse] = []
+    for f in run_dir.glob("**/*"):
+        if not f.is_file():
+            continue
+        suffix = f.suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webm", ".mp4", ".zip", ".json", ".txt"}:
+            continue
+        try:
+            rel_path = f.relative_to(RUNS_DIR)
+        except ValueError:
+            continue
+        artifact_type = "file"
+        if suffix in {".png", ".jpg", ".jpeg"}:
+            artifact_type = "image"
+        elif suffix in {".webm", ".mp4"}:
+            artifact_type = "video"
+        elif suffix == ".json":
+            artifact_type = "json"
+        elif suffix == ".txt":
+            artifact_type = "text"
+        artifacts.append(
+            TestTaskArtifactResponse(
+                name=f.name,
+                path=f"/artifacts/{rel_path}",
+                type=artifact_type,
+            )
+        )
+    return artifacts
+
+
+def _task_artifact_summary(task: AutoPilotTestTask) -> tuple[int, bool]:
+    run_dir = _fallback_task_run_dir(task)
+    if not run_dir or not run_dir.exists():
+        return 0, False
+    artifacts = _collect_task_artifacts(run_dir)
+    return len(artifacts), (run_dir / "execution.log").exists()
+
+
+def _get_failed_phase(session: Session, session_id: str) -> str | None:
+    """Return the most recent failed phase name for a session."""
+    stmt = (
+        select(AutoPilotPhase)
+        .where(AutoPilotPhase.session_id == session_id)
+        .where(AutoPilotPhase.status == "failed")
+        .order_by(AutoPilotPhase.completed_at.desc(), AutoPilotPhase.phase_order.desc())
+    )
+    phase = session.exec(stmt).first()
+    return phase.phase_name if phase else None
+
+
+def _get_resume_metadata(
+    ap_session: AutoPilotSession,
+    session: Session | None = None,
+) -> tuple[bool, str | None, str | None]:
+    """Classify whether persisted Auto Pilot state can be resumed."""
+    owns_session = session is None
+    db = session or Session(engine)
+    try:
+        failed_phase = _get_failed_phase(db, ap_session.id)
+        if ap_session.status == "failed" and not failed_phase:
+            failed_phase = ap_session.current_phase
+        active_entry = _running_pipelines.get(ap_session.id)
+        task_active = bool(active_entry and not active_entry[0].done())
+
+        if ap_session.status in ("completed", "cancelled"):
+            return False, None, failed_phase
+        if ap_session.status == "paused":
+            failed_phase = failed_phase or ap_session.current_phase
+            return True, "Session is paused", failed_phase
+        if ap_session.status == "awaiting_input":
+            return True, "Session is waiting for checkpoint input", failed_phase
+        if ap_session.status in ("pending", "running") and not task_active:
+            return True, "Pipeline is not active in memory", failed_phase
+        if ap_session.status == "failed" and failed_phase:
+            return True, f"Retry failed phase: {failed_phase.replace('_', ' ')}", failed_phase
+        return False, None, failed_phase
+    finally:
+        if owns_session:
+            db.close()
+
+
+def _session_to_response(
+    ap_session: AutoPilotSession,
+    session: Session | None = None,
+) -> AutoPilotSessionResponse:
     """Convert a DB session model to the API response model."""
+    can_resume, resume_reason, failed_phase = _get_resume_metadata(ap_session, session)
     return AutoPilotSessionResponse(
         id=ap_session.id,
         project_id=ap_session.project_id,
@@ -233,6 +376,9 @@ def _session_to_response(ap_session: AutoPilotSession) -> AutoPilotSessionRespon
         completed_at=ap_session.completed_at,
         instructions=ap_session.instructions,
         config=ap_session.config,
+        can_resume=can_resume,
+        resume_reason=resume_reason,
+        failed_phase=failed_phase,
     )
 
 
@@ -293,21 +439,75 @@ def _spec_task_to_response(t: AutoPilotSpecTask) -> SpecTaskResponse:
 
 def _test_task_to_response(t: AutoPilotTestTask) -> TestTaskResponse:
     """Convert a DB test task model to the API response model."""
+    generation_mode = None
+    if t.current_stage and "conservative" in t.current_stage:
+        generation_mode = "conservative_smoke"
+    elif t.current_stage == "native_e2e":
+        generation_mode = "native_e2e"
+    elif t.test_path:
+        generation_mode = "native_e2e"
+
+    artifact_count, log_available = _task_artifact_summary(t)
+
     return TestTaskResponse(
         id=t.id,
         session_id=t.session_id,
         spec_task_id=t.spec_task_id,
         spec_name=t.spec_name,
+        spec_path=t.spec_path,
         run_id=t.run_id,
         status=t.status,
         current_stage=t.current_stage,
+        generation_mode=generation_mode,
         healing_attempt=t.healing_attempt,
         test_path=t.test_path,
         passed=t.passed,
         error_summary=t.error_summary,
+        artifact_count=artifact_count,
+        log_available=log_available,
         created_at=t.created_at,
         started_at=t.started_at,
         completed_at=t.completed_at,
+    )
+
+
+def _test_task_to_detail(t: AutoPilotTestTask) -> TestTaskDetailResponse:
+    """Convert a DB test task model and run artifacts to a detailed response."""
+    base = _test_task_to_response(t).model_dump()
+    run_dir = _fallback_task_run_dir(t)
+    artifacts = _collect_task_artifacts(run_dir)
+    pipeline_error = _safe_read_json(run_dir / "pipeline_error.json") if run_dir else None
+    agentic_summary = _safe_read_json(run_dir / "agentic_summary.json") if run_dir else None
+    validation = _safe_read_json(run_dir / "validation.json") if run_dir else None
+    report_url = None
+    log_excerpt = None
+
+    if run_dir and run_dir.exists():
+        report_index = run_dir / "report" / "index.html"
+        if report_index.exists():
+            try:
+                rel_report = report_index.relative_to(RUNS_DIR)
+                report_url = f"/artifacts/{rel_report}"
+            except ValueError:
+                report_url = None
+
+        log_path = run_dir / "execution.log"
+        if log_path.exists():
+            try:
+                log_text = log_path.read_text(errors="replace")
+                log_excerpt = log_text[-8000:]
+            except Exception as exc:
+                logger.debug(f"Unable to read Auto Pilot task log {log_path}: {exc}")
+
+    return TestTaskDetailResponse(
+        **base,
+        run_dir=str(run_dir) if run_dir else None,
+        pipeline_error=pipeline_error,
+        agentic_summary=agentic_summary,
+        validation=validation,
+        artifacts=artifacts,
+        report_url=report_url,
+        log_excerpt=log_excerpt,
     )
 
 
@@ -356,10 +556,10 @@ async def _run_pipeline_background(pipeline, session_id: str):
         result = await pipeline.run(config)
         logger.info(f"Auto Pilot {session_id} completed: {result}")
     except asyncio.CancelledError:
-        logger.info(f"Auto Pilot {session_id} cancelled")
+        logger.info(f"Auto Pilot {session_id} background task cancelled")
         with Session(engine) as db:
             sess = db.get(AutoPilotSession, session_id)
-            if sess and sess.status not in ("cancelled", "completed"):
+            if sess and sess.status not in ("cancelled", "completed", "paused"):
                 sess.status = "cancelled"
                 sess.completed_at = datetime.utcnow()
                 db.add(sess)
@@ -379,6 +579,97 @@ async def _run_pipeline_background(pipeline, session_id: str):
         _running_pipelines.pop(session_id, None)
 
 
+def _reset_resumable_state(db: Session, ap_session: AutoPilotSession, failed_phase: str | None) -> None:
+    """Prepare persisted rows before recreating a pipeline task."""
+    now = datetime.utcnow()
+    original_status = ap_session.status
+    resume_phase = failed_phase or (ap_session.current_phase if original_status == "paused" else None)
+    ap_session.status = "running"
+    ap_session.completed_at = None
+    ap_session.error_message = None
+    if resume_phase:
+        ap_session.current_phase = resume_phase
+    completed = [phase for phase in ap_session.phases_completed if phase != resume_phase]
+    ap_session.phases_completed = completed
+    db.add(ap_session)
+
+    if resume_phase:
+        stmt = (
+            select(AutoPilotPhase)
+            .where(AutoPilotPhase.session_id == ap_session.id)
+            .where(AutoPilotPhase.phase_name == resume_phase)
+        )
+        phase = db.exec(stmt).first()
+        if phase:
+            phase.status = "pending"
+            phase.error_message = None
+            phase.completed_at = None
+            phase.current_step = f"Waiting to resume {resume_phase.replace('_', ' ')}"
+            phase.progress = 0.0
+            db.add(phase)
+
+    if resume_phase == "spec_generation":
+        stmt = (
+            select(AutoPilotSpecTask)
+            .where(AutoPilotSpecTask.session_id == ap_session.id)
+            .where(AutoPilotSpecTask.status.in_(["pending", "generating", "failed"]))
+        )
+        for task in db.exec(stmt).all():
+            task.status = "pending"
+            task.error_message = None
+            task.completed_at = None
+            db.add(task)
+        ap_session.total_specs_generated = 0
+        db.add(ap_session)
+
+    if resume_phase == "test_generation":
+        stmt = (
+            select(AutoPilotTestTask)
+            .where(AutoPilotTestTask.session_id == ap_session.id)
+            .where(AutoPilotTestTask.status.in_(["pending", "running", "paused", "failed", "error"]))
+        )
+        for task in db.exec(stmt).all():
+            task.status = "pending"
+            task.error_summary = None
+            task.started_at = None
+            task.completed_at = None
+            task.passed = None
+            db.add(task)
+            if task.run_id:
+                run = db.get(TestRun, task.run_id)
+                if run:
+                    run.status = "pending"
+                    run.current_stage = "pending"
+                    run.stage_message = "Waiting to resume Auto Pilot test generation"
+                    run.error_message = None
+                    run.completed_at = None
+                    db.add(run)
+
+    stmt = (
+        select(AutoPilotQuestion)
+        .where(AutoPilotQuestion.session_id == ap_session.id)
+        .where(AutoPilotQuestion.status == "pending")
+    )
+    for question in db.exec(stmt).all():
+        if original_status != "awaiting_input":
+            question.status = "skipped"
+            db.add(question)
+
+    ap_session.started_at = ap_session.started_at or now
+    db.add(ap_session)
+    db.commit()
+
+
+def _launch_pipeline(session_id: str, project_id: str | None, user_key: str):
+    """Create and track a new background pipeline task."""
+    from orchestrator.workflows.autopilot_pipeline import AutoPilotPipeline
+
+    pipeline = AutoPilotPipeline(session_id, project_id or "default")
+    task = asyncio.create_task(_run_pipeline_background(pipeline, session_id))
+    _running_pipelines[session_id] = (task, pipeline, user_key)
+    return pipeline
+
+
 # ========== API Endpoints ==========
 
 
@@ -391,12 +682,10 @@ async def start_autopilot(
     """
     Start a new Auto Pilot pipeline session.
 
-    Runs exploration, requirements extraction, spec generation,
+    Runs exploration, requirements extraction, test idea generation, spec generation,
     test generation, and reporting in sequence as background tasks.
     Use GET /autopilot/{session_id} to poll progress.
     """
-    from orchestrator.workflows.autopilot_pipeline import AutoPilotPipeline
-
     _sweep_done_tasks()
 
     user_key = _get_user_key(user, request)
@@ -455,7 +744,7 @@ async def start_autopilot(
         db.add(ap_session)
         db.flush()  # Ensure session row exists before inserting phases (FK constraint)
 
-        # Create the 5 phase records
+        # Create phase records
         for phase_name, phase_order in PHASE_DEFINITIONS:
             phase = AutoPilotPhase(
                 session_id=session_id,
@@ -468,9 +757,7 @@ async def start_autopilot(
         db.commit()
 
     # Instantiate the pipeline and launch background task
-    pipeline = AutoPilotPipeline(session_id, request_body.project_id)
-    task = asyncio.create_task(_run_pipeline_background(pipeline, session_id))
-    _running_pipelines[session_id] = (task, pipeline, user_key)
+    _launch_pipeline(session_id, request_body.project_id, user_key)
 
     logger.info(f"Auto Pilot session {session_id} started for {len(request_body.entry_urls)} URL(s)")
 
@@ -498,7 +785,7 @@ async def list_sessions(
         stmt = stmt.where(AutoPilotSession.status == status)
 
     sessions = session.exec(stmt).all()
-    return [_session_to_response(s) for s in sessions]
+    return [_session_to_response(s, session) for s in sessions]
 
 
 @router.get("/{session_id}", response_model=AutoPilotSessionResponse)
@@ -510,7 +797,7 @@ async def get_session_detail(
     ap_session = session.get(AutoPilotSession, session_id)
     if not ap_session:
         raise HTTPException(status_code=404, detail="Auto Pilot session not found")
-    return _session_to_response(ap_session)
+    return _session_to_response(ap_session, session)
 
 
 @router.get("/{session_id}/phases", response_model=list[AutoPilotPhaseResponse])
@@ -571,6 +858,14 @@ async def answer_question(
         raise HTTPException(status_code=404, detail="Question not found")
     if question.session_id != session_id:
         raise HTTPException(status_code=400, detail="Question does not belong to this session")
+    if question.status in ("answered", "auto_continued"):
+        return {
+            "status": "already_resolved",
+            "question_status": question.status,
+            "question_id": body.question_id,
+            "session_id": session_id,
+            "answer_text": question.answer_text,
+        }
     if question.status != "pending":
         raise HTTPException(
             status_code=409,
@@ -586,18 +881,26 @@ async def answer_question(
 
     # Notify running pipeline if it exists
     entry = _running_pipelines.get(session_id)
-    if entry:
+    if entry and not entry[0].done():
         _, pipeline, _ = entry
         try:
             pipeline.answer_question(body.question_id, body.answer_text)
             logger.info(f"Forwarded answer to pipeline {session_id} for question {body.question_id}")
         except Exception as e:
             logger.warning(f"Could not forward answer to pipeline: {e}")
+    else:
+        can_resume, resume_reason, failed_phase = _get_resume_metadata(ap_session, session)
+        if can_resume and len(_running_pipelines) < MAX_TRACKED_PIPELINES:
+            _reset_resumable_state(session, ap_session, failed_phase)
+            _launch_pipeline(session_id, ap_session.project_id, ap_session.triggered_by or "system")
+            logger.info(f"Recreated pipeline for answered Auto Pilot checkpoint {session_id}: {resume_reason}")
 
     return {
         "status": "answered",
+        "question_status": "answered",
         "question_id": body.question_id,
         "session_id": session_id,
+        "answer_text": body.answer_text,
     }
 
 
@@ -647,6 +950,24 @@ async def get_test_tasks(
     return [_test_task_to_response(t) for t in tasks]
 
 
+@router.get("/{session_id}/test-tasks/{task_id}", response_model=TestTaskDetailResponse)
+async def get_test_task_detail(
+    session_id: str,
+    task_id: int,
+    session: Session = Depends(get_session),
+):
+    """Get a detailed test-generation task view with failure artifacts."""
+    ap_session = session.get(AutoPilotSession, session_id)
+    if not ap_session:
+        raise HTTPException(status_code=404, detail="Auto Pilot session not found")
+
+    test_task = session.get(AutoPilotTestTask, task_id)
+    if not test_task or test_task.session_id != session_id:
+        raise HTTPException(status_code=404, detail="Test task not found in this session")
+
+    return _test_task_to_detail(test_task)
+
+
 @router.post("/{session_id}/pause", response_model=dict)
 async def pause_session(
     session_id: str,
@@ -654,8 +975,8 @@ async def pause_session(
 ):
     """Pause a running Auto Pilot session.
 
-    The pipeline will finish its current atomic operation and then
-    wait until resumed.
+    Active test-generation tasks are marked paused and restarted cleanly
+    when the session is resumed.
     """
     ap_session = session.get(AutoPilotSession, session_id)
     if not ap_session:
@@ -669,18 +990,54 @@ async def pause_session(
 
     entry = _running_pipelines.get(session_id)
     if entry:
-        _, pipeline, _ = entry
+        task, pipeline, _ = entry
         try:
             pipeline.pause()
         except Exception as e:
             logger.warning(f"Error pausing pipeline {session_id}: {e}")
+        task.cancel()
 
+    now = datetime.utcnow()
     ap_session.status = "paused"
+    ap_session.completed_at = None
     session.add(ap_session)
+
+    phase_stmt = (
+        select(AutoPilotPhase)
+        .where(AutoPilotPhase.session_id == session_id)
+        .where(AutoPilotPhase.phase_name == ap_session.current_phase)
+    )
+    phase = session.exec(phase_stmt).first()
+    if phase and phase.status in ("pending", "running"):
+        phase.status = "paused"
+        phase.current_step = "Paused by user"
+        session.add(phase)
+
+    test_stmt = (
+        select(AutoPilotTestTask)
+        .where(AutoPilotTestTask.session_id == session_id)
+        .where(AutoPilotTestTask.status.in_(["pending", "running"]))
+    )
+    paused_tasks = session.exec(test_stmt).all()
+    for test_task in paused_tasks:
+        test_task.status = "paused"
+        test_task.error_summary = "Paused by user"
+        test_task.completed_at = now
+        session.add(test_task)
+        if test_task.run_id:
+            run = session.get(TestRun, test_task.run_id)
+            if run:
+                run.status = "paused"
+                run.current_stage = "paused"
+                run.stage_message = "Paused by user"
+                run.error_message = None
+                run.completed_at = now
+                session.add(run)
+
     session.commit()
 
     logger.info(f"Auto Pilot {session_id} paused")
-    return {"status": "paused", "session_id": session_id}
+    return {"status": "paused", "session_id": session_id, "paused_test_tasks": len(paused_tasks)}
 
 
 @router.post("/{session_id}/resume", response_model=dict)
@@ -699,7 +1056,8 @@ async def resume_session(
     if not ap_session:
         raise HTTPException(status_code=404, detail="Auto Pilot session not found")
 
-    if ap_session.status not in ("paused", "awaiting_input"):
+    can_resume, resume_reason, failed_phase = _get_resume_metadata(ap_session, session)
+    if not can_resume:
         raise HTTPException(
             status_code=409,
             detail=f"Cannot resume session with status '{ap_session.status}'",
@@ -708,7 +1066,20 @@ async def resume_session(
     _sweep_done_tasks()
 
     entry = _running_pipelines.get(session_id)
-    if entry:
+    if ap_session.status == "paused":
+        if entry and not entry[0].done():
+            entry[0].cancel()
+            _running_pipelines.pop(session_id, None)
+        if len(_running_pipelines) >= MAX_TRACKED_PIPELINES:
+            raise HTTPException(
+                status_code=503,
+                detail="System at maximum Auto Pilot capacity. Please try again later.",
+            )
+        user_key = _get_user_key(user, request)
+        _reset_resumable_state(session, ap_session, failed_phase)
+        _launch_pipeline(session_id, ap_session.project_id, user_key)
+        logger.info(f"Recreated paused pipeline for {session_id}")
+    elif entry and not entry[0].done():
         # Pipeline still in memory -- just resume it
         _, pipeline, _ = entry
         try:
@@ -717,8 +1088,6 @@ async def resume_session(
             logger.warning(f"Error resuming in-memory pipeline {session_id}: {e}")
     else:
         # Pipeline lost (server restart) -- recreate from DB state
-        from orchestrator.workflows.autopilot_pipeline import AutoPilotPipeline
-
         if len(_running_pipelines) >= MAX_TRACKED_PIPELINES:
             raise HTTPException(
                 status_code=503,
@@ -726,17 +1095,19 @@ async def resume_session(
             )
 
         user_key = _get_user_key(user, request)
-        pipeline = AutoPilotPipeline(session_id, ap_session.project_id or "default")
-        task = asyncio.create_task(_run_pipeline_background(pipeline, session_id))
-        _running_pipelines[session_id] = (task, pipeline, user_key)
+        _reset_resumable_state(session, ap_session, failed_phase)
+        _launch_pipeline(session_id, ap_session.project_id, user_key)
         logger.info(f"Recreated pipeline for {session_id} after server restart")
 
-    ap_session.status = "running"
-    session.add(ap_session)
-    session.commit()
+    if ap_session.status != "running":
+        ap_session.status = "running"
+        ap_session.completed_at = None
+        ap_session.error_message = None
+        session.add(ap_session)
+        session.commit()
 
-    logger.info(f"Auto Pilot {session_id} resumed")
-    return {"status": "running", "session_id": session_id}
+    logger.info(f"Auto Pilot {session_id} resumed: {resume_reason}")
+    return {"status": "running", "session_id": session_id, "resume_reason": resume_reason}
 
 
 @router.post("/{session_id}/cancel", response_model=dict)
@@ -781,7 +1152,7 @@ async def cancel_session(
     stmt = (
         select(AutoPilotPhase)
         .where(AutoPilotPhase.session_id == session_id)
-        .where(AutoPilotPhase.status.in_(["running", "pending"]))
+        .where(AutoPilotPhase.status.in_(["running", "pending", "paused"]))
     )
     running_phases = session.exec(stmt).all()
     for phase in running_phases:
@@ -807,7 +1178,7 @@ async def cancel_session(
     stmt = (
         select(AutoPilotTestTask)
         .where(AutoPilotTestTask.session_id == session_id)
-        .where(AutoPilotTestTask.status.in_(["pending", "running"]))
+        .where(AutoPilotTestTask.status.in_(["pending", "running", "paused"]))
     )
     running_test_tasks = session.exec(stmt).all()
     for t in running_test_tasks:
@@ -815,6 +1186,15 @@ async def cancel_session(
         t.error_summary = "Session cancelled"
         t.completed_at = now
         session.add(t)
+        if t.run_id:
+            run = session.get(TestRun, t.run_id)
+            if run:
+                run.status = "error"
+                run.current_stage = "cancelled"
+                run.stage_message = "Session cancelled"
+                run.error_message = "Session cancelled"
+                run.completed_at = now
+                session.add(run)
 
     # Skip pending questions
     stmt = (
@@ -873,6 +1253,15 @@ async def stop_test_task(
     test_task.error_summary = "Stopped by user"
     test_task.completed_at = now
     session.add(test_task)
+    if test_task.run_id:
+        run = session.get(TestRun, test_task.run_id)
+        if run:
+            run.status = "error"
+            run.current_stage = "stopped"
+            run.stage_message = "Stopped by user"
+            run.error_message = "Stopped by user"
+            run.completed_at = now
+            session.add(run)
     session.commit()
 
     logger.info(f"Test task {task_id} in session {session_id} stopped by user")
@@ -947,21 +1336,15 @@ async def resume_interrupted_sessions() -> int:
     """
     count = 0
     with Session(engine) as db:
-        stmt = select(AutoPilotSession).where(AutoPilotSession.status.in_(["running", "awaiting_input"]))
+        stmt = select(AutoPilotSession).where(AutoPilotSession.status.in_(["running", "awaiting_input", "paused"]))
         interrupted = db.exec(stmt).all()
 
         for ap_session in interrupted:
             try:
                 logger.info(f"Resuming interrupted Auto Pilot: {ap_session.id}")
-                from orchestrator.workflows.autopilot_pipeline import AutoPilotPipeline
-
-                pipeline = AutoPilotPipeline(
-                    ap_session.id,
-                    ap_session.project_id or "default",
-                )
-                task = asyncio.create_task(_run_pipeline_background(pipeline, ap_session.id))
                 user_key = ap_session.triggered_by or "system"
-                _running_pipelines[ap_session.id] = (task, pipeline, user_key)
+                _reset_resumable_state(db, ap_session, _get_failed_phase(db, ap_session.id))
+                _launch_pipeline(ap_session.id, ap_session.project_id, user_key)
                 count += 1
             except Exception as e:
                 logger.error(

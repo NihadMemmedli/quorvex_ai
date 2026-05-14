@@ -32,6 +32,7 @@ config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 if config_dir:
     os.chdir(config_dir)
 
+from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
 from orchestrator.utils.agent_runner import AgentRunner, build_allowed_tools, get_default_timeout
 
 
@@ -83,6 +84,9 @@ class NativeGenerator:
 
         # Determine output path
         output_path = self.tests_dir / f"{spec_name}.spec.ts"
+        if output_path.exists():
+            logger.info(f"Removing stale generated test before regeneration: {output_path}")
+            output_path.unlink()
 
         logger.info(f"Generating test from: {spec_path}")
         logger.info(f"   Output: {output_path}")
@@ -228,7 +232,14 @@ After writing the test file, call `browser_close` to close the browser before fi
 
 Save the generated test file to: {output_path}
 """
-        return prompt
+        metadata = build_prompt_metadata(
+            prompt_id="native_generator.playwright",
+            version="2026-05-13.1",
+            stage="test_generation",
+            schema_name="playwright_test_file.v1",
+            rendered_prompt=prompt,
+        )
+        return attach_prompt_metadata(prompt, metadata)
 
     # Playwright MCP tools matching .claude/agents/playwright-test-generator.md
     GENERATOR_MCP_TOOLS = [

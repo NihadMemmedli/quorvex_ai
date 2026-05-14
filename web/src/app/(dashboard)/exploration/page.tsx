@@ -210,6 +210,32 @@ const statusColors: Record<string, { bg: string; color: string }> = {
     stopped: { bg: 'rgba(156, 163, 175, 0.1)', color: 'var(--text-tertiary)' },
 };
 
+async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 15000): Promise<T> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (!res.ok) {
+            let detail = `${res.status} ${res.statusText}`;
+            try {
+                const data = await res.json();
+                detail = data.detail || data.error || detail;
+            } catch {
+                // Keep HTTP status when the body is not JSON.
+            }
+            throw new Error(detail);
+        }
+        return await res.json();
+    } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+            throw new Error('Request timed out. The backend may be busy with an Auto Pilot or agent task.');
+        }
+        throw err;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 export default function DiscoveryPage() {
     const { currentProject, isLoading: projectLoading } = useProject();
 
@@ -219,6 +245,7 @@ export default function DiscoveryPage() {
     // ============ SESSIONS TAB STATE ============
     const [sessions, setSessions] = useState<ExplorationSession[]>([]);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
     const [modalOpen, setModalOpen] = useState(false);
     const [detailModalOpen, setDetailModalOpen] = useState(false);
     const [selectedSession, setSelectedSession] = useState<ExplorationSession | null>(null);
@@ -351,15 +378,17 @@ export default function DiscoveryPage() {
             : '';
 
         try {
-            const res = await fetch(`${API_BASE}/exploration${projectParam}`);
-            const data = await res.json();
+            const data = await fetchJsonWithTimeout<ExplorationSession[]>(`${API_BASE}/exploration${projectParam}`);
             setSessions(data);
+            setLoadError(null);
             // Update ref for polling decisions (avoids useEffect dependency on sessions)
             hasRunningRef.current = data.some((s: ExplorationSession) =>
                 s.status === 'running' || s.status === 'queued'
             );
         } catch (err) {
             console.error('Failed to fetch exploration sessions:', err);
+            setLoadError(err instanceof Error ? err.message : 'Failed to load exploration sessions');
+            hasRunningRef.current = false;
         } finally {
             setLoading(false);
         }
@@ -1338,6 +1367,30 @@ export default function DiscoveryPage() {
         );
     }
 
+    if (loadError && sessions.length === 0) {
+        return (
+            <PageLayout tier="wide" style={{ paddingBottom: '4rem' }}>
+                <PageHeader
+                    title="Discovery"
+                    subtitle="AI-powered app exploration, test discovery, and spec generation."
+                    icon={<Compass size={22} />}
+                    breadcrumb={<WorkflowBreadcrumb />}
+                />
+                <EmptyState
+                    icon={<AlertTriangle size={28} />}
+                    title="Discovery data did not load"
+                    description={loadError}
+                    action={
+                        <button className="btn btn-primary" onClick={fetchSessions} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <RefreshCw size={16} />
+                            Retry
+                        </button>
+                    }
+                />
+            </PageLayout>
+        );
+    }
+
     // ============ RENDER ============
     return (
         <PageLayout tier="wide" style={{ paddingBottom: '4rem' }}>
@@ -1357,6 +1410,19 @@ export default function DiscoveryPage() {
                     </button>
                 ) : undefined}
             />
+
+            {loadError && (
+                <div className="card" style={{ marginBottom: '1rem', borderColor: 'var(--danger)', color: 'var(--danger)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <AlertTriangle size={16} />
+                        {loadError}
+                    </span>
+                    <button className="btn btn-secondary" onClick={fetchSessions} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <RefreshCw size={14} />
+                        Retry
+                    </button>
+                </div>
+            )}
 
             {/* Tab Navigation */}
             <div className="animate-in stagger-2" style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.5rem', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '1rem' }}>

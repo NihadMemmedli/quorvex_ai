@@ -49,7 +49,10 @@ class AISpecSplitter:
         """
         api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN")
         base_url = os.environ.get("ANTHROPIC_BASE_URL")
-        model = os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514")
+        model = os.environ.get("ANTHROPIC_MODEL") or os.environ.get(
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "claude-sonnet-4-20250514",
+        )
 
         if not api_key:
             raise RuntimeError("ANTHROPIC_AUTH_TOKEN not set. Configure AI credentials in .env file or settings.")
@@ -114,7 +117,10 @@ class AISpecSplitter:
         """
         api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN")
         base_url = os.environ.get("ANTHROPIC_BASE_URL")
-        model = os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "claude-sonnet-4-20250514")
+        model = os.environ.get("ANTHROPIC_MODEL") or os.environ.get(
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "claude-sonnet-4-20250514",
+        )
 
         if not api_key:
             raise RuntimeError("ANTHROPIC_AUTH_TOKEN not set. Configure AI credentials in .env file or settings.")

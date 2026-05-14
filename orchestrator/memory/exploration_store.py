@@ -104,25 +104,25 @@ class ExplorationStore:
     def update_session_counts(
         self,
         session_id: str,
-        pages: int = 0,
-        flows: int = 0,
-        elements: int = 0,
-        api_endpoints: int = 0,
-        issues: int = 0,
+        pages: int | None = None,
+        flows: int | None = None,
+        elements: int | None = None,
+        api_endpoints: int | None = None,
+        issues: int | None = None,
     ) -> ExplorationSession | None:
         """Update session discovery counts."""
         with self._get_session() as db:
             session = db.get(ExplorationSession, session_id)
             if session:
-                if pages:
+                if pages is not None:
                     session.pages_discovered = pages
-                if flows:
+                if flows is not None:
                     session.flows_discovered = flows
-                if elements:
+                if elements is not None:
                     session.elements_discovered = elements
-                if api_endpoints:
+                if api_endpoints is not None:
                     session.api_endpoints_discovered = api_endpoints
-                if issues:
+                if issues is not None:
                     session.issues_discovered = issues
                 db.commit()
                 db.refresh(session)
