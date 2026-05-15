@@ -2153,54 +2153,6 @@ test.describe({suite}, () => {{
                 counts[status] += 1
         return counts
 
-    def _create_spec_tasks_from_test_ideas(self, test_ideas):
-        """Create AutoPilotSpecTask records for generated test ideas."""
-        from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AutoPilotSpecTask
-
-        with Session(engine) as db:
-            existing_titles = set(
-                db.exec(
-                    select(AutoPilotSpecTask.requirement_title).where(
-                        AutoPilotSpecTask.session_id == self.session_id
-                    )
-                ).all()
-            )
-            for idea in test_ideas:
-                if idea.title in existing_titles:
-                    continue
-                requirement_id = self._lookup_requirement_id_for_test_idea(idea)
-                task = AutoPilotSpecTask(
-                    session_id=self.session_id,
-                    requirement_id=requirement_id,
-                    requirement_title=idea.title,
-                    priority=idea.priority,
-                    status="pending",
-                )
-                db.add(task)
-                existing_titles.add(idea.title)
-            db.commit()
-
-    def _has_spec_tasks(self) -> bool:
-        from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AutoPilotSpecTask
-
-        with Session(engine) as db:
-            stmt = select(AutoPilotSpecTask).where(AutoPilotSpecTask.session_id == self.session_id).limit(1)
-            return db.exec(stmt).first() is not None
-
-    def _count_spec_tasks(self) -> int:
-        from sqlalchemy import func
-
-        from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AutoPilotSpecTask
-
-        with Session(engine) as db:
-            stmt = select(func.count()).select_from(AutoPilotSpecTask).where(
-                AutoPilotSpecTask.session_id == self.session_id
-            )
-            return int(db.exec(stmt).one())
-
     def _update_spec_task(
         self,
         task_id: int,

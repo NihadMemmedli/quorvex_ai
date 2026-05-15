@@ -6,7 +6,7 @@ import { PageHeader } from '@/components/ui/page-header';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
 import { createTabStyle } from '@/lib/styles';
-import { ApiSpec, ApiSpecsSummary, GeneratedTest, JobStatus, ApiTestRun, TabType } from './components/types';
+import { ApiSpec, ApiSpecsSummary, GeneratedTest, GeneratedTestsSummary, JobStatus, ApiTestRun, TabType } from './components/types';
 import SpecsPanel from './components/SpecsPanel';
 import GeneratedTestsList from './components/GeneratedTestsList';
 import HistoryPanel from './components/HistoryPanel';
@@ -35,11 +35,14 @@ export default function ApiTestingPage() {
 
     // Generated tests tab state
     const [generatedTests, setGeneratedTests] = useState<GeneratedTest[]>([]);
-    const [testsLoading, setTestsLoading] = useState(true);
+    const [testsLoading, setTestsLoading] = useState(false);
+    const [testsRefreshing, setTestsRefreshing] = useState(false);
+    const [testsLoaded, setTestsLoaded] = useState(false);
     const [testsTotal, setTestsTotal] = useState(0);
     const [testsHasMore, setTestsHasMore] = useState(false);
     const [testsOffset, setTestsOffset] = useState(0);
     const [expandedTest, setExpandedTest] = useState<string | null>(null);
+    const [generatedTestsSummary, setGeneratedTestsSummary] = useState<GeneratedTestsSummary | null>(null);
 
     // Job tracking
     const [activeJobs, setActiveJobs] = useState<Record<string, JobStatus>>({});
@@ -97,7 +100,8 @@ export default function ApiTestingPage() {
     }, [projectId]);
 
     const fetchGeneratedTests = useCallback(async (offset = 0, append = false, search?: string, sort?: string, statusFilter?: string) => {
-        setTestsLoading(!append);
+        if (!append && !testsLoaded) setTestsLoading(true);
+        else setTestsRefreshing(true);
         try {
             let url = `${API_BASE}/api-testing/generated-tests?project_id=${projectId}&limit=${PAGE_SIZE}&offset=${offset}`;
             if (search) url += `&search=${encodeURIComponent(search)}`;
@@ -115,12 +119,14 @@ export default function ApiTestingPage() {
                     else setGeneratedTests(data.items || []);
                     setTestsTotal(data.total || 0);
                     setTestsHasMore(data.has_more || false);
+                    if (data.summary) setGeneratedTestsSummary(data.summary);
                 }
                 setTestsOffset(offset);
+                setTestsLoaded(true);
             }
         } catch (e) { console.error('Failed to fetch generated tests:', e); }
-        finally { setTestsLoading(false); }
-    }, [projectId]);
+        finally { setTestsLoading(false); setTestsRefreshing(false); }
+    }, [projectId, testsLoaded]);
 
     const fetchRecentJobs = useCallback(async () => {
         try {
@@ -207,8 +213,26 @@ export default function ApiTestingPage() {
 
     // ========== Effects ==========
 
-    useEffect(() => { fetchApiSpecs(); fetchGeneratedTests(); fetchRecentJobs(); fetchLatestRuns(); },
-        [fetchApiSpecs, fetchGeneratedTests, fetchRecentJobs, fetchLatestRuns]);
+    useEffect(() => { fetchApiSpecs(); fetchRecentJobs(); fetchLatestRuns(); },
+        [fetchApiSpecs, fetchRecentJobs, fetchLatestRuns]);
+
+    useEffect(() => {
+        setGeneratedTests([]);
+        setGeneratedTestsSummary(null);
+        setTestsTotal(0);
+        setTestsHasMore(false);
+        setTestsOffset(0);
+        setTestsLoaded(false);
+        setTestsLoading(false);
+        setTestsRefreshing(false);
+        setExpandedTest(null);
+    }, [projectId]);
+
+    useEffect(() => {
+        if (activeTab === 'generated' && !testsLoaded && !testsLoading) {
+            fetchGeneratedTests(0);
+        }
+    }, [activeTab, testsLoaded, testsLoading, fetchGeneratedTests]);
 
     useEffect(() => { if (activeTab === 'history') fetchApiRuns(0); }, [activeTab, fetchApiRuns]);
 
@@ -342,12 +366,14 @@ export default function ApiTestingPage() {
                 <GeneratedTestsList
                     generatedTests={generatedTests}
                     testsLoading={testsLoading}
+                    testsRefreshing={testsRefreshing}
                     fetchGeneratedTests={fetchGeneratedTests}
                     expandedTest={expandedTest}
                     setExpandedTest={setExpandedTest}
                     setMessage={setMessage}
                     testsTotal={testsTotal}
                     testsHasMore={testsHasMore}
+                    summary={generatedTestsSummary}
                     projectId={projectId}
                     activeJobs={activeJobs}
                     setActiveJobs={setActiveJobs}

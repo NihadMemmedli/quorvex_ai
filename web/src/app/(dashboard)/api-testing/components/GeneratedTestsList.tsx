@@ -13,12 +13,14 @@ const CodeEditor = dynamic(() => import('@/components/CodeEditor'), { ssr: false
 interface GeneratedTestsListProps {
     generatedTests: GeneratedTest[];
     testsLoading: boolean;
+    testsRefreshing: boolean;
     fetchGeneratedTests: (offset?: number, append?: boolean, search?: string, sort?: string, statusFilter?: string) => Promise<void>;
     expandedTest: string | null;
     setExpandedTest: (name: string | null) => void;
     setMessage: (msg: { type: 'success' | 'error'; text: string } | null) => void;
     testsTotal: number;
     testsHasMore: boolean;
+    summary: GeneratedTestsSummary | null;
     projectId: string;
     activeJobs: Record<string, JobStatus>;
     setActiveJobs: React.Dispatch<React.SetStateAction<Record<string, JobStatus>>>;
@@ -59,12 +61,14 @@ function StatusDot({ status }: { status: 'passed' | 'failed' | 'running' | null 
 export default React.memo(function GeneratedTestsList({
     generatedTests,
     testsLoading,
+    testsRefreshing,
     fetchGeneratedTests,
     expandedTest,
     setExpandedTest,
     setMessage,
     testsTotal,
     testsHasMore,
+    summary,
     projectId,
     activeJobs,
     setActiveJobs,
@@ -82,23 +86,12 @@ export default React.memo(function GeneratedTestsList({
     const [sortBy, setSortBy] = useState<SortOption>('modified');
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
     const [selectedTests, setSelectedTests] = useState<Set<string>>(new Set());
-    const [summary, setSummary] = useState<GeneratedTestsSummary | null>(null);
     const [runningTests, setRunningTests] = useState<Record<string, string>>({}); // testPath -> jobId
     const [menuOpen, setMenuOpen] = useState<string | null>(null);
     const [currentOffset, setCurrentOffset] = useState(0);
 
     const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const menuRef = useRef<HTMLDivElement>(null);
-
-    // Fetch summary
-    const fetchSummary = useCallback(async () => {
-        try {
-            const res = await fetch(`${API_BASE}/api-testing/generated-tests/summary?project_id=${projectId}`);
-            if (res.ok) setSummary(await res.json());
-        } catch { /* ignore */ }
-    }, [projectId]);
-
-    useEffect(() => { fetchSummary(); }, [fetchSummary]);
 
     // Close menu on outside click
     useEffect(() => {
@@ -150,16 +143,25 @@ export default React.memo(function GeneratedTestsList({
     }, [fetchGeneratedTests, currentOffset, testsSearch, sortBy, statusFilter]);
 
     // Test content loading
-    const loadTestContent = async (name: string) => {
-        if (testContents[name]) return;
+    const loadTestContent = useCallback(async (name: string) => {
+        if (testContents[name]) return testContents[name];
         try {
             const res = await fetch(`${API_BASE}/api-testing/generated-tests/${name}?project_id=${projectId}`);
             if (res.ok) {
                 const data = await res.json();
                 setTestContents(prev => ({ ...prev, [name]: data.content }));
+                return data.content as string;
             }
         } catch { console.error('Failed to load test content'); }
-    };
+        return undefined;
+    }, [projectId, testContents]);
+
+    const handleStartEdit = useCallback(async (testName: string) => {
+        const content = testContents[testName] || await loadTestContent(testName) || '';
+        setEditingTest(testName);
+        setEditTestContent(content);
+        setMenuOpen(null);
+    }, [loadTestContent, testContents]);
 
     const handleSaveTest = async (testName: string) => {
         setSavingTest(true);
@@ -200,7 +202,6 @@ export default React.memo(function GeneratedTestsList({
                 pollJob(data.job_id, () => {
                     setRunningTests(prev => { const next = { ...prev }; delete next[test.path]; return next; });
                     refreshTests(0);
-                    fetchSummary();
                     fetchApiRuns(0);
                 });
             } else {
@@ -208,7 +209,7 @@ export default React.memo(function GeneratedTestsList({
                 setMessage({ type: 'error', text: err.detail || 'Failed to start test' });
             }
         } catch { setMessage({ type: 'error', text: 'Failed to start test run' }); }
-    }, [projectId, setActiveJobs, pollJob, refreshTests, fetchSummary, fetchApiRuns, setMessage]);
+    }, [projectId, setActiveJobs, pollJob, refreshTests, fetchApiRuns, setMessage]);
 
     // Run selected tests
     const handleRunSelected = useCallback(async () => {
@@ -238,13 +239,12 @@ export default React.memo(function GeneratedTestsList({
             if (res.ok) {
                 setMessage({ type: 'success', text: `Deleted ${test.name}` });
                 refreshTests(0);
-                fetchSummary();
             } else {
                 const err = await res.json();
                 setMessage({ type: 'error', text: err.detail || 'Failed to delete' });
             }
         } catch { setMessage({ type: 'error', text: 'Failed to delete test' }); }
-    }, [refreshTests, fetchSummary, setMessage]);
+    }, [projectId, refreshTests, setMessage]);
 
     // Copy path
     const handleCopyPath = useCallback((test: GeneratedTest) => {
@@ -349,7 +349,7 @@ export default React.memo(function GeneratedTestsList({
                     ))}
                 </select>
                 <button
-                    onClick={() => { refreshTests(0); fetchSummary(); }}
+                    onClick={() => refreshTests(0)}
                     style={{
                         display: 'flex', alignItems: 'center', gap: '0.4rem',
                         padding: '0.5rem 0.75rem', background: 'var(--surface)',
@@ -359,6 +359,12 @@ export default React.memo(function GeneratedTestsList({
                 >
                     <RefreshCw size={14} /> Refresh
                 </button>
+                {testsRefreshing && (
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
+                        <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                        Refreshing
+                    </span>
+                )}
                 <button
                     onClick={handleRunAll}
                     disabled={generatedTests.length === 0 || hasRunning}
@@ -453,7 +459,7 @@ export default React.memo(function GeneratedTestsList({
                                     }}
                                     onClick={() => {
                                         if (isExpanded) setExpandedTest(null);
-                                        else { setExpandedTest(test.name); loadTestContent(test.name); }
+                                        else { setExpandedTest(test.name); void loadTestContent(test.name); }
                                     }}
                                 >
                                     <div onClick={e => e.stopPropagation()}>
@@ -535,12 +541,7 @@ export default React.memo(function GeneratedTestsList({
                                                     <button
                                                         onClick={() => {
                                                             setExpandedTest(test.name);
-                                                            loadTestContent(test.name);
-                                                            setMenuOpen(null);
-                                                            setTimeout(() => {
-                                                                setEditingTest(test.name);
-                                                                setEditTestContent(testContents[test.name] || '');
-                                                            }, 100);
+                                                            void handleStartEdit(test.name);
                                                         }}
                                                         style={menuItemStyle}
                                                         onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
@@ -632,10 +633,7 @@ export default React.memo(function GeneratedTestsList({
                                                     </>
                                                 ) : (
                                                     <button
-                                                        onClick={() => {
-                                                            setEditingTest(test.name);
-                                                            setEditTestContent(testContents[test.name] || '');
-                                                        }}
+                                                        onClick={() => void handleStartEdit(test.name)}
                                                         disabled={!testContents[test.name]}
                                                         style={{
                                                             display: 'flex', alignItems: 'center', gap: '0.3rem',
@@ -652,13 +650,28 @@ export default React.memo(function GeneratedTestsList({
                                             </div>
                                         </div>
                                         <div style={{ height: '500px', borderRadius: 'var(--radius)', overflow: 'hidden' }}>
-                                            {testContents[test.name] ? (
+                                            {editingTest === test.name && testContents[test.name] ? (
                                                 <CodeEditor
-                                                    value={editingTest === test.name ? editTestContent : testContents[test.name]}
+                                                    value={editTestContent}
                                                     onChange={(val: string) => setEditTestContent(val)}
                                                     language="typescript"
-                                                    readOnly={editingTest !== test.name}
+                                                    readOnly={false}
                                                 />
+                                            ) : testContents[test.name] ? (
+                                                <pre style={{
+                                                    height: '100%',
+                                                    margin: 0,
+                                                    padding: '1rem',
+                                                    overflow: 'auto',
+                                                    background: 'var(--background)',
+                                                    color: 'var(--text-primary)',
+                                                    fontSize: '0.82rem',
+                                                    lineHeight: 1.55,
+                                                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                                                    whiteSpace: 'pre',
+                                                }}>
+                                                    {testContents[test.name]}
+                                                </pre>
                                             ) : (
                                                 <div style={{
                                                     height: '100%', display: 'flex', alignItems: 'center',

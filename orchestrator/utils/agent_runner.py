@@ -87,12 +87,13 @@ except ImportError:
             return 0
 
 
-def get_mcp_tool_prefix() -> str:
+def get_mcp_tool_prefix(server_hint: str = "playwright") -> str:
     """Detect MCP server name from .mcp.json to build tool names.
 
     The MCP server name varies by context:
     - Dashboard/Docker: server named "playwright-test" -> tools prefixed mcp__playwright-test__
     - CLI direct: server named "playwright" -> tools prefixed mcp__playwright__
+    - Mobile: server named "appium-mcp" -> tools prefixed mcp__appium-mcp__
     """
     import json as _json
 
@@ -101,10 +102,12 @@ def get_mcp_tool_prefix() -> str:
         try:
             config = _json.loads(mcp_path.read_text())
             for name in config.get("mcpServers", {}):
-                if "playwright" in name:
+                if server_hint in name:
                     return f"mcp__{name}__"
         except Exception as e:
             logger.debug(f"MCP config read failed, using default prefix: {e}")
+    if server_hint == "appium":
+        return "mcp__appium-mcp__"
     return "mcp__playwright-test__"  # default (dashboard/production)
 
 
@@ -118,7 +121,13 @@ def build_allowed_tools(base_tools: list, mcp_tools: list) -> list:
     Returns:
         Combined list with MCP tools properly prefixed.
     """
-    prefix = get_mcp_tool_prefix()
+    prefix = get_mcp_tool_prefix("playwright")
+    return base_tools + [f"{prefix}{t}" for t in mcp_tools]
+
+
+def build_mcp_allowed_tools(server_hint: str, base_tools: list, mcp_tools: list) -> list:
+    """Build allowed_tools for a named MCP server family."""
+    prefix = get_mcp_tool_prefix(server_hint)
     return base_tools + [f"{prefix}{t}" for t in mcp_tools]
 
 

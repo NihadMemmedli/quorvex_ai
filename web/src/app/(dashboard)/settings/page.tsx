@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Save, AlertCircle, CheckCircle, Key, Globe, Box, Eye, EyeOff, Server, Layers, Monitor, Database, Zap, HardDrive, Lock, Link2, Mail, Loader2, ChevronDown, Bug, GitBranch, GitMerge, Shield, Settings } from 'lucide-react';
+import { Save, AlertCircle, CheckCircle, Key, Globe, Box, Eye, EyeOff, Server, Layers, Monitor, Database, Zap, HardDrive, Lock, Link2, Mail, Loader2, ChevronDown, Bug, GitBranch, GitMerge, Shield, Settings, Smartphone } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { CredentialsManager } from '@/components/CredentialsManager';
@@ -37,6 +37,14 @@ interface RemoteProject {
 interface RemoteSuite {
     id: number;
     name: string;
+}
+
+interface MobileHealth {
+    ready: boolean;
+    errors: string[];
+    warnings: string[];
+    udid?: string | null;
+    device_name?: string | null;
 }
 
 export default function SettingsPage() {
@@ -132,6 +140,12 @@ export default function SettingsPage() {
     const [ghLoadingRepos, setGhLoadingRepos] = useState(false);
     const [ghRemoteWorkflows, setGhRemoteWorkflows] = useState<{ id: number; name: string; path: string }[]>([]);
     const [ghLoadingWorkflows, setGhLoadingWorkflows] = useState(false);
+
+    // Appium mobile testing state
+    const [appiumServerUrl, setAppiumServerUrl] = useState('http://127.0.0.1:4723');
+    const [appiumCapabilitiesFile, setAppiumCapabilitiesFile] = useState('');
+    const [mobileHealth, setMobileHealth] = useState<MobileHealth | null>(null);
+    const [mobileTesting, setMobileTesting] = useState(false);
 
     useEffect(() => {
         Promise.all([
@@ -490,6 +504,39 @@ export default function SettingsPage() {
             setMessage({ type: 'error', text: err.message });
         } finally {
             setSavingExecution(false);
+        }
+    };
+
+    const handleMobileHealthCheck = async () => {
+        setMobileTesting(true);
+        setMobileHealth(null);
+        setMessage(null);
+
+        try {
+            const params = new URLSearchParams({
+                platform: 'ios',
+                appium_server_url: appiumServerUrl,
+                require_server: 'true',
+            });
+            if (appiumCapabilitiesFile.trim()) {
+                params.set('capabilities_file', appiumCapabilitiesFile.trim());
+            }
+
+            const res = await fetch(`${API_BASE}/api/mobile-testing/health?${params.toString()}`);
+            const data = await res.json();
+            if (!res.ok) {
+                throw new Error(data.detail || 'Mobile health check failed');
+            }
+            setMobileHealth(data);
+            setMessage({
+                type: data.ready ? 'success' : 'error',
+                text: data.ready ? 'Appium mobile environment is ready.' : 'Appium mobile environment needs setup.',
+            });
+        } catch (err: any) {
+            setMessage({ type: 'error', text: err.message || 'Mobile health check failed' });
+        } finally {
+            setMobileTesting(false);
+            setTimeout(() => setMessage(null), 6000);
         }
     };
 
@@ -1322,6 +1369,100 @@ export default function SettingsPage() {
                         </button>
                     </div>
                 </form>
+            </div>
+
+            {/* Appium Mobile Testing Section */}
+            <div style={{ marginTop: '2rem' }}>
+                <h2 style={{ fontSize: '1.5rem', marginBottom: '1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <Smartphone size={24} />
+                    Appium Mobile Testing
+                </h2>
+
+                <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', boxShadow: 'var(--shadow-card)' }}>
+                    <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', margin: 0 }}>
+                        Check local iPhone/Appium readiness before running mobile specs.
+                    </p>
+
+                    <div className="form-group">
+                        <label className="label">Appium Server URL</label>
+                        <div className="input-group">
+                            <div className="input-icon">
+                                <Server size={18} />
+                            </div>
+                            <input
+                                type="text"
+                                value={appiumServerUrl}
+                                onChange={e => setAppiumServerUrl(e.target.value)}
+                                placeholder="http://127.0.0.1:4723"
+                                className="input has-icon"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="form-group">
+                        <label className="label">Capabilities File <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}>(Optional)</span></label>
+                        <div className="input-group">
+                            <div className="input-icon">
+                                <Settings size={18} />
+                            </div>
+                            <input
+                                type="text"
+                                value={appiumCapabilitiesFile}
+                                onChange={e => setAppiumCapabilitiesFile(e.target.value)}
+                                placeholder="/absolute/path/to/capabilities.json"
+                                className="input has-icon"
+                            />
+                        </div>
+                    </div>
+
+                    {mobileHealth && (
+                        <div style={{
+                            padding: '1rem',
+                            borderRadius: 'var(--radius)',
+                            background: mobileHealth.ready ? 'var(--success-muted)' : 'var(--danger-muted)',
+                            border: `1px solid ${mobileHealth.ready ? 'rgba(52, 211, 153, 0.2)' : 'rgba(248, 113, 113, 0.2)'}`,
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 600, marginBottom: '0.5rem' }}>
+                                {mobileHealth.ready ? <CheckCircle size={18} /> : <AlertCircle size={18} />}
+                                {mobileHealth.ready ? 'Ready' : 'Setup required'}
+                            </div>
+                            {(mobileHealth.device_name || mobileHealth.udid) && (
+                                <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginBottom: mobileHealth.errors?.length ? '0.5rem' : 0 }}>
+                                    Device: {mobileHealth.device_name || mobileHealth.udid}
+                                </div>
+                            )}
+                            {mobileHealth.errors?.length > 0 && (
+                                <ul style={{ margin: 0, paddingLeft: '1.25rem', color: 'var(--danger)', fontSize: '0.875rem' }}>
+                                    {mobileHealth.errors.slice(0, 5).map((err, idx) => (
+                                        <li key={idx}>{err}</li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+                    )}
+
+                    <div style={{ paddingTop: '1.5rem', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'flex-end' }}>
+                        <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={handleMobileHealthCheck}
+                            disabled={mobileTesting || !appiumServerUrl}
+                            style={{ minWidth: '180px', justifyContent: 'center' }}
+                        >
+                            {mobileTesting ? (
+                                <>
+                                    <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
+                                    Checking...
+                                </>
+                            ) : (
+                                <>
+                                    <Zap size={18} />
+                                    Check Mobile Setup
+                                </>
+                            )}
+                        </button>
+                    </div>
+                </div>
             </div>
 
             {/* TestRail Integration Section */}

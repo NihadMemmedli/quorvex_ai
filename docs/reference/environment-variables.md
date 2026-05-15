@@ -41,6 +41,21 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | `PLAYWRIGHT_WORKERS` | `4` | No | Number of Playwright test runner workers |
 | `PLAYWRIGHT_OUTPUT_DIR` | `./test-results` | No | Directory for Playwright test output |
 
+## Appium / Mobile
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `APPIUM_MCP_ENABLED` | `false` | No | Enable Appium MCP mobile testing features |
+| `APPIUM_SERVER_URL` | `http://127.0.0.1:4723` | Mobile runs | Appium server URL |
+| `APPIUM_CAPABILITIES_CONFIG` | -- | No | Path to Appium capabilities JSON |
+| `APPIUM_SCREENSHOTS_DIR` | `runs/appium-screenshots` | No | Screenshot output directory for Appium runs |
+| `APPIUM_REMOTE_SERVER_URL_ALLOW_REGEX` | `^https?://` | No | Allowed remote Appium server URL pattern for Appium MCP |
+| `APPIUM_HOME` | Appium default | No | Appium extension home used for installed drivers |
+| `MOBILE_TESTS_DIR` | `tests/mobile` | No | Output directory for generated mobile tests |
+| `IOS_UDID` | auto-detected | No | Connected iPhone UDID override |
+| `IOS_TEAM_ID` | -- | iOS real devices | Apple Developer Team ID for WebDriverAgent signing |
+| `IOS_BUNDLE_ID_PREFIX` | -- | iOS real devices | Bundle prefix used for WebDriverAgent signing |
+
 ## Browser Resource Pool
 
 | Variable | Default | Required | Description |

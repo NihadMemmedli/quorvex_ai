@@ -134,6 +134,18 @@ class AppSettings(BaseSettings):
     skill_timeout: int | None = None
     slow_mo: int | None = None
 
+    # --- Mobile / Appium ---
+    appium_mcp_enabled: bool = False
+    appium_server_url: str = "http://127.0.0.1:4723"
+    appium_capabilities_config: str | None = None
+    appium_screenshots_dir: str | None = None
+    appium_remote_server_url_allow_regex: str = r"^https?://"
+    appium_home: str | None = None
+    mobile_tests_dir: str = "tests/mobile"
+    ios_team_id: str | None = None
+    ios_bundle_id_prefix: str | None = None
+    ios_udid: str | None = None
+
     # --- Initial Admin ---
     initial_admin_email: str | None = None
     initial_admin_password: str | None = None

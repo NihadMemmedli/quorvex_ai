@@ -26,6 +26,12 @@ interface BatchRun {
     started_at: string | null;
     completed_at: string | null;
     error_message: string | null;
+    failure_category: string | null;
+    failure_summary: string | null;
+    failure_source: string | null;
+    failing_step: Record<string, unknown> | null;
+    error_stack: string | null;
+    artifact_links: { label: string; url: string }[];
     duration_seconds: number | null;
     actual_test_count: number;
 }
@@ -86,6 +92,17 @@ interface ErrorCategory {
     name: string;
     count: number;
     percentage: number;
+    examples?: ErrorExample[];
+}
+
+interface ErrorExample {
+    run_id: string;
+    test_name: string;
+    spec_name: string;
+    status: string;
+    summary: string | null;
+    source: string | null;
+    failing_step?: Record<string, unknown> | null;
 }
 
 interface CompareResult {
@@ -377,6 +394,43 @@ export default function BatchDetailPage() {
         return `${hrs}h ${mins % 60}m`;
     };
 
+    const isFailureStatus = (status: string) => status === 'failed' || status === 'error' || status === 'stopped';
+
+    const getFailureSummary = (run: BatchRun) =>
+        run.failure_summary || run.error_message || 'No detailed failure artifact was captured for this run.';
+
+    const getFailureCategoryColor = (category?: string | null) => {
+        switch ((category || '').toLowerCase()) {
+            case 'timeout':
+                return '#f59e0b';
+            case 'selector':
+                return '#8b5cf6';
+            case 'navigation':
+            case 'connectivity':
+                return '#3b82f6';
+            case 'assertion':
+                return '#ef4444';
+            case 'authentication':
+                return '#ec4899';
+            case 'server error':
+                return '#f97316';
+            default:
+                return '#6b7280';
+        }
+    };
+
+    const formatFailureStep = (step: Record<string, unknown> | null | undefined) => {
+        if (!step) return null;
+        const entries = Object.entries(step)
+            .filter(([, value]) => value !== null && value !== undefined && value !== '')
+            .slice(0, 5);
+        if (entries.length === 0) return null;
+        return entries.map(([key, value]) => {
+            const displayValue = Array.isArray(value) ? value.join(', ') : String(value);
+            return `${key.replace(/_/g, ' ')}: ${displayValue}`;
+        }).join(' | ');
+    };
+
     const getSuccessRateColor = (rate: number) => {
         if (rate >= 90) return 'var(--success)';
         if (rate >= 70) return 'var(--warning)';
@@ -418,8 +472,10 @@ export default function BatchDetailPage() {
     const errorBarData = errorCategories.map(c => ({
         name: c.name,
         count: c.count,
-        fill: c.name === 'Timeout' ? '#f59e0b' : c.name === 'Selector' ? '#8b5cf6' : c.name === 'Network' ? '#3b82f6' : c.name === 'Assertion' ? '#ef4444' : '#6b7280',
+        fill: getFailureCategoryColor(c.name),
     }));
+
+    const failureRuns = batch.runs.filter(r => isFailureStatus(r.status));
 
     return (
         <PageLayout tier="standard">
@@ -523,7 +579,7 @@ export default function BatchDetailPage() {
                     {errorCategories.length > 0 && (
                         <div className="card animate-in" style={{ padding: '1.25rem' }}>
                             <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.95rem' }}>
-                                <BarChart3 size={16} /> Error Analysis ({totalErrors} errors)
+                                <BarChart3 size={16} /> Failure Analysis ({totalErrors} errors)
                             </h3>
                             <div style={{ width: '100%', height: 180 }}>
                                 <ResponsiveContainer>
@@ -535,6 +591,22 @@ export default function BatchDetailPage() {
                                         <Bar dataKey="count" radius={[0, 4, 4, 0]} />
                                     </BarChart>
                                 </ResponsiveContainer>
+                            </div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
+                                {errorCategories.map(category => (
+                                    <div key={category.name} style={{ padding: '0.75rem', borderRadius: '6px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.5rem' }}>
+                                            <span style={{ fontWeight: 600, color: getFailureCategoryColor(category.name) }}>{category.name}</span>
+                                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{category.count} ({category.percentage}%)</span>
+                                        </div>
+                                        {(category.examples || []).map(example => (
+                                            <Link key={example.run_id} href={`/runs/${example.run_id}`} target="_blank" style={{ display: 'block', color: 'var(--text)', textDecoration: 'none', padding: '0.45rem 0', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+                                                <div style={{ fontSize: '0.85rem', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{example.test_name || example.spec_name}</div>
+                                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{example.summary || 'No detailed failure artifact was captured for this run.'}</div>
+                                            </Link>
+                                        ))}
+                                    </div>
+                                ))}
                             </div>
                         </div>
                     )}
@@ -639,7 +711,7 @@ export default function BatchDetailPage() {
                                     </div>
                                     <div style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>{run.steps_completed}/{run.total_steps}</div>
                                     <div style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>{formatDuration(run.duration_seconds)}</div>
-                                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: run.error_message ? 'var(--danger)' : 'var(--text-secondary)', fontSize: '0.85rem' }}>{run.error_message || '-'}</div>
+                                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: isFailureStatus(run.status) ? 'var(--danger)' : 'var(--text-secondary)', fontSize: '0.85rem' }}>{isFailureStatus(run.status) ? getFailureSummary(run) : '-'}</div>
                                     {/* D7: History toggle */}
                                     <div style={{ textAlign: 'center' }}>
                                         <button
@@ -683,21 +755,51 @@ export default function BatchDetailPage() {
             </div>
 
             {/* Failure Details */}
-            {batch.failed > 0 && (
+            {failureRuns.length > 0 && (
                 <div className="card" style={{ padding: '1.25rem' }}>
                     <h3 style={{ fontWeight: 600, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <AlertTriangle size={18} color="var(--danger)" /> Failure Details ({batch.failed} failed)
+                        <AlertTriangle size={18} color="var(--danger)" /> Failure Details ({failureRuns.length} failed)
                     </h3>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                        {batch.runs.filter(r => r.status === 'failed' && r.error_message).map(run => (
-                            <div key={run.id} style={{ padding: '1rem', borderRadius: 'var(--radius)', background: 'var(--danger-muted)', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.5rem' }}>
-                                    <span style={{ fontWeight: 600, fontSize: '0.95rem' }}>{run.test_name || run.spec_name}</span>
-                                    <Link href={`/runs/${run.id}`} target="_blank" style={{ fontSize: '0.85rem', color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>View Details <ChevronRight size={14} /></Link>
+                        {failureRuns.map(run => {
+                            const stepText = formatFailureStep(run.failing_step);
+                            const categoryColor = getFailureCategoryColor(run.failure_category);
+                            return (
+                                <div key={run.id} style={{ padding: '1rem', borderRadius: 'var(--radius)', background: 'var(--danger-muted)', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', marginBottom: '0.75rem' }}>
+                                        <div style={{ minWidth: 0 }}>
+                                            <div style={{ fontWeight: 600, fontSize: '0.95rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{run.test_name || run.spec_name}</div>
+                                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.4rem', fontSize: '0.78rem' }}>
+                                                <span style={{ padding: '0.15rem 0.5rem', borderRadius: '9999px', background: 'rgba(0,0,0,0.18)', color: categoryColor, border: `1px solid ${categoryColor}55`, fontWeight: 600 }}>{run.failure_category || 'Other'}</span>
+                                                <span style={{ color: 'var(--text-secondary)' }}>Source: {run.failure_source || 'run status'}</span>
+                                            </div>
+                                        </div>
+                                        <Link href={`/runs/${run.id}`} target="_blank" style={{ flexShrink: 0, fontSize: '0.85rem', color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>View Details <ChevronRight size={14} /></Link>
+                                    </div>
+                                    {stepText && (
+                                        <div style={{ marginBottom: '0.75rem', padding: '0.6rem 0.75rem', borderRadius: '4px', background: 'rgba(0, 0, 0, 0.16)', color: 'var(--text-secondary)', fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                            {stepText}
+                                        </div>
+                                    )}
+                                    <pre style={{ margin: 0, padding: '0.75rem', borderRadius: '4px', background: 'rgba(0, 0, 0, 0.25)', fontSize: '0.8rem', color: 'var(--danger)', overflow: 'auto', maxHeight: '180px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{getFailureSummary(run)}</pre>
+                                    {run.error_stack && (
+                                        <details style={{ marginTop: '0.75rem' }}>
+                                            <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Stack trace</summary>
+                                            <pre style={{ margin: '0.5rem 0 0', padding: '0.75rem', borderRadius: '4px', background: 'rgba(0, 0, 0, 0.25)', fontSize: '0.78rem', color: 'var(--text-secondary)', overflow: 'auto', maxHeight: '220px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{run.error_stack}</pre>
+                                        </details>
+                                    )}
+                                    {(run.artifact_links || []).length > 0 && (
+                                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+                                            {(run.artifact_links || []).slice(0, 4).map(link => (
+                                                <a key={link.url} href={`${API_BASE}${link.url}`} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary)', fontSize: '0.8rem', textDecoration: 'none' }}>
+                                                    {link.label}
+                                                </a>
+                                            ))}
+                                        </div>
+                                    )}
                                 </div>
-                                <pre style={{ margin: 0, padding: '0.75rem', borderRadius: '4px', background: 'rgba(0, 0, 0, 0.25)', fontSize: '0.8rem', color: 'var(--danger)', overflow: 'auto', maxHeight: '150px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{run.error_message}</pre>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </div>
             )}

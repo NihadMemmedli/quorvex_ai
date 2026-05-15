@@ -5,6 +5,10 @@ import { createAssistantTools } from '@/lib/ai/tools';
 import { backendFetch } from '@/lib/ai/backend-client';
 
 export const maxDuration = 120;
+const OPTIONAL_CONTEXT_TIMEOUT_MS = 1500;
+const SETTINGS_TIMEOUT_MS = 1500;
+const CHAT_HISTORY_MESSAGE_LIMIT = 12;
+const CHAT_TOOL_STEP_LIMIT = 8;
 
 interface RuntimeSettings {
   model_name?: string;
@@ -31,12 +35,43 @@ function supportsExtendedThinking(modelId: string) {
 async function getRuntimeModelId(authToken?: string) {
   const settingsRes = await backendFetch<RuntimeSettings>('/settings', {
     authToken,
-    timeoutMs: 5000,
+    timeoutMs: SETTINGS_TIMEOUT_MS,
   });
 
   return settingsRes.ok && settingsRes.data?.model_name
     ? settingsRes.data.model_name
     : MODEL_ID;
+}
+
+function logTiming(label: string, startedAt: number) {
+  console.info(`[chat/route] ${label} in ${Date.now() - startedAt}ms`);
+}
+
+async function timedBackendFetch<T>(
+  label: string,
+  path: string,
+  options: Parameters<typeof backendFetch<T>>[1] = {}
+) {
+  const startedAt = Date.now();
+  const res = await backendFetch<T>(path, options);
+  logTiming(label, startedAt);
+  return res;
+}
+
+function hasDirectAnthropicChatCredential() {
+  return Boolean(
+    (
+      process.env.ANTHROPIC_AUTH_TOKENS ||
+      process.env.ANTHROPIC_API_KEY ||
+      process.env.ANTHROPIC_AUTH_TOKEN ||
+      ''
+    ).trim()
+  );
+}
+
+function getRecentMessages(messages: any[]): any[] {
+  if (messages.length <= CHAT_HISTORY_MESSAGE_LIMIT) return messages;
+  return messages.slice(-CHAT_HISTORY_MESSAGE_LIMIT);
 }
 
 function extractLatestUserText(messages: any[]): string {
@@ -73,7 +108,7 @@ async function openAIChatFallbackResponse(messages: any[], systemPrompt: string,
 
   const baseURL = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
   const model = process.env.OPENAI_CHAT_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini';
-  const modelMessages = messages
+  const modelMessages = getRecentMessages(messages)
     .map((message: any) => {
       const role = ['user', 'assistant', 'system'].includes(message?.role) ? message.role : 'user';
       const content = extractMessageText(message);
@@ -416,6 +451,152 @@ function buildAutoPilotStartInput(messages: any[]): Record<string, unknown> | nu
   };
 }
 
+function slugifySpecName(input: string, fallback: string) {
+  const slug = input
+    .toLowerCase()
+    .replace(/https?:\/\//g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  return `${slug || fallback}-${Date.now()}.md`;
+}
+
+function extractApiSpecName(text: string): string | null {
+  const match = text.match(/\b([a-z0-9][a-z0-9._/-]*api[a-z0-9._/-]*\.md|[a-z0-9][a-z0-9._/-]*\.md)\b/i);
+  return match?.[1] || null;
+}
+
+function extractHttpOperations(text: string): string[] {
+  const matches = [...text.matchAll(/\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(\/[^\s,.;)]+)/gi)];
+  return matches.map((match) => `${match[1].toUpperCase()} ${match[2]}`);
+}
+
+function buildDemoApiSpecContent(): string {
+  return `# Test: HTTPBin Demo API
+
+## Type: API
+## Base URL: https://httpbin.org
+## Auth: None
+
+## Description
+Demo API coverage for stable HTTPBin endpoints. This verifies common request/response behavior without needing user credentials.
+
+## Steps
+1. GET /get
+2. Verify response status is 200
+3. Verify response body has "url" field
+4. POST /post with body {"name": "Quorvex Demo", "source": "chatbot"}
+5. Verify response status is 200
+6. Verify response body.json.name equals "Quorvex Demo"
+7. GET /status/204
+8. Verify response status is 204
+9. GET /status/404
+10. Verify response status is 404
+
+## Expected Outcome
+- The API accepts GET and POST requests.
+- JSON request bodies are echoed correctly.
+- Success and error status endpoints return the expected status codes.
+`;
+}
+
+function buildApiSpecFromPromptContent(text: string, baseUrl: string, operations: string[]): string {
+  const steps = operations.length > 0
+    ? operations.flatMap((operation, index) => [
+        `${index * 2 + 1}. ${operation}`,
+        `${index * 2 + 2}. Verify response status is between 200 and 299`,
+      ])
+    : [
+        `1. GET /`,
+        `2. Verify response status is between 200 and 299`,
+      ];
+
+  return `# Test: Chatbot API Test
+
+## Type: API
+## Base URL: ${baseUrl}
+## Auth: None
+
+## Description
+API test generated from the chatbot request.
+
+## Source Request
+${text.trim() || 'Create API coverage from chatbot input.'}
+
+## Steps
+${steps.join('\n')}
+
+## Expected Outcome
+- The API endpoints respond successfully according to the requested behavior.
+- Response status codes and payloads are validated by the generated Playwright API test.
+`;
+}
+
+function buildApiTestAction(messages: any[]): { text: string; toolName: string; input: Record<string, unknown> } | null {
+  const latestUserText = extractLatestUserText(messages);
+  const conversationText = messages.map(extractMessageText).filter(Boolean).join('\n');
+  const combinedText = `${conversationText}\n${latestUserText}`;
+
+  const apiIntent = /\b(api|openapi|swagger|endpoint|http\s+request|rest)\b/i.test(combinedText)
+    && /\b(test|tests|testing|generate|create|import|demo|random)\b/i.test(combinedText);
+  if (!apiIntent) return null;
+  if (/auto\s*pilot|autopilot|explorer\s+agent|exploration/i.test(latestUserText)) return null;
+
+  const startIntent = /\b(generate|create|make|import|build|start|proceed|confirm(ed)?|yes|go ahead|ok|okay)\b/i.test(latestUserText);
+  if (!startIntent && !/\b(random|demo)\b/i.test(latestUserText)) return null;
+
+  const urls = extractUrls(combinedText);
+  const targetUrl = urls.at(-1);
+  const looksLikeOpenApi = Boolean(targetUrl)
+    && /\b(openapi|swagger)\b/i.test(combinedText);
+  if (looksLikeOpenApi && targetUrl) {
+    return {
+      text: 'I prepared an OpenAPI import action below. Approve it to import the spec and generate API tests.',
+      toolName: 'importOpenApiSpec',
+      input: { url: targetUrl },
+    };
+  }
+
+  const explicitSpecName = extractApiSpecName(latestUserText) || extractApiSpecName(conversationText);
+  const mentionsExistingSpec = /\b(existing|from|for|using)\b/i.test(latestUserText)
+    && explicitSpecName
+    && !/\b(random|demo|new)\b/i.test(latestUserText);
+  if (mentionsExistingSpec && explicitSpecName) {
+    return {
+      text: 'I prepared the API test generation action below. Approve it to generate Playwright API tests from the existing spec.',
+      toolName: 'generateApiTest',
+      input: { specName: explicitSpecName },
+    };
+  }
+
+  const wantsDemo = /\b(random|demo|sample|example)\b/i.test(combinedText);
+  if (wantsDemo) {
+    return {
+      text: 'I prepared a demo API spec and generation action below. Approve it to create the spec and generate Playwright API tests.',
+      toolName: 'createAndGenerateApiTest',
+      input: {
+        specName: slugifySpecName('demo-httpbin-api', 'demo-api'),
+        content: buildDemoApiSpecContent(),
+      },
+    };
+  }
+
+  const operations = extractHttpOperations(combinedText);
+  if (targetUrl || operations.length > 0) {
+    const baseUrl = targetUrl || 'https://httpbin.org';
+    return {
+      text: 'I prepared an API spec and generation action below. Approve it to create the spec and generate Playwright API tests.',
+      toolName: 'createAndGenerateApiTest',
+      input: {
+        specName: slugifySpecName(targetUrl || operations[0] || 'chatbot-api-test', 'api-test'),
+        content: buildApiSpecFromPromptContent(latestUserText || conversationText, baseUrl, operations),
+      },
+    };
+  }
+
+  return null;
+}
+
 /** Extract a user-friendly message from various error shapes */
 function extractUserMessage(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error);
@@ -461,63 +642,16 @@ function extractUserMessage(error: unknown): string {
 }
 
 export async function POST(req: Request) {
+  const startedAt = Date.now();
   const { messages, projectId, projectName, currentPage, pageContext } = await req.json();
-
-  // Extract auth token from request headers
-  const authHeader = req.headers.get('authorization');
-  const authToken = authHeader?.replace('Bearer ', '') || undefined;
-  const modelId = await getRuntimeModelId(authToken);
-
-  // Fetch project context for proactive prompts
-  let projectStats: {
-    recent_runs?: number;
-    recent_failures?: number;
-    total_requirements?: number;
-    recent_explorations?: number;
-    flaky_tests?: Array<{ spec_name: string; pass_count: number; fail_count: number }>;
-    pass_rate_7d?: number;
-    pass_rate_prior_7d?: number;
-    stale_specs_count?: number;
-    uncovered_requirements_count?: number;
-  } | undefined;
-  try {
-    const ctxRes = await backendFetch<{ recent_runs: number; recent_failures: number; total_requirements: number; recent_explorations: number }>(
-      `/chat/project-context${projectId ? `?project_id=${projectId}` : ''}`,
-      { authToken }
-    );
-    if (ctxRes.ok && ctxRes.data) {
-      projectStats = ctxRes.data;
-    }
-  } catch {
-    // silently skip - proactive prompts are optional
-  }
-
-  // Fetch recent conversation summaries for context memory
-  let recentSummaries: Array<{ title: string; first_message: string; last_message: string }> = [];
-  try {
-    const summRes = await backendFetch<{ summaries: Array<{ title: string; first_message: string; last_message: string }> }>(
-      `/chat/conversations/recent-summaries${projectId ? `?project_id=${projectId}` : ''}`,
-      { authToken }
-    );
-    if (summRes.ok && summRes.data) {
-      recentSummaries = summRes.data.summaries || [];
-    }
-  } catch {
-    // optional feature
-  }
-
-  const systemPrompt = buildSystemPrompt({
-    projectName,
-    projectId,
-    currentPage,
-    projectStats,
-    conversationHistory: recentSummaries,
-    pageContext,
-  });
 
   if (!messages || !Array.isArray(messages)) {
     return new Response('Missing messages', { status: 400 });
   }
+
+  // Extract auth token from request headers
+  const authHeader = req.headers.get('authorization');
+  const authToken = authHeader?.replace('Bearer ', '') || undefined;
 
   const missingExplorerUrl = buildExplorerAgentMissingUrlResponse(messages);
   if (missingExplorerUrl) return missingExplorerUrl;
@@ -534,6 +668,15 @@ export async function POST(req: Request) {
   const explorerStatus = await explorerAgentStatusResponse(messages, projectId, authToken);
   if (explorerStatus) return explorerStatus;
 
+  const apiTestAction = buildApiTestAction(messages);
+  if (apiTestAction) {
+    return toolInputUIMessageResponse(
+      apiTestAction.text,
+      apiTestAction.toolName,
+      apiTestAction.input
+    );
+  }
+
   const autoPilotStartInput = buildAutoPilotStartInput(messages);
   if (autoPilotStartInput) {
     return toolInputUIMessageResponse(
@@ -543,24 +686,61 @@ export async function POST(req: Request) {
     );
   }
 
-  const hasApiKey = Boolean(
-    (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '').trim()
-  );
-  if (!hasApiKey) {
+  const [modelId, ctxRes, summRes] = await Promise.all([
+    getRuntimeModelId(authToken),
+    timedBackendFetch<{
+      recent_runs?: number;
+      recent_failures?: number;
+      total_requirements?: number;
+      recent_explorations?: number;
+      flaky_tests?: Array<{ spec_name: string; pass_count: number; fail_count: number }>;
+      pass_rate_7d?: number;
+      pass_rate_prior_7d?: number;
+      stale_specs_count?: number;
+      uncovered_requirements_count?: number;
+    }>(
+      'project context',
+      `/chat/project-context${projectId ? `?project_id=${projectId}` : ''}`,
+      { authToken, timeoutMs: OPTIONAL_CONTEXT_TIMEOUT_MS }
+    ).catch(() => null),
+    timedBackendFetch<{ summaries: Array<{ title: string; first_message: string; last_message: string }> }>(
+      'recent summaries',
+      `/chat/conversations/recent-summaries${projectId ? `?project_id=${projectId}` : ''}`,
+      { authToken, timeoutMs: OPTIONAL_CONTEXT_TIMEOUT_MS }
+    ).catch(() => null),
+  ]);
+
+  const projectStats = ctxRes?.ok ? ctxRes.data : undefined;
+  const recentSummaries = summRes?.ok ? summRes.data?.summaries || [] : [];
+  const systemPrompt = buildSystemPrompt({
+    projectName,
+    projectId,
+    currentPage,
+    projectStats,
+    conversationHistory: recentSummaries,
+    pageContext,
+  });
+
+  if (!hasDirectAnthropicChatCredential()) {
+    const fallback = await openAIChatFallbackResponse(messages, systemPrompt, 'no direct Anthropic chat credential');
+    if (fallback) return fallback;
     return claudeCodeBackendResponse(messages, systemPrompt, authToken);
   }
 
   const tools = createAssistantTools(authToken, projectId);
+  const recentMessages = getRecentMessages(messages);
 
   try {
-    const modelMessages = await convertToModelMessages(messages);
+    const modelMessages = await convertToModelMessages(recentMessages);
 
     // Enable extended thinking for models that support it
     const supportsThinking = supportsExtendedThinking(modelId);
 
     // Use multi-key provider
-    const { provider, slot } = getActiveProvider();
-    console.info('[chat/route] routing chat through Anthropic SDK provider');
+    const { provider } = getActiveProvider();
+    console.info(
+      `[chat/route] routing chat through Anthropic SDK provider model=${modelId} messages=${recentMessages.length}/${messages.length}`
+    );
 
     const result = streamText({
       model: provider(modelId),
@@ -568,7 +748,7 @@ export async function POST(req: Request) {
       messages: modelMessages,
       maxOutputTokens: 2048,
       tools,
-      stopWhen: stepCountIs(25),
+      stopWhen: stepCountIs(CHAT_TOOL_STEP_LIMIT),
       ...(supportsThinking && {
         providerOptions: {
           anthropic: {
@@ -580,6 +760,8 @@ export async function POST(req: Request) {
         console.error('[chat/route] streamText error:', error);
       },
     });
+
+    logTiming('stream created', startedAt);
 
     return result.toUIMessageStreamResponse({
       sendReasoning: true,
@@ -597,13 +779,13 @@ export async function POST(req: Request) {
     const isRateLimit = /429|rate.limit|usage.limit|quota/i.test(errMsg);
 
     if (isRateLimit) {
-      const { provider: firstProvider, slot: firstSlot } = getActiveProvider();
+      const { slot: firstSlot } = getActiveProvider();
       reportRateLimit(firstSlot ?? undefined);
 
       try {
         console.warn('[chat/route] Rate limit hit, retrying with next key');
-        const { provider: retryProvider, slot: retrySlot } = getActiveProvider();
-        const modelMessages = await convertToModelMessages(messages);
+        const { provider: retryProvider } = getActiveProvider();
+        const modelMessages = await convertToModelMessages(recentMessages);
         const supportsThinking = supportsExtendedThinking(modelId);
 
         const retryResult = streamText({
@@ -612,11 +794,11 @@ export async function POST(req: Request) {
           messages: modelMessages,
           maxOutputTokens: 2048,
           tools,
-          stopWhen: stepCountIs(25),
+          stopWhen: stepCountIs(CHAT_TOOL_STEP_LIMIT),
           ...(supportsThinking && {
             providerOptions: {
               anthropic: {
-                    thinking: { type: 'enabled', budgetTokens: 1024 },
+                thinking: { type: 'enabled', budgetTokens: 1024 },
               },
             },
           }),

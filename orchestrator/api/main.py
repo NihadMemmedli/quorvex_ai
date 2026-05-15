@@ -4614,6 +4614,220 @@ async def execute_run_task_wrapper(
             update_batch_stats(batch_id)
 
 
+def execute_mobile_run_task(
+    spec_path: str,
+    run_dir: str,
+    run_id: str,
+    platform: str = "ios",
+    appium_server_url: str | None = None,
+    capabilities_file: str | None = None,
+    spec_name: str = "",
+    batch_id: str = None,
+    project_id: str = None,
+):
+    """Execute the Appium mobile pipeline in an isolated subprocess."""
+    global PROCESS_MANAGER
+
+    from orchestrator.workflows.mobile_appium import MobileAppiumConfig, build_appium_mcp_config
+
+    run_dir_path = Path(run_dir)
+    run_dir_path.mkdir(parents=True, exist_ok=True)
+
+    config = MobileAppiumConfig.from_env(
+        platform=platform,
+        appium_server_url=appium_server_url,
+        capabilities_file=capabilities_file,
+    )
+
+    mcp_output_dir = run_dir_path / "appium-mcp-output"
+    mcp_output_dir.mkdir(parents=True, exist_ok=True)
+    config.screenshots_dir = str(mcp_output_dir)
+    run_mcp_config_path = run_dir_path / ".mcp.json"
+    run_mcp_config_path.write_text(json.dumps(build_appium_mcp_config(config), indent=2))
+    logger.info(f"Created Appium MCP config for mobile run {run_id}")
+
+    claude_src = BASE_DIR / ".claude"
+    claude_dst = run_dir_path / ".claude"
+    if claude_src.exists() and not claude_dst.exists():
+        shutil.copytree(claude_src, claude_dst, dirs_exist_ok=True)
+
+    cmd = [
+        sys.executable,
+        "orchestrator/cli.py",
+        spec_path,
+        "--run-dir",
+        run_dir,
+        "--target",
+        "mobile",
+        "--platform",
+        platform,
+    ]
+    if appium_server_url:
+        cmd.extend(["--appium-server-url", appium_server_url])
+    if capabilities_file:
+        cmd.extend(["--capabilities-file", capabilities_file])
+
+    env = os.environ.copy()
+    env["CLAUDE_CONFIG_DIR"] = str(run_dir_path)
+    env["APPIUM_SCREENSHOTS_DIR"] = str(mcp_output_dir)
+    if appium_server_url:
+        env["APPIUM_SERVER_URL"] = appium_server_url
+    if capabilities_file:
+        env["APPIUM_CAPABILITIES_CONFIG"] = capabilities_file
+    if project_id:
+        env["PROJECT_ID"] = project_id
+        env["MEMORY_PROJECT_ID"] = project_id
+
+    log_file = run_dir_path / "execution.log"
+    with open(log_file, "w") as f:
+        process = subprocess.Popen(
+            cmd,
+            cwd=BASE_DIR,
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+
+        try:
+            pgid = os.getpgid(process.pid)
+        except (ProcessLookupError, OSError):
+            pgid = process.pid
+
+        register_process(run_id, process)
+        if PROCESS_MANAGER:
+            PROCESS_MANAGER.register(run_id=run_id, pid=process.pid, pgid=pgid, spec_name=spec_name, batch_id=batch_id)
+
+        logger.info(f"Started mobile process for {run_id}: pid={process.pid}, pgid={pgid}")
+        try:
+            process.wait(timeout=1800)
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Mobile process for {run_id} timed out after 1800s")
+            import signal as _signal
+
+            try:
+                os.killpg(os.getpgid(process.pid), _signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                try:
+                    process.kill()
+                except (ProcessLookupError, OSError):
+                    pass
+            process.wait(timeout=10)
+        finally:
+            unregister_process(run_id)
+            if PROCESS_MANAGER:
+                PROCESS_MANAGER.unregister(run_id)
+            logger.info(f"Mobile process completed for {run_id}: exit_code={process.returncode}")
+
+
+async def execute_mobile_run_task_wrapper(
+    spec_path: str,
+    run_dir: str,
+    run_id: str,
+    platform: str = "ios",
+    appium_server_url: str | None = None,
+    capabilities_file: str | None = None,
+    batch_id: str = None,
+    spec_name: str = "",
+    project_id: str = None,
+):
+    """Async wrapper for Appium mobile runs."""
+    try:
+        with Session(engine) as session:
+            run = session.get(DBTestRun, run_id)
+            if run:
+                if run.status in ("stopped", "cancelled"):
+                    return
+                run.status = "running"
+                run.started_at = datetime.utcnow()
+                run.queue_position = None
+                session.add(run)
+                session.commit()
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            execute_mobile_run_task,
+            spec_path,
+            run_dir,
+            run_id,
+            platform,
+            appium_server_url,
+            capabilities_file,
+            spec_name,
+            batch_id,
+            project_id,
+        )
+
+        with Session(engine) as session:
+            run = session.get(DBTestRun, run_id)
+            if run:
+                run_dir_path = Path(run_dir)
+                status_file = run_dir_path / "status.txt"
+                if status_file.exists():
+                    file_status = status_file.read_text().strip()
+                    if file_status:
+                        run.status = file_status
+
+                plan_file = run_dir_path / "plan.json"
+                if plan_file.exists():
+                    try:
+                        plan_data = json.loads(plan_file.read_text())
+                        run.test_name = plan_data.get("testName") or run.test_name
+                        run.total_steps = len(plan_data.get("steps", []))
+                    except json.JSONDecodeError:
+                        pass
+
+                error_file = run_dir_path / "pipeline_error.json"
+                if error_file.exists() and not run.error_message:
+                    try:
+                        error_data = json.loads(error_file.read_text())
+                        if error_data.get("error"):
+                            run.error_message = str(error_data["error"])[:500]
+                    except json.JSONDecodeError:
+                        pass
+
+                if run.status in ("running", "queued"):
+                    run.status = "error"
+                    run.error_message = run.error_message or "Mobile process exited without writing status."
+                    try:
+                        status_file.write_text("error")
+                    except Exception:
+                        pass
+
+                run.completed_at = datetime.utcnow()
+                session.add(run)
+                session.commit()
+
+        if batch_id:
+            update_batch_stats(batch_id)
+
+    except asyncio.CancelledError:
+        with Session(engine) as session:
+            run = session.get(DBTestRun, run_id)
+            if run and run.status not in ("stopped", "cancelled", "passed", "failed", "error", "completed"):
+                run.status = "cancelled"
+                run.queue_position = None
+                run.completed_at = datetime.utcnow()
+                session.add(run)
+                session.commit()
+        Path(run_dir, "status.txt").write_text("cancelled")
+        raise
+    except Exception as e:
+        logger.error(f"Mobile run {run_id} failed with exception: {e}", exc_info=True)
+        with Session(engine) as session:
+            run = session.get(DBTestRun, run_id)
+            if run:
+                run.status = "error"
+                run.error_message = str(e)[:500]
+                run.completed_at = datetime.utcnow()
+                session.add(run)
+                session.commit()
+        Path(run_dir, "status.txt").write_text("error")
+        if batch_id:
+            update_batch_stats(batch_id)
+
+
 class RunRequest(BaseModel):
     """Request model for creating a test run.
 
@@ -4627,6 +4841,10 @@ class RunRequest(BaseModel):
 
     spec_name: str
     browser: str | None = "chromium"
+    target: str | None = "browser"
+    platform: str | None = "ios"
+    appium_server_url: str | None = None
+    capabilities_file: str | None = None
     hybrid: bool | None = False  # Default: Native Healer only
     max_iterations: int | None = 20  # Only used with hybrid=True
     project_id: str | None = None  # Project to associate run with
@@ -4811,6 +5029,13 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
     queued_count = session.exec(select(func.count()).select_from(DBTestRun).where(DBTestRun.status == "queued")).one()
     queue_position = queued_count + 1
 
+    target = (request.target or "browser").lower()
+    if target not in ("browser", "mobile"):
+        raise HTTPException(status_code=400, detail="target must be 'browser' or 'mobile'")
+    platform = (request.platform or "ios").lower()
+    if target == "mobile" and platform not in ("ios", "android"):
+        raise HTTPException(status_code=400, detail="platform must be 'ios' or 'android'")
+
     # Create DB Entry with queue info
     now = datetime.utcnow()
     run = DBTestRun(
@@ -4818,13 +5043,40 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
         spec_name=request.spec_name,
         test_name=request.spec_name,
         status="queued",
-        browser=request.browser or "chromium",
+        browser=f"mobile-{platform}" if target == "mobile" else (request.browser or "chromium"),
+        test_type="mobile" if target == "mobile" else "browser",
         queued_at=now,
         queue_position=queue_position,
         project_id=request.project_id,
     )
     session.add(run)
     session.commit()
+
+    if target == "mobile":
+        task = asyncio.create_task(
+            execute_mobile_run_task_wrapper(
+                spec_path=str(spec_path),
+                run_dir=str(run_dir),
+                run_id=run_id,
+                platform=platform,
+                appium_server_url=request.appium_server_url,
+                capabilities_file=request.capabilities_file,
+                batch_id=None,
+                spec_name=request.spec_name,
+                project_id=request.project_id,
+            )
+        )
+        task.add_done_callback(_task_exception_handler)
+        if PROCESS_MANAGER:
+            PROCESS_MANAGER.register_task(run_id, task)
+
+        return {
+            "id": run_id,
+            "status": "queued",
+            "queue_position": queue_position,
+            "mode": "mobile",
+            "platform": platform,
+        }
 
     # Map legacy flags to new behavior
     # ralph or native_healer alone -> now just uses default native healer
@@ -4861,6 +5113,25 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
         "hybrid_mode": hybrid_mode,
         "max_iterations": max_iterations if hybrid_mode else None,
     }
+
+
+@app.get("/api/mobile-testing/health")
+def mobile_testing_health(
+    platform: str = Query(default="ios"),
+    appium_server_url: str | None = Query(default=None),
+    capabilities_file: str | None = Query(default=None),
+    require_server: bool = Query(default=True),
+):
+    """Check local Appium/mobile prerequisites before running mobile tests."""
+    from orchestrator.workflows.mobile_appium import AppiumPreflightChecker, MobileAppiumConfig
+
+    config = MobileAppiumConfig.from_env(
+        platform=platform,
+        appium_server_url=appium_server_url,
+        capabilities_file=capabilities_file,
+    )
+    result = AppiumPreflightChecker(config).run(require_server=require_server)
+    return result.to_dict()
 
 
 @app.post("/runs/{id}/stop")

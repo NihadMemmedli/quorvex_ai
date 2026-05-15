@@ -16,6 +16,10 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 
 def run_command(
     command: str, stream_output: bool = False, interactive: bool = False, is_python: bool = True, env: dict = None
@@ -475,7 +479,7 @@ def _show_memory_stats(project_id: str = None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert natural language test specs to Playwright code.")
+    parser = argparse.ArgumentParser(description="Convert natural language test specs to executable automation.")
     parser.add_argument("spec", nargs="?", help="Path to the markdown specification file or PRD PDF (with --prd)")
     parser.add_argument(
         "--prd",
@@ -517,6 +521,25 @@ def main():
         default="chromium",
         choices=["chromium", "firefox", "webkit"],
         help="Browser project to run tests on (default: chromium)",
+    )
+    parser.add_argument(
+        "--target",
+        default="browser",
+        choices=["browser", "mobile"],
+        help="Automation target: browser uses Playwright, mobile uses Appium (default: browser)",
+    )
+    parser.add_argument(
+        "--platform",
+        default="ios",
+        choices=["ios", "android"],
+        help="Mobile platform for --target mobile (default: ios)",
+    )
+    parser.add_argument("--appium-server-url", help="Remote/local Appium server URL for mobile runs")
+    parser.add_argument("--capabilities-file", help="Path to Appium capabilities JSON for mobile runs")
+    parser.add_argument(
+        "--mobile-smoke",
+        action="store_true",
+        help="Run the built-in Appium mobile smoke flow for the spec (currently iOS Safari)",
     )
     parser.add_argument(
         "--project-id", help="Project ID for memory system isolation (default: derived from spec folder)"
@@ -972,6 +995,68 @@ def main():
     if args.validate_only or args.dry_run:
         ok = _run_validate_only(spec_file, timeout_seconds=args.validate_timeout)
         sys.exit(0 if ok else 1)
+
+    # --- MOBILE APPIUM PIPELINE ---
+    if args.target == "mobile":
+        import asyncio
+
+        from orchestrator.workflows.mobile_appium import (
+            MobileAppiumConfig,
+            MobileAppiumWorkflow,
+            extract_target_url,
+        )
+
+        if args.run_dir:
+            run_dir = Path(args.run_dir)
+        else:
+            run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            run_dir = Path(f"runs/{run_id}")
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        spec_content = spec_file.read_text()
+        target_url = extract_target_url(spec_content, default=os.environ.get("MOBILE_TARGET_URL", "https://example.com"))
+        config = MobileAppiumConfig.from_env(
+            platform=args.platform,
+            appium_server_url=args.appium_server_url,
+            capabilities_file=args.capabilities_file,
+            target_url=target_url,
+        )
+
+        print("=" * 80)
+        print("📱 MOBILE APPIUM PIPELINE")
+        print("=" * 80)
+        print(f"   Spec: {spec_file.name}")
+        print(f"   Platform: {config.platform}")
+        print(f"   Appium server: {config.appium_server_url}")
+        print(f"   Target URL: {config.target_url}")
+        print()
+
+        workflow = MobileAppiumWorkflow(config)
+        try:
+            result = asyncio.run(workflow.run_safari_smoke(str(spec_file), run_dir))
+        except Exception as e:
+            print(f"\n❌ Mobile pipeline error: {e}")
+            import traceback
+
+            traceback.print_exc()
+            (run_dir / "status.txt").write_text("error")
+            sys.exit(1)
+
+        if result.get("success"):
+            print("\n" + "=" * 80)
+            print("✅ MOBILE TEST PASSED")
+            print(f"   Test file: {result.get('test_path')}")
+            print("=" * 80)
+            sys.exit(0)
+
+        print("\n" + "=" * 80)
+        print("❌ MOBILE TEST FAILED")
+        print(f"   Stage: {result.get('stage', 'unknown')}")
+        if result.get("error"):
+            print(f"   Error: {result.get('error')}")
+        print(f"   Preflight: {run_dir / 'mobile_preflight.json'}")
+        print("=" * 80)
+        sys.exit(1)
 
     # --- OPENAPI/SWAGGER IMPORT ---
     if args.api_tests:
