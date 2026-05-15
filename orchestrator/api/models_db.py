@@ -1954,7 +1954,10 @@ class ChatMessage(SQLModel, table=True):
     """Individual messages within a chat conversation."""
 
     __tablename__ = "chat_messages"
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        Index("ix_chatmessage_conversation_created", "conversation_id", "created_at"),
+        {"extend_existing": True},
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     conversation_id: str = Field(foreign_key="chat_conversations.id", index=True)

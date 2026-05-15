@@ -22,10 +22,8 @@ import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
 
 # Add both project root and orchestrator package dir for package and standalone execution.
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -273,37 +271,8 @@ class AppExplorer:
             result = self._parse_exploration_output(
                 raw_output=raw_output, session_id=session_id, entry_url=config.entry_url
             )
-            used_deterministic_fallback = False
-
-            if self._is_unverified_agent_output(raw_output):
-                logger.warning(
-                    "   Explorer output says browser interaction was unavailable; "
-                    "discarding agent prose and running deterministic HTTP fallback."
-                )
-                result = await self._run_http_fallback_exploration(
-                    config=config,
-                    session_id=session_id,
-                    reason="agent_reported_browser_tools_unavailable",
-                )
-                used_deterministic_fallback = True
 
             if (
-                not used_deterministic_fallback
-                and result.status == "failed"
-                and not result.transitions
-                and not result.flows
-            ):
-                logger.warning("   No structured exploration data parsed; running deterministic HTTP fallback.")
-                result = await self._run_http_fallback_exploration(
-                    config=config,
-                    session_id=session_id,
-                    reason="no_structured_agent_output",
-                )
-                used_deterministic_fallback = bool(result.transitions or result.flows)
-
-            if (
-                not used_deterministic_fallback
-                and
                 result.status == "failed"
                 and not result.transitions
                 and not result.flows
@@ -325,7 +294,7 @@ class AppExplorer:
 
             # Run AI flow synthesis pass if too few flows relative to transitions
             min_expected = max(1, len(result.transitions) // 5)
-            if not used_deterministic_fallback and len(result.transitions) >= 1 and len(result.flows) < min_expected:
+            if len(result.transitions) >= 1 and len(result.flows) < min_expected:
                 logger.info(
                     f"   Running AI flow synthesis pass "
                     f"({len(result.flows)} flows from {len(result.transitions)} transitions)..."

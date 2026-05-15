@@ -40,6 +40,8 @@ export const MUTATING_TOOL_CONFIGS: Record<string, { label: string }> = {
   createApiSpec: { label: 'Create API Spec' },
   updateApiSpec: { label: 'Update API Spec' },
   deleteApiSpec: { label: 'Delete API Spec' },
+  createAndGenerateApiTest: { label: 'Create and Generate API Test' },
+  importOpenApiSpec: { label: 'Import OpenAPI Spec' },
   generateApiTest: { label: 'Generate API Test' },
   runApiTest: { label: 'Run API Test' },
   runApiTestDirect: { label: 'Run Generated API Test' },
@@ -587,6 +589,47 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       },
     }),
 
+    listApiSpecs: tool({
+      description: 'List API test specifications with generation/run status. Supports pagination, search, sorting, and status filtering.',
+      inputSchema: z.object({
+        search: z.string().optional().describe('Search API specs by name'),
+        limit: z.number().optional().default(20).describe('Max results to return'),
+        offset: z.number().optional().default(0).describe('Pagination offset'),
+        sort: z.enum(['name', 'status', 'last_run', 'test_count', 'modified']).optional().default('name'),
+        statusFilter: z.enum(['passed', 'failed', 'not_run', 'no_tests']).optional().describe('Optional status filter'),
+      }),
+      execute: async ({ search, limit, offset, sort, statusFilter }): Promise<ToolResult> => {
+        const params = projectParams();
+        params.set('limit', String(limit ?? 20));
+        params.set('offset', String(offset ?? 0));
+        params.set('sort', sort ?? 'name');
+        if (search) params.set('search', search);
+        if (statusFilter) params.set('status_filter', statusFilter);
+        return fetchTool(`/api-testing/specs?${params}`);
+      },
+    }),
+
+    getApiSpec: tool({
+      description: 'Get the markdown content for a specific API test specification.',
+      inputSchema: z.object({
+        specName: z.string().describe('The API spec file name, e.g. users-api.md'),
+      }),
+      execute: async ({ specName }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/api-testing/specs/${encodeURIComponent(specName)}?${params}`);
+      },
+    }),
+
+    getApiJobStatus: tool({
+      description: 'Get the status of an API testing background job by job ID.',
+      inputSchema: z.object({
+        jobId: z.string().describe('The API job ID returned by generation/import/run actions'),
+      }),
+      execute: async ({ jobId }): Promise<ToolResult> => {
+        return fetchTool(`/api-testing/jobs/${encodeURIComponent(jobId)}`);
+      },
+    }),
+
     getDatabaseTestSummary: tool({
       description: 'Get database testing summary for the current project.',
       inputSchema: z.object({}),
@@ -892,6 +935,14 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       }),
     }),
 
+    createAndGenerateApiTest: tool({
+      description: 'Create a new API test specification and immediately generate a Playwright API test from it. Use when the user asks to create/generate API tests from natural language or a demo idea.',
+      inputSchema: z.object({
+        specName: z.string().describe('The API spec name'),
+        content: z.string().describe('Markdown API spec content'),
+      }),
+    }),
+
     updateApiSpec: tool({
       description: 'Update an existing API test specification.',
       inputSchema: z.object({
@@ -904,6 +955,14 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       description: 'Delete an API test specification.',
       inputSchema: z.object({
         specName: z.string().describe('The API spec file name to delete'),
+      }),
+    }),
+
+    importOpenApiSpec: tool({
+      description: 'Import an OpenAPI or Swagger specification from a URL and generate API tests.',
+      inputSchema: z.object({
+        url: z.string().url().describe('The OpenAPI/Swagger document URL'),
+        featureFilter: z.string().optional().describe('Optional feature or tag filter'),
       }),
     }),
 

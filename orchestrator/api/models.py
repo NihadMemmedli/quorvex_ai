@@ -182,6 +182,12 @@ class BatchRunInList(BaseModel):
     started_at: str | None = None
     completed_at: str | None = None
     error_message: str | None = None
+    failure_category: str | None = None
+    failure_summary: str | None = None
+    failure_source: str | None = None
+    failing_step: dict[str, Any] | None = None
+    error_stack: str | None = None
+    artifact_links: list[dict[str, str]] = []
     duration_seconds: int | None = None
     # Actual test count within the test file (if file has multiple tests)
     actual_test_count: int = 1

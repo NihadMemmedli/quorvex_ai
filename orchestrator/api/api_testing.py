@@ -87,6 +87,12 @@ class GenerateTestRequest(BaseModel):
     project_id: str | None = "default"
 
 
+class CreateAndGenerateApiSpecRequest(BaseModel):
+    name: str
+    content: str
+    project_id: str | None = "default"
+
+
 class ImportOpenApiRequest(BaseModel):
     url: str | None = None
     feature_filter: str | None = None
@@ -201,6 +207,21 @@ def _get_tests_dir(project_id: str = "default") -> Path:
         project_dir.mkdir(parents=True, exist_ok=True)
         return project_dir
     return TESTS_DIR
+
+
+def _find_api_spec_by_name(name: str, project_id: str = "default") -> Path | None:
+    """Find an API spec by file name, preferring project-scoped specs."""
+    search_dirs = [_get_specs_dir(project_id)]
+    if project_id and project_id != "default":
+        search_dirs.append(SPECS_DIR)
+
+    for specs_dir in search_dirs:
+        if not specs_dir.exists():
+            continue
+        for md_file in specs_dir.rglob("*.md"):
+            if md_file.name == name:
+                return md_file
+    return None
 
 
 def _scan_api_specs(
@@ -459,7 +480,18 @@ def _scan_generated_tests(
     tests = []
     tests_dir = _get_tests_dir(project_id)
     if not tests_dir.exists():
-        return {"items": [], "total": 0, "has_more": False}
+        return {
+            "items": [],
+            "total": 0,
+            "has_more": False,
+            "summary": {
+                "total_files": 0,
+                "total_tests": 0,
+                "passed": 0,
+                "failed": 0,
+                "not_run": 0,
+            },
+        }
 
     # Fetch latest runs from DB for status enrichment
     latest_run_map: dict[str, dict] = {}
@@ -545,6 +577,14 @@ def _scan_generated_tests(
                 }
             )
 
+    summary = {
+        "total_files": len(tests),
+        "total_tests": sum(t.get("test_count", 0) for t in tests),
+        "passed": sum(1 for t in tests if t.get("last_run_status") == "passed"),
+        "failed": sum(1 for t in tests if t.get("last_run_status") == "failed"),
+        "not_run": sum(1 for t in tests if t.get("last_run_status") is None),
+    }
+
     # Apply status filter
     if status_filter:
         if status_filter == "not_run":
@@ -572,7 +612,7 @@ def _scan_generated_tests(
 
     total = len(tests)
     sliced = tests[offset : offset + limit]
-    return {"items": sliced, "total": total, "has_more": (offset + limit) < total}
+    return {"items": sliced, "total": total, "has_more": (offset + limit) < total, "summary": summary}
 
 
 # ========== Background Job Runners ==========
@@ -1464,22 +1504,59 @@ async def generate_api_test(req: GenerateTestRequest, background_tasks: Backgrou
     """Generate a Playwright API test from a spec. Returns job ID for polling."""
     _cleanup_old_jobs()
 
-    # Find the spec file
-    specs_dir = _get_specs_dir()
-    target = None
-    for md_file in specs_dir.rglob("*.md"):
-        if md_file.name == req.spec_name:
-            target = md_file
-            break
-
+    project_id = req.project_id or "default"
+    target = _find_api_spec_by_name(req.spec_name, project_id)
     if not target or not target.exists():
         raise HTTPException(status_code=404, detail=f"Spec '{req.spec_name}' not found")
 
     import uuid
 
     job_id = str(uuid.uuid4())[:8]
-    background_tasks.add_task(_run_generate_test, job_id, str(target), req.project_id)
+    background_tasks.add_task(_run_generate_test, job_id, str(target), project_id)
     return {"job_id": job_id, "status": "running", "message": "API test generation started"}
+
+
+@router.post("/create-and-generate")
+async def create_and_generate_api_test(req: CreateAndGenerateApiSpecRequest, background_tasks: BackgroundTasks):
+    """Create an API spec and immediately enqueue Playwright API test generation."""
+    _cleanup_old_jobs()
+
+    project_id = req.project_id or "default"
+    name = req.name if req.name.endswith(".md") else f"{req.name}.md"
+
+    specs_base = _get_specs_dir(project_id)
+    api_dir = specs_base / "api"
+    api_dir.mkdir(parents=True, exist_ok=True)
+    target = api_dir / name
+
+    if target.exists():
+        raise HTTPException(status_code=409, detail=f"Spec '{name}' already exists")
+
+    content = req.content
+    if "## Type: API" not in content and "## Type: api" not in content:
+        lines = content.split("\n")
+        insert_idx = 0
+        for i, line in enumerate(lines):
+            if line.startswith("# "):
+                insert_idx = i + 1
+                break
+        lines.insert(insert_idx, "\n## Type: API\n")
+        content = "\n".join(lines)
+
+    target.write_text(content, encoding="utf-8")
+    logger.info(f"Created API spec from assistant: {target}")
+
+    import uuid
+
+    job_id = str(uuid.uuid4())[:8]
+    background_tasks.add_task(_run_generate_test, job_id, str(target), project_id)
+    return {
+        "name": target.name,
+        "path": str(target.relative_to(BASE_DIR)),
+        "job_id": job_id,
+        "status": "running",
+        "message": "API spec created and test generation started",
+    }
 
 
 @router.post("/import-openapi")
@@ -1774,22 +1851,8 @@ async def list_generated_tests(
 @router.get("/generated-tests/summary")
 async def generated_tests_summary(project_id: str = Query("default")):
     """Get aggregate status counts for generated API tests."""
-    data = _scan_generated_tests(limit=9999, project_id=project_id)
-    tests = data["items"]
-
-    total_files = len(tests)
-    total_tests = sum(t.get("test_count", 0) for t in tests)
-    passed = sum(1 for t in tests if t.get("last_run_status") == "passed")
-    failed = sum(1 for t in tests if t.get("last_run_status") == "failed")
-    not_run = sum(1 for t in tests if t.get("last_run_status") is None)
-
-    return {
-        "total_files": total_files,
-        "total_tests": total_tests,
-        "passed": passed,
-        "failed": failed,
-        "not_run": not_run,
-    }
+    data = _scan_generated_tests(limit=1, project_id=project_id)
+    return data["summary"]
 
 
 @router.get("/generated-tests/{name:path}")

@@ -80,6 +80,7 @@ nav:
           - Load Testing: guides/load-testing.md
           - Security Testing: guides/security-testing.md
           - Database Testing: guides/database-testing.md
+          - Mobile Testing: guides/mobile-testing.md
           - LLM Evaluation: guides/llm-testing.md
       - Discovery & Coverage:
           - Exploration & Requirements: guides/exploration-requirements.md

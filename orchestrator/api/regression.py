@@ -10,8 +10,10 @@ import csv
 import io
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
@@ -30,6 +32,28 @@ from .models_db import RegressionBatch
 from .models_db import TestRun as DBTestRun
 
 logger = logging.getLogger(__name__)
+
+try:
+    from ..utils.test_results_parser import categorize_error, parse_test_results
+except Exception as e:
+    logger.warning(f"Failed to import Playwright result parser: {e}. Failure reports will use fallback parsing.")
+
+    def categorize_error(error_message: str) -> str:
+        if not error_message:
+            return "unknown"
+        msg = error_message.lower()
+        if "timeout" in msg:
+            return "timeout"
+        if any(k in msg for k in ("selector", "locator", "element")):
+            return "selector"
+        if any(k in msg for k in ("navigation", "net::")):
+            return "navigation"
+        if any(k in msg for k in ("assertion", "expect")):
+            return "assertion"
+        return "unknown"
+
+    def parse_test_results(json_path: str) -> dict | None:
+        return None
 
 # Import test counter utility for accurate test counting
 _test_counter_available = False
@@ -155,6 +179,300 @@ def _calculate_actual_test_counts(runs: list[DBTestRun]) -> tuple[int, int, int]
     return actual_total, actual_passed, actual_failed
 
 
+FAILURE_STATUSES = {"failed", "error", "stopped"}
+
+CATEGORY_LABELS = {
+    "assertion": "Assertion",
+    "auth": "Authentication",
+    "connectivity": "Connectivity",
+    "navigation": "Navigation",
+    "not_found": "Not Found",
+    "selector": "Selector",
+    "server_error": "Server Error",
+    "timeout": "Timeout",
+    "unknown": "Other",
+}
+
+
+def _safe_read_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _category_label(category: str | None) -> str:
+    if not category:
+        return "Other"
+    normalized = str(category).strip().lower().replace("-", "_").replace(" ", "_")
+    return CATEGORY_LABELS.get(normalized, normalized.replace("_", " ").title() if normalized else "Other")
+
+
+def _categorize_failure_text(text: str | None) -> str:
+    return _category_label(categorize_error(text or ""))
+
+
+def _truncate_text(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
+
+
+def _strip_ansi(text: str) -> str:
+    if not text:
+        return ""
+    return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", text)
+
+
+def _artifact_links(run_dir: Path, run_id: str) -> list[dict[str, str]]:
+    links: list[dict[str, str]] = []
+    candidates = [
+        run_dir / "execution.log",
+        run_dir / "test-results.json",
+        run_dir / "pipeline_error.json",
+        run_dir / "failure_diagnosis.json",
+        run_dir / "agentic_summary.json",
+        run_dir / "run.json",
+        run_dir / "test-results" / "test-results.json",
+    ]
+    seen: set[str] = set()
+    for path in candidates:
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            rel_path = path.relative_to(run_dir).as_posix()
+        except ValueError:
+            continue
+        if rel_path in seen:
+            continue
+        seen.add(rel_path)
+        links.append({"label": rel_path, "url": f"/artifacts/{run_id}/{rel_path}"})
+    return links
+
+
+def _extract_playwright_failure(run_dir: Path) -> dict[str, Any] | None:
+    for results_path in (run_dir / "test-results.json", run_dir / "test-results" / "test-results.json"):
+        parsed = parse_test_results(str(results_path))
+        if not parsed:
+            continue
+        for test in parsed.get("tests", []):
+            if test.get("status") not in ("failed", "timedOut", "interrupted"):
+                continue
+            error = test.get("error") or {}
+            message = error.get("message") if isinstance(error, dict) else None
+            stack = error.get("stack") if isinstance(error, dict) else None
+            category = error.get("category") if isinstance(error, dict) else None
+            return {
+                "summary": _truncate_text(message or parsed.get("first_failure") or "Playwright test failed", 1000),
+                "stack": _truncate_text(stack, 4000),
+                "category": _category_label(category),
+                "source": "Playwright JSON reporter",
+                "failing_step": {
+                    "title": test.get("title"),
+                    "full_title": test.get("full_title"),
+                    "file": test.get("file"),
+                    "duration_ms": test.get("duration_ms"),
+                    "retry": test.get("retry"),
+                },
+            }
+    return None
+
+
+def _extract_execution_log_failure(run_dir: Path) -> dict[str, Any] | None:
+    log_path = run_dir / "execution.log"
+    if not log_path.exists():
+        return None
+    try:
+        text = _strip_ansi(log_path.read_text(errors="replace"))
+    except OSError:
+        return None
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    priority_patterns = [
+        r"test timeout of .* exceeded",
+        r"timeout.*exceeded",
+        r"TimeoutError",
+        r"AssertionError",
+        r"expect\(.*failed",
+        r"Error:\s+page\.",
+        r"Error:\s+locator",
+        r"Error:\s+.*",
+        r"❌\s*TEST FAILED",
+    ]
+    start_index = None
+    for pattern in priority_patterns:
+        for index, line in enumerate(lines):
+            if re.search(pattern, line, re.IGNORECASE):
+                start_index = index
+                break
+        if start_index is not None:
+            break
+    if start_index is None:
+        return None
+
+    context: list[str] = []
+    for line in lines[start_index : start_index + 18]:
+        stripped = line.strip()
+        if not stripped:
+            if context:
+                context.append("")
+            continue
+        context.append(stripped)
+    summary = _truncate_text("\n".join(context).strip(), 1200)
+
+    call_log = []
+    for index, line in enumerate(lines):
+        if "Call log:" in line:
+            for call_line in lines[index + 1 : index + 5]:
+                stripped = call_line.strip()
+                if stripped:
+                    call_log.append(stripped)
+            break
+
+    source_line = next((line.strip() for line in lines if re.match(r"\s*at\s+.+:\d+:\d+", line)), None)
+    failing_step: dict[str, Any] = {}
+    if call_log:
+        failing_step["call_log"] = call_log
+    if source_line:
+        failing_step["source"] = source_line
+
+    return {
+        "summary": summary,
+        "category": _categorize_failure_text(summary),
+        "source": "execution.log",
+        "failing_step": failing_step or None,
+    }
+
+
+def _extract_run_json_failure(run_dir: Path) -> dict[str, Any] | None:
+    run_data = _safe_read_json(run_dir / "run.json")
+    if not run_data:
+        return None
+    for index, step in enumerate(run_data.get("steps") or [], start=1):
+        if not isinstance(step, dict) or not step.get("error"):
+            continue
+        summary = _truncate_text(step.get("error"), 1000)
+        return {
+            "summary": summary,
+            "category": _categorize_failure_text(summary),
+            "source": "run.json",
+            "failing_step": {
+                "index": step.get("step") or index,
+                "action": step.get("action"),
+                "description": step.get("description") or step.get("target"),
+                "selector": step.get("selector"),
+                "url": step.get("url"),
+            },
+        }
+    return None
+
+
+def _get_run_failure_details(run: DBTestRun) -> dict[str, Any]:
+    """Return normalized, display-ready failure details for a run."""
+    run_dir = RUNS_DIR / run.id
+    details: dict[str, Any] = {
+        "failure_category": None,
+        "failure_summary": None,
+        "failure_source": None,
+        "failing_step": None,
+        "error_stack": None,
+        "artifact_links": _artifact_links(run_dir, run.id),
+    }
+
+    if run.status not in FAILURE_STATUSES:
+        return details
+
+    playwright_failure = _extract_playwright_failure(run_dir)
+    if playwright_failure:
+        details.update(
+            {
+                "failure_category": playwright_failure.get("category"),
+                "failure_summary": playwright_failure.get("summary"),
+                "failure_source": playwright_failure.get("source"),
+                "failing_step": playwright_failure.get("failing_step"),
+                "error_stack": playwright_failure.get("stack"),
+            }
+        )
+
+    diagnosis = _safe_read_json(run_dir / "failure_diagnosis.json")
+    if diagnosis:
+        diagnosis_category = _category_label(diagnosis.get("category"))
+        if not details["failure_category"] or details["failure_category"] == "Other":
+            details["failure_category"] = diagnosis_category
+        if not details["failure_summary"]:
+            details["failure_summary"] = _truncate_text(diagnosis.get("root_cause"), 1000)
+            details["failure_source"] = "failure_diagnosis.json"
+        if not details["failing_step"]:
+            evidence = diagnosis.get("evidence")
+            details["failing_step"] = {
+                "confidence": diagnosis.get("confidence"),
+                "recommended_action": diagnosis.get("recommended_action"),
+                "evidence": evidence[:3] if isinstance(evidence, list) else evidence,
+            }
+
+    pipeline_error = _safe_read_json(run_dir / "pipeline_error.json")
+    if pipeline_error:
+        stage = pipeline_error.get("stage")
+        error_text = pipeline_error.get("error")
+        error_tail = pipeline_error.get("error_tail")
+        summary_parts = []
+        if stage:
+            summary_parts.append(f"[{stage}]")
+        if error_text:
+            summary_parts.append(str(error_text))
+        if error_tail and error_tail not in summary_parts:
+            summary_parts.append(str(error_tail))
+        summary = _truncate_text(" ".join(summary_parts), 1000)
+        if not details["failure_summary"]:
+            details["failure_summary"] = summary
+            details["failure_source"] = "pipeline_error.json"
+        if (not details["failure_category"] or details["failure_category"] == "Other") and summary:
+            details["failure_category"] = _categorize_failure_text(summary)
+
+    execution_log_failure = _extract_execution_log_failure(run_dir)
+    if execution_log_failure:
+        if not details["failure_summary"] or details["failure_summary"].startswith("No detailed failure artifact"):
+            details["failure_summary"] = execution_log_failure.get("summary")
+            details["failure_source"] = execution_log_failure.get("source")
+        if not details["failure_category"] or details["failure_category"] == "Other":
+            details["failure_category"] = execution_log_failure.get("category")
+        if not details["failing_step"]:
+            details["failing_step"] = execution_log_failure.get("failing_step")
+
+    run_json_failure = _extract_run_json_failure(run_dir)
+    if run_json_failure:
+        if not details["failure_summary"]:
+            details["failure_summary"] = run_json_failure.get("summary")
+            details["failure_source"] = run_json_failure.get("source")
+        if not details["failure_category"] or details["failure_category"] == "Other":
+            details["failure_category"] = run_json_failure.get("category")
+        if not details["failing_step"]:
+            details["failing_step"] = run_json_failure.get("failing_step")
+
+    if run.error_message:
+        db_summary = _truncate_text(run.error_message, 1000)
+        if not details["failure_summary"]:
+            details["failure_summary"] = db_summary
+            details["failure_source"] = "database error_message"
+        if not details["failure_category"] or details["failure_category"] == "Other":
+            details["failure_category"] = _categorize_failure_text(db_summary)
+
+    if not details["failure_summary"]:
+        details["failure_summary"] = "No detailed failure artifact was captured for this run."
+        details["failure_source"] = "run status"
+
+    if not details["failure_category"]:
+        details["failure_category"] = _categorize_failure_text(details["failure_summary"])
+
+    return details
+
+
 def _batch_to_summary(
     batch: RegressionBatch,
     actual_total: int | None = None,
@@ -191,6 +509,7 @@ def _run_to_batch_item(run: DBTestRun, test_count: int = 1) -> BatchRunInList:
     duration = None
     if run.started_at and run.completed_at:
         duration = int((run.completed_at - run.started_at).total_seconds())
+    failure_details = _get_run_failure_details(run)
 
     return BatchRunInList(
         id=run.id,
@@ -202,6 +521,12 @@ def _run_to_batch_item(run: DBTestRun, test_count: int = 1) -> BatchRunInList:
         started_at=run.started_at.isoformat() if run.started_at else None,
         completed_at=run.completed_at.isoformat() if run.completed_at else None,
         error_message=run.error_message,
+        failure_category=failure_details["failure_category"],
+        failure_summary=failure_details["failure_summary"],
+        failure_source=failure_details["failure_source"],
+        failing_step=failure_details["failing_step"],
+        error_stack=failure_details["error_stack"],
+        artifact_links=failure_details["artifact_links"],
         duration_seconds=duration,
         actual_test_count=test_count,
     )
@@ -549,14 +874,18 @@ def generate_batch_html_report(batch: RegressionBatch, tests: list[dict]) -> str
 
     # Build failure details
     failures_html = ""
-    failed_tests = [t for t in tests if t["status"] == "failed" and t.get("error_message")]
+    failed_tests = [t for t in tests if t["status"] in FAILURE_STATUSES]
     if failed_tests:
         failure_items = []
         for t in failed_tests:
+            summary = t.get("failure_summary") or t.get("error_message") or "No detailed failure artifact was captured for this run."
+            category = t.get("failure_category") or "Other"
+            source = t.get("failure_source") or "run status"
             failure_items.append(f"""
                 <div class="failure-item">
-                    <div class="failure-header">{t.get("test_name") or t.get("spec_name", "-")}</div>
-                    <pre class="failure-error">{t.get("error_message", "")}</pre>
+                    <div class="failure-header">{t.get("test_name") or t.get("spec_name", "-")} <span class="tag">{category}</span></div>
+                    <div class="test-meta">Source: {source}</div>
+                    <pre class="failure-error">{summary}</pre>
                 </div>
             """)
         failures_html = f"""
@@ -1172,6 +1501,7 @@ def export_batch(
                 "started_at": run.started_at.isoformat() if run.started_at else None,
                 "completed_at": run.completed_at.isoformat() if run.completed_at else None,
                 "error_message": run.error_message,
+                **_get_run_failure_details(run),
                 "duration_seconds": duration,
             }
         )
@@ -1448,32 +1778,38 @@ def error_summary(batch_id: str, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail="Batch not found")
 
     failed_runs = session.exec(
-        select(DBTestRun).where(DBTestRun.batch_id == batch_id, DBTestRun.status == "failed")
+        select(DBTestRun).where(DBTestRun.batch_id == batch_id, DBTestRun.status.in_(["failed", "error"]))
     ).all()
 
-    categories: dict[str, int] = {}
+    categories: dict[str, dict[str, Any]] = {}
     for run in failed_runs:
-        msg = (run.error_message or "").lower()
-        if "timeout" in msg:
-            cat = "Timeout"
-        elif any(k in msg for k in ("selector", "locator", "element")):
-            cat = "Selector"
-        elif any(k in msg for k in ("navigation", "net::")):
-            cat = "Network"
-        elif any(k in msg for k in ("assertion", "expect")):
-            cat = "Assertion"
-        else:
-            cat = "Other"
-        categories[cat] = categories.get(cat, 0) + 1
+        details = _get_run_failure_details(run)
+        cat = details.get("failure_category") or "Other"
+        bucket = categories.setdefault(cat, {"count": 0, "examples": []})
+        bucket["count"] += 1
+        if len(bucket["examples"]) < 3:
+            bucket["examples"].append(
+                {
+                    "run_id": run.id,
+                    "test_name": run.test_name or run.spec_name,
+                    "spec_name": run.spec_name,
+                    "status": run.status,
+                    "summary": details.get("failure_summary"),
+                    "source": details.get("failure_source"),
+                    "failing_step": details.get("failing_step"),
+                }
+            )
 
-    total_errors = sum(categories.values())
+    total_errors = sum(bucket["count"] for bucket in categories.values())
     items = []
-    for name, count in sorted(categories.items(), key=lambda x: -x[1]):
+    for name, bucket in sorted(categories.items(), key=lambda x: -x[1]["count"]):
+        count = bucket["count"]
         items.append(
             {
                 "name": name,
                 "count": count,
                 "percentage": round(count / total_errors * 100, 1) if total_errors else 0,
+                "examples": bucket["examples"],
             }
         )
 

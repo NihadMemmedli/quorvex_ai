@@ -8,6 +8,18 @@
         "chromium"
       ]
     },
+    "appium-mcp": {
+      "command": "npx",
+      "args": [
+        "appium-mcp"
+      ],
+      "env": {
+        "NO_UI": "true",
+        "SCREENSHOTS_DIR": "runs/appium-mcp-screenshots",
+        "REMOTE_SERVER_URL_ALLOW_REGEX": "^https?://",
+        "APPIUM_MCP_ON_CLIENT_DISCONNECT": "delete_all"
+      }
+    },
     "mermaid": {
       "command": "mcp-mermaid"
     }
