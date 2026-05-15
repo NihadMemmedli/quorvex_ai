@@ -24,6 +24,13 @@ function extractDisplayTitle(fullPath: string): { title: string; folder: string 
     return { title, folder };
 }
 
+function getSpecNameCandidates(name: string): string[] {
+    const trimmed = name.trim();
+    if (!trimmed) return [];
+    if (trimmed.endsWith('.md')) return [trimmed];
+    return [trimmed, `${trimmed}.md`];
+}
+
 export default function SpecDetailPage() {
     const params = useParams();
     const router = useRouter();
@@ -32,12 +39,13 @@ export default function SpecDetailPage() {
     const nameParam = params?.name;
     const rawName = Array.isArray(nameParam) ? nameParam.join('/') : (nameParam as string);
     const decodedName = decodeURIComponent(rawName || '');
-    const { title: displayTitle, folder } = extractDisplayTitle(decodedName);
 
     const projectParam = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
 
     const [content, setContent] = useState('');
     const [originalContent, setOriginalContent] = useState('');
+    const [resolvedSpecName, setResolvedSpecName] = useState('');
+    const [loadError, setLoadError] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
@@ -55,26 +63,63 @@ export default function SpecDetailPage() {
 
     useEffect(() => {
         if (!decodedName) return;
-        fetch(`${API_BASE}/specs/${decodedName}${projectParam}`)
-            .then(res => res.json())
-            .then(data => {
-                setContent(data.content);
-                setOriginalContent(data.content);
-                setIsAutomated(data.is_automated || false);
-                setCodePath(data.code_path || null);
+
+        let cancelled = false;
+
+        async function loadSpec() {
+            setLoading(true);
+            setLoadError(null);
+            setContent('');
+            setOriginalContent('');
+            setResolvedSpecName('');
+            setGeneratedCode(null);
+            setOriginalGeneratedCode(null);
+            setCodePath(null);
+            setIsAutomated(false);
+
+            const candidates = getSpecNameCandidates(decodedName);
+
+            for (const candidate of candidates) {
+                try {
+                    const res = await fetch(`${API_BASE}/specs/${candidate}${projectParam}`);
+                    if (!res.ok) continue;
+                    const data = await res.json();
+                    if (typeof data.content !== 'string') continue;
+
+                    if (cancelled) return;
+                    setContent(data.content);
+                    setOriginalContent(data.content);
+                    setResolvedSpecName(data.name || candidate);
+                    setIsAutomated(data.is_automated || false);
+                    setCodePath(data.code_path || null);
+                    setLoading(false);
+                    return;
+                } catch (err) {
+                    console.error(err);
+                }
+            }
+
+            if (!cancelled) {
+                setLoadError(`Spec not found: ${decodedName}`);
                 setLoading(false);
-            })
-            .catch(err => {
-                console.error(err);
-                setLoading(false);
-            });
+            }
+        }
+
+        loadSpec();
+
+        return () => {
+            cancelled = true;
+        };
     }, [decodedName, projectParam]);
+
+    const activeSpecName = resolvedSpecName || decodedName;
+    const { title: displayTitle, folder } = extractDisplayTitle(activeSpecName);
 
     const loadGeneratedCode = async () => {
         if (generatedCode !== null) return;
         setLoadingCode(true);
         try {
-            const res = await fetch(`${API_BASE}/specs/${decodedName}/generated-code${projectParam}`);
+            const res = await fetch(`${API_BASE}/specs/${activeSpecName}/generated-code${projectParam}`);
             if (res.ok) {
                 const data = await res.json();
                 setGeneratedCode(data.content);
@@ -98,7 +143,7 @@ export default function SpecDetailPage() {
         if (!generatedCode) return;
         setSavingCode(true);
         try {
-            const res = await fetch(`${API_BASE}/specs/${decodedName}/generated-code${projectParam}`, {
+            const res = await fetch(`${API_BASE}/specs/${activeSpecName}/generated-code${projectParam}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ content: generatedCode })
@@ -119,7 +164,7 @@ export default function SpecDetailPage() {
     const handleSave = async () => {
         setSaving(true);
         try {
-            const res = await fetch(`${API_BASE}/specs/${decodedName}${projectParam}`, {
+            const res = await fetch(`${API_BASE}/specs/${activeSpecName}${projectParam}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ content })
@@ -148,7 +193,7 @@ export default function SpecDetailPage() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    spec_name: decodedName,
+                    spec_name: activeSpecName,
                     project_id: currentProject?.id
                 })
             });
@@ -171,6 +216,24 @@ export default function SpecDetailPage() {
     );
 
     const hasChanges = content !== originalContent;
+
+    if (loadError) return (
+        <PageLayout tier="standard">
+            <PageHeader
+                title={displayTitle}
+                subtitle="Test specification"
+                icon={<FileText size={20} />}
+                breadcrumb={
+                    <Link href="/specs" className="link-hover" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)' }}>
+                        <ArrowLeft size={16} /> Back to Specs
+                    </Link>
+                }
+            />
+            <div className="card-elevated" style={{ padding: '2rem', color: 'var(--text-secondary)' }}>
+                {loadError}
+            </div>
+        </PageLayout>
+    );
 
     return (
         <PageLayout tier="standard">

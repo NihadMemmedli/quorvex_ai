@@ -1042,8 +1042,8 @@ const toolPageMap: Record<string, string> = {
   getExplorationSessions: '/exploration',
   startExplorerAgent: '/exploration',
   getRequirements: '/requirements',
-  getRtmCoverage: '/requirements',
-  getRTMSummary: '/requirements',
+  getRtmCoverage: '/rtm',
+  getRTMSummary: '/rtm',
   getDashboardStats: '/',
   getSecurityFindings: '/security-testing',
   getPassRateTrends: '/analytics',
@@ -1090,9 +1090,9 @@ const toolPageMap: Record<string, string> = {
   triageSecurityFinding: '/security-testing',
   compareSecurityScans: '/security-testing',
   // RTM tools
-  getRTMGaps: '/requirements',
-  exportRTM: '/requirements',
-  getRTMTrend: '/requirements',
+  getRTMGaps: '/rtm',
+  exportRTM: '/rtm',
+  getRTMTrend: '/rtm',
   // LLM testing tools
   getLlmComparisonMatrix: '/llm-testing',
   getLlmGoldenDashboard: '/llm-testing',

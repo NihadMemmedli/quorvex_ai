@@ -53,6 +53,7 @@ const navGroups: NavGroup[] = [
             { href: '/autopilot', label: 'Auto Pilot', icon: Rocket },
             { href: '/exploration', label: 'Discovery', icon: Compass },
             { href: '/requirements', label: 'Requirements', icon: CheckSquare },
+            { href: '/rtm', label: 'RTM', icon: GitBranch },
             { href: '/coverage', label: 'Coverage', icon: PieChart },
         ],
     },
