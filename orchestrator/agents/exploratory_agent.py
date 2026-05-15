@@ -260,6 +260,18 @@ DO NOT include any conversational text, intro, or outro.
 DO NOT use markdown formatting outside the JSON block.
 Your ENTIRE response must be parseable as JSON.
 
+VIDEO RECORDING:
+1. Before navigating to the target, call browser_start_video with filename "exploration.webm".
+2. Add browser_video_chapter markers for major phases such as "Start", "Authentication", "Discovery", and "Flow testing" when those phases apply.
+3. Before returning the final JSON, call browser_stop_video.
+4. If video recording tools fail or are unavailable, continue exploration and still return the required JSON.
+
+LIVE VIEW SCREENSHOTS:
+1. Save a screenshot after initial navigation, after authentication, and after every 3-5 meaningful browser interactions.
+2. Use browser_take_screenshot with filenames like "live-step-001.png", "live-step-004.png", etc. so the UI can show the latest state while you run.
+3. Do not take screenshots of pages that visibly contain passwords or secret tokens.
+4. If screenshot capture fails, continue exploration and still return the required JSON.
+
 REQUIRED JSON OUTPUT FORMAT:
 ```json
 {{
@@ -340,11 +352,14 @@ CONSTRAINTS:
 - NO string dumps or HTML content in JSON values
 
 Begin exploration now:
-Step 0: {"Clear ALL cookies and localStorage to ensure a fresh start" if auth_config.get("type") != "session" else "Load session data (Pre-authenticated)"}
-Step 1: {"Navigate to login and authenticate" if auth_config.get("type") == "credentials" else f"Navigate to {url} and discover site structure"}
-Step 2: Explore navigation and main features
-Step 3: Identify and test user flows
-Step 4: Return JSON summary when done"""
+Step 0: Start video recording with browser_start_video using filename "exploration.webm"
+Step 1: {"Clear ALL cookies and localStorage to ensure a fresh start" if auth_config.get("type") != "session" else "Load session data (Pre-authenticated)"}
+Step 2: {"Navigate to login and authenticate" if auth_config.get("type") == "credentials" else f"Navigate to {url} and discover site structure"}
+Step 3: Save the first live screenshot with browser_take_screenshot
+Step 4: Explore navigation and main features, saving live screenshots every 3-5 meaningful interactions
+Step 5: Identify and test user flows, saving live screenshots at major state changes
+Step 6: Stop video recording with browser_stop_video
+Step 7: Return JSON summary when done"""
 
     def _process_results(self, result: Any, config: dict[str, Any]) -> dict[str, Any]:
         """Process exploration results, save full flows to file, and persist to memory."""

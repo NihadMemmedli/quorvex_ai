@@ -1,28 +1,30 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Maximize2, Minimize2, Monitor, Wifi, WifiOff, Shield, Server, Terminal } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
-import { API_BASE } from '@/lib/api';
 
 interface LiveBrowserViewProps {
     runId: string;
     isActive: boolean;
     showHeader?: boolean; // Whether to show internal header (default: false for embedded use)
+    onShowLog?: () => void;
 }
 
-export function LiveBrowserView({ runId, isActive, showHeader = false }: LiveBrowserViewProps) {
+const VNC_CONNECT_TIMEOUT_MS = 8000;
+
+export function LiveBrowserView({ isActive, showHeader = false, onShowLog }: LiveBrowserViewProps) {
     const { user } = useAuth();
     const [isConnected, setIsConnected] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [vncAvailable, setVncAvailable] = useState<boolean | null>(null);
-    const [connectionAttempts, setConnectionAttempts] = useState(0);
 
     const containerRef = useRef<HTMLDivElement>(null);
     const rfbRef = useRef<any>(null);
     const canvasContainerRef = useRef<HTMLDivElement>(null);
+    const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Only admins can see VNC
     const isAdmin = user?.is_superuser === true;
@@ -66,9 +68,14 @@ export function LiveBrowserView({ runId, isActive, showHeader = false }: LiveBro
             return;
         }
 
+        if (connectionTimeoutRef.current) {
+            clearTimeout(connectionTimeoutRef.current);
+            connectionTimeoutRef.current = null;
+        }
+
         setIsLoading(true);
+        setIsConnected(false);
         setError(null);
-        setConnectionAttempts(prev => prev + 1);
 
         // First check if VNC is available
         const available = await checkVncAvailability();
@@ -109,13 +116,22 @@ export function LiveBrowserView({ runId, isActive, showHeader = false }: LiveBro
 
             // Event handlers
             rfb.addEventListener('connect', () => {
+                if (connectionTimeoutRef.current) {
+                    clearTimeout(connectionTimeoutRef.current);
+                    connectionTimeoutRef.current = null;
+                }
                 setIsConnected(true);
                 setIsLoading(false);
                 setError(null);
             });
 
             rfb.addEventListener('disconnect', (e: any) => {
+                if (connectionTimeoutRef.current) {
+                    clearTimeout(connectionTimeoutRef.current);
+                    connectionTimeoutRef.current = null;
+                }
                 setIsConnected(false);
+                setIsLoading(false);
                 if (e.detail.clean) {
                     // Clean disconnect
                 } else {
@@ -124,11 +140,24 @@ export function LiveBrowserView({ runId, isActive, showHeader = false }: LiveBro
             });
 
             rfb.addEventListener('securityfailure', (e: any) => {
+                if (connectionTimeoutRef.current) {
+                    clearTimeout(connectionTimeoutRef.current);
+                    connectionTimeoutRef.current = null;
+                }
                 setError(`Security error: ${e.detail.reason}`);
                 setIsLoading(false);
             });
 
             rfbRef.current = rfb;
+            connectionTimeoutRef.current = setTimeout(() => {
+                if (rfbRef.current === rfb) {
+                    rfb.disconnect();
+                    rfbRef.current = null;
+                    setIsConnected(false);
+                    setIsLoading(false);
+                    setError('Browser view did not become available. Use progress or screenshots to follow this work.');
+                }
+            }, VNC_CONNECT_TIMEOUT_MS);
         } catch (err) {
             console.error('Failed to initialize VNC:', err);
             setError('Failed to connect to browser view');
@@ -143,6 +172,10 @@ export function LiveBrowserView({ runId, isActive, showHeader = false }: LiveBro
         }
 
         return () => {
+            if (connectionTimeoutRef.current) {
+                clearTimeout(connectionTimeoutRef.current);
+                connectionTimeoutRef.current = null;
+            }
             if (rfbRef.current) {
                 rfbRef.current.disconnect();
                 rfbRef.current = null;
@@ -217,7 +250,7 @@ export function LiveBrowserView({ runId, isActive, showHeader = false }: LiveBro
             >
                 <Monitor size={48} color="var(--text-secondary)" />
                 <p style={{ color: 'var(--text-secondary)' }}>
-                    Browser view available when test is running
+                    Browser view available while browser work is running
                 </p>
             </div>
         );
@@ -311,14 +344,24 @@ export function LiveBrowserView({ runId, isActive, showHeader = false }: LiveBro
             <div
                 style={{
                     flex: 1,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
+                    position: 'relative',
                     padding: '0.5rem',
                     minHeight: isFullscreen ? 'calc(100vh - 60px)' : '500px',
                     background: '#000',
                 }}
             >
+                <div
+                    ref={canvasContainerRef}
+                    style={{
+                        width: '100%',
+                        height: '100%',
+                        minHeight: isFullscreen ? 'calc(100vh - 76px)' : '484px',
+                        display: isConnected ? 'flex' : 'none',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                    }}
+                />
+
                 {vncAvailable === false ? (
                     // VNC not available - show local dev message
                     <div
@@ -326,11 +369,14 @@ export function LiveBrowserView({ runId, isActive, showHeader = false }: LiveBro
                             display: 'flex',
                             flexDirection: 'column',
                             alignItems: 'center',
+                            justifyContent: 'center',
                             gap: '1.5rem',
                             color: 'var(--text-secondary)',
                             maxWidth: '400px',
                             textAlign: 'center',
                             padding: '2rem',
+                            minHeight: isFullscreen ? 'calc(100vh - 76px)' : '484px',
+                            margin: '0 auto',
                         }}
                     >
                         <Server size={48} color="var(--primary)" />
@@ -371,8 +417,17 @@ export function LiveBrowserView({ runId, isActive, showHeader = false }: LiveBro
                             </code>
                         </div>
                         <p style={{ fontSize: '0.8rem', opacity: 0.7 }}>
-                            Switch to the <strong>Log</strong> tab to view execution output.
+                            Use progress or screenshots to follow execution when VNC is unavailable.
                         </p>
+                        {onShowLog && (
+                            <button
+                                onClick={onShowLog}
+                                className="btn btn-secondary"
+                                style={{ fontSize: '0.85rem' }}
+                            >
+                                View Log
+                            </button>
+                        )}
                     </div>
                 ) : error ? (
                     <div
@@ -380,19 +435,32 @@ export function LiveBrowserView({ runId, isActive, showHeader = false }: LiveBro
                             display: 'flex',
                             flexDirection: 'column',
                             alignItems: 'center',
+                            justifyContent: 'center',
                             gap: '1rem',
                             color: 'var(--text-secondary)',
+                            minHeight: isFullscreen ? 'calc(100vh - 76px)' : '484px',
                         }}
                     >
                         <WifiOff size={32} color="var(--danger)" />
                         <span style={{ color: 'var(--danger)' }}>{error}</span>
-                        <button
-                            onClick={initVNC}
-                            className="btn btn-secondary"
-                            style={{ fontSize: '0.85rem' }}
-                        >
-                            Retry Connection
-                        </button>
+                        <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+                            <button
+                                onClick={initVNC}
+                                className="btn btn-secondary"
+                                style={{ fontSize: '0.85rem' }}
+                            >
+                                Retry Connection
+                            </button>
+                            {onShowLog && (
+                                <button
+                                    onClick={onShowLog}
+                                    className="btn btn-ghost"
+                                    style={{ fontSize: '0.85rem' }}
+                                >
+                                    View Log
+                                </button>
+                            )}
+                        </div>
                     </div>
                 ) : isLoading && !isConnected ? (
                     <div
@@ -400,25 +468,16 @@ export function LiveBrowserView({ runId, isActive, showHeader = false }: LiveBro
                             display: 'flex',
                             flexDirection: 'column',
                             alignItems: 'center',
+                            justifyContent: 'center',
                             gap: '1rem',
                             color: 'var(--text-secondary)',
+                            minHeight: isFullscreen ? 'calc(100vh - 76px)' : '484px',
                         }}
                     >
                         <div className="loading-spinner" style={{ width: '32px', height: '32px' }} />
                         <span>Connecting to browser...</span>
                     </div>
-                ) : (
-                    <div
-                        ref={canvasContainerRef}
-                        style={{
-                            width: '100%',
-                            height: '100%',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                        }}
-                    />
-                )}
+                ) : null}
             </div>
         </div>
     );

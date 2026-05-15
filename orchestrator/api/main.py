@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -58,6 +59,7 @@ from . import (
     memory,
     prd,
     projects,
+    recordings,
     regression,
     requirements,
     rtm,
@@ -258,6 +260,7 @@ app.include_router(memory.router)
 app.include_router(prd.router)
 app.include_router(regression.router)
 app.include_router(projects.router)
+app.include_router(recordings.router)
 app.include_router(exploration.router)
 app.include_router(requirements.router)
 app.include_router(rtm.router)
@@ -3280,6 +3283,13 @@ def get_run(
             "spec_name": run_db.spec_name,
             "test_name": run_db.test_name,
             "agentic_summary": run_db.agentic_summary,
+            "current_stage": run_db.current_stage,
+            "stage_message": run_db.stage_message,
+            "healing_attempt": run_db.healing_attempt,
+            "queue_position": run_db.queue_position,
+            "queued_at": run_db.queued_at.isoformat() if run_db.queued_at else None,
+            "started_at": run_db.started_at.isoformat() if run_db.started_at else None,
+            "completed_at": run_db.completed_at.isoformat() if run_db.completed_at else None,
             "note": "Files missing",
         }
 
@@ -3295,6 +3305,13 @@ def get_run(
         "spec_name": run_db.spec_name,
         "test_name": run_db.test_name,
         "agentic_summary": run_db.agentic_summary,
+        "current_stage": run_db.current_stage,
+        "stage_message": run_db.stage_message,
+        "healing_attempt": run_db.healing_attempt,
+        "queue_position": run_db.queue_position,
+        "queued_at": run_db.queued_at.isoformat() if run_db.queued_at else None,
+        "started_at": run_db.started_at.isoformat() if run_db.started_at else None,
+        "completed_at": run_db.completed_at.isoformat() if run_db.completed_at else None,
     }
 
     # Check runtime status if not completed
@@ -4289,6 +4306,9 @@ def execute_run_task(
             "outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || './test-results'",
             f"outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || '{run_dir_path}/test-results'",
         )
+        # Dashboard run details are expected to replay successful runs too.
+        config_content = config_content.replace("video: 'retain-on-failure'", "video: 'on'")
+        config_content = config_content.replace('video: "retain-on-failure"', 'video: "on"')
         playwright_config_dst.write_text(config_content)
 
     # Copy seed file to run directory for generator_setup_page
@@ -5426,6 +5446,15 @@ class FlowUpdateRequest(BaseModel):
     complexity: str | None = None
 
 
+def _collect_agent_run_artifacts(run_id: str) -> list[dict[str, Any]]:
+    """Return browser recording/screenshot artifacts for an agent run."""
+    try:
+        return jsonable_encoder(exploration._collect_exploration_artifacts(run_id))
+    except Exception as exc:
+        logger.debug("Failed to collect artifacts for agent run %s: %s", run_id, exc)
+        return []
+
+
 async def execute_agent_background(run_id: str, agent_type: str, config: dict):
     """Execute an agent in the background with unified browser pool management.
 
@@ -5479,6 +5508,8 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             result = {}
             if agent_type == "exploratory":
                 agent = ExploratoryAgent()
+                run_dir = exploration._prepare_exploration_mcp_config(run_id)
+                agent.agent_cwd = str(run_dir)
 
                 # Inject project_id from URL if not present
                 if "project_id" not in config:
@@ -5667,6 +5698,7 @@ def list_agent_runs(
             "created_at": r.created_at.isoformat(),
             "config": r.config,
             "project_id": r.project_id,
+            "artifacts": _collect_agent_run_artifacts(r.id) if r.agent_type == "exploratory" else [],
             # Don't send full result in list view if it's huge
             "summary": r.result.get("summary") if r.result else None,
         }
@@ -5701,6 +5733,7 @@ def get_agent_run(
         "config": r.config,
         "result": r.result,
         "project_id": r.project_id,
+        "artifacts": _collect_agent_run_artifacts(r.id) if r.agent_type == "exploratory" else [],
     }
 
 

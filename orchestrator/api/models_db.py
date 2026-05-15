@@ -316,6 +316,50 @@ class RegressionBatch(SQLModel, table=True):
         return None
 
 
+class RecordingSession(SQLModel, table=True):
+    """Playwright codegen recording session."""
+
+    __tablename__ = "recording_sessions"
+    __table_args__ = (
+        Index("ix_recordings_project_status", "project_id", "status"),
+        Index("ix_recordings_project_created", "project_id", "created_at"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    status: str = Field(default="starting", index=True)  # starting, recording, completed, stopped, failed
+    target_url: str
+    engine: str = "playwright-codegen"
+    name: str | None = None
+    output_spec_path: str | None = None
+    output_code_path: str | None = None
+    artifact_dir: str | None = None
+    process_id: int | None = None
+    error: str | None = None
+    config_json: str = "{}"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+    @property
+    def config(self) -> dict[str, Any]:
+        try:
+            return json.loads(self.config_json)
+        except json.JSONDecodeError:
+            return {}
+
+    @config.setter
+    def config(self, value: dict[str, Any]):
+        self.config_json = json.dumps(value)
+
+    @property
+    def duration_seconds(self) -> int | None:
+        if self.started_at and self.completed_at:
+            return int((self.completed_at - self.started_at).total_seconds())
+        return None
+
+
 # ========== AI-Powered Exploration & RTM Models ==========
 
 

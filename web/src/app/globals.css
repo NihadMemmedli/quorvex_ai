@@ -315,6 +315,10 @@ select.input {
   }
 }
 
+.spin {
+  animation: spin 1s linear infinite;
+}
+
 /* Layout Utilities Added for PRD Page */
 .flex {
   display: flex;

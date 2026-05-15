@@ -61,6 +61,7 @@ from .models_db import (  # noqa: F401
     OpenApiImportHistory,
     PrdGenerationResult,
     Project,
+    RecordingSession,
     RegressionBatch,
     Requirement,
     RequirementSource,

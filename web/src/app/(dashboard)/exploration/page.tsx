@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Compass, Plus, Play, Square, Eye, FileText, Clock, Globe, Zap, Activity, X, Loader2, Bot, Terminal, ChevronRight, CheckCircle2, AlertTriangle, RotateCcw, Lock, Settings, Download, Sparkles, ArrowRight, Info, RefreshCw, Scissors, ExternalLink, Edit, Trash2, Save } from 'lucide-react';
+import { Compass, Plus, Play, Square, Eye, FileText, Clock, Globe, Zap, Activity, X, Loader2, Bot, Terminal, ChevronRight, CheckCircle2, AlertTriangle, RotateCcw, Lock, Settings, Download, Sparkles, ArrowRight, Info, RefreshCw, Scissors, ExternalLink, Edit, Trash2, Save, Video as VideoIcon, Monitor, Image as ImageIcon } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
 import { useJobPoller } from '@/hooks/useJobPoller';
@@ -9,6 +9,7 @@ import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { EmptyState } from '@/components/ui/empty-state';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
+import { LiveBrowserView } from '@/components/LiveBrowserView';
 
 // ============ SESSIONS TAB TYPES ============
 interface ExplorationSession {
@@ -101,6 +102,13 @@ interface DiscoveredIssue {
     created_at: string;
 }
 
+interface ExplorationArtifact {
+    name: string;
+    path: string;
+    type: 'image' | 'video';
+    modified_at?: string | null;
+}
+
 interface ExplorationDetails {
     session: ExplorationSession;
     pages: PageSummary[];
@@ -108,6 +116,7 @@ interface ExplorationDetails {
     elements: ElementSummary[];
     api_endpoints: ApiEndpointDetail[];
     issues: DiscoveredIssue[];
+    artifacts: ExplorationArtifact[];
 }
 
 interface SpecGenJob {
@@ -120,7 +129,7 @@ interface SpecGenJob {
     endpoint_count?: number;
 }
 
-type DetailTabType = 'pages' | 'flows' | 'elements' | 'apis' | 'issues';
+type DetailTabType = 'live' | 'pages' | 'flows' | 'elements' | 'apis' | 'issues';
 
 // ============ AGENT TAB TYPES ============
 interface AgentRun {
@@ -132,6 +141,7 @@ interface AgentRun {
     summary?: string;
     result?: any;
     project_id?: string;
+    artifacts?: ExplorationArtifact[];
 }
 
 interface SpecResult {
@@ -167,6 +177,9 @@ const toolLabels: Record<string, string> = {
     browser_file_upload: "Uploading file...",
     browser_handle_dialog: "Handling dialog...",
     browser_drag: "Dragging element...",
+    browser_start_video: "Starting recording...",
+    browser_video_chapter: "Marking recording chapter...",
+    browser_stop_video: "Saving recording...",
 };
 
 function parseProgress(session: ExplorationSession): {
@@ -200,6 +213,10 @@ function humanizeToolName(toolName: string): string {
     // Strip MCP prefix (e.g. mcp__playwright-test__browser_click -> browser_click)
     const shortName = toolName.replace(/^mcp__[^_]+__/, '');
     return toolLabels[shortName] || `Running ${shortName.replace(/_/g, ' ')}...`;
+}
+
+function isLiveSession(status: string): boolean {
+    return status === 'running' || status === 'queued';
 }
 
 const statusColors: Record<string, { bg: string; color: string }> = {
@@ -485,10 +502,10 @@ export default function DiscoveryPage() {
         }
     };
 
-    const viewDetails = async (session: ExplorationSession) => {
+    const viewDetails = async (session: ExplorationSession, initialTab: DetailTabType = 'pages') => {
         setSelectedSession(session);
         setDetailsLoading(true);
-        setDetailTab('pages');
+        setDetailTab(initialTab);
         setExplorationDetails(null);
         setExpandedFlowId(null);
         setExpandedApiId(null);
@@ -516,6 +533,31 @@ export default function DiscoveryPage() {
             setDetailsLoading(false);
         }
     };
+
+    useEffect(() => {
+        if (!detailModalOpen || !selectedSession) return;
+
+        const status = explorationDetails?.session.status || selectedSession.status;
+        if (!isLiveSession(status)) return;
+
+        const projectParam = currentProject?.id
+            ? `?project_id=${encodeURIComponent(currentProject.id)}`
+            : '';
+
+        const refreshDetails = async () => {
+            try {
+                const res = await fetch(`${API_BASE}/exploration/${selectedSession.id}/details${projectParam}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                setExplorationDetails(data);
+            } catch (e) {
+                console.error('Failed to refresh live exploration details:', e);
+            }
+        };
+
+        const interval = setInterval(refreshDetails, 5000);
+        return () => clearInterval(interval);
+    }, [currentProject?.id, detailModalOpen, explorationDetails?.session.status, selectedSession]);
 
     const generateRequirements = async (sessionId: string) => {
         setGeneratingSessionId(sessionId);
@@ -1657,6 +1699,16 @@ export default function DiscoveryPage() {
                                     )}
 
                                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
+                                        {isLiveSession(session.status) && (
+                                            <button
+                                                className="btn btn-secondary"
+                                                onClick={() => viewDetails(session, 'live')}
+                                                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+                                            >
+                                                <Monitor size={16} />
+                                                Watch Live
+                                            </button>
+                                        )}
                                         {session.status === 'running' && (
                                             <button
                                                 className="btn btn-secondary"
@@ -2145,32 +2197,44 @@ export default function DiscoveryPage() {
                                     <Bot size={64} style={{ marginBottom: '1rem' }} />
                                     <p>Select a run from history or start a new one.</p>
                                 </div>
-                            ) : activeRun.status === 'running' ? (
-                                <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)' }}>
-                                    <Loader2 size={48} className="spin" style={{ marginBottom: '1rem', color: 'var(--primary)' }} />
-                                    <p>Explorer agent is working...</p>
-                                    <p style={{ fontSize: '0.9rem', marginTop: '0.5rem' }}>This may take up to {timeLimitMinutes} minutes.</p>
+                            ) : isLiveSession(activeRun.status) ? (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                    <LiveBrowserView
+                                        runId={activeRun.id}
+                                        isActive={true}
+                                        showHeader
+                                    />
+                                    <ExplorerAgentCapturePanel activeRun={activeRun} mode="live" />
+                                    <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'center' }}>
+                                        Explorer agent is working. This may take up to {timeLimitMinutes} minutes.
+                                    </div>
                                 </div>
                             ) : activeRun.status === 'failed' ? (
-                                <div style={{ padding: '1rem', background: 'var(--danger-muted)', color: 'var(--danger)', borderRadius: '8px', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
-                                    <h4 style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                        <AlertTriangle size={18} /> Run Failed
-                                    </h4>
-                                    <p style={{ marginTop: '0.5rem', fontFamily: 'monospace' }}>
-                                        {activeRun.result?.error || "Unknown error occurred"}
-                                    </p>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                    <ExplorerAgentCapturePanel activeRun={activeRun} mode="recording" />
+                                    <div style={{ padding: '1rem', background: 'var(--danger-muted)', color: 'var(--danger)', borderRadius: '8px', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
+                                        <h4 style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                            <AlertTriangle size={18} /> Run Failed
+                                        </h4>
+                                        <p style={{ marginTop: '0.5rem', fontFamily: 'monospace' }}>
+                                            {activeRun.result?.error || "Unknown error occurred"}
+                                        </p>
+                                    </div>
                                 </div>
                             ) : activeRun.agent_type === 'exploratory' && activeRun.result ? (
-                                <ExplorerResults
-                                    activeRun={activeRun}
-                                    timeLimitMinutes={timeLimitMinutes}
-                                    fetchFlowDetails={fetchFlowDetails}
-                                    loadingFlowDetails={loadingFlowDetails}
-                                    handleSynthesize={handleSynthesize}
-                                    isSynthesizing={isSynthesizing}
-                                    specResult={specResult}
-                                    downloadSpec={downloadSpec}
-                                />
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                                    <ExplorerAgentCapturePanel activeRun={activeRun} mode="recording" />
+                                    <ExplorerResults
+                                        activeRun={activeRun}
+                                        timeLimitMinutes={timeLimitMinutes}
+                                        fetchFlowDetails={fetchFlowDetails}
+                                        loadingFlowDetails={loadingFlowDetails}
+                                        handleSynthesize={handleSynthesize}
+                                        isSynthesizing={isSynthesizing}
+                                        specResult={specResult}
+                                        downloadSpec={downloadSpec}
+                                    />
+                                </div>
                             ) : null}
                         </div>
                     </div>
@@ -2436,6 +2500,61 @@ export default function DiscoveryPage() {
                             </div>
                         ) : explorationDetails ? (
                             <>
+                                {(() => {
+                                    const videoArtifacts = (explorationDetails.artifacts || []).filter(artifact => artifact.type === 'video');
+                                    const imageArtifacts = (explorationDetails.artifacts || []).filter(artifact => artifact.type === 'image');
+                                    const isFinished = !['pending', 'queued', 'running'].includes(explorationDetails.session.status);
+
+                                    return (
+                                        <div style={{ marginBottom: '1.5rem' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', marginBottom: '0.75rem' }}>
+                                                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                    <VideoIcon size={18} />
+                                                    Recording
+                                                </h3>
+                                                {videoArtifacts[0] && (
+                                                    <a
+                                                        href={`${API_BASE}${videoArtifacts[0].path}`}
+                                                        target="_blank"
+                                                        rel="noreferrer"
+                                                        style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', color: 'var(--primary)', fontSize: '0.82rem', textDecoration: 'none', flexShrink: 0 }}
+                                                    >
+                                                        Open <ExternalLink size={13} />
+                                                    </a>
+                                                )}
+                                            </div>
+                                            {videoArtifacts.length > 0 ? (
+                                                <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: 'var(--background)' }}>
+                                                    <video
+                                                        controls
+                                                        preload="metadata"
+                                                        src={`${API_BASE}${videoArtifacts[0].path}`}
+                                                        style={{ width: '100%', display: 'block', aspectRatio: '16/9', background: '#000' }}
+                                                    />
+                                                    <div style={{ padding: '0.65rem 0.85rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', borderTop: '1px solid var(--border)' }}>
+                                                        <span style={{ minWidth: 0, fontSize: '0.82rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                            {videoArtifacts[0].name}
+                                                        </span>
+                                                        {imageArtifacts.length > 0 && (
+                                                            <span style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)', flexShrink: 0 }}>
+                                                                {imageArtifacts.length} image artifact{imageArtifacts.length === 1 ? '' : 's'}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            ) : isFinished ? (
+                                                <div style={{ border: '1px dashed var(--border)', borderRadius: '8px', padding: '0.9rem 1rem', color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
+                                                    No recording was captured for this exploration.
+                                                </div>
+                                            ) : (
+                                                <div style={{ border: '1px dashed var(--border)', borderRadius: '8px', padding: '0.9rem 1rem', color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
+                                                    Recording will appear here when the exploration finishes.
+                                                </div>
+                                            )}
+                                        </div>
+                                    );
+                                })()}
+
                                 {/* Summary stats - clickable */}
                                 <div style={{ display: 'grid', gridTemplateColumns: `repeat(${(explorationDetails.issues?.length || 0) > 0 ? 5 : 4}, 1fr)`, gap: '0.75rem', marginBottom: '1.5rem' }}>
                                     {[
@@ -2467,6 +2586,7 @@ export default function DiscoveryPage() {
                                 {/* Tab bar */}
                                 <div style={{ display: 'flex', gap: '0.25rem', marginBottom: '1.5rem', borderBottom: '1px solid var(--border)', paddingBottom: '0' }}>
                                     {[
+                                        ...((isLiveSession(explorationDetails.session.status) || detailTab === 'live') ? [{ key: 'live' as DetailTabType, label: 'Live', count: null }] : []),
                                         { key: 'pages' as DetailTabType, label: 'Pages', count: explorationDetails.pages.length },
                                         { key: 'flows' as DetailTabType, label: 'Flows', count: explorationDetails.flows.length },
                                         { key: 'elements' as DetailTabType, label: 'Elements', count: explorationDetails.elements.length },
@@ -2488,10 +2608,88 @@ export default function DiscoveryPage() {
                                                 transition: 'all 0.2s var(--ease-smooth)'
                                             }}
                                         >
-                                            {tab.label} ({tab.count})
+                                            {tab.count === null ? tab.label : `${tab.label} (${tab.count})`}
                                         </button>
                                     ))}
                                 </div>
+
+                                {/* ===== LIVE TAB ===== */}
+                                {detailTab === 'live' && (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                        {(() => {
+                                            const progress = parseProgress(explorationDetails.session) || parseProgress(selectedSession);
+                                            const liveArtifacts = [...(explorationDetails.artifacts || [])]
+                                                .filter(artifact => artifact.type === 'image')
+                                                .sort((a, b) => {
+                                                    const aTime = a.modified_at ? new Date(a.modified_at).getTime() : 0;
+                                                    const bTime = b.modified_at ? new Date(b.modified_at).getTime() : 0;
+                                                    return bTime - aTime;
+                                                });
+                                            const latestImage = liveArtifacts[0];
+                                            const liveActive = isLiveSession(explorationDetails.session.status);
+
+                                            return (
+                                                <>
+                                                    <div style={{
+                                                        display: 'grid',
+                                                        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                                                        gap: '0.75rem',
+                                                        padding: '0.85rem 1rem',
+                                                        background: 'var(--surface-hover)',
+                                                        border: '1px solid var(--border)',
+                                                        borderRadius: '8px'
+                                                    }}>
+                                                        <div>
+                                                            <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: 0, marginBottom: '0.25rem' }}>Status</div>
+                                                            <div style={{ fontWeight: 700, textTransform: 'capitalize' }}>{explorationDetails.session.status.replace(/_/g, ' ')}</div>
+                                                        </div>
+                                                        <div>
+                                                            <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: 0, marginBottom: '0.25rem' }}>Progress</div>
+                                                            <div style={{ fontWeight: 600 }}>{progress ? `Step ${progress.step} of ${progress.max_steps}` : 'Waiting for agent progress'}</div>
+                                                        </div>
+                                                        <div>
+                                                            <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: 0, marginBottom: '0.25rem' }}>Current Action</div>
+                                                            <div style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{progress ? (progress.message || humanizeToolName(progress.last_action)) : 'Working...'}</div>
+                                                        </div>
+                                                    </div>
+
+                                                    <LiveBrowserView
+                                                        runId={selectedSession.id}
+                                                        isActive={liveActive}
+                                                        showHeader
+                                                    />
+
+                                                    <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: 'var(--background)' }}>
+                                                        <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem' }}>
+                                                            <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                                <ImageIcon size={17} />
+                                                                Latest Screenshot
+                                                            </h3>
+                                                            {latestImage?.modified_at && (
+                                                                <span style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)' }}>
+                                                                    {new Date(latestImage.modified_at).toLocaleTimeString()}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        {latestImage ? (
+                                                            <a href={`${API_BASE}${latestImage.path}`} target="_blank" rel="noreferrer" style={{ display: 'block' }}>
+                                                                <img
+                                                                    src={`${API_BASE}${latestImage.path}`}
+                                                                    alt="Latest exploration screenshot"
+                                                                    style={{ width: '100%', display: 'block', maxHeight: '480px', objectFit: 'contain', background: '#000' }}
+                                                                />
+                                                            </a>
+                                                        ) : (
+                                                            <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                                                No live screenshots have been captured yet.
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </>
+                                            );
+                                        })()}
+                                    </div>
+                                )}
 
                                 {/* ===== PAGES TAB ===== */}
                                 {detailTab === 'pages' && (
@@ -3799,6 +3997,146 @@ export default function DiscoveryPage() {
                 }
             `}</style>
         </PageLayout>
+    );
+}
+
+function getArtifactUrl(artifact: ExplorationArtifact): string {
+    return `${API_BASE}${artifact.path}`;
+}
+
+function sortArtifactsByModifiedAt(artifacts: ExplorationArtifact[]): ExplorationArtifact[] {
+    return [...artifacts].sort((a, b) => {
+        const bTime = b.modified_at ? new Date(b.modified_at).getTime() : 0;
+        const aTime = a.modified_at ? new Date(a.modified_at).getTime() : 0;
+        return bTime - aTime;
+    });
+}
+
+function ExplorerAgentCapturePanel({
+    activeRun,
+    mode
+}: {
+    activeRun: AgentRun;
+    mode: 'live' | 'recording';
+}) {
+    const artifacts = activeRun.artifacts || [];
+    const videoArtifacts = sortArtifactsByModifiedAt(artifacts.filter(artifact => artifact.type === 'video'));
+    const imageArtifacts = sortArtifactsByModifiedAt(artifacts.filter(artifact => artifact.type === 'image'));
+    const latestVideo = videoArtifacts[0];
+    const latestImage = imageArtifacts[0];
+
+    if (!latestVideo && !latestImage && mode === 'recording') {
+        return null;
+    }
+
+    return (
+        <div style={{
+            border: '1px solid var(--border)',
+            borderRadius: '8px',
+            overflow: 'hidden',
+            background: 'var(--surface-hover)'
+        }}>
+            <div style={{
+                padding: '0.75rem 1rem',
+                borderBottom: '1px solid var(--border)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '0.75rem'
+            }}>
+                <h4 style={{
+                    margin: 0,
+                    fontSize: '0.9rem',
+                    fontWeight: 600,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.5rem'
+                }}>
+                    {mode === 'live' ? <Monitor size={16} /> : <VideoIcon size={16} />}
+                    {mode === 'live' ? 'Live Capture' : 'Recording'}
+                </h4>
+                {latestVideo && (
+                    <a
+                        href={getArtifactUrl(latestVideo)}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.35rem',
+                            color: 'var(--primary)',
+                            fontSize: '0.8rem',
+                            textDecoration: 'none',
+                            flexShrink: 0
+                        }}
+                    >
+                        Open <ExternalLink size={13} />
+                    </a>
+                )}
+            </div>
+
+            <div style={{ padding: '1rem' }}>
+                {latestVideo ? (
+                    <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: '#000' }}>
+                        <video
+                            controls
+                            preload="metadata"
+                            src={getArtifactUrl(latestVideo)}
+                            style={{ width: '100%', display: 'block', aspectRatio: '16/9', background: '#000' }}
+                        />
+                        <div style={{
+                            padding: '0.65rem 0.85rem',
+                            background: 'var(--surface)',
+                            borderTop: '1px solid var(--border)',
+                            fontSize: '0.82rem',
+                            color: 'var(--text-secondary)',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis'
+                        }}>
+                            {latestVideo.name}
+                        </div>
+                    </div>
+                ) : latestImage ? (
+                    <div>
+                        <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.4rem',
+                            color: 'var(--text-secondary)',
+                            fontSize: '0.82rem',
+                            marginBottom: '0.75rem'
+                        }}>
+                            <ImageIcon size={14} />
+                            Latest screenshot
+                        </div>
+                        <img
+                            src={getArtifactUrl(latestImage)}
+                            alt="Latest Explorer Agent browser screenshot"
+                            style={{
+                                width: '100%',
+                                display: 'block',
+                                borderRadius: '8px',
+                                border: '1px solid var(--border)',
+                                background: 'var(--background)'
+                            }}
+                        />
+                    </div>
+                ) : (
+                    <div style={{
+                        minHeight: '90px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'var(--text-secondary)',
+                        fontSize: '0.9rem',
+                        textAlign: 'center'
+                    }}>
+                        Waiting for the first browser capture...
+                    </div>
+                )}
+            </div>
+        </div>
     );
 }
 

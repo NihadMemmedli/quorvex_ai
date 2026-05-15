@@ -173,6 +173,8 @@ class BaseAgent:
         setup_claude_env()
         # Optional callback fired after task is enqueued via Redis queue
         self.on_task_enqueued = None
+        # Optional per-run working directory used for run-local MCP configs/artifacts.
+        self.agent_cwd: str | None = None
 
     async def _query_agent_direct(self, prompt: str, system_prompt: str = None, timeout_seconds: int = None) -> Any:
         """Query the agent using subprocess.run in a thread pool executor.
@@ -183,7 +185,7 @@ class BaseAgent:
         import concurrent.futures
         import time
 
-        cwd = os.getcwd()
+        cwd = self.agent_cwd or os.getcwd()
         mcp_path = Path(cwd) / ".mcp.json"
 
         logger.info("[DIRECT CLI] Starting direct CLI invocation (thread pool)")
@@ -215,6 +217,9 @@ class BaseAgent:
             "--",
             full_prompt,
         ]
+        if mcp_path.exists():
+            insert_at = cli_args.index("--permission-mode")
+            cli_args[insert_at:insert_at] = ["--mcp-config", str(mcp_path), "--strict-mcp-config"]
 
         # Check if running as root - if so, use su to run as agent user
         # (Claude CLI refuses bypassPermissions when running as root)
@@ -468,7 +473,7 @@ echo "done" > {done_file}
                 timeout_seconds=timeout_seconds or 1800,
                 agent_type=agent_type,
                 operation_type=operation_type,
-                cwd=os.getcwd(),
+                cwd=self.agent_cwd or os.getcwd(),
                 env_vars=env_vars or None,
             )
 
@@ -553,7 +558,10 @@ echo "done" > {done_file}
         async def _do_query():
             try:
                 # Pre-flight diagnostics - use logger to ensure visibility in Docker logs
-                cwd = os.getcwd()
+                cwd = self.agent_cwd or os.getcwd()
+                original_cwd = os.getcwd()
+                if self.agent_cwd:
+                    os.chdir(cwd)
                 mcp_path = Path(cwd) / ".mcp.json"
                 logger.info("[SDK DEBUG] Pre-flight check:")
                 logger.info(f"[SDK DEBUG]   Working directory: {cwd}")
@@ -606,35 +614,39 @@ echo "done" > {done_file}
 
                 logger.info("[SDK DEBUG] About to call query() - entering async iterator...")
 
-                async for message in query(prompt=full_prompt, options=options):
-                    message_count += 1
-                    if first_message_time is None:
-                        first_message_time = datetime.now()
-                        elapsed = (first_message_time - query_start).total_seconds()
-                        logger.info(f"[SDK DEBUG] First message received after {elapsed:.1f}s")
+                try:
+                    async for message in query(prompt=full_prompt, options=options):
+                        message_count += 1
+                        if first_message_time is None:
+                            first_message_time = datetime.now()
+                            elapsed = (first_message_time - query_start).total_seconds()
+                            logger.info(f"[SDK DEBUG] First message received after {elapsed:.1f}s")
 
-                    msg_type = type(message).__name__
-                    has_result = hasattr(message, "result")
-                    has_content = hasattr(message, "content")
+                        msg_type = type(message).__name__
+                        has_result = hasattr(message, "result")
+                        has_content = hasattr(message, "content")
 
-                    # More detailed message info
-                    extra_info = ""
-                    if hasattr(message, "type"):
-                        extra_info += f" msg.type={message.type}"
-                    if hasattr(message, "error"):
-                        extra_info += f" error={message.error}"
+                        # More detailed message info
+                        extra_info = ""
+                        if hasattr(message, "type"):
+                            extra_info += f" msg.type={message.type}"
+                        if hasattr(message, "error"):
+                            extra_info += f" error={message.error}"
 
-                    logger.info(
-                        f"[SDK DEBUG] Message #{message_count}: type={msg_type}, has_result={has_result}, has_content={has_content}{extra_info}"
-                    )
+                        logger.info(
+                            f"[SDK DEBUG] Message #{message_count}: type={msg_type}, has_result={has_result}, has_content={has_content}{extra_info}"
+                        )
 
-                    if hasattr(message, "result"):
-                        result_preview = str(message.result)[:200] if message.result else "None"
-                        logger.info(f"[SDK DEBUG] Got result: {result_preview}...")
-                        return message.result
-                    if hasattr(message, "content"):
-                        # Accumulate streaming content for timeout recovery
-                        accumulator.add_content(message.content)
+                        if hasattr(message, "result"):
+                            result_preview = str(message.result)[:200] if message.result else "None"
+                            logger.info(f"[SDK DEBUG] Got result: {result_preview}...")
+                            return message.result
+                        if hasattr(message, "content"):
+                            # Accumulate streaming content for timeout recovery
+                            accumulator.add_content(message.content)
+                finally:
+                    if self.agent_cwd:
+                        os.chdir(original_cwd)
 
                 # If we exit the loop without result, return accumulated content
                 logger.info(
@@ -643,6 +655,11 @@ echo "done" > {done_file}
                 return accumulator.get_content()
 
             except Exception as e:
+                if self.agent_cwd and "original_cwd" in locals():
+                    try:
+                        os.chdir(original_cwd)
+                    except Exception:
+                        pass
                 logger.error(f"Agent Query Error: {e}", exc_info=True)
                 raise e
 

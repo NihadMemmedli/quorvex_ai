@@ -12,6 +12,7 @@ Resource Management:
 """
 
 import asyncio
+import json
 import logging
 import os
 
@@ -199,6 +200,15 @@ class IssueResponse(BaseModel):
     created_at: datetime
 
 
+class ExplorationArtifactResponse(BaseModel):
+    """Static artifact created during an exploration session."""
+
+    name: str
+    path: str
+    type: str
+    modified_at: datetime | None = None
+
+
 class ExplorationFullDetailsResponse(BaseModel):
     """Combined full details for all 5 categories."""
 
@@ -208,6 +218,7 @@ class ExplorationFullDetailsResponse(BaseModel):
     elements: list[ElementSummary] = Field(default_factory=list)
     api_endpoints: list[ApiEndpointDetailResponse] = Field(default_factory=list)
     issues: list[IssueResponse] = Field(default_factory=list)
+    artifacts: list[ExplorationArtifactResponse] = Field(default_factory=list)
 
 
 class FlowUpdateRequest(BaseModel):
@@ -375,6 +386,130 @@ def _build_exploratory_agent_config(
         config["focus_areas"] = request_body.focus_areas
 
     return config
+
+
+def _is_package_version_at_least(package_json: Path, minimum: str) -> bool:
+    """Return whether package_json declares a semver version >= minimum."""
+    if not package_json.exists():
+        return False
+    try:
+        package = json.loads(package_json.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    def parse(version: str) -> tuple[int, int, int]:
+        core = str(version).split("-", 1)[0]
+        parts = []
+        for part in core.split(".")[:3]:
+            try:
+                parts.append(int(part))
+            except ValueError:
+                parts.append(0)
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts)  # type: ignore[return-value]
+
+    return parse(str(package.get("version", "0.0.0"))) >= parse(minimum)
+
+
+def _build_playwright_mcp_server_config() -> dict[str, Any]:
+    """Return a Playwright MCP command compatible with video recording tools."""
+    override = os.environ.get("PLAYWRIGHT_MCP_COMMAND")
+    if override:
+        args = os.environ.get("PLAYWRIGHT_MCP_ARGS", "--browser chromium").split()
+        return {"command": override, "args": args}
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    local_bins = [
+        project_root / "node_modules" / ".bin" / "playwright-mcp",
+        project_root / "node_modules" / ".bin" / "mcp-server-playwright",
+    ]
+    local_pkg = project_root / "node_modules" / "@playwright" / "mcp" / "package.json"
+    min_version = os.environ.get("PLAYWRIGHT_MCP_MIN_VERSION", "0.0.75")
+    if _is_package_version_at_least(local_pkg, min_version):
+        for local_bin in local_bins:
+            if local_bin.exists():
+                return {"command": str(local_bin), "args": ["--browser", "chromium"]}
+
+    package = os.environ.get("PLAYWRIGHT_MCP_PACKAGE", f"@playwright/mcp@{min_version}")
+    return {"command": "npx", "args": ["-y", package, "--browser", "chromium"]}
+
+
+def _prepare_exploration_mcp_config(session_id: str) -> Path:
+    """Create run-local MCP config so video output stays with this exploration."""
+    project_root = Path(__file__).resolve().parent.parent.parent
+    run_dir = project_root / "runs" / session_id
+    artifacts_dir = run_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    mcp_server = _build_playwright_mcp_server_config()
+    mcp_args = list(mcp_server["args"])
+    mcp_args.extend(["--output-dir", str(artifacts_dir), "--isolated"])
+    if os.environ.get("HEADLESS", "true").lower() != "false":
+        mcp_args.append("--headless")
+
+    mcp_config = {
+        "mcpServers": {
+            "playwright": {
+                "command": mcp_server["command"],
+                "args": mcp_args,
+            }
+        }
+    }
+    (run_dir / ".mcp.json").write_text(json.dumps(mcp_config, indent=2))
+    return run_dir
+
+
+def _collect_exploration_artifacts(session_id: str) -> list[ExplorationArtifactResponse]:
+    """Collect static video/image artifacts for an exploration session."""
+    project_root = Path(__file__).resolve().parent.parent.parent
+    runs_roots = [project_root / "runs", Path("/app/runs")]
+    suffix_types = {
+        ".png": "image",
+        ".jpg": "image",
+        ".jpeg": "image",
+        ".webm": "video",
+        ".mp4": "video",
+    }
+    artifacts: list[ExplorationArtifactResponse] = []
+    seen: set[str] = set()
+
+    for runs_root in runs_roots:
+        session_dir = runs_root / session_id
+        if not session_dir.exists():
+            continue
+        for path in session_dir.glob("**/*"):
+            if not path.is_file():
+                continue
+            artifact_type = suffix_types.get(path.suffix.lower())
+            if not artifact_type:
+                continue
+            try:
+                resolved = str(path.resolve())
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                rel_path = path.relative_to(runs_root)
+                modified_at = datetime.utcfromtimestamp(path.stat().st_mtime)
+            except (OSError, ValueError):
+                continue
+            artifacts.append(
+                ExplorationArtifactResponse(
+                    name=path.name,
+                    path=f"/artifacts/{rel_path}",
+                    type=artifact_type,
+                    modified_at=modified_at,
+                )
+            )
+
+    return sorted(
+        artifacts,
+        key=lambda item: (
+            item.type != "video",
+            -(item.modified_at.timestamp() if item.modified_at else 0),
+            item.name,
+        ),
+    )
 
 
 def _bridge_action_trace_to_transitions(
@@ -691,6 +826,7 @@ async def start_exploration(
             "max_interactions": request_body.max_interactions,
             "max_depth": request_body.max_depth,
             "timeout_minutes": request_body.timeout_minutes,
+            "record_video": True,
             "has_credentials": bool(request_body.credentials),
             "exclude_patterns": request_body.exclude_patterns,
             "focus_areas": request_body.focus_areas,
@@ -816,8 +952,10 @@ async def start_exploration(
                 progress_task = asyncio.create_task(_poll_progress())
 
                 # --- ExploratoryAgent execution ---
+                run_dir = _prepare_exploration_mcp_config(session_id)
                 agent = ExploratoryAgent()
                 agent.on_task_enqueued = _on_task_enqueued
+                agent.agent_cwd = str(run_dir)
 
                 ea_config = _build_exploratory_agent_config(request_body, run_id=session_id)
                 ea_result = await agent.run(ea_config)
@@ -962,6 +1100,19 @@ async def get_spec_gen_job(job_id: str):
         "started_at": job.get("started_at"),
         "completed_at": job.get("completed_at"),
     }
+
+
+@router.get("/{session_id}/artifacts", response_model=list[ExplorationArtifactResponse])
+async def get_exploration_artifacts(session_id: str, project_id: str = Query(default="default")):
+    """Get video/image artifacts captured during an exploration session."""
+    from memory.exploration_store import get_exploration_store
+
+    store = get_exploration_store(project_id=project_id)
+    session = store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return _collect_exploration_artifacts(session_id)
 
 
 @router.get("/{session_id}", response_model=ExplorationSessionResponse)
@@ -1640,6 +1791,7 @@ async def get_exploration_details(session_id: str, project_id: str = Query(defau
             )
             for i in issues
         ],
+        artifacts=_collect_exploration_artifacts(session_id),
     )
 
 

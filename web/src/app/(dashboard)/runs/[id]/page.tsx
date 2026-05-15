@@ -38,7 +38,6 @@ export default function RunDetailPage() {
     const [streamingLog, setStreamingLog] = useState<string>('');
     const [isStreaming, setIsStreaming] = useState(false);
     const [viewMode, setViewMode] = useState<'browser' | 'log'>('log'); // Default to log (VNC may not be available)
-    const [vncAvailable, setVncAvailable] = useState<boolean | null>(null);
 
     // Jira bug report state
     const [jiraIssue, setJiraIssue] = useState<{ exists: boolean; jira_issue_key?: string; jira_url?: string; summary?: string } | null>(null);
@@ -51,44 +50,6 @@ export default function RunDetailPage() {
     const [bugReportLabels, setBugReportLabels] = useState<string[]>([]);
     const [creatingIssue, setCreatingIssue] = useState(false);
     const [jiraConfig, setJiraConfig] = useState<{ configured: boolean; project_key?: string; issue_type_id?: string } | null>(null);
-
-    // Check if VNC is available (runs once on mount)
-    useEffect(() => {
-        const vncHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-        const vncUrl = `ws://${vncHost}:6080/websockify`;
-
-        const checkVnc = async () => {
-            try {
-                const ws = new WebSocket(vncUrl);
-                const available = await new Promise<boolean>((resolve) => {
-                    const timeout = setTimeout(() => {
-                        ws.close();
-                        resolve(false);
-                    }, 2000);
-
-                    ws.onopen = () => {
-                        clearTimeout(timeout);
-                        ws.close();
-                        resolve(true);
-                    };
-
-                    ws.onerror = () => {
-                        clearTimeout(timeout);
-                        resolve(false);
-                    };
-                });
-                setVncAvailable(available);
-                // If VNC is available, switch to browser view
-                if (available) {
-                    setViewMode('browser');
-                }
-            } catch {
-                setVncAvailable(false);
-            }
-        };
-
-        checkVnc();
-    }, []);
 
     // Build project query param for API calls
     const projectParam = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
@@ -229,6 +190,9 @@ export default function RunDetailPage() {
         }
     });
 
+    const videoArtifacts = standardArtifacts.filter(art => art.type === 'video');
+    const imageArtifacts = standardArtifacts.filter(art => art.type === 'image');
+
     const formatRunId = (id: string) => {
         try {
             // Extract time portion from format 2026-01-07_22-12-37
@@ -243,6 +207,25 @@ export default function RunDetailPage() {
             return `#${id.substring(0, 6)}`;
         }
     };
+
+    const formatTimestamp = (value?: string | null) => {
+        if (!value) return null;
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return null;
+        return date.toLocaleString();
+    };
+
+    const runStatus = data.effective_status || data.run?.status || data.status || 'unknown';
+    const isRunActive = isStreaming || runStatus === 'running' || runStatus === 'in_progress';
+    const isRunFinished = !isRunActive && ['passed', 'failed', 'success', 'error', 'stopped', 'completed'].includes(runStatus);
+    const statusDetails = [
+        data.current_stage ? ['Stage', data.current_stage] : null,
+        data.stage_message ? ['Message', data.stage_message] : null,
+        data.healing_attempt ? ['Healing attempt', String(data.healing_attempt)] : null,
+        data.queue_position ? ['Queue', `#${data.queue_position}`] : null,
+        formatTimestamp(data.started_at || data.run?.started_at) ? ['Started', formatTimestamp(data.started_at || data.run?.started_at)] : null,
+        formatTimestamp(data.completed_at || data.run?.completed_at) ? ['Completed', formatTimestamp(data.completed_at || data.run?.completed_at)] : null,
+    ].filter(Boolean) as [string, string][];
 
     const handleStop = async () => {
         if (!confirm('Are you sure you want to stop this run?')) return;
@@ -683,7 +666,7 @@ export default function RunDetailPage() {
                             }}>
                                 <button
                                     onClick={() => setViewMode('browser')}
-                                    title={vncAvailable === false ? 'VNC not available (Docker production only)' : 'Live browser view'}
+                                    title={isRunActive ? 'Live browser view' : 'Browser view is only available while a run is active'}
                                     style={{
                                         padding: '0.4rem 0.75rem',
                                         borderRadius: 'calc(var(--radius) - 2px)',
@@ -697,11 +680,11 @@ export default function RunDetailPage() {
                                         alignItems: 'center',
                                         gap: '0.4rem',
                                         transition: 'all 0.15s ease',
-                                        opacity: vncAvailable === false ? 0.6 : 1
+                                        opacity: isRunActive ? 1 : 0.65
                                     }}
                                 >
                                     <Monitor size={14} /> Browser
-                                    {vncAvailable === false && (
+                                    {!isRunActive && (
                                         <span style={{
                                             fontSize: '0.65rem',
                                             padding: '0.1rem 0.3rem',
@@ -710,7 +693,7 @@ export default function RunDetailPage() {
                                             borderRadius: '3px',
                                             marginLeft: '0.2rem'
                                         }}>
-                                            N/A
+                                            Idle
                                         </span>
                                     )}
                                 </button>
@@ -736,11 +719,39 @@ export default function RunDetailPage() {
                             </div>
                         </div>
 
+                        <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                            gap: '0.75rem',
+                            padding: '0.85rem 1rem',
+                            marginBottom: '1rem',
+                            background: 'var(--surface-hover)',
+                            border: '1px solid var(--border)',
+                            borderRadius: 'var(--radius)'
+                        }}>
+                            <div>
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: 0, marginBottom: '0.25rem' }}>Status</div>
+                                <div style={{ fontWeight: 700, textTransform: 'capitalize' }}>{runStatus.replace(/_/g, ' ')}</div>
+                            </div>
+                            {statusDetails.length > 0 ? statusDetails.map(([label, value]) => (
+                                <div key={label}>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: 0, marginBottom: '0.25rem' }}>{label}</div>
+                                    <div style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{value}</div>
+                                </div>
+                            )) : (
+                                <div>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: 0, marginBottom: '0.25rem' }}>Progress</div>
+                                    <div style={{ fontWeight: 600 }}>Waiting for run output</div>
+                                </div>
+                            )}
+                        </div>
+
                         {/* Live Browser View */}
                         {viewMode === 'browser' && (
                             <LiveBrowserView
                                 runId={id}
-                                isActive={isStreaming || data.effective_status === 'running' || data.effective_status === 'in_progress'}
+                                isActive={isRunActive}
+                                onShowLog={() => setViewMode('log')}
                             />
                         )}
 
@@ -779,29 +790,55 @@ export default function RunDetailPage() {
                         `}</style>
                     </section>
 
-                    {standardArtifacts.length > 0 && (
+                    {(videoArtifacts.length > 0 || isRunFinished) && (
+                        <section className="card">
+                            <h2 style={{ fontSize: '1.25rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem', fontWeight: 600 }}>
+                                <VideoIcon size={20} /> Run Recording
+                            </h2>
+                            {videoArtifacts.length > 0 ? (
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: '1rem' }}>
+                                    {videoArtifacts.map((art: Artifact, i: number) => (
+                                        <div key={i} style={{ borderRadius: 'var(--radius)', overflow: 'hidden', background: 'var(--background)', border: '1px solid var(--border)' }}>
+                                            <video
+                                                controls
+                                                preload="metadata"
+                                                src={`${API_BASE}${art.path}`}
+                                                style={{ width: '100%', display: 'block', aspectRatio: '16/9', background: '#000' }}
+                                            />
+                                            <div style={{ padding: '0.75rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+                                                <span style={{ minWidth: 0, fontSize: '0.85rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                    {art.name}
+                                                </span>
+                                                <a href={`${API_BASE}${art.path}`} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', color: 'var(--primary)', fontSize: '0.8rem', textDecoration: 'none', flexShrink: 0 }}>
+                                                    Open <ExternalLink size={13} />
+                                                </a>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div style={{ border: '1px dashed var(--border)', borderRadius: 'var(--radius)', padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                    No video artifact was captured for this run. New runs will record video automatically.
+                                </div>
+                            )}
+                        </section>
+                    )}
+
+                    {imageArtifacts.length > 0 && (
                         <section className="card">
                             <h2 style={{ fontSize: '1.25rem', marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem', fontWeight: 600 }}>
                                 <ImageIcon size={20} /> Other Artifacts
                             </h2>
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '1rem' }}>
-                                {standardArtifacts.map((art: any, i: number) => (
+                                {imageArtifacts.map((art: Artifact, i: number) => (
                                     <div key={i} style={{ borderRadius: 'var(--radius)', overflow: 'hidden', background: 'var(--background)', border: '1px solid var(--border)' }}>
-                                        {art.type === 'image' ? (
-                                            <a href={`${API_BASE}${art.path}`} target="_blank" rel="noreferrer">
-                                                <img
-                                                    src={`${API_BASE}${art.path}`}
-                                                    alt={art.name}
-                                                    style={{ width: '100%', aspectRatio: '16/9', objectFit: 'cover' }}
-                                                />
-                                            </a>
-                                        ) : (
-                                            <video
-                                                controls
+                                        <a href={`${API_BASE}${art.path}`} target="_blank" rel="noreferrer">
+                                            <img
                                                 src={`${API_BASE}${art.path}`}
-                                                style={{ width: '100%' }}
+                                                alt={art.name}
+                                                style={{ width: '100%', aspectRatio: '16/9', objectFit: 'cover' }}
                                             />
-                                        )}
+                                        </a>
                                         <div style={{ padding: '0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                             {art.name}
                                         </div>

@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
-import { Home, FileText, Play, Settings, BarChart2, ClipboardList, FlaskConical, Layers, Compass, CheckSquare, Users, Shield, Zap, Activity, Database, BrainCircuit, TrendingUp, Clock, GitBranch, ChevronRight, MessageSquare, Search, Command, Brain, Bot, FolderOpen, PieChart, Rocket, Workflow } from 'lucide-react';
+import { Home, FileText, Play, Settings, BarChart2, ClipboardList, FlaskConical, Layers, Compass, CheckSquare, Users, Shield, Zap, Activity, Database, BrainCircuit, TrendingUp, Clock, GitBranch, ChevronRight, MessageSquare, Search, Brain, Bot, FolderOpen, PieChart, Rocket, Workflow, MousePointerClick } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
@@ -37,6 +37,7 @@ const navGroups: NavGroup[] = [
         icon: FlaskConical,
         items: [
             { href: '/prd', label: 'PRD', icon: ClipboardList },
+            { href: '/recordings', label: 'Recorder', icon: MousePointerClick },
             { href: '/specs', label: 'Test Specs', icon: FileText },
             { href: '/templates', label: 'Templates', icon: FileText },
             { href: '/runs', label: 'Test Runs', icon: Play },
