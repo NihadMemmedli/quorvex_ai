@@ -83,6 +83,23 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       project_id: pid || 'default',
     }),
   },
+  startCustomAgentFromReport: {
+    label: 'Start Custom Agent From Report',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/api/agents/definitions/${encodeURIComponent(String(args.definitionId))}/runs`,
+    getBody: (args, pid) => ({
+      prompt: args.prompt,
+      url: args.url || undefined,
+      project_id: pid || 'default',
+      config: {
+        source_run_id: args.sourceRunId,
+        source_item_id: args.sourceItemId,
+      },
+    }),
+  },
   stopExploration: {
     label: 'Stop Exploration',
     method: 'POST',
@@ -108,6 +125,19 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     confirmationRequired: true,
     getPath: () => '/specs',
     getBody: (args, pid) => ({ name: args.specName, content: args.content, project_id: pid }),
+  },
+  createTestSpecFromAgentReport: {
+    label: 'Create Test Spec From Agent Report',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/specs',
+    getBody: (args, pid) => ({
+      name: args.specName,
+      content: args.content,
+      project_id: pid,
+    }),
   },
   updateTestSpec: {
     label: 'Update Test Spec',

@@ -11,9 +11,11 @@ export const MUTATING_TOOL_CONFIGS: Record<string, { label: string }> = {
   startDiscoveryExploration: { label: 'Start Discovery Exploration' },
   startExploration: { label: 'Start Exploration' },
   startExplorerAgent: { label: 'Start Explorer Agent' },
+  startCustomAgentFromReport: { label: 'Start Custom Agent From Report' },
   stopExploration: { label: 'Stop Exploration' },
   generateRequirements: { label: 'Generate Requirements' },
   createTestSpec: { label: 'Create Test Spec' },
+  createTestSpecFromAgentReport: { label: 'Create Test Spec From Agent Report' },
   updateTestSpec: { label: 'Update Test Spec' },
   runRegressionBatch: { label: 'Run Regression Batch' },
   stopRun: { label: 'Stop Test Run' },
@@ -241,6 +243,51 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       },
     }),
 
+    listAgentRuns: tool({
+      description: 'List autonomous agent runs, including custom agents and Explorer Agent runs. Use this to find recent custom agent reports.',
+      inputSchema: z.object({
+        agentType: z.enum(['custom', 'exploratory', 'writer', 'spec-synthesis']).optional().describe('Optional agent type filter'),
+        limit: z.number().optional().default(20).describe('Number of runs to fetch'),
+      }),
+      execute: async ({ agentType, limit }): Promise<ToolResult> => {
+        const params = projectParams();
+        params.set('limit', String(limit ?? 20));
+        const data = await fetchTool(`/api/agents/runs?${params}`) as unknown;
+        if (!Array.isArray(data)) return data as ToolResult;
+        const runs = agentType ? data.filter((run: any) => run.agent_type === agentType) : data;
+        return { runs, count: runs.length } as ToolResult;
+      },
+    }),
+
+    getAgentRunReport: tool({
+      description: 'Get the structured QA report for a custom agent run, including findings, pages checked, test ideas, evidence, and raw output.',
+      inputSchema: z.object({
+        runId: z.string().describe('The agent run ID'),
+      }),
+      execute: async ({ runId }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/api/agents/runs/${encodeURIComponent(runId)}/report?${params}`);
+      },
+    }),
+
+    searchAgentReports: tool({
+      description: 'Search custom agent structured reports for findings, test ideas, pages, evidence, or follow-up actions.',
+      inputSchema: z.object({
+        query: z.string().optional().describe('Text to search for'),
+        severity: z.enum(['critical', 'high', 'medium', 'low', 'info']).optional().describe('Finding severity or test priority filter'),
+        itemType: z.enum(['finding', 'test_idea', 'page', 'evidence', 'action']).optional().describe('Structured report item type'),
+        limit: z.number().optional().default(30),
+      }),
+      execute: async ({ query, severity, itemType, limit }): Promise<ToolResult> => {
+        const params = projectParams();
+        if (query) params.set('query', query);
+        if (severity) params.set('severity', severity);
+        if (itemType) params.set('item_type', itemType);
+        params.set('limit', String(limit ?? 30));
+        return fetchTool(`/api/agents/reports/search?${params}`);
+      },
+    }),
+
     getRegressionBatches: tool({
       description: 'Get regression batch results with pass/fail counts and duration. Supports pagination via limit/offset.',
       inputSchema: z.object({
@@ -393,6 +440,17 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       }),
     }),
 
+    startCustomAgentFromReport: tool({
+      description: 'Start a follow-up custom agent run from a structured agent report finding or test idea. Requires user approval.',
+      inputSchema: z.object({
+        definitionId: z.string().describe('Custom agent definition ID to run'),
+        prompt: z.string().describe('Follow-up task prompt with the selected report context'),
+        url: z.string().optional().describe('Optional target URL'),
+        sourceRunId: z.string().optional().describe('Source custom agent run ID'),
+        sourceItemId: z.string().optional().describe('Finding/test idea ID that triggered this follow-up'),
+      }),
+    }),
+
     stopExploration: tool({
       description: 'Stop a running or queued exploration session.',
       inputSchema: z.object({
@@ -412,6 +470,16 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       inputSchema: z.object({
         specName: z.string(),
         content: z.string().describe('Markdown spec content with steps'),
+      }),
+    }),
+
+    createTestSpecFromAgentReport: tool({
+      description: 'Create a markdown test spec from a custom agent report finding or test idea. Use after reading getAgentRunReport; requires user approval.',
+      inputSchema: z.object({
+        specName: z.string().describe('Spec file name, e.g. agent-finding-login-error.md'),
+        content: z.string().describe('Markdown spec content with concrete steps and expected outcomes'),
+        sourceRunId: z.string().describe('Source custom agent run ID'),
+        sourceItemId: z.string().describe('Source finding or test idea ID'),
       }),
     }),
 

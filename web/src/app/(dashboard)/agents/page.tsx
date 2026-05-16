@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
-import { Bot, FileText, Play, Terminal, ChevronRight, CheckCircle2, AlertTriangle, Loader2, Clock, RotateCcw, Lock, Globe, Settings, Download, List, Sparkles, Zap, ArrowRight, Info, X, RefreshCw, Scissors, ExternalLink, Plus, Save, Trash2, Wrench } from 'lucide-react';
+import { Bot, FileText, Play, Terminal, ChevronRight, CheckCircle2, AlertTriangle, Loader2, Clock, RotateCcw, Lock, Globe, Settings, Download, List, Sparkles, Zap, ArrowRight, Info, X, RefreshCw, Scissors, ExternalLink, Plus, Save, Trash2, Wrench, MessageSquare, Bug, Lightbulb, Eye } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
@@ -64,6 +64,53 @@ interface SpecResult {
 }
 
 type AuthType = 'none' | 'credentials' | 'session';
+type CustomResultTab = 'overview' | 'findings' | 'test_ideas' | 'evidence' | 'raw';
+
+interface ReportPage {
+    id?: string;
+    url: string;
+    status?: string;
+    notes?: string;
+}
+
+interface ReportFinding {
+    id: string;
+    title: string;
+    severity?: string;
+    confidence?: string;
+    page?: string;
+    description?: string;
+    evidence?: string;
+    suggested_action?: string;
+}
+
+interface ReportTestIdea {
+    id: string;
+    title: string;
+    priority?: string;
+    page?: string;
+    steps?: string[];
+    expected?: string;
+    source_finding_id?: string;
+}
+
+interface ReportEvidence {
+    id?: string;
+    type?: string;
+    label?: string;
+    value?: string;
+}
+
+interface StructuredAgentReport {
+    summary?: string;
+    scope?: string;
+    pages_checked?: ReportPage[];
+    findings?: ReportFinding[];
+    test_ideas?: ReportTestIdea[];
+    evidence?: ReportEvidence[];
+    follow_up_actions?: { id?: string; label?: string; action?: string; target?: string }[];
+    parse_status?: string;
+}
 
 function formatToolName(toolName?: string) {
     if (!toolName) return 'Waiting for first tool';
@@ -81,6 +128,275 @@ function sortArtifactsByModifiedAt(artifacts: AgentArtifact[] = []) {
 
 function getArtifactUrl(artifact: AgentArtifact) {
     return `${API_BASE}${artifact.path}`;
+}
+
+function getStructuredReport(run: AgentRun): StructuredAgentReport {
+    return run.result?.structured_report || {
+        summary: run.result?.summary || 'Custom agent completed. Review the raw output for details.',
+        scope: run.config?.prompt || run.config?.url || '',
+        pages_checked: [],
+        findings: [],
+        test_ideas: [],
+        evidence: [],
+        follow_up_actions: [],
+        parse_status: 'raw',
+    };
+}
+
+function severityColor(value?: string) {
+    const normalized = (value || '').toLowerCase();
+    if (normalized === 'critical' || normalized === 'high') return 'var(--danger)';
+    if (normalized === 'medium') return 'var(--warning)';
+    if (normalized === 'low') return 'var(--primary)';
+    return 'var(--text-secondary)';
+}
+
+function reportStatusColor(value?: string) {
+    const normalized = (value || '').toLowerCase();
+    if (normalized.includes('issue') || normalized.includes('failed') || normalized.includes('error')) return 'var(--danger)';
+    if (normalized.includes('load') || normalized.includes('pass')) return 'var(--success)';
+    return 'var(--text-secondary)';
+}
+
+function itemPrompt(run: AgentRun, item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test idea') {
+    const title = item.title || item.id;
+    return [
+        `Use custom agent run ${run.id} (${run.config?.agent_name || 'Custom Agent'}) as context.`,
+        `Selected ${kind}: ${item.id} - ${title}`,
+        'Create an actionable next step. If it requires changing platform state, prepare an approval action instead of doing it silently.',
+    ].join('\n');
+}
+
+function CustomAgentReportView({
+    run,
+    activeTab,
+    onTabChange,
+    onAskAssistant,
+}: {
+    run: AgentRun;
+    activeTab: CustomResultTab;
+    onTabChange: (tab: CustomResultTab) => void;
+    onAskAssistant: (prompt: string) => void;
+}) {
+    const report = getStructuredReport(run);
+    const findings = report.findings || [];
+    const testIdeas = report.test_ideas || [];
+    const pages = report.pages_checked || [];
+    const evidence = report.evidence || [];
+    const tabs: { key: CustomResultTab; label: string }[] = [
+        { key: 'overview', label: 'Overview' },
+        { key: 'findings', label: `Findings ${findings.length}` },
+        { key: 'test_ideas', label: `Test Ideas ${testIdeas.length}` },
+        { key: 'evidence', label: `Evidence ${evidence.length}` },
+        { key: 'raw', label: 'Raw Output' },
+    ];
+    const basePrompt = `Analyze custom agent run ${run.id} (${run.config?.agent_name || 'Custom Agent'}). Focus on findings, test ideas, and useful follow-up actions.`;
+
+    return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <div style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                    <div style={{ minWidth: 0 }}>
+                        <h3 style={{ fontWeight: 700, fontSize: '1rem', margin: '0 0 0.35rem' }}>
+                            {run.config?.agent_name || 'Custom Agent'}
+                        </h3>
+                        <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                            {run.result?.duration_seconds ? `Completed in ${run.result.duration_seconds.toFixed(1)} seconds` : 'Completed'}
+                            {report.parse_status ? ` · ${report.parse_status} report` : ''}
+                        </p>
+                    </div>
+                    <button
+                        onClick={() => onAskAssistant(basePrompt)}
+                        style={{ border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--text)', borderRadius: '6px', padding: '0.45rem 0.7rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem', fontWeight: 600 }}
+                    >
+                        <MessageSquare size={14} /> Ask Assistant
+                    </button>
+                </div>
+                {report.summary && (
+                    <p style={{ margin: '0.85rem 0 0', color: 'var(--text)', lineHeight: 1.55, fontSize: '0.92rem' }}>
+                        {report.summary}
+                    </p>
+                )}
+            </div>
+
+            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', borderBottom: '1px solid var(--border)', paddingBottom: '0.6rem' }}>
+                {tabs.map(tab => (
+                    <button
+                        key={tab.key}
+                        onClick={() => onTabChange(tab.key)}
+                        style={{
+                            border: '1px solid var(--border)',
+                            background: activeTab === tab.key ? 'var(--primary-glow)' : 'var(--background)',
+                            color: activeTab === tab.key ? 'var(--primary)' : 'var(--text-secondary)',
+                            borderRadius: '6px',
+                            padding: '0.4rem 0.65rem',
+                            cursor: 'pointer',
+                            fontSize: '0.8rem',
+                            fontWeight: 600,
+                        }}
+                    >
+                        {tab.label}
+                    </button>
+                ))}
+            </div>
+
+            {activeTab === 'overview' && (
+                <div style={{ display: 'grid', gap: '1rem' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
+                        {[
+                            { label: 'Pages Checked', value: pages.length, icon: Eye },
+                            { label: 'Findings', value: findings.length, icon: Bug },
+                            { label: 'Test Ideas', value: testIdeas.length, icon: Lightbulb },
+                            { label: 'Tool Calls', value: run.result?.tool_calls?.length || 0, icon: Wrench },
+                        ].map(item => {
+                            const Icon = item.icon;
+                            return (
+                                <div key={item.label} style={{ padding: '0.9rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', color: 'var(--text-secondary)', fontSize: '0.75rem', marginBottom: '0.45rem' }}>
+                                        <Icon size={14} /> {item.label}
+                                    </div>
+                                    <div style={{ fontWeight: 800, fontSize: '1.4rem' }}>{item.value}</div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                    {report.scope && (
+                        <div style={{ padding: '0.9rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)' }}>
+                            <div style={{ fontWeight: 700, fontSize: '0.85rem', marginBottom: '0.35rem' }}>Scope</div>
+                            <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem', lineHeight: 1.5 }}>{report.scope}</p>
+                        </div>
+                    )}
+                    {pages.length > 0 && (
+                        <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: 'var(--background)' }}>
+                            <div style={{ padding: '0.7rem 0.9rem', borderBottom: '1px solid var(--border)', fontWeight: 700, fontSize: '0.85rem' }}>Pages Checked</div>
+                            {pages.slice(0, 12).map((page, i) => (
+                                <div key={`${page.url}-${i}`} style={{ padding: '0.65rem 0.9rem', borderBottom: i === Math.min(pages.length, 12) - 1 ? 'none' : '1px solid var(--border)', display: 'grid', gridTemplateColumns: '1fr auto', gap: '0.8rem', fontSize: '0.82rem' }}>
+                                    <span style={{ overflowWrap: 'anywhere' }}>{page.url}</span>
+                                    <span style={{ color: reportStatusColor(page.status), fontWeight: 700, textTransform: 'capitalize' }}>{page.status || 'unknown'}</span>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {activeTab === 'findings' && (
+                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                    {findings.length === 0 ? (
+                        <EmptyReportState text="No structured findings were reported." />
+                    ) : findings.map(finding => (
+                        <div key={finding.id} style={{ padding: '0.9rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.45rem' }}>
+                                <div style={{ fontWeight: 700, fontSize: '0.92rem' }}>{finding.id}: {finding.title}</div>
+                                <span style={{ color: severityColor(finding.severity), fontWeight: 800, fontSize: '0.78rem', textTransform: 'uppercase' }}>{finding.severity || 'info'}</span>
+                            </div>
+                            {finding.page && <div style={{ fontSize: '0.78rem', color: 'var(--primary)', marginBottom: '0.35rem', overflowWrap: 'anywhere' }}>{finding.page}</div>}
+                            {finding.description && <p style={{ margin: '0 0 0.45rem', color: 'var(--text-secondary)', fontSize: '0.85rem', lineHeight: 1.5 }}>{finding.description}</p>}
+                            {finding.evidence && <p style={{ margin: '0 0 0.7rem', color: 'var(--text)', fontSize: '0.82rem', lineHeight: 1.45 }}><strong>Evidence:</strong> {finding.evidence}</p>}
+                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <ReportActionButton onClick={() => onAskAssistant(itemPrompt(run, finding, 'finding'))} label="Use in Assistant" icon={MessageSquare} />
+                                <ReportActionButton onClick={() => onAskAssistant(`Create a Playwright markdown test spec from custom agent finding ${finding.id} in run ${run.id}. Include concrete steps and expected results. Use an approval action before creating it.`)} label="Create Spec" icon={FileText} />
+                                <ReportActionButton onClick={() => onAskAssistant(`Start a follow-up custom agent from finding ${finding.id} in run ${run.id}. Verify whether this issue still reproduces and collect evidence. Use approval before starting the agent.`)} label="Follow Up Agent" icon={Bot} />
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {activeTab === 'test_ideas' && (
+                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                    {testIdeas.length === 0 ? (
+                        <EmptyReportState text="No structured test ideas were reported." />
+                    ) : testIdeas.map(idea => (
+                        <div key={idea.id} style={{ padding: '0.9rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.45rem' }}>
+                                <div style={{ fontWeight: 700, fontSize: '0.92rem' }}>{idea.id}: {idea.title}</div>
+                                <span style={{ color: severityColor(idea.priority), fontWeight: 800, fontSize: '0.78rem', textTransform: 'uppercase' }}>{idea.priority || 'medium'}</span>
+                            </div>
+                            {idea.page && <div style={{ fontSize: '0.78rem', color: 'var(--primary)', marginBottom: '0.35rem', overflowWrap: 'anywhere' }}>{idea.page}</div>}
+                            {idea.steps && idea.steps.length > 0 && (
+                                <ol style={{ margin: '0.35rem 0 0.55rem 1.15rem', color: 'var(--text-secondary)', fontSize: '0.84rem', lineHeight: 1.45 }}>
+                                    {idea.steps.map((step, i) => <li key={`${idea.id}-step-${i}`}>{step}</li>)}
+                                </ol>
+                            )}
+                            {idea.expected && <p style={{ margin: '0 0 0.7rem', color: 'var(--text)', fontSize: '0.82rem' }}><strong>Expected:</strong> {idea.expected}</p>}
+                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <ReportActionButton onClick={() => onAskAssistant(itemPrompt(run, idea, 'test idea'))} label="Use in Assistant" icon={MessageSquare} />
+                                <ReportActionButton onClick={() => onAskAssistant(`Create a Playwright markdown test spec from custom agent test idea ${idea.id} in run ${run.id}. Use approval before creating it.`)} label="Create Spec" icon={FileText} />
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {activeTab === 'evidence' && (
+                <div style={{ display: 'grid', gap: '0.6rem' }}>
+                    {evidence.length === 0 ? (
+                        <EmptyReportState text="No structured evidence was reported." />
+                    ) : evidence.map((item, i) => (
+                        <div key={item.id || `${item.label}-${i}`} style={{ padding: '0.75rem 0.9rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)', display: 'grid', gap: '0.3rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', fontSize: '0.84rem' }}>
+                                <strong>{item.label || item.id || `Evidence ${i + 1}`}</strong>
+                                <span style={{ color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{item.type || 'note'}</span>
+                            </div>
+                            {item.value && (
+                                item.value.startsWith('/api/') ? (
+                                    <a href={`${API_BASE}${item.value}`} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.8rem', overflowWrap: 'anywhere' }}>{item.value}</a>
+                                ) : (
+                                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', overflowWrap: 'anywhere' }}>{item.value}</span>
+                                )
+                            )}
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {activeTab === 'raw' && (
+                <div style={{ display: 'grid', gap: '1rem' }}>
+                    <div style={{ background: '#111827', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                        <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.84rem', color: '#e5e7eb', margin: 0 }}>
+                            {run.result?.output || JSON.stringify(run.result, null, 2)}
+                        </pre>
+                    </div>
+                    {run.result?.tool_calls?.length > 0 && (
+                        <details>
+                            <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: '0.9rem' }}>
+                                Tool Calls ({run.result.tool_calls.length})
+                            </summary>
+                            <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.4rem' }}>
+                                {run.result.tool_calls.map((call: any, i: number) => (
+                                    <div key={`${call.name}-${i}`} style={{ padding: '0.5rem', background: 'var(--surface-hover)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '0.78rem' }}>
+                                        <strong>{call.name}</strong>
+                                        {call.duration_ms !== undefined && <span style={{ color: 'var(--text-secondary)' }}> · {Math.round(call.duration_ms)}ms</span>}
+                                        {call.error && <div style={{ color: 'var(--danger)', marginTop: '0.25rem' }}>{call.error}</div>}
+                                    </div>
+                                ))}
+                            </div>
+                        </details>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function EmptyReportState({ text }: { text: string }) {
+    return (
+        <div style={{ padding: '1.25rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)', color: 'var(--text-secondary)', textAlign: 'center', fontSize: '0.86rem' }}>
+            {text}
+        </div>
+    );
+}
+
+function ReportActionButton({ onClick, label, icon: Icon }: { onClick: () => void; label: string; icon: any }) {
+    return (
+        <button
+            onClick={onClick}
+            style={{ border: '1px solid var(--border)', background: 'var(--surface-hover)', color: 'var(--text)', borderRadius: '6px', padding: '0.38rem 0.6rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600 }}
+        >
+            <Icon size={13} /> {label}
+        </button>
+    );
 }
 
 export default function AgentsPage() {
@@ -122,6 +438,7 @@ export default function AgentsPage() {
     const [agentDefinitions, setAgentDefinitions] = useState<AgentDefinition[]>([]);
     const [toolCatalog, setToolCatalog] = useState<AgentTool[]>([]);
     const [selectedDefinitionId, setSelectedDefinitionId] = useState<string>('');
+    const [customResultTab, setCustomResultTab] = useState<CustomResultTab>('overview');
     const [builderOpen, setBuilderOpen] = useState(false);
     const [savingDefinition, setSavingDefinition] = useState(false);
     const [definitionForm, setDefinitionForm] = useState({
@@ -192,6 +509,17 @@ export default function AgentsPage() {
         fetchAgentDefinitions();
         return () => { if (pollInterval.current) clearInterval(pollInterval.current); }
     }, [currentProject?.id]);  // Re-fetch when project changes
+
+    useEffect(() => {
+        setCustomResultTab('overview');
+    }, [activeRun?.id]);
+
+    const openAssistantWithPrompt = (prompt: string) => {
+        window.dispatchEvent(new CustomEvent('open-ai-assistant'));
+        setTimeout(() => {
+            window.dispatchEvent(new CustomEvent('assistant-prefill', { detail: { prompt } }));
+        }, 50);
+    };
 
     // Fetch single run
     const fetchRun = async (id: string) => {
@@ -1341,46 +1669,12 @@ export default function AgentsPage() {
                                         </div>
                                     </>
                                 ) : activeRun.agent_type === 'custom' ? (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                                        <div style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '10px', border: '1px solid var(--border)' }}>
-                                            <h3 style={{ fontWeight: 700, fontSize: '1rem', margin: '0 0 0.5rem' }}>
-                                                {activeRun.config?.agent_name || 'Custom Agent'}
-                                            </h3>
-                                            <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                                                {activeRun.result?.duration_seconds ? `Completed in ${activeRun.result.duration_seconds.toFixed(1)} seconds` : 'Completed'}
-                                            </p>
-                                            {activeRun.config?.selected_tools?.length > 0 && (
-                                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.75rem' }}>
-                                                    {activeRun.config.selected_tools.map((tool: AgentTool) => (
-                                                        <span key={tool.id} style={{ fontSize: '0.72rem', padding: '0.2rem 0.45rem', borderRadius: '999px', background: 'var(--primary-glow)', color: 'var(--primary)' }}>
-                                                            {tool.label}
-                                                        </span>
-                                                    ))}
-                                                </div>
-                                            )}
-                                        </div>
-                                        <div style={{ background: '#111827', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                                            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.88rem', color: '#e5e7eb', margin: 0 }}>
-                                                {activeRun.result?.output || JSON.stringify(activeRun.result, null, 2)}
-                                            </pre>
-                                        </div>
-                                        {activeRun.result?.tool_calls?.length > 0 && (
-                                            <details>
-                                                <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: '0.9rem' }}>
-                                                    Tool Calls ({activeRun.result.tool_calls.length})
-                                                </summary>
-                                                <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.4rem' }}>
-                                                    {activeRun.result.tool_calls.map((call: any, i: number) => (
-                                                        <div key={`${call.name}-${i}`} style={{ padding: '0.5rem', background: 'var(--surface-hover)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '0.78rem' }}>
-                                                            <strong>{call.name}</strong>
-                                                            {call.duration_ms !== undefined && <span style={{ color: 'var(--text-secondary)' }}> · {Math.round(call.duration_ms)}ms</span>}
-                                                            {call.error && <div style={{ color: 'var(--danger)', marginTop: '0.25rem' }}>{call.error}</div>}
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </details>
-                                        )}
-                                    </div>
+                                    <CustomAgentReportView
+                                        run={activeRun}
+                                        activeTab={customResultTab}
+                                        onTabChange={setCustomResultTab}
+                                        onAskAssistant={openAssistantWithPrompt}
+                                    />
                                 ) : (
                                     // Exploratory Result - User Friendly Display
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>

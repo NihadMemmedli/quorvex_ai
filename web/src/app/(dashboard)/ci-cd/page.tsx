@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { GitBranch, Loader2, RefreshCw, Play, ChevronDown, ChevronUp } from 'lucide-react';
+import { GitBranch, Loader2, RefreshCw, Play, ChevronDown, ChevronUp, GitPullRequest, ShieldCheck, XCircle, CheckCircle, AlertTriangle, ExternalLink } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
 import { PipelineStatusCard } from '@/components/PipelineStatusCard';
@@ -37,6 +37,156 @@ interface GhWorkflow {
     state: string;
 }
 
+interface QualityGate {
+    id: string;
+    pr_number: number;
+    title?: string;
+    owner: string;
+    repo: string;
+    head_ref?: string;
+    base_ref?: string;
+    risk_level: string;
+    confidence: string;
+    changed_files_count: number;
+    selected_tests_count: number;
+    total_candidate_tests: number;
+    saved_tests_count?: number;
+    fallback_reason?: string;
+    batch_id?: string;
+    created_at?: string;
+    quality_gate: {
+        state: string;
+        description: string;
+        batch_url?: string;
+        analysis_url?: string;
+        batch?: {
+            id: string;
+            status: string;
+            total_tests: number;
+            passed: number;
+            failed: number;
+            running: number;
+            queued: number;
+            success_rate: number;
+        } | null;
+    };
+}
+
+function getGateColor(state: string): string {
+    switch (state) {
+        case 'passed': return 'var(--success)';
+        case 'failed':
+        case 'blocked': return 'var(--danger)';
+        case 'running':
+        case 'analyzed': return 'var(--primary)';
+        case 'needs-full-suite': return 'var(--warning)';
+        default: return 'var(--text-secondary)';
+    }
+}
+
+function getGateIcon(state: string) {
+    switch (state) {
+        case 'passed': return <CheckCircle size={15} />;
+        case 'failed':
+        case 'blocked': return <XCircle size={15} />;
+        case 'running':
+        case 'analyzed': return <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} />;
+        case 'needs-full-suite': return <AlertTriangle size={15} />;
+        default: return <ShieldCheck size={15} />;
+    }
+}
+
+function QualityGateCard({ gate }: { gate: QualityGate }) {
+    const state = gate.quality_gate?.state || 'unknown';
+    const color = getGateColor(state);
+    const batch = gate.quality_gate?.batch;
+
+    return (
+        <div style={{
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius)',
+            background: 'var(--background)',
+            padding: '0.9rem',
+            minWidth: 0,
+        }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'flex-start' }}>
+                <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 750, fontSize: '0.9rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        PR #{gate.pr_number}: {gate.title || 'Untitled'}
+                    </div>
+                    <div style={{ marginTop: '0.25rem', color: 'var(--text-secondary)', fontSize: '0.76rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {gate.owner}/{gate.repo} · {gate.head_ref || 'head'} → {gate.base_ref || 'base'}
+                    </div>
+                </div>
+                <span style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.3rem',
+                    padding: '0.18rem 0.5rem',
+                    borderRadius: '999px',
+                    color,
+                    background: `color-mix(in srgb, ${color} 12%, transparent)`,
+                    fontSize: '0.72rem',
+                    fontWeight: 750,
+                    textTransform: 'capitalize',
+                    flexShrink: 0,
+                }}>
+                    {getGateIcon(state)}
+                    {state.replaceAll('-', ' ')}
+                </span>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.45rem', marginTop: '0.85rem' }}>
+                {[
+                    ['Risk', gate.risk_level],
+                    ['Selected', `${gate.selected_tests_count}/${gate.total_candidate_tests}`],
+                    ['Skipped', String(gate.saved_tests_count ?? 0)],
+                ].map(([label, value]) => (
+                    <div key={label} style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '0.5rem' }}>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.68rem' }}>{label}</div>
+                        <div style={{ marginTop: '0.2rem', fontWeight: 750, fontSize: '0.82rem', textTransform: label === 'Risk' ? 'capitalize' : undefined }}>{value}</div>
+                    </div>
+                ))}
+            </div>
+
+            {batch && (
+                <div style={{ marginTop: '0.7rem', color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
+                    Batch: {batch.passed}/{batch.total_tests} passed
+                    {batch.failed > 0 ? <span style={{ color: 'var(--danger)' }}> · {batch.failed} failed</span> : null}
+                    {(batch.running > 0 || batch.queued > 0) ? ` · ${batch.running + batch.queued} active` : ''}
+                </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+                {gate.batch_id && (
+                    <a href={`/regression/batches/${gate.batch_id}`} style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.3rem',
+                        color: 'var(--primary)',
+                        textDecoration: 'none',
+                        fontSize: '0.78rem',
+                        fontWeight: 700,
+                    }}>
+                        View Batch <ExternalLink size={12} />
+                    </a>
+                )}
+                <a href="/pr-advisor" style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.3rem',
+                    color: 'var(--text-secondary)',
+                    textDecoration: 'none',
+                    fontSize: '0.78rem',
+                    fontWeight: 700,
+                }}>
+                    Open PR Advisor <ExternalLink size={12} />
+                </a>
+            </div>
+        </div>
+    );
+}
+
 export default function CiCdPage() {
     const { currentProject } = useProject();
     const projectId = currentProject?.id || (typeof window !== 'undefined' ? localStorage.getItem('selectedProjectId') : null) || 'default';
@@ -47,6 +197,10 @@ export default function CiCdPage() {
     const [syncing, setSyncing] = useState(false);
     const [filter, setFilter] = useState<ProviderFilter>('all');
     const refreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+    const [qualityGates, setQualityGates] = useState<QualityGate[]>([]);
+    const [gatePrNumber, setGatePrNumber] = useState('');
+    const [startingGate, setStartingGate] = useState(false);
+    const [gateError, setGateError] = useState('');
 
     // GitHub config state
     const [ghConfigured, setGhConfigured] = useState(false);
@@ -94,6 +248,13 @@ export default function CiCdPage() {
         } catch { /* ignore sync errors */ }
     }, [pid]);
 
+    const fetchQualityGates = useCallback(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/github/${pid}/quality-gates/pr?limit=20`);
+            if (res.ok) setQualityGates(await res.json());
+        } catch { /* ignore */ }
+    }, [pid]);
+
     const fetchPipelines = useCallback(async (doSync = false) => {
         if (doSync) {
             setSyncing(true);
@@ -127,8 +288,9 @@ export default function CiCdPage() {
 
             setPipelines(results);
         } catch { /* ignore */ }
+        await fetchQualityGates();
         setLoading(false);
-    }, [pid, syncGithubRuns]);
+    }, [pid, syncGithubRuns, fetchQualityGates]);
 
     // Initial load with sync
     useEffect(() => {
@@ -141,8 +303,9 @@ export default function CiCdPage() {
         const hasActive = pipelines.some(p =>
             ['pending', 'running', 'queued', 'waiting', 'in_progress'].includes(p.status)
         );
+        const hasActiveGate = qualityGates.some(g => ['running', 'analyzed'].includes(g.quality_gate?.state));
 
-        if (hasActive) {
+        if (hasActive || hasActiveGate) {
             refreshTimer.current = setInterval(() => fetchPipelines(true), 15000);
         } else if (refreshTimer.current) {
             clearInterval(refreshTimer.current);
@@ -152,7 +315,7 @@ export default function CiCdPage() {
         return () => {
             if (refreshTimer.current) clearInterval(refreshTimer.current);
         };
-    }, [pipelines, fetchPipelines]);
+    }, [pipelines, qualityGates, fetchPipelines]);
 
     const handleTrigger = async () => {
         setTriggering(true);
@@ -180,9 +343,45 @@ export default function CiCdPage() {
         setTriggering(false);
     };
 
+    const startQualityGate = async () => {
+        const pr = Number(gatePrNumber);
+        if (!Number.isInteger(pr) || pr <= 0) {
+            setGateError('Enter a valid PR number');
+            return;
+        }
+        setStartingGate(true);
+        setGateError('');
+        try {
+            const res = await fetch(`${API_BASE}/github/${pid}/quality-gates/pr/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    pr_number: pr,
+                    run_recommended: true,
+                    post_feedback: true,
+                    create_commit_status: true,
+                }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                setGateError(data.detail || `Failed (${res.status})`);
+                return;
+            }
+            setGatePrNumber('');
+            await fetchQualityGates();
+            setTimeout(() => fetchQualityGates(), 3000);
+        } catch (e: any) {
+            setGateError(e.message || 'Failed to start quality gate');
+        } finally {
+            setStartingGate(false);
+        }
+    };
+
     const filteredPipelines = filter === 'all'
         ? pipelines
         : pipelines.filter(p => p.provider === filter);
+
+    const activeGate = qualityGates.some(g => ['running', 'analyzed'].includes(g.quality_gate?.state));
 
     const tabStyle = (tab: ProviderFilter): React.CSSProperties => ({
         padding: '0.6rem 1.25rem',
@@ -341,6 +540,95 @@ export default function CiCdPage() {
                 </div>
             )}
 
+            {/* PR quality gates */}
+            <section className="animate-in stagger-1" style={{
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius)',
+                background: 'var(--surface)',
+                marginBottom: '1.5rem',
+                overflow: 'hidden',
+            }}>
+                <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '1rem',
+                    padding: '1rem 1.25rem',
+                    borderBottom: '1px solid var(--border)',
+                    flexWrap: 'wrap',
+                }}>
+                    <div style={{ minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 700 }}>
+                            <GitPullRequest size={17} />
+                            PR Quality Gates
+                        </div>
+                        <div style={{ marginTop: '0.2rem', color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+                            Changed-file-aware Quorvex test selection and merge confidence.
+                        </div>
+                    </div>
+                    {ghConfigured && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            <input
+                                value={gatePrNumber}
+                                onChange={e => setGatePrNumber(e.target.value)}
+                                placeholder="PR #"
+                                inputMode="numeric"
+                                style={{
+                                    width: '100px',
+                                    padding: '0.48rem 0.55rem',
+                                    border: '1px solid var(--border)',
+                                    borderRadius: 'var(--radius)',
+                                    background: 'var(--background)',
+                                    color: 'var(--text)',
+                                    fontSize: '0.85rem',
+                                }}
+                            />
+                            <button
+                                onClick={startQualityGate}
+                                disabled={startingGate}
+                                style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.4rem',
+                                    padding: '0.5rem 0.75rem',
+                                    border: 'none',
+                                    borderRadius: 'var(--radius)',
+                                    color: '#fff',
+                                    background: 'var(--primary)',
+                                    cursor: startingGate ? 'default' : 'pointer',
+                                    fontWeight: 700,
+                                    fontSize: '0.85rem',
+                                    opacity: startingGate ? 0.7 : 1,
+                                }}
+                            >
+                                {startingGate ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <ShieldCheck size={14} />}
+                                {startingGate ? 'Starting...' : 'Start Gate'}
+                            </button>
+                        </div>
+                    )}
+                </div>
+                {gateError && (
+                    <div style={{ padding: '0.65rem 1.25rem', color: 'var(--danger)', fontSize: '0.82rem', borderBottom: '1px solid var(--border)' }}>
+                        {gateError}
+                    </div>
+                )}
+                {!ghConfigured ? (
+                    <div style={{ padding: '1rem 1.25rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                        Configure GitHub in Settings to start PR quality gates.
+                    </div>
+                ) : qualityGates.length === 0 ? (
+                    <div style={{ padding: '1rem 1.25rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                        No PR quality gates yet.
+                    </div>
+                ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.75rem', padding: '1rem' }}>
+                        {qualityGates.slice(0, 6).map(gate => (
+                            <QualityGateCard key={gate.id} gate={gate} />
+                        ))}
+                    </div>
+                )}
+            </section>
+
             {/* Provider filter tabs */}
             <div className="animate-in stagger-2" style={{
                 display: 'flex',
@@ -403,7 +691,7 @@ export default function CiCdPage() {
             )}
 
             {/* Auto-refresh indicator */}
-            {pipelines.some(p => ['pending', 'running', 'queued', 'waiting', 'in_progress'].includes(p.status)) && (
+            {(pipelines.some(p => ['pending', 'running', 'queued', 'waiting', 'in_progress'].includes(p.status)) || activeGate) && (
                 <div style={{
                     marginTop: '1rem',
                     padding: '0.5rem 0.75rem',
@@ -414,7 +702,7 @@ export default function CiCdPage() {
                     gap: '0.4rem',
                 }}>
                     <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
-                    Auto-refreshing every 15 seconds
+                    Auto-refreshing active work every 15 seconds
                 </div>
             )}
 

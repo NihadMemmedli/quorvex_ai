@@ -128,6 +128,58 @@ class GithubClient:
             page += 1
         return files
 
+    async def list_issue_comments(self, owner: str, repo: str, issue_number: int) -> list[dict[str, Any]]:
+        """List comments on an issue or pull request."""
+        data = await self._request(
+            "GET",
+            f"repos/{owner}/{repo}/issues/{issue_number}/comments",
+            params={"per_page": 100},
+        )
+        if isinstance(data, list):
+            return data
+        return []
+
+    async def create_issue_comment(self, owner: str, repo: str, issue_number: int, body: str) -> dict[str, Any]:
+        """Create a comment on an issue or pull request."""
+        return await self._request(
+            "POST",
+            f"repos/{owner}/{repo}/issues/{issue_number}/comments",
+            json={"body": body},
+        )
+
+    async def update_issue_comment(self, owner: str, repo: str, comment_id: int, body: str) -> dict[str, Any]:
+        """Update an existing issue or pull request comment."""
+        return await self._request(
+            "PATCH",
+            f"repos/{owner}/{repo}/issues/comments/{comment_id}",
+            json={"body": body},
+        )
+
+    async def create_commit_status(
+        self,
+        owner: str,
+        repo: str,
+        sha: str,
+        *,
+        state: str,
+        context: str,
+        description: str,
+        target_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a GitHub commit status for a SHA."""
+        payload: dict[str, Any] = {
+            "state": state,
+            "context": context,
+            "description": description[:140],
+        }
+        if target_url:
+            payload["target_url"] = target_url
+        return await self._request(
+            "POST",
+            f"repos/{owner}/{repo}/statuses/{sha}",
+            json=payload,
+        )
+
     # -- Workflows -------------------------------------------------
 
     async def list_workflows(self, owner: str, repo: str) -> list[dict[str, Any]]:

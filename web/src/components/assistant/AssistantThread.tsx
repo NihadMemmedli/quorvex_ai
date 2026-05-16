@@ -1041,6 +1041,11 @@ const toolPageMap: Record<string, string> = {
   listSpecTemplates: '/specs',
   getExplorationSessions: '/exploration',
   startExplorerAgent: '/exploration',
+  listAgentRuns: '/agents',
+  getAgentRunReport: '/agents',
+  searchAgentReports: '/agents',
+  startCustomAgentFromReport: '/agents',
+  createTestSpecFromAgentReport: '/specs',
   getRequirements: '/requirements',
   getRtmCoverage: '/rtm',
   getRTMSummary: '/rtm',
@@ -2226,6 +2231,22 @@ function Composer() {
   const mentionDebounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const { currentProject } = useProject();
+
+  useEffect(() => {
+    function handleAssistantPrefill(event: Event) {
+      const detail = (event as CustomEvent<{ prompt?: string; send?: boolean }>).detail;
+      const prompt = detail?.prompt;
+      if (!prompt) return;
+      setInputText(prompt);
+      runtime.composer.setText(prompt);
+      setTimeout(() => inputRef.current?.focus(), 0);
+      if (detail?.send) {
+        setTimeout(() => runtime.composer.send(), 0);
+      }
+    }
+    window.addEventListener('assistant-prefill', handleAssistantPrefill);
+    return () => window.removeEventListener('assistant-prefill', handleAssistantPrefill);
+  }, [runtime]);
 
   // Filter commands based on current input
   const filtered = inputText.startsWith('/')

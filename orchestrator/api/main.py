@@ -38,6 +38,12 @@ from logging_config import get_logger, request_id_var, setup_logging
 from services.browser_pool import AbstractBrowserPool, get_browser_pool
 from services.browser_pool import OperationType as BrowserOpType
 from services.resource_manager import ResourceManager, ResourceType, get_resource_manager
+from utils.agent_report import (
+    CUSTOM_AGENT_REPORT_INSTRUCTIONS,
+    _as_report_list,
+    _build_custom_agent_structured_report,
+    _clean_text,
+)
 from utils.project_utils import derive_project_id_from_url
 
 from . import (
@@ -5818,6 +5824,25 @@ def _collect_agent_run_artifacts(run_id: str) -> list[dict[str, Any]]:
         return []
 
 
+def _agent_run_summary(run: AgentRun) -> str | None:
+    result = run.result or {}
+    structured = result.get("structured_report") if isinstance(result, dict) else None
+    if isinstance(structured, dict) and structured.get("summary"):
+        return structured.get("summary")
+    return result.get("summary") if isinstance(result, dict) else None
+
+
+def _filter_agent_run_project(run: AgentRun, project_id: str | None) -> None:
+    if not project_id:
+        return
+    if run.project_id:
+        if project_id == "default":
+            if run.project_id not in (None, "default"):
+                raise HTTPException(status_code=404, detail="Run not found")
+        elif run.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+
 def _sync_agent_tool_catalog(session: Session) -> list[AgentToolDefinition]:
     """Upsert the built-in selectable tool catalog."""
     now = datetime.utcnow()
@@ -6202,6 +6227,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     config.get("system_prompt") or "You are a focused QA automation agent.",
                     "",
                     "Run this task using only the tools you have been granted.",
+                    CUSTOM_AGENT_REPORT_INSTRUCTIONS,
                 ]
                 if has_screenshot_tool:
                     prompt_parts.append(
@@ -6259,9 +6285,17 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     cwd=run_dir,
                 )
                 agent_result = await runner.run("\n".join(prompt_parts))
+                artifacts = _collect_agent_run_artifacts(run_id)
+                structured_report = _build_custom_agent_structured_report(
+                    agent_result.output or "",
+                    config,
+                    artifacts,
+                )
                 result = {
-                    "summary": agent_result.output[:500] if agent_result.output else agent_result.error,
+                    "summary": structured_report.get("summary")
+                    or (agent_result.output[:500] if agent_result.output else agent_result.error),
                     "output": agent_result.output,
+                    "structured_report": structured_report,
                     "error": agent_result.error,
                     "duration_seconds": agent_result.duration_seconds,
                     "tool_calls": [
@@ -6597,7 +6631,7 @@ def list_agent_runs(
             "agent_task_id": r.agent_task_id,
             "artifacts": _collect_agent_run_artifacts(r.id) if r.agent_type in ("exploratory", "custom") else [],
             # Don't send full result in list view if it's huge
-            "summary": r.result.get("summary") if r.result else None,
+            "summary": _agent_run_summary(r),
         }
         for r in runs
     ]
@@ -6613,14 +6647,7 @@ def get_agent_run(
     if not r:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    # Filter by project_id if provided
-    if project_id:
-        if r.project_id:
-            if project_id == "default":
-                if r.project_id not in (None, "default"):
-                    raise HTTPException(status_code=404, detail="Run not found")
-            elif r.project_id != project_id:
-                raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(r, project_id)
 
     return {
         "id": r.id,
@@ -6634,6 +6661,97 @@ def get_agent_run(
         "agent_task_id": r.agent_task_id,
         "artifacts": _collect_agent_run_artifacts(r.id) if r.agent_type in ("exploratory", "custom") else [],
     }
+
+
+@app.get("/api/agents/runs/{id}/report")
+def get_agent_run_report(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    session: Session = Depends(get_session),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+
+    result = run.result or {}
+    artifacts = _collect_agent_run_artifacts(run.id) if run.agent_type in ("exploratory", "custom") else []
+    structured = result.get("structured_report") if isinstance(result, dict) else None
+    if run.agent_type == "custom" and not isinstance(structured, dict):
+        structured = _build_custom_agent_structured_report(result.get("output", "") if isinstance(result, dict) else "", run.config, artifacts)
+
+    return {
+        "id": run.id,
+        "agent_type": run.agent_type,
+        "status": run.status,
+        "created_at": run.created_at.isoformat(),
+        "config": run.config,
+        "project_id": run.project_id,
+        "summary": _agent_run_summary(run),
+        "structured_report": structured,
+        "raw_output": result.get("output") if isinstance(result, dict) else None,
+        "artifacts": artifacts,
+    }
+
+
+@app.get("/api/agents/reports/search")
+def search_agent_reports(
+    project_id: str | None = Query(default=None),
+    query: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    item_type: str | None = Query(default=None, description="finding, test_idea, page, evidence, or action"),
+    limit: int = Query(default=50, ge=1, le=200),
+    session: Session = Depends(get_session),
+):
+    statement = select(AgentRun).where(AgentRun.agent_type == "custom").order_by(AgentRun.created_at.desc())
+    if project_id:
+        if project_id == "default":
+            statement = statement.where((AgentRun.project_id == project_id) | (AgentRun.project_id == None))
+        else:
+            statement = statement.where(AgentRun.project_id == project_id)
+
+    needle = (query or "").strip().lower()
+    severity_filter = (severity or "").strip().lower()
+    type_filter = (item_type or "").strip().lower()
+    results: list[dict[str, Any]] = []
+
+    for run in session.exec(statement.limit(200)).all():
+        result = run.result or {}
+        structured = result.get("structured_report") if isinstance(result, dict) else None
+        if not isinstance(structured, dict):
+            continue
+
+        collections = {
+            "finding": structured.get("findings") or [],
+            "test_idea": structured.get("test_ideas") or [],
+            "page": structured.get("pages_checked") or [],
+            "evidence": structured.get("evidence") or [],
+            "action": structured.get("follow_up_actions") or [],
+        }
+        for current_type, items in collections.items():
+            if type_filter and current_type != type_filter:
+                continue
+            for item in _as_report_list(items):
+                if not isinstance(item, dict):
+                    continue
+                haystack = json.dumps(item, ensure_ascii=False).lower()
+                if needle and needle not in haystack:
+                    continue
+                item_severity = _clean_text(item.get("severity") or item.get("priority"), 30).lower()
+                if severity_filter and item_severity != severity_filter:
+                    continue
+                results.append(
+                    {
+                        "run_id": run.id,
+                        "agent_name": run.config.get("agent_name") or "Custom Agent",
+                        "created_at": run.created_at.isoformat(),
+                        "type": current_type,
+                        "item": item,
+                    }
+                )
+                if len(results) >= limit:
+                    return {"items": results, "count": len(results)}
+    return {"items": results, "count": len(results)}
 
 
 # ========= Enhanced Exploratory Testing Endpoints =========

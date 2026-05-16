@@ -7,6 +7,7 @@ tracking pipeline runs, and receiving webhook events.
 """
 
 import logging
+import os
 from datetime import datetime
 from typing import Any
 
@@ -19,7 +20,15 @@ from .credentials import decrypt_credential, encrypt_credential, mask_credential
 from .db import get_session
 from .middleware.auth import get_current_user_optional
 from .models_auth import User
-from .models_db import CiPipelineMapping, PrImpactAnalysis, PrSelectedTest, Project, RepoIndexSnapshot
+from .models_db import (
+    CiPipelineMapping,
+    PrImpactAnalysis,
+    PrSelectedTest,
+    Project,
+    RegressionBatch,
+    RepoIndexSnapshot,
+    TestRun as DBTestRun,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +65,19 @@ class PrAdvisorAnalyzeRequest(BaseModel):
 
 
 class PrAdvisorRunRequest(BaseModel):
+    browser: str = "chromium"
+    hybrid: bool = False
+    max_iterations: int = 20
+
+
+class PrQualityGateStartRequest(BaseModel):
+    pr_number: int
+    head_sha: str | None = None
+    ensure_indexed: bool = True
+    force_reindex: bool = False
+    run_recommended: bool = True
+    post_feedback: bool = True
+    create_commit_status: bool = True
     browser: str = "chromium"
     hybrid: bool = False
     max_iterations: int = 20
@@ -733,18 +755,24 @@ def get_latest_repository_index(
     return _serialize_repo_index(snapshot)
 
 
-# -- PR Test Advisor -----------------------------------------------
+# -- PR Quality Gate -----------------------------------------------
 
 
-@router.post("/{project_id}/pr-advisor/analyze")
-async def analyze_pull_request_tests(
+TERMINAL_RUN_STATUSES = {"passed", "completed", "failed", "error", "stopped", "cancelled", "canceled"}
+FAILURE_RUN_STATUSES = {"failed", "error", "stopped", "cancelled", "canceled"}
+ACTIVE_RUN_STATUSES = {"queued", "running", "in_progress", "pending"}
+QUALITY_GATE_CONTEXT = "Quorvex Quality Gate"
+QUALITY_GATE_COMMENT_MARKER = "<!-- quorvex-quality-gate -->"
+
+
+async def _analyze_configured_github_pr(
+    *,
     project_id: str,
-    request: PrAdvisorAnalyzeRequest,
-    session: Session = Depends(get_session),
-    current_user: User | None = Depends(get_current_user_optional),
-):
-    """Analyze a GitHub PR and recommend impacted Quorvex tests."""
-    from orchestrator.services.pr_test_advisor import analyze_pr_changes, serialize_analysis
+    request: PrQualityGateStartRequest | PrAdvisorAnalyzeRequest,
+    session: Session,
+) -> PrImpactAnalysis:
+    """Analyze a configured GitHub PR and persist a PrImpactAnalysis."""
+    from orchestrator.services.pr_test_advisor import analyze_pr_changes
 
     project = _require_project(project_id, session)
     config = _get_github_config(project)
@@ -759,6 +787,14 @@ async def analyze_pull_request_tests(
     client = await _build_client(project)
     try:
         pr_data = await client.get_pull_request(owner, repo, request.pr_number)
+        expected_sha = getattr(request, "head_sha", None)
+        actual_sha = (pr_data.get("head") or {}).get("sha")
+        if expected_sha and actual_sha and expected_sha != actual_sha:
+            raise HTTPException(
+                status_code=409,
+                detail="PR head SHA changed before analysis could start; retry for the latest commit.",
+            )
+
         base_ref = (pr_data.get("base") or {}).get("ref") or config.get("default_ref") or "main"
         snapshot = None
         if request.ensure_indexed:
@@ -772,7 +808,7 @@ async def analyze_pull_request_tests(
                 force=request.force_reindex,
             )
         changed_files = await client.list_pull_request_files(owner, repo, request.pr_number)
-        analysis = analyze_pr_changes(
+        return analyze_pr_changes(
             project_id=project_id,
             owner=owner,
             repo=repo,
@@ -782,13 +818,359 @@ async def analyze_pull_request_tests(
             session=session,
             snapshot_id=snapshot.id if snapshot else None,
         )
+    finally:
+        await client.close()
+
+
+def _start_recommended_batch(
+    *,
+    project_id: str,
+    analysis: PrImpactAnalysis,
+    request: PrAdvisorRunRequest | PrQualityGateStartRequest,
+    session: Session,
+) -> dict[str, Any]:
+    """Create and start the regression batch selected by PR analysis."""
+    selected = session.exec(select(PrSelectedTest).where(PrSelectedTest.analysis_id == analysis.id)).all()
+    spec_names = [t.spec_name for t in selected]
+    if not spec_names:
+        return {"batch_created": False, "reason": "Analysis has no selected tests to run"}
+
+    from orchestrator.services.batch_executor import BatchConfig, create_regression_batch
+
+    config = BatchConfig(
+        project_id=project_id,
+        browser=request.browser,
+        hybrid_mode=request.hybrid,
+        max_iterations=request.max_iterations,
+        automated_only=False,
+        spec_names=spec_names,
+        triggered_by="quality-gate",
+        batch_name=f"PR #{analysis.pr_number} Quality Gate",
+    )
+
+    try:
+        result = create_regression_batch(config, session)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    import asyncio
+
+    from .main import PROCESS_MANAGER, execute_run_task_wrapper
+
+    for task_args in result.tasks_to_start:
+        task = asyncio.ensure_future(
+            execute_run_task_wrapper(
+                spec_path=task_args["spec_path"],
+                run_dir=task_args["run_dir"],
+                run_id=task_args["run_id"],
+                try_code_path=task_args.get("try_code_path"),
+                browser=task_args["browser"],
+                hybrid=task_args["hybrid"],
+                max_iterations=task_args["max_iterations"],
+                batch_id=task_args["batch_id"],
+                spec_name=task_args["spec_name"],
+                project_id=task_args["project_id"],
+            )
+        )
+        if hasattr(PROCESS_MANAGER, "register_task"):
+            PROCESS_MANAGER.register_task(task_args["run_id"], task)
+
+    analysis.batch_id = result.batch_id
+    analysis.updated_at = datetime.utcnow()
+    session.add(analysis)
+    session.commit()
+
+    return {
+        "batch_created": True,
+        "batch_id": result.batch_id,
+        "run_ids": result.run_ids,
+        "count": len(result.run_ids),
+    }
+
+
+def _batch_payload(batch: RegressionBatch | None, session: Session) -> dict[str, Any] | None:
+    if not batch:
+        return None
+    runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch.id)).all()
+    failed_runs = [r for r in runs if r.status in FAILURE_RUN_STATUSES]
+    return {
+        "id": batch.id,
+        "name": batch.name,
+        "status": batch.status,
+        "total_tests": batch.actual_total_tests if batch.actual_total_tests is not None else batch.total_tests,
+        "passed": batch.actual_passed if batch.actual_passed is not None else batch.passed,
+        "failed": batch.actual_failed if batch.actual_failed is not None else batch.failed,
+        "stopped": batch.stopped,
+        "running": batch.running,
+        "queued": batch.queued,
+        "success_rate": batch.success_rate,
+        "created_at": batch.created_at.isoformat() if batch.created_at else None,
+        "started_at": batch.started_at.isoformat() if batch.started_at else None,
+        "completed_at": batch.completed_at.isoformat() if batch.completed_at else None,
+        "failed_tests": [
+            {
+                "run_id": r.id,
+                "spec_name": r.spec_name,
+                "status": r.status,
+                "error_message": r.error_message,
+            }
+            for r in failed_runs[:20]
+        ],
+    }
+
+
+def _quality_gate_status(analysis: PrImpactAnalysis, batch: RegressionBatch | None, session: Session) -> dict[str, Any]:
+    if not analysis.selected_tests_count:
+        return {
+            "state": "blocked",
+            "github_state": "error",
+            "description": "No runnable Quorvex tests were selected",
+        }
+    if not batch:
+        if analysis.fallback_reason:
+            return {
+                "state": "needs-full-suite",
+                "github_state": "error",
+                "description": "Full suite recommended before merge",
+            }
+        return {
+            "state": "analyzed",
+            "github_state": "pending",
+            "description": "Quorvex selected PR tests; run is pending",
+        }
+
+    runs = session.exec(select(DBTestRun.status).where(DBTestRun.batch_id == batch.id)).all()
+    has_active = any(status in ACTIVE_RUN_STATUSES for status in runs)
+    has_failure = any(status in FAILURE_RUN_STATUSES for status in runs)
+    all_terminal = bool(runs) and all(status in TERMINAL_RUN_STATUSES for status in runs)
+
+    if has_active or batch.status in {"pending", "running"}:
+        return {
+            "state": "running",
+            "github_state": "pending",
+            "description": "Quorvex PR tests are running",
+        }
+    if has_failure or batch.failed > 0 or batch.stopped > 0:
+        return {
+            "state": "failed",
+            "github_state": "failure",
+            "description": "Quorvex PR tests failed",
+        }
+    if all_terminal and (batch.passed > 0 or (batch.actual_passed or 0) > 0):
+        return {
+            "state": "passed",
+            "github_state": "success",
+            "description": "Quorvex PR tests passed",
+        }
+    return {
+        "state": "blocked",
+        "github_state": "error",
+        "description": "Quorvex could not determine a passing gate result",
+    }
+
+
+def _app_url(path: str) -> str | None:
+    base = os.getenv("WEB_BASE_URL") or os.getenv("FRONTEND_URL") or os.getenv("APP_BASE_URL")
+    if not base:
+        return None
+    return f"{base.rstrip('/')}/{path.lstrip('/')}"
+
+
+def _serialize_quality_gate(analysis: PrImpactAnalysis, session: Session, include_details: bool = True) -> dict[str, Any]:
+    from orchestrator.services.pr_test_advisor import serialize_analysis
+
+    batch = session.get(RegressionBatch, analysis.batch_id) if analysis.batch_id else None
+    gate = _quality_gate_status(analysis, batch, session)
+    payload = serialize_analysis(analysis, session, include_details=include_details)
+    payload["quality_gate"] = {
+        **gate,
+        "batch": _batch_payload(batch, session),
+        "analysis_url": _app_url(f"pr-advisor"),
+        "batch_url": _app_url(f"regression/batches/{analysis.batch_id}") if analysis.batch_id else None,
+    }
+    return payload
+
+
+def _quality_gate_comment(payload: dict[str, Any]) -> str:
+    gate = payload["quality_gate"]
+    selected = payload.get("selected_tests") or []
+    failed = ((gate.get("batch") or {}).get("failed_tests") or [])
+    selected_lines = "\n".join(
+        f"- `{item['spec_name']}`: {item.get('reason', 'Selected by impact analysis')}" for item in selected[:12]
+    )
+    if len(selected) > 12:
+        selected_lines += f"\n- ...and {len(selected) - 12} more"
+    failed_lines = "\n".join(
+        f"- `{item['spec_name']}`: {item.get('status')}" for item in failed[:10]
+    )
+    links = []
+    if gate.get("batch_url"):
+        links.append(f"[View regression batch]({gate['batch_url']})")
+    if gate.get("analysis_url"):
+        links.append(f"[Open PR Advisor]({gate['analysis_url']})")
+    links_line = " | ".join(links)
+    fallback = f"\n\n**Fallback:** {payload['fallback_reason']}" if payload.get("fallback_reason") else ""
+    failures = f"\n\n**Failed tests**\n{failed_lines}" if failed_lines else ""
+    return (
+        f"{QUALITY_GATE_COMMENT_MARKER}\n"
+        "## Quorvex Quality Gate\n\n"
+        f"**Status:** `{gate['state']}`  \n"
+        f"**Risk:** `{payload['risk_level']}`  \n"
+        f"**Confidence:** `{payload['confidence']}`  \n"
+        f"**Changed files:** {payload['changed_files_count']}  \n"
+        f"**Selected tests:** {payload['selected_tests_count']} of {payload['total_candidate_tests']}  \n"
+        f"**Estimated time saved:** {payload.get('saved_tests_count') or 0} tests skipped"
+        f"{fallback}\n\n"
+        f"**Recommended tests**\n{selected_lines or '- No tests selected'}"
+        f"{failures}\n\n"
+        f"{links_line}"
+    )
+
+
+async def _publish_quality_gate_feedback(
+    *,
+    project: Project,
+    analysis: PrImpactAnalysis,
+    payload: dict[str, Any],
+    post_feedback: bool,
+    create_commit_status: bool,
+) -> dict[str, Any]:
+    config = _get_github_config(project) or {}
+    owner = config.get("owner", "")
+    repo = config.get("repo", "")
+    errors: list[str] = []
+    result: dict[str, Any] = {"comment": None, "commit_status": None, "errors": errors}
+    if not owner or not repo:
+        return result
+
+    client = await _build_client(project)
+    try:
+        if post_feedback:
+            try:
+                comments = await client.list_issue_comments(owner, repo, analysis.pr_number)
+                existing = next((c for c in comments if QUALITY_GATE_COMMENT_MARKER in (c.get("body") or "")), None)
+                body = _quality_gate_comment(payload)
+                if existing and existing.get("id"):
+                    updated = await client.update_issue_comment(owner, repo, int(existing["id"]), body)
+                    result["comment"] = {"action": "updated", "url": updated.get("html_url")}
+                else:
+                    created = await client.create_issue_comment(owner, repo, analysis.pr_number, body)
+                    result["comment"] = {"action": "created", "url": created.get("html_url")}
+            except Exception as e:
+                errors.append(f"PR comment failed: {e}")
+
+        if create_commit_status and analysis.head_sha:
+            try:
+                gate = payload["quality_gate"]
+                status = await client.create_commit_status(
+                    owner,
+                    repo,
+                    analysis.head_sha,
+                    state=gate["github_state"],
+                    context=QUALITY_GATE_CONTEXT,
+                    description=gate["description"],
+                    target_url=gate.get("batch_url") or gate.get("analysis_url"),
+                )
+                result["commit_status"] = {"state": status.get("state"), "url": status.get("target_url")}
+            except Exception as e:
+                errors.append(f"Commit status failed: {e}")
+    finally:
+        await client.close()
+    return result
+
+
+@router.post("/{project_id}/quality-gates/pr/start")
+async def start_pr_quality_gate(
+    project_id: str,
+    request: PrQualityGateStartRequest,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Analyze a GitHub PR, optionally run selected tests, and publish quality-gate feedback."""
+    project = _require_project(project_id, session)
+    analysis = await _analyze_configured_github_pr(project_id=project_id, request=request, session=session)
+    run_result = None
+    if request.run_recommended:
+        run_result = _start_recommended_batch(project_id=project_id, analysis=analysis, request=request, session=session)
+        session.refresh(analysis)
+
+    payload = _serialize_quality_gate(analysis, session, include_details=True)
+    payload["run_request"] = run_result
+    if request.post_feedback or request.create_commit_status:
+        payload["feedback"] = await _publish_quality_gate_feedback(
+            project=project,
+            analysis=analysis,
+            payload=payload,
+            post_feedback=request.post_feedback,
+            create_commit_status=request.create_commit_status,
+        )
+    return payload
+
+
+@router.get("/{project_id}/quality-gates/pr/{analysis_id}")
+async def get_pr_quality_gate(
+    project_id: str,
+    analysis_id: str,
+    refresh_feedback: bool = False,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Return the current quality-gate state for a stored PR impact analysis."""
+    project = _require_project(project_id, session)
+    analysis = session.get(PrImpactAnalysis, analysis_id)
+    if not analysis or analysis.project_id != project_id:
+        raise HTTPException(status_code=404, detail="PR quality gate not found")
+    payload = _serialize_quality_gate(analysis, session, include_details=True)
+    if refresh_feedback:
+        payload["feedback"] = await _publish_quality_gate_feedback(
+            project=project,
+            analysis=analysis,
+            payload=payload,
+            post_feedback=True,
+            create_commit_status=True,
+        )
+    return payload
+
+
+@router.get("/{project_id}/quality-gates/pr")
+def list_pr_quality_gates(
+    project_id: str,
+    limit: int = 20,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """List recent PR quality gates with current gate status."""
+    _require_project(project_id, session)
+    safe_limit = max(1, min(limit, 100))
+    analyses = session.exec(
+        select(PrImpactAnalysis)
+        .where(PrImpactAnalysis.project_id == project_id)
+        .order_by(PrImpactAnalysis.created_at.desc())
+        .limit(safe_limit)
+    ).all()
+    return [_serialize_quality_gate(a, session, include_details=False) for a in analyses]
+
+
+# -- PR Test Advisor -----------------------------------------------
+
+
+@router.post("/{project_id}/pr-advisor/analyze")
+async def analyze_pull_request_tests(
+    project_id: str,
+    request: PrAdvisorAnalyzeRequest,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Analyze a GitHub PR and recommend impacted Quorvex tests."""
+    from orchestrator.services.pr_test_advisor import serialize_analysis
+
+    try:
+        analysis = await _analyze_configured_github_pr(project_id=project_id, request=request, session=session)
         return serialize_analysis(analysis, session, include_details=True)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to analyze PR: {e}")
-    finally:
-        await client.close()
 
 
 @router.get("/{project_id}/pr-advisor/analyses")
@@ -843,60 +1225,14 @@ async def run_pr_advisor_recommendation(
     if not analysis or analysis.project_id != project_id:
         raise HTTPException(status_code=404, detail="PR impact analysis not found")
 
-    selected = session.exec(select(PrSelectedTest).where(PrSelectedTest.analysis_id == analysis_id)).all()
-    spec_names = [t.spec_name for t in selected]
-    if not spec_names:
-        raise HTTPException(status_code=400, detail="Analysis has no selected tests to run")
-
-    from orchestrator.services.batch_executor import BatchConfig, create_regression_batch
-
-    config = BatchConfig(
-        project_id=project_id,
-        browser=request.browser,
-        hybrid_mode=request.hybrid,
-        max_iterations=request.max_iterations,
-        automated_only=False,
-        spec_names=spec_names,
-        triggered_by="pr-advisor",
-        batch_name=f"PR #{analysis.pr_number} Recommended Tests",
-    )
-
-    try:
-        result = create_regression_batch(config, session)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    import asyncio
-
-    from .main import PROCESS_MANAGER, execute_run_task_wrapper
-
-    for task_args in result.tasks_to_start:
-        task = asyncio.ensure_future(
-            execute_run_task_wrapper(
-                spec_path=task_args["spec_path"],
-                run_dir=task_args["run_dir"],
-                run_id=task_args["run_id"],
-                try_code_path=task_args.get("try_code_path"),
-                browser=task_args["browser"],
-                hybrid=task_args["hybrid"],
-                max_iterations=task_args["max_iterations"],
-                batch_id=task_args["batch_id"],
-                spec_name=task_args["spec_name"],
-                project_id=task_args["project_id"],
-            )
-        )
-        if hasattr(PROCESS_MANAGER, "register_task"):
-            PROCESS_MANAGER.register_task(task_args["run_id"], task)
-
-    analysis.batch_id = result.batch_id
-    analysis.updated_at = datetime.utcnow()
-    session.add(analysis)
-    session.commit()
+    result = _start_recommended_batch(project_id=project_id, analysis=analysis, request=request, session=session)
+    if not result.get("batch_created"):
+        raise HTTPException(status_code=400, detail=result.get("reason") or "Analysis has no selected tests to run")
 
     return {
-        "batch_id": result.batch_id,
-        "run_ids": result.run_ids,
-        "count": len(result.run_ids),
+        "batch_id": result["batch_id"],
+        "run_ids": result["run_ids"],
+        "count": result["count"],
         "analysis_id": analysis_id,
     }
 
