@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Index
+from sqlalchemy import JSON, Index, UniqueConstraint
 from sqlmodel import Column, Field, SQLModel
 
 
@@ -2078,6 +2078,65 @@ class PrImpactAnalysis(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: datetime | None = Field(default_factory=datetime.utcnow)
+
+
+class PrQualityGateRun(SQLModel, table=True):
+    """Durable CI-facing quality gate run for a specific PR head SHA."""
+
+    __tablename__ = "pr_quality_gate_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "provider",
+            "owner",
+            "repo",
+            "pr_number",
+            "head_sha",
+            name="uq_pr_quality_gate_identity",
+        ),
+        Index("ix_pr_quality_gate_project_pr_sha", "project_id", "pr_number", "head_sha"),
+        Index("ix_pr_quality_gate_batch", "batch_id"),
+        Index("ix_pr_quality_gate_status_updated", "status", "updated_at"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    provider: str = Field(default="github", index=True)
+    owner: str
+    repo: str
+    pr_number: int = Field(index=True)
+    head_sha: str = Field(index=True)
+    analysis_id: str | None = Field(default=None, foreign_key="pr_impact_analyses.id", index=True)
+    batch_id: str | None = Field(default=None, foreign_key="regression_batches.id", index=True)
+
+    status: str = Field(default="initializing", index=True)
+    github_state: str = Field(default="pending", index=True)
+    error_message: str | None = None
+
+    post_feedback: bool = True
+    create_commit_status: bool = True
+    feedback_comment_id: str | None = None
+    feedback_comment_url: str | None = None
+    commit_status_url: str | None = None
+    last_feedback_state: str | None = None
+    feedback_errors_json: str = "[]"
+    final_feedback_published_at: datetime | None = None
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: datetime | None = None
+
+    @property
+    def feedback_errors(self) -> list[str]:
+        try:
+            return json.loads(self.feedback_errors_json)
+        except json.JSONDecodeError:
+            return []
+
+    @feedback_errors.setter
+    def feedback_errors(self, value: list[str]):
+        self.feedback_errors_json = json.dumps(value)
 
 
 class PrChangedFile(SQLModel, table=True):

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Save, AlertCircle, CheckCircle, Key, Globe, Box, Eye, EyeOff, Server, Layers, Monitor, Database, Zap, HardDrive, Lock, Link2, Mail, Loader2, ChevronDown, Bug, GitBranch, GitMerge, Shield, Settings, Smartphone } from 'lucide-react';
+import { Save, AlertCircle, CheckCircle, Key, Globe, Box, Eye, EyeOff, Server, Layers, Monitor, Database, Zap, HardDrive, Lock, Link2, Mail, Loader2, ChevronDown, Bug, GitBranch, GitMerge, Shield, Settings, Smartphone, Copy } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { CredentialsManager } from '@/components/CredentialsManager';
@@ -9,6 +9,8 @@ import { API_BASE } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { FormPageSkeleton } from '@/components/ui/page-skeleton';
+import type { QualityGateDefaults } from '../ci-cd/components/types';
+import { FALLBACK_QUALITY_GATE_DEFAULTS, qualityGateConfigPayload, resolveQualityGateDefaults } from '../ci-cd/components/types';
 
 interface ExecutionSettings {
     parallelism: number;
@@ -45,6 +47,43 @@ interface MobileHealth {
     warnings: string[];
     udid?: string | null;
     device_name?: string | null;
+}
+
+function githubActionsQualityGateYaml(owner: string, repo: string): string {
+    const projectIdExpression = '${{ vars.QUORVEX_PROJECT_ID || \'default\' }}';
+    return `name: Quorvex PR Quality Gate
+# Repository: ${owner || 'OWNER'}/${repo || 'REPO'}
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  quality-gate:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start Quorvex PR Quality Gate
+        env:
+          QUORVEX_API_URL: \${{ secrets.QUORVEX_API_URL }}
+          QUORVEX_API_TOKEN: \${{ secrets.QUORVEX_API_TOKEN }}
+          QUORVEX_PROJECT_ID: ${projectIdExpression}
+        run: |
+          curl -fsS -X POST "$QUORVEX_API_URL/github/$QUORVEX_PROJECT_ID/quality-gates/pr/start" \\
+            -H "Authorization: Bearer $QUORVEX_API_TOKEN" \\
+            -H "Content-Type: application/json" \\
+            -d '{
+              "pr_number": '"\${{ github.event.pull_request.number }}"',
+              "head_sha": "\${{ github.event.pull_request.head.sha }}",
+              "ensure_indexed": true,
+              "run_recommended": true,
+              "post_feedback": true,
+              "create_commit_status": true,
+              "browser": "chromium",
+              "hybrid": false,
+              "max_iterations": 20
+            }'
+`;
 }
 
 export default function SettingsPage() {
@@ -140,6 +179,8 @@ export default function SettingsPage() {
     const [ghLoadingRepos, setGhLoadingRepos] = useState(false);
     const [ghRemoteWorkflows, setGhRemoteWorkflows] = useState<{ id: number; name: string; path: string }[]>([]);
     const [ghLoadingWorkflows, setGhLoadingWorkflows] = useState(false);
+    const [ghQualityGateDefaults, setGhQualityGateDefaults] = useState<QualityGateDefaults>(FALLBACK_QUALITY_GATE_DEFAULTS);
+    const [ghWorkflowYamlCopied, setGhWorkflowYamlCopied] = useState(false);
 
     // Appium mobile testing state
     const [appiumServerUrl, setAppiumServerUrl] = useState('http://127.0.0.1:4723');
@@ -336,6 +377,7 @@ export default function SettingsPage() {
                     setGhDefaultWorkflow(data.default_workflow || '');
                     setGhDefaultRef(data.default_ref || 'main');
                     setGhWebhookSecret(data.webhook_secret || '');
+                    setGhQualityGateDefaults(resolveQualityGateDefaults(data));
 
                     try {
                         const connRes = await fetch(`${API_BASE}/github/${pid}/test-connection`, { method: 'POST' });
@@ -366,6 +408,7 @@ export default function SettingsPage() {
                     setGhDefaultWorkflow('');
                     setGhDefaultRef('main');
                     setGhWebhookSecret('');
+                    setGhQualityGateDefaults(FALLBACK_QUALITY_GATE_DEFAULTS);
                     setGhConnectionStatus(null);
                     setGhRemoteRepos([]);
                     setGhRemoteWorkflows([]);
@@ -941,6 +984,7 @@ export default function SettingsPage() {
                         default_workflow: ghDefaultWorkflow || undefined,
                         default_ref: ghDefaultRef,
                         webhook_secret: ghWebhookSecret || undefined,
+                        quality_gate: qualityGateConfigPayload(ghQualityGateDefaults),
                     })
                 });
             }
@@ -1004,6 +1048,7 @@ export default function SettingsPage() {
                 default_workflow: ghDefaultWorkflow || undefined,
                 default_ref: ghDefaultRef,
                 webhook_secret: ghWebhookSecret || undefined,
+                quality_gate: qualityGateConfigPayload(ghQualityGateDefaults),
             };
             if (ghToken) body.token = ghToken;
 
@@ -1040,6 +1085,7 @@ export default function SettingsPage() {
             setGhDefaultWorkflow('');
             setGhDefaultRef('main');
             setGhWebhookSecret('');
+            setGhQualityGateDefaults(FALLBACK_QUALITY_GATE_DEFAULTS);
             setGhConnectionStatus(null);
             setGhRemoteRepos([]);
             setGhRemoteWorkflows([]);
@@ -1047,6 +1093,21 @@ export default function SettingsPage() {
             setTimeout(() => setMessage(null), 3000);
         } catch {
             setMessage({ type: 'error', text: 'Failed to remove GitHub config' });
+        }
+    };
+
+    const handleGhQualityGateDefaultChange = <K extends keyof QualityGateDefaults>(field: K, value: QualityGateDefaults[K]) => {
+        setGhQualityGateDefaults(prev => ({ ...prev, [field]: value }));
+    };
+
+    const copyGhWorkflowYaml = async () => {
+        try {
+            await navigator.clipboard.writeText(githubActionsQualityGateYaml(ghOwner, ghRepo));
+            setGhWorkflowYamlCopied(true);
+            setTimeout(() => setGhWorkflowYamlCopied(false), 1800);
+        } catch {
+            setMessage({ type: 'error', text: 'Could not copy workflow YAML' });
+            setTimeout(() => setMessage(null), 3000);
         }
     };
 
@@ -2050,6 +2111,115 @@ export default function SettingsPage() {
                                     placeholder="main"
                                     className="input has-icon"
                                 />
+                            </div>
+                        </div>
+
+                        {/* PR Quality Gate Defaults */}
+                        <div style={{
+                            padding: '1rem',
+                            border: '1px solid var(--border)',
+                            borderRadius: 'var(--radius)',
+                            background: 'var(--surface)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '1rem',
+                        }}>
+                            <div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 700 }}>
+                                    <Shield size={18} />
+                                    PR Quality Gate Defaults
+                                </div>
+                                <p style={{ margin: '0.35rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem', lineHeight: 1.45 }}>
+                                    Used when starting or rerunning PR quality gates from CI/CD. Backend config values are applied when available.
+                                </p>
+                            </div>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(160px, 1fr))', gap: '0.85rem' }}>
+                                {[
+                                    ['run_recommended', 'Run recommended tests'],
+                                    ['post_feedback', 'Post PR feedback'],
+                                    ['create_commit_status', 'Create commit status'],
+                                    ['ensure_indexed', 'Ensure repository index'],
+                                    ['force_reindex', 'Force reindex'],
+                                    ['hybrid', 'Hybrid mode'],
+                                ].map(([field, label]) => (
+                                    <label key={field} style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '0.5rem',
+                                        padding: '0.55rem 0.65rem',
+                                        border: '1px solid var(--border)',
+                                        borderRadius: 'var(--radius)',
+                                        background: 'var(--background)',
+                                        color: 'var(--text)',
+                                        fontSize: '0.85rem',
+                                        fontWeight: 600,
+                                    }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={Boolean(ghQualityGateDefaults[field as keyof QualityGateDefaults])}
+                                            onChange={e => handleGhQualityGateDefaultChange(field as keyof QualityGateDefaults, e.target.checked as never)}
+                                        />
+                                        {label}
+                                    </label>
+                                ))}
+                            </div>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(160px, 1fr) minmax(160px, 1fr)', gap: '0.85rem' }}>
+                                <div className="form-group" style={{ margin: 0 }}>
+                                    <label className="label">Browser</label>
+                                    <select
+                                        value={ghQualityGateDefaults.browser}
+                                        onChange={e => handleGhQualityGateDefaultChange('browser', e.target.value)}
+                                        className="input"
+                                    >
+                                        <option value="chromium">Chromium</option>
+                                        <option value="firefox">Firefox</option>
+                                        <option value="webkit">WebKit</option>
+                                    </select>
+                                </div>
+                                <div className="form-group" style={{ margin: 0 }}>
+                                    <label className="label">Max Iterations</label>
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        max={100}
+                                        value={ghQualityGateDefaults.max_iterations}
+                                        onChange={e => handleGhQualityGateDefaultChange('max_iterations', Math.max(1, Number(e.target.value) || 20))}
+                                        className="input"
+                                    />
+                                </div>
+                            </div>
+
+                            <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden', background: 'var(--background)' }}>
+                                <div style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    gap: '1rem',
+                                    padding: '0.75rem 0.85rem',
+                                    borderBottom: '1px solid var(--border)',
+                                }}>
+                                    <div style={{ fontWeight: 700, fontSize: '0.9rem' }}>GitHub Actions workflow</div>
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary"
+                                        onClick={copyGhWorkflowYaml}
+                                        style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', padding: '0.45rem 0.65rem' }}
+                                    >
+                                        {ghWorkflowYamlCopied ? <CheckCircle size={15} /> : <Copy size={15} />}
+                                        {ghWorkflowYamlCopied ? 'Copied' : 'Copy YAML'}
+                                    </button>
+                                </div>
+                                <pre style={{
+                                    margin: 0,
+                                    padding: '0.85rem',
+                                    overflow: 'auto',
+                                    color: 'var(--text-secondary)',
+                                    fontSize: '0.78rem',
+                                    lineHeight: 1.45,
+                                    maxHeight: 360,
+                                }}><code>{githubActionsQualityGateYaml(ghOwner, ghRepo)}</code></pre>
                             </div>
                         </div>
 

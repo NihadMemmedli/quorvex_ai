@@ -1,7 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { GitBranch, Loader2, RefreshCw, Play, ChevronDown, ChevronUp, GitPullRequest, ShieldCheck, XCircle, CheckCircle, AlertTriangle, ExternalLink } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { GitBranch, Loader2, RefreshCw, Play, ChevronDown, ChevronUp, GitPullRequest, ShieldCheck } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
 import { PipelineStatusCard } from '@/components/PipelineStatusCard';
@@ -9,6 +9,10 @@ import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { EmptyState } from '@/components/ui/empty-state';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
+import { QualityGateCard } from './components/QualityGateCard';
+import { QualityGateDetailDrawer } from './components/QualityGateDetailDrawer';
+import type { GateState, QualityGate, QualityGateDefaults } from './components/types';
+import { FALLBACK_QUALITY_GATE_DEFAULTS, resolveQualityGateDefaults } from './components/types';
 
 type ProviderFilter = 'all' | 'gitlab' | 'github';
 
@@ -37,156 +41,6 @@ interface GhWorkflow {
     state: string;
 }
 
-interface QualityGate {
-    id: string;
-    pr_number: number;
-    title?: string;
-    owner: string;
-    repo: string;
-    head_ref?: string;
-    base_ref?: string;
-    risk_level: string;
-    confidence: string;
-    changed_files_count: number;
-    selected_tests_count: number;
-    total_candidate_tests: number;
-    saved_tests_count?: number;
-    fallback_reason?: string;
-    batch_id?: string;
-    created_at?: string;
-    quality_gate: {
-        state: string;
-        description: string;
-        batch_url?: string;
-        analysis_url?: string;
-        batch?: {
-            id: string;
-            status: string;
-            total_tests: number;
-            passed: number;
-            failed: number;
-            running: number;
-            queued: number;
-            success_rate: number;
-        } | null;
-    };
-}
-
-function getGateColor(state: string): string {
-    switch (state) {
-        case 'passed': return 'var(--success)';
-        case 'failed':
-        case 'blocked': return 'var(--danger)';
-        case 'running':
-        case 'analyzed': return 'var(--primary)';
-        case 'needs-full-suite': return 'var(--warning)';
-        default: return 'var(--text-secondary)';
-    }
-}
-
-function getGateIcon(state: string) {
-    switch (state) {
-        case 'passed': return <CheckCircle size={15} />;
-        case 'failed':
-        case 'blocked': return <XCircle size={15} />;
-        case 'running':
-        case 'analyzed': return <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} />;
-        case 'needs-full-suite': return <AlertTriangle size={15} />;
-        default: return <ShieldCheck size={15} />;
-    }
-}
-
-function QualityGateCard({ gate }: { gate: QualityGate }) {
-    const state = gate.quality_gate?.state || 'unknown';
-    const color = getGateColor(state);
-    const batch = gate.quality_gate?.batch;
-
-    return (
-        <div style={{
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius)',
-            background: 'var(--background)',
-            padding: '0.9rem',
-            minWidth: 0,
-        }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'flex-start' }}>
-                <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 750, fontSize: '0.9rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        PR #{gate.pr_number}: {gate.title || 'Untitled'}
-                    </div>
-                    <div style={{ marginTop: '0.25rem', color: 'var(--text-secondary)', fontSize: '0.76rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {gate.owner}/{gate.repo} · {gate.head_ref || 'head'} → {gate.base_ref || 'base'}
-                    </div>
-                </div>
-                <span style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '0.3rem',
-                    padding: '0.18rem 0.5rem',
-                    borderRadius: '999px',
-                    color,
-                    background: `color-mix(in srgb, ${color} 12%, transparent)`,
-                    fontSize: '0.72rem',
-                    fontWeight: 750,
-                    textTransform: 'capitalize',
-                    flexShrink: 0,
-                }}>
-                    {getGateIcon(state)}
-                    {state.replaceAll('-', ' ')}
-                </span>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.45rem', marginTop: '0.85rem' }}>
-                {[
-                    ['Risk', gate.risk_level],
-                    ['Selected', `${gate.selected_tests_count}/${gate.total_candidate_tests}`],
-                    ['Skipped', String(gate.saved_tests_count ?? 0)],
-                ].map(([label, value]) => (
-                    <div key={label} style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '0.5rem' }}>
-                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.68rem' }}>{label}</div>
-                        <div style={{ marginTop: '0.2rem', fontWeight: 750, fontSize: '0.82rem', textTransform: label === 'Risk' ? 'capitalize' : undefined }}>{value}</div>
-                    </div>
-                ))}
-            </div>
-
-            {batch && (
-                <div style={{ marginTop: '0.7rem', color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
-                    Batch: {batch.passed}/{batch.total_tests} passed
-                    {batch.failed > 0 ? <span style={{ color: 'var(--danger)' }}> · {batch.failed} failed</span> : null}
-                    {(batch.running > 0 || batch.queued > 0) ? ` · ${batch.running + batch.queued} active` : ''}
-                </div>
-            )}
-
-            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
-                {gate.batch_id && (
-                    <a href={`/regression/batches/${gate.batch_id}`} style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '0.3rem',
-                        color: 'var(--primary)',
-                        textDecoration: 'none',
-                        fontSize: '0.78rem',
-                        fontWeight: 700,
-                    }}>
-                        View Batch <ExternalLink size={12} />
-                    </a>
-                )}
-                <a href="/pr-advisor" style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '0.3rem',
-                    color: 'var(--text-secondary)',
-                    textDecoration: 'none',
-                    fontSize: '0.78rem',
-                    fontWeight: 700,
-                }}>
-                    Open PR Advisor <ExternalLink size={12} />
-                </a>
-            </div>
-        </div>
-    );
-}
-
 export default function CiCdPage() {
     const { currentProject } = useProject();
     const projectId = currentProject?.id || (typeof window !== 'undefined' ? localStorage.getItem('selectedProjectId') : null) || 'default';
@@ -198,9 +52,15 @@ export default function CiCdPage() {
     const [filter, setFilter] = useState<ProviderFilter>('all');
     const refreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
     const [qualityGates, setQualityGates] = useState<QualityGate[]>([]);
+    const [selectedGate, setSelectedGate] = useState<QualityGate | null>(null);
+    const [gateFilter, setGateFilter] = useState<GateState>('all');
+    const [gateDetailLoading, setGateDetailLoading] = useState(false);
+    const [gateActionLoading, setGateActionLoading] = useState('');
+    const [gateDetailError, setGateDetailError] = useState('');
     const [gatePrNumber, setGatePrNumber] = useState('');
     const [startingGate, setStartingGate] = useState(false);
     const [gateError, setGateError] = useState('');
+    const [qualityGateDefaults, setQualityGateDefaults] = useState<QualityGateDefaults>(FALLBACK_QUALITY_GATE_DEFAULTS);
 
     // GitHub config state
     const [ghConfigured, setGhConfigured] = useState(false);
@@ -225,6 +85,7 @@ export default function CiCdPage() {
                     setGhConfigured(!!data.configured);
                     if (data.default_workflow) setGhDefaultWorkflow(data.default_workflow);
                     if (data.default_ref) setGhDefaultRef(data.default_ref);
+                    setQualityGateDefaults(resolveQualityGateDefaults(data));
 
                     if (data.configured) {
                         const wfRes = await fetch(`${API_BASE}/github/${pid}/remote-workflows`);
@@ -251,9 +112,45 @@ export default function CiCdPage() {
     const fetchQualityGates = useCallback(async () => {
         try {
             const res = await fetch(`${API_BASE}/github/${pid}/quality-gates/pr?limit=20`);
-            if (res.ok) setQualityGates(await res.json());
+            if (res.ok) {
+                const gates = await res.json();
+                setQualityGates(gates);
+                setSelectedGate(prev => prev ? (gates.find((gate: QualityGate) => gate.id === prev.id) || prev) : prev);
+            }
         } catch { /* ignore */ }
     }, [pid]);
+
+    const loadQualityGateDetail = useCallback(async (analysisId: string, refreshFeedback = false) => {
+        setGateDetailLoading(true);
+        setGateDetailError('');
+        try {
+            const suffix = refreshFeedback ? '?refresh_feedback=true' : '';
+            const res = await fetch(`${API_BASE}/github/${pid}/quality-gates/pr/${encodeURIComponent(analysisId)}${suffix}`);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                setGateDetailError(data.detail || `Failed to load gate (${res.status})`);
+                return null;
+            }
+            setSelectedGate(data);
+            setQualityGates(prev => prev.map(item => item.id === data.id ? data : item));
+            return data as QualityGate;
+        } catch (e: any) {
+            setGateDetailError(e.message || 'Failed to load gate');
+            return null;
+        } finally {
+            setGateDetailLoading(false);
+        }
+    }, [pid]);
+
+    const selectQualityGate = useCallback((gate: QualityGate) => {
+        setSelectedGate(gate);
+        loadQualityGateDetail(gate.id);
+        if (typeof window !== 'undefined') {
+            const params = new URLSearchParams(window.location.search);
+            params.set('gate', gate.id);
+            window.history.replaceState(null, '', `/ci-cd?${params.toString()}`);
+        }
+    }, [loadQualityGateDetail]);
 
     const fetchPipelines = useCallback(async (doSync = false) => {
         if (doSync) {
@@ -297,6 +194,17 @@ export default function CiCdPage() {
         setLoading(true);
         fetchPipelines(true);
     }, [fetchPipelines]);
+
+    useEffect(() => {
+        if (typeof window === 'undefined' || selectedGate || qualityGates.length === 0) return;
+        const gateId = new URLSearchParams(window.location.search).get('gate');
+        if (!gateId) return;
+        const gate = qualityGates.find(item => item.id === gateId);
+        if (gate) {
+            setSelectedGate(gate);
+            loadQualityGateDetail(gate.id);
+        }
+    }, [qualityGates, selectedGate, loadQualityGateDetail]);
 
     // Auto-refresh every 15 seconds if any pipeline is active
     useEffect(() => {
@@ -357,9 +265,7 @@ export default function CiCdPage() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     pr_number: pr,
-                    run_recommended: true,
-                    post_feedback: true,
-                    create_commit_status: true,
+                    ...qualityGateDefaults,
                 }),
             });
             const data = await res.json().catch(() => ({}));
@@ -377,11 +283,78 @@ export default function CiCdPage() {
         }
     };
 
+    const rerunQualityGate = async () => {
+        if (!selectedGate) return;
+        setGateActionLoading('rerun');
+        setGateDetailError('');
+        try {
+            const res = await fetch(`${API_BASE}/github/${pid}/pr-advisor/analyses/${encodeURIComponent(selectedGate.id)}/run`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    browser: qualityGateDefaults.browser,
+                    hybrid: qualityGateDefaults.hybrid,
+                    max_iterations: qualityGateDefaults.max_iterations,
+                }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                setGateDetailError(data.detail || `Rerun failed (${res.status})`);
+                return;
+            }
+            const updated = await loadQualityGateDetail(selectedGate.id);
+            if (!updated && data.batch_id) {
+                setSelectedGate(prev => prev ? { ...prev, batch_id: data.batch_id } : prev);
+            }
+            await fetchQualityGates();
+            setTimeout(() => fetchQualityGates(), 3000);
+        } catch (e: any) {
+            setGateDetailError(e.message || 'Rerun failed');
+        } finally {
+            setGateActionLoading('');
+        }
+    };
+
+    const publishQualityGateFeedback = async () => {
+        if (!selectedGate) return;
+        setGateActionLoading('feedback');
+        await loadQualityGateDetail(selectedGate.id, true);
+        setGateActionLoading('');
+    };
+
     const filteredPipelines = filter === 'all'
         ? pipelines
         : pipelines.filter(p => p.provider === filter);
 
     const activeGate = qualityGates.some(g => ['running', 'analyzed'].includes(g.quality_gate?.state));
+
+    const gateCounts = useMemo(() => {
+        const counts: Record<GateState, number> = {
+            all: qualityGates.length,
+            running: 0,
+            failed: 0,
+            passed: 0,
+            'needs-full-suite': 0,
+        };
+        qualityGates.forEach(gate => {
+            const state = gate.quality_gate?.state;
+            if (state === 'running' || state === 'analyzed') counts.running += 1;
+            if (state === 'failed' || state === 'blocked') counts.failed += 1;
+            if (state === 'passed') counts.passed += 1;
+            if (state === 'needs-full-suite') counts['needs-full-suite'] += 1;
+        });
+        return counts;
+    }, [qualityGates]);
+
+    const filteredQualityGates = useMemo(() => {
+        if (gateFilter === 'all') return qualityGates;
+        return qualityGates.filter(gate => {
+            const state = gate.quality_gate?.state;
+            if (gateFilter === 'running') return state === 'running' || state === 'analyzed';
+            if (gateFilter === 'failed') return state === 'failed' || state === 'blocked';
+            return state === gateFilter;
+        });
+    }, [qualityGates, gateFilter]);
 
     const tabStyle = (tab: ProviderFilter): React.CSSProperties => ({
         padding: '0.6rem 1.25rem',
@@ -621,13 +594,78 @@ export default function CiCdPage() {
                         No PR quality gates yet.
                     </div>
                 ) : (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.75rem', padding: '1rem' }}>
-                        {qualityGates.slice(0, 6).map(gate => (
-                            <QualityGateCard key={gate.id} gate={gate} />
-                        ))}
-                    </div>
+                    <>
+                        <div style={{
+                            display: 'flex',
+                            gap: '0.45rem',
+                            flexWrap: 'wrap',
+                            padding: '0.8rem 1rem 0',
+                        }}>
+                            {[
+                                ['all', 'All'],
+                                ['running', 'Running'],
+                                ['failed', 'Failed'],
+                                ['passed', 'Passed'],
+                                ['needs-full-suite', 'Needs full suite'],
+                            ].map(([value, label]) => (
+                                <button
+                                    key={value}
+                                    type="button"
+                                    onClick={() => setGateFilter(value as GateState)}
+                                    style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '0.35rem',
+                                        padding: '0.4rem 0.65rem',
+                                        border: gateFilter === value ? '1px solid var(--primary)' : '1px solid var(--border)',
+                                        borderRadius: '999px',
+                                        background: gateFilter === value ? 'rgba(59, 130, 246, 0.08)' : 'var(--background)',
+                                        color: gateFilter === value ? 'var(--primary)' : 'var(--text-secondary)',
+                                        cursor: 'pointer',
+                                        fontSize: '0.78rem',
+                                        fontWeight: 750,
+                                    }}
+                                >
+                                    {label}
+                                    <span style={{ color: 'inherit', opacity: 0.8 }}>{gateCounts[value as GateState]}</span>
+                                </button>
+                            ))}
+                        </div>
+                        {filteredQualityGates.length === 0 ? (
+                            <div style={{ padding: '1rem 1.25rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                No gates match this filter.
+                            </div>
+                        ) : (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.75rem', padding: '1rem' }}>
+                                {filteredQualityGates.map(gate => (
+                                    <QualityGateCard
+                                        key={gate.id}
+                                        gate={gate}
+                                        selected={selectedGate?.id === gate.id}
+                                        onSelect={selectQualityGate}
+                                    />
+                                ))}
+                            </div>
+                        )}
+                    </>
                 )}
             </section>
+
+            <QualityGateDetailDrawer
+                gate={selectedGate}
+                loading={gateDetailLoading}
+                actionLoading={gateActionLoading}
+                error={gateDetailError}
+                onClose={() => {
+                    setSelectedGate(null);
+                    if (typeof window !== 'undefined') {
+                        window.history.replaceState(null, '', '/ci-cd');
+                    }
+                }}
+                onRefresh={() => selectedGate && loadQualityGateDetail(selectedGate.id)}
+                onRerun={rerunQualityGate}
+                onPublishFeedback={publishQualityGateFeedback}
+            />
 
             {/* Provider filter tabs */}
             <div className="animate-in stagger-2" style={{

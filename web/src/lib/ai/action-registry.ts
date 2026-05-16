@@ -83,6 +83,22 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       project_id: pid || 'default',
     }),
   },
+  startAdhocCustomAgent: {
+    label: 'Start Custom Agent',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/api/agents/definitions',
+    getBody: (args, pid) => ({
+      name: `Ad-hoc QA Agent - ${hostnameLabel(String(args.url || 'website'))}`,
+      description: `Chat-created custom QA agent for ${args.url || 'the requested website'}.`,
+      system_prompt: ADHOC_CUSTOM_AGENT_SYSTEM_PROMPT,
+      timeout_seconds: clampTimeoutSeconds(args.timeoutSeconds),
+      tool_ids: ADHOC_CUSTOM_AGENT_TOOL_IDS,
+      project_id: pid || 'default',
+    }),
+  },
   startCustomAgentFromReport: {
     label: 'Start Custom Agent From Report',
     method: 'POST',
@@ -500,6 +516,30 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
   },
 };
 
+export const ADHOC_CUSTOM_AGENT_TOOL_IDS = [
+  'browser_navigate',
+  'browser_snapshot',
+  'browser_click',
+  'browser_type',
+  'browser_select',
+  'browser_press_key',
+  'browser_hover',
+  'browser_network',
+  'browser_console',
+  'browser_screenshot',
+  'browser_wait',
+  'browser_navigate_back',
+  'browser_close',
+];
+
+export const ADHOC_CUSTOM_AGENT_SYSTEM_PROMPT = [
+  'You are a focused QA automation agent.',
+  'Inspect the target website using the granted browser tools and gather practical test ideas from observed behavior.',
+  'Prefer public unauthenticated paths unless credentials are explicitly provided in the task.',
+  'Report concise findings, pages checked, test ideas, evidence, and follow-up actions.',
+  'Do not modify external data unless the user explicitly requested that action.',
+].join(' ');
+
 const TOKEN_TTL_MS = 10 * 60 * 1000;
 const redeemedActionIds = new Set<string>();
 
@@ -577,6 +617,40 @@ function buildCredentials(args: Record<string, unknown>) {
     return { username: args.username, password: args.password };
   }
   return undefined;
+}
+
+export function buildAdhocCustomAgentRunBody(args: Record<string, unknown>, projectId?: string) {
+  const focusAreas = Array.isArray(args.focusAreas)
+    ? args.focusAreas.filter((area): area is string => typeof area === 'string' && area.trim().length > 0)
+    : [];
+  const url = typeof args.url === 'string' ? args.url : '';
+  const prompt = typeof args.prompt === 'string' && args.prompt.trim()
+    ? args.prompt.trim()
+    : `Inspect ${url || 'the target website'} and report useful QA test ideas.`;
+
+  return {
+    prompt,
+    url: url || undefined,
+    project_id: projectId || 'default',
+    config: {
+      source: 'chat_adhoc_custom_agent',
+      focus_areas: focusAreas.length > 0 ? focusAreas : undefined,
+    },
+  };
+}
+
+function clampTimeoutSeconds(value: unknown) {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed)) return 1800;
+  return Math.max(60, Math.min(Math.floor(parsed), 7200));
+}
+
+function hostnameLabel(rawUrl: string) {
+  try {
+    return new URL(rawUrl).hostname.replace(/^www\./, '').slice(0, 48) || 'website';
+  } catch {
+    return 'website';
+  }
 }
 
 function buildExplorerAuth(args: Record<string, unknown>) {

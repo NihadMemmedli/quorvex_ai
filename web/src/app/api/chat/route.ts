@@ -292,6 +292,68 @@ function buildDiscoveryAgentStartAction(
   };
 }
 
+function isAdhocCustomAgentConversation(text: string): boolean {
+  return /\bcustom\s+agent\b/i.test(text)
+    && /\b(test ideas?|qa|testing|inspect|explore|findings?|website|site|url|run|start|create)\b/i.test(text)
+    && !/\b(from report|agent report|finding\s+[a-z0-9_-]+|test idea\s+[a-z0-9_-]+|source run)\b/i.test(text);
+}
+
+function extractFocusAreas(text: string): string[] {
+  const match = text.match(/\bfocus(?:ing)?\s+(?:on|areas?:?)\s+([^.\n]+)/i);
+  if (!match?.[1]) return [];
+  return match[1]
+    .split(/,|\band\b/i)
+    .map((area) => area.trim())
+    .filter(Boolean)
+    .slice(0, 5);
+}
+
+function buildAdhocCustomAgentStartAction(messages: any[]): { text: string; toolName: string; input: Record<string, unknown> } | null {
+  const latestUserText = extractLatestUserText(messages);
+  const conversationText = messages.map(extractMessageText).filter(Boolean).join('\n');
+  const targetUrl = extractUrls(conversationText).at(-1);
+  const customIntent = isAdhocCustomAgentConversation(conversationText);
+  if (!customIntent || !targetUrl) return null;
+  if (/\b(auto\s*pilot|autopilot|explorer\s+agent|discovery\s+(session|exploration)|new\s+exploration)\b/i.test(latestUserText)) {
+    return null;
+  }
+
+  const latestHasUrl = extractUrls(latestUserText).length > 0;
+  const startIntent = /\b(create|run|start|launch|kick off|begin|execute|proceed|confirm(ed)?|yes|go ahead|ok|okay)\b/i.test(latestUserText);
+  if (!startIntent && !latestHasUrl) return null;
+
+  const focusAreas = extractFocusAreas(conversationText);
+  const prompt = [
+    `Inspect ${targetUrl} and gather actionable QA test ideas from observed behavior.`,
+    'Use public unauthenticated pages only unless credentials are explicitly provided.',
+    'Capture pages checked, findings, test ideas, evidence, and follow-up actions.',
+    focusAreas.length > 0 ? `Focus areas: ${focusAreas.join(', ')}.` : '',
+  ].filter(Boolean).join(' ');
+
+  return {
+    text: 'I prepared a real custom agent start action below. Approve it to create the agent and start the run from the chatbot.',
+    toolName: 'startAdhocCustomAgent',
+    input: {
+      url: targetUrl,
+      prompt,
+      focusAreas: focusAreas.length > 0 ? focusAreas : undefined,
+      timeoutSeconds: 1800,
+    },
+  };
+}
+
+function buildAdhocCustomAgentMissingUrlResponse(messages: any[]): Response | null {
+  const latestUserText = extractLatestUserText(messages);
+  const conversationText = messages.map(extractMessageText).filter(Boolean).join('\n');
+  if (!isAdhocCustomAgentConversation(conversationText)) return null;
+  if (extractUrls(conversationText).length > 0) return null;
+  if (!/\b(create|run|start|launch|kick off|begin|execute)\b/i.test(latestUserText)) return null;
+
+  return textToUIMessageResponse(
+    'Send the target website URL and I will show a real custom agent approval action. The run will only start after you click Approve.'
+  );
+}
+
 function isExplorerAgentConversation(text: string): boolean {
   return /\bexplorer\s+agent\b/i.test(text);
 }
@@ -655,6 +717,18 @@ export async function POST(req: Request) {
 
   const missingExplorerUrl = buildExplorerAgentMissingUrlResponse(messages);
   if (missingExplorerUrl) return missingExplorerUrl;
+
+  const missingCustomAgentUrl = buildAdhocCustomAgentMissingUrlResponse(messages);
+  if (missingCustomAgentUrl) return missingCustomAgentUrl;
+
+  const customAgentAction = buildAdhocCustomAgentStartAction(messages);
+  if (customAgentAction) {
+    return toolInputUIMessageResponse(
+      customAgentAction.text,
+      customAgentAction.toolName,
+      customAgentAction.input
+    );
+  }
 
   const discoveryAgentAction = buildDiscoveryAgentStartAction(messages, currentPage, pageContext);
   if (discoveryAgentAction) {

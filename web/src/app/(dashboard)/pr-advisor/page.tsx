@@ -174,8 +174,12 @@ export default function PrAdvisorPage() {
                     if (cfg.configured && cfg.repo) {
                         const list = await fetchAnalyses();
                         setAnalyses(list);
-                        if (list.length > 0) {
-                            await loadDetail(list[0].id);
+                        const requestedAnalysis = typeof window !== 'undefined'
+                            ? new URLSearchParams(window.location.search).get('analysis')
+                            : null;
+                        const initial = (requestedAnalysis && list.find((item: PrAnalysis) => item.id === requestedAnalysis)) || list[0];
+                        if (initial) {
+                            await loadDetail(initial.id);
                         } else {
                             setSelected(null);
                         }
@@ -509,6 +513,20 @@ export default function PrAdvisorPage() {
                                                 View Batch
                                             </Link>
                                         )}
+                                        <Link href={`/ci-cd?gate=${encodeURIComponent(selected.id)}`} style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '0.4rem',
+                                            padding: '0.6rem 0.85rem',
+                                            border: '1px solid var(--border)',
+                                            borderRadius: 'var(--radius)',
+                                            color: 'var(--text)',
+                                            textDecoration: 'none',
+                                            fontWeight: 700,
+                                        }}>
+                                            <ShieldCheck size={16} />
+                                            Open Quality Gate
+                                        </Link>
                                     </div>
                                 </div>
 

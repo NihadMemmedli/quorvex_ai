@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { backendFetch } from '@/lib/ai/backend-client';
 import {
+  buildAdhocCustomAgentRunBody,
   getAssistantActionConfig,
   markPendingActionRedeemed,
   redactAssistantActionArgs,
@@ -41,6 +42,18 @@ export async function POST(req: NextRequest) {
   const path = config.getPath(args, projectId);
   const body = config.getBody ? config.getBody(args, projectId) : undefined;
   markPendingActionRedeemed(payload.id);
+
+  if (payload.toolName === 'startAdhocCustomAgent') {
+    return executeAdhocCustomAgentAction({
+      actionId: payload.id,
+      args,
+      authToken,
+      body,
+      path,
+      projectId,
+    });
+  }
+
   console.info('[assistant-action] approved', {
     id: payload.id,
     toolName: payload.toolName,
@@ -99,4 +112,93 @@ async function validateActionRole(requiredRole: string, authToken?: string) {
   if (!userRes.ok) return 'Could not verify user permissions for this assistant action';
   if (!userRes.data?.is_superuser) return 'This assistant action requires an administrator';
   return null;
+}
+
+async function executeAdhocCustomAgentAction({
+  actionId,
+  args,
+  authToken,
+  body,
+  path,
+  projectId,
+}: {
+  actionId: string;
+  args: Record<string, unknown>;
+  authToken?: string;
+  body?: Record<string, unknown>;
+  path: string;
+  projectId?: string;
+}) {
+  console.info('[assistant-action] approved', {
+    id: actionId,
+    toolName: 'startAdhocCustomAgent',
+    risk: 'medium',
+    projectId,
+    path,
+  });
+
+  const definitionRes = await backendFetch<{ id?: string }>(path, {
+    method: 'POST',
+    body,
+    authToken,
+    projectId,
+  });
+
+  if (!definitionRes.ok || !definitionRes.data?.id) {
+    console.warn('[assistant-action] adhoc custom agent definition failed', {
+      id: actionId,
+      status: definitionRes.status,
+      error: definitionRes.error,
+    });
+    return NextResponse.json(
+      { error: definitionRes.error || 'Failed to create custom agent definition' },
+      { status: definitionRes.status || 500 }
+    );
+  }
+
+  const definitionId = definitionRes.data.id;
+  const runPath = `/api/agents/definitions/${encodeURIComponent(definitionId)}/runs`;
+  const runBody = buildAdhocCustomAgentRunBody(args, projectId);
+  const runRes = await backendFetch(runPath, {
+    method: 'POST',
+    body: runBody,
+    authToken,
+    projectId,
+  });
+
+  if (!runRes.ok) {
+    console.warn('[assistant-action] adhoc custom agent run failed', {
+      id: actionId,
+      definitionId,
+      status: runRes.status,
+      error: runRes.error,
+    });
+    return NextResponse.json(
+      {
+        error: runRes.error || 'Failed to start custom agent run',
+        definition_id: definitionId,
+      },
+      { status: runRes.status || 500 }
+    );
+  }
+
+  console.info('[assistant-action] executed', {
+    id: actionId,
+    toolName: 'startAdhocCustomAgent',
+    projectId,
+    definitionId,
+  });
+
+  return NextResponse.json({
+    ...(runRes.data && typeof runRes.data === 'object' ? runRes.data : { result: runRes.data }),
+    definition_id: definitionId,
+    _assistantAction: {
+      id: actionId,
+      toolName: 'startAdhocCustomAgent',
+      label: 'Start Custom Agent',
+      risk: 'medium',
+      projectId,
+      args: redactAssistantActionArgs(args),
+    },
+  });
 }

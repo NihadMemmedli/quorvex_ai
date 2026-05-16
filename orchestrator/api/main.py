@@ -1024,6 +1024,10 @@ async def startup_event():
     _BACKGROUND_TASKS.append(asyncio.create_task(_queue_watchdog()))
     logger.info("Started queue watchdog (30s interval, 60s grace period)")
 
+    # Start PR quality gate finalizer to recover missed GitHub feedback updates
+    _BACKGROUND_TASKS.append(asyncio.create_task(_quality_gate_finalizer_loop()))
+    logger.info("Started quality gate finalizer loop")
+
     # Start exploration cleanup loop to detect stuck explorations
     _BACKGROUND_TASKS.append(asyncio.create_task(_exploration_cleanup_loop()))
     logger.info("Started exploration cleanup loop")
@@ -3584,6 +3588,7 @@ def update_batch_stats(batch_id: str):
             batch = session.get(RegressionBatch, batch_id)
             if not batch:
                 return
+            previous_status = batch.status
 
             # For PostgreSQL, use row-level locking to prevent race conditions
             # For SQLite, the database-level locking handles this
@@ -3640,10 +3645,44 @@ def update_batch_stats(batch_id: str):
             session.add(batch)
             session.commit()
 
+            if previous_status != "completed" and batch.status == "completed":
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_finalize_quality_gate_for_batch_safe(batch_id))
+                except RuntimeError:
+                    logger.debug("No running event loop available to finalize quality gate for batch %s", batch_id)
+
         except Exception as e:
             session.rollback()
             logger.error(f"Failed to update batch stats for {batch_id}: {e}", exc_info=True)
             raise
+
+
+async def _finalize_quality_gate_for_batch_safe(batch_id: str):
+    try:
+        from orchestrator.services.quality_gate import finalize_quality_gate_for_batch
+
+        finalized = await finalize_quality_gate_for_batch(batch_id)
+        if finalized:
+            logger.info("Finalized %d quality gate(s) for batch %s", finalized, batch_id)
+    except Exception as e:
+        logger.warning("Failed to finalize quality gate feedback for batch %s: %s", batch_id, e)
+
+
+async def _quality_gate_finalizer_loop():
+    """Periodically publish missed final PR quality gate feedback."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            from orchestrator.services.quality_gate import finalize_stale_quality_gates
+
+            finalized = await finalize_stale_quality_gates()
+            if finalized:
+                logger.info("Quality gate finalizer published %d stale final update(s)", finalized)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning("Quality gate finalizer loop error: %s", e)
 
 
 async def _batch_watchdog():

@@ -11,6 +11,7 @@ export const MUTATING_TOOL_CONFIGS: Record<string, { label: string }> = {
   startDiscoveryExploration: { label: 'Start Discovery Exploration' },
   startExploration: { label: 'Start Exploration' },
   startExplorerAgent: { label: 'Start Explorer Agent' },
+  startAdhocCustomAgent: { label: 'Start Custom Agent' },
   startCustomAgentFromReport: { label: 'Start Custom Agent From Report' },
   stopExploration: { label: 'Stop Exploration' },
   generateRequirements: { label: 'Generate Requirements' },
@@ -437,6 +438,16 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         testData: z.record(z.unknown()).optional().describe('Optional structured test data'),
         focusAreas: z.array(z.string()).optional().describe('Specific features or areas to focus on'),
         excludedPatterns: z.array(z.string()).optional().describe('URL patterns to avoid'),
+      }),
+    }),
+
+    startAdhocCustomAgent: tool({
+      description: 'Create an ad-hoc custom QA agent definition and start it on a target website to gather findings, evidence, and test ideas. Requires user approval.',
+      inputSchema: z.object({
+        url: z.string().describe('The website URL for the custom agent to inspect'),
+        prompt: z.string().describe('The task prompt for the custom agent run'),
+        focusAreas: z.array(z.string()).optional().describe('Specific features, pages, or behaviors to focus on'),
+        timeoutSeconds: z.number().optional().default(1800).describe('Maximum custom agent runtime in seconds'),
       }),
     }),
 

@@ -1044,6 +1044,7 @@ const toolPageMap: Record<string, string> = {
   listAgentRuns: '/agents',
   getAgentRunReport: '/agents',
   searchAgentReports: '/agents',
+  startAdhocCustomAgent: '/agents',
   startCustomAgentFromReport: '/agents',
   createTestSpecFromAgentReport: '/specs',
   getRequirements: '/requirements',
@@ -1939,6 +1940,7 @@ const toolFollowUps: Record<string, string[]> = {
   triggerSecurityScan: ['Check scan findings', 'View security summary', 'Analyze scan results'],
   // Auto Pilot
   startAutoPilot: ['Check Auto Pilot status', 'List all Auto Pilot sessions', 'View Auto Pilot dashboard'],
+  startAdhocCustomAgent: ['View agent run', 'Check agent status', 'Show custom agent reports'],
   getAutoPilotStatus: ['Answer a pending question', 'Pause Auto Pilot', 'Check status again later'],
   pauseAutoPilot: ['Resume Auto Pilot', 'Check Auto Pilot status', 'View Auto Pilot dashboard'],
   resumeAutoPilot: ['Check Auto Pilot status', 'View Auto Pilot dashboard'],

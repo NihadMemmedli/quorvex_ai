@@ -63,6 +63,7 @@ from .models_db import (  # noqa: F401
     OpenApiImportHistory,
     PrChangedFile,
     PrImpactAnalysis,
+    PrQualityGateRun,
     PrSelectedTest,
     PrdGenerationResult,
     Project,
@@ -535,6 +536,81 @@ def _run_migrations():
                 logger.info("Created unique index on testrail_run_mappings")
             except Exception as e:
                 logger.debug(f"Index may already exist on testrail_run_mappings: {e}")
+
+        # ===== GitHub PR Quality Gates =====
+        if "pr_quality_gate_runs" not in inspector.get_table_names():
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            bool_true = "TRUE" if db_type == "postgresql" else "1"
+            conn.execute(
+                text(f"""
+                CREATE TABLE pr_quality_gate_runs (
+                    id VARCHAR PRIMARY KEY,
+                    project_id VARCHAR,
+                    provider VARCHAR NOT NULL DEFAULT 'github',
+                    owner VARCHAR NOT NULL,
+                    repo VARCHAR NOT NULL,
+                    pr_number INTEGER NOT NULL,
+                    head_sha VARCHAR NOT NULL,
+                    analysis_id VARCHAR,
+                    batch_id VARCHAR,
+                    status VARCHAR NOT NULL DEFAULT 'initializing',
+                    github_state VARCHAR NOT NULL DEFAULT 'pending',
+                    error_message TEXT,
+                    post_feedback BOOLEAN NOT NULL DEFAULT {bool_true},
+                    create_commit_status BOOLEAN NOT NULL DEFAULT {bool_true},
+                    feedback_comment_id VARCHAR,
+                    feedback_comment_url VARCHAR,
+                    commit_status_url VARCHAR,
+                    last_feedback_state VARCHAR,
+                    feedback_errors_json TEXT NOT NULL DEFAULT '[]',
+                    final_feedback_published_at {timestamp_type},
+                    created_at {timestamp_type},
+                    updated_at {timestamp_type},
+                    completed_at {timestamp_type},
+                    CONSTRAINT uq_pr_quality_gate_identity UNIQUE (
+                        project_id, provider, owner, repo, pr_number, head_sha
+                    )
+                )
+                """)
+            )
+            logger.info("Created table: pr_quality_gate_runs")
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_pr_quality_gate_project_pr_sha "
+                    "ON pr_quality_gate_runs (project_id, pr_number, head_sha)"
+                )
+            )
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_pr_quality_gate_batch ON pr_quality_gate_runs (batch_id)"))
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_pr_quality_gate_status_updated "
+                    "ON pr_quality_gate_runs (status, updated_at)"
+                )
+            )
+
+        if "pr_quality_gate_runs" in inspector.get_table_names():
+            try:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_pr_quality_gate_identity_idx "
+                        "ON pr_quality_gate_runs (project_id, provider, owner, repo, pr_number, head_sha)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_pr_quality_gate_project_pr_sha "
+                        "ON pr_quality_gate_runs (project_id, pr_number, head_sha)"
+                    )
+                )
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_pr_quality_gate_batch ON pr_quality_gate_runs (batch_id)"))
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_pr_quality_gate_status_updated "
+                        "ON pr_quality_gate_runs (status, updated_at)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Index may already exist on pr_quality_gate_runs: {e}")
 
         # ===== Load Testing - Distributed Execution =====
 

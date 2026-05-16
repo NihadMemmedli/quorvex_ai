@@ -7,12 +7,13 @@ tracking pipeline runs, and receiving webhook events.
 """
 
 import logging
-import os
+import uuid
 from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select
 
@@ -23,11 +24,24 @@ from .models_auth import User
 from .models_db import (
     CiPipelineMapping,
     PrImpactAnalysis,
+    PrQualityGateRun,
     PrSelectedTest,
     Project,
     RegressionBatch,
     RepoIndexSnapshot,
     TestRun as DBTestRun,
+)
+from orchestrator.services.quality_gate import (
+    DEFAULT_QUALITY_GATE_CONFIG,
+    batch_payload,
+    ci_status_payload,
+    get_quality_gate_config,
+    publish_quality_gate_feedback,
+    quality_gate_app_url,
+    quality_gate_comment,
+    quality_gate_status,
+    serialize_quality_gate,
+    sync_gate_run_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +59,7 @@ class GithubConfigRequest(BaseModel):
     default_workflow: str | None = None
     default_ref: str | None = None
     webhook_secret: str | None = None  # None means keep existing
+    quality_gate: dict[str, Any] | None = None
 
 
 class TriggerWorkflowRequest(BaseModel):
@@ -73,14 +88,29 @@ class PrAdvisorRunRequest(BaseModel):
 class PrQualityGateStartRequest(BaseModel):
     pr_number: int
     head_sha: str | None = None
+    ensure_indexed: bool | None = None
+    force_reindex: bool | None = None
+    run_recommended: bool | None = None
+    post_feedback: bool | None = None
+    create_commit_status: bool | None = None
+    browser: str | None = None
+    hybrid: bool | None = None
+    max_iterations: int | None = None
+
+
+class PrQualityGateConfigRequest(BaseModel):
+    enabled: bool = True
     ensure_indexed: bool = True
-    force_reindex: bool = False
     run_recommended: bool = True
     post_feedback: bool = True
     create_commit_status: bool = True
-    browser: str = "chromium"
+    force_reindex: bool = False
+    require_full_suite_on_low_confidence: bool = True
+    allow_empty_selection: bool = False
+    default_browser: str = "chromium"
     hybrid: bool = False
     max_iterations: int = 20
+    timeout_minutes: int = 120
 
 
 class RepositoryIndexRequest(BaseModel):
@@ -157,6 +187,7 @@ def get_config(
         "default_workflow": config.get("default_workflow"),
         "default_ref": config.get("default_ref"),
         "webhook_secret_masked": mask_credential(webhook_secret) if webhook_secret else None,
+        "quality_gate": get_quality_gate_config(project),
     }
 
 
@@ -197,6 +228,7 @@ def save_config(
         "default_workflow": request.default_workflow,
         "default_ref": request.default_ref or "main",
         "webhook_secret_encrypted": webhook_secret_encrypted,
+        "quality_gate": request.quality_gate or (existing or {}).get("quality_gate") or DEFAULT_QUALITY_GATE_CONFIG,
     }
     _save_github_config(project, config, session)
     return {"status": "ok"}
@@ -216,6 +248,39 @@ def delete_config(
         session.add(project)
         session.commit()
     return {"status": "ok"}
+
+
+@router.get("/{project_id}/quality-gates/config")
+def get_quality_gate_settings(
+    project_id: str,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Get GitHub PR quality gate defaults for a project."""
+    project = _require_project(project_id, session)
+    return get_quality_gate_config(project)
+
+
+@router.put("/{project_id}/quality-gates/config")
+def save_quality_gate_settings(
+    project_id: str,
+    request: PrQualityGateConfigRequest,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Save GitHub PR quality gate defaults for a project."""
+    project = _require_project(project_id, session)
+    config = _get_github_config(project)
+    if not config:
+        raise HTTPException(status_code=400, detail="GitHub not configured for this project")
+    quality_gate = {**DEFAULT_QUALITY_GATE_CONFIG, **request.model_dump()}
+    if quality_gate["default_browser"] not in {"chromium", "firefox", "webkit"}:
+        raise HTTPException(status_code=400, detail="default_browser must be chromium, firefox, or webkit")
+    quality_gate["max_iterations"] = max(1, min(int(quality_gate["max_iterations"]), 100))
+    quality_gate["timeout_minutes"] = max(5, min(int(quality_gate["timeout_minutes"]), 720))
+    config["quality_gate"] = quality_gate
+    _save_github_config(project, config, session)
+    return quality_gate
 
 
 # -- Connection Test -----------------------------------------------
@@ -758,13 +823,6 @@ def get_latest_repository_index(
 # -- PR Quality Gate -----------------------------------------------
 
 
-TERMINAL_RUN_STATUSES = {"passed", "completed", "failed", "error", "stopped", "cancelled", "canceled"}
-FAILURE_RUN_STATUSES = {"failed", "error", "stopped", "cancelled", "canceled"}
-ACTIVE_RUN_STATUSES = {"queued", "running", "in_progress", "pending"}
-QUALITY_GATE_CONTEXT = "Quorvex Quality Gate"
-QUALITY_GATE_COMMENT_MARKER = "<!-- quorvex-quality-gate -->"
-
-
 async def _analyze_configured_github_pr(
     *,
     project_id: str,
@@ -844,8 +902,12 @@ def _start_recommended_batch(
         max_iterations=request.max_iterations,
         automated_only=False,
         spec_names=spec_names,
-        triggered_by="quality-gate",
-        batch_name=f"PR #{analysis.pr_number} Quality Gate",
+        triggered_by="quality-gate" if isinstance(request, PrQualityGateStartRequest) else "pr-advisor",
+        batch_name=(
+            f"PR #{analysis.pr_number} Quality Gate"
+            if isinstance(request, PrQualityGateStartRequest)
+            else f"PR #{analysis.pr_number} Recommended Tests"
+        ),
     )
 
     try:
@@ -889,6 +951,7 @@ def _start_recommended_batch(
 
 
 def _batch_payload(batch: RegressionBatch | None, session: Session) -> dict[str, Any] | None:
+    return batch_payload(batch, session)
     if not batch:
         return None
     runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch.id)).all()
@@ -920,6 +983,7 @@ def _batch_payload(batch: RegressionBatch | None, session: Session) -> dict[str,
 
 
 def _quality_gate_status(analysis: PrImpactAnalysis, batch: RegressionBatch | None, session: Session) -> dict[str, Any]:
+    return quality_gate_status(analysis, batch, session)
     if not analysis.selected_tests_count:
         return {
             "state": "blocked",
@@ -970,6 +1034,7 @@ def _quality_gate_status(analysis: PrImpactAnalysis, batch: RegressionBatch | No
 
 
 def _app_url(path: str) -> str | None:
+    return quality_gate_app_url(path)
     base = os.getenv("WEB_BASE_URL") or os.getenv("FRONTEND_URL") or os.getenv("APP_BASE_URL")
     if not base:
         return None
@@ -977,6 +1042,7 @@ def _app_url(path: str) -> str | None:
 
 
 def _serialize_quality_gate(analysis: PrImpactAnalysis, session: Session, include_details: bool = True) -> dict[str, Any]:
+    return serialize_quality_gate(analysis, session, include_details=include_details)
     from orchestrator.services.pr_test_advisor import serialize_analysis
 
     batch = session.get(RegressionBatch, analysis.batch_id) if analysis.batch_id else None
@@ -992,6 +1058,7 @@ def _serialize_quality_gate(analysis: PrImpactAnalysis, session: Session, includ
 
 
 def _quality_gate_comment(payload: dict[str, Any]) -> str:
+    return quality_gate_comment(payload)
     gate = payload["quality_gate"]
     selected = payload.get("selected_tests") or []
     failed = ((gate.get("batch") or {}).get("failed_tests") or [])
@@ -1035,6 +1102,13 @@ async def _publish_quality_gate_feedback(
     post_feedback: bool,
     create_commit_status: bool,
 ) -> dict[str, Any]:
+    return await publish_quality_gate_feedback(
+        project=project,
+        analysis=analysis,
+        payload=payload,
+        post_feedback=post_feedback,
+        create_commit_status=create_commit_status,
+    )
     config = _get_github_config(project) or {}
     owner = config.get("owner", "")
     repo = config.get("repo", "")
@@ -1079,6 +1153,10 @@ async def _publish_quality_gate_feedback(
     return result
 
 
+_quality_gate_status = quality_gate_status
+_serialize_quality_gate = serialize_quality_gate
+
+
 @router.post("/{project_id}/quality-gates/pr/start")
 async def start_pr_quality_gate(
     project_id: str,
@@ -1088,23 +1166,164 @@ async def start_pr_quality_gate(
 ):
     """Analyze a GitHub PR, optionally run selected tests, and publish quality-gate feedback."""
     project = _require_project(project_id, session)
+    config = _get_github_config(project)
+    if not config:
+        raise HTTPException(status_code=400, detail="GitHub not configured for this project")
+    owner = config.get("owner", "")
+    repo = config.get("repo", "")
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="owner and repo must be configured")
+
+    defaults = get_quality_gate_config(project)
+    request.ensure_indexed = bool(request.ensure_indexed if request.ensure_indexed is not None else defaults["ensure_indexed"])
+    request.run_recommended = bool(request.run_recommended if request.run_recommended is not None else defaults["run_recommended"])
+    request.post_feedback = bool(request.post_feedback if request.post_feedback is not None else defaults["post_feedback"])
+    request.create_commit_status = bool(
+        request.create_commit_status if request.create_commit_status is not None else defaults["create_commit_status"]
+    )
+    request.browser = request.browser or defaults["default_browser"]
+    request.hybrid = bool(request.hybrid if request.hybrid is not None else defaults["hybrid"])
+    request.max_iterations = int(request.max_iterations or defaults["max_iterations"])
+    request.force_reindex = bool(request.force_reindex if request.force_reindex is not None else defaults["force_reindex"])
+
+    client = await _build_client(project)
+    try:
+        pr_data = await client.get_pull_request(owner, repo, request.pr_number)
+    finally:
+        await client.close()
+    actual_sha = (pr_data.get("head") or {}).get("sha")
+    if not actual_sha:
+        raise HTTPException(status_code=400, detail="PR head SHA could not be resolved")
+    if request.head_sha and request.head_sha != actual_sha:
+        raise HTTPException(
+            status_code=409,
+            detail="PR head SHA changed before analysis could start; retry for the latest commit.",
+        )
+    request.head_sha = actual_sha
+
+    existing_gate = session.exec(
+        select(PrQualityGateRun).where(
+            PrQualityGateRun.project_id == project_id,
+            PrQualityGateRun.provider == "github",
+            PrQualityGateRun.owner == owner,
+            PrQualityGateRun.repo == repo,
+            PrQualityGateRun.pr_number == request.pr_number,
+            PrQualityGateRun.head_sha == actual_sha,
+        )
+    ).first()
+    if existing_gate:
+        analysis = session.get(PrImpactAnalysis, existing_gate.analysis_id) if existing_gate.analysis_id else None
+        if analysis:
+            sync_gate_run_state(existing_gate, analysis, session)
+            session.commit()
+            payload = serialize_quality_gate(analysis, session, include_details=True, gate_run=existing_gate)
+            payload["run_request"] = {"batch_created": False, "reason": "Existing quality gate returned for this PR SHA"}
+            payload["idempotent"] = True
+            return payload
+
+    gate_run = PrQualityGateRun(
+        id=f"qgate_{uuid.uuid4().hex[:12]}",
+        project_id=project_id,
+        provider="github",
+        owner=owner,
+        repo=repo,
+        pr_number=request.pr_number,
+        head_sha=actual_sha,
+        status="initializing",
+        github_state="pending",
+        post_feedback=request.post_feedback,
+        create_commit_status=request.create_commit_status,
+    )
+    session.add(gate_run)
+    try:
+        session.commit()
+        session.refresh(gate_run)
+    except IntegrityError:
+        session.rollback()
+        existing_gate = session.exec(
+            select(PrQualityGateRun).where(
+                PrQualityGateRun.project_id == project_id,
+                PrQualityGateRun.provider == "github",
+                PrQualityGateRun.owner == owner,
+                PrQualityGateRun.repo == repo,
+                PrQualityGateRun.pr_number == request.pr_number,
+                PrQualityGateRun.head_sha == actual_sha,
+            )
+        ).first()
+        if existing_gate and existing_gate.analysis_id:
+            analysis = session.get(PrImpactAnalysis, existing_gate.analysis_id)
+            if analysis:
+                payload = serialize_quality_gate(analysis, session, include_details=True, gate_run=existing_gate)
+                payload["run_request"] = {"batch_created": False, "reason": "Existing quality gate returned for this PR SHA"}
+                payload["idempotent"] = True
+                return payload
+        raise
+
+    gate_run.status = "analyzing"
+    gate_run.updated_at = datetime.utcnow()
+    session.add(gate_run)
+    session.commit()
+
     analysis = await _analyze_configured_github_pr(project_id=project_id, request=request, session=session)
+    gate_run.analysis_id = analysis.id
+    gate_run.updated_at = datetime.utcnow()
+    session.add(gate_run)
+    session.commit()
+
     run_result = None
     if request.run_recommended:
         run_result = _start_recommended_batch(project_id=project_id, analysis=analysis, request=request, session=session)
         session.refresh(analysis)
+        gate_run.batch_id = analysis.batch_id
+        gate_run.status = "queued" if analysis.batch_id else "blocked"
+        gate_run.updated_at = datetime.utcnow()
+        session.add(gate_run)
+        session.commit()
 
-    payload = _serialize_quality_gate(analysis, session, include_details=True)
+    sync_gate_run_state(gate_run, analysis, session)
+    session.commit()
+    payload = serialize_quality_gate(analysis, session, include_details=True, gate_run=gate_run)
     payload["run_request"] = run_result
     if request.post_feedback or request.create_commit_status:
-        payload["feedback"] = await _publish_quality_gate_feedback(
+        payload["feedback"] = await publish_quality_gate_feedback(
             project=project,
             analysis=analysis,
             payload=payload,
+            gate_run=gate_run,
             post_feedback=request.post_feedback,
             create_commit_status=request.create_commit_status,
         )
+        session.add(gate_run)
+        session.commit()
     return payload
+
+
+@router.get("/{project_id}/quality-gates/pr/status")
+def get_pr_quality_gate_status_for_ci(
+    project_id: str,
+    pr_number: int,
+    head_sha: str,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Return CI-friendly quality-gate status for a PR head SHA."""
+    _require_project(project_id, session)
+    gate_run = session.exec(
+        select(PrQualityGateRun).where(
+            PrQualityGateRun.project_id == project_id,
+            PrQualityGateRun.provider == "github",
+            PrQualityGateRun.pr_number == pr_number,
+            PrQualityGateRun.head_sha == head_sha,
+        )
+    ).first()
+    if not gate_run or not gate_run.analysis_id:
+        raise HTTPException(status_code=404, detail="PR quality gate not found")
+    analysis = session.get(PrImpactAnalysis, gate_run.analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="PR quality gate analysis not found")
+    sync_gate_run_state(gate_run, analysis, session)
+    session.commit()
+    return ci_status_payload(analysis, session, gate_run=gate_run)
 
 
 @router.get("/{project_id}/quality-gates/pr/{analysis_id}")
@@ -1120,15 +1339,23 @@ async def get_pr_quality_gate(
     analysis = session.get(PrImpactAnalysis, analysis_id)
     if not analysis or analysis.project_id != project_id:
         raise HTTPException(status_code=404, detail="PR quality gate not found")
-    payload = _serialize_quality_gate(analysis, session, include_details=True)
+    gate_run = session.exec(select(PrQualityGateRun).where(PrQualityGateRun.analysis_id == analysis.id)).first()
+    if gate_run:
+        sync_gate_run_state(gate_run, analysis, session)
+        session.commit()
+    payload = serialize_quality_gate(analysis, session, include_details=True, gate_run=gate_run)
     if refresh_feedback:
-        payload["feedback"] = await _publish_quality_gate_feedback(
+        payload["feedback"] = await publish_quality_gate_feedback(
             project=project,
             analysis=analysis,
             payload=payload,
-            post_feedback=True,
-            create_commit_status=True,
+            gate_run=gate_run,
+            post_feedback=gate_run.post_feedback if gate_run else True,
+            create_commit_status=gate_run.create_commit_status if gate_run else True,
         )
+        if gate_run:
+            session.add(gate_run)
+            session.commit()
     return payload
 
 
@@ -1142,13 +1369,21 @@ def list_pr_quality_gates(
     """List recent PR quality gates with current gate status."""
     _require_project(project_id, session)
     safe_limit = max(1, min(limit, 100))
-    analyses = session.exec(
-        select(PrImpactAnalysis)
-        .where(PrImpactAnalysis.project_id == project_id)
-        .order_by(PrImpactAnalysis.created_at.desc())
+    gate_runs = session.exec(
+        select(PrQualityGateRun)
+        .where(PrQualityGateRun.project_id == project_id)
+        .order_by(PrQualityGateRun.created_at.desc())
         .limit(safe_limit)
     ).all()
-    return [_serialize_quality_gate(a, session, include_details=False) for a in analyses]
+    payloads = []
+    for gate_run in gate_runs:
+        analysis = session.get(PrImpactAnalysis, gate_run.analysis_id) if gate_run.analysis_id else None
+        if not analysis:
+            continue
+        sync_gate_run_state(gate_run, analysis, session)
+        payloads.append(serialize_quality_gate(analysis, session, include_details=False, gate_run=gate_run))
+    session.commit()
+    return payloads
 
 
 # -- PR Test Advisor -----------------------------------------------
