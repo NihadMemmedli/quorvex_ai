@@ -151,6 +151,7 @@ export default function BatchDetailPage() {
 
     // D2: Re-run failed
     const [rerunning, setRerunning] = useState(false);
+    const [cancelling, setCancelling] = useState(false);
 
     // D5: Error analysis
     const [errorCategories, setErrorCategories] = useState<ErrorCategory[]>([]);
@@ -189,7 +190,7 @@ export default function BatchDetailPage() {
             }
         }, 5000);
         return () => clearInterval(interval);
-    }, [batchId, batch?.status]);
+    }, [batch?.status, fetchBatch]);
 
     // Load TestRail config
     useEffect(() => {
@@ -215,9 +216,11 @@ export default function BatchDetailPage() {
     }, [batch?.status, batch?.failed, batchId]);
 
     // D6: Load recent batches for compare
+    const loadedBatchId = batch?.id;
+    const batchProjectId = batch?.project_id;
     useEffect(() => {
-        if (!batch) return;
-        const pid = currentProject?.id || batch.project_id;
+        if (!loadedBatchId) return;
+        const pid = currentProject?.id || batchProjectId;
         let url = `${API_BASE}/regression/batches?limit=10&status=completed`;
         if (pid) url += `&project_id=${encodeURIComponent(pid)}`;
         fetch(url)
@@ -230,7 +233,7 @@ export default function BatchDetailPage() {
                 );
             })
             .catch(() => {});
-    }, [batch?.id, currentProject?.id]);
+    }, [batchId, batchProjectId, currentProject?.id, loadedBatchId]);
 
     // D2: Re-run failed handler
     const handleRerunFailed = async () => {
@@ -250,6 +253,27 @@ export default function BatchDetailPage() {
             alert(e.message || 'Failed');
         } finally {
             setRerunning(false);
+        }
+    };
+
+    const handleCancelBatch = async () => {
+        if (!batch) return;
+        setCancelling(true);
+        try {
+            const pid = currentProject?.id || batch.project_id;
+            let url = `${API_BASE}/regression/batches/${batchId}/cancel`;
+            if (pid) url += `?project_id=${encodeURIComponent(pid)}`;
+            const res = await fetch(url, { method: 'POST' });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: 'Failed to cancel runs' }));
+                alert(err.detail || 'Failed to cancel runs');
+                return;
+            }
+            fetchBatch();
+        } catch (e: any) {
+            alert(e.message || 'Failed to cancel runs');
+        } finally {
+            setCancelling(false);
         }
     };
 
@@ -362,6 +386,8 @@ export default function BatchDetailPage() {
                 return { icon: <XCircle size={16} />, color: 'var(--danger)', bg: 'var(--danger-muted)', borderColor: 'rgba(248, 113, 113, 0.2)', label: 'Failed' };
             case 'stopped':
                 return { icon: <StopCircle size={16} />, color: 'var(--warning)', bg: 'var(--warning-muted)', borderColor: 'rgba(251, 191, 36, 0.2)', label: 'Stopped' };
+            case 'cancelled':
+                return { icon: <StopCircle size={16} />, color: 'var(--warning)', bg: 'var(--warning-muted)', borderColor: 'rgba(251, 191, 36, 0.2)', label: 'Cancelled' };
             case 'running': case 'in_progress':
                 return { icon: <PlayCircle size={16} />, color: 'var(--primary)', bg: 'var(--primary-glow)', borderColor: 'rgba(59, 130, 246, 0.25)', label: 'Running' };
             case 'queued':
@@ -455,13 +481,15 @@ export default function BatchDetailPage() {
         );
     }
 
+    const activeRunCount = batch.running + batch.queued;
+
     const filteredRuns = showFailuresOnly
-        ? batch.runs.filter(r => r.status === 'failed' || r.status === 'stopped')
+        ? batch.runs.filter(r => r.status === 'failed' || r.status === 'stopped' || r.status === 'cancelled')
         : batch.runs;
 
     const sortedRuns = [...filteredRuns].sort((a, b) => {
         if (sortBy === 'status') {
-            const o: Record<string, number> = { failed: 0, stopped: 1, running: 2, queued: 3, passed: 4, completed: 4 };
+            const o: Record<string, number> = { failed: 0, stopped: 1, cancelled: 1, running: 2, queued: 3, passed: 4, completed: 4 };
             return (o[a.status] ?? 5) - (o[b.status] ?? 5);
         }
         if (sortBy === 'name') return (a.test_name || a.spec_name).localeCompare(b.test_name || b.spec_name);
@@ -512,6 +540,26 @@ export default function BatchDetailPage() {
                         {showSyncButton && (
                             <button className="btn" onClick={handleOpenSyncModal} style={{ padding: '0.5rem 1rem', background: 'var(--primary-glow)', color: 'var(--primary)', border: '1px solid rgba(59, 130, 246, 0.3)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                                 <Upload size={16} /> Sync to TestRail
+                            </button>
+                        )}
+                        {activeRunCount > 0 && (
+                            <button
+                                className="btn"
+                                onClick={handleCancelBatch}
+                                disabled={cancelling}
+                                style={{
+                                    padding: '0.5rem 1rem',
+                                    background: 'var(--danger-muted)',
+                                    color: 'var(--danger)',
+                                    border: '1px solid rgba(248, 113, 113, 0.3)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '0.4rem',
+                                    opacity: cancelling ? 0.6 : 1,
+                                }}
+                            >
+                                {cancelling ? <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /> : <StopCircle size={16} />}
+                                {cancelling ? 'Cancelling...' : `Cancel Runs (${activeRunCount})`}
                             </button>
                         )}
                         <button className="btn btn-secondary" onClick={fetchBatch} style={{ padding: '0.5rem 1rem' }}><RefreshCw size={16} /> Refresh</button>

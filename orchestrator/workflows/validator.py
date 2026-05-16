@@ -22,6 +22,7 @@ setup_claude_env()
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 
+from utils.agent_tool_allowlists import get_agent_allowed_tools
 from utils.json_utils import extract_json_from_markdown
 
 
@@ -313,10 +314,12 @@ Fix the test now.
 
         try:
             logger.info("   AI analyzing failure and generating fix...")
+            allowed_tools = get_agent_allowed_tools("test-validator") or []
             async for message in query(
                 prompt=prompt,
                 options=ClaudeAgentOptions(
-                    allowed_tools=["*"],  # All tools including MCP and Write
+                    allowed_tools=allowed_tools,
+                    tools=allowed_tools,
                     setting_sources=["project"],
                     permission_mode="bypassPermissions",
                 ),

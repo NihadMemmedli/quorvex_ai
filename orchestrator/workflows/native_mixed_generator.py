@@ -27,7 +27,8 @@ if config_dir:
 
 import logging
 
-from orchestrator.utils.agent_runner import AgentRunner, build_allowed_tools, get_default_timeout
+from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
+from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
 
 logger = logging.getLogger(__name__)
 
@@ -188,30 +189,6 @@ Return the COMPLETE TypeScript code inside a ```typescript code block.
 Write the file to: {output_path}
 """
 
-    # Playwright MCP tools matching .claude/agents/playwright-test-generator.md
-    GENERATOR_MCP_TOOLS = [
-        "browser_click",
-        "browser_close",
-        "browser_drag",
-        "browser_evaluate",
-        "browser_file_upload",
-        "browser_handle_dialog",
-        "browser_hover",
-        "browser_navigate",
-        "browser_press_key",
-        "browser_select_option",
-        "browser_snapshot",
-        "browser_type",
-        "browser_verify_element_visible",
-        "browser_verify_list_visible",
-        "browser_verify_text_visible",
-        "browser_verify_value",
-        "browser_wait_for",
-        "generator_read_log",
-        "generator_setup_page",
-        "generator_write_test",
-    ]
-
     async def _query_agent(self, prompt: str) -> str:
         """Query the agent."""
         timeout = int(os.environ.get("GENERATOR_TIMEOUT_SECONDS", get_default_timeout()))
@@ -219,10 +196,7 @@ Write the file to: {output_path}
 
         runner = AgentRunner(
             timeout_seconds=timeout,
-            allowed_tools=build_allowed_tools(
-                ["Glob", "Grep", "Read", "LS"],
-                self.GENERATOR_MCP_TOOLS,
-            ),
+            allowed_tools=get_agent_allowed_tools("playwright-test-generator"),
             log_tools=True,
         )
         result = await runner.run(prompt)

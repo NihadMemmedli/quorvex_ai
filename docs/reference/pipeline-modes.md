@@ -21,7 +21,7 @@ Comparison reference for all Quorvex AI execution pipelines.
 | CLI flag | *(none)* |
 | Stages | Planner, Generator, Healer |
 | Healing attempts | 3 |
-| Healing tool | Playwright `test_debug` MCP |
+| Healing tool | Playwright `test_run` plus diagnostic/devtools MCP tools |
 | Browser interaction | Every stage |
 
 ### Stage Sequence
@@ -31,7 +31,7 @@ Comparison reference for all Quorvex AI execution pipelines.
 | 1. Planning | AI agent opens browser, navigates to target URL, explores page, builds plan with discovered selectors |
 | 2. Generation | AI agent opens fresh browser, reads spec and plan, writes Playwright test code with live app interaction |
 | 3. Execution | Generated test runs via `npx playwright test` |
-| 4. Healing | On failure: healer uses `test_debug` MCP tool, rewrites failing portions, re-runs (up to 3 attempts) |
+| 4. Healing | On failure: healer uses `test_run`, page diagnostics, and devtools tools, rewrites failing portions, re-runs (up to 3 attempts) |
 
 ## Hybrid Pipeline
 

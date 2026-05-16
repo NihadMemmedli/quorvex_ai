@@ -94,7 +94,9 @@ from .models import (
     UpdateMetadataRequest,
     UpdateSpecRequest,
 )
-from .models_db import AgentRun, ExplorationSession, RegressionBatch, TestrailCaseMapping
+from .middleware.auth import get_current_user_optional
+from .middleware.permissions import ProjectRole, check_project_access
+from .models_db import AgentDefinition, AgentRun, AgentToolDefinition, ExplorationSession, RegressionBatch, TestrailCaseMapping
 from .models_db import ExecutionSettings as DBExecutionSettings
 from .models_db import SpecMetadata as DBSpecMetadata
 from .models_db import TestRun as DBTestRun
@@ -3593,7 +3595,7 @@ def update_batch_stats(batch_id: str):
             batch.total_tests = len(runs)
             batch.passed = sum(1 for r in runs if r.status in ("passed", "completed"))
             batch.failed = sum(1 for r in runs if r.status in ("failed", "error"))
-            batch.stopped = sum(1 for r in runs if r.status == "stopped")
+            batch.stopped = sum(1 for r in runs if r.status in ("stopped", "cancelled"))
             batch.running = sum(1 for r in runs if r.status in ("running", "in_progress"))
             batch.queued = sum(1 for r in runs if r.status == "queued")
 
@@ -4248,12 +4250,18 @@ def execute_run_task(
     """Execute the native pipeline (default) with optional hybrid healing mode.
 
     Native pipeline is always used. The only choice is healing mode:
-    - hybrid=False: Native Healer (3 attempts using test_debug)
+    - hybrid=False: Native Healer (3 attempts using test_run + diagnostic/devtools tools)
     - hybrid=True: Native + Ralph (3 attempts + up to 17 more)
 
     Process groups are used to ensure all child processes can be terminated together.
     """
     global PROCESS_MANAGER
+
+    with Session(engine) as session:
+        run = session.get(DBTestRun, run_id)
+        if run and run.status in ("stopped", "cancelled"):
+            logger.info(f"Run {run_id} was {run.status} before subprocess start. Aborting.")
+            return
 
     cmd = [sys.executable, "orchestrator/cli.py", spec_path, "--run-dir", run_dir, "--browser", browser]
     if try_code_path:
@@ -4332,6 +4340,12 @@ def execute_run_task(
     if project_id:
         env["PROJECT_ID"] = project_id
         env["MEMORY_PROJECT_ID"] = project_id
+
+    with Session(engine) as session:
+        run = session.get(DBTestRun, run_id)
+        if run and run.status in ("stopped", "cancelled"):
+            logger.info(f"Run {run_id} was {run.status} before process spawn. Aborting.")
+            return
 
     log_file = Path(run_dir) / "execution.log"
     with open(log_file, "w") as f:
@@ -4650,6 +4664,12 @@ def execute_mobile_run_task(
 
     from orchestrator.workflows.mobile_appium import MobileAppiumConfig, build_appium_mcp_config
 
+    with Session(engine) as session:
+        run = session.get(DBTestRun, run_id)
+        if run and run.status in ("stopped", "cancelled"):
+            logger.info(f"Mobile run {run_id} was {run.status} before subprocess start. Aborting.")
+            return
+
     run_dir_path = Path(run_dir)
     run_dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -4697,6 +4717,12 @@ def execute_mobile_run_task(
     if project_id:
         env["PROJECT_ID"] = project_id
         env["MEMORY_PROJECT_ID"] = project_id
+
+    with Session(engine) as session:
+        run = session.get(DBTestRun, run_id)
+        if run and run.status in ("stopped", "cancelled"):
+            logger.info(f"Mobile run {run_id} was {run.status} before process spawn. Aborting.")
+            return
 
     log_file = run_dir_path / "execution.log"
     with open(log_file, "w") as f:
@@ -4852,7 +4878,7 @@ class RunRequest(BaseModel):
     """Request model for creating a test run.
 
     Native pipeline is always used. The only choice is healing mode:
-    - hybrid=False: Native Healer (3 attempts using test_debug)
+    - hybrid=False: Native Healer (3 attempts using test_run + diagnostic/devtools tools)
     - hybrid=True: Hybrid (Native 3 attempts + Ralph up to 17 more)
 
     Legacy fields (ralph, native_healer, native_generator) are kept for
@@ -5414,6 +5440,343 @@ class AgentRunRequest(BaseModel):
     project_id: str | None = None  # Project isolation
 
 
+class AgentDefinitionRequest(BaseModel):
+    name: str
+    description: str = ""
+    system_prompt: str
+    model: str | None = None
+    timeout_seconds: int = 1800
+    tool_ids: list[str] = []
+    project_id: str | None = None
+
+
+class AgentDefinitionUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    system_prompt: str | None = None
+    model: str | None = None
+    timeout_seconds: int | None = None
+    tool_ids: list[str] | None = None
+    status: str | None = None
+
+
+class CustomAgentRunRequest(BaseModel):
+    prompt: str
+    url: str | None = None
+    config: dict[str, Any] | None = None
+    project_id: str | None = None
+
+
+def _agent_tool(
+    id: str,
+    label: str,
+    description: str,
+    category: str,
+    tool_name: str,
+    risk: str = "low",
+    requires_mcp_server: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": id,
+        "label": label,
+        "description": description,
+        "category": category,
+        "tool_name": tool_name,
+        "risk": risk,
+        "requires_mcp_server": requires_mcp_server,
+    }
+
+
+AGENT_TOOL_CATALOG: list[dict[str, Any]] = [
+    _agent_tool("read_file", "Read files", "Read repository and generated artifact files.", "Workspace", "Read"),
+    _agent_tool("list_files", "List files", "Inspect directories and workspace structure.", "Workspace", "LS"),
+    _agent_tool("glob_files", "Find files", "Find files by pattern.", "Workspace", "Glob"),
+    _agent_tool("grep_files", "Search text", "Search file contents by pattern.", "Workspace", "Grep"),
+    _agent_tool("write_file", "Write files", "Create or overwrite files in the workspace.", "Workspace", "Write", "high"),
+    _agent_tool("edit_file", "Edit files", "Apply targeted edits to workspace files.", "Workspace", "Edit", "high"),
+    _agent_tool(
+        "multi_edit_file",
+        "Multi-edit files",
+        "Apply multiple edits to workspace files in one operation.",
+        "Workspace",
+        "MultiEdit",
+        "high",
+    ),
+    _agent_tool("bash", "Shell command", "Run shell commands in the agent workspace.", "Workspace", "Bash", "destructive"),
+    _agent_tool(
+        "browser_navigate",
+        "Browser navigate",
+        "Open web pages in an isolated Playwright browser.",
+        "Browser",
+        "mcp__playwright-test__browser_navigate",
+        "medium",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "browser_navigate_back",
+        "Browser back",
+        "Return to the previous page in browser history.",
+        "Browser",
+        "mcp__playwright-test__browser_navigate_back",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_close",
+        "Browser close",
+        "Close the active browser page.",
+        "Browser",
+        "mcp__playwright-test__browser_close",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_snapshot",
+        "Browser snapshot",
+        "Read the current page accessibility tree.",
+        "Browser",
+        "mcp__playwright-test__browser_snapshot",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_click",
+        "Browser click",
+        "Click page elements.",
+        "Browser",
+        "mcp__playwright-test__browser_click",
+        "medium",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "browser_type",
+        "Browser type",
+        "Type into page inputs.",
+        "Browser",
+        "mcp__playwright-test__browser_type",
+        "medium",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "browser_drag",
+        "Browser drag",
+        "Drag one page element onto another.",
+        "Browser",
+        "mcp__playwright-test__browser_drag",
+        "medium",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "browser_hover",
+        "Browser hover",
+        "Hover over page elements.",
+        "Browser",
+        "mcp__playwright-test__browser_hover",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_evaluate",
+        "Browser JavaScript",
+        "Evaluate JavaScript in the page context.",
+        "Browser",
+        "mcp__playwright-test__browser_evaluate",
+        "high",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "browser_select",
+        "Browser select",
+        "Choose values in dropdowns.",
+        "Browser",
+        "mcp__playwright-test__browser_select_option",
+        "medium",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "browser_press_key",
+        "Browser key press",
+        "Press keyboard keys in the page.",
+        "Browser",
+        "mcp__playwright-test__browser_press_key",
+        "medium",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "browser_upload",
+        "File upload",
+        "Upload files into a page.",
+        "Browser",
+        "mcp__playwright-test__browser_file_upload",
+        "high",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "browser_dialog",
+        "Handle dialogs",
+        "Accept or dismiss browser dialogs.",
+        "Browser",
+        "mcp__playwright-test__browser_handle_dialog",
+        "medium",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "browser_network",
+        "Network requests",
+        "Inspect browser network traffic.",
+        "Diagnostics",
+        "mcp__playwright-test__browser_network_requests",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_console",
+        "Console messages",
+        "Inspect browser console output.",
+        "Diagnostics",
+        "mcp__playwright-test__browser_console_messages",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_screenshot",
+        "Screenshot",
+        "Capture browser screenshots.",
+        "Diagnostics",
+        "mcp__playwright-test__browser_take_screenshot",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_wait",
+        "Browser wait",
+        "Wait for text, disappearance, or time.",
+        "Diagnostics",
+        "mcp__playwright-test__browser_wait_for",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_generate_locator",
+        "Generate locator",
+        "Generate a robust locator for a page element.",
+        "Testing",
+        "mcp__playwright-test__browser_generate_locator",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_verify_element",
+        "Verify element visible",
+        "Check that a target element is visible.",
+        "Assertions",
+        "mcp__playwright-test__browser_verify_element_visible",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_verify_list",
+        "Verify list visible",
+        "Check that a list of elements is visible.",
+        "Assertions",
+        "mcp__playwright-test__browser_verify_list_visible",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_verify_text",
+        "Verify text visible",
+        "Check that expected text is visible.",
+        "Assertions",
+        "mcp__playwright-test__browser_verify_text_visible",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_verify_value",
+        "Verify value",
+        "Check an element value.",
+        "Assertions",
+        "mcp__playwright-test__browser_verify_value",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_resume",
+        "Resume browser",
+        "Resume browser state for diagnostic workflows.",
+        "Testing",
+        "mcp__playwright-test__browser_resume",
+        "medium",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "browser_start_tracing",
+        "Start tracing",
+        "Start browser tracing for diagnostics.",
+        "Diagnostics",
+        "mcp__playwright-test__browser_start_tracing",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "browser_stop_tracing",
+        "Stop tracing",
+        "Stop browser tracing and collect trace artifacts.",
+        "Diagnostics",
+        "mcp__playwright-test__browser_stop_tracing",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "test_list",
+        "List tests",
+        "List runnable Playwright tests.",
+        "Testing",
+        "mcp__playwright-test__test_list",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "test_run",
+        "Run tests",
+        "Run Playwright tests and collect failure output.",
+        "Testing",
+        "mcp__playwright-test__test_run",
+        "medium",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "planner_setup_page",
+        "Planner setup page",
+        "Prepare a page for planner workflows.",
+        "Pipeline",
+        "mcp__playwright-test__planner_setup_page",
+        "medium",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "planner_save_plan",
+        "Planner save plan",
+        "Save a generated test plan artifact.",
+        "Pipeline",
+        "mcp__playwright-test__planner_save_plan",
+        "high",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "generator_setup_page",
+        "Generator setup page",
+        "Prepare a page for generator workflows.",
+        "Pipeline",
+        "mcp__playwright-test__generator_setup_page",
+        "medium",
+        "playwright-test",
+    ),
+    _agent_tool(
+        "generator_read_log",
+        "Generator read log",
+        "Read generator workflow logs.",
+        "Pipeline",
+        "mcp__playwright-test__generator_read_log",
+        requires_mcp_server="playwright-test",
+    ),
+    _agent_tool(
+        "generator_write_test",
+        "Generator write test",
+        "Write generated Playwright test code.",
+        "Pipeline",
+        "mcp__playwright-test__generator_write_test",
+        "high",
+        "playwright-test",
+    ),
+]
+
+
 class ExploratoryRunRequest(BaseModel):
     """Enhanced exploratory testing request."""
 
@@ -5453,6 +5816,228 @@ def _collect_agent_run_artifacts(run_id: str) -> list[dict[str, Any]]:
     except Exception as exc:
         logger.debug("Failed to collect artifacts for agent run %s: %s", run_id, exc)
         return []
+
+
+def _sync_agent_tool_catalog(session: Session) -> list[AgentToolDefinition]:
+    """Upsert the built-in selectable tool catalog."""
+    now = datetime.utcnow()
+    for item in AGENT_TOOL_CATALOG:
+        tool = session.get(AgentToolDefinition, item["id"])
+        if not tool:
+            tool = AgentToolDefinition(id=item["id"], tool_name=item["tool_name"])
+        tool.label = item["label"]
+        tool.description = item["description"]
+        tool.category = item["category"]
+        tool.tool_name = item["tool_name"]
+        tool.risk = item["risk"]
+        tool.enabled = True
+        tool.requires_mcp_server = item.get("requires_mcp_server")
+        tool.updated_at = now
+        session.add(tool)
+    session.commit()
+    return session.exec(
+        select(AgentToolDefinition)
+        .where(AgentToolDefinition.enabled == True)
+        .order_by(AgentToolDefinition.category, AgentToolDefinition.label)
+    ).all()
+
+
+def _serialize_agent_tool(tool: AgentToolDefinition) -> dict[str, Any]:
+    return {
+        "id": tool.id,
+        "label": tool.label,
+        "description": tool.description,
+        "category": tool.category,
+        "tool_name": tool.tool_name,
+        "risk": tool.risk,
+        "enabled": tool.enabled,
+        "requires_mcp_server": tool.requires_mcp_server,
+    }
+
+
+def _serialize_agent_definition(definition: AgentDefinition) -> dict[str, Any]:
+    return {
+        "id": definition.id,
+        "project_id": definition.project_id,
+        "name": definition.name,
+        "description": definition.description,
+        "system_prompt": definition.system_prompt,
+        "model": definition.model,
+        "timeout_seconds": definition.timeout_seconds,
+        "tool_ids": definition.tool_ids,
+        "status": definition.status,
+        "created_at": definition.created_at.isoformat(),
+        "updated_at": definition.updated_at.isoformat(),
+    }
+
+
+def _get_agent_definition_or_404(definition_id: str, project_id: str | None, session: Session) -> AgentDefinition:
+    definition = session.get(AgentDefinition, definition_id)
+    if not definition or definition.status == "archived":
+        raise HTTPException(status_code=404, detail="Agent definition not found")
+    if project_id:
+        if project_id == "default":
+            if definition.project_id not in (None, "default"):
+                raise HTTPException(status_code=404, detail="Agent definition not found")
+        elif definition.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Agent definition not found")
+    return definition
+
+
+async def _ensure_agent_write_access(project_id: str | None, current_user: Any, session: Session) -> None:
+    if project_id:
+        await check_project_access(project_id, current_user, [ProjectRole.ADMIN, ProjectRole.EDITOR], session)
+
+
+def _resolve_agent_tools(tool_ids: list[str], session: Session) -> tuple[list[str], list[dict[str, Any]]]:
+    _sync_agent_tool_catalog(session)
+    if not tool_ids:
+        raise HTTPException(status_code=400, detail="Select at least one tool for this agent")
+
+    tools: list[AgentToolDefinition] = []
+    unknown: list[str] = []
+    for tool_id in tool_ids:
+        tool = session.get(AgentToolDefinition, tool_id)
+        if not tool or not tool.enabled:
+            unknown.append(tool_id)
+        else:
+            tools.append(tool)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown or disabled tools: {', '.join(unknown)}")
+
+    allowed_tools = sorted({tool.tool_name for tool in tools})
+    return allowed_tools, [_serialize_agent_tool(tool) for tool in tools]
+
+
+def _prepare_custom_agent_mcp_config(run_id: str) -> Path:
+    """Create run-local Playwright MCP config for UI-created custom agents."""
+    run_dir = RUNS_DIR / run_id
+    artifacts_dir = run_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    mcp_server = exploration._build_playwright_mcp_server_config()
+    mcp_args = list(mcp_server["args"])
+    mcp_args.extend(["--output-dir", str(artifacts_dir), "--isolated"])
+    if os.environ.get("HEADLESS", "true").lower() != "false":
+        mcp_args.append("--headless")
+
+    mcp_config = {
+        "mcpServers": {
+            "playwright-test": {
+                "command": mcp_server["command"],
+                "args": mcp_args,
+            }
+        }
+    }
+    (run_dir / ".mcp.json").write_text(json.dumps(mcp_config, indent=2))
+    return run_dir
+
+
+def _ensure_custom_agent_browser_available(run_id: str) -> None:
+    """Install the Playwright browser used by @playwright/mcp if it is missing.
+
+    This is intentionally runtime-scoped because local/dev and slim backend
+    environments may have Node dependencies without the browser cache.
+    """
+    _update_agent_run_progress(
+        run_id,
+        {
+            "phase": "browser_setup",
+            "message": "Checking Playwright browser installation",
+        },
+    )
+    env = os.environ.copy()
+    env.setdefault("NPM_CONFIG_CACHE", "/tmp/quorvex-npm-cache")
+    env.setdefault("PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT", "300000")
+
+    try:
+        result = subprocess.run(
+            ["npx", "@playwright/mcp", "install-browser", "chromium"],
+            cwd=str(BASE_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as exc:
+        _update_agent_run_progress(
+            run_id,
+            {
+                "phase": "failed",
+                "message": "Timed out installing Playwright browser",
+            },
+        )
+        raise RuntimeError(
+            "Timed out installing the Playwright browser for custom agent browser tools. "
+            "Run `NPM_CONFIG_CACHE=/tmp/quorvex-npm-cache npx @playwright/mcp install-browser chromium` "
+            "on the backend/agent-worker host, then retry."
+        ) from exc
+
+    combined_output = f"{result.stdout}\n{result.stderr}".strip()
+    if result.returncode != 0:
+        _update_agent_run_progress(
+            run_id,
+            {
+                "phase": "failed",
+                "message": "Playwright browser installation failed",
+                "browser_install_output": combined_output[-2000:],
+            },
+        )
+        raise RuntimeError(
+            "Playwright browser is not available for custom agent browser tools, and automatic install failed. "
+            "Run `NPM_CONFIG_CACHE=/tmp/quorvex-npm-cache npx @playwright/mcp install-browser chromium` "
+            f"on the backend/agent-worker host. Installer output: {combined_output[-1000:]}"
+        )
+
+    _update_agent_run_progress(
+        run_id,
+        {
+            "phase": "browser_ready",
+            "message": "Playwright browser is ready",
+        },
+    )
+
+
+def _short_tool_name(tool_name: str | None) -> str:
+    if not tool_name:
+        return ""
+    return str(tool_name).rsplit("__", 1)[-1] if "__" in str(tool_name) else str(tool_name)
+
+
+def _update_agent_run_progress(run_id: str, patch: dict[str, Any]) -> None:
+    """Persist live progress for custom agent runs."""
+    try:
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            if not run:
+                return
+            existing = run.progress or {}
+            recent_tools = list(existing.get("recent_tools") or [])
+            last_tool = patch.get("last_tool")
+            if last_tool and (not recent_tools or recent_tools[-1].get("name") != last_tool):
+                recent_tools.append(
+                    {
+                        "name": str(last_tool),
+                        "label": _short_tool_name(str(last_tool)),
+                        "at": datetime.utcnow().isoformat(),
+                    }
+                )
+                recent_tools = recent_tools[-12:]
+
+            progress = {
+                **existing,
+                **patch,
+                "last_tool_label": _short_tool_name(str(last_tool or existing.get("last_tool") or "")),
+                "recent_tools": recent_tools,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            run.progress = progress
+            if patch.get("agent_task_id"):
+                run.agent_task_id = str(patch["agent_task_id"])
+            session.add(run)
+            session.commit()
+    except Exception as exc:
+        logger.debug("Failed to update custom agent progress for %s: %s", run_id, exc)
 
 
 async def execute_agent_background(run_id: str, agent_type: str, config: dict):
@@ -5586,6 +6171,128 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             elif agent_type == "spec-synthesis":
                 agent = SpecSynthesisAgent()
                 result = await agent.run(config)
+            elif agent_type == "custom":
+                from utils.agent_runner import AgentRunner
+
+                allowed_tools = config.get("allowed_tools") or []
+                run_dir = None
+                has_browser_tools = any(str(tool).startswith("mcp__playwright") for tool in allowed_tools)
+                has_screenshot_tool = any(str(tool).endswith("__browser_take_screenshot") for tool in allowed_tools)
+                if any(str(tool).startswith("mcp__") for tool in allowed_tools):
+                    if has_browser_tools:
+                        _ensure_custom_agent_browser_available(run_id)
+                    run_dir = _prepare_custom_agent_mcp_config(run_id)
+
+                _update_agent_run_progress(
+                    run_id,
+                    {
+                        "phase": "starting",
+                        "message": "Starting custom agent",
+                        "tool_calls": 0,
+                        "browser_tool_calls": 0,
+                        "interactions": 0,
+                        "has_browser_tools": has_browser_tools,
+                    },
+                )
+
+                task_prompt = config.get("prompt", "")
+                target_url = config.get("url")
+                custom_config = config.get("custom_config") or {}
+                prompt_parts = [
+                    config.get("system_prompt") or "You are a focused QA automation agent.",
+                    "",
+                    "Run this task using only the tools you have been granted.",
+                ]
+                if has_screenshot_tool:
+                    prompt_parts.append(
+                        "While working in the browser, periodically call browser_take_screenshot with filenames "
+                        "like live-step-001.png, live-step-002.png, etc. so the UI can show your current state."
+                    )
+                if target_url:
+                    prompt_parts.append(f"Target URL: {target_url}")
+                if custom_config:
+                    prompt_parts.append(f"Additional config JSON:\n{json.dumps(custom_config, indent=2)}")
+                prompt_parts.extend(["", "Task:", task_prompt])
+
+                def _on_custom_task_enqueued(task_id: str) -> None:
+                    _update_agent_run_progress(
+                        run_id,
+                        {
+                            "phase": "queued",
+                            "message": "Agent task queued for worker",
+                            "agent_task_id": task_id,
+                        },
+                    )
+
+                def _on_custom_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
+                    _update_agent_run_progress(
+                        run_id,
+                        {
+                            "phase": "tool_use",
+                            "message": f"Using {_short_tool_name(tool_name)}",
+                            "last_tool": tool_name,
+                            "last_tool_input": tool_input,
+                            "has_browser_tools": has_browser_tools,
+                        },
+                    )
+
+                def _on_custom_progress(progress: dict[str, Any]) -> None:
+                    last_tool = progress.get("last_tool")
+                    _update_agent_run_progress(
+                        run_id,
+                        {
+                            **progress,
+                            "phase": progress.get("phase") or "running",
+                            "message": f"Using {_short_tool_name(str(last_tool))}" if last_tool else "Agent is running",
+                            "has_browser_tools": has_browser_tools,
+                        },
+                    )
+
+                runner = AgentRunner(
+                    timeout_seconds=int(config.get("timeout_seconds") or 1800),
+                    allowed_tools=allowed_tools,
+                    tools=allowed_tools,
+                    session_dir=run_dir,
+                    on_task_enqueued=_on_custom_task_enqueued,
+                    on_tool_use=_on_custom_tool_use,
+                    on_progress=_on_custom_progress,
+                    cwd=run_dir,
+                )
+                agent_result = await runner.run("\n".join(prompt_parts))
+                result = {
+                    "summary": agent_result.output[:500] if agent_result.output else agent_result.error,
+                    "output": agent_result.output,
+                    "error": agent_result.error,
+                    "duration_seconds": agent_result.duration_seconds,
+                    "tool_calls": [
+                        {
+                            "name": call.name,
+                            "timestamp": call.timestamp.isoformat(),
+                            "duration_ms": call.duration_ms,
+                            "success": call.success,
+                            "error": call.error,
+                            "input": call.input,
+                        }
+                        for call in agent_result.tool_calls
+                    ],
+                    "messages_received": agent_result.messages_received,
+                    "text_blocks_received": agent_result.text_blocks_received,
+                    "timed_out": agent_result.timed_out,
+                }
+                if not agent_result.success:
+                    raise RuntimeError(agent_result.error or "Custom agent failed")
+                _update_agent_run_progress(
+                    run_id,
+                    {
+                        "phase": "completed",
+                        "message": "Custom agent completed",
+                        "tool_calls": len(agent_result.tool_calls),
+                        "browser_tool_calls": len(
+                            [call for call in agent_result.tool_calls if call.name.startswith("mcp__playwright")]
+                        ),
+                        "interactions": len(agent_result.tool_calls),
+                    },
+                )
 
             # Update DB success
             with Session(engine) as session:
@@ -5617,6 +6324,12 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             if run:
                 run.status = "failed"
                 run.result = {"error": str(e)}
+                run.progress = {
+                    **(run.progress or {}),
+                    "phase": "failed",
+                    "message": str(e),
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
                 session.add(run)
                 session.commit()
 
@@ -5671,6 +6384,188 @@ async def run_agent(
     return response
 
 
+@app.get("/api/agents/tools/catalog")
+def list_agent_tool_catalog(session: Session = Depends(get_session)):
+    tools = _sync_agent_tool_catalog(session)
+    serialized = [_serialize_agent_tool(tool) for tool in tools]
+    categories: dict[str, list[dict[str, Any]]] = {}
+    for tool in serialized:
+        categories.setdefault(tool["category"], []).append(tool)
+    return {"tools": serialized, "categories": categories}
+
+
+@app.get("/api/agents/definitions")
+def list_agent_definitions(
+    project_id: str | None = Query(default=None),
+    include_archived: bool = Query(default=False),
+    session: Session = Depends(get_session),
+):
+    statement = select(AgentDefinition).order_by(AgentDefinition.updated_at.desc())
+    if not include_archived:
+        statement = statement.where(AgentDefinition.status == "active")
+    if project_id:
+        if project_id == "default":
+            statement = statement.where((AgentDefinition.project_id == project_id) | (AgentDefinition.project_id == None))
+        else:
+            statement = statement.where(AgentDefinition.project_id == project_id)
+    return [_serialize_agent_definition(item) for item in session.exec(statement).all()]
+
+
+@app.post("/api/agents/definitions")
+async def create_agent_definition(
+    request: AgentDefinitionRequest,
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(get_current_user_optional),
+):
+    await _ensure_agent_write_access(request.project_id, current_user, session)
+    _resolve_agent_tools(request.tool_ids, session)
+    if not request.name.strip():
+        raise HTTPException(status_code=400, detail="Agent name is required")
+    if not request.system_prompt.strip():
+        raise HTTPException(status_code=400, detail="System prompt is required")
+
+    definition = AgentDefinition(
+        project_id=request.project_id,
+        name=request.name.strip(),
+        description=request.description.strip(),
+        system_prompt=request.system_prompt.strip(),
+        model=request.model,
+        timeout_seconds=max(60, min(int(request.timeout_seconds or 1800), 7200)),
+        status="active",
+    )
+    definition.tool_ids = request.tool_ids
+    session.add(definition)
+    session.commit()
+    session.refresh(definition)
+    return _serialize_agent_definition(definition)
+
+
+@app.get("/api/agents/definitions/{definition_id}")
+def get_agent_definition(
+    definition_id: str,
+    project_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    return _serialize_agent_definition(_get_agent_definition_or_404(definition_id, project_id, session))
+
+
+@app.put("/api/agents/definitions/{definition_id}")
+async def update_agent_definition(
+    definition_id: str,
+    request: AgentDefinitionUpdateRequest,
+    project_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(get_current_user_optional),
+):
+    definition = _get_agent_definition_or_404(definition_id, project_id, session)
+    await _ensure_agent_write_access(definition.project_id, current_user, session)
+
+    if request.tool_ids is not None:
+        _resolve_agent_tools(request.tool_ids, session)
+        definition.tool_ids = request.tool_ids
+    if request.name is not None:
+        if not request.name.strip():
+            raise HTTPException(status_code=400, detail="Agent name is required")
+        definition.name = request.name.strip()
+    if request.description is not None:
+        definition.description = request.description.strip()
+    if request.system_prompt is not None:
+        if not request.system_prompt.strip():
+            raise HTTPException(status_code=400, detail="System prompt is required")
+        definition.system_prompt = request.system_prompt.strip()
+    if request.model is not None:
+        definition.model = request.model
+    if request.timeout_seconds is not None:
+        definition.timeout_seconds = max(60, min(int(request.timeout_seconds), 7200))
+    if request.status is not None:
+        if request.status not in {"active", "archived"}:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        definition.status = request.status
+    definition.updated_at = datetime.utcnow()
+    session.add(definition)
+    session.commit()
+    session.refresh(definition)
+    return _serialize_agent_definition(definition)
+
+
+@app.delete("/api/agents/definitions/{definition_id}")
+async def archive_agent_definition(
+    definition_id: str,
+    project_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(get_current_user_optional),
+):
+    definition = _get_agent_definition_or_404(definition_id, project_id, session)
+    await _ensure_agent_write_access(definition.project_id, current_user, session)
+    definition.status = "archived"
+    definition.updated_at = datetime.utcnow()
+    session.add(definition)
+    session.commit()
+    return {"status": "archived", "id": definition.id}
+
+
+@app.post("/api/agents/definitions/{definition_id}/runs")
+async def run_agent_definition(
+    definition_id: str,
+    request: CustomAgentRunRequest,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(get_current_user_optional),
+):
+    definition = _get_agent_definition_or_404(definition_id, request.project_id, session)
+    await _ensure_agent_write_access(definition.project_id, current_user, session)
+    if not request.prompt.strip():
+        raise HTTPException(status_code=400, detail="Prompt is required")
+
+    allowed_tools, selected_tools = _resolve_agent_tools(definition.tool_ids, session)
+
+    resource_manager = await get_resource_manager()
+    agent_status = resource_manager.get_agent_status()
+    initial_status = "running" if resource_manager.is_slot_available(ResourceType.AGENT) else "queued"
+    queue_position = None if initial_status == "running" else agent_status.queued + 1
+
+    run_id = str(uuid.uuid4())
+    run_config = {
+        "agent_definition_id": definition.id,
+        "agent_name": definition.name,
+        "prompt": request.prompt.strip(),
+        "url": request.url,
+        "custom_config": request.config or {},
+        "system_prompt": definition.system_prompt,
+        "timeout_seconds": definition.timeout_seconds,
+        "model": definition.model,
+        "tool_ids": definition.tool_ids,
+        "allowed_tools": allowed_tools,
+        "selected_tools": selected_tools,
+    }
+    run = AgentRun(
+        id=run_id,
+        agent_type="custom",
+        config_json=json.dumps(run_config),
+        status=initial_status,
+        project_id=definition.project_id,
+    )
+    session.add(run)
+    session.commit()
+
+    background_tasks.add_task(execute_agent_background, run_id, "custom", run_config)
+
+    response = {
+        "status": initial_status,
+        "run_id": run_id,
+        "agent_definition_id": definition.id,
+        "agent_slots": {
+            "active": agent_status.active,
+            "max": agent_status.max_slots,
+            "queued": agent_status.queued + (1 if initial_status == "queued" else 0),
+        },
+    }
+    if queue_position:
+        response["queue_position"] = queue_position
+        response["message"] = f"Request queued at position {queue_position}. Will start when a slot becomes available."
+    return response
+
+
 @app.get("/api/agents/runs")
 def list_agent_runs(
     project_id: str | None = None,
@@ -5698,7 +6593,9 @@ def list_agent_runs(
             "created_at": r.created_at.isoformat(),
             "config": r.config,
             "project_id": r.project_id,
-            "artifacts": _collect_agent_run_artifacts(r.id) if r.agent_type == "exploratory" else [],
+            "progress": r.progress,
+            "agent_task_id": r.agent_task_id,
+            "artifacts": _collect_agent_run_artifacts(r.id) if r.agent_type in ("exploratory", "custom") else [],
             # Don't send full result in list view if it's huge
             "summary": r.result.get("summary") if r.result else None,
         }
@@ -5733,7 +6630,9 @@ def get_agent_run(
         "config": r.config,
         "result": r.result,
         "project_id": r.project_id,
-        "artifacts": _collect_agent_run_artifacts(r.id) if r.agent_type == "exploratory" else [],
+        "progress": r.progress,
+        "agent_task_id": r.agent_task_id,
+        "artifacts": _collect_agent_run_artifacts(r.id) if r.agent_type in ("exploratory", "custom") else [],
     }
 
 

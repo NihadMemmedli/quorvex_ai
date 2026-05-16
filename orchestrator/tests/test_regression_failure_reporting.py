@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session, SQLModel, select
 
 
 def test_batch_failure_reporting_uses_artifacts_and_error_runs():
@@ -179,6 +179,173 @@ at /app/tests/generated/example.spec.ts:20:33
                 run = session.get(DBTestRun, run_id)
                 if run:
                     session.delete(run)
+            batch = session.get(RegressionBatch, batch_id)
+            if batch:
+                session.delete(batch)
+            session.commit()
+
+
+def test_rerun_failed_creates_batch_for_failed_and_error_runs(monkeypatch):
+    import orchestrator.api.regression as regression_module
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import RegressionBatch
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    from orchestrator.api.regression import RUNS_DIR, router
+    from orchestrator.services.batch_executor import SPECS_DIR
+
+    batch_id = f"batch-rerun-failed-{uuid4()}"
+    spec_root = f"rerun-failed-{uuid4()}"
+    failed_spec = f"{spec_root}/failed-case.md"
+    error_spec = f"{spec_root}/error-case.md"
+    passed_spec = f"{spec_root}/passed-case.md"
+    stopped_spec = f"{spec_root}/stopped-case.md"
+    now = datetime.utcnow()
+    scheduled_tasks: list[dict] = []
+    created_batch_id = None
+    created_run_ids: list[str] = []
+
+    SQLModel.metadata.create_all(engine)
+
+    for spec_name in (failed_spec, error_spec, passed_spec, stopped_spec):
+        spec_path = SPECS_DIR / spec_name
+        spec_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_path.write_text(f"# {Path(spec_name).stem}\n")
+
+    def fake_start_regression_tasks(tasks_to_start, runtime):
+        scheduled_tasks.extend(tasks_to_start)
+
+    monkeypatch.setattr(regression_module, "_get_bulk_run_runtime", lambda: ("process-manager", "handler", "executor"))
+    monkeypatch.setattr(regression_module, "_start_regression_tasks", fake_start_regression_tasks)
+
+    with Session(engine) as session:
+        session.add(
+            RegressionBatch(
+                id=batch_id,
+                name="Original batch",
+                created_at=now,
+                browser="chromium",
+                total_tests=4,
+                failed=2,
+                status="completed",
+                project_id="default",
+            )
+        )
+        for spec_name, status in (
+            (failed_spec, "failed"),
+            (error_spec, "error"),
+            (passed_spec, "passed"),
+            (stopped_spec, "stopped"),
+        ):
+            session.add(
+                DBTestRun(
+                    id=f"rerun-source-{uuid4()}",
+                    spec_name=spec_name,
+                    test_name=spec_name,
+                    status=status,
+                    batch_id=batch_id,
+                    project_id="default",
+                    created_at=now,
+                    completed_at=now,
+                )
+            )
+        session.commit()
+
+    try:
+        app = FastAPI()
+        app.include_router(router)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(f"/regression/batches/{batch_id}/rerun-failed")
+
+        assert response.status_code == 200
+        data = response.json()
+        created_batch_id = data["batch_id"]
+        created_run_ids = data["run_ids"]
+        assert data["count"] == 2
+        assert set(data["failed_specs"]) == {failed_spec, error_spec}
+        assert {task["spec_name"] for task in scheduled_tasks} == {failed_spec, error_spec}
+        assert len(scheduled_tasks) == 2
+
+        with Session(engine) as session:
+            new_batch = session.get(RegressionBatch, created_batch_id)
+            assert new_batch is not None
+            assert new_batch.triggered_by == "rerun-failed"
+            assert new_batch.total_tests == 2
+            new_runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == created_batch_id)).all()
+            assert {run.spec_name for run in new_runs} == {failed_spec, error_spec}
+            assert {run.status for run in new_runs} == {"queued"}
+    finally:
+        shutil.rmtree(SPECS_DIR / spec_root, ignore_errors=True)
+        for run_id in created_run_ids:
+            shutil.rmtree(RUNS_DIR / run_id, ignore_errors=True)
+        with Session(engine) as session:
+            for cleanup_batch_id in (batch_id, created_batch_id):
+                if not cleanup_batch_id:
+                    continue
+                for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == cleanup_batch_id)).all():
+                    shutil.rmtree(RUNS_DIR / run.id, ignore_errors=True)
+                    session.delete(run)
+                batch = session.get(RegressionBatch, cleanup_batch_id)
+                if batch:
+                    session.delete(batch)
+            session.commit()
+
+
+def test_rerun_failed_rejects_batch_without_failed_or_error_runs(monkeypatch):
+    import orchestrator.api.regression as regression_module
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import RegressionBatch
+    from orchestrator.api.models_db import TestRun as DBTestRun
+    from orchestrator.api.regression import router
+
+    batch_id = f"batch-rerun-empty-{uuid4()}"
+    now = datetime.utcnow()
+
+    def fail_if_runtime_is_resolved():
+        raise AssertionError("runtime should not be resolved when there are no failed runs")
+
+    monkeypatch.setattr(regression_module, "_get_bulk_run_runtime", fail_if_runtime_is_resolved)
+    SQLModel.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        session.add(
+            RegressionBatch(
+                id=batch_id,
+                name="Clean batch",
+                created_at=now,
+                browser="chromium",
+                total_tests=1,
+                passed=1,
+                failed=0,
+                status="completed",
+                project_id="default",
+            )
+        )
+        session.add(
+            DBTestRun(
+                id=f"rerun-clean-source-{uuid4()}",
+                spec_name="clean.md",
+                test_name="clean.md",
+                status="passed",
+                batch_id=batch_id,
+                project_id="default",
+                created_at=now,
+                completed_at=now,
+            )
+        )
+        session.commit()
+
+    try:
+        app = FastAPI()
+        app.include_router(router)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(f"/regression/batches/{batch_id}/rerun-failed")
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "No failed tests to re-run"
+    finally:
+        with Session(engine) as session:
+            for run in session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all():
+                session.delete(run)
             batch = session.get(RegressionBatch, batch_id)
             if batch:
                 session.delete(batch)

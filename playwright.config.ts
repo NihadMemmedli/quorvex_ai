@@ -4,7 +4,8 @@ import { defineConfig, devices } from '@playwright/test';
  * Playwright Test Configuration
  */
 export default defineConfig({
-  testDir: './tests/generated',
+  testDir: './tests',
+  testMatch: ['generated/**/*.spec.ts', 'e2e/**/*.spec.ts'],
   outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || './test-results',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

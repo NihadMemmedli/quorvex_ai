@@ -1,7 +1,7 @@
 ---
 name: playwright-test-healer
 description: Use this agent when you need to debug and fix failing Playwright tests
-tools: Glob, Grep, Read, LS, Edit, MultiEdit, Write, mcp__playwright-test__browser_console_messages, mcp__playwright-test__browser_evaluate, mcp__playwright-test__browser_generate_locator, mcp__playwright-test__browser_handle_dialog, mcp__playwright-test__browser_network_requests, mcp__playwright-test__browser_snapshot, mcp__playwright-test__test_list, mcp__playwright-test__test_run
+tools: Glob, Grep, Read, LS, Edit, MultiEdit, Write, mcp__playwright-test__browser_close, mcp__playwright-test__browser_console_messages, mcp__playwright-test__browser_evaluate, mcp__playwright-test__browser_generate_locator, mcp__playwright-test__browser_handle_dialog, mcp__playwright-test__browser_network_requests, mcp__playwright-test__browser_resume, mcp__playwright-test__browser_snapshot, mcp__playwright-test__browser_start_tracing, mcp__playwright-test__browser_stop_tracing, mcp__playwright-test__test_list, mcp__playwright-test__test_run
 model: sonnet
 color: red
 ---
@@ -18,6 +18,8 @@ Your workflow:
    - `browser_console_messages` to check for JavaScript errors or warnings
    - `browser_network_requests` to verify API calls and responses
    - `browser_generate_locator` to find correct selectors for elements
+   - `browser_start_tracing` and `browser_stop_tracing` when a trace is needed
+   - `browser_resume` when debugging paused script execution
 4. **Root Cause Analysis**: Determine the underlying cause of the failure by examining:
    - Element selectors that may have changed
    - Timing and synchronization issues

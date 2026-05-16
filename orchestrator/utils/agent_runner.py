@@ -188,8 +188,10 @@ class AgentRunner:
         include_hook_events: bool = False,
         log_tools: bool = True,
         on_tool_use: Callable[[str, dict], None] | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
         session_dir: Path | None = None,
         on_task_enqueued: Callable[[str], None] | None = None,
+        cwd: Path | str | None = None,
     ):
         """
         Initialize the agent runner.
@@ -208,8 +210,10 @@ class AgentRunner:
             include_hook_events: Include hook lifecycle events in the SDK stream
             log_tools: Whether to log tool invocations to console
             on_tool_use: Optional callback when a tool is used
+            on_progress: Optional callback receiving live progress snapshots
             session_dir: Optional directory to save debug output
             on_task_enqueued: Optional callback fired with task_id when queued (for progress tracking)
+            cwd: Optional working directory for MCP config discovery and queued execution
         """
         self.timeout_seconds = timeout_seconds
         self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
@@ -222,8 +226,10 @@ class AgentRunner:
         self.include_hook_events = include_hook_events
         self.log_tools = log_tools
         self.on_tool_use = on_tool_use
+        self.on_progress = on_progress
         self.session_dir = session_dir
         self.on_task_enqueued = on_task_enqueued
+        self.cwd = Path(cwd) if cwd else None
 
     def _effective_tools(self) -> list[str] | dict[str, str] | None:
         """Build the SDK/CLI tool availability set.
@@ -254,6 +260,14 @@ class AgentRunner:
                 requested.extend(str(tool) for tool in source if str(tool).startswith("mcp__"))
         return requested
 
+    def _emit_progress(self, progress: dict[str, Any]) -> None:
+        if not self.on_progress:
+            return
+        try:
+            self.on_progress(progress)
+        except Exception as exc:
+            logger.debug(f"Agent progress callback failed: {exc}")
+
     def _should_attach_mcp_config(self, cwd: Path | None = None) -> bool:
         base_dir = cwd or Path.cwd()
         if not (base_dir / ".mcp.json").exists():
@@ -279,8 +293,8 @@ class AgentRunner:
         if self.include_hook_events:
             kwargs["include_hook_events"] = True
 
-        if self._should_attach_mcp_config():
-            kwargs["mcp_servers"] = Path.cwd() / ".mcp.json"
+        if self._should_attach_mcp_config(self.cwd):
+            kwargs["mcp_servers"] = (self.cwd or Path.cwd()) / ".mcp.json"
             kwargs["strict_mcp_config"] = self.strict_mcp_config
 
         return kwargs
@@ -368,7 +382,7 @@ class AgentRunner:
         timeout = timeout_override or self.timeout_seconds
         start_time = datetime.now()
         self._apply_active_ai_settings()
-        self._validate_mcp_config_for_allowed_tools()
+        self._validate_mcp_config_for_allowed_tools(self.cwd)
 
         # First, try agent queue if Redis is available
         # This offloads execution to a separate worker process outside uvicorn
@@ -449,6 +463,17 @@ class AgentRunner:
                             if self.on_tool_use:
                                 tool_input = getattr(message, "input", {})
                                 self.on_tool_use(tool_name, tool_input)
+                            self._emit_progress(
+                                {
+                                    "phase": "tool_use",
+                                    "tool_calls": len(tool_calls) + 1,
+                                    "browser_tool_calls": len([tc for tc in tool_calls if tc.name.startswith("mcp__playwright")])
+                                    + (1 if str(tool_name).startswith("mcp__playwright") else 0),
+                                    "interactions": len(tool_calls) + 1,
+                                    "last_tool": tool_name,
+                                    "updated_at": datetime.utcnow().isoformat(),
+                                }
+                            )
 
                         elif message.type == "tool_result":
                             # Record completed tool call
@@ -464,6 +489,18 @@ class AgentRunner:
                                         error=str(getattr(message, "content", ""))[:200] if is_error else None,
                                         input=current_tool_input,
                                     )
+                                )
+                                self._emit_progress(
+                                    {
+                                        "phase": "tool_result",
+                                        "tool_calls": len(tool_calls),
+                                        "browser_tool_calls": len(
+                                            [tc for tc in tool_calls if tc.name.startswith("mcp__playwright")]
+                                        ),
+                                        "interactions": len(tool_calls),
+                                        "last_tool": current_tool_name,
+                                        "updated_at": datetime.utcnow().isoformat(),
+                                    }
                                 )
                             current_tool_name = None
                             current_tool_start = None
@@ -731,7 +768,7 @@ class AgentRunner:
                 timeout_seconds=timeout,
                 agent_type="AgentRunner",
                 operation_type="run",
-                cwd=os.getcwd(),
+                cwd=str(self.cwd) if self.cwd else os.getcwd(),
                 env_vars=self._collect_api_env_vars(),
                 allowed_tools=self.allowed_tools,
                 tools=self._effective_tools(),
@@ -763,6 +800,7 @@ class AgentRunner:
                     f"   🔄 Worker progress: {tool_calls} tools, {interactions} interactions, last={short_tool}",
                     flush=True,
                 )
+                self._emit_progress(progress)
 
             result = await queue.wait_for_result(
                 task_id,

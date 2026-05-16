@@ -25,6 +25,7 @@ logger.info(f"base_agent.py: utils exists={(project_root / 'utils' / 'json_utils
 from claude_agent_sdk import ClaudeAgentOptions, query
 
 from load_env import setup_claude_env
+from utils.agent_tool_allowlists import get_agent_tool_config
 
 # Import API key rotator for multi-key failover
 try:
@@ -175,6 +176,36 @@ class BaseAgent:
         self.on_task_enqueued = None
         # Optional per-run working directory used for run-local MCP configs/artifacts.
         self.agent_cwd: str | None = None
+        # Optional explicit tool configuration. If unset, known agent classes
+        # resolve through the shared least-privilege profile matrix.
+        self.agent_tool_profile: str | None = None
+        self.allowed_tools: list[str] | None = None
+        self.tools: list[str] | dict[str, str] | None = None
+
+    def _resolved_tool_config(self) -> dict[str, Any]:
+        """Return tool configuration for this agent.
+
+        Known agents get an explicit availability/approval list. Unknown legacy
+        agents retain wildcard access to avoid changing behavior silently.
+        """
+        if self.allowed_tools is not None:
+            tools = self.tools
+            if tools is None and "*" not in self.allowed_tools:
+                tools = list(self.allowed_tools)
+            return {"allowed_tools": self.allowed_tools, "tools": tools}
+
+        profile_name = self.agent_tool_profile or self.__class__.__name__
+        profile_config = get_agent_tool_config(profile_name)
+        if profile_config:
+            return profile_config
+
+        return {"allowed_tools": ["*"], "tools": self.tools}
+
+    def _resolved_permission_mode(self) -> str:
+        tool_config = self._resolved_tool_config()
+        if tool_config.get("tools") == [] or tool_config.get("allowed_tools") == []:
+            return "dontAsk"
+        return "bypassPermissions"
 
     async def _query_agent_direct(self, prompt: str, system_prompt: str = None, timeout_seconds: int = None) -> Any:
         """Query the agent using subprocess.run in a thread pool executor.
@@ -199,6 +230,10 @@ class BaseAgent:
             sp_str = system_prompt if isinstance(system_prompt, str) else "".join(str(p) for p in system_prompt)
             full_prompt = f"{sp_str}\n\n{prompt}"
 
+        tool_config = self._resolved_tool_config()
+        allowed_tools = tool_config["allowed_tools"]
+        tools = tool_config.get("tools")
+
         # Build the base CLI command
         cli_args = [
             CLAUDE_CLI_PATH,
@@ -207,16 +242,20 @@ class BaseAgent:
             "--verbose",
             "--system-prompt",
             "",
-            "--allowedTools",
-            "*",
             "--permission-mode",
-            "bypassPermissions",
+            self._resolved_permission_mode(),
             "--setting-sources",
             "project",
             "--print",
             "--",
             full_prompt,
         ]
+        if tools is not None:
+            insert_at = cli_args.index("--permission-mode")
+            cli_args[insert_at:insert_at] = ["--tools", ",".join(tools) if isinstance(tools, list) else "default"]
+        if allowed_tools:
+            insert_at = cli_args.index("--permission-mode")
+            cli_args[insert_at:insert_at] = ["--allowedTools", ",".join(allowed_tools)]
         if mcp_path.exists():
             insert_at = cli_args.index("--permission-mode")
             cli_args[insert_at:insert_at] = ["--mcp-config", str(mcp_path), "--strict-mcp-config"]
@@ -465,6 +504,7 @@ echo "done" > {done_file}
                 "ANTHROPIC_DEFAULT_SONNET_MODEL",
             ]
             env_vars = {k: os.environ[k] for k in api_env_keys if os.environ.get(k)}
+            tool_config = self._resolved_tool_config()
 
             # Enqueue the task
             task_id = await queue.enqueue_task(
@@ -475,6 +515,9 @@ echo "done" > {done_file}
                 operation_type=operation_type,
                 cwd=self.agent_cwd or os.getcwd(),
                 env_vars=env_vars or None,
+                allowed_tools=tool_config["allowed_tools"],
+                tools=tool_config.get("tools"),
+                permission_mode=self._resolved_permission_mode(),
             )
 
             logger.info(f"[QUEUE] Task enqueued: {task_id}, waiting for result...")
@@ -584,10 +627,12 @@ echo "done" > {done_file}
                 def stderr_callback(line: str):
                     logger.info(f"[SDK STDERR] {line}")
 
+                tool_config = self._resolved_tool_config()
                 options = ClaudeAgentOptions(
-                    allowed_tools=["*"],  # Allow all tools (Playwright, etc)
+                    allowed_tools=tool_config["allowed_tools"],
+                    tools=tool_config.get("tools"),
                     setting_sources=["project"],
-                    permission_mode="bypassPermissions",
+                    permission_mode=self._resolved_permission_mode(),
                     stderr=stderr_callback,  # Capture CLI stderr
                 )
 

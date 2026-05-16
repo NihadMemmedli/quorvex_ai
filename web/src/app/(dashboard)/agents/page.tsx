@@ -1,12 +1,13 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
-import { Bot, FileText, Play, Terminal, ChevronRight, CheckCircle2, AlertTriangle, Loader2, Clock, RotateCcw, Lock, Globe, Settings, Download, List, Sparkles, Zap, ArrowRight, Info, X, RefreshCw, Scissors, ExternalLink } from 'lucide-react';
+import { Bot, FileText, Play, Terminal, ChevronRight, CheckCircle2, AlertTriangle, Loader2, Clock, RotateCcw, Lock, Globe, Settings, Download, List, Sparkles, Zap, ArrowRight, Info, X, RefreshCw, Scissors, ExternalLink, Plus, Save, Trash2, Wrench } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
 import { useJobPoller } from '@/hooks/useJobPoller';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
+import { LiveBrowserView } from '@/components/LiveBrowserView';
 
 interface AgentRun {
     id: string;
@@ -17,6 +18,38 @@ interface AgentRun {
     summary?: string;
     result?: any;
     project_id?: string;
+    progress?: any;
+    agent_task_id?: string | null;
+    artifacts?: AgentArtifact[];
+}
+
+interface AgentArtifact {
+    name: string;
+    path: string;
+    type: string;
+    modified_at?: string | null;
+}
+
+interface AgentTool {
+    id: string;
+    label: string;
+    description: string;
+    category: string;
+    tool_name: string;
+    risk: 'low' | 'medium' | 'high' | 'destructive';
+    requires_mcp_server?: string | null;
+}
+
+interface AgentDefinition {
+    id: string;
+    name: string;
+    description: string;
+    system_prompt: string;
+    model?: string | null;
+    timeout_seconds: number;
+    tool_ids: string[];
+    status: string;
+    project_id?: string | null;
 }
 
 interface SpecResult {
@@ -32,9 +65,27 @@ interface SpecResult {
 
 type AuthType = 'none' | 'credentials' | 'session';
 
+function formatToolName(toolName?: string) {
+    if (!toolName) return 'Waiting for first tool';
+    const short = toolName.includes('__') ? toolName.split('__').pop() || toolName : toolName;
+    return short.replace(/^browser_/, '').replace(/_/g, ' ');
+}
+
+function sortArtifactsByModifiedAt(artifacts: AgentArtifact[] = []) {
+    return [...artifacts].sort((a, b) => {
+        const bTime = b.modified_at ? new Date(b.modified_at).getTime() : 0;
+        const aTime = a.modified_at ? new Date(a.modified_at).getTime() : 0;
+        return bTime - aTime;
+    });
+}
+
+function getArtifactUrl(artifact: AgentArtifact) {
+    return `${API_BASE}${artifact.path}`;
+}
+
 export default function AgentsPage() {
     const { currentProject } = useProject();
-    const [selectedAgent, setSelectedAgent] = useState<'exploratory' | 'writer'>('exploratory');
+    const [selectedAgent, setSelectedAgent] = useState<'exploratory' | 'writer' | 'custom'>('exploratory');
 
     // Basic config
     const [url, setUrl] = useState('');
@@ -68,6 +119,19 @@ export default function AgentsPage() {
     const [specModalOpen, setSpecModalOpen] = useState(false);
     const [splittingSpec, setSplittingSpec] = useState(false);
     const [splitResult, setSplitResult] = useState<{ count: number; files: string[]; output_dir: string } | null>(null);
+    const [agentDefinitions, setAgentDefinitions] = useState<AgentDefinition[]>([]);
+    const [toolCatalog, setToolCatalog] = useState<AgentTool[]>([]);
+    const [selectedDefinitionId, setSelectedDefinitionId] = useState<string>('');
+    const [builderOpen, setBuilderOpen] = useState(false);
+    const [savingDefinition, setSavingDefinition] = useState(false);
+    const [definitionForm, setDefinitionForm] = useState({
+        id: '',
+        name: '',
+        description: '',
+        system_prompt: 'You are a focused QA automation agent. Use the selected tools to inspect the target, report findings clearly, and avoid actions outside the requested task.',
+        timeout_seconds: 1800,
+        tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console'],
+    });
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
 
     // Fetch history (filtered by project)
@@ -95,9 +159,37 @@ export default function AgentsPage() {
         } catch (e) { console.error("Failed to fetch sessions", e); }
     };
 
+    const fetchToolCatalog = async () => {
+        try {
+            const res = await fetch(`${API_BASE}/api/agents/tools/catalog`);
+            if (res.ok) {
+                const data = await res.json();
+                setToolCatalog(data.tools || []);
+            }
+        } catch (e) { console.error("Failed to fetch agent tool catalog", e); }
+    };
+
+    const fetchAgentDefinitions = async () => {
+        try {
+            const projectParam = currentProject?.id
+                ? `?project_id=${encodeURIComponent(currentProject.id)}`
+                : '';
+            const res = await fetch(`${API_BASE}/api/agents/definitions${projectParam}`);
+            if (res.ok) {
+                const data = await res.json();
+                setAgentDefinitions(data || []);
+                if (!selectedDefinitionId && data?.length) {
+                    setSelectedDefinitionId(data[0].id);
+                }
+            }
+        } catch (e) { console.error("Failed to fetch agent definitions", e); }
+    };
+
     useEffect(() => {
         fetchHistory();
         fetchSessions();
+        fetchToolCatalog();
+        fetchAgentDefinitions();
         return () => { if (pollInterval.current) clearInterval(pollInterval.current); }
     }, [currentProject?.id]);  // Re-fetch when project changes
 
@@ -333,8 +425,128 @@ export default function AgentsPage() {
     }, [selectedRunId]);
 
 
+    const selectedDefinition = agentDefinitions.find(agent => agent.id === selectedDefinitionId);
+    const toolsByCategory = toolCatalog.reduce<Record<string, AgentTool[]>>((acc, tool) => {
+        acc[tool.category] = acc[tool.category] || [];
+        acc[tool.category].push(tool);
+        return acc;
+    }, {});
+
+    const resetDefinitionForm = () => {
+        setDefinitionForm({
+            id: '',
+            name: '',
+            description: '',
+            system_prompt: 'You are a focused QA automation agent. Use the selected tools to inspect the target, report findings clearly, and avoid actions outside the requested task.',
+            timeout_seconds: 1800,
+            tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console'],
+        });
+        setBuilderOpen(true);
+    };
+
+    const editDefinition = (definition: AgentDefinition) => {
+        setDefinitionForm({
+            id: definition.id,
+            name: definition.name,
+            description: definition.description || '',
+            system_prompt: definition.system_prompt,
+            timeout_seconds: definition.timeout_seconds || 1800,
+            tool_ids: definition.tool_ids || [],
+        });
+        setBuilderOpen(true);
+    };
+
+    const toggleDefinitionTool = (toolId: string) => {
+        setDefinitionForm(prev => ({
+            ...prev,
+            tool_ids: prev.tool_ids.includes(toolId)
+                ? prev.tool_ids.filter(id => id !== toolId)
+                : [...prev.tool_ids, toolId],
+        }));
+    };
+
+    const toggleCategoryTools = (tools: AgentTool[]) => {
+        const ids = tools.map(tool => tool.id);
+        const allSelected = ids.every(id => definitionForm.tool_ids.includes(id));
+        setDefinitionForm(prev => ({
+            ...prev,
+            tool_ids: allSelected
+                ? prev.tool_ids.filter(id => !ids.includes(id))
+                : Array.from(new Set([...prev.tool_ids, ...ids])),
+        }));
+    };
+
+    const saveDefinition = async () => {
+        if (!definitionForm.name.trim()) {
+            alert('Agent name is required');
+            return;
+        }
+        if (!definitionForm.system_prompt.trim()) {
+            alert('System prompt is required');
+            return;
+        }
+        if (definitionForm.tool_ids.length === 0) {
+            alert('Select at least one tool');
+            return;
+        }
+
+        setSavingDefinition(true);
+        try {
+            const isEdit = Boolean(definitionForm.id);
+            const url = isEdit
+                ? `${API_BASE}/api/agents/definitions/${definitionForm.id}${currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : ''}`
+                : `${API_BASE}/api/agents/definitions`;
+            const res = await fetch(url, {
+                method: isEdit ? 'PUT' : 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: definitionForm.name,
+                    description: definitionForm.description,
+                    system_prompt: definitionForm.system_prompt,
+                    timeout_seconds: definitionForm.timeout_seconds,
+                    tool_ids: definitionForm.tool_ids,
+                    project_id: currentProject?.id,
+                }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || 'Failed to save agent');
+            }
+            const saved = await res.json();
+            await fetchAgentDefinitions();
+            setSelectedDefinitionId(saved.id);
+            setSelectedAgent('custom');
+            setBuilderOpen(false);
+        } catch (e: any) {
+            alert(e.message || 'Failed to save agent');
+        } finally {
+            setSavingDefinition(false);
+        }
+    };
+
+    const archiveDefinition = async (definition: AgentDefinition) => {
+        if (!confirm(`Archive "${definition.name}"? Existing run history will remain.`)) return;
+        try {
+            const res = await fetch(`${API_BASE}/api/agents/definitions/${definition.id}${currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : ''}`, {
+                method: 'DELETE',
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.detail || 'Failed to archive agent');
+            }
+            await fetchAgentDefinitions();
+            if (selectedDefinitionId === definition.id) setSelectedDefinitionId('');
+        } catch (e: any) {
+            alert(e.message || 'Failed to archive agent');
+        }
+    };
+
     const handleRun = async () => {
-        if (!url) {
+        if (selectedAgent === 'custom' && !selectedDefinitionId) {
+            alert("Select or create a custom agent first");
+            return;
+        }
+        if (selectedAgent !== 'custom' && !url) {
             alert("URL is required");
             return;
         }
@@ -375,11 +587,25 @@ export default function AgentsPage() {
             const excludedPatternsList = excludedPatterns ? excludedPatterns.split(',').map(s => s.trim()).filter(s => s) : [];
 
             // Use new enhanced endpoint for exploratory agent
-            const endpoint = selectedAgent === 'exploratory'
+            const endpoint = selectedAgent === 'custom'
+                ? `${API_BASE}/api/agents/definitions/${selectedDefinitionId}/runs`
+                : selectedAgent === 'exploratory'
                 ? `${API_BASE}/api/agents/exploratory`
                 : `${API_BASE}/api/agents/runs`;
 
-            const body = selectedAgent === 'exploratory'
+            const body = selectedAgent === 'custom'
+                ? {
+                    prompt: instructions || `Inspect ${url || 'the current application context'} and report useful QA findings.`,
+                    url: url || undefined,
+                    config: {
+                        auth: authConfig,
+                        test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
+                        focus_areas: focusAreasList,
+                        excluded_patterns: excludedPatternsList,
+                    },
+                    project_id: currentProject?.id,
+                }
+                : selectedAgent === 'exploratory'
                 ? {
                     url,
                     time_limit_minutes: timeLimitMinutes,
@@ -500,8 +726,8 @@ export default function AgentsPage() {
                                     }}
                                 >
                                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
-                                        <span style={{ fontWeight: 600, fontSize: '0.85rem', color: run.agent_type === 'writer' ? 'var(--primary)' : 'var(--warning)' }}>
-                                            {run.agent_type === 'writer' ? 'Writer' : 'Explorer'}
+                                        <span style={{ fontWeight: 600, fontSize: '0.85rem', color: run.agent_type === 'custom' ? 'var(--success)' : run.agent_type === 'writer' ? 'var(--primary)' : 'var(--warning)' }}>
+                                            {run.agent_type === 'custom' ? (run.config?.agent_name || 'Custom') : run.agent_type === 'writer' ? 'Writer' : 'Explorer'}
                                         </span>
                                         <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{formatDate(run.created_at)}</span>
                                     </div>
@@ -549,16 +775,205 @@ export default function AgentsPage() {
                                     </p>
                                 </div>
                             </div>
+
+                            <div
+                                onClick={() => setSelectedAgent('custom')}
+                                style={{
+                                    padding: '0.75rem',
+                                    cursor: 'pointer',
+                                    background: selectedAgent === 'custom' ? 'var(--primary-glow)' : 'transparent',
+                                    border: selectedAgent === 'custom' ? '1px solid var(--primary)' : '1px solid transparent',
+                                    borderRadius: '8px',
+                                    display: 'flex', gap: '0.75rem'
+                                }}
+                            >
+                                <Wrench size={20} color={selectedAgent === 'custom' ? 'var(--primary)' : 'var(--text-secondary)'} />
+                                <div>
+                                    <h4 style={{ fontWeight: 600, fontSize: '0.9rem', color: selectedAgent === 'custom' ? 'var(--primary)' : 'var(--text)' }}>Custom Agent</h4>
+                                    <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                        User-defined tools and prompt
+                                    </p>
+                                </div>
+                            </div>
                         </div>
+                    </div>
+
+                    {/* Custom Agent Builder */}
+                    <div className="card" style={{ padding: '1rem', flexShrink: 0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                            <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>Custom Agents</h3>
+                            <button
+                                onClick={resetDefinitionForm}
+                                title="Create agent"
+                                style={{ border: '1px solid var(--border)', background: 'var(--surface-hover)', borderRadius: '6px', padding: '0.35rem', cursor: 'pointer', color: 'var(--text)' }}
+                            >
+                                <Plus size={15} />
+                            </button>
+                        </div>
+
+                        {agentDefinitions.length === 0 ? (
+                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
+                                No custom agents yet.
+                            </div>
+                        ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                                {agentDefinitions.map(definition => (
+                                    <div
+                                        key={definition.id}
+                                        onClick={() => { setSelectedDefinitionId(definition.id); setSelectedAgent('custom'); }}
+                                        style={{
+                                            padding: '0.65rem',
+                                            border: selectedDefinitionId === definition.id ? '1px solid var(--primary)' : '1px solid var(--border)',
+                                            borderRadius: '6px',
+                                            background: selectedDefinitionId === definition.id ? 'var(--primary-glow)' : 'var(--surface-hover)',
+                                            cursor: 'pointer'
+                                        }}
+                                    >
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem' }}>
+                                            <div style={{ minWidth: 0 }}>
+                                                <div style={{ fontSize: '0.85rem', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{definition.name}</div>
+                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>{definition.tool_ids.length} tools</div>
+                                            </div>
+                                            <div style={{ display: 'flex', gap: '0.25rem' }}>
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); editDefinition(definition); }}
+                                                    title="Edit agent"
+                                                    style={{ border: 'none', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer' }}
+                                                >
+                                                    <Settings size={14} />
+                                                </button>
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); archiveDefinition(definition); }}
+                                                    title="Archive agent"
+                                                    style={{ border: 'none', background: 'transparent', color: 'var(--danger)', cursor: 'pointer' }}
+                                                >
+                                                    <Trash2 size={14} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {builderOpen && (
+                            <div style={{ borderTop: '1px solid var(--border)', paddingTop: '0.75rem' }}>
+                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Name</label>
+                                <input
+                                    value={definitionForm.name}
+                                    onChange={e => setDefinitionForm({ ...definitionForm, name: e.target.value })}
+                                    placeholder="API explorer"
+                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', margin: '0.25rem 0 0.65rem' }}
+                                />
+                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Description</label>
+                                <input
+                                    value={definitionForm.description}
+                                    onChange={e => setDefinitionForm({ ...definitionForm, description: e.target.value })}
+                                    placeholder="Explores pages and reports API calls"
+                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', margin: '0.25rem 0 0.65rem' }}
+                                />
+                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>System Prompt</label>
+                                <textarea
+                                    value={definitionForm.system_prompt}
+                                    onChange={e => setDefinitionForm({ ...definitionForm, system_prompt: e.target.value })}
+                                    rows={4}
+                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.8rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', resize: 'vertical', margin: '0.25rem 0 0.65rem' }}
+                                />
+                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Timeout seconds</label>
+                                <input
+                                    type="number"
+                                    min={60}
+                                    max={7200}
+                                    value={definitionForm.timeout_seconds}
+                                    onChange={e => setDefinitionForm({ ...definitionForm, timeout_seconds: parseInt(e.target.value) || 1800 })}
+                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', margin: '0.25rem 0 0.65rem' }}
+                                />
+                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem' }}>
+                                    <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>Tools</div>
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                                        {definitionForm.tool_ids.length} of {toolCatalog.length} selected
+                                    </div>
+                                </div>
+                                <div style={{ maxHeight: '260px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: '6px', padding: '0.5rem' }}>
+                                    {Object.entries(toolsByCategory).map(([category, tools]) => (
+                                        <div key={category} style={{ marginBottom: '0.75rem' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '0.35rem' }}>
+                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontWeight: 700, textTransform: 'uppercase' }}>
+                                                    {category} ({tools.length})
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => toggleCategoryTools(tools)}
+                                                    style={{ fontSize: '0.68rem', border: 'none', background: 'transparent', color: 'var(--primary)', cursor: 'pointer', padding: 0 }}
+                                                >
+                                                    {tools.every(tool => definitionForm.tool_ids.includes(tool.id)) ? 'Clear' : 'Select all'}
+                                                </button>
+                                            </div>
+                                            {tools.map(tool => (
+                                                <label key={tool.id} style={{ display: 'flex', gap: '0.45rem', alignItems: 'flex-start', fontSize: '0.78rem', marginBottom: '0.4rem', cursor: 'pointer' }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={definitionForm.tool_ids.includes(tool.id)}
+                                                        onChange={() => toggleDefinitionTool(tool.id)}
+                                                        style={{ marginTop: '0.15rem' }}
+                                                    />
+                                                    <span style={{ flex: 1 }}>
+                                                        <span style={{ fontWeight: 600 }}>{tool.label}</span>
+                                                        <span style={{ marginLeft: '0.35rem', fontSize: '0.68rem', color: tool.risk === 'high' ? 'var(--danger)' : tool.risk === 'medium' ? 'var(--warning)' : 'var(--success)' }}>{tool.risk}</span>
+                                                        <span style={{ display: 'block', color: 'var(--text-secondary)', lineHeight: 1.35 }}>{tool.description}</span>
+                                                    </span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                    ))}
+                                </div>
+                                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
+                                    <button
+                                        onClick={saveDefinition}
+                                        disabled={savingDefinition}
+                                        style={{ flex: 1, padding: '0.6rem', borderRadius: '6px', background: 'var(--primary)', color: 'white', border: 'none', fontWeight: 600, cursor: savingDefinition ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}
+                                    >
+                                        {savingDefinition ? <Loader2 className="spin" size={14} /> : <Save size={14} />} Save
+                                    </button>
+                                    <button
+                                        onClick={() => setBuilderOpen(false)}
+                                        style={{ padding: '0.6rem 0.75rem', borderRadius: '6px', background: 'var(--surface-hover)', color: 'var(--text)', border: '1px solid var(--border)', cursor: 'pointer' }}
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                     {/* Configuration Form */}
                     <div className="card" style={{ padding: '1.25rem', flexShrink: 0 }}>
+                        {selectedAgent === 'custom' && (
+                            <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Runnable Agent</label>
+                                <select
+                                    value={selectedDefinitionId}
+                                    onChange={e => setSelectedDefinitionId(e.target.value)}
+                                    style={{ width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)' }}
+                                >
+                                    <option value="">Select an agent</option>
+                                    {agentDefinitions.map(definition => (
+                                        <option key={definition.id} value={definition.id}>{definition.name}</option>
+                                    ))}
+                                </select>
+                                {selectedDefinition && (
+                                    <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', margin: '0.5rem 0 0' }}>
+                                        {selectedDefinition.description || `${selectedDefinition.tool_ids.length} selected tools`}
+                                    </p>
+                                )}
+                            </div>
+                        )}
+
                         <div style={{ marginBottom: '1rem' }}>
                             <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Target URL</label>
                             <input
                                 type="text"
-                                placeholder="https://example.com"
+                                placeholder={selectedAgent === 'custom' ? 'Optional target URL' : 'https://example.com'}
                                 value={url}
                                 onChange={e => setUrl(e.target.value)}
                                 style={{
@@ -676,10 +1091,10 @@ export default function AgentsPage() {
 
                         <div style={{ marginBottom: '1.25rem' }}>
                             <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>
-                                Instructions (Optional)
+                                {selectedAgent === 'custom' ? 'Task Prompt' : 'Instructions (Optional)'}
                             </label>
                             <textarea
-                                placeholder={selectedAgent === 'exploratory' ? "Focus on checkout flow, test edge cases..." : "Generate spec for login page..."}
+                                placeholder={selectedAgent === 'custom' ? "Inspect the API calls triggered by the login and checkout flows." : selectedAgent === 'exploratory' ? "Focus on checkout flow, test edge cases..." : "Generate spec for login page..."}
                                 value={instructions}
                                 onChange={e => setInstructions(e.target.value)}
                                 rows={3}
@@ -776,7 +1191,7 @@ export default function AgentsPage() {
                 <div className="card" style={{ padding: '0', display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
                     <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>
-                            {activeRun ? `Result: ${activeRun.config?.url || 'Unknown'}` : 'Agent Output'}
+                            {activeRun ? `Result: ${activeRun.config?.agent_name || activeRun.config?.url || 'Unknown'}` : 'Agent Output'}
                         </h3>
                         {activeRun && (
                             <span style={{
@@ -795,11 +1210,107 @@ export default function AgentsPage() {
                                 <Bot size={64} style={{ marginBottom: '1rem' }} />
                                 <p>Select a run from history or start a new one.</p>
                             </div>
-                        ) : activeRun.status === 'running' ? (
+                        ) : ['running', 'pending', 'queued'].includes(activeRun.status) && activeRun.agent_type === 'custom' ? (
+                            (() => {
+                                const progress = activeRun.progress || {};
+                                const selectedTools = activeRun.config?.selected_tools || [];
+                                const hasBrowserTools = Boolean(progress.has_browser_tools) || selectedTools.some((tool: AgentTool) => tool.tool_name?.startsWith('mcp__playwright'));
+                                const latestImage = sortArtifactsByModifiedAt((activeRun.artifacts || []).filter(artifact => artifact.type === 'image'))[0];
+                                const recentTools = progress.recent_tools || [];
+                                return (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                        <div style={{
+                                            display: 'grid',
+                                            gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+                                            gap: '0.75rem',
+                                            padding: '1rem',
+                                            background: 'var(--surface-hover)',
+                                            border: '1px solid var(--border)',
+                                            borderRadius: '10px'
+                                        }}>
+                                            <div>
+                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Status</div>
+                                                <div style={{ fontWeight: 700, textTransform: 'capitalize' }}>{activeRun.status}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Current Tool</div>
+                                                <div style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{progress.last_tool_label || formatToolName(progress.last_tool)}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Tool Calls</div>
+                                                <div style={{ fontWeight: 700 }}>{progress.tool_calls ?? 0}</div>
+                                            </div>
+                                            <div>
+                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Browser Actions</div>
+                                                <div style={{ fontWeight: 700 }}>{progress.browser_tool_calls ?? 0}</div>
+                                            </div>
+                                        </div>
+
+                                        {hasBrowserTools ? (
+                                            <LiveBrowserView runId={activeRun.id} isActive={true} showHeader />
+                                        ) : (
+                                            <div style={{ padding: '1.25rem', background: 'var(--surface-hover)', border: '1px solid var(--border)', borderRadius: '10px', color: 'var(--text-secondary)', textAlign: 'center' }}>
+                                                This custom agent does not have browser tools selected. Follow its tool activity below.
+                                            </div>
+                                        )}
+
+                                        <div style={{ border: '1px solid var(--border)', borderRadius: '10px', overflow: 'hidden', background: 'var(--background)' }}>
+                                            <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
+                                                <h4 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600 }}>Latest Screenshot</h4>
+                                                {latestImage?.modified_at && (
+                                                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                                                        {new Date(latestImage.modified_at).toLocaleTimeString()}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            {latestImage ? (
+                                                <a href={getArtifactUrl(latestImage)} target="_blank" rel="noreferrer" style={{ display: 'block' }}>
+                                                    <img
+                                                        src={getArtifactUrl(latestImage)}
+                                                        alt="Latest custom agent screenshot"
+                                                        style={{ width: '100%', display: 'block', maxHeight: '420px', objectFit: 'contain', background: '#000' }}
+                                                    />
+                                                </a>
+                                            ) : (
+                                                <div style={{ padding: '1.5rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                                    No screenshots have been captured yet. Select the Screenshot tool for visual fallback.
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div style={{ border: '1px solid var(--border)', borderRadius: '10px', overflow: 'hidden' }}>
+                                            <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', fontWeight: 600 }}>
+                                                Live Activity
+                                            </div>
+                                            {recentTools.length > 0 ? (
+                                                <div style={{ display: 'grid' }}>
+                                                    {recentTools.slice().reverse().map((tool: any, i: number) => (
+                                                        <div key={`${tool.name}-${tool.at}-${i}`} style={{ padding: '0.65rem 1rem', borderBottom: i === recentTools.length - 1 ? 'none' : '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', gap: '1rem', fontSize: '0.85rem' }}>
+                                                            <span style={{ fontWeight: 600 }}>{tool.label || formatToolName(tool.name)}</span>
+                                                            {tool.at && <span style={{ color: 'var(--text-secondary)' }}>{new Date(tool.at).toLocaleTimeString()}</span>}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : (
+                                                <div style={{ padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                                    Waiting for the agent to use its first tool.
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem', textAlign: 'center' }}>
+                                            {progress.message || `This may take up to ${Math.ceil((activeRun.config?.timeout_seconds || 1800) / 60)} minutes.`}
+                                        </p>
+                                    </div>
+                                );
+                            })()
+                        ) : ['running', 'pending', 'queued'].includes(activeRun.status) ? (
                             <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)' }}>
                                 <Loader2 size={48} className="spin" style={{ marginBottom: '1rem', color: 'var(--primary)' }} />
                                 <p>Agent is working...</p>
-                                <p style={{ fontSize: '0.9rem', marginTop: '0.5rem' }}>This may take up to {timeLimitMinutes} minutes.</p>
+                                <p style={{ fontSize: '0.9rem', marginTop: '0.5rem' }}>
+                                    This may take up to {activeRun.agent_type === 'custom' ? Math.ceil((activeRun.config?.timeout_seconds || 1800) / 60) : timeLimitMinutes} minutes.
+                                </p>
                             </div>
                         ) : activeRun.status === 'failed' ? (
                             <div style={{ padding: '1rem', background: 'var(--danger-muted)', color: 'var(--danger)', borderRadius: '8px', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
@@ -829,6 +1340,47 @@ export default function AgentsPage() {
                                             </pre>
                                         </div>
                                     </>
+                                ) : activeRun.agent_type === 'custom' ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                        <div style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '10px', border: '1px solid var(--border)' }}>
+                                            <h3 style={{ fontWeight: 700, fontSize: '1rem', margin: '0 0 0.5rem' }}>
+                                                {activeRun.config?.agent_name || 'Custom Agent'}
+                                            </h3>
+                                            <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                                                {activeRun.result?.duration_seconds ? `Completed in ${activeRun.result.duration_seconds.toFixed(1)} seconds` : 'Completed'}
+                                            </p>
+                                            {activeRun.config?.selected_tools?.length > 0 && (
+                                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem', marginTop: '0.75rem' }}>
+                                                    {activeRun.config.selected_tools.map((tool: AgentTool) => (
+                                                        <span key={tool.id} style={{ fontSize: '0.72rem', padding: '0.2rem 0.45rem', borderRadius: '999px', background: 'var(--primary-glow)', color: 'var(--primary)' }}>
+                                                            {tool.label}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div style={{ background: '#111827', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                                            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.88rem', color: '#e5e7eb', margin: 0 }}>
+                                                {activeRun.result?.output || JSON.stringify(activeRun.result, null, 2)}
+                                            </pre>
+                                        </div>
+                                        {activeRun.result?.tool_calls?.length > 0 && (
+                                            <details>
+                                                <summary style={{ cursor: 'pointer', fontWeight: 600, fontSize: '0.9rem' }}>
+                                                    Tool Calls ({activeRun.result.tool_calls.length})
+                                                </summary>
+                                                <div style={{ marginTop: '0.5rem', display: 'grid', gap: '0.4rem' }}>
+                                                    {activeRun.result.tool_calls.map((call: any, i: number) => (
+                                                        <div key={`${call.name}-${i}`} style={{ padding: '0.5rem', background: 'var(--surface-hover)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '0.78rem' }}>
+                                                            <strong>{call.name}</strong>
+                                                            {call.duration_ms !== undefined && <span style={{ color: 'var(--text-secondary)' }}> · {Math.round(call.duration_ms)}ms</span>}
+                                                            {call.error && <div style={{ color: 'var(--danger)', marginTop: '0.25rem' }}>{call.error}</div>}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </details>
+                                        )}
+                                    </div>
                                 ) : (
                                     // Exploratory Result - User Friendly Display
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>

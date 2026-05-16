@@ -105,6 +105,8 @@ class AgentRun(SQLModel, table=True):
     agent_type: str
     config_json: str = "{}"
     result_json: str | None = None
+    progress_json: str | None = None
+    agent_task_id: str | None = None
     status: str = "running"  # running, completed, failed
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -134,6 +136,70 @@ class AgentRun(SQLModel, table=True):
     @result.setter
     def result(self, value: dict):
         self.result_json = json.dumps(value)
+
+    @property
+    def progress(self) -> dict | None:
+        if not self.progress_json:
+            return None
+        try:
+            return json.loads(self.progress_json)
+        except json.JSONDecodeError:
+            return None
+
+    @progress.setter
+    def progress(self, value: dict):
+        self.progress_json = json.dumps(value)
+
+
+class AgentToolDefinition(SQLModel, table=True):
+    """Selectable tool metadata for UI-created agents."""
+
+    __tablename__ = "agent_tool_definitions"
+    __table_args__ = {"extend_existing": True}
+
+    id: str = Field(primary_key=True)
+    label: str
+    description: str = ""
+    category: str = "general"
+    tool_name: str
+    risk: str = "low"  # low, medium, high, destructive
+    enabled: bool = True
+    requires_mcp_server: str | None = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AgentDefinition(SQLModel, table=True):
+    """Reusable agent profile created from the UI."""
+
+    __tablename__ = "agent_definitions"
+    __table_args__ = (
+        Index("ix_agent_definitions_project_status", "project_id", "status"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    name: str
+    description: str = ""
+    system_prompt: str
+    model: str | None = None
+    timeout_seconds: int = 1800
+    tool_ids_json: str = "[]"
+    status: str = "active"  # active, archived
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def tool_ids(self) -> list[str]:
+        try:
+            value = json.loads(self.tool_ids_json or "[]")
+            return [str(item) for item in value if item]
+        except json.JSONDecodeError:
+            return []
+
+    @tool_ids.setter
+    def tool_ids(self, value: list[str]):
+        self.tool_ids_json = json.dumps(value)
 
 
 # ========== Phase 1: Coverage and Memory Models ==========
@@ -1970,6 +2036,196 @@ class CiPipelineMapping(SQLModel, table=True):
     @artifacts.setter
     def artifacts(self, value: list[dict[str, Any]]):
         self.artifacts_json = json.dumps(value)
+
+
+class PrImpactAnalysis(SQLModel, table=True):
+    """Stored PR test-impact recommendation for a project repository."""
+
+    __tablename__ = "pr_impact_analyses"
+    __table_args__ = (
+        Index("ix_pr_impact_project_created", "project_id", "created_at"),
+        Index("ix_pr_impact_project_pr", "project_id", "pr_number"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    provider: str = Field(default="github", index=True)
+    owner: str
+    repo: str
+    pr_number: int = Field(index=True)
+    title: str | None = None
+    base_ref: str | None = None
+    head_ref: str | None = None
+    head_sha: str | None = None
+    author: str | None = None
+
+    status: str = Field(default="completed", index=True)
+    risk_level: str = Field(default="medium", index=True)
+    confidence: str = Field(default="medium", index=True)
+    summary: str | None = None
+    fallback_reason: str | None = None
+    ai_notes: str | None = None
+
+    changed_files_count: int = 0
+    selected_tests_count: int = 0
+    total_candidate_tests: int = 0
+    estimated_duration_seconds: int | None = None
+    saved_tests_count: int | None = None
+    category_summary: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+
+    batch_id: str | None = Field(default=None, foreign_key="regression_batches.id", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: datetime | None = Field(default_factory=datetime.utcnow)
+
+
+class PrChangedFile(SQLModel, table=True):
+    """Changed file captured for a PR impact analysis."""
+
+    __tablename__ = "pr_changed_files"
+    __table_args__ = (
+        Index("ix_pr_changed_analysis", "analysis_id"),
+        Index("ix_pr_changed_path", "path"),
+        {"extend_existing": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    analysis_id: str = Field(foreign_key="pr_impact_analyses.id", index=True)
+    path: str = Field(index=True)
+    status: str = "modified"
+    additions: int = 0
+    deletions: int = 0
+    changes: int = 0
+    previous_filename: str | None = None
+    area: str = "unknown"
+    risk_level: str = "medium"
+    reason: str | None = None
+
+
+class PrSelectedTest(SQLModel, table=True):
+    """Test selected by a PR impact analysis with its explanation."""
+
+    __tablename__ = "pr_selected_tests"
+    __table_args__ = (
+        Index("ix_pr_selected_analysis", "analysis_id"),
+        Index("ix_pr_selected_spec", "spec_name"),
+        {"extend_existing": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    analysis_id: str = Field(foreign_key="pr_impact_analyses.id", index=True)
+    spec_name: str = Field(index=True)
+    test_path: str | None = None
+    reason: str
+    confidence: str = "medium"
+    risk_level: str = "medium"
+    selection_source: str = "rule"
+    estimated_duration_seconds: int | None = None
+    tags: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    categories: list[str] | None = Field(default=None, sa_column=Column(JSON))
+
+
+class TestImpactMap(SQLModel, table=True):
+    """Project-level mapping from source areas/files to specs/tests."""
+
+    __tablename__ = "test_impact_maps"
+    __table_args__ = (
+        Index("ix_test_impact_project_spec", "project_id", "spec_name"),
+        {"extend_existing": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    spec_name: str = Field(index=True)
+    test_path: str | None = None
+    impacted_paths: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    tags: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    categories: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    source: str = "metadata"
+    confidence: str = "medium"
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TestExecutionHistory(SQLModel, table=True):
+    """Normalized test execution facts used by PR test selection."""
+
+    __tablename__ = "test_execution_history"
+    __table_args__ = (
+        Index("ix_test_history_project_spec", "project_id", "spec_name"),
+        Index("ix_test_history_project_executed", "project_id", "executed_at"),
+        Index("ix_test_history_run_id", "run_id"),
+        {"extend_existing": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    spec_name: str = Field(index=True)
+    test_name: str | None = None
+    test_path: str | None = None
+    browser: str = "chromium"
+    status: str = Field(index=True)
+    duration_seconds: int | None = None
+    failure_category: str | None = None
+    run_id: str | None = Field(default=None, foreign_key="testrun.id", index=True)
+    batch_id: str | None = Field(default=None, foreign_key="regression_batches.id", index=True)
+    is_flaky: bool = False
+    executed_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
+class RepoIndexSnapshot(SQLModel, table=True):
+    """Indexed view of a tested repository used before PR impact analysis."""
+
+    __tablename__ = "repo_index_snapshots"
+    __table_args__ = (
+        Index("ix_repo_index_project_created", "project_id", "created_at"),
+        Index("ix_repo_index_project_ref", "project_id", "ref"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    provider: str = Field(default="github", index=True)
+    owner: str
+    repo: str
+    ref: str
+    commit_sha: str | None = None
+    status: str = Field(default="completed", index=True)
+    indexed_files_count: int = 0
+    source_files_count: int = 0
+    test_files_count: int = 0
+    route_count: int = 0
+    summary: str | None = None
+    error_message: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: datetime | None = Field(default_factory=datetime.utcnow)
+
+
+class RepoIndexedFile(SQLModel, table=True):
+    """A parsed repository file from a RepoIndexSnapshot."""
+
+    __tablename__ = "repo_indexed_files"
+    __table_args__ = (
+        Index("ix_repo_indexed_snapshot_path", "snapshot_id", "path"),
+        Index("ix_repo_indexed_project_path", "project_id", "path"),
+        {"extend_existing": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    snapshot_id: str = Field(foreign_key="repo_index_snapshots.id", index=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    path: str = Field(index=True)
+    file_type: str = "source"  # source, test, config, docs, unknown
+    area: str = "unknown"
+    language: str | None = None
+    size: int | None = None
+    sha: str | None = None
+    imports: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    imported_by: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    routes: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    symbols: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    keywords: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    risk_flags: list[str] | None = Field(default=None, sa_column=Column(JSON))
 
 
 # ========== AI Assistant Chat Models ==========

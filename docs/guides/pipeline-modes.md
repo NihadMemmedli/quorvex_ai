@@ -32,7 +32,7 @@ How it works:
 1. **Planning** -- AI opens a browser, navigates to the target URL, explores the page, and builds a plan with real selectors from the live DOM.
 2. **Generation** -- AI opens a fresh browser, reads the spec and plan, then writes Playwright test code while interacting with the live application.
 3. **Execution** -- The generated test runs via `npx playwright test`. If it passes, the pipeline is done.
-4. **Healing** (up to 3 attempts) -- If the test fails, the healer uses Playwright's `test_debug` MCP tool to diagnose and fix the issue.
+4. **Healing** (up to 3 attempts) -- If the test fails, the healer uses Playwright `test_run` plus diagnostic/devtools MCP tools to diagnose and fix the issue.
 
 !!! tip
     Use this for standard functional tests: login flows, form submissions, navigation, and assertions.

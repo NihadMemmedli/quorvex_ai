@@ -88,7 +88,7 @@ sequenceDiagram
         PW-->>CLI: Exit success
     else Fail
         CLI->>NH: Stage 4 - Heal (up to 3 attempts)
-        NH->>NH: test_debug MCP + browser_snapshot
+        NH->>NH: test_run + diagnostics/devtools
         NH-->>CLI: Fixed code
     end
 ```
@@ -101,7 +101,7 @@ This optimization matters in CI/CD where specs are re-run frequently. A spec tha
 
 ### Why Browser at Every Stage
 
-The planner browses the target application to discover actual selectors, page structure, and navigation flows. The generator executes each test step in a live browser, capturing the selectors that actually work. The healer uses `test_debug` to pause at the failure point and inspect the real page state.
+The planner browses the target application to discover actual selectors, page structure, and navigation flows. The generator executes each test step in a live browser, capturing the selectors that actually work. The healer uses `test_run` output plus page diagnostics, locator generation, traces, and console/network evidence to inspect the real failure state.
 
 This "browser-first" approach produces more reliable tests than text-only planning because it works with what the application actually renders, not what the spec describes.
 

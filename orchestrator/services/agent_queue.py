@@ -414,6 +414,7 @@ class AgentQueue:
         stale_heartbeat_checks = 0
         queued_warning_logged = False
         last_progress_log = 0.0  # timestamp of last progress log
+        last_progress_payload: dict[str, Any] | None = None
 
         while (datetime.utcnow() - start_time).total_seconds() < timeout:
             task = await self.get_task(task_id)
@@ -459,9 +460,17 @@ class AgentQueue:
 
                 # --- RUNNING state monitoring ---
                 if task.status == AgentTaskStatus.RUNNING:
+                    progress = await self.get_task_progress(task_id)
+                    if progress and progress != last_progress_payload:
+                        last_progress_payload = progress
+                        if on_progress:
+                            try:
+                                on_progress(progress)
+                            except Exception:
+                                pass
+
                     # Log progress every 30s
                     if elapsed - last_progress_log >= 30:
-                        progress = await self.get_task_progress(task_id)
                         if progress:
                             tool_calls = progress.get("tool_calls", 0)
                             last_tool = progress.get("last_tool", "")
@@ -472,11 +481,6 @@ class AgentQueue:
                                 f"Task {task_id} progress: {tool_calls} tool calls, "
                                 f"{interactions} interactions, last_tool={short_tool}"
                             )
-                            if on_progress:
-                                try:
-                                    on_progress(progress)
-                                except Exception:
-                                    pass
                         last_progress_log = elapsed
 
                     # Check heartbeat (after initial grace period)

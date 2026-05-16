@@ -172,7 +172,7 @@ class ProcessManager:
 
         logger.info(f"Unregistered process: run_id={run_id}")
 
-    def stop(self, run_id: str, timeout: int = 5) -> bool:
+    def stop(self, run_id: str, timeout: int = 5, cancel_task_if_no_process: bool = True) -> bool:
         """
         Stop a running process and all its children.
 
@@ -181,6 +181,9 @@ class ProcessManager:
         Args:
             run_id: Unique run identifier
             timeout: Seconds to wait after SIGTERM before SIGKILL
+            cancel_task_if_no_process: Cancel the wrapper task when no process
+                is registered. Set to False while waiting for a just-started
+                executor thread to register its subprocess.
 
         Returns:
             True if process was stopped, False if not found
@@ -191,8 +194,25 @@ class ProcessManager:
         caller_stack = "".join(traceback.format_stack(limit=5)[:-1])
         logger.info(f"ProcessManager.stop() called for run_id={run_id}\n{caller_stack}")
 
+        # Prefer terminating a registered process over cancelling the wrapper
+        # task. Cancelling the asyncio task alone does not stop work already
+        # running inside run_in_executor().
+        info = self._processes.get(run_id)
+        if not info:
+            # Try to load from disk (server might have restarted)
+            info = self._read_pid_file(run_id)
+
+        if info:
+            stopped = self._terminate_process_group(info.pgid, info.pid, timeout)
+            if stopped:
+                self.unregister(run_id)
+            return stopped
+
         # Check if it's a queued task (not yet running)
         if run_id in self._asyncio_tasks:
+            if not cancel_task_if_no_process:
+                logger.info(f"Task exists but no process is registered yet: run_id={run_id}")
+                return False
             task = self._asyncio_tasks[run_id]
             if not task.done():
                 task.cancel()
@@ -200,17 +220,8 @@ class ProcessManager:
             self.unregister_task(run_id)
             return True
 
-        # Get process info
-        info = self._processes.get(run_id)
-        if not info:
-            # Try to load from disk (server might have restarted)
-            info = self._read_pid_file(run_id)
-
-        if not info:
-            logger.warning(f"Process not found: run_id={run_id}")
-            return False
-
-        return self._terminate_process_group(info.pgid, info.pid, timeout)
+        logger.warning(f"Process not found: run_id={run_id}")
+        return False
 
     def _terminate_process_group(self, pgid: int, pid: int, timeout: int = 5) -> bool:
         """

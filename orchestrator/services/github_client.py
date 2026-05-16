@@ -6,6 +6,7 @@ Mirrors the pattern from gitlab_client.py and jira_client.py.
 """
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import logging
@@ -74,6 +75,58 @@ class GithubClient:
         if isinstance(data, list):
             return data
         return []
+
+    async def get_repository(self, owner: str, repo: str) -> dict[str, Any]:
+        """Fetch repository metadata."""
+        return await self._request("GET", f"repos/{owner}/{repo}")
+
+    async def get_tree(self, owner: str, repo: str, ref: str, recursive: bool = True) -> list[dict[str, Any]]:
+        """Fetch a Git tree for a branch, tag, or commit SHA."""
+        params = {"recursive": "1"} if recursive else None
+        data = await self._request("GET", f"repos/{owner}/{repo}/git/trees/{ref}", params=params)
+        if isinstance(data, dict):
+            return data.get("tree", [])
+        return []
+
+    async def get_file_content(self, owner: str, repo: str, path: str, ref: str | None = None) -> str | None:
+        """Fetch and decode a text file from a repository."""
+        params = {"ref": ref} if ref else None
+        data = await self._request("GET", f"repos/{owner}/{repo}/contents/{path}", params=params)
+        if not isinstance(data, dict):
+            return None
+        content = data.get("content")
+        encoding = data.get("encoding")
+        if not content or encoding != "base64":
+            return None
+        try:
+            return base64.b64decode(content).decode("utf-8", errors="replace")
+        except Exception:
+            return None
+
+    # -- Pull Requests ---------------------------------------------
+
+    async def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
+        """Fetch metadata for a pull request."""
+        return await self._request("GET", f"repos/{owner}/{repo}/pulls/{pr_number}")
+
+    async def list_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
+        """List files changed by a pull request, following GitHub pagination."""
+        files: list[dict[str, Any]] = []
+        page = 1
+        per_page = 100
+        while True:
+            data = await self._request(
+                "GET",
+                f"repos/{owner}/{repo}/pulls/{pr_number}/files",
+                params={"per_page": per_page, "page": page},
+            )
+            if not isinstance(data, list) or not data:
+                break
+            files.extend(data)
+            if len(data) < per_page:
+                break
+            page += 1
+        return files
 
     # -- Workflows -------------------------------------------------
 

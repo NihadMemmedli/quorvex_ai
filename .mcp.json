@@ -5,7 +5,9 @@
       "args": [
         "@playwright/mcp",
         "--browser",
-        "chromium"
+        "chromium",
+        "--caps",
+        "testing,devtools"
       ]
     },
     "appium-mcp": {

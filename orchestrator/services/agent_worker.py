@@ -155,7 +155,7 @@ class AgentWorker:
         """Stop the worker."""
         self.running = False
 
-    async def _heartbeat_loop(self, task_id: str, interval: int = 30):
+    async def _heartbeat_loop(self, task_id: str, interval: int = 3):
         """Send periodic heartbeat updates for a running task with progress data."""
         try:
             while True:

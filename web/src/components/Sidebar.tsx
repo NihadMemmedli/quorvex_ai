@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
-import { Home, FileText, Play, Settings, BarChart2, ClipboardList, FlaskConical, Layers, Compass, CheckSquare, Users, Shield, Zap, Activity, Database, BrainCircuit, TrendingUp, Clock, GitBranch, ChevronRight, MessageSquare, Search, Brain, Bot, FolderOpen, PieChart, Rocket, Workflow, MousePointerClick } from 'lucide-react';
+import { Home, FileText, Play, Settings, BarChart2, ClipboardList, FlaskConical, Layers, Compass, CheckSquare, Users, Shield, Zap, Activity, Database, BrainCircuit, TrendingUp, Clock, GitBranch, GitPullRequest, ChevronRight, MessageSquare, Search, Brain, Bot, FolderOpen, PieChart, Rocket, Workflow, MousePointerClick } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
@@ -77,6 +77,7 @@ const navGroups: NavGroup[] = [
             { href: '/analytics', label: 'Analytics', icon: TrendingUp },
             { href: '/schedules', label: 'Schedules', icon: Clock },
             { href: '/ci-cd', label: 'CI/CD', icon: GitBranch },
+            { href: '/pr-advisor', label: 'PR Advisor', icon: GitPullRequest },
             { href: '/memory', label: 'Memory', icon: Brain },
             { href: '/agents', label: 'Agents', icon: Bot },
         ],
@@ -98,6 +99,9 @@ function isItemActive(href: string, pathname: string): boolean {
     }
     if (href === '/ci-cd') {
         return pathname === href || pathname.startsWith('/ci-cd/');
+    }
+    if (href === '/pr-advisor') {
+        return pathname === href || pathname.startsWith('/pr-advisor/');
     }
     if (href === '/assistant') {
         return pathname === href;

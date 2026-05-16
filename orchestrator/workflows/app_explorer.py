@@ -46,7 +46,8 @@ import logging
 from orchestrator.ai.context import SOURCE_OBSERVED
 from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
 from orchestrator.ai.validation import assess_exploration_quality, validate_exploration_result
-from utils.agent_runner import AgentRunner, build_allowed_tools, get_default_timeout
+from utils.agent_runner import AgentRunner, get_default_timeout
+from utils.agent_tool_allowlists import get_agent_allowed_tools
 from utils.json_utils import extract_json_from_markdown
 
 logger = logging.getLogger(__name__)
@@ -896,34 +897,11 @@ visit your queued URLs before exploring the current page further.
                     if interaction_count[0] % 10 == 0:
                         logger.info(f"   Interactions: {interaction_count[0]}")
 
-            # Playwright MCP tools matching .claude/agents/app-explorer.md (and api-explorer.md for api_focused strategy)
-            EXPLORER_MCP_TOOLS = [
-                "browser_click",
-                "browser_close",
-                "browser_console_messages",
-                "browser_drag",
-                "browser_evaluate",
-                "browser_file_upload",
-                "browser_handle_dialog",
-                "browser_hover",
-                "browser_navigate",
-                "browser_navigate_back",
-                "browser_network_requests",
-                "browser_press_key",
-                "browser_select_option",
-                "browser_snapshot",
-                "browser_take_screenshot",
-                "browser_type",
-                "browser_wait_for",
-            ]
-
             # Use the unified AgentRunner
+            profile_name = "api-explorer" if config.strategy == "api_focused" else "app-explorer"
             runner = AgentRunner(
                 timeout_seconds=timeout,
-                allowed_tools=build_allowed_tools(
-                    [],
-                    EXPLORER_MCP_TOOLS,
-                ),
+                allowed_tools=get_agent_allowed_tools(profile_name),
                 log_tools=True,
                 on_tool_use=on_tool_use,
                 session_dir=session_dir,

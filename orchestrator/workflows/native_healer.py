@@ -38,21 +38,8 @@ if config_dir:
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 
-from orchestrator.utils.agent_runner import build_allowed_tools
+from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
 from orchestrator.utils.browser_cleanup import kill_new_children, snapshot_child_pids
-
-# Playwright MCP tools matching .claude/agents/playwright-test-healer.md
-HEALER_MCP_TOOLS = [
-    "browser_close",
-    "browser_console_messages",
-    "browser_evaluate",
-    "browser_generate_locator",
-    "browser_handle_dialog",
-    "browser_network_requests",
-    "browser_snapshot",
-    "test_list",
-    "test_run",
-]
 
 
 class NativeHealer:
@@ -225,13 +212,12 @@ Start by running the test to see the current state.
 
             async def _run_healer_query():
                 nonlocal result
+                allowed_tools = get_agent_allowed_tools("playwright-test-healer") or []
                 async for message in query(
                     prompt=prompt,
                     options=ClaudeAgentOptions(
-                        allowed_tools=build_allowed_tools(
-                            ["Glob", "Grep", "Read", "LS", "Edit", "MultiEdit", "Write"],
-                            HEALER_MCP_TOOLS,
-                        ),
+                        allowed_tools=allowed_tools,
+                        tools=allowed_tools,
                         setting_sources=["project"],  # Load .claude/ and .mcp.json
                         permission_mode="bypassPermissions",  # Auto-approve tools
                     ),

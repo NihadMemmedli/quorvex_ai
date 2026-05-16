@@ -18,6 +18,8 @@ from .models_auth import ProjectMember, RefreshToken, User  # noqa: F401
 # This must happen before create_all() is called
 from .models_db import (  # noqa: F401
     AgentRun,
+    AgentDefinition,
+    AgentToolDefinition,
     ApplicationMap,
     ArchiveJob,
     AutoPilotPhase,
@@ -59,10 +61,15 @@ from .models_db import (  # noqa: F401
     LoadTestRun,
     # OpenAPI import history
     OpenApiImportHistory,
+    PrChangedFile,
+    PrImpactAnalysis,
+    PrSelectedTest,
     PrdGenerationResult,
     Project,
     RecordingSession,
     RegressionBatch,
+    RepoIndexedFile,
+    RepoIndexSnapshot,
     Requirement,
     RequirementSource,
     RtmEntry,
@@ -76,6 +83,8 @@ from .models_db import (  # noqa: F401
     SpecMetadata,
     StorageStats,
     TestPattern,
+    TestExecutionHistory,
+    TestImpactMap,
     # TestRail integration models
     TestrailCaseMapping,
     TestrailRunMapping,
@@ -305,6 +314,98 @@ def _run_migrations():
             if "project_id" not in agentrun_columns:
                 conn.execute(text("ALTER TABLE agentrun ADD COLUMN project_id VARCHAR"))
                 logger.info("Added column: agentrun.project_id")
+            if "progress_json" not in agentrun_columns:
+                conn.execute(text("ALTER TABLE agentrun ADD COLUMN progress_json TEXT"))
+                logger.info("Added column: agentrun.progress_json")
+            if "agent_task_id" not in agentrun_columns:
+                conn.execute(text("ALTER TABLE agentrun ADD COLUMN agent_task_id VARCHAR"))
+                logger.info("Added column: agentrun.agent_task_id")
+
+        # Create UI-created agent tables for databases initialized before this feature.
+        if "agent_definitions" not in inspector.get_table_names():
+            if db_type == "postgresql":
+                conn.execute(
+                    text("""
+                    CREATE TABLE agent_definitions (
+                        id VARCHAR PRIMARY KEY,
+                        project_id VARCHAR,
+                        name VARCHAR NOT NULL,
+                        description VARCHAR NOT NULL DEFAULT '',
+                        system_prompt TEXT NOT NULL,
+                        model VARCHAR,
+                        timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+                        tool_ids_json TEXT NOT NULL DEFAULT '[]',
+                        status VARCHAR NOT NULL DEFAULT 'active',
+                        created_at TIMESTAMP,
+                        updated_at TIMESTAMP
+                    )
+                    """)
+                )
+            else:
+                conn.execute(
+                    text("""
+                    CREATE TABLE agent_definitions (
+                        id VARCHAR PRIMARY KEY,
+                        project_id VARCHAR,
+                        name VARCHAR NOT NULL,
+                        description VARCHAR NOT NULL DEFAULT '',
+                        system_prompt TEXT NOT NULL,
+                        model VARCHAR,
+                        timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+                        tool_ids_json TEXT NOT NULL DEFAULT '[]',
+                        status VARCHAR NOT NULL DEFAULT 'active',
+                        created_at DATETIME,
+                        updated_at DATETIME
+                    )
+                    """)
+                )
+            logger.info("Created table: agent_definitions")
+
+        if "agent_tool_definitions" not in inspector.get_table_names():
+            if db_type == "postgresql":
+                conn.execute(
+                    text("""
+                    CREATE TABLE agent_tool_definitions (
+                        id VARCHAR PRIMARY KEY,
+                        label VARCHAR NOT NULL,
+                        description VARCHAR NOT NULL DEFAULT '',
+                        category VARCHAR NOT NULL DEFAULT 'general',
+                        tool_name VARCHAR NOT NULL,
+                        risk VARCHAR NOT NULL DEFAULT 'low',
+                        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                        requires_mcp_server VARCHAR,
+                        updated_at TIMESTAMP
+                    )
+                    """)
+                )
+            else:
+                conn.execute(
+                    text("""
+                    CREATE TABLE agent_tool_definitions (
+                        id VARCHAR PRIMARY KEY,
+                        label VARCHAR NOT NULL,
+                        description VARCHAR NOT NULL DEFAULT '',
+                        category VARCHAR NOT NULL DEFAULT 'general',
+                        tool_name VARCHAR NOT NULL,
+                        risk VARCHAR NOT NULL DEFAULT 'low',
+                        enabled BOOLEAN NOT NULL DEFAULT 1,
+                        requires_mcp_server VARCHAR,
+                        updated_at DATETIME
+                    )
+                    """)
+                )
+            logger.info("Created table: agent_tool_definitions")
+
+        if "agent_definitions" in inspector.get_table_names():
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_agent_definitions_project_status "
+                        "ON agent_definitions (project_id, status)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Index may already exist on agent_definitions: {e}")
 
         # Add title_embedding_json to requirements table for deduplication
         if "requirements" in inspector.get_table_names():

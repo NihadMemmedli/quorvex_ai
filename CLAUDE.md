@@ -125,7 +125,7 @@ Before running any pipeline, the system checks for existing generated code:
 
 ### Healing Modes
 
-- **Native Healer** (default): 3 attempts using Playwright's `test_debug` MCP tool
+- **Native Healer** (default): 3 attempts using Playwright `test_run` plus diagnostic/devtools MCP tools
 - **Hybrid Mode** (`--hybrid`): Native (3 attempts) + Ralph escalation (up to 17 more)
 
 ## Critical Patterns
@@ -134,7 +134,7 @@ Before running any pipeline, the system checks for existing generated code:
 Each pipeline stage runs as a separate subprocess to avoid SDK cleanup issues. The main orchestrator (`cli.py`) spawns individual workflow scripts via `run_command()`.
 
 ### Agent Execution
-Most workflows use `AgentRunner` (`orchestrator/utils/agent_runner.py`) for consistent agent execution with timeouts, logging, and SDK cleanup handling. The healer workflows use `query()` directly from `claude_agent_sdk` with manual message streaming. All pipeline stages set `allowed_tools=["*"]` to grant unrestricted MCP tool access.
+Most workflows use `AgentRunner` (`orchestrator/utils/agent_runner.py`) for consistent agent execution with timeouts, logging, and SDK cleanup handling. Known agent stages use explicit least-privilege tool profiles from `orchestrator/utils/agent_tool_allowlists.py`; unknown legacy agents retain wildcard fallback until they are profiled.
 
 ### Logging
 All backend code uses `logging.getLogger(__name__)`. Configuration in `orchestrator/logging_config.py` provides colored console output, rotating file handler (`logs/orchestrator.log`, 10MB, 5 backups), and optional JSON format for production. Workflow files call `setup_logging()` in their `__main__` blocks for standalone execution. The API layer configures logging at startup via `main.py`.

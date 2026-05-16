@@ -19,7 +19,7 @@ from .credentials import decrypt_credential, encrypt_credential, mask_credential
 from .db import get_session
 from .middleware.auth import get_current_user_optional
 from .models_auth import User
-from .models_db import CiPipelineMapping, Project
+from .models_db import CiPipelineMapping, PrImpactAnalysis, PrSelectedTest, Project, RepoIndexSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,23 @@ class TriggerWorkflowRequest(BaseModel):
 class SyncRunsRequest(BaseModel):
     workflow_id: str | None = None  # None = fetch all workflows
     per_page: int = 20
+
+
+class PrAdvisorAnalyzeRequest(BaseModel):
+    pr_number: int
+    ensure_indexed: bool = True
+    force_reindex: bool = False
+
+
+class PrAdvisorRunRequest(BaseModel):
+    browser: str = "chromium"
+    hybrid: bool = False
+    max_iterations: int = 20
+
+
+class RepositoryIndexRequest(BaseModel):
+    ref: str | None = None
+    force: bool = False
 
 
 # -- Helpers -------------------------------------------------------
@@ -553,6 +570,334 @@ async def get_pipeline_detail(
         "created_at": mapping.created_at.isoformat() if mapping.created_at else None,
         "started_at": mapping.started_at.isoformat() if mapping.started_at else None,
         "completed_at": mapping.completed_at.isoformat() if mapping.completed_at else None,
+    }
+
+
+# -- Repository Index ----------------------------------------------
+
+
+def _serialize_repo_index(snapshot: RepoIndexSnapshot, derived_impact_maps: int | None = None) -> dict[str, Any]:
+    return {
+        "status": snapshot.status,
+        "snapshot_id": snapshot.id,
+        "owner": snapshot.owner,
+        "repo": snapshot.repo,
+        "ref": snapshot.ref,
+        "commit_sha": snapshot.commit_sha,
+        "file_count": snapshot.indexed_files_count,
+        "source_files_count": snapshot.source_files_count,
+        "test_files_count": snapshot.test_files_count,
+        "route_count": snapshot.route_count,
+        "derived_impact_maps": derived_impact_maps,
+        "summary": snapshot.summary,
+        "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
+        "completed_at": snapshot.completed_at.isoformat() if snapshot.completed_at else None,
+    }
+
+
+def _should_index_path(path: str, size: int | None = None) -> bool:
+    if size and size > 250_000:
+        return False
+    lower = path.lower()
+    if lower.startswith(("node_modules/", ".next/", "dist/", "build/", ".git/", "test-results/", "runs/")):
+        return False
+    return lower.endswith((
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".py",
+        ".md",
+        ".json",
+        ".yaml",
+        ".yml",
+    ))
+
+
+async def _build_repository_index(
+    *,
+    project_id: str,
+    owner: str,
+    repo: str,
+    ref: str,
+    client,
+    session: Session,
+    force: bool = False,
+):
+    from orchestrator.services.pr_test_advisor import RepoFileInput, index_repository_snapshot, latest_repo_index
+
+    tree = await client.get_tree(owner, repo, ref, recursive=True)
+    commit_sha = None
+    if tree:
+        commit_sha = next((item.get("sha") for item in tree if item.get("path") == "package.json"), None)
+    existing = latest_repo_index(project_id, owner, repo, ref, session, commit_sha=commit_sha) if not force else None
+    if existing:
+        return existing, None
+
+    selected_files = [
+        item
+        for item in tree
+        if item.get("type") == "blob" and _should_index_path(item.get("path", ""), item.get("size"))
+    ][:800]
+    repo_files = []
+    for item in selected_files:
+        path = item.get("path", "")
+        content = await client.get_file_content(owner, repo, path, ref=ref)
+        if content is None:
+            continue
+        repo_files.append(
+            RepoFileInput(
+                path=path,
+                sha=item.get("sha"),
+                size=item.get("size"),
+                content=content,
+            )
+        )
+    result = index_repository_snapshot(
+        project_id=project_id,
+        owner=owner,
+        repo=repo,
+        ref=ref,
+        commit_sha=commit_sha,
+        files=repo_files,
+        session=session,
+    )
+    return result.snapshot, result.derived_impact_maps
+
+
+@router.post("/{project_id}/repository-index")
+async def create_repository_index(
+    project_id: str,
+    request: RepositoryIndexRequest,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Index the configured GitHub repository so PR Advisor can reason over repo context."""
+    project = _require_project(project_id, session)
+    config = _get_github_config(project)
+    if not config:
+        raise HTTPException(status_code=400, detail="GitHub not configured for this project")
+    owner = config.get("owner", "")
+    repo = config.get("repo", "")
+    ref = request.ref or config.get("default_ref") or "main"
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="owner and repo must be configured")
+
+    client = await _build_client(project)
+    try:
+        snapshot, derived = await _build_repository_index(
+            project_id=project_id,
+            owner=owner,
+            repo=repo,
+            ref=ref,
+            client=client,
+            session=session,
+            force=request.force,
+        )
+        return _serialize_repo_index(snapshot, derived_impact_maps=derived)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to index repository: {e}")
+    finally:
+        await client.close()
+
+
+@router.get("/{project_id}/repository-index/latest")
+def get_latest_repository_index(
+    project_id: str,
+    ref: str | None = None,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Return the latest completed repository index for this project."""
+    project = _require_project(project_id, session)
+    config = _get_github_config(project)
+    owner = (config or {}).get("owner", "")
+    repo = (config or {}).get("repo", "")
+    target_ref = ref or (config or {}).get("default_ref") or "main"
+    stmt = (
+        select(RepoIndexSnapshot)
+        .where(
+            RepoIndexSnapshot.project_id == project_id,
+            RepoIndexSnapshot.ref == target_ref,
+            RepoIndexSnapshot.status == "completed",
+        )
+        .order_by(RepoIndexSnapshot.created_at.desc())
+    )
+    if owner:
+        stmt = stmt.where(RepoIndexSnapshot.owner == owner)
+    if repo:
+        stmt = stmt.where(RepoIndexSnapshot.repo == repo)
+    snapshot = session.exec(stmt).first()
+    if not snapshot:
+        return {"status": "missing", "ref": target_ref}
+    return _serialize_repo_index(snapshot)
+
+
+# -- PR Test Advisor -----------------------------------------------
+
+
+@router.post("/{project_id}/pr-advisor/analyze")
+async def analyze_pull_request_tests(
+    project_id: str,
+    request: PrAdvisorAnalyzeRequest,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Analyze a GitHub PR and recommend impacted Quorvex tests."""
+    from orchestrator.services.pr_test_advisor import analyze_pr_changes, serialize_analysis
+
+    project = _require_project(project_id, session)
+    config = _get_github_config(project)
+    if not config:
+        raise HTTPException(status_code=400, detail="GitHub not configured for this project")
+
+    owner = config.get("owner", "")
+    repo = config.get("repo", "")
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="owner and repo must be configured")
+
+    client = await _build_client(project)
+    try:
+        pr_data = await client.get_pull_request(owner, repo, request.pr_number)
+        base_ref = (pr_data.get("base") or {}).get("ref") or config.get("default_ref") or "main"
+        snapshot = None
+        if request.ensure_indexed:
+            snapshot, _derived = await _build_repository_index(
+                project_id=project_id,
+                owner=owner,
+                repo=repo,
+                ref=base_ref,
+                client=client,
+                session=session,
+                force=request.force_reindex,
+            )
+        changed_files = await client.list_pull_request_files(owner, repo, request.pr_number)
+        analysis = analyze_pr_changes(
+            project_id=project_id,
+            owner=owner,
+            repo=repo,
+            pr_number=request.pr_number,
+            pr_data=pr_data,
+            changed_files=changed_files,
+            session=session,
+            snapshot_id=snapshot.id if snapshot else None,
+        )
+        return serialize_analysis(analysis, session, include_details=True)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to analyze PR: {e}")
+    finally:
+        await client.close()
+
+
+@router.get("/{project_id}/pr-advisor/analyses")
+def list_pr_advisor_analyses(
+    project_id: str,
+    limit: int = 20,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """List recent PR impact analyses for a project."""
+    from orchestrator.services.pr_test_advisor import serialize_analysis
+
+    _require_project(project_id, session)
+    safe_limit = max(1, min(limit, 100))
+    analyses = session.exec(
+        select(PrImpactAnalysis)
+        .where(PrImpactAnalysis.project_id == project_id)
+        .order_by(PrImpactAnalysis.created_at.desc())
+        .limit(safe_limit)
+    ).all()
+    return [serialize_analysis(a, session, include_details=False) for a in analyses]
+
+
+@router.get("/{project_id}/pr-advisor/analyses/{analysis_id}")
+def get_pr_advisor_analysis(
+    project_id: str,
+    analysis_id: str,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Get a stored PR impact analysis with changed files and selected tests."""
+    from orchestrator.services.pr_test_advisor import serialize_analysis
+
+    _require_project(project_id, session)
+    analysis = session.get(PrImpactAnalysis, analysis_id)
+    if not analysis or analysis.project_id != project_id:
+        raise HTTPException(status_code=404, detail="PR impact analysis not found")
+    return serialize_analysis(analysis, session, include_details=True)
+
+
+@router.post("/{project_id}/pr-advisor/analyses/{analysis_id}/run")
+async def run_pr_advisor_recommendation(
+    project_id: str,
+    analysis_id: str,
+    request: PrAdvisorRunRequest,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Run the tests selected by a PR impact analysis as a regression batch."""
+    _require_project(project_id, session)
+    analysis = session.get(PrImpactAnalysis, analysis_id)
+    if not analysis or analysis.project_id != project_id:
+        raise HTTPException(status_code=404, detail="PR impact analysis not found")
+
+    selected = session.exec(select(PrSelectedTest).where(PrSelectedTest.analysis_id == analysis_id)).all()
+    spec_names = [t.spec_name for t in selected]
+    if not spec_names:
+        raise HTTPException(status_code=400, detail="Analysis has no selected tests to run")
+
+    from orchestrator.services.batch_executor import BatchConfig, create_regression_batch
+
+    config = BatchConfig(
+        project_id=project_id,
+        browser=request.browser,
+        hybrid_mode=request.hybrid,
+        max_iterations=request.max_iterations,
+        automated_only=False,
+        spec_names=spec_names,
+        triggered_by="pr-advisor",
+        batch_name=f"PR #{analysis.pr_number} Recommended Tests",
+    )
+
+    try:
+        result = create_regression_batch(config, session)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    import asyncio
+
+    from .main import PROCESS_MANAGER, execute_run_task_wrapper
+
+    for task_args in result.tasks_to_start:
+        task = asyncio.ensure_future(
+            execute_run_task_wrapper(
+                spec_path=task_args["spec_path"],
+                run_dir=task_args["run_dir"],
+                run_id=task_args["run_id"],
+                try_code_path=task_args.get("try_code_path"),
+                browser=task_args["browser"],
+                hybrid=task_args["hybrid"],
+                max_iterations=task_args["max_iterations"],
+                batch_id=task_args["batch_id"],
+                spec_name=task_args["spec_name"],
+                project_id=task_args["project_id"],
+            )
+        )
+        if hasattr(PROCESS_MANAGER, "register_task"):
+            PROCESS_MANAGER.register_task(task_args["run_id"], task)
+
+    analysis.batch_id = result.batch_id
+    analysis.updated_at = datetime.utcnow()
+    session.add(analysis)
+    session.commit()
+
+    return {
+        "batch_id": result.batch_id,
+        "run_ids": result.run_ids,
+        "count": len(result.run_ids),
+        "analysis_id": analysis_id,
     }
 
 

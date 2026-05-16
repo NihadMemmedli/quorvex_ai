@@ -11,6 +11,7 @@ import io
 import json
 import logging
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from .models import (
 )
 from .models_db import RegressionBatch
 from .models_db import TestRun as DBTestRun
+from .process_manager import get_process_manager
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +182,8 @@ def _calculate_actual_test_counts(runs: list[DBTestRun]) -> tuple[int, int, int]
 
 
 FAILURE_STATUSES = {"failed", "error", "stopped"}
+ACTIVE_RUN_STATUSES = {"queued", "running", "in_progress"}
+TERMINAL_RUN_STATUSES = {"passed", "completed", "failed", "error", "stopped", "cancelled"}
 
 CATEGORY_LABELS = {
     "assertion": "Assertion",
@@ -504,6 +508,38 @@ def _batch_to_summary(
     )
 
 
+def _batch_allows_project(batch: RegressionBatch, project_id: str | None) -> bool:
+    if not project_id:
+        return True
+    if not batch.project_id:
+        return True
+    if project_id == "default":
+        return batch.project_id in (None, "default")
+    return batch.project_id == project_id
+
+
+def _apply_batch_status_counts(batch: RegressionBatch, runs: list[DBTestRun]) -> None:
+    batch.total_tests = len(runs)
+    batch.passed = sum(1 for r in runs if r.status in ("passed", "completed"))
+    batch.failed = sum(1 for r in runs if r.status in ("failed", "error"))
+    batch.stopped = sum(1 for r in runs if r.status in ("stopped", "cancelled"))
+    batch.running = sum(1 for r in runs if r.status in ("running", "in_progress"))
+    batch.queued = sum(1 for r in runs if r.status == "queued")
+
+    if batch.running > 0 or batch.queued > 0:
+        batch.status = "running"
+        if not batch.started_at:
+            started_runs = [r for r in runs if r.started_at]
+            if started_runs:
+                batch.started_at = min(r.started_at for r in started_runs)
+        return
+
+    if batch.total_tests == 0 or all(r.status in TERMINAL_RUN_STATUSES for r in runs):
+        batch.status = "completed"
+        completed_runs = [r for r in runs if r.completed_at]
+        batch.completed_at = max(completed_runs, key=lambda r: r.completed_at).completed_at if completed_runs else datetime.utcnow()
+
+
 def _run_to_batch_item(run: DBTestRun, test_count: int = 1) -> BatchRunInList:
     """Convert database run to batch run item."""
     duration = None
@@ -607,14 +643,8 @@ def get_batch_detail(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
 
-    # Filter by project_id if provided
-    if project_id:
-        if batch.project_id:
-            if project_id == "default":
-                if batch.project_id not in (None, "default"):
-                    raise HTTPException(status_code=404, detail="Batch not found")
-            elif batch.project_id != project_id:
-                raise HTTPException(status_code=404, detail="Batch not found")
+    if not _batch_allows_project(batch, project_id):
+        raise HTTPException(status_code=404, detail="Batch not found")
 
     # Get all runs for this batch
     runs_query = select(DBTestRun).where(DBTestRun.batch_id == batch_id)
@@ -624,7 +654,7 @@ def get_batch_detail(
     actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
 
     # Sort runs: failed first, then by status, then by name
-    status_order = {"failed": 0, "stopped": 1, "running": 2, "queued": 3, "passed": 4, "completed": 4}
+    status_order = {"failed": 0, "stopped": 1, "cancelled": 1, "running": 2, "queued": 3, "passed": 4, "completed": 4}
     runs_sorted = sorted(runs, key=lambda r: (status_order.get(r.status, 5), r.spec_name))
 
     # Build run items with actual test counts
@@ -674,35 +704,7 @@ def refresh_batch_stats(batch_id: str, session: Session = Depends(get_session)):
     runs_query = select(DBTestRun).where(DBTestRun.batch_id == batch_id)
     runs = session.exec(runs_query).all()
 
-    # Recalculate counts
-    batch.total_tests = len(runs)
-    batch.passed = sum(1 for r in runs if r.status in ("passed", "completed"))
-    batch.failed = sum(1 for r in runs if r.status in ("failed", "error"))
-    batch.stopped = sum(1 for r in runs if r.status == "stopped")
-    batch.running = sum(1 for r in runs if r.status in ("running", "in_progress"))
-    batch.queued = sum(1 for r in runs if r.status == "queued")
-
-    # Update status
-    if batch.running > 0 or batch.queued > 0:
-        batch.status = "running"
-    elif batch.total_tests > 0 and (batch.passed + batch.failed + batch.stopped) == batch.total_tests:
-        batch.status = "completed"
-        if not batch.completed_at:
-            batch.completed_at = datetime.utcnow()
-    elif batch.total_tests == 0:
-        batch.status = "completed"
-        if not batch.completed_at:
-            batch.completed_at = datetime.utcnow()
-
-    # Find earliest start and latest end
-    started_runs = [r for r in runs if r.started_at]
-    completed_runs = [r for r in runs if r.completed_at]
-
-    if started_runs and not batch.started_at:
-        batch.started_at = min(r.started_at for r in started_runs)
-
-    if completed_runs and batch.status == "completed":
-        batch.completed_at = max(r.completed_at for r in completed_runs)
+    _apply_batch_status_counts(batch, runs)
 
     # Cache actual test counts (D1 performance fix)
     actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
@@ -715,6 +717,87 @@ def refresh_batch_stats(batch_id: str, session: Session = Depends(get_session)):
     session.refresh(batch)
 
     return _batch_to_summary(batch, actual_total=actual_total, actual_passed=actual_passed, actual_failed=actual_failed)
+
+
+@router.post("/batches/{batch_id}/cancel")
+def cancel_batch_runs(
+    batch_id: str,
+    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    session: Session = Depends(get_session),
+):
+    """Cancel all queued or running runs in a regression batch."""
+    batch = session.get(RegressionBatch, batch_id)
+    if not batch or not _batch_allows_project(batch, project_id):
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all()
+    active_runs = [run for run in runs if run.status in ACTIVE_RUN_STATUSES]
+    if not active_runs:
+        _apply_batch_status_counts(batch, runs)
+        session.add(batch)
+        session.commit()
+        return {
+            "status": "no_active_runs",
+            "batch_id": batch_id,
+            "targeted": 0,
+            "queued_cancelled": 0,
+            "running_stopped": 0,
+            "already_terminal": len(runs),
+        }
+
+    process_manager = get_process_manager()
+    now = datetime.utcnow()
+    queued_cancelled = 0
+    running_stopped = 0
+    stop_failures: list[str] = []
+
+    for run in active_runs:
+        previous_status = run.status
+        if previous_status == "queued":
+            stopped = process_manager.stop(run.id, timeout=5)
+        else:
+            stopped = False
+            for _ in range(5):
+                stopped = process_manager.stop(run.id, timeout=5, cancel_task_if_no_process=False)
+                if stopped:
+                    break
+                time.sleep(0.2)
+            if not stopped:
+                stopped = process_manager.stop(run.id, timeout=5)
+        if not stopped and previous_status in ("running", "in_progress"):
+            stop_failures.append(run.id)
+            logger.warning("Batch cancel could not find active process for running run %s", run.id)
+
+        if previous_status == "queued":
+            run.status = "cancelled"
+            queued_cancelled += 1
+        else:
+            run.status = "stopped"
+            running_stopped += 1
+
+        run.completed_at = now
+        run.queue_position = None
+        if not run.error_message:
+            run.error_message = "Cancelled by user"
+        session.add(run)
+
+        run_dir = RUNS_DIR / run.id
+        if run_dir.exists():
+            (run_dir / "status.txt").write_text(run.status)
+
+    _apply_batch_status_counts(batch, runs)
+    session.add(batch)
+    session.commit()
+
+    return {
+        "status": "cancelled",
+        "batch_id": batch_id,
+        "targeted": len(active_runs),
+        "queued_cancelled": queued_cancelled,
+        "running_stopped": running_stopped,
+        "already_terminal": len(runs) - len(active_runs),
+        "stop_failures": stop_failures,
+    }
 
 
 def generate_batch_html_report(batch: RegressionBatch, tests: list[dict]) -> str:
@@ -1674,6 +1757,38 @@ def update_batch(batch_id: str, body: BatchRenameRequest, session: Session = Dep
     return _batch_to_summary(batch)
 
 
+def _get_bulk_run_runtime():
+    """Resolve the bulk-run executor from main before creating rerun DB records."""
+    from .main import PROCESS_MANAGER, _task_exception_handler, execute_run_task_wrapper
+
+    return PROCESS_MANAGER, _task_exception_handler, execute_run_task_wrapper
+
+
+def _start_regression_tasks(tasks_to_start: list[dict[str, Any]], runtime) -> None:
+    import asyncio
+
+    process_manager, task_exception_handler, execute_run_task_wrapper = runtime
+
+    for task_args in tasks_to_start:
+        task = asyncio.create_task(
+            execute_run_task_wrapper(
+                spec_path=task_args["spec_path"],
+                run_dir=task_args["run_dir"],
+                run_id=task_args["run_id"],
+                try_code_path=task_args.get("try_code_path"),
+                browser=task_args["browser"],
+                hybrid=task_args["hybrid"],
+                max_iterations=task_args["max_iterations"],
+                batch_id=task_args["batch_id"],
+                spec_name=task_args["spec_name"],
+                project_id=task_args["project_id"],
+            )
+        )
+        task.add_done_callback(task_exception_handler)
+        if process_manager:
+            process_manager.register_task(task_args["run_id"], task)
+
+
 @router.post("/batches/{batch_id}/rerun-failed")
 async def rerun_failed(batch_id: str, session: Session = Depends(get_session)):
     """D2: Re-run only the failed tests from a batch, creating a new batch."""
@@ -1683,13 +1798,19 @@ async def rerun_failed(batch_id: str, session: Session = Depends(get_session)):
 
     # Get failed runs
     failed_runs = session.exec(
-        select(DBTestRun).where(DBTestRun.batch_id == batch_id, DBTestRun.status == "failed")
+        select(DBTestRun).where(DBTestRun.batch_id == batch_id, DBTestRun.status.in_(["failed", "error"]))
     ).all()
 
     if not failed_runs:
         raise HTTPException(status_code=400, detail="No failed tests to re-run")
 
     failed_spec_names = [r.spec_name for r in failed_runs]
+
+    try:
+        runtime = _get_bulk_run_runtime()
+    except Exception as e:
+        logger.error("Failed to initialize rerun task executor: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to initialize re-run executor")
 
     # Create new batch using batch_executor
     from orchestrator.services.batch_executor import BatchConfig, create_regression_batch
@@ -1709,28 +1830,7 @@ async def rerun_failed(batch_id: str, session: Session = Depends(get_session)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Start the tasks (same pattern as main.py create_bulk_run)
-    import asyncio
-
-    from .main import PROCESS_MANAGER, start_native_run
-
-    for task_args in result.tasks_to_start:
-        task = asyncio.ensure_future(
-            start_native_run(
-                task_args["spec_path"],
-                task_args["run_dir"],
-                task_args["run_id"],
-                task_args.get("try_code_path"),
-                task_args["browser"],
-                task_args["hybrid"],
-                task_args["max_iterations"],
-                batch_id=task_args["batch_id"],
-                spec_name=task_args["spec_name"],
-                project_id=task_args["project_id"],
-            )
-        )
-        if hasattr(PROCESS_MANAGER, "register_task"):
-            PROCESS_MANAGER.register_task(task_args["run_id"], task)
+    _start_regression_tasks(result.tasks_to_start, runtime)
 
     return {
         "batch_id": result.batch_id,

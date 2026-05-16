@@ -33,7 +33,8 @@ if config_dir:
     os.chdir(config_dir)
 
 from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
-from orchestrator.utils.agent_runner import AgentRunner, build_allowed_tools, get_default_timeout
+from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
+from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
 
 
 class NativeGenerator:
@@ -241,30 +242,6 @@ Save the generated test file to: {output_path}
         )
         return attach_prompt_metadata(prompt, metadata)
 
-    # Playwright MCP tools matching .claude/agents/playwright-test-generator.md
-    GENERATOR_MCP_TOOLS = [
-        "browser_click",
-        "browser_close",
-        "browser_drag",
-        "browser_evaluate",
-        "browser_file_upload",
-        "browser_handle_dialog",
-        "browser_hover",
-        "browser_navigate",
-        "browser_press_key",
-        "browser_select_option",
-        "browser_snapshot",
-        "browser_type",
-        "browser_verify_element_visible",
-        "browser_verify_list_visible",
-        "browser_verify_text_visible",
-        "browser_verify_value",
-        "browser_wait_for",
-        "generator_read_log",
-        "generator_setup_page",
-        "generator_write_test",
-    ]
-
     async def _query_generator_agent(self, prompt: str) -> str:
         """
         Query the Playwright Generator agent using the unified AgentRunner.
@@ -277,10 +254,7 @@ Save the generated test file to: {output_path}
 
         runner = AgentRunner(
             timeout_seconds=timeout,
-            allowed_tools=build_allowed_tools(
-                ["Glob", "Grep", "Read", "LS"],
-                self.GENERATOR_MCP_TOOLS,
-            ),
+            allowed_tools=get_agent_allowed_tools("playwright-test-generator"),
             log_tools=True,
         )
 

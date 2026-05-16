@@ -1,7 +1,7 @@
 import {
     Home, FileText, Play, Settings, BarChart2, ClipboardList, FlaskConical,
     Compass, CheckSquare, Users, Shield, Zap, Activity, Database, BrainCircuit,
-    TrendingUp, Clock, GitBranch, MessageSquare, Plus, Search, Upload, Layers,
+    TrendingUp, Clock, GitBranch, GitPullRequest, MessageSquare, Plus, Search, Upload, Layers,
     Workflow, FolderOpen, Rocket, PieChart, Brain, Bot,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -102,6 +102,7 @@ export const navigationItems: CommandItem[] = [
     { id: 'nav-analytics', label: 'Analytics', icon: TrendingUp, href: '/analytics', keywords: ['analytics', 'trends', 'flake', 'insights'], category: 'navigation', group: 'Operations' },
     { id: 'nav-schedules', label: 'Schedules', icon: Clock, href: '/schedules', keywords: ['schedule', 'cron', 'timer', 'recurring'], category: 'navigation', group: 'Operations' },
     { id: 'nav-cicd', label: 'CI/CD', icon: GitBranch, href: '/ci-cd', keywords: ['cicd', 'ci', 'cd', 'pipeline', 'github', 'gitlab'], category: 'navigation', group: 'Operations' },
+    { id: 'nav-pr-advisor', label: 'PR Advisor', icon: GitPullRequest, href: '/pr-advisor', keywords: ['pr', 'pull request', 'advisor', 'impact', 'test selection', 'github'], category: 'navigation', group: 'Operations' },
     { id: 'nav-memory', label: 'Memory', icon: Brain, href: '/memory', keywords: ['memory', 'semantic', 'patterns', 'knowledge'], category: 'navigation', group: 'Operations' },
     { id: 'nav-agents', label: 'Agents', icon: Bot, href: '/agents', keywords: ['agents', 'agent', 'worker', 'automation'], category: 'navigation', group: 'Operations' },
 

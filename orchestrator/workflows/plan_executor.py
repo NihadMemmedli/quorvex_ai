@@ -22,6 +22,7 @@ setup_claude_env()
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 
+from utils.agent_tool_allowlists import get_agent_allowed_tools
 from utils.json_utils import extract_json_from_markdown, validate_json_schema
 
 
@@ -275,14 +276,14 @@ OUTPUT FORMAT:
 
 CRITICAL INSTRUCTIONS - MUST FOLLOW:
 1. **REUSED SELECTORS**: {reused_instruction if reused_context else "None provided."}
-2. Use `mcp__playwright__browser_evaluate` or `getBy...` for validation.
+2. Use `browser_evaluate`, `browser_snapshot`, or role/text selectors for validation.
 3. **DIALOG HANDLING**: When browser dialogs appear (alerts, confirms, "Leave site?" beforeunload):
    - Use `browser_handle_dialog` with `accept: true` IMMEDIATELY
    - For "Leave site?" dialogs: Always accept to continue navigation
    - After handling, take a snapshot to verify page state
 4. **SELF-CORRECTION**: If a step fails (e.g. timeout, selector not found):
    a. DO NOT FAIL IMMEDIATELY.
-   b. Use `mcp__playwright__get_accessibility_tree` or text content to analyze the page.
+   b. Use `browser_snapshot` or text content to analyze the page.
    c. DETERMINE A FIX (e.g. found button with different ID or text).
    d. RETRY the action with the corrected selector.
    e. Only return failure if 3 attempts fail.
@@ -363,10 +364,12 @@ Execute steps now and return ONLY the JSON.
         """Query the agent with Playwright MCP access"""
         run = None
         try:
+            allowed_tools = get_agent_allowed_tools("test-operator") or []
             async for message in query(
                 prompt=prompt,
                 options=ClaudeAgentOptions(
-                    allowed_tools=["*"],  # All tools including MCP
+                    allowed_tools=allowed_tools,
+                    tools=allowed_tools,
                     setting_sources=["project"],  # Enable .claude/ and .mcp.json
                     permission_mode="bypassPermissions",  # Auto-approve tools
                 ),
