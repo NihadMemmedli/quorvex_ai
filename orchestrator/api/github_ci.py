@@ -1515,13 +1515,15 @@ def _update_mapping_from_run(mapping: CiPipelineMapping, run_data: dict[str, Any
 
 async def _process_webhook(
     payload: dict[str, Any],
-    session_factory,
+    project_id: str | None = None,
 ):
     """Background task to process a GitHub webhook event."""
     try:
         payload.get("action", "")
         workflow_run = payload.get("workflow_run", {})
         run_id = str(workflow_run.get("id", ""))
+        repository = payload.get("repository", {}) or {}
+        repo_full_name = repository.get("full_name")
 
         if not run_id:
             logger.debug("Webhook payload missing workflow_run.id, skipping")
@@ -1537,6 +1539,10 @@ async def _process_webhook(
                 CiPipelineMapping.provider == "github",
                 CiPipelineMapping.external_pipeline_id == run_id,
             )
+            if project_id:
+                stmt = stmt.where(CiPipelineMapping.project_id == project_id)
+            elif repo_full_name:
+                stmt = stmt.where(CiPipelineMapping.external_project_id == repo_full_name)
             mapping = session.exec(stmt).first()
 
             if not mapping:
@@ -1570,31 +1576,33 @@ async def handle_webhook(
     body = await request.body()
     event_type = request.headers.get("X-GitHub-Event", "")
     signature = request.headers.get("X-Hub-Signature-256", "")
+    validated_project_id: str | None = None
 
     # Try to validate signature if any project has a webhook secret configured
     # We validate signature per-project since different projects may have different secrets
-    if signature:
-        from sqlmodel import Session as _Session
+    from sqlmodel import Session as _Session
 
-        from services.github_client import verify_webhook_signature
+    from ..services.github_client import verify_webhook_signature
 
-        from .db import engine
+    from .db import engine
 
-        validated = False
-        with _Session(engine) as session:
-            projects = session.exec(select(Project)).all()
-            for project in projects:
-                config = _get_github_config(project)
-                if not config:
-                    continue
-                secret_encrypted = config.get("webhook_secret_encrypted")
-                if not secret_encrypted:
-                    continue
-                secret = decrypt_credential(secret_encrypted)
-                if secret and verify_webhook_signature(body, signature, secret):
-                    validated = True
-                    break
+    with _Session(engine) as session:
+        projects_with_secret = []
+        for project in session.exec(select(Project)).all():
+            config = _get_github_config(project)
+            if config and config.get("webhook_secret_encrypted"):
+                projects_with_secret.append((project, config))
 
+        if projects_with_secret and not signature:
+            raise HTTPException(status_code=401, detail="Missing webhook signature")
+
+        validated = not projects_with_secret
+        for project, config in projects_with_secret:
+            secret = decrypt_credential(config.get("webhook_secret_encrypted", ""))
+            if secret and verify_webhook_signature(body, signature, secret):
+                validated = True
+                validated_project_id = project.id
+                break
         if not validated:
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
@@ -1609,5 +1617,5 @@ async def handle_webhook(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    background_tasks.add_task(_process_webhook, payload, None)
+    background_tasks.add_task(_process_webhook, payload, validated_project_id)
     return {"status": "ok"}

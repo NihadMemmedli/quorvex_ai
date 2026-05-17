@@ -1,4 +1,5 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
+import { createOpenAI } from '@ai-sdk/openai';
 
 /**
  * Normalize the base URL for @ai-sdk/anthropic.
@@ -14,6 +15,11 @@ function normalizeBaseURL(url?: string): string | undefined {
   if (trimmed.includes('api.anthropic.com')) return `${trimmed}/v1`;
   // For proxies (OpenRouter, custom, etc.), append /v1
   return `${trimmed}/v1`;
+}
+
+function normalizeOpenAIBaseURL(url?: string): string | undefined {
+  if (!url) return undefined;
+  return url.replace(/\/+$/, '');
 }
 
 /**
@@ -97,6 +103,31 @@ export function getActiveProvider() {
   return { provider, slot };
 }
 
+export function hasDirectAnthropicChatCredential() {
+  return Boolean(
+    (
+      process.env.ANTHROPIC_AUTH_TOKENS ||
+      process.env.ANTHROPIC_API_KEY ||
+      process.env.ANTHROPIC_AUTH_TOKEN ||
+      ''
+    ).trim()
+  );
+}
+
+export function hasOpenAIChatCredential() {
+  return Boolean((process.env.OPENAI_API_KEY || '').trim());
+}
+
+export function getActiveOpenAIProvider() {
+  const apiKey = (process.env.OPENAI_API_KEY || '').trim();
+  const provider = createOpenAI({
+    apiKey,
+    baseURL: normalizeOpenAIBaseURL(process.env.OPENAI_BASE_URL),
+  });
+
+  return { provider };
+}
+
 /**
  * Default provider — backward compatible export.
  * Uses the first available key from the rotation pool.
@@ -115,3 +146,8 @@ export const MODEL_ID =
   process.env.ANTHROPIC_MODEL ||
   process.env.ANTHROPIC_DEFAULT_SONNET_MODEL ||
   'claude-sonnet-4-6';
+
+export const OPENAI_MODEL_ID =
+  process.env.OPENAI_CHAT_MODEL ||
+  process.env.OPENAI_MODEL ||
+  'gpt-4o-mini';

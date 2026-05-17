@@ -103,11 +103,109 @@ class GithubClient:
         except Exception:
             return None
 
+    async def get_ref(self, owner: str, repo: str, ref: str) -> dict[str, Any]:
+        """Fetch a Git ref such as heads/main."""
+        clean_ref = ref.removeprefix("refs/")
+        return await self._request("GET", f"repos/{owner}/{repo}/git/ref/{clean_ref}")
+
+    async def create_ref(self, owner: str, repo: str, ref: str, sha: str) -> dict[str, Any]:
+        """Create a Git ref from an existing commit SHA."""
+        full_ref = ref if ref.startswith("refs/") else f"refs/{ref}"
+        return await self._request(
+            "POST",
+            f"repos/{owner}/{repo}/git/refs",
+            json={"ref": full_ref, "sha": sha},
+        )
+
+    async def get_content_metadata(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        ref: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Fetch repository content metadata, including SHA, without discarding GitHub fields."""
+        params = {"ref": ref} if ref else None
+        try:
+            data = await self._request("GET", f"repos/{owner}/{repo}/contents/{path}", params=params)
+        except GithubError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        return data if isinstance(data, dict) else None
+
+    async def create_or_update_file(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        *,
+        content: str,
+        message: str,
+        branch: str,
+        sha: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a text file on a branch using the Contents API."""
+        payload: dict[str, Any] = {
+            "message": message,
+            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+            "branch": branch,
+        }
+        if sha:
+            payload["sha"] = sha
+        return await self._request(
+            "PUT",
+            f"repos/{owner}/{repo}/contents/{path}",
+            json=payload,
+        )
+
     # -- Pull Requests ---------------------------------------------
 
     async def get_pull_request(self, owner: str, repo: str, pr_number: int) -> dict[str, Any]:
         """Fetch metadata for a pull request."""
         return await self._request("GET", f"repos/{owner}/{repo}/pulls/{pr_number}")
+
+    async def create_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        title: str,
+        head: str,
+        base: str,
+        body: str,
+        draft: bool = False,
+    ) -> dict[str, Any]:
+        """Create a pull request."""
+        return await self._request(
+            "POST",
+            f"repos/{owner}/{repo}/pulls",
+            json={
+                "title": title,
+                "head": head,
+                "base": base,
+                "body": body,
+                "draft": draft,
+            },
+        )
+
+    async def list_pull_requests(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str = "open",
+        head: str | None = None,
+        base: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List pull requests, optionally filtered by head/base."""
+        params: dict[str, Any] = {"state": state, "per_page": 30}
+        if head:
+            params["head"] = head
+        if base:
+            params["base"] = base
+        data = await self._request("GET", f"repos/{owner}/{repo}/pulls", params=params)
+        return data if isinstance(data, list) else []
 
     async def list_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
         """List files changed by a pull request, following GitHub pagination."""
@@ -237,7 +335,50 @@ class GithubClient:
             return data.get("jobs", [])
         return []
 
+    async def cancel_run(self, owner: str, repo: str, run_id: int) -> bool:
+        """Cancel a workflow run."""
+        await self._request("POST", f"repos/{owner}/{repo}/actions/runs/{run_id}/cancel")
+        return True
+
+    async def rerun_run(self, owner: str, repo: str, run_id: int, failed_only: bool = False) -> bool:
+        """Rerun a workflow run, optionally only failed jobs."""
+        endpoint = "rerun-failed-jobs" if failed_only else "rerun"
+        await self._request("POST", f"repos/{owner}/{repo}/actions/runs/{run_id}/{endpoint}")
+        return True
+
+    async def list_run_artifacts(self, owner: str, repo: str, run_id: int) -> list[dict[str, Any]]:
+        """List artifacts produced by a workflow run."""
+        data = await self._request("GET", f"repos/{owner}/{repo}/actions/runs/{run_id}/artifacts")
+        if isinstance(data, dict):
+            return data.get("artifacts", [])
+        return []
+
+    async def get_run_logs_url(self, owner: str, repo: str, run_id: int) -> str | None:
+        """Return the short-lived redirected download URL for a workflow run log archive."""
+        resp = await self._raw_request("GET", f"repos/{owner}/{repo}/actions/runs/{run_id}/logs")
+        if 300 <= resp.status_code < 400:
+            return resp.headers.get("location")
+        if resp.status_code == 200:
+            return str(resp.url)
+        return None
+
     # -- Internal --------------------------------------------------
+
+    async def _raw_request(
+        self,
+        method: str,
+        endpoint: str,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Execute an API request and return the raw response."""
+        url = self.API_BASE + endpoint
+        async with self._semaphore:
+            client = self._get_client()
+            resp = await client.request(method, url, json=json, params=params, follow_redirects=False)
+            if resp.status_code >= 400:
+                raise GithubError(f"GitHub API {resp.status_code}: {resp.text}", status_code=resp.status_code)
+            return resp
 
     async def _request(
         self,

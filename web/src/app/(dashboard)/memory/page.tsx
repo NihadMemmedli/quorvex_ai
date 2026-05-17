@@ -118,7 +118,8 @@ export default function MemoryPage() {
                 body: JSON.stringify({
                     description: searchQuery,
                     n_results: 10,
-                    min_success_rate: 0.0
+                    min_success_rate: 0.0,
+                    project_id: selectedProject
                 })
             });
 

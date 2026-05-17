@@ -399,12 +399,16 @@ class AgentRunner:
         start_time = datetime.now()
         self._apply_active_ai_settings()
         self._validate_mcp_config_for_allowed_tools(self.cwd)
+        original_prompt = prompt
+        prompt = self._augment_prompt_with_agent_memory(prompt)
 
         # First, try agent queue if Redis is available
         # This offloads execution to a separate worker process outside uvicorn
         if AGENT_QUEUE_AVAILABLE and should_use_agent_queue():
             logger.info(f"Using agent queue for execution (timeout={timeout}s)")
-            return await self._run_via_queue(prompt, timeout)
+            queued_result = await self._run_via_queue(prompt, timeout)
+            self._capture_agent_memory(original_prompt, queued_result)
+            return queued_result
 
         if query is None:
             return AgentResult(
@@ -779,7 +783,57 @@ class AgentRunner:
             except Exception:
                 pass  # Non-fatal - don't let cleanup errors mask real results
 
+        self._capture_agent_memory(original_prompt, agent_result)
         return agent_result
+
+    def _agent_memory_project_id(self) -> str | None:
+        return os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID")
+
+    def _augment_prompt_with_agent_memory(self, prompt: str) -> str:
+        if os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
+            return prompt
+        project_id = self._agent_memory_project_id()
+        if not project_id:
+            return prompt
+        try:
+            from orchestrator.memory.agent_memory import get_agent_memory_service
+
+            context = get_agent_memory_service().build_context(
+                query=prompt[:2000],
+                project_id=project_id,
+                agent_type="AgentRunner",
+                limit=8,
+            )
+            if not context:
+                return prompt
+            return f"{context}\n\n---\n\n{prompt}"
+        except Exception as exc:
+            logger.debug("Agent memory retrieval skipped: %s", exc)
+            return prompt
+
+    def _capture_agent_memory(self, prompt: str, result: AgentResult | None) -> None:
+        if os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
+            return
+        project_id = self._agent_memory_project_id()
+        if not project_id or result is None:
+            return
+        text = result.output or ""
+        if "remember" in prompt.lower():
+            text = f"{prompt[:1200]}\n{text}"
+        if not text.strip():
+            return
+        try:
+            from orchestrator.memory.agent_memory import get_agent_memory_service
+
+            get_agent_memory_service().capture_candidates(
+                text,
+                project_id=project_id,
+                source_type="agent_run",
+                source_id=result.session_id,
+                agent_type="AgentRunner",
+            )
+        except Exception as exc:
+            logger.debug("Agent memory capture skipped: %s", exc)
 
     @staticmethod
     def _collect_api_env_vars() -> dict:

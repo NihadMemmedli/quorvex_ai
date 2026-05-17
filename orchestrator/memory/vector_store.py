@@ -8,26 +8,128 @@ with semantic search capabilities.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
-import chromadb
-from chromadb.config import Settings
-from chromadb.utils import embedding_functions
+try:
+    import chromadb
+    from chromadb.config import Settings
+    from chromadb.utils import embedding_functions
+
+    CHROMADB_AVAILABLE = True
+except Exception:
+    chromadb = None
+    Settings = None
+    embedding_functions = SimpleNamespace(EmbeddingFunction=object)
+    CHROMADB_AVAILABLE = False
 
 from .config import get_config
 from .embeddings import get_embedding_client
 
 # Global ChromaDB clients keyed by persist directory.
-_chroma_clients: dict[str, chromadb.PersistentClient] = {}
+_chroma_clients: dict[str, Any] = {}
 
 
-def _get_chroma_client(persist_directory: str) -> chromadb.PersistentClient:
+class _FallbackCollection:
+    """Small in-process Chroma-compatible collection used when Chroma cannot import."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self._items: dict[str, dict[str, Any]] = {}
+
+    def add(self, ids: list[str], documents: list[str], metadatas: list[dict[str, Any]]):
+        for idx, item_id in enumerate(ids):
+            self._items[item_id] = {
+                "document": documents[idx] if documents else "",
+                "metadata": metadatas[idx] if metadatas else {},
+            }
+
+    def update(
+        self,
+        ids: list[str],
+        documents: list[str] | None = None,
+        metadatas: list[dict[str, Any]] | None = None,
+    ):
+        for idx, item_id in enumerate(ids):
+            item = self._items.setdefault(item_id, {"document": "", "metadata": {}})
+            if documents is not None:
+                item["document"] = documents[idx]
+            if metadatas is not None:
+                item["metadata"] = metadatas[idx]
+
+    def get(
+        self,
+        ids: list[str] | None = None,
+        where: dict[str, Any] | None = None,
+        include: list[str] | None = None,
+    ) -> dict[str, Any]:
+        rows = []
+        for item_id, item in self._items.items():
+            if ids is not None and item_id not in ids:
+                continue
+            if where and any(item["metadata"].get(key) != value for key, value in where.items()):
+                continue
+            rows.append((item_id, item))
+        return {
+            "ids": [item_id for item_id, _ in rows],
+            "documents": [item["document"] for _, item in rows],
+            "metadatas": [item["metadata"] for _, item in rows],
+        }
+
+    def query(self, query_texts: list[str], n_results: int = 5, where: dict[str, Any] | None = None) -> dict[str, Any]:
+        query = (query_texts[0] if query_texts else "").lower()
+        query_terms = set(query.split())
+        rows = []
+        for item_id, item in self._items.items():
+            if where and any(item["metadata"].get(key) != value for key, value in where.items()):
+                continue
+            document = str(item["document"]).lower()
+            overlap = len(query_terms & set(document.split())) if query_terms else 0
+            distance = 1.0 / (overlap + 1)
+            rows.append((distance, item_id, item))
+        rows.sort(key=lambda row: row[0])
+        rows = rows[:n_results]
+        return {
+            "ids": [[item_id for _, item_id, _ in rows]],
+            "documents": [[item["document"] for _, _, item in rows]],
+            "metadatas": [[item["metadata"] for _, _, item in rows]],
+            "distances": [[distance for distance, _, _ in rows]],
+        }
+
+    def delete(self, ids: list[str]):
+        for item_id in ids:
+            self._items.pop(item_id, None)
+
+    def count(self) -> int:
+        return len(self._items)
+
+
+class _FallbackClient:
+    def __init__(self):
+        self._collections: dict[str, _FallbackCollection] = {}
+
+    def get_or_create_collection(self, name: str, embedding_function=None, metadata: dict[str, Any] | None = None):
+        if name not in self._collections:
+            self._collections[name] = _FallbackCollection(name)
+        return self._collections[name]
+
+    def list_collections(self):
+        return list(self._collections.values())
+
+    def reset(self):
+        self._collections.clear()
+
+
+def _get_chroma_client(persist_directory: str) -> Any:
     """Get or create a ChromaDB client for a persist directory."""
     resolved_directory = str(Path(persist_directory).resolve())
     if resolved_directory not in _chroma_clients:
-        _chroma_clients[resolved_directory] = chromadb.PersistentClient(
-            path=resolved_directory, settings=Settings(anonymized_telemetry=False, allow_reset=True)
-        )
+        if CHROMADB_AVAILABLE:
+            _chroma_clients[resolved_directory] = chromadb.PersistentClient(
+                path=resolved_directory, settings=Settings(anonymized_telemetry=False, allow_reset=True)
+            )
+        else:
+            _chroma_clients[resolved_directory] = _FallbackClient()
     return _chroma_clients[resolved_directory]
 
 
@@ -40,6 +142,7 @@ class VectorStore:
     COLLECTION_TEST_IDEAS = "test_ideas"
     COLLECTION_PRD_CHUNKS = "prd_chunks"
     COLLECTION_SIMILAR_TESTS = "similar_tests"
+    COLLECTION_AGENT_MEMORIES = "agent_memories"
 
     def __init__(self, persist_directory: str | None = None, project_id: str | None = None):
         """
@@ -465,6 +568,42 @@ class VectorStore:
                 )
 
         return hits
+
+    def add_agent_memory(self, memory_id: str, content: str, metadata: dict[str, Any]) -> str:
+        """Add or update an agent working-memory search document."""
+        collection = self.get_or_create_collection(self.COLLECTION_AGENT_MEMORIES)
+        metadata = metadata or {"_placeholder": True}
+        existing = collection.get(ids=[memory_id], include=["metadatas"])
+        if existing.get("ids"):
+            collection.update(ids=[memory_id], documents=[content], metadatas=[metadata])
+        else:
+            collection.add(ids=[memory_id], documents=[content], metadatas=[metadata])
+        return memory_id
+
+    def search_agent_memories(
+        self, query: str, n_results: int = 8, filters: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Search agent working memories by semantic similarity."""
+        collection = self.get_or_create_collection(self.COLLECTION_AGENT_MEMORIES)
+        results = collection.query(query_texts=[query], n_results=n_results, where=filters)
+
+        memories = []
+        if results["ids"] and results["ids"][0]:
+            for i, memory_id in enumerate(results["ids"][0]):
+                memories.append(
+                    {
+                        "id": memory_id,
+                        "document": results["documents"][0][i],
+                        "metadata": results["metadatas"][0][i],
+                        "distance": results["distances"][0][i] if "distances" in results else None,
+                    }
+                )
+        return memories
+
+    def delete_agent_memory(self, memory_id: str) -> None:
+        """Delete an agent working-memory search document."""
+        collection = self.get_or_create_collection(self.COLLECTION_AGENT_MEMORIES)
+        collection.delete(ids=[memory_id])
 
 
 # Global vector store instances keyed by persist directory and project.

@@ -28,7 +28,7 @@ def _make_hash(scanner: str, finding_type: str, url: str, evidence_key: str = ""
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-async def run_quick_scan(target_url: str) -> list[dict]:
+async def run_quick_scan(target_url: str, headers: dict[str, str] | None = None) -> list[dict]:
     """Run all quick security checks against target URL.
 
     Returns list of finding dicts with keys:
@@ -45,7 +45,7 @@ async def run_quick_scan(target_url: str) -> list[dict]:
         verify=True,  # SSL verification on
     ) as client:
         try:
-            response = await client.get(target_url)
+            response = await client.get(target_url, headers=headers)
         except httpx.ConnectError as e:
             logger.error(f"Cannot connect to {target_url}: {e}")
             raise RuntimeError(f"Cannot connect to target: {e}")
@@ -58,7 +58,7 @@ async def run_quick_scan(target_url: str) -> list[dict]:
         findings.extend(_check_cookie_security(target_url, response))
         findings.extend(_check_cors(target_url, response))
         findings.extend(_check_info_disclosure(target_url, response))
-        findings.extend(await _check_sensitive_paths(client, target_url))
+        findings.extend(await _check_sensitive_paths(client, target_url, headers=headers))
 
     # SSL checks (separate - uses socket, not httpx)
     findings.extend(_check_ssl(target_url))
@@ -339,7 +339,9 @@ def _check_info_disclosure(target_url: str, response: httpx.Response) -> list[di
     return findings
 
 
-async def _check_sensitive_paths(client: httpx.AsyncClient, target_url: str) -> list[dict]:
+async def _check_sensitive_paths(
+    client: httpx.AsyncClient, target_url: str, headers: dict[str, str] | None = None
+) -> list[dict]:
     """Probe common sensitive paths for information exposure."""
     findings = []
     parsed = urlparse(target_url)
@@ -361,7 +363,7 @@ async def _check_sensitive_paths(client: httpx.AsyncClient, target_url: str) -> 
     for probe in sensitive_paths:
         probe_url = f"{base}{probe['path']}"
         try:
-            resp = await client.get(probe_url, follow_redirects=False)
+            resp = await client.get(probe_url, headers=headers, follow_redirects=False)
 
             # robots.txt and security.txt: report as info if present
             if probe["path"] in ["/robots.txt", "/.well-known/security.txt"]:

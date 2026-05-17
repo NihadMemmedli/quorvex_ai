@@ -61,7 +61,14 @@ export async function backendFetch<T = unknown>(
       return { ok: false, error: errorMessage, status: response.status };
     }
 
-    const data = await response.json() as T;
+    if (response.status === 204) {
+      return { ok: true, data: null as T, status: response.status };
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    const data = contentType.includes('application/json')
+      ? await response.json() as T
+      : await response.text() as T;
     return { ok: true, data, status: response.status };
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Backend unreachable';

@@ -19,6 +19,7 @@ from .models_auth import ProjectMember, RefreshToken, User  # noqa: F401
 from .models_db import (  # noqa: F401
     AgentRun,
     AgentDefinition,
+    AgentMemory,
     AgentToolDefinition,
     ApplicationMap,
     ArchiveJob,

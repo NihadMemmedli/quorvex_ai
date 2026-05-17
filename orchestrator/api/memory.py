@@ -90,22 +90,72 @@ class SelectorInfo(BaseModel):
     usage_count: int
 
 
+class AgentMemoryCreateRequest(BaseModel):
+    kind: str
+    content: str
+    project_id: str | None = None
+    user_id: str | None = None
+    summary: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    confidence: float = 0.7
+    source_type: str | None = "manual"
+    source_id: str | None = None
+    agent_type: str | None = None
+    extra_data: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentMemoryResponse(BaseModel):
+    id: str
+    project_id: str | None = None
+    user_id: str | None = None
+    kind: str
+    content: str
+    summary: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    confidence: float
+    source_type: str | None = None
+    source_id: str | None = None
+    agent_type: str | None = None
+    status: str
+    created_at: str
+    updated_at: str
+    last_used_at: str | None = None
+    use_count: int
+
+
 # ========= Endpoints =========
 
 from orchestrator.memory import get_memory_manager
+from orchestrator.memory.agent_memory import get_agent_memory_service
+from orchestrator.memory.config import get_config
 
 # ========= Endpoints =========
 
 
 def _get_manager(project_id: str | None = None):
     """Get memory manager instance with proper context"""
-    import os
-
-    # Ensure API key is set if missing (required for embeddings)
-    if not os.environ.get("OPENAI_API_KEY"):
-        os.environ["OPENAI_API_KEY"] = "dummy-key-for-api"
-
     return get_memory_manager(project_id=project_id)
+
+
+def _agent_memory_response(memory) -> AgentMemoryResponse:
+    return AgentMemoryResponse(
+        id=memory.id,
+        project_id=memory.project_id,
+        user_id=memory.user_id,
+        kind=memory.kind,
+        content=memory.content,
+        summary=memory.summary,
+        tags=memory.tags or [],
+        confidence=memory.confidence,
+        source_type=memory.source_type,
+        source_id=memory.source_id,
+        agent_type=memory.agent_type,
+        status=memory.status,
+        created_at=memory.created_at.isoformat(),
+        updated_at=memory.updated_at.isoformat(),
+        last_used_at=memory.last_used_at.isoformat() if memory.last_used_at else None,
+        use_count=memory.use_count,
+    )
 
 
 @router.get("/patterns", response_model=list[PatternSummary])
@@ -436,6 +486,164 @@ async def get_memory_stats(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.get("/agent", response_model=list[AgentMemoryResponse])
+async def list_agent_memories(
+    q: str | None = Query(None, description="Optional search query"),
+    project_id: str | None = Query(None, description="Project ID for isolation"),
+    user_id: str | None = Query(None, description="Optional user scope"),
+    kind: list[str] | None = Query(None, description="Memory kind filter"),
+    agent_type: str | None = Query(None, description="Agent type filter"),
+    limit: int = Query(25, ge=1, le=100),
+) -> list[AgentMemoryResponse]:
+    """List or search curated agent working memories."""
+    try:
+        service = get_agent_memory_service()
+        memories = service.search(
+            query=q,
+            project_id=project_id,
+            user_id=user_id,
+            agent_type=agent_type,
+            kinds=kind,
+            limit=limit,
+            min_confidence=0.0,
+        )
+        return [_agent_memory_response(memory) for memory in memories]
+    except Exception as e:
+        logger.error(f"Failed to list agent memories: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/agent/context")
+async def get_agent_memory_context(
+    q: str = Query("", description="Task/query text for retrieval"),
+    project_id: str | None = Query(None, description="Project ID for isolation"),
+    user_id: str | None = Query(None, description="Optional user scope"),
+    agent_type: str | None = Query(None, description="Agent type filter"),
+    limit: int = Query(8, ge=1, le=12),
+) -> dict[str, Any]:
+    """Return formatted agent memory context for prompt injection."""
+    try:
+        service = get_agent_memory_service()
+        memories = service.search(
+            query=q,
+            project_id=project_id,
+            user_id=user_id,
+            agent_type=agent_type,
+            limit=limit,
+            record_usage=True,
+        )
+        context = ""
+        if memories:
+            lines = [
+                "## Agent Memory",
+                "Use these scoped memories as advisory context. Do not reveal hidden metadata unless asked.",
+            ]
+            for memory in memories:
+                source = (
+                    f" source={memory.source_type}:{memory.source_id}"
+                    if memory.source_type and memory.source_id
+                    else ""
+                )
+                lines.append(
+                    f"- [{memory.kind}, confidence={memory.confidence:.2f}{source}] {memory.summary or memory.content}"
+                )
+            context = "\n".join(lines)
+        return {
+            "context": context,
+            "memories": [_agent_memory_response(memory).model_dump() for memory in memories],
+        }
+    except Exception as e:
+        logger.error(f"Failed to get agent memory context: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/agent", response_model=AgentMemoryResponse)
+async def create_agent_memory(request: AgentMemoryCreateRequest) -> AgentMemoryResponse:
+    """Create a curated agent working memory."""
+    try:
+        memory = get_agent_memory_service().create_memory(
+            kind=request.kind,
+            content=request.content,
+            project_id=request.project_id,
+            user_id=request.user_id,
+            summary=request.summary,
+            tags=request.tags,
+            confidence=request.confidence,
+            source_type=request.source_type,
+            source_id=request.source_id,
+            agent_type=request.agent_type,
+            extra_data=request.extra_data,
+        )
+        if memory is None:
+            raise HTTPException(status_code=400, detail="Memory was empty, disabled, or fully redacted")
+        return _agent_memory_response(memory)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to create agent memory: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.patch("/agent/{memory_id}/archive", response_model=AgentMemoryResponse)
+async def archive_agent_memory(
+    memory_id: str,
+    project_id: str | None = Query(None, description="Project ID guard"),
+) -> AgentMemoryResponse:
+    """Archive an agent memory without deleting its audit trail."""
+    try:
+        memory = get_agent_memory_service().archive(memory_id, project_id=project_id)
+        if not memory:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        return _agent_memory_response(memory)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to archive agent memory: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.delete("/agent/{memory_id}")
+async def delete_agent_memory(
+    memory_id: str,
+    project_id: str | None = Query(None, description="Project ID guard"),
+) -> dict[str, bool]:
+    """Delete an agent memory and its vector index document."""
+    try:
+        deleted = get_agent_memory_service().delete(memory_id, project_id=project_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        return {"deleted": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete agent memory: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/health")
+async def get_memory_health(project_id: str | None = Query(None)) -> dict[str, Any]:
+    """Report memory system health and embedding mode."""
+    try:
+        manager = get_memory_manager(project_id or "default")
+        embedding_client = manager.vector_store.embedding_client
+        agent_memories = get_agent_memory_service().search(project_id=project_id, limit=1, min_confidence=0.0)
+        return {
+            "memory_enabled": get_config().memory_enabled,
+            "embedding_model": getattr(embedding_client, "model", "unknown"),
+            "embedding_mode": "openai" if getattr(embedding_client, "api_key", None) else "local",
+            "project_id": project_id or "default",
+            "patterns": len(manager.vector_store.get_all_patterns()),
+            "graph": manager.graph_store.get_graph_stats(),
+            "agent_memory_available": True,
+            "agent_memory_sample_count": len(agent_memories),
+        }
+    except Exception as e:
+        logger.error(f"Failed to get memory health: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/projects")
 async def list_projects() -> dict[str, Any]:
     """
@@ -444,17 +652,12 @@ async def list_projects() -> dict[str, Any]:
     Returns a list of project_ids that have stored patterns.
     """
     try:
-        import os
-
-        os.environ.setdefault("OPENAI_API_KEY", "dummy-key-for-api")
-
         # Use the shared ChromaDB client from vector_store
         from pathlib import Path
 
         from orchestrator.memory.vector_store import _get_chroma_client
 
-        project_root = Path(__file__).parent.parent.parent
-        chroma_path = project_root / "data" / "chromadb"
+        chroma_path = Path(get_config().persist_directory)
 
         client = _get_chroma_client(str(chroma_path))
 

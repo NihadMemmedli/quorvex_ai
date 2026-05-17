@@ -10,7 +10,7 @@ export interface AssistantActionConfig {
   requiredRole: AssistantProjectRole;
   confirmationRequired: boolean;
   getPath: (args: Record<string, unknown>, projectId?: string) => string;
-  getBody?: (args: Record<string, unknown>, projectId?: string) => Record<string, unknown> | undefined;
+  getBody?: (args: Record<string, unknown>, projectId?: string) => unknown;
 }
 
 export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
@@ -116,6 +116,87 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       },
     }),
   },
+  synthesizeExplorerSpecs: {
+    label: 'Synthesize Explorer Specs',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/api/agents/exploratory/${encodeURIComponent(String(args.runId))}/synthesize`,
+  },
+  analyzeExplorerPrerequisites: {
+    label: 'Analyze Explorer Prerequisites',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => {
+      const params = new URLSearchParams({ project_id: pid || 'default' });
+      if (args.forceReanalyze !== undefined) params.set('force_reanalyze', String(args.forceReanalyze));
+      return `/api/agents/exploratory/${encodeURIComponent(String(args.runId))}/analyze-prerequisites?${params}`;
+    },
+  },
+  generateExplorerFlowSpec: {
+    label: 'Generate Explorer Flow Spec',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => {
+      const params = new URLSearchParams({ project_id: pid || 'default' });
+      if (args.forceRegenerate !== undefined) params.set('force_regenerate', String(args.forceRegenerate));
+      return `/api/agents/exploratory/${encodeURIComponent(String(args.runId))}/flows/${encodeURIComponent(String(args.flowId))}/spec?${params}`;
+    },
+  },
+  generateExplorerFlowTest: {
+    label: 'Generate Explorer Flow Test',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => {
+      const params = new URLSearchParams({ project_id: pid || 'default' });
+      if (args.forceRegenerate !== undefined) params.set('force_regenerate', String(args.forceRegenerate));
+      return `/api/agents/exploratory/${encodeURIComponent(String(args.runId))}/flows/${encodeURIComponent(String(args.flowId))}/generate?${params}`;
+    },
+  },
+  updateExplorerFlow: {
+    label: 'Update Explorer Flow',
+    method: 'PUT',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/api/agents/exploratory/${encodeURIComponent(String(args.runId))}/flows/${encodeURIComponent(String(args.flowId))}?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => args.updates || {},
+  },
+  deleteExplorerFlow: {
+    label: 'Delete Explorer Flow',
+    method: 'DELETE',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/api/agents/exploratory/${encodeURIComponent(String(args.runId))}/flows/${encodeURIComponent(String(args.flowId))}?project_id=${encodeURIComponent(pid || 'default')}`,
+  },
+  saveExplorerSession: {
+    label: 'Save Explorer Session',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/api/agents/sessions/${encodeURIComponent(String(args.sessionId))}`,
+    getBody: (args) => ({
+      cookies: args.cookies || [],
+      storage: args.storage || {},
+    }),
+  },
+  deleteExplorerSession: {
+    label: 'Delete Explorer Session',
+    method: 'DELETE',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/api/agents/sessions/${encodeURIComponent(String(args.sessionId))}`,
+  },
   stopExploration: {
     label: 'Stop Exploration',
     method: 'POST',
@@ -123,6 +204,22 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     requiredRole: 'editor',
     confirmationRequired: true,
     getPath: (args, pid) => `/exploration/${args.sessionId}/stop?project_id=${encodeURIComponent(pid || 'default')}`,
+  },
+  generateApiSpecsFromExploration: {
+    label: 'Generate API Specs From Exploration',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/exploration/${encodeURIComponent(String(args.sessionId))}/generate-api-specs?project_id=${encodeURIComponent(pid || 'default')}`,
+  },
+  generateApiTestsFromExploration: {
+    label: 'Generate API Tests From Exploration',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/exploration/${encodeURIComponent(String(args.sessionId))}/generate-api-tests?project_id=${encodeURIComponent(pid || 'default')}`,
   },
   generateRequirements: {
     label: 'Generate Requirements',
@@ -132,6 +229,131 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     confirmationRequired: true,
     getPath: (_args, pid) => `/requirements/generate?project_id=${encodeURIComponent(pid || 'default')}`,
     getBody: (args) => ({ exploration_session_id: args.sessionId }),
+  },
+  createRequirement: {
+    label: 'Create Requirement',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/requirements?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => requirementBody(args),
+  },
+  bulkCreateRequirements: {
+    label: 'Bulk Create Requirements',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/requirements/bulk?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => ({
+      items: Array.isArray(args.items) ? args.items.map((item) => requirementBody(item as Record<string, unknown>)) : [],
+    }),
+  },
+  updateRequirement: {
+    label: 'Update Requirement',
+    method: 'PUT',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/requirements/${args.requirementId}?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => requirementBody(args, true),
+  },
+  deleteRequirement: {
+    label: 'Delete Requirement',
+    method: 'DELETE',
+    risk: 'destructive',
+    requiredRole: 'admin',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/requirements/${args.requirementId}?project_id=${encodeURIComponent(pid || 'default')}`,
+  },
+  generateSpecFromRequirement: {
+    label: 'Generate Spec From Requirement',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/requirements/${args.requirementId}/generate-spec?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => ({
+      target_url: args.targetUrl,
+      login_url: args.loginUrl || undefined,
+      credentials: args.credentials || undefined,
+      force_regenerate: args.forceRegenerate ?? false,
+    }),
+  },
+  bulkGenerateRequirementSpecs: {
+    label: 'Bulk Generate Requirement Specs',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/requirements/bulk-generate-specs?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => ({
+      target_url: args.targetUrl,
+      login_url: args.loginUrl || undefined,
+      credentials: args.credentials || undefined,
+    }),
+  },
+  mergeRequirements: {
+    label: 'Merge Requirements',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/requirements/merge?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => ({
+      canonical_id: args.canonicalId,
+      duplicate_ids: args.duplicateIds,
+      merge_acceptance_criteria: args.mergeAcceptanceCriteria ?? true,
+    }),
+  },
+  generateRTM: {
+    label: 'Generate RTM',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/rtm/generate?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => ({
+      specs_paths: args.specsPaths || undefined,
+      use_ai_matching: args.useAiMatching ?? true,
+    }),
+  },
+  createRTMSnapshot: {
+    label: 'Create RTM Snapshot',
+    method: 'POST',
+    risk: 'low',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => {
+      const params = new URLSearchParams({ project_id: pid || 'default' });
+      if (args.name) params.set('name', String(args.name));
+      return `/rtm/snapshot?${params}`;
+    },
+  },
+  createRTMEntry: {
+    label: 'Create RTM Entry',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/rtm/entry?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => ({
+      requirement_id: args.requirementId,
+      test_spec_name: args.testSpecName,
+      test_spec_path: args.testSpecPath || undefined,
+      mapping_type: args.mappingType || 'full',
+      confidence: args.confidence ?? 1,
+      coverage_notes: args.coverageNotes || undefined,
+    }),
+  },
+  deleteRTMEntry: {
+    label: 'Delete RTM Entry',
+    method: 'DELETE',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/rtm/entry/${args.entryId}?project_id=${encodeURIComponent(pid || 'default')}`,
   },
   createTestSpec: {
     label: 'Create Test Spec',
@@ -164,6 +386,84 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     getPath: (args) => `/specs/${encodeURIComponent(String(args.specName))}`,
     getBody: (args) => ({ content: args.content, reason: args.reason }),
   },
+  updateGeneratedCode: {
+    label: 'Update Generated Code',
+    method: 'PUT',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/specs/${encodeURIComponent(String(args.specName))}/generated-code`,
+    getBody: (args) => ({ content: args.code }),
+  },
+  updateSpecMetadata: {
+    label: 'Update Spec Metadata',
+    method: 'PUT',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/spec-metadata/${encodeURIComponent(String(args.specName))}`,
+    getBody: (args, pid) => ({
+      tags: args.tags || undefined,
+      description: args.description || undefined,
+      author: args.author || undefined,
+      project_id: args.projectId || pid || undefined,
+    }),
+  },
+  moveSpec: {
+    label: 'Move Spec',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/specs/move',
+    getBody: (args, pid) => ({
+      source_path: args.sourcePath,
+      destination_folder: args.destinationFolder || '',
+      is_folder: args.isFolder ?? false,
+      project_id: pid || 'default',
+    }),
+  },
+  renameSpec: {
+    label: 'Rename Spec',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/specs/rename',
+    getBody: (args, pid) => ({
+      old_path: args.oldPath,
+      new_name: args.newName,
+      is_folder: args.isFolder ?? false,
+      project_id: pid || 'default',
+    }),
+  },
+  splitSpec: {
+    label: 'Split Spec',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/specs/split',
+    getBody: (args, pid) => ({
+      spec_name: args.specName,
+      output_dir: args.outputDir || undefined,
+      project_id: pid || 'default',
+      mode: args.mode || 'individual',
+    }),
+  },
+  createSpecFolder: {
+    label: 'Create Spec Folder',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/specs/create-folder',
+    getBody: (args, pid) => ({
+      folder_name: args.folderName,
+      parent_path: args.parentPath || '',
+      project_id: pid || 'default',
+    }),
+  },
   runRegressionBatch: {
     label: 'Run Regression Batch',
     method: 'POST',
@@ -172,6 +472,19 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     confirmationRequired: true,
     getPath: () => '/runs/bulk',
     getBody: (args, pid) => ({ spec_names: args.specNames, project_id: pid }),
+  },
+  executeUiTestCoveragePlan: {
+    label: 'Execute UI Test Coverage Plan',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/runs/bulk',
+    getBody: (args, pid) => ({
+      spec_names: args.specNames,
+      project_id: pid,
+      reason: args.reason || undefined,
+    }),
   },
   stopRun: {
     label: 'Stop Test Run',
@@ -201,6 +514,26 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       include_running: args.includeRunning ?? true,
     }),
   },
+  quarantineSpec: {
+    label: 'Quarantine Spec',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => {
+      const params = new URLSearchParams({ project_id: pid || 'default' });
+      if (args.reason) params.set('reason', String(args.reason));
+      return `/analytics/quarantine/${encodeURIComponent(String(args.specName))}?${params}`;
+    },
+  },
+  unquarantineSpec: {
+    label: 'Unquarantine Spec',
+    method: 'DELETE',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/analytics/quarantine/${encodeURIComponent(String(args.specName))}?project_id=${encodeURIComponent(pid || 'default')}`,
+  },
   triggerSecurityScan: {
     label: 'Trigger Security Scan',
     method: 'POST',
@@ -209,6 +542,61 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     confirmationRequired: true,
     getPath: () => '/security-testing/scan/quick',
     getBody: (args, pid) => ({ target_url: args.url, project_id: pid }),
+  },
+  runSecurityScan: {
+    label: 'Run Security Scan',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/security-testing/scan/${args.scanType || 'quick'}`,
+    getBody: (args, pid) => securityScanBody(args, pid),
+  },
+  stopSecurityScan: {
+    label: 'Stop Security Scan',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/security-testing/runs/${encodeURIComponent(String(args.runId))}/stop`,
+  },
+  createSecuritySpec: {
+    label: 'Create Security Spec',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/security-testing/specs',
+    getBody: (args, pid) => ({ name: args.specName, content: args.content, project_id: pid || 'default' }),
+  },
+  updateSecuritySpec: {
+    label: 'Update Security Spec',
+    method: 'PUT',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/security-testing/specs/${encodeURIComponent(String(args.specName))}?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => ({ content: args.content }),
+  },
+  deleteSecuritySpec: {
+    label: 'Delete Security Spec',
+    method: 'DELETE',
+    risk: 'destructive',
+    requiredRole: 'admin',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/security-testing/specs/${encodeURIComponent(String(args.specName))}?project_id=${encodeURIComponent(pid || 'default')}`,
+  },
+  generateSecuritySpecFromExploration: {
+    label: 'Generate Security Spec From Exploration',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/security-testing/generate-spec',
+    getBody: (args, pid) => ({
+      session_id: args.sessionId,
+      project_id: pid || 'default',
+    }),
   },
   retryFailedRun: {
     label: 'Retry Failed Run',
@@ -243,6 +631,39 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     requiredRole: 'editor',
     confirmationRequired: true,
     getPath: (args) => `/regression/batches/${args.batchId}/rerun-failed`,
+  },
+  refreshRegressionBatch: {
+    label: 'Refresh Regression Batch',
+    method: 'PATCH',
+    risk: 'low',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/regression/batches/${encodeURIComponent(String(args.batchId))}/refresh`,
+  },
+  cancelRegressionBatch: {
+    label: 'Cancel Regression Batch',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/regression/batches/${encodeURIComponent(String(args.batchId))}/cancel?project_id=${encodeURIComponent(pid || 'default')}`,
+  },
+  renameRegressionBatch: {
+    label: 'Rename Regression Batch',
+    method: 'PATCH',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/regression/batches/${encodeURIComponent(String(args.batchId))}`,
+    getBody: (args) => ({ name: args.name }),
+  },
+  deleteRegressionBatch: {
+    label: 'Delete Regression Batch',
+    method: 'DELETE',
+    risk: 'destructive',
+    requiredRole: 'admin',
+    confirmationRequired: true,
+    getPath: (args) => `/regression/batches/${encodeURIComponent(String(args.batchId))}`,
   },
   analyzeLoadTestRun: {
     label: 'Analyze Load Test Run',
@@ -543,6 +964,402 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     confirmationRequired: true,
     getPath: (args) => `/autopilot/${args.sessionId}/cancel`,
   },
+  createProject: {
+    label: 'Create Project',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/projects',
+    getBody: (args) => ({
+      name: args.name,
+      base_url: args.baseUrl || undefined,
+      description: args.description || undefined,
+    }),
+  },
+  updateProject: {
+    label: 'Update Project',
+    method: 'PUT',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/projects/${encodeURIComponent(String(args.projectId || pid || 'default'))}`,
+    getBody: (args) => ({
+      name: args.name || undefined,
+      base_url: args.baseUrl || undefined,
+      description: args.description || undefined,
+    }),
+  },
+  deleteProject: {
+    label: 'Delete Project',
+    method: 'DELETE',
+    risk: 'destructive',
+    requiredRole: 'admin',
+    confirmationRequired: true,
+    getPath: (args) => {
+      const params = new URLSearchParams();
+      if (args.reassignTo) params.set('reassign_to', String(args.reassignTo));
+      const suffix = params.toString() ? `?${params}` : '';
+      return `/projects/${encodeURIComponent(String(args.projectId))}${suffix}`;
+    },
+  },
+  assignSpecToProject: {
+    label: 'Assign Spec to Project',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => {
+      const targetProjectId = String(args.projectId || pid || 'default');
+      const params = new URLSearchParams({ spec_name: String(args.specName || '') });
+      return `/projects/${encodeURIComponent(targetProjectId)}/assign-spec?${params}`;
+    },
+  },
+  bulkAssignSpecsToProject: {
+    label: 'Bulk Assign Specs to Project',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/projects/${encodeURIComponent(String(args.projectId || pid || 'default'))}/bulk-assign-specs`,
+    getBody: (args) => args.specNames,
+  },
+  setProjectCredential: {
+    label: 'Set Project Credential',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/projects/${encodeURIComponent(String(args.projectId || pid || 'default'))}/credentials`,
+    getBody: (args) => ({ key: args.key, value: args.value }),
+  },
+  removeProjectCredential: {
+    label: 'Remove Project Credential',
+    method: 'DELETE',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/projects/${encodeURIComponent(String(args.projectId || pid || 'default'))}/credentials/${encodeURIComponent(String(args.key))}`,
+  },
+  startRecording: {
+    label: 'Start Recording',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/recordings/start',
+    getBody: (args, pid) => ({
+      target_url: args.targetUrl,
+      project_id: pid || 'default',
+      name: args.name || undefined,
+      viewport_size: args.viewportSize || undefined,
+      device: args.device || undefined,
+      load_storage_path: args.loadStoragePath || undefined,
+      save_storage: args.saveStorage ?? false,
+      save_har: args.saveHar ?? false,
+    }),
+  },
+  stopRecording: {
+    label: 'Stop Recording',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/recordings/${encodeURIComponent(String(args.recordingId))}/stop`,
+  },
+  importRecording: {
+    label: 'Import Recording',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/recordings/${encodeURIComponent(String(args.recordingId))}/import`,
+    getBody: (args) => ({ name: args.name || undefined }),
+  },
+  createSchedule: {
+    label: 'Create Schedule',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/scheduling/${encodeURIComponent(pid || 'default')}/schedules`,
+    getBody: (args) => scheduleBody(args),
+  },
+  updateSchedule: {
+    label: 'Update Schedule',
+    method: 'PUT',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/scheduling/${encodeURIComponent(pid || 'default')}/schedules/${encodeURIComponent(String(args.scheduleId))}`,
+    getBody: (args) => scheduleBody(args),
+  },
+  deleteSchedule: {
+    label: 'Delete Schedule',
+    method: 'DELETE',
+    risk: 'destructive',
+    requiredRole: 'admin',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/scheduling/${encodeURIComponent(pid || 'default')}/schedules/${encodeURIComponent(String(args.scheduleId))}`,
+  },
+  toggleSchedule: {
+    label: 'Toggle Schedule',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/scheduling/${encodeURIComponent(pid || 'default')}/schedules/${encodeURIComponent(String(args.scheduleId))}/toggle`,
+  },
+  updateAssistantSettings: {
+    label: 'Update Assistant Settings',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'admin',
+    confirmationRequired: true,
+    getPath: () => '/settings',
+    getBody: (args) => ({
+      llm_provider: args.llmProvider,
+      api_key: args.apiKey || undefined,
+      base_url: args.baseUrl || undefined,
+      model_name: args.modelName || undefined,
+    }),
+  },
+  generatePrdPlan: {
+    label: 'Generate PRD Test Plan',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/api/prd/${encodeURIComponent(String(args.prdProjectId))}/generate-plan`,
+    getBody: (args) => ({
+      feature: args.feature || undefined,
+      target_url: args.targetUrl || undefined,
+      login_url: args.loginUrl || undefined,
+      credentials: args.credentials || undefined,
+    }),
+  },
+  stopPrdGeneration: {
+    label: 'Stop PRD Generation',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/api/prd/generation/${args.generationId}/stop`,
+  },
+  generatePrdTest: {
+    label: 'Generate PRD Test',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/api/prd/generate-test',
+    getBody: (args) => ({ spec_path: args.specPath, target_url: args.targetUrl || undefined }),
+  },
+  healPrdTest: {
+    label: 'Heal PRD Test',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/api/prd/heal-test',
+    getBody: (args) => ({ test_path: args.testPath, error_log: args.errorLog }),
+  },
+  runPrdTest: {
+    label: 'Run PRD Test',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/api/prd/run-test',
+    getBody: (args) => ({
+      test_path: args.testPath,
+      heal: args.heal ?? true,
+      max_attempts: args.maxAttempts ?? 3,
+    }),
+  },
+  syncCiRuns: {
+    label: 'Sync CI Runs',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/runs/sync`,
+    getBody: (args) => ({
+      provider: args.provider || 'all',
+      workflow_id: args.workflowId || undefined,
+      per_page: args.perPage ?? 20,
+    }),
+  },
+  dispatchCiWorkflow: {
+    label: 'Dispatch CI Workflow',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/workflows/dispatch`,
+    getBody: (args) => ({
+      provider: args.provider || 'github',
+      workflow_id: args.workflowId || undefined,
+      ref: args.ref || undefined,
+      inputs: args.inputs || undefined,
+    }),
+  },
+  cancelCiRun: {
+    label: 'Cancel CI Run',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/runs/${args.provider}/${args.mappingId}/cancel`,
+  },
+  rerunCiRun: {
+    label: 'Rerun CI Run',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/runs/${args.provider}/${args.mappingId}/rerun`,
+    getBody: (args) => ({ failed_only: args.failedOnly ?? false }),
+  },
+  generateCiWorkflowChange: {
+    label: 'Generate CI Workflow Change',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/workflow-change-requests`,
+    getBody: (args) => ({
+      provider: 'github',
+      workflow_name: args.workflowName || 'Quorvex Test Automation',
+      template: args.template || 'pr-quality-gate',
+      prompt: args.prompt || undefined,
+      ref: args.ref || undefined,
+      branches: args.branches || undefined,
+      browsers: args.browsers || undefined,
+    }),
+  },
+  openCiWorkflowPullRequest: {
+    label: 'Open CI Workflow Pull Request',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/workflow-change-requests/${encodeURIComponent(String(args.changeId))}/pull-request`,
+    getBody: (args) => ({
+      base_ref: args.baseRef || undefined,
+      branch_name: args.branchName || undefined,
+      title: args.title || undefined,
+      body: args.body || undefined,
+      commit_message: args.commitMessage || undefined,
+      draft: args.draft ?? true,
+    }),
+  },
+  analyzePullRequestTests: {
+    label: 'Analyze Pull Request Tests',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/github/${encodeURIComponent(pid || 'default')}/pr-advisor/analyze`,
+    getBody: (args) => ({
+      pr_number: args.prNumber,
+      ensure_indexed: args.ensureIndexed ?? true,
+      force_reindex: args.forceReindex ?? false,
+    }),
+  },
+  runPrAdvisorRecommendedTests: {
+    label: 'Run PR Advisor Recommended Tests',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/github/${encodeURIComponent(pid || 'default')}/pr-advisor/analyses/${encodeURIComponent(String(args.analysisId))}/run`,
+    getBody: (args) => ({
+      browser: args.browser || 'chromium',
+      hybrid: args.hybrid ?? false,
+      max_iterations: args.maxIterations ?? 20,
+    }),
+  },
+  startPrQualityGate: {
+    label: 'Start PR Quality Gate',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/github/${encodeURIComponent(pid || 'default')}/quality-gates/pr/start`,
+    getBody: (args) => ({
+      pr_number: args.prNumber,
+      head_sha: args.headSha || undefined,
+      ensure_indexed: args.ensureIndexed,
+      force_reindex: args.forceReindex,
+      run_recommended: args.runRecommended,
+      post_feedback: args.postFeedback,
+      create_commit_status: args.createCommitStatus,
+      browser: args.browser || undefined,
+      hybrid: args.hybrid,
+      max_iterations: args.maxIterations,
+    }),
+  },
+  generateJiraBugReport: {
+    label: 'Generate Jira Bug Report',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/jira/${encodeURIComponent(pid || 'default')}/generate-bug-report/${encodeURIComponent(String(args.runId))}`,
+  },
+  createJiraIssue: {
+    label: 'Create Jira Issue',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/jira/${encodeURIComponent(pid || 'default')}/create-issue`,
+    getBody: (args) => ({
+      run_id: args.runId,
+      project_key: args.projectKey,
+      issue_type_id: args.issueTypeId,
+      title: args.title,
+      description: args.description,
+      priority_name: args.priorityName || undefined,
+      labels: args.labels || undefined,
+      attach_screenshots: args.attachScreenshots ?? true,
+    }),
+  },
+  pushTestRailCases: {
+    label: 'Push TestRail Cases',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/testrail/${encodeURIComponent(pid || 'default')}/push-cases`,
+    getBody: (args) => ({
+      spec_names: args.specNames,
+      testrail_project_id: args.testrailProjectId,
+      testrail_suite_id: args.testrailSuiteId,
+    }),
+  },
+  syncTestRailResults: {
+    label: 'Sync TestRail Results',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/testrail/${encodeURIComponent(pid || 'default')}/sync-results`,
+    getBody: (args) => ({
+      batch_id: args.batchId,
+      testrail_project_id: args.testrailProjectId,
+      testrail_suite_id: args.testrailSuiteId,
+    }),
+  },
+  deleteTestRailMapping: {
+    label: 'Delete TestRail Mapping',
+    method: 'DELETE',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/testrail/${encodeURIComponent(pid || 'default')}/mappings/${encodeURIComponent(String(args.mappingId))}`,
+  },
 };
 
 export const ADHOC_CUSTOM_AGENT_TOOL_IDS = [
@@ -646,6 +1463,52 @@ function buildCredentials(args: Record<string, unknown>) {
     return { username: args.username, password: args.password };
   }
   return undefined;
+}
+
+function scheduleBody(args: Record<string, unknown>) {
+  return {
+    name: args.name || undefined,
+    description: args.description || undefined,
+    cron_expression: args.cronExpression || undefined,
+    timezone: args.timezone || undefined,
+    tags: args.tags || undefined,
+    automated_only: args.automatedOnly,
+    browser: args.browser || undefined,
+    hybrid_mode: args.hybridMode,
+    max_iterations: args.maxIterations,
+    spec_names: args.specNames || undefined,
+    enabled: args.enabled,
+  };
+}
+
+function requirementBody(args: Record<string, unknown>, partial = false) {
+  const body: Record<string, unknown> = {
+    title: args.title,
+    description: args.description || undefined,
+    category: args.category || (partial ? undefined : 'other'),
+    priority: args.priority || (partial ? undefined : 'medium'),
+    status: args.status || undefined,
+    acceptance_criteria: args.acceptanceCriteria || undefined,
+  };
+  return Object.fromEntries(Object.entries(body).filter(([, value]) => value !== undefined));
+}
+
+function securityScanBody(args: Record<string, unknown>, projectId?: string) {
+  const body: Record<string, unknown> = {
+    target_url: args.targetUrl || args.url,
+    project_id: projectId || 'default',
+    auth_config: args.authConfig || undefined,
+    login_url: args.loginUrl || undefined,
+    username_key: args.usernameKey || undefined,
+    password_key: args.passwordKey || undefined,
+    scope: args.scope || 'origin',
+    excluded_paths: args.excludedPaths || [],
+    active_scan_level: args.activeScanLevel || 'safe',
+  };
+  if (args.severityFilter) body.severity_filter = args.severityFilter;
+  if (args.templates) body.templates = args.templates;
+  if (args.scanPolicy) body.scan_policy = args.scanPolicy;
+  return body;
 }
 
 export function buildAdhocCustomAgentRunBody(args: Record<string, unknown>, projectId?: string) {

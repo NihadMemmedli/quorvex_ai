@@ -27,6 +27,7 @@ RUN apt-get update && \
         fluxbox \
         supervisor \
         git \
+        unzip \
         # gosu for dropping privileges in entrypoint
         gosu && \
     apt-get clean && \
@@ -41,6 +42,47 @@ RUN K6_VERSION="v0.54.0" && \
     mv /tmp/k6-${K6_VERSION}-linux-${ARCH}/k6 /usr/local/bin/k6 && \
     chmod +x /usr/local/bin/k6 && \
     rm -rf /tmp/k6*
+
+# Install ProjectDiscovery Nuclei for template-based security scans.
+# The latest release is resolved at build time so multi-arch Docker builds work
+# without requiring Go in the runtime image.
+RUN python - <<'PY'
+import json
+import os
+import platform
+import stat
+import tempfile
+import urllib.request
+import zipfile
+
+arch_map = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+arch = arch_map.get(platform.machine())
+if not arch:
+    raise SystemExit(f"Unsupported architecture for nuclei install: {platform.machine()}")
+
+with urllib.request.urlopen("https://api.github.com/repos/projectdiscovery/nuclei/releases/latest", timeout=30) as response:
+    release = json.load(response)
+
+asset = next(
+    (
+        item
+        for item in release.get("assets", [])
+        if f"linux_{arch}.zip" in item.get("name", "")
+    ),
+    None,
+)
+if not asset:
+    raise SystemExit(f"No nuclei linux_{arch} release asset found")
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    archive_path = os.path.join(tmpdir, asset["name"])
+    urllib.request.urlretrieve(asset["browser_download_url"], archive_path)
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extract("nuclei", tmpdir)
+    target = "/usr/local/bin/nuclei"
+    os.replace(os.path.join(tmpdir, "nuclei"), target)
+    os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+PY
 
 # Copy requirements first to leverage caching
 # Use requirements.lock for pinned versions (reproducible builds)

@@ -8,9 +8,10 @@ and graph store to provide a unified memory API for the AI agent.
 import hashlib
 import json
 from datetime import datetime
+from dataclasses import replace
 from typing import Any
 
-from .config import get_config, set_project
+from .config import get_config
 from .graph_store import GraphStore, get_graph_store
 from .vector_store import VectorStore, get_vector_store
 
@@ -33,17 +34,10 @@ class MemoryManager:
         Args:
             project_id: Project identifier for isolation
         """
-        self.config = get_config()
-
-        effective_project = project_id or self.config.project_id or "default"
+        base_config = get_config()
+        effective_project = project_id or base_config.project_id or "default"
+        self.config = replace(base_config, project_id=effective_project)
         self.project_id = effective_project
-
-        # Keep the legacy global config in sync for callers that still use it,
-        # but pass project_id explicitly to stores so this manager does not rely
-        # on mutable global state for isolation.
-        if project_id:
-            set_project(project_id)
-            self.config.project_id = project_id
         print(f"[Memory] Initializing for project: {effective_project}")
 
         self.vector_store: VectorStore = get_vector_store(project_id=effective_project)
@@ -452,6 +446,7 @@ class MemoryManager:
                         "selector": element.get("selector"),
                         "text": element.get("text"),
                         "url": element.get("url"),
+                        "description": f"Untested {element.get('element_type', 'element')} {element.get('text') or element['id']}",
                         "priority": "medium",
                     }
                 )
@@ -462,7 +457,13 @@ class MemoryManager:
             page_attrs = self.graph_store.graph.nodes[page_id]
             if url is None or page_attrs.get("url", "").startswith(url):
                 gaps.append(
-                    {"type": "orphan_page", "page_id": page_id, "url": page_attrs.get("url"), "priority": "low"}
+                    {
+                        "type": "orphan_page",
+                        "page_id": page_id,
+                        "url": page_attrs.get("url"),
+                        "description": f"Discovered page is not connected to a known flow: {page_attrs.get('url') or page_id}",
+                        "priority": "low",
+                    }
                 )
 
         return gaps
@@ -689,7 +690,7 @@ class MemoryManager:
 
         for node in self.graph_store.graph.nodes():
             attrs = self.graph_store.graph.nodes[node]
-            if attrs.get("type") == "graph_store.NODE_TYPE_PAGE":
+            if attrs.get("type") == self.graph_store.NODE_TYPE_PAGE:
                 if attrs.get("url") == from_url:
                     from_page = node
                 if attrs.get("url") == to_url:

@@ -199,6 +199,7 @@ Every request receives an `X-Request-ID` header (UUID) for traceability.
 | PRD | `/api/prd` | `prd.py` |
 | Health | `/health` | `health.py` |
 | TestRail | `/testrail` | `testrail.py` |
+| CI Control | `/projects/{project_id}/ci` | `ci_control.py` |
 | GitHub CI | `/github` | `github_ci.py` |
 | GitLab CI | `/gitlab` | `gitlab_ci.py` |
 | Jira | `/jira` | `jira.py` |

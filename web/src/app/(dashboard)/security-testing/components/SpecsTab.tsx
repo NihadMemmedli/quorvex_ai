@@ -1,7 +1,7 @@
 'use client';
 import React, { useState } from 'react';
 import dynamic from 'next/dynamic';
-import { Plus, Trash2, Edit2, Save } from 'lucide-react';
+import { Plus, Trash2, Edit2, Save, FileText } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { API_BASE } from '@/lib/api';
@@ -9,6 +9,95 @@ import { getAuthHeaders, cardStyle } from '@/lib/styles';
 import { SecuritySpec } from './types';
 
 const CodeEditor = dynamic(() => import('@/components/CodeEditor'), { ssr: false });
+
+const SPEC_TEMPLATES = [
+    {
+        name: 'security-testing-capabilities',
+        label: 'Capabilities',
+        content: [
+            '# Security Testing Capabilities',
+            '',
+            '## Purpose',
+            '',
+            'Show Quick, Nuclei, ZAP, authenticated scanning, exclusions, and active scan levels.',
+            '',
+            '## Scan modes',
+            '',
+            '| Mode | Use it for | Safety |',
+            '| --- | --- | --- |',
+            '| Quick | Header, TLS, cookie, CORS, and disclosure checks | Production-safe smoke test |',
+            '| Nuclei | Template-based CVE and misconfiguration checks | Safe when using trusted templates |',
+            '| ZAP | Passive DAST with optional spider and active scan | Passive/safe for demos, full for disposable targets |',
+            '| Full | Quick + Nuclei + ZAP | Use full mode only in staging |',
+            '',
+            '## Demo target',
+            '',
+            'Use `http://host.docker.internal:3000/login` for UI scans from Docker.',
+            '',
+            '## Acceptance criteria',
+            '',
+            '- Capability checks show Quick, Nuclei, and ZAP as available.',
+            '- A passive scan completes and stores a run.',
+            '- Findings include severity, evidence, remediation, and status.',
+        ].join('\n'),
+    },
+    {
+        name: 'authenticated-security-scan',
+        label: 'Authenticated',
+        content: [
+            '# Authenticated Security Scan',
+            '',
+            '## Target',
+            '',
+            '`http://host.docker.internal:3000/security-testing`',
+            '',
+            '## Login',
+            '',
+            '- Login URL: `http://host.docker.internal:3000/login`',
+            '- Username key: project credential key',
+            '- Password key: project credential key',
+            '',
+            '## Exclusions',
+            '',
+            '```text',
+            '/logout',
+            '/api/delete',
+            '/api/admin',
+            '/reset-password',
+            '```',
+            '',
+            '## Checks',
+            '',
+            '- Authenticated pages reject anonymous users.',
+            '- Session cookies use secure attributes in production.',
+            '- Role-restricted routes return 401 or 403.',
+            '- Sensitive pages are not cached.',
+            '- Security headers are present.',
+        ].join('\n'),
+    },
+    {
+        name: 'security-regression-gate',
+        label: 'Regression gate',
+        content: [
+            '# Security Regression Gate',
+            '',
+            '## Scope',
+            '',
+            'Run before release against staging or demo-safe targets.',
+            '',
+            '## Required checks',
+            '',
+            '- Quick Scan returns no critical or high findings.',
+            '- Nuclei returns no critical or high template matches.',
+            '- ZAP passive scan returns no new high alerts.',
+            '- Accepted risks have notes and owner approval.',
+            '',
+            '## Release rule',
+            '',
+            'Block release when any new critical or high finding is open.',
+        ].join('\n'),
+    },
+];
 
 interface SpecsTabProps {
     projectId: string;
@@ -23,6 +112,14 @@ export default function SpecsTab({ projectId, specs, fetchSpecs }: SpecsTabProps
     const [newSpecName, setNewSpecName] = useState('');
     const [newSpecContent, setNewSpecContent] = useState('');
     const [editingSpec, setEditingSpec] = useState(false);
+
+    const startNewSpec = (template?: typeof SPEC_TEMPLATES[number]) => {
+        setSelectedSpec(null);
+        setEditingSpec(false);
+        setIsCreatingSpec(true);
+        setNewSpecName(template?.name || '');
+        setNewSpecContent(template?.content || '');
+    };
 
     const loadSpecContent = async (spec: SecuritySpec) => {
         try {
@@ -85,7 +182,7 @@ export default function SpecsTab({ projectId, specs, fetchSpecs }: SpecsTabProps
             <div style={cardStyle}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                     <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>Security Specs</h3>
-                    <button onClick={() => setIsCreatingSpec(true)} style={{
+                    <button onClick={() => startNewSpec()} style={{
                         background: 'var(--primary)', color: 'white', border: 'none',
                         borderRadius: 'var(--radius)', padding: '4px 8px', cursor: 'pointer',
                         display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem',
@@ -95,7 +192,28 @@ export default function SpecsTab({ projectId, specs, fetchSpecs }: SpecsTabProps
                 </div>
 
                 {specs.length === 0 && (
-                    <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No specs yet</p>
+                    <div style={{ display: 'grid', gap: '0.5rem' }}>
+                        <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No specs yet</p>
+                        {SPEC_TEMPLATES.map(template => (
+                            <button key={template.name} onClick={() => startNewSpec(template)} style={{
+                                width: '100%',
+                                background: 'var(--bg)',
+                                border: '1px solid var(--border)',
+                                color: 'var(--text)',
+                                borderRadius: 'var(--radius)',
+                                padding: '0.5rem 0.65rem',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.5rem',
+                                fontSize: '0.8rem',
+                                textAlign: 'left',
+                            }}>
+                                <FileText size={14} />
+                                {template.label}
+                            </button>
+                        ))}
+                    </div>
                 )}
 
                 {specs.map(spec => (
@@ -132,6 +250,25 @@ export default function SpecsTab({ projectId, specs, fetchSpecs }: SpecsTabProps
                                 background: 'var(--bg)', color: 'var(--text)',
                             }}
                         />
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '1rem' }}>
+                            {SPEC_TEMPLATES.map(template => (
+                                <button key={template.name} onClick={() => startNewSpec(template)} style={{
+                                    background: 'var(--bg)',
+                                    border: '1px solid var(--border)',
+                                    color: 'var(--text)',
+                                    borderRadius: 'var(--radius)',
+                                    padding: '0.4rem 0.65rem',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '0.4rem',
+                                    fontSize: '0.8rem',
+                                }}>
+                                    <FileText size={14} />
+                                    {template.label}
+                                </button>
+                            ))}
+                        </div>
                         <div style={{ height: '400px', marginBottom: '1rem' }}>
                             <CodeEditor
                                 value={newSpecContent}

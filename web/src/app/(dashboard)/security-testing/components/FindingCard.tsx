@@ -16,7 +16,11 @@ export default React.memo(function FindingCard({
     finding, onStatusChange, expanded, onToggle,
 }: FindingCardProps) {
     let refUrls: string[] = [];
-    try { refUrls = JSON.parse(finding.reference_urls_json || '[]'); } catch { /* ignore */ }
+    if (Array.isArray(finding.reference_urls)) {
+        refUrls = finding.reference_urls;
+    } else {
+        try { refUrls = JSON.parse(finding.reference_urls_json || '[]'); } catch { /* ignore */ }
+    }
 
     return (
         <div style={{

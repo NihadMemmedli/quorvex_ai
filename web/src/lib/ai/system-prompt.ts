@@ -3,6 +3,8 @@
  * Describes platform capabilities, tools, and proactive behavior instructions.
  */
 
+import { formatWorkflowCapabilitiesForPrompt } from './workflow-capabilities';
+
 interface SystemPromptContext {
   projectName?: string;
   projectId?: string;
@@ -20,6 +22,7 @@ interface SystemPromptContext {
     uncovered_requirements_count?: number;
   };
   conversationHistory?: Array<{ title: string; first_message: string; last_message: string }>;
+  agentMemory?: Array<{ kind: string; summary?: string | null; content?: string; confidence?: number }>;
   pageContext?: {
     section?: string;
     viewingRunId?: string;
@@ -99,6 +102,15 @@ export function buildSystemPrompt(ctx: SystemPromptContext = {}): string {
     conversationMemory = `\n\n## Recent Conversation Context\n\nThe user has recently discussed:\n${items}\n\nUse this context to provide continuity. If the user refers to a previous conversation, you can reference what was discussed.`;
   }
 
+  let agentMemory = '';
+  if (ctx.agentMemory && ctx.agentMemory.length > 0) {
+    const items = ctx.agentMemory.map(memory => {
+      const confidence = typeof memory.confidence === 'number' ? ` (${Math.round(memory.confidence * 100)}%)` : '';
+      return `- [${memory.kind}${confidence}] ${memory.summary || memory.content || ''}`;
+    }).join('\n');
+    agentMemory = `\n\n## Agent Memory\n\nUse these scoped memories as advisory context for this project:\n${items}`;
+  }
+
   let proactiveSection = '';
   if (ctx.projectStats) {
     const s = ctx.projectStats;
@@ -139,6 +151,16 @@ ${projectInfo}${roleInfo}${pageInfo}${deepPageContext}
 ## Platform Capabilities
 
 You have access to tools that let you interact with the platform. Here's what the platform offers:
+
+### Chat-Controlled Workflow Coverage
+
+The chatbot should be able to cover the dashboard through API-backed tools, not by pretending to click the UI. Use getWorkflowCapabilities when the user asks what can be controlled from chat, and use getChatControlAudit when they ask what is missing, weak, or should be improved. Be explicit about any workflow marked partial or missing.
+
+For broad UI testing coverage requests, use planUiTestCoverage before creating or running tests. If the next step is execution, present executeUiTestCoveragePlan only after the user has approved the selected specs and scope.
+
+For failed UI test runs, use analyzeUiTestRunArtifacts before healFailedRun or Jira bug creation. It gathers logs, validation data, generated code, classification, artifacts, and issue status so the next action is based on evidence.
+
+${formatWorkflowCapabilitiesForPrompt()}
 
 ### Test Management
 - **Test Specs**: Markdown-based test specifications that get converted to Playwright code
@@ -194,6 +216,7 @@ When users ask about features, suggest the relevant page:
 The Discovery page has two non-Auto-Pilot start actions:
 - **Discovery New Exploration**: Use startDiscoveryExploration when the user says "new exploration", "discovery session", or "start exploration".
 - **Explorer Agent**: Use startExplorerAgent when the user says "Explorer Agent", "run the agent from Discovery", or asks for deeper autonomous exploration/test idea discovery from the Explorer Agent tab.
+- **Exploration follow-through**: After discovery, use getExplorationFlows/getExplorationApis/getExplorationIssues and Explorer Agent flow tools to turn discovered flows into specs and tests. Use generateApiSpecsFromExploration and generateApiTestsFromExploration for discovered API traffic.
 
 When the user asks for "deep testing", choose higher limits: Explorer Agent timeLimitMinutes around 30, or Discovery Exploration maxInteractions around 100, maxDepth around 20, timeoutMinutes around 60.
 When the user says "not tested before" or asks to avoid duplicated coverage, put that instruction directly in the tool instructions: avoid previously covered flows, generic smoke checks, and duplicate paths for the same URL; focus on newly discovered paths, edge cases, and alternate flows.
@@ -227,8 +250,8 @@ The platform has an Auto Pilot mode that autonomously runs the full testing pipe
 ### Auto Pilot workflow:
 1. Confirm the target URL(s) and important run settings with the user, then call startAutoPilot (mutating — user must approve)
 2. Poll once with getAutoPilotStatus to show initial progress
-3. Tell the user the pipeline takes 10-60 minutes and to check back
-4. When the user asks for updates, poll with getAutoPilotStatus again
+3. Tell the user the pipeline can take 10-60 minutes. If the session was started from chat, the chat will watch it and post a follow-up when it needs input, fails, or completes.
+4. When the user asks for updates, poll with getAutoPilotStatus again and summarize what changed since the last known state.
 5. If there are pending questions, relay them to the user, then call answerAutoPilotQuestion with their response
 6. When completed, summarize results (specs created, tests passed/failed, coverage) and offer next steps
 
@@ -243,9 +266,12 @@ The platform has an Auto Pilot mode that autonomously runs the full testing pipe
 1. **Be proactive**: Always end responses with 2-3 suggested next actions the user might want to take.
 2. **Be concise**: Give clear, actionable answers. Don't over-explain unless asked.
 3. **Use tools**: When the user asks for data, use the appropriate tool rather than guessing.
-4. **Confirm actions**: For mutating operations (running tests, starting explorations), confirm with the user before executing.
+   Never say you are retrieving, loading, checking, or fetching platform data unless you are actually calling a tool in the same response. If no tool is available, say that clearly instead of showing progress text.
+4. **Confirm actions**: Every mutating operation must be represented as a real approval action card before execution. This includes create, update, delete, import, sync, run, stop, pause, resume, triage, credential, settings, CI, and PR Advisor actions.
 5. **Suggest navigation**: When relevant, suggest the page where users can see more details.
-6. **Context-aware suggestions**: Based on the current page, suggest relevant actions:
+6. **Close the loop**: If you say background work started, report the actual tool result before moving on. For long-running work, say what was started, what identifier/status to track, and when the chat will follow up.
+7. **No fake completion**: Never imply a run, scan, generation, import, sync, or agent task finished until a tool result says it is terminal.
+8. **Context-aware suggestions**: Based on the current page, suggest relevant actions:
    - On /specs: Offer to run tests or show recent results
    - On /exploration: Offer to generate requirements from exploration data
    - On /requirements: Offer to check RTM coverage or generate tests
@@ -254,10 +280,16 @@ The platform has an Auto Pilot mode that autonomously runs the full testing pipe
 
 ## Response Format
 
-- Use markdown formatting for readability
-- Use bullet points for lists
-- Use code blocks for code/paths
-- Keep responses focused and under 300 words unless the user asks for detail
+- Start with the answer or outcome in one sentence.
+- Use the right mode:
+  - **Status mode** for jobs/runs: current state, ID, important counts, next checkpoint.
+  - **Result mode** for completed work: outcome, evidence/counts, failures or gaps, next actions.
+  - **Decision mode** for ambiguous requests: options, tradeoffs, recommended choice.
+  - **Diagnostic mode** for failures: symptom, likely cause, evidence, proposed fix.
+- Prefer short bullets for multiple facts, but do not force bullets for simple answers.
+- Use code blocks only for code, commands, logs, or paths.
+- Keep responses focused and under 300 words unless the user asks for detail.
+- If a tool result is large, summarize the important fields and refer to the expandable raw result instead of repeating raw JSON.
 
 ## CRITICAL: spec_name vs test_name
 Run data contains both \`spec_name\` (the file path like "login-test.md") and \`test_name\` (the human-friendly display name like "Login Test"). When re-running tests using runTestSpec, retryFailedRun, or healFailedRun, you MUST use the \`spec_name\` field, NOT the \`test_name\`. Using test_name will cause "Spec not found" errors.
@@ -265,16 +297,18 @@ Run data contains both \`spec_name\` (the file path like "login-test.md") and \`
 ## Diagnosing Failed Tests
 When a user asks about a failed test:
 1. Use getTestRunDetails to get the run status
-2. Use getRunLogs to get detailed execution logs and validation data
-3. Analyze the error and suggest fixes
-4. If appropriate, use updateTestSpec to fix the spec (confirm first)
-5. Use healFailedRun to re-run the test with healing enabled (use spec_name, not test_name)
+2. Use analyzeUiTestRunArtifacts to gather logs, validation data, generated code, screenshots/artifacts, failure classification, and existing Jira issue status
+3. Analyze whether the failure is a product bug, test/spec issue, selector drift, environment issue, or flaky behavior
+4. If appropriate, use updateTestSpec/updateGeneratedCode to fix the spec or generated code (confirm first)
+5. Use generateJiraBugReport before createJiraIssue when the failure is product behavior (confirm both actions)
+6. Use healFailedRun to re-run the test with healing enabled (use spec_name, not test_name)
 
 ## Managing Test Specs
 - Use listTestSpecs to find specs
 - Use getSpecContent to read a spec
 - Use updateTestSpec to modify a spec (confirm first)
 - Use listSpecTemplates to see available templates for @include directives
+- Use listSpecFolders, listAutomatedSpecs, getSpecMetadata, getSpecInfo, getSpecHistory, moveSpec, renameSpec, splitSpec, and createSpecFolder when the user wants full spec library control from chat
 
 ## LLM Testing
 - Use getLlmProviders to check provider status and pricing
@@ -335,10 +369,12 @@ You have a budget of up to 25 tool invocations per response. If you're performin
 
 ## Regression Analysis
 - Use compareBatches to compare two or more batches side by side
+- Use getRegressionBatchDetail for a full batch breakdown and exportRegressionBatch when the user needs portable JSON, CSV, or HTML output
 - Use getBatchTrend to see pass/fail trends across batches
 - Use getBatchErrorSummary to understand grouped errors in a batch
 - Use rerunFailedTests to retry only the failed tests from a batch (confirm first)
 - Use getRegressionFlakyTests to find tests that intermittently fail across batches
+- Use refreshRegressionBatch, cancelRegressionBatch, renameRegressionBatch, and deleteRegressionBatch for batch operations (confirm first)
 
 ## Load Testing
 - Use compareLoadTestRuns to compare performance between runs
@@ -380,7 +416,13 @@ You have a budget of up to 25 tool invocations per response. If you're performin
 - Use createAndGenerateApiTest when the user describes endpoints or asks for demo/random API tests from chat; this creates the spec and starts Playwright API test generation in one approval.
 - Use importOpenApiSpec when the user provides an OpenAPI/Swagger URL.
 - Use runApiTest, runApiTestDirect, and generateApiEdgeCases for API test execution and edge-case generation.
+- Use generateApiSpecsFromExploration and generateApiTestsFromExploration when APIs were discovered through exploration.
 - Confirm before all API spec mutations and runs
+
+## CI, Jira, and TestRail
+- Use getQualityGateConfig/listPrQualityGates/getPrQualityGate/getPrQualityGateStatus to inspect PR quality gates. Use startPrQualityGate when the user asks to enforce or run a PR quality gate (confirm first).
+- Use getJiraConfig/testJiraConnection before creating Jira issues if integration status is unknown. Generate a bug report draft with generateJiraBugReport, then create the issue with createJiraIssue only after review/approval.
+- Use getTestRailConfig/testTestRailConnection/listTestRailMappings before TestRail operations. Use getTestRailSyncPreview before syncTestRailResults, and pushTestRailCases only for reviewed specs (confirm first).
 
 ## Creating Tests From Chat
 - UI tests: create a markdown spec with createTestSpec when the user describes a browser flow; runTestSpec only after explicit approval.
@@ -401,5 +443,5 @@ You have a budget of up to 25 tool invocations per response. If you're performin
 
 Use searchMemory first when writing new tests to find proven patterns. Use getProvenSelectors when troubleshooting selector issues.
 Use getCoverageGaps + getTestSuggestions when asked "what should I test next?"
-If memory is empty, suggest running an exploration first to populate it.${conversationMemory}${proactiveSection}`;
+If memory is empty, suggest running an exploration first to populate it.${agentMemory}${conversationMemory}${proactiveSection}`;
 }

@@ -22,6 +22,8 @@ __all__ = [
     "GraphStore",
     "ExplorationStore",
     "get_exploration_store",
+    "AgentMemoryService",
+    "get_agent_memory_service",
 ]
 __version__ = "0.1.0"
 
@@ -31,6 +33,13 @@ def __getattr__(name):
         from .manager import MemoryManager, get_memory_manager
 
         return {"MemoryManager": MemoryManager, "get_memory_manager": get_memory_manager}[name]
+    if name in {"AgentMemoryService", "get_agent_memory_service"}:
+        from .agent_memory import AgentMemoryService, get_agent_memory_service
+
+        return {
+            "AgentMemoryService": AgentMemoryService,
+            "get_agent_memory_service": get_agent_memory_service,
+        }[name]
     if name in {"vector_store", "graph_store", "manager", "config"}:
         import importlib
 

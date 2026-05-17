@@ -108,6 +108,11 @@ class GitlabClient:
         """Get details of a specific pipeline."""
         return await self._request("GET", f"projects/{project_id}/pipelines/{pipeline_id}")
 
+    async def list_pipelines(self, project_id: int, per_page: int = 20) -> list[dict[str, Any]]:
+        """List recent pipelines for a project."""
+        data = await self._request("GET", f"projects/{project_id}/pipelines", params={"per_page": per_page})
+        return data if isinstance(data, list) else []
+
     async def get_pipeline_jobs(self, project_id: int, pipeline_id: int) -> list[dict[str, Any]]:
         """Get jobs for a specific pipeline."""
         data = await self._request("GET", f"projects/{project_id}/pipelines/{pipeline_id}/jobs")
@@ -119,7 +124,53 @@ class GitlabClient:
         """Get the test report for a specific pipeline."""
         return await self._request("GET", f"projects/{project_id}/pipelines/{pipeline_id}/test_report")
 
+    async def cancel_pipeline(self, project_id: int, pipeline_id: int) -> dict[str, Any]:
+        """Cancel a pipeline."""
+        return await self._request("POST", f"projects/{project_id}/pipelines/{pipeline_id}/cancel")
+
+    async def retry_pipeline(self, project_id: int, pipeline_id: int) -> dict[str, Any]:
+        """Retry failed jobs in a pipeline."""
+        return await self._request("POST", f"projects/{project_id}/pipelines/{pipeline_id}/retry")
+
+    async def get_job_trace(self, project_id: int, job_id: int) -> str:
+        """Fetch a job trace as text."""
+        resp = await self._raw_request("GET", f"projects/{project_id}/jobs/{job_id}/trace")
+        return resp.text
+
+    async def get_job_artifacts_url(self, project_id: int, job_id: int) -> str:
+        """Return the API URL for a job artifact archive."""
+        return f"{self.api_prefix}projects/{project_id}/jobs/{job_id}/artifacts"
+
     # -- Internal --------------------------------------------------
+
+    async def _raw_request(
+        self,
+        method: str,
+        endpoint: str,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        """Execute a request and return the raw response."""
+        url = self.api_prefix + endpoint
+        async with self._semaphore:
+            client = self._get_client()
+            if data is not None:
+                resp = await client.request(
+                    method,
+                    url,
+                    data=data,
+                    params=params,
+                    headers={
+                        "PRIVATE-TOKEN": self.token,
+                        "Accept": "application/json",
+                    },
+                )
+            else:
+                resp = await client.request(method, url, json=json, params=params)
+            if resp.status_code >= 400:
+                raise GitlabError(f"GitLab API {resp.status_code}: {resp.text}", status_code=resp.status_code)
+            return resp
 
     async def _request(
         self,

@@ -502,6 +502,27 @@ All endpoints scoped to a project via `{project_id}` path parameter.
 
 ## CI/CD Integration
 
+### Unified Control Center
+
+Prefix: `/projects/{project_id}/ci` | Source: `orchestrator/api/ci_control.py`
+
+Provider-neutral CI/CD control surface for the dashboard.
+
+| Method | Path | Description | Auth Required |
+|--------|------|-------------|---------------|
+| GET | `/projects/{project_id}/ci/providers` | List configured CI providers and capabilities | Optional |
+| GET | `/projects/{project_id}/ci/workflows` | List normalized provider workflows | Optional |
+| GET | `/projects/{project_id}/ci/runs` | List normalized CI runs across providers | Optional |
+| POST | `/projects/{project_id}/ci/runs/sync` | Sync recent provider runs into normalized CI run history | Optional |
+| GET | `/projects/{project_id}/ci/runs/{provider}/{mapping_id}` | Get run details with jobs/artifacts | Optional |
+| POST | `/projects/{project_id}/ci/workflows/dispatch` | Dispatch a GitHub workflow or GitLab pipeline | Optional |
+| POST | `/projects/{project_id}/ci/runs/{provider}/{mapping_id}/cancel` | Cancel a provider run | Optional |
+| POST | `/projects/{project_id}/ci/runs/{provider}/{mapping_id}/rerun` | Rerun a provider run | Optional |
+| GET | `/projects/{project_id}/ci/runs/{provider}/{mapping_id}/logs` | Fetch provider run/job log access | Optional |
+| POST | `/projects/{project_id}/ci/workflow-change-requests` | Generate and validate a GitHub Actions workflow draft | Optional |
+| POST | `/projects/{project_id}/ci/workflow-change-requests/{change_id}/pull-request` | Open a draft GitHub PR for a generated workflow | Optional |
+| GET | `/projects/{project_id}/ci/audit-events` | List CI actions initiated from Quorvex | Optional |
+
 ### GitHub
 
 Prefix: `/github` | Source: `orchestrator/api/github_ci.py`

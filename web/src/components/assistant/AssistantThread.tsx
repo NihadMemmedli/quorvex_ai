@@ -120,6 +120,30 @@ function ToolError({ message }: { message: string }) {
   );
 }
 
+function ToolStaleState({ toolName }: { toolName: string }) {
+  return (
+    <div style={{
+      padding: '0.75rem',
+      background: 'rgba(245, 158, 11, 0.08)',
+      border: '1px solid rgba(245, 158, 11, 0.24)',
+      borderRadius: '8px',
+      color: 'var(--text-secondary)',
+      fontSize: '0.85rem',
+      marginTop: '0.5rem',
+      lineHeight: 1.45,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', color: '#f59e0b', fontWeight: 600 }}>
+        <AlertTriangle size={14} />
+        <span>No tool result was received</span>
+      </div>
+      <div style={{ marginTop: '0.35rem' }}>
+        The assistant started {toolDisplayName(toolName)}, but the chat stream did not return a result.
+        Try the request again or open the related page to check the data directly.
+      </div>
+    </div>
+  );
+}
+
 // ===== Tool Result Renderers =====
 
 const NavigateToolUI = makeAssistantToolUI({
@@ -206,9 +230,9 @@ const DashboardStatsToolUI = makeAssistantToolUI({
 
 const statusColor = (status: string) => {
   const s = String(status).toLowerCase();
-  if (s === 'passed' || s === 'pass' || s === 'success') return 'var(--success)';
-  if (s === 'failed' || s === 'fail' || s === 'error') return 'var(--danger)';
-  if (s === 'running' || s === 'in_progress') return 'var(--warning)';
+  if (['passed', 'pass', 'success', 'succeeded', 'completed', 'complete', 'done', 'finished', 'created', 'saved', 'synced'].includes(s)) return 'var(--success)';
+  if (['failed', 'fail', 'error', 'errored', 'cancelled', 'canceled', 'timeout', 'timed_out'].includes(s)) return 'var(--danger)';
+  if (['running', 'in_progress', 'processing', 'queued', 'pending', 'scheduled', 'starting', 'started', 'awaiting_input'].includes(s)) return 'var(--warning)';
   return 'var(--text-secondary)';
 };
 
@@ -1031,15 +1055,25 @@ const AutoPilotStatusToolUI = makeAssistantToolUI({
 // ===== Generic Tool UI (Wildcard - must be registered last) =====
 
 const toolPageMap: Record<string, string> = {
+  getWorkflowCapabilities: '/assistant',
   getTestRuns: '/runs',
   getRecentTestResults: '/runs',
   getRecentRuns: '/runs',
+  getTestRunDetails: '/runs',
+  pollRunStatus: '/runs',
+  runTestSpec: '/runs',
   getSpecList: '/specs',
   listTestSpecs: '/specs',
+  getSpecContent: '/specs',
+  getSpecGeneratedCode: '/specs',
+  createTestSpec: '/specs',
   updateTestSpec: '/specs',
+  runRegressionBatch: '/regression',
   startDiscoveryExploration: '/exploration',
   listSpecTemplates: '/specs',
   getExplorationSessions: '/exploration',
+  listExplorations: '/exploration',
+  getExplorationDetails: '/exploration',
   startExplorerAgent: '/exploration',
   listAgentRuns: '/agents',
   getAgentRunReport: '/agents',
@@ -1048,14 +1082,55 @@ const toolPageMap: Record<string, string> = {
   startCustomAgentFromReport: '/agents',
   createTestSpecFromAgentReport: '/specs',
   getRequirements: '/requirements',
+  generateRequirements: '/requirements',
+  getRequirementDetails: '/requirements',
+  getRequirementStats: '/requirements',
+  getRequirementHealth: '/requirements',
+  listRequirementCategories: '/requirements',
+  findDuplicateRequirements: '/requirements',
+  checkRequirementDuplicate: '/requirements',
+  getRequirementsGenerateJob: '/requirements',
+  getBulkSpecGenerationJob: '/requirements',
+  getRequirementSpecStatus: '/requirements',
+  createRequirement: '/requirements',
+  bulkCreateRequirements: '/requirements',
+  updateRequirement: '/requirements',
+  deleteRequirement: '/requirements',
+  generateSpecFromRequirement: '/requirements',
+  bulkGenerateRequirementSpecs: '/requirements',
+  mergeRequirements: '/requirements',
   getRtmCoverage: '/rtm',
   getRTMSummary: '/rtm',
+  getRTMMatrix: '/rtm',
+  getRTMGenerateJob: '/rtm',
+  listRTMSnapshots: '/rtm',
+  getRTMSnapshotDetail: '/rtm',
+  getRequirementTests: '/rtm',
+  getTestRequirements: '/rtm',
+  generateRTM: '/rtm',
+  createRTMSnapshot: '/rtm',
+  createRTMEntry: '/rtm',
+  deleteRTMEntry: '/rtm',
   getDashboardStats: '/',
+  getBrowserPoolStatus: '/',
   getSecurityFindings: '/security-testing',
+  getSecurityCapabilities: '/security-testing',
+  getSecurityTargets: '/security-testing',
+  listSecuritySpecs: '/security-testing',
+  getSecuritySpec: '/security-testing',
+  getSecurityJobStatus: '/security-testing',
+  listSecurityFindings: '/security-testing',
+  getSecurityRunFindings: '/security-testing',
   getPassRateTrends: '/analytics',
+  getFlakeDetection: '/analytics',
   getFailureClassification: '/analytics',
+  getSpecPerformance: '/analytics',
+  getCoverageOverview: '/analytics',
+  quarantineSpec: '/analytics',
+  unquarantineSpec: '/analytics',
   getRunLogs: '/runs',
   healFailedRun: '/runs',
+  retryFailedRun: '/runs',
   stopRun: '/runs',
   stopAllJobs: '/runs',
   clearQueue: '/runs',
@@ -1071,7 +1146,12 @@ const toolPageMap: Record<string, string> = {
   getApiSpec: '/api-testing',
   getApiJobStatus: '/api-testing',
   getDatabaseTestSummary: '/database-testing',
+  listDatabaseConnections: '/database-testing',
+  listDatabaseSpecs: '/database-testing',
+  getDatabaseJobStatus: '/database-testing',
+  saveGeneratedDatabaseSpec: '/database-testing',
   // Regression tools
+  getRegressionBatches: '/regression',
   compareBatches: '/regression',
   getBatchTrend: '/regression',
   getBatchErrorSummary: '/regression',
@@ -1079,6 +1159,18 @@ const toolPageMap: Record<string, string> = {
   getRegressionFlakyTests: '/regression',
   // Load testing tools
   compareLoadTestRuns: '/load-testing',
+  getLoadTestResults: '/load-testing',
+  listLoadSpecs: '/load-testing',
+  getLoadSpec: '/load-testing',
+  listLoadScripts: '/load-testing',
+  getLoadScript: '/load-testing',
+  listLoadTestJobs: '/load-testing',
+  getLoadTestJobStatus: '/load-testing',
+  getLoadTestJobLogs: '/load-testing',
+  getLatestLoadRunsBySpec: '/load-testing',
+  getLoadTestRunDetails: '/load-testing',
+  getLoadTestTimeseries: '/load-testing',
+  getLoadTestingStatus: '/load-testing',
   getLoadTestDashboard: '/load-testing',
   getLoadTestTrends: '/load-testing',
   analyzeLoadTestRun: '/load-testing',
@@ -1092,9 +1184,17 @@ const toolPageMap: Record<string, string> = {
   runLoadTestFromSpec: '/load-testing',
   getLoadTestSystemLimits: '/load-testing',
   // Security testing tools
+  getSecurityRunDetails: '/security-testing',
+  triggerSecurityScan: '/security-testing',
+  runSecurityScan: '/security-testing',
+  stopSecurityScan: '/security-testing',
+  createSecuritySpec: '/security-testing',
+  updateSecuritySpec: '/security-testing',
+  deleteSecuritySpec: '/security-testing',
   analyzeSecurityRun: '/security-testing',
   triageSecurityFinding: '/security-testing',
   compareSecurityScans: '/security-testing',
+  generateSecuritySpecFromExploration: '/security-testing',
   // RTM tools
   getRTMGaps: '/rtm',
   exportRTM: '/rtm',
@@ -1108,6 +1208,7 @@ const toolPageMap: Record<string, string> = {
   getDbSchemaAnalysis: '/database-testing',
   getDbChecks: '/database-testing',
   suggestDbFixes: '/database-testing',
+  generateDatabaseSpec: '/database-testing',
   createApiSpec: '/api-testing',
   createAndGenerateApiTest: '/api-testing',
   importOpenApiSpec: '/api-testing',
@@ -1135,6 +1236,138 @@ const toolPageMap: Record<string, string> = {
   stopAutoPilotTestTask: '/autopilot',
   cancelAutoPilot: '/autopilot',
   listAutoPilotSessions: '/autopilot',
+  // Project tools
+  listProjects: '/projects',
+  getProject: '/projects',
+  listProjectMembers: '/projects',
+  listProjectCredentials: '/projects',
+  createProject: '/projects',
+  updateProject: '/projects',
+  deleteProject: '/projects',
+  assignSpecToProject: '/projects',
+  bulkAssignSpecsToProject: '/projects',
+  setProjectCredential: '/projects',
+  removeProjectCredential: '/projects',
+  // Recording tools
+  listRecordings: '/recordings',
+  getRecording: '/recordings',
+  getRecordingCode: '/recordings',
+  startRecording: '/recordings',
+  stopRecording: '/recordings',
+  importRecording: '/recordings',
+  // Settings tools
+  getAssistantSettings: '/settings',
+  testAssistantSettingsConnection: '/settings',
+  updateAssistantSettings: '/settings',
+  // Extended schedule tools
+  getSchedule: '/schedules',
+  validateCronExpression: '/schedules',
+  listScheduleExecutions: '/schedules',
+  listProjectScheduleExecutions: '/schedules',
+  getNextScheduleRuns: '/schedules',
+  createSchedule: '/schedules',
+  updateSchedule: '/schedules',
+  deleteSchedule: '/schedules',
+  toggleSchedule: '/schedules',
+  // PRD tools
+  listPrdProjects: '/prd',
+  listPrdFeatures: '/prd',
+  listPrdGenerations: '/prd',
+  getPrdGenerationStatus: '/prd',
+  getPrdQueueStatus: '/prd',
+  generatePrdPlan: '/prd',
+  stopPrdGeneration: '/prd',
+  generatePrdTest: '/prd',
+  healPrdTest: '/prd',
+  runPrdTest: '/prd',
+  // CI/CD and PR Advisor tools
+  listCiProviders: '/ci-cd',
+  listCiWorkflows: '/ci-cd',
+  listCiRuns: '/ci-cd',
+  getCiRunDetail: '/ci-cd',
+  getCiRunLogs: '/ci-cd',
+  listCiAuditEvents: '/ci-cd',
+  syncCiRuns: '/ci-cd',
+  dispatchCiWorkflow: '/ci-cd',
+  cancelCiRun: '/ci-cd',
+  rerunCiRun: '/ci-cd',
+  generateCiWorkflowChange: '/ci-cd',
+  openCiWorkflowPullRequest: '/ci-cd',
+  analyzePullRequestTests: '/pr-advisor',
+  listPrAdvisorAnalyses: '/pr-advisor',
+  getPrAdvisorAnalysis: '/pr-advisor',
+  runPrAdvisorRecommendedTests: '/pr-advisor',
+  // Chat control and coverage planning
+  getChatControlAudit: '/assistant',
+  planUiTestCoverage: '/analytics',
+  analyzeUiTestRunArtifacts: '/runs',
+  executeUiTestCoveragePlan: '/runs',
+  // Extended spec management
+  listSpecFolders: '/specs',
+  listAutomatedSpecs: '/specs',
+  getSpecMetadata: '/specs',
+  getSpecInfo: '/specs',
+  updateGeneratedCode: '/specs',
+  updateSpecMetadata: '/specs',
+  moveSpec: '/specs',
+  renameSpec: '/specs',
+  splitSpec: '/specs',
+  createSpecFolder: '/specs',
+  // Extended exploration and Explorer Agent control
+  getExplorationHealth: '/exploration',
+  getExplorationQueueStatus: '/exploration',
+  getExplorationArtifacts: '/exploration',
+  getExplorationResults: '/exploration',
+  getExplorationFlows: '/exploration',
+  getExplorationApis: '/exploration',
+  getExplorationIssues: '/exploration',
+  getAgentQueueStatus: '/agents',
+  listAgentToolCatalog: '/agents',
+  listAgentDefinitions: '/agents',
+  getAgentDefinition: '/agents',
+  getAgentRun: '/agents',
+  getExplorerGeneratedSpecs: '/exploration',
+  getExplorerFlowDetails: '/exploration',
+  getExplorerFlowSpecJob: '/exploration',
+  listExplorerSessions: '/exploration',
+  synthesizeExplorerSpecs: '/exploration',
+  analyzeExplorerPrerequisites: '/exploration',
+  generateExplorerFlowSpec: '/exploration',
+  generateExplorerFlowTest: '/exploration',
+  updateExplorerFlow: '/exploration',
+  deleteExplorerFlow: '/exploration',
+  saveExplorerSession: '/exploration',
+  deleteExplorerSession: '/exploration',
+  generateApiSpecsFromExploration: '/api-testing',
+  generateApiTestsFromExploration: '/api-testing',
+  // Extended regression control
+  getRegressionBatchDetail: '/regression',
+  getSpecHistory: '/regression',
+  exportRegressionBatch: '/regression',
+  refreshRegressionBatch: '/regression',
+  cancelRegressionBatch: '/regression',
+  renameRegressionBatch: '/regression',
+  deleteRegressionBatch: '/regression',
+  // Quality gates and external integrations
+  getQualityGateConfig: '/ci-cd',
+  listPrQualityGates: '/ci-cd',
+  getPrQualityGate: '/ci-cd',
+  getPrQualityGateStatus: '/ci-cd',
+  startPrQualityGate: '/ci-cd',
+  getJiraConfig: '/settings',
+  testJiraConnection: '/settings',
+  getJiraBugReportJob: '/runs',
+  listJiraIssues: '/runs',
+  getJiraIssueForRun: '/runs',
+  generateJiraBugReport: '/runs',
+  createJiraIssue: '/runs',
+  getTestRailConfig: '/settings',
+  testTestRailConnection: '/settings',
+  listTestRailMappings: '/settings',
+  getTestRailSyncPreview: '/regression',
+  pushTestRailCases: '/settings',
+  syncTestRailResults: '/regression',
+  deleteTestRailMapping: '/settings',
 };
 
 function ApprovalCard({ toolName, args, addResult, toolCallId }: {
@@ -1145,7 +1378,7 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
 }) {
   const [status, setStatus] = useState<'pending' | 'executing' | 'done'>('pending');
   const { currentProject } = useProject();
-  const { persistToolResult } = useChatContext();
+  const { persistToolResult, registerTrackedJob } = useChatContext();
   const config = MUTATING_TOOL_CONFIGS[toolName];
   const label = config?.label || toolName;
 
@@ -1190,6 +1423,7 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
       } else {
         addResult(data);
         if (toolCallId) persistToolResult(toolCallId, toolName, data);
+        registerTrackedJob(toolName, data, enrichedArgs, label);
       }
     } catch (err) {
       const errorResult = { error: err instanceof Error ? err.message : 'Network error' };
@@ -1292,6 +1526,296 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
   );
 }
 
+type ToolSummaryRow = {
+  label: string;
+  value: string;
+  color?: string;
+};
+
+type ToolResultSummary = {
+  title: string;
+  status?: string;
+  message?: string;
+  rows: ToolSummaryRow[];
+  nextActions: string[];
+  pageLink?: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : { value };
+}
+
+function compactLabel(value: string) {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function toolDisplayName(toolName: string) {
+  return MUTATING_TOOL_CONFIGS[toolName]?.label || compactLabel(toolName);
+}
+
+function truncateText(value: string, max = 180) {
+  return value.length > max ? `${value.slice(0, max - 1)}...` : value;
+}
+
+function nestedRecords(data: Record<string, unknown>) {
+  return [
+    data,
+    data.result,
+    data.data,
+    data.summary,
+    data.session,
+    data.run,
+    data.job,
+    data.report,
+    data.structured_report,
+  ].filter(isRecord);
+}
+
+function firstField(data: Record<string, unknown>, keys: string[]): unknown {
+  for (const source of nestedRecords(data)) {
+    for (const key of keys) {
+      const value = source[key];
+      if (value !== undefined && value !== null && value !== '') return value;
+    }
+  }
+  return undefined;
+}
+
+function stringField(data: Record<string, unknown>, keys: string[]) {
+  const value = firstField(data, keys);
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return undefined;
+}
+
+function numberField(data: Record<string, unknown>, keys: string[]) {
+  const value = firstField(data, keys);
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+  return undefined;
+}
+
+function normalizeToolStatus(status?: string) {
+  if (!status) return undefined;
+  return status.trim().toLowerCase().replace(/\s+/g, '_').replace(/-/g, '_');
+}
+
+function getToolStatus(data?: Record<string, unknown>) {
+  if (!data) return undefined;
+  return normalizeToolStatus(stringField(data, ['status', 'state', 'run_status', 'job_status', 'phase_status', 'parse_status']));
+}
+
+function isFailureStatus(status?: string) {
+  return Boolean(status && ['failed', 'fail', 'error', 'errored', 'cancelled', 'canceled', 'timeout', 'timed_out'].includes(status));
+}
+
+function isActiveStatus(status?: string) {
+  return Boolean(status && ['running', 'in_progress', 'processing', 'queued', 'pending', 'scheduled', 'starting', 'started', 'awaiting_input'].includes(status));
+}
+
+function isAwaitingInput(data?: Record<string, unknown>) {
+  const status = getToolStatus(data);
+  if (status === 'awaiting_input') return true;
+  const pendingQuestions = numberField(data || {}, ['pending_questions', 'questions_pending', 'unanswered_questions']);
+  return Boolean(pendingQuestions && pendingQuestions > 0);
+}
+
+function countArrayField(data: Record<string, unknown>, keys: string[]) {
+  for (const source of nestedRecords(data)) {
+    for (const key of keys) {
+      const value = source[key];
+      if (Array.isArray(value)) return value.length;
+    }
+  }
+  return undefined;
+}
+
+function addRow(rows: ToolSummaryRow[], label: string, value: unknown, color?: string) {
+  if (value === undefined || value === null || value === '') return;
+  rows.push({ label, value: String(value), color });
+}
+
+function getStateAwareFollowUps(toolName: string, result?: unknown): string[] {
+  const fallback = toolFollowUps[toolName] || ['Show dashboard stats', 'What can I do next?'];
+  const data = result ? asRecord(result) : undefined;
+  const status = getToolStatus(data);
+  const pageLabel = toolPageMap[toolName] ? 'Open related page' : 'Show dashboard stats';
+
+  if (data && (data.error || isFailureStatus(status))) {
+    if (toolName.toLowerCase().includes('run')) {
+      return ['Show run logs', 'Analyze failure artifacts', 'Retry or heal this run'];
+    }
+    return ['Show details', 'Retry this action', pageLabel];
+  }
+
+  if (isAwaitingInput(data)) {
+    return ['Answer the pending question', 'Check status again', pageLabel];
+  }
+
+  if (isActiveStatus(status)) {
+    if (toolName.toLowerCase().includes('autopilot')) {
+      return ['Check Auto Pilot status', 'View Auto Pilot dashboard', 'List Auto Pilot sessions'];
+    }
+    return ['Check status again', pageLabel, 'Show recent activity'];
+  }
+
+  return fallback;
+}
+
+function buildToolResultSummary(toolName: string, data: Record<string, unknown>): ToolResultSummary {
+  const rows: ToolSummaryRow[] = [];
+  const status = getToolStatus(data);
+  const id = stringField(data, [
+    'run_id',
+    'job_id',
+    'session_id',
+    'agent_run_id',
+    'generation_id',
+    'batch_id',
+    'scan_id',
+    'issue_id',
+    'spec_id',
+    'id',
+  ]);
+  const message = stringField(data, ['message', 'detail', 'summary', 'description', 'note']);
+  const progress = numberField(data, ['progress', 'progress_percent', 'percent_complete', 'coverage', 'coverage_percent', 'pass_rate']);
+  const currentPhase = stringField(data, ['current_phase', 'phase', 'stage']);
+
+  addRow(rows, 'Status', status ? compactLabel(status) : undefined, status ? statusColor(status) : undefined);
+  addRow(rows, 'ID', id);
+  addRow(rows, 'Phase', currentPhase ? compactLabel(currentPhase) : undefined);
+  addRow(rows, 'Progress', progress !== undefined ? `${Math.round(progress)}%` : undefined);
+
+  const scalarRows: Array<[string, string[]]> = [
+    ['Created', ['created', 'created_count', 'specs_created', 'tests_created', 'generated_count']],
+    ['Updated', ['updated', 'updated_count']],
+    ['Passed', ['passed', 'passed_count', 'tests_passed']],
+    ['Failed', ['failed', 'failed_count', 'tests_failed', 'failure_count']],
+    ['Total', ['total', 'total_count', 'run_count', 'test_count']],
+  ];
+  for (const [label, keys] of scalarRows) {
+    addRow(rows, label, numberField(data, keys));
+  }
+
+  const arrayRows: Array<[string, string[]]> = [
+    ['Runs', ['runs', 'test_runs']],
+    ['Specs', ['specs', 'generated_specs']],
+    ['Findings', ['findings', 'issues', 'vulnerabilities']],
+    ['Test Ideas', ['test_ideas', 'testIdeas']],
+    ['Pages', ['pages_checked', 'pages', 'visited_pages']],
+    ['Flows', ['flows', 'discovered_flows']],
+    ['APIs', ['apis', 'endpoints']],
+    ['Questions', ['questions', 'pending_questions']],
+    ['Evidence', ['evidence', 'artifacts']],
+  ];
+  for (const [label, keys] of arrayRows) {
+    addRow(rows, label, countArrayField(data, keys));
+  }
+
+  return {
+    title: toolDisplayName(toolName),
+    status,
+    message: message ? truncateText(message) : undefined,
+    rows: rows.slice(0, 8),
+    nextActions: getStateAwareFollowUps(toolName, data),
+    pageLink: toolPageMap[toolName],
+  };
+}
+
+function ToolSummaryCard({ summary }: { summary: ToolResultSummary }) {
+  return (
+    <div style={{
+      padding: '0.75rem',
+      background: 'var(--surface)',
+      border: '1px solid var(--border)',
+      borderRadius: '8px',
+      marginTop: '0.5rem',
+      fontSize: '0.85rem',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: summary.message || summary.rows.length ? '0.5rem' : 0 }}>
+        <span style={{ fontWeight: 600, color: 'var(--text)' }}>{summary.title}</span>
+        {summary.status && (
+          <span style={{
+            padding: '0.15rem 0.45rem',
+            borderRadius: '999px',
+            fontSize: '0.68rem',
+            fontWeight: 600,
+            background: `color-mix(in srgb, ${statusColor(summary.status)} 14%, transparent)`,
+            color: statusColor(summary.status),
+          }}>
+            {compactLabel(summary.status)}
+          </span>
+        )}
+      </div>
+      {summary.message && (
+        <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', lineHeight: 1.45, marginBottom: '0.5rem' }}>
+          {summary.message}
+        </div>
+      )}
+      {summary.rows.length > 0 && (
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
+          gap: '0.5rem',
+        }}>
+          {summary.rows.map((row) => (
+            <div key={`${row.label}:${row.value}`} style={{
+              padding: '0.5rem',
+              background: 'var(--code-bg)',
+              borderRadius: '6px',
+              minWidth: 0,
+            }}>
+              <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', marginBottom: '0.15rem' }}>
+                {row.label}
+              </div>
+              <div style={{
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                color: row.color || 'var(--text)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }} title={row.value}>
+                {row.value}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {(summary.nextActions.length > 0 || summary.pageLink) && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '0.75rem',
+          marginTop: '0.6rem',
+          flexWrap: 'wrap',
+        }}>
+          <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+            Next: {summary.nextActions.slice(0, 2).join(' · ')}
+          </div>
+          {summary.pageLink && (
+            <Link href={summary.pageLink} style={{
+              fontSize: '0.75rem',
+              color: 'var(--primary)',
+              whiteSpace: 'nowrap',
+            }}>
+              Open page &rarr;
+            </Link>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ToolCallFallback({ toolName, args, result, addResult, toolCallId }: {
   toolName: string;
   args: Record<string, unknown>;
@@ -1300,6 +1824,19 @@ function ToolCallFallback({ toolName, args, result, addResult, toolCallId }: {
   toolCallId?: string;
   [key: string]: unknown;
 }) {
+  const [stale, setStale] = useState(false);
+
+  useEffect(() => {
+    if (result) {
+      setStale(false);
+      return;
+    }
+
+    setStale(false);
+    const timeout = window.setTimeout(() => setStale(true), 35000);
+    return () => window.clearTimeout(timeout);
+  }, [result, toolCallId, toolName]);
+
   if (!result && MUTATING_TOOL_NAMES.has(toolName)) {
     return (
       <ApprovalCard
@@ -1311,8 +1848,11 @@ function ToolCallFallback({ toolName, args, result, addResult, toolCallId }: {
     );
   }
 
-  if (!result) return <ToolLoading name={`Running ${toolName}...`} />;
-  const data = result as Record<string, unknown>;
+  if (!result) {
+    return stale ? <ToolStaleState toolName={toolName} /> : <ToolLoading name={`Running ${toolName}...`} />;
+  }
+
+  const data = asRecord(result);
   if (data.error) return <ToolError message={String(data.error)} />;
   if (data.cancelled) return (
     <div style={{
@@ -1327,9 +1867,10 @@ function ToolCallFallback({ toolName, args, result, addResult, toolCallId }: {
       Action declined by user
     </div>
   );
-  const pageLink = toolPageMap[toolName];
+  const summary = buildToolResultSummary(toolName, data);
   return (
     <div>
+      <ToolSummaryCard summary={summary} />
       <details style={{
         padding: '0.75rem',
         background: 'var(--surface)',
@@ -1359,19 +1900,6 @@ function ToolCallFallback({ toolName, args, result, addResult, toolCallId }: {
           {JSON.stringify(data, null, 2)}
         </pre>
       </details>
-      {pageLink && (
-        <Link href={pageLink} style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: '0.25rem',
-          marginTop: '0.25rem',
-          marginLeft: '0.75rem',
-          fontSize: '0.75rem',
-          color: 'var(--primary)',
-        }}>
-          View in Dashboard &rarr;
-        </Link>
-      )}
     </div>
   );
 }
@@ -1872,6 +2400,7 @@ function TextPart({ text }: TextMessagePartProps) {
 // ===== Follow-Up Suggestions =====
 
 const toolFollowUps: Record<string, string[]> = {
+  getWorkflowCapabilities: ['Show missing workflow gaps', 'Open AI Assistant page', 'Run a full health check'],
   getRecentRuns: ['Show details for the latest failure', 'What are the flaky tests?', 'Run regression batch'],
   getDashboardStats: ['Show recent failures', 'Check RTM coverage', 'View analytics'],
   getSecurityFindings: ['Show critical findings detail', 'Run a new scan'],
@@ -1948,6 +2477,102 @@ const toolFollowUps: Record<string, string[]> = {
   stopAutoPilotTestTask: ['Check Auto Pilot status', 'View Auto Pilot dashboard'],
   cancelAutoPilot: ['List Auto Pilot sessions', 'Start a new Auto Pilot'],
   listAutoPilotSessions: ['Check status of a session', 'Start a new Auto Pilot', 'View Auto Pilot dashboard'],
+  listProjects: ['Show current project details', 'List project credentials', 'Create a new project'],
+  getProject: ['List project members', 'Assign specs to this project', 'Show dashboard stats'],
+  listProjectCredentials: ['Set a project credential', 'Open project settings', 'List projects'],
+  createProject: ['List projects', 'Set project credentials', 'Assign specs'],
+  listRecordings: ['Start a recording', 'Import a recording', 'Show latest recording code'],
+  getRecording: ['Stop this recording', 'Import this recording', 'Show recording code'],
+  startRecording: ['Check recording status', 'Stop recording', 'Open recorder'],
+  importRecording: ['Run imported spec', 'Show specs', 'View recording'],
+  getAssistantSettings: ['Test connection', 'Update model settings', 'Open settings'],
+  testAssistantSettingsConnection: ['Show settings', 'Update settings', 'Run health check'],
+  listScheduleExecutions: ['Show schedules', 'Get next run times', 'Trigger schedule now'],
+  listProjectScheduleExecutions: ['Show schedules', 'Check failures', 'Create schedule'],
+  getNextScheduleRuns: ['Update schedule', 'Trigger schedule now', 'Show executions'],
+  validateCronExpression: ['Create schedule', 'Show schedules', 'Try another cron'],
+  createSchedule: ['Show schedules', 'Get next run times', 'Run schedule now'],
+  updateSchedule: ['Show schedule', 'Get next run times', 'List executions'],
+  toggleSchedule: ['Show schedules', 'List executions', 'Get next run times'],
+  listPrdProjects: ['Show PRD features', 'Check PRD queue', 'Show generation history'],
+  listPrdFeatures: ['Generate test plan', 'Show PRD generations', 'Check queue status'],
+  getPrdGenerationStatus: ['Generate Playwright test', 'Stop generation', 'Show generation history'],
+  generatePrdPlan: ['Check generation status', 'Show PRD generations', 'Open PRD page'],
+  listCiProviders: ['List CI workflows', 'Sync CI runs', 'Show CI runs'],
+  listCiWorkflows: ['Dispatch workflow', 'Generate workflow change', 'List CI runs'],
+  listCiRuns: ['Show CI run detail', 'Get CI logs', 'Sync CI runs'],
+  getCiRunDetail: ['Get CI logs', 'Rerun CI run', 'Cancel CI run'],
+  getCiRunLogs: ['Show CI run detail', 'Rerun CI run', 'Open CI/CD'],
+  generateCiWorkflowChange: ['Open workflow PR', 'List CI workflows', 'Open CI/CD'],
+  listPrAdvisorAnalyses: ['Analyze a PR', 'Run recommended tests', 'Show latest analysis'],
+  getPrAdvisorAnalysis: ['Run recommended tests', 'Show changed files', 'Open PR Advisor'],
+  analyzePullRequestTests: ['Run recommended tests', 'Show analysis details', 'Open PR Advisor'],
+  getChatControlAudit: ['Plan UI test coverage', 'Show Explorer Agent gaps', 'Open AI Assistant'],
+  planUiTestCoverage: ['Execute selected specs', 'Create missing specs', 'Analyze latest failures'],
+  analyzeUiTestRunArtifacts: ['Generate Jira bug report', 'Heal and rerun', 'Show generated code'],
+  executeUiTestCoveragePlan: ['Check run status', 'Open test runs', 'Analyze failures'],
+  listSpecFolders: ['List automated specs', 'Create a folder', 'Move a spec'],
+  listAutomatedSpecs: ['Plan UI test coverage', 'Run selected specs', 'Show spec history'],
+  getSpecMetadata: ['Update metadata', 'Show spec content', 'Run this spec'],
+  getSpecInfo: ['Show generated code', 'Show run history', 'Update metadata'],
+  updateGeneratedCode: ['Run this spec', 'Show generated code', 'Open specs'],
+  updateSpecMetadata: ['Show metadata', 'Run this spec', 'Open specs'],
+  moveSpec: ['Show spec folders', 'List specs', 'Open specs'],
+  renameSpec: ['Show spec info', 'List specs', 'Open specs'],
+  splitSpec: ['Show generated specs', 'Run selected specs', 'Open specs'],
+  createSpecFolder: ['Move specs here', 'List folders', 'Open specs'],
+  getExplorationHealth: ['Show exploration queue', 'List explorations', 'Start Explorer Agent'],
+  getExplorationQueueStatus: ['Show exploration health', 'Start exploration', 'Open exploration'],
+  getExplorationArtifacts: ['Show flows', 'Show issues', 'Generate API specs'],
+  getExplorationResults: ['Show artifacts', 'Show discovered APIs', 'Generate tests'],
+  getExplorationFlows: ['Generate flow specs', 'Show flow details', 'Create tests from flows'],
+  getExplorationApis: ['Generate API specs', 'Generate API tests', 'Open API testing'],
+  getExplorationIssues: ['Create Jira issue', 'Show artifacts', 'Plan coverage'],
+  getAgentQueueStatus: ['List agent runs', 'Start Explorer Agent', 'Open agents'],
+  listAgentToolCatalog: ['List agent definitions', 'Start custom agent', 'Open agents'],
+  listAgentDefinitions: ['Start an agent', 'Show tool catalog', 'Open agents'],
+  getAgentDefinition: ['Start this agent', 'List agent runs', 'Open agents'],
+  getAgentRun: ['Show agent report', 'Search reports', 'Create specs'],
+  getExplorerGeneratedSpecs: ['Run generated specs', 'Show Explorer flows', 'Open specs'],
+  getExplorerFlowDetails: ['Generate flow spec', 'Generate flow test', 'Update flow'],
+  getExplorerFlowSpecJob: ['Check job again', 'Show generated specs', 'Open exploration'],
+  listExplorerSessions: ['Save browser session', 'Delete old sessions', 'Start Explorer Agent'],
+  synthesizeExplorerSpecs: ['Show generated specs', 'Run selected specs', 'Open exploration'],
+  analyzeExplorerPrerequisites: ['Generate flow spec', 'Show flow details', 'Open exploration'],
+  generateExplorerFlowSpec: ['Check spec job', 'Generate Playwright test', 'Open specs'],
+  generateExplorerFlowTest: ['Run generated test', 'Show generated code', 'Open runs'],
+  updateExplorerFlow: ['Show flow details', 'Generate flow spec', 'Open exploration'],
+  deleteExplorerFlow: ['List remaining flows', 'Open exploration', 'Plan coverage'],
+  saveExplorerSession: ['List sessions', 'Start Explorer Agent', 'Open exploration'],
+  deleteExplorerSession: ['List sessions', 'Open exploration'],
+  generateApiSpecsFromExploration: ['Open API testing', 'Generate API tests', 'Run API tests'],
+  generateApiTestsFromExploration: ['Open API testing', 'Run API tests', 'Show API specs'],
+  getRegressionBatchDetail: ['Rerun failed tests', 'Export batch', 'Show spec history'],
+  getSpecHistory: ['Plan coverage', 'Run this spec', 'Show recent failures'],
+  exportRegressionBatch: ['Open regression', 'Compare batches', 'Show latest batch'],
+  refreshRegressionBatch: ['Show batch detail', 'Rerun failed tests', 'Export batch'],
+  cancelRegressionBatch: ['Show regression batches', 'Open regression'],
+  renameRegressionBatch: ['Show batch detail', 'Open regression'],
+  deleteRegressionBatch: ['Show regression batches', 'Open regression'],
+  getQualityGateConfig: ['Start PR quality gate', 'List quality gates', 'Open CI/CD'],
+  listPrQualityGates: ['Show gate status', 'Start PR quality gate', 'Open CI/CD'],
+  getPrQualityGate: ['Check gate status', 'Run recommended tests', 'Open CI/CD'],
+  getPrQualityGateStatus: ['Show gate details', 'List quality gates', 'Open CI/CD'],
+  startPrQualityGate: ['Check gate status', 'Open CI/CD', 'Run recommended tests'],
+  getJiraConfig: ['Test Jira connection', 'Create issue from run', 'Open settings'],
+  testJiraConnection: ['Show Jira config', 'Generate bug report', 'Open settings'],
+  getJiraBugReportJob: ['Create Jira issue', 'Show run artifacts', 'Open runs'],
+  listJiraIssues: ['Show run issue', 'Generate bug report', 'Open runs'],
+  getJiraIssueForRun: ['Show run artifacts', 'Create another issue', 'Open runs'],
+  generateJiraBugReport: ['Create Jira issue', 'Show job status', 'Analyze run artifacts'],
+  createJiraIssue: ['Show issue for run', 'Open runs', 'Analyze failures'],
+  getTestRailConfig: ['Test TestRail connection', 'List mappings', 'Open settings'],
+  testTestRailConnection: ['Show TestRail config', 'Push test cases', 'Open settings'],
+  listTestRailMappings: ['Push test cases', 'Preview result sync', 'Open settings'],
+  getTestRailSyncPreview: ['Sync results', 'Show regression batch', 'Open regression'],
+  pushTestRailCases: ['List mappings', 'Preview result sync', 'Open settings'],
+  syncTestRailResults: ['Preview sync', 'Show regression batch', 'Open regression'],
+  deleteTestRailMapping: ['List mappings', 'Push test cases', 'Open settings'],
 };
 
 function FollowUpSuggestions() {
@@ -1962,11 +2587,8 @@ function FollowUpSuggestions() {
     if (Array.isArray(parts)) {
       for (const p of parts) {
         if ((p.type === 'tool-call' || p.type === 'tool-result') && p.toolName) {
-          const specific = toolFollowUps[p.toolName];
-          if (specific) {
-            suggestions = specific;
-            break;
-          }
+          suggestions = getStateAwareFollowUps(p.toolName, p.result ?? p.output ?? p.toolResult);
+          break;
         }
       }
     }
@@ -2041,11 +2663,20 @@ function TypingIndicator() {
 // ===== Slash Commands =====
 
 const slashCommands: Array<{ command: string; label: string; description: string; prompt: string }> = [
+  { command: '/control', label: 'Chat Control', description: 'Show chatbot workflow coverage', prompt: 'Show me everything the chatbot can control for UI testing workflows' },
+  { command: '/audit', label: 'Control Audit', description: 'Find chatbot control gaps', prompt: 'Audit chatbot control coverage for UI testing and tell me what is missing or weak' },
+  { command: '/coverage-plan', label: 'Coverage Plan', description: 'Plan UI test coverage', prompt: 'Plan UI test coverage from current specs, explorations, recent runs, and known gaps' },
+  { command: '/artifacts', label: 'Run Artifacts', description: 'Analyze run evidence', prompt: 'Analyze the latest failed UI test run artifacts and suggest the next action' },
+  { command: '/bug', label: 'Jira Bug', description: 'Create bug report from a run', prompt: 'Generate a Jira-ready bug report from the latest failed UI test run' },
+  { command: '/testrail', label: 'TestRail Sync', description: 'Preview or sync TestRail', prompt: 'Show TestRail configuration, mappings, and the safest next sync action' },
   { command: '/run', label: 'Run Tests', description: 'Run a test spec', prompt: 'Run the test spec: ' },
   { command: '/status', label: 'Dashboard Status', description: 'Show dashboard stats', prompt: 'Show me the current dashboard stats and test status' },
   { command: '/explore', label: 'Start Exploration', description: 'Explore a web app', prompt: 'Start a new AI exploration of ' },
+  { command: '/record', label: 'Record UI Flow', description: 'Start or inspect recordings', prompt: 'Help me record a UI flow for ' },
   { command: '/autopilot', label: 'Auto Pilot', description: 'Control Auto Pilot', prompt: 'Show my Auto Pilot sessions and pending work' },
   { command: '/stop', label: 'Stop Work', description: 'Stop a run or session', prompt: 'Help me stop a running job or session' },
+  { command: '/ci', label: 'CI/CD Control', description: 'Inspect or run CI workflows', prompt: 'Show my CI/CD providers, workflows, and recent runs' },
+  { command: '/prd', label: 'PRD Workflow', description: 'Inspect PRD plans and generations', prompt: 'Show my PRD projects, features, and generation queue status' },
   { command: '/trends', label: 'Pass Rate Trends', description: 'Show test trends', prompt: 'Show me the pass rate trends for the last 7 days' },
   { command: '/security', label: 'Security Findings', description: 'View security scan results', prompt: 'Show me the latest security findings' },
   { command: '/coverage', label: 'RTM Coverage', description: 'Check test coverage', prompt: 'Show me the RTM coverage summary' },
@@ -2059,7 +2690,7 @@ const slashCommands: Array<{ command: string; label: string; description: string
   { command: '/compare', label: 'Compare Batches', description: 'Compare regression batches', prompt: 'Compare the two most recent regression batches side by side' },
   { command: '/gaps', label: 'Coverage Gaps', description: 'RTM coverage gaps', prompt: 'Show me the RTM coverage gaps — which requirements have no tests?' },
   { command: '/costs', label: 'LLM Costs', description: 'LLM cost breakdown', prompt: 'Show me the LLM cost tracking breakdown for the last 30 days' },
-  { command: '/audit', label: 'Security Audit', description: 'Security posture review', prompt: 'Give me a security posture review — findings summary, recent scans, and comparison of the latest two scans' },
+  { command: '/security-audit', label: 'Security Audit', description: 'Security posture review', prompt: 'Give me a security posture review — findings summary, recent scans, and comparison of the latest two scans' },
 ];
 
 // ===== Step Counter =====

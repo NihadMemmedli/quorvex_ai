@@ -1,8 +1,20 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import { backendFetch } from './backend-client';
+import { ASSISTANT_WORKFLOW_CAPABILITIES } from './workflow-capabilities';
 
 type ToolResult = Record<string, unknown> | null;
+
+const CHAT_CONTROL_DOMAINS = [
+  { domain: 'Core UI testing', status: 'supported', tools: ['listTestSpecs', 'createTestSpec', 'runTestSpec', 'getRunLogs', 'healFailedRun', 'runRegressionBatch'] },
+  { domain: 'Coverage planning', status: 'supported', tools: ['planUiTestCoverage', 'getRTMSummary', 'getRTMGaps', 'getCoverageGaps', 'getTestSuggestions'] },
+  { domain: 'Explorer Agent', status: 'supported', tools: ['startExplorerAgent', 'getAgentRun', 'getExplorerGeneratedSpecs', 'generateExplorerFlowTest'] },
+  { domain: 'Discovery exploration', status: 'supported', tools: ['startDiscoveryExploration', 'getExplorationDetails', 'getExplorationFlows', 'generateApiTestsFromExploration'] },
+  { domain: 'Specs and artifacts', status: 'supported', tools: ['getSpecContent', 'getSpecGeneratedCode', 'moveSpec', 'renameSpec', 'splitSpec'] },
+  { domain: 'Regression operations', status: 'supported', tools: ['getRegressionBatchDetail', 'cancelRegressionBatch', 'getSpecHistory', 'exportRegressionBatch'] },
+  { domain: 'Integrations follow-through', status: 'partial', tools: ['generateJiraBugReport', 'createJiraIssue', 'pushTestRailCases', 'syncTestRailResults'], missing: ['Jira/TestRail/GitHub credential setup remains dashboard-led by default'] },
+  { domain: 'Admin and users', status: 'partial', tools: ['listProjectMembers', 'listProjects'], missing: ['User invite, disable, and role management are intentionally not chat-mutatable in this pass'] },
+];
 
 // ===== Mutating tool execution configs (used by proxy route for HitL approval) =====
 
@@ -13,20 +25,60 @@ export const MUTATING_TOOL_CONFIGS: Record<string, { label: string }> = {
   startExplorerAgent: { label: 'Start Explorer Agent' },
   startAdhocCustomAgent: { label: 'Start Custom Agent' },
   startCustomAgentFromReport: { label: 'Start Custom Agent From Report' },
+  synthesizeExplorerSpecs: { label: 'Synthesize Explorer Specs' },
+  analyzeExplorerPrerequisites: { label: 'Analyze Explorer Prerequisites' },
+  generateExplorerFlowSpec: { label: 'Generate Explorer Flow Spec' },
+  generateExplorerFlowTest: { label: 'Generate Explorer Flow Test' },
+  updateExplorerFlow: { label: 'Update Explorer Flow' },
+  deleteExplorerFlow: { label: 'Delete Explorer Flow' },
+  saveExplorerSession: { label: 'Save Explorer Session' },
+  deleteExplorerSession: { label: 'Delete Explorer Session' },
   stopExploration: { label: 'Stop Exploration' },
+  generateApiSpecsFromExploration: { label: 'Generate API Specs From Exploration' },
+  generateApiTestsFromExploration: { label: 'Generate API Tests From Exploration' },
   generateRequirements: { label: 'Generate Requirements' },
+  createRequirement: { label: 'Create Requirement' },
+  bulkCreateRequirements: { label: 'Bulk Create Requirements' },
+  updateRequirement: { label: 'Update Requirement' },
+  deleteRequirement: { label: 'Delete Requirement' },
+  generateSpecFromRequirement: { label: 'Generate Spec From Requirement' },
+  bulkGenerateRequirementSpecs: { label: 'Bulk Generate Requirement Specs' },
+  mergeRequirements: { label: 'Merge Requirements' },
+  generateRTM: { label: 'Generate RTM' },
+  createRTMSnapshot: { label: 'Create RTM Snapshot' },
+  createRTMEntry: { label: 'Create RTM Entry' },
+  deleteRTMEntry: { label: 'Delete RTM Entry' },
   createTestSpec: { label: 'Create Test Spec' },
   createTestSpecFromAgentReport: { label: 'Create Test Spec From Agent Report' },
   updateTestSpec: { label: 'Update Test Spec' },
+  updateGeneratedCode: { label: 'Update Generated Code' },
+  updateSpecMetadata: { label: 'Update Spec Metadata' },
+  moveSpec: { label: 'Move Spec' },
+  renameSpec: { label: 'Rename Spec' },
+  splitSpec: { label: 'Split Spec' },
+  createSpecFolder: { label: 'Create Spec Folder' },
   runRegressionBatch: { label: 'Run Regression Batch' },
+  executeUiTestCoveragePlan: { label: 'Execute UI Test Coverage Plan' },
   stopRun: { label: 'Stop Test Run' },
   stopAllJobs: { label: 'Stop All Jobs' },
   clearQueue: { label: 'Clear Queue' },
   triggerSecurityScan: { label: 'Trigger Security Scan' },
+  runSecurityScan: { label: 'Run Security Scan' },
+  stopSecurityScan: { label: 'Stop Security Scan' },
+  createSecuritySpec: { label: 'Create Security Spec' },
+  updateSecuritySpec: { label: 'Update Security Spec' },
+  deleteSecuritySpec: { label: 'Delete Security Spec' },
+  generateSecuritySpecFromExploration: { label: 'Generate Security Spec From Exploration' },
+  quarantineSpec: { label: 'Quarantine Spec' },
+  unquarantineSpec: { label: 'Unquarantine Spec' },
   retryFailedRun: { label: 'Retry Failed Run' },
   healFailedRun: { label: 'Heal Failed Run' },
   triggerScheduleNow: { label: 'Trigger Schedule Now' },
   rerunFailedTests: { label: 'Rerun Failed Tests' },
+  refreshRegressionBatch: { label: 'Refresh Regression Batch' },
+  cancelRegressionBatch: { label: 'Cancel Regression Batch' },
+  renameRegressionBatch: { label: 'Rename Regression Batch' },
+  deleteRegressionBatch: { label: 'Delete Regression Batch' },
   analyzeLoadTestRun: { label: 'Analyze Load Test Run' },
   stopLoadTestRun: { label: 'Stop Load Test Run' },
   forceUnlockLoadTesting: { label: 'Force Unlock Load Testing' },
@@ -57,6 +109,40 @@ export const MUTATING_TOOL_CONFIGS: Record<string, { label: string }> = {
   answerAutoPilotQuestion: { label: 'Answer Auto Pilot Question' },
   stopAutoPilotTestTask: { label: 'Stop Auto Pilot Test Task' },
   cancelAutoPilot: { label: 'Cancel Auto Pilot' },
+  createProject: { label: 'Create Project' },
+  updateProject: { label: 'Update Project' },
+  deleteProject: { label: 'Delete Project' },
+  assignSpecToProject: { label: 'Assign Spec to Project' },
+  bulkAssignSpecsToProject: { label: 'Bulk Assign Specs to Project' },
+  setProjectCredential: { label: 'Set Project Credential' },
+  removeProjectCredential: { label: 'Remove Project Credential' },
+  startRecording: { label: 'Start Recording' },
+  stopRecording: { label: 'Stop Recording' },
+  importRecording: { label: 'Import Recording' },
+  createSchedule: { label: 'Create Schedule' },
+  updateSchedule: { label: 'Update Schedule' },
+  deleteSchedule: { label: 'Delete Schedule' },
+  toggleSchedule: { label: 'Toggle Schedule' },
+  updateAssistantSettings: { label: 'Update Assistant Settings' },
+  generatePrdPlan: { label: 'Generate PRD Test Plan' },
+  stopPrdGeneration: { label: 'Stop PRD Generation' },
+  generatePrdTest: { label: 'Generate PRD Test' },
+  healPrdTest: { label: 'Heal PRD Test' },
+  runPrdTest: { label: 'Run PRD Test' },
+  syncCiRuns: { label: 'Sync CI Runs' },
+  dispatchCiWorkflow: { label: 'Dispatch CI Workflow' },
+  cancelCiRun: { label: 'Cancel CI Run' },
+  rerunCiRun: { label: 'Rerun CI Run' },
+  generateCiWorkflowChange: { label: 'Generate CI Workflow Change' },
+  openCiWorkflowPullRequest: { label: 'Open CI Workflow Pull Request' },
+  analyzePullRequestTests: { label: 'Analyze Pull Request Tests' },
+  runPrAdvisorRecommendedTests: { label: 'Run PR Advisor Recommended Tests' },
+  startPrQualityGate: { label: 'Start PR Quality Gate' },
+  generateJiraBugReport: { label: 'Generate Jira Bug Report' },
+  createJiraIssue: { label: 'Create Jira Issue' },
+  pushTestRailCases: { label: 'Push TestRail Cases' },
+  syncTestRailResults: { label: 'Sync TestRail Results' },
+  deleteTestRailMapping: { label: 'Delete TestRail Mapping' },
 };
 
 export const MUTATING_TOOL_NAMES = new Set(Object.keys(MUTATING_TOOL_CONFIGS));
@@ -74,7 +160,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
     return params;
   }
 
-  async function fetchTool(path: string, method = 'GET', body?: Record<string, unknown>): Promise<ToolResult> {
+  async function fetchTool(path: string, method = 'GET', body?: unknown): Promise<ToolResult> {
     const res = await backendFetch(path, { ...opts, method, body });
     if (!res.ok) return { error: res.error } as ToolResult;
     return res.data as ToolResult;
@@ -83,12 +169,306 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
   return {
     // ===== Read-only tools =====
 
+    getWorkflowCapabilities: tool({
+      description: 'Show which dashboard workflows the chatbot can inspect, start, monitor, stop, analyze, or improve. Use this when the user asks what can be controlled from chat.',
+      inputSchema: z.object({
+        section: z.string().optional().describe('Optional dashboard section filter, e.g. "CI/CD", "Projects", "Schedules"'),
+      }),
+      execute: async ({ section }): Promise<ToolResult> => {
+        const capabilities = section
+          ? ASSISTANT_WORKFLOW_CAPABILITIES.filter((capability) =>
+              capability.section.toLowerCase().includes(section.toLowerCase())
+              || capability.page.toLowerCase().includes(section.toLowerCase())
+            )
+          : ASSISTANT_WORKFLOW_CAPABILITIES;
+        return { capabilities, count: capabilities.length } as ToolResult;
+      },
+    }),
+
+    getChatControlAudit: tool({
+      description: 'Audit chatbot control coverage by domain, including supported, partial, and intentionally omitted areas. Use this when users ask what is missing or how chat control can improve.',
+      inputSchema: z.object({
+        includeRecommendations: z.boolean().optional().default(true),
+      }),
+      execute: async ({ includeRecommendations }): Promise<ToolResult> => {
+        const partial = CHAT_CONTROL_DOMAINS.filter((domain) => domain.status !== 'supported');
+        return {
+          summary: {
+            domains: CHAT_CONTROL_DOMAINS.length,
+            supported: CHAT_CONTROL_DOMAINS.filter((domain) => domain.status === 'supported').length,
+            partial: partial.length,
+            declared_workflows: ASSISTANT_WORKFLOW_CAPABILITIES.length,
+          },
+          domains: CHAT_CONTROL_DOMAINS,
+          gaps: partial,
+          recommended_actions: includeRecommendations ? [
+            'Use planUiTestCoverage before creating or running new tests.',
+            'Use analyzeUiTestRunArtifacts after failures before healing or filing bugs.',
+            'Use Explorer Agent flow tools to turn discovered flows into runnable specs.',
+            'Use Jira/TestRail tools only after project integrations are configured.',
+          ] : [],
+        } as ToolResult;
+      },
+    }),
+
+    planUiTestCoverage: tool({
+      description: 'Build a chat-native UI test coverage plan from specs, requirements, RTM gaps, memory coverage gaps, test suggestions, recent runs, and flaky tests.',
+      inputSchema: z.object({
+        focus: z.string().optional().describe('Optional product area, page, requirement, or risk to focus on'),
+        limit: z.number().optional().default(20),
+      }),
+      execute: async ({ focus, limit }): Promise<ToolResult> => {
+        const params = projectParams();
+        const suggestionParams = new URLSearchParams(params);
+        suggestionParams.set('max_suggestions', String(limit ?? 20));
+        if (focus) suggestionParams.set('feature', focus);
+        const coverageGapParams = new URLSearchParams(params);
+        coverageGapParams.set('max_results', String(limit ?? 20));
+        if (focus) coverageGapParams.set('url', focus);
+        const recentRunParams = new URLSearchParams(params);
+        recentRunParams.set('limit', '10');
+        const [specs, requirements, rtmCoverage, rtmGaps, memoryGaps, suggestions, recentRuns, flaky] = await Promise.all([
+          fetchTool(`/specs?${params}`),
+          fetchTool(`/requirements?${params}`),
+          fetchTool(`/rtm/coverage?${params}`),
+          fetchTool(`/rtm/gaps?${params}`),
+          fetchTool(`/api/memory/coverage/gaps?${coverageGapParams}`),
+          fetchTool(`/api/memory/coverage/suggestions?${suggestionParams}`),
+          fetchTool(`/runs?${recentRunParams}`),
+          fetchTool(`/analytics/flake-detection?${params}`),
+        ]);
+        return {
+          focus: focus || null,
+          inputs: { specs, requirements, rtmCoverage, rtmGaps, memoryGaps, suggestions, recentRuns, flaky },
+          recommended_next_steps: [
+            'Create or update specs for uncovered high-priority requirements.',
+            'Run a targeted regression batch for affected specs.',
+            'Analyze failed artifacts before healing or filing external bugs.',
+          ],
+        } as ToolResult;
+      },
+    }),
+
+    analyzeUiTestRunArtifacts: tool({
+      description: 'Analyze a UI test run with logs, validation data, generated code, artifacts, failure classification, Jira issue status, and fix suggestions.',
+      inputSchema: z.object({
+        runId: z.string().describe('Run ID to analyze'),
+      }),
+      execute: async ({ runId }): Promise<ToolResult> => {
+        const params = projectParams();
+        const run = await fetchTool(`/runs/${encodeURIComponent(runId)}?${params}`);
+        const specName = run && typeof run === 'object' ? String((run as Record<string, unknown>).spec_name || '') : '';
+        const [validation, failureClassification, jiraIssue, generatedCode] = await Promise.all([
+          fetchTool(`/runs/${encodeURIComponent(runId)}/validation`).catch((error) => ({ error: String(error) }) as ToolResult),
+          fetchTool(`/analytics/failure-classification?${params}`),
+          fetchTool(`/jira/${encodeURIComponent(projectId || 'default')}/issues/${encodeURIComponent(runId)}`).catch(() => null),
+          specName ? fetchTool(`/specs/${encodeURIComponent(specName)}/generated-code?${params}`).catch(() => null) : Promise.resolve(null),
+        ]);
+        return {
+          run,
+          validation,
+          failureClassification,
+          jiraIssue,
+          generatedCode,
+          recommended_next_steps: [
+            'If the failure is selector or timing related, inspect generated code and run healing.',
+            'If the failure is product behavior, generate a Jira bug report before rerunning.',
+            'If the spec is flaky, quarantine it or run a focused regression comparison.',
+          ],
+        } as ToolResult;
+      },
+    }),
+
     getDashboardStats: tool({
       description: 'Get dashboard overview statistics: total specs, recent runs, pass rates, and trends.',
       inputSchema: z.object({}),
       execute: async (): Promise<ToolResult> => {
         return fetchTool('/dashboard');
       },
+    }),
+
+    // ===== Project Workspace Tools =====
+
+    listProjects: tool({
+      description: 'List projects and their spec/run/batch counts.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/projects'),
+    }),
+
+    getProject: tool({
+      description: 'Get project details including spec/run/batch counts.',
+      inputSchema: z.object({
+        projectId: z.string().optional().describe('Project ID. Defaults to the current project.'),
+      }),
+      execute: async ({ projectId: requestedProjectId }): Promise<ToolResult> => {
+        return fetchTool(`/projects/${encodeURIComponent(requestedProjectId || projectId || 'default')}`);
+      },
+    }),
+
+    listProjectMembers: tool({
+      description: 'List members for the current or specified project.',
+      inputSchema: z.object({
+        projectId: z.string().optional().describe('Project ID. Defaults to the current project.'),
+      }),
+      execute: async ({ projectId: requestedProjectId }): Promise<ToolResult> => {
+        return fetchTool(`/projects/${encodeURIComponent(requestedProjectId || projectId || 'default')}/members`);
+      },
+    }),
+
+    listProjectCredentials: tool({
+      description: 'List masked project credentials for the current or specified project.',
+      inputSchema: z.object({
+        projectId: z.string().optional().describe('Project ID. Defaults to the current project.'),
+        includeEnv: z.boolean().optional().default(true).describe('Include masked .env-backed credentials'),
+      }),
+      execute: async ({ projectId: requestedProjectId, includeEnv }): Promise<ToolResult> => {
+        const pid = requestedProjectId || projectId || 'default';
+        return fetchTool(`/projects/${encodeURIComponent(pid)}/credentials?include_env=${includeEnv ?? true}`);
+      },
+    }),
+
+    createProject: tool({
+      description: 'Create a new project. Requires approval.',
+      inputSchema: z.object({
+        name: z.string().describe('Project name'),
+        baseUrl: z.string().optional().describe('Optional base URL for the project'),
+        description: z.string().optional().describe('Optional project description'),
+      }),
+    }),
+
+    updateProject: tool({
+      description: 'Update a project name, base URL, or description. Requires approval.',
+      inputSchema: z.object({
+        projectId: z.string().optional().describe('Project ID. Defaults to the current project.'),
+        name: z.string().optional(),
+        baseUrl: z.string().optional(),
+        description: z.string().optional(),
+      }),
+    }),
+
+    deleteProject: tool({
+      description: 'Delete a project and reassign its content. Requires approval.',
+      inputSchema: z.object({
+        projectId: z.string().describe('Project ID to delete'),
+        reassignTo: z.string().optional().describe('Project ID to reassign content to. Defaults to default project.'),
+      }),
+    }),
+
+    assignSpecToProject: tool({
+      description: 'Assign one spec to a project. Requires approval.',
+      inputSchema: z.object({
+        projectId: z.string().optional().describe('Project ID. Defaults to the current project.'),
+        specName: z.string().describe('Spec name/path to assign'),
+      }),
+    }),
+
+    bulkAssignSpecsToProject: tool({
+      description: 'Assign multiple specs to a project. Requires approval.',
+      inputSchema: z.object({
+        projectId: z.string().optional().describe('Project ID. Defaults to the current project.'),
+        specNames: z.array(z.string()).min(1).describe('Spec names/paths to assign'),
+      }),
+    }),
+
+    setProjectCredential: tool({
+      description: 'Add or update a project credential. Requires approval and redacts the value in chat history.',
+      inputSchema: z.object({
+        projectId: z.string().optional().describe('Project ID. Defaults to the current project.'),
+        key: z.string().describe('Credential key, e.g. APP_USERNAME'),
+        value: z.string().describe('Credential value'),
+      }),
+    }),
+
+    removeProjectCredential: tool({
+      description: 'Remove a project-specific credential. Requires approval.',
+      inputSchema: z.object({
+        projectId: z.string().optional().describe('Project ID. Defaults to the current project.'),
+        key: z.string().describe('Credential key to remove'),
+      }),
+    }),
+
+    // ===== Recording Tools =====
+
+    listRecordings: tool({
+      description: 'List Playwright recorder sessions for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/recordings?${params}`);
+      },
+    }),
+
+    getRecording: tool({
+      description: 'Get recording session status and artifact paths.',
+      inputSchema: z.object({
+        recordingId: z.string().describe('Recording session ID'),
+      }),
+      execute: async ({ recordingId }): Promise<ToolResult> => {
+        return fetchTool(`/recordings/${encodeURIComponent(recordingId)}`);
+      },
+    }),
+
+    getRecordingCode: tool({
+      description: 'Get generated Playwright code for a recording session.',
+      inputSchema: z.object({
+        recordingId: z.string().describe('Recording session ID'),
+      }),
+      execute: async ({ recordingId }): Promise<ToolResult> => {
+        const code = await fetchTool(`/recordings/${encodeURIComponent(recordingId)}/code`) as unknown;
+        return typeof code === 'string' ? { code } : code as ToolResult;
+      },
+    }),
+
+    startRecording: tool({
+      description: 'Start a Playwright codegen recording session for a target URL. Requires approval.',
+      inputSchema: z.object({
+        targetUrl: z.string().url().describe('URL to record'),
+        name: z.string().optional().describe('Optional recording name'),
+        viewportSize: z.string().optional().describe('Viewport size like "1280,720"'),
+        device: z.string().optional().describe('Optional Playwright device name'),
+        loadStoragePath: z.string().optional().describe('Optional storage state path'),
+        saveStorage: z.boolean().optional().default(false),
+        saveHar: z.boolean().optional().default(false),
+      }),
+    }),
+
+    stopRecording: tool({
+      description: 'Stop an active recording session. Requires approval.',
+      inputSchema: z.object({
+        recordingId: z.string().describe('Recording session ID'),
+      }),
+    }),
+
+    importRecording: tool({
+      description: 'Import a completed or stopped recording into a spec and generated test file. Requires approval.',
+      inputSchema: z.object({
+        recordingId: z.string().describe('Recording session ID'),
+        name: z.string().optional().describe('Optional spec title/name'),
+      }),
+    }),
+
+    // ===== Settings Tools =====
+
+    getAssistantSettings: tool({
+      description: 'Get masked AI assistant runtime settings.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/settings'),
+    }),
+
+    testAssistantSettingsConnection: tool({
+      description: 'Test the active AI assistant provider/model connection.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/settings/test-connection', 'POST'),
+    }),
+
+    updateAssistantSettings: tool({
+      description: 'Update AI assistant provider settings. Requires approval.',
+      inputSchema: z.object({
+        llmProvider: z.string().describe('Provider label, e.g. anthropic, openrouter, custom'),
+        apiKey: z.string().optional().describe('New API key/token. Omit to keep current key.'),
+        baseUrl: z.string().optional().describe('Optional provider base URL'),
+        modelName: z.string().optional().describe('Model name to use'),
+      }),
     }),
 
     listTestSpecs: tool({
@@ -142,11 +522,183 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
 
     getRequirements: tool({
       description: 'List requirements with their category, priority, and coverage status.',
+      inputSchema: z.object({
+        search: z.string().optional().describe('Optional search text'),
+        category: z.string().optional().describe('Optional category filter'),
+        priority: z.string().optional().describe('Optional priority filter'),
+        status: z.string().optional().describe('Optional status filter'),
+      }),
+      execute: async ({ search, category, priority, status }): Promise<ToolResult> => {
+        const params = projectParams();
+        if (search) params.set('search', search);
+        if (category) params.set('category', category);
+        if (priority) params.set('priority', priority);
+        if (status) params.set('status', status);
+        return fetchTool(`/requirements?${params}`);
+      },
+    }),
+
+    getRequirementDetails: tool({
+      description: 'Get one requirement by ID, including acceptance criteria and traceability fields.',
+      inputSchema: z.object({
+        requirementId: z.number().describe('Requirement ID'),
+      }),
+      execute: async ({ requirementId }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/requirements/${requirementId}?${params}`);
+      },
+    }),
+
+    getRequirementStats: tool({
+      description: 'Get requirement counts by category, priority, status, and coverage.',
       inputSchema: z.object({}),
       execute: async (): Promise<ToolResult> => {
         const params = projectParams();
-        return fetchTool(`/requirements?${params}`);
+        return fetchTool(`/requirements/stats?${params}`);
       },
+    }),
+
+    getRequirementHealth: tool({
+      description: 'Get requirement-system health and duplicate/coverage signals.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/requirements/health?${params}`);
+      },
+    }),
+
+    listRequirementCategories: tool({
+      description: 'List requirement categories currently used by the project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/requirements/categories/list?${params}`);
+      },
+    }),
+
+    findDuplicateRequirements: tool({
+      description: 'List requirement duplicate groups detected by the backend.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/requirements/duplicates?${params}`);
+      },
+    }),
+
+    checkRequirementDuplicate: tool({
+      description: 'Check whether a proposed requirement title/description duplicates existing requirements.',
+      inputSchema: z.object({
+        title: z.string(),
+        description: z.string().optional(),
+      }),
+      execute: async ({ title, description }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/requirements/check-duplicate?${params}`, 'POST', { title, description });
+      },
+    }),
+
+    getRequirementsGenerateJob: tool({
+      description: 'Get status for a requirements generation job.',
+      inputSchema: z.object({
+        jobId: z.string(),
+      }),
+      execute: async ({ jobId }): Promise<ToolResult> => {
+        return fetchTool(`/requirements/generate-jobs/${encodeURIComponent(jobId)}`);
+      },
+    }),
+
+    getBulkSpecGenerationJob: tool({
+      description: 'Get status for a bulk requirement-to-spec generation job.',
+      inputSchema: z.object({
+        jobId: z.string(),
+      }),
+      execute: async ({ jobId }): Promise<ToolResult> => {
+        return fetchTool(`/requirements/bulk-generate-jobs/${encodeURIComponent(jobId)}`);
+      },
+    }),
+
+    getRequirementSpecStatus: tool({
+      description: 'Check whether a requirement already has generated specs or linked tests.',
+      inputSchema: z.object({
+        requirementId: z.number(),
+      }),
+      execute: async ({ requirementId }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/requirements/${requirementId}/spec-status?${params}`);
+      },
+    }),
+
+    createRequirement: tool({
+      description: 'Create a requirement with acceptance criteria. Requires approval.',
+      inputSchema: z.object({
+        title: z.string(),
+        description: z.string().optional(),
+        category: z.string().optional().default('other'),
+        priority: z.enum(['low', 'medium', 'high', 'critical']).optional().default('medium'),
+        acceptanceCriteria: z.array(z.string()).optional().default([]),
+      }),
+    }),
+
+    bulkCreateRequirements: tool({
+      description: 'Create multiple requirements in one request. Requires approval.',
+      inputSchema: z.object({
+        items: z.array(z.object({
+          title: z.string(),
+          description: z.string().optional(),
+          category: z.string().optional().default('other'),
+          priority: z.enum(['low', 'medium', 'high', 'critical']).optional().default('medium'),
+          acceptanceCriteria: z.array(z.string()).optional().default([]),
+        })).min(1),
+      }),
+    }),
+
+    updateRequirement: tool({
+      description: 'Update a requirement title, description, category, priority, status, or acceptance criteria. Requires approval.',
+      inputSchema: z.object({
+        requirementId: z.number(),
+        title: z.string().optional(),
+        description: z.string().optional(),
+        category: z.string().optional(),
+        priority: z.enum(['low', 'medium', 'high', 'critical']).optional(),
+        status: z.string().optional(),
+        acceptanceCriteria: z.array(z.string()).optional(),
+      }),
+    }),
+
+    deleteRequirement: tool({
+      description: 'Delete a requirement. Requires approval.',
+      inputSchema: z.object({
+        requirementId: z.number(),
+      }),
+    }),
+
+    generateSpecFromRequirement: tool({
+      description: 'Generate a test spec for a single requirement. Requires approval.',
+      inputSchema: z.object({
+        requirementId: z.number(),
+        targetUrl: z.string().url(),
+        loginUrl: z.string().url().optional(),
+        credentials: z.record(z.unknown()).optional(),
+        forceRegenerate: z.boolean().optional().default(false),
+      }),
+    }),
+
+    bulkGenerateRequirementSpecs: tool({
+      description: 'Generate specs for uncovered requirements in the current project. Requires approval.',
+      inputSchema: z.object({
+        targetUrl: z.string().url(),
+        loginUrl: z.string().url().optional(),
+        credentials: z.record(z.unknown()).optional(),
+      }),
+    }),
+
+    mergeRequirements: tool({
+      description: 'Merge duplicate requirements into a canonical requirement. Requires approval.',
+      inputSchema: z.object({
+        canonicalId: z.number(),
+        duplicateIds: z.array(z.number()).min(1),
+        mergeAcceptanceCriteria: z.boolean().optional().default(true),
+      }),
     }),
 
     getRTMSummary: tool({
@@ -156,6 +708,117 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         const params = projectParams();
         return fetchTool(`/rtm/coverage?${params}`);
       },
+    }),
+
+    getRTMMatrix: tool({
+      description: 'Get paginated requirements traceability matrix rows, with optional search and filters.',
+      inputSchema: z.object({
+        limit: z.number().optional().default(50),
+        offset: z.number().optional().default(0),
+        search: z.string().optional(),
+        coverageStatus: z.enum(['covered', 'partial', 'uncovered']).optional(),
+        category: z.string().optional(),
+        priority: z.string().optional(),
+      }),
+      execute: async ({ limit, offset, search, coverageStatus, category, priority }): Promise<ToolResult> => {
+        const params = projectParams();
+        params.set('limit', String(limit ?? 50));
+        params.set('offset', String(offset ?? 0));
+        if (search) params.set('search', search);
+        if (coverageStatus) params.set('coverage_status', coverageStatus);
+        if (category) params.set('category', category);
+        if (priority) params.set('priority', priority);
+        return fetchTool(`/rtm?${params}`);
+      },
+    }),
+
+    getRTMGenerateJob: tool({
+      description: 'Get status for an RTM generation job.',
+      inputSchema: z.object({
+        jobId: z.string(),
+      }),
+      execute: async ({ jobId }): Promise<ToolResult> => {
+        return fetchTool(`/rtm/generate-jobs/${encodeURIComponent(jobId)}`);
+      },
+    }),
+
+    listRTMSnapshots: tool({
+      description: 'List saved RTM coverage snapshots.',
+      inputSchema: z.object({
+        limit: z.number().optional().default(20),
+      }),
+      execute: async ({ limit }): Promise<ToolResult> => {
+        const params = projectParams();
+        params.set('limit', String(limit ?? 20));
+        return fetchTool(`/rtm/snapshots?${params}`);
+      },
+    }),
+
+    getRTMSnapshotDetail: tool({
+      description: 'Get one RTM snapshot by ID.',
+      inputSchema: z.object({
+        snapshotId: z.number(),
+      }),
+      execute: async ({ snapshotId }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/rtm/snapshot/${snapshotId}?${params}`);
+      },
+    }),
+
+    getRequirementTests: tool({
+      description: 'List tests mapped to a requirement.',
+      inputSchema: z.object({
+        requirementId: z.number(),
+      }),
+      execute: async ({ requirementId }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/rtm/requirement/${requirementId}/tests?${params}`);
+      },
+    }),
+
+    getTestRequirements: tool({
+      description: 'List requirements covered by a test spec.',
+      inputSchema: z.object({
+        testName: z.string(),
+      }),
+      execute: async ({ testName }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/rtm/test/${encodeURIComponent(testName)}/requirements?${params}`);
+      },
+    }),
+
+    generateRTM: tool({
+      description: 'Generate or refresh the requirements traceability matrix. Requires approval.',
+      inputSchema: z.object({
+        specsPaths: z.array(z.string()).optional().describe('Optional spec paths to limit matching'),
+        useAiMatching: z.boolean().optional().default(true),
+      }),
+    }),
+
+    createRTMSnapshot: tool({
+      description: 'Create a snapshot of current RTM coverage. Requires approval.',
+      inputSchema: z.object({
+        name: z.string().optional().describe('Optional snapshot name'),
+      }),
+    }),
+
+    createRTMEntry: tool({
+      description: 'Manually map a requirement to a test. Requires approval.',
+      inputSchema: z.object({
+        requirementId: z.number(),
+        testSpecName: z.string(),
+        testSpecPath: z.string().optional(),
+        mappingType: z.enum(['full', 'partial']).optional().default('full'),
+        confidence: z.number().optional().default(1),
+        coverageNotes: z.string().optional(),
+      }),
+    }),
+
+    deleteRTMEntry: tool({
+      description: 'Delete a manual RTM mapping entry. Requires approval.',
+      inputSchema: z.object({
+        entryId: z.number(),
+      }),
     }),
 
     getLoadTestResults: tool({
@@ -173,6 +836,69 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       execute: async (): Promise<ToolResult> => {
         const params = projectParams();
         return fetchTool(`/security-testing/findings/summary?${params}`);
+      },
+    }),
+
+    getSecurityCapabilities: tool({
+      description: 'Get available security scanner capabilities and configured engines.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/security-testing/capabilities'),
+    }),
+
+    getSecurityTargets: tool({
+      description: 'List known security scan targets for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/security-testing/targets?${params}`);
+      },
+    }),
+
+    listSecuritySpecs: tool({
+      description: 'List security testing specs for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/security-testing/specs?${params}`);
+      },
+    }),
+
+    getSecuritySpec: tool({
+      description: 'Get markdown content for a security testing spec.',
+      inputSchema: z.object({
+        specName: z.string(),
+      }),
+      execute: async ({ specName }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/security-testing/specs/${encodeURIComponent(specName)}?${params}`);
+      },
+    }),
+
+    getSecurityJobStatus: tool({
+      description: 'Get status for a security testing background job.',
+      inputSchema: z.object({
+        jobId: z.string(),
+      }),
+      execute: async ({ jobId }): Promise<ToolResult> => {
+        return fetchTool(`/security-testing/jobs/${encodeURIComponent(jobId)}`);
+      },
+    }),
+
+    listSecurityFindings: tool({
+      description: 'List security findings across runs, optionally filtered by severity or status.',
+      inputSchema: z.object({
+        severity: z.string().optional(),
+        status: z.string().optional(),
+        limit: z.number().optional().default(50),
+        offset: z.number().optional().default(0),
+      }),
+      execute: async ({ severity, status, limit, offset }): Promise<ToolResult> => {
+        const params = projectParams();
+        params.set('limit', String(limit ?? 50));
+        params.set('offset', String(offset ?? 0));
+        if (severity) params.set('severity', severity);
+        if (status) params.set('status', status);
+        return fetchTool(`/security-testing/findings?${params}`);
       },
     }),
 
@@ -214,6 +940,39 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       },
     }),
 
+    getSpecPerformance: tool({
+      description: 'Get per-spec performance analytics including duration, pass rate, and flakiness signals.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/analytics/spec-performance?${params}`);
+      },
+    }),
+
+    getCoverageOverview: tool({
+      description: 'Get coverage overview across requirements, specs, and execution history.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/analytics/coverage-overview?${params}`);
+      },
+    }),
+
+    quarantineSpec: tool({
+      description: 'Quarantine a flaky or unsafe spec so it is excluded from normal runs. Requires approval.',
+      inputSchema: z.object({
+        specName: z.string(),
+        reason: z.string().optional(),
+      }),
+    }),
+
+    unquarantineSpec: tool({
+      description: 'Remove a spec from quarantine. Requires approval.',
+      inputSchema: z.object({
+        specName: z.string(),
+      }),
+    }),
+
     getSpecContent: tool({
       description: 'Get the full content of a test specification file.',
       inputSchema: z.object({
@@ -236,6 +995,54 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       },
     }),
 
+    listSpecFolders: tool({
+      description: 'List spec folders with automated test counts.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/specs/folders?${params}`);
+      },
+    }),
+
+    listAutomatedSpecs: tool({
+      description: 'List specs that have generated automated Playwright tests, with optional tag/folder filters.',
+      inputSchema: z.object({
+        tags: z.string().optional().describe('Comma-separated tag filter'),
+        folder: z.string().optional(),
+        limit: z.number().optional().default(50),
+        offset: z.number().optional().default(0),
+      }),
+      execute: async ({ tags, folder, limit, offset }): Promise<ToolResult> => {
+        const params = projectParams();
+        if (tags) params.set('tags', tags);
+        if (folder) params.set('folder', folder);
+        params.set('limit', String(limit ?? 50));
+        params.set('offset', String(offset ?? 0));
+        return fetchTool(`/specs/automated?${params}`);
+      },
+    }),
+
+    getSpecMetadata: tool({
+      description: 'Get metadata for one spec, including tags, description, author, and project assignment.',
+      inputSchema: z.object({
+        specName: z.string(),
+      }),
+      execute: async ({ specName }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/spec-metadata/${encodeURIComponent(specName)}?${params}`);
+      },
+    }),
+
+    getSpecInfo: tool({
+      description: 'Get parsed spec information, including type, test count, categories, and extracted test cases.',
+      inputSchema: z.object({
+        specName: z.string(),
+      }),
+      execute: async ({ specName }): Promise<ToolResult> => {
+        return fetchTool(`/specs/${encodeURIComponent(specName)}/info`);
+      },
+    }),
+
     getExplorationDetails: tool({
       description: 'Get detailed exploration session results including discovered pages, flows, and API endpoints.',
       inputSchema: z.object({
@@ -243,6 +1050,68 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       }),
       execute: async ({ sessionId }): Promise<ToolResult> => {
         return fetchTool(`/exploration/${sessionId}/details`);
+      },
+    }),
+
+    getExplorationHealth: tool({
+      description: 'Get exploration subsystem health.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/exploration/health'),
+    }),
+
+    getExplorationQueueStatus: tool({
+      description: 'Get queued/running exploration job status.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/exploration/queue/status'),
+    }),
+
+    getExplorationArtifacts: tool({
+      description: 'List artifacts captured for an exploration session.',
+      inputSchema: z.object({
+        sessionId: z.string(),
+      }),
+      execute: async ({ sessionId }): Promise<ToolResult> => {
+        return fetchTool(`/exploration/${encodeURIComponent(sessionId)}/artifacts`);
+      },
+    }),
+
+    getExplorationResults: tool({
+      description: 'Get structured exploration results for one session.',
+      inputSchema: z.object({
+        sessionId: z.string(),
+      }),
+      execute: async ({ sessionId }): Promise<ToolResult> => {
+        return fetchTool(`/exploration/${encodeURIComponent(sessionId)}/results`);
+      },
+    }),
+
+    getExplorationFlows: tool({
+      description: 'Get discovered flows for one exploration session.',
+      inputSchema: z.object({
+        sessionId: z.string(),
+      }),
+      execute: async ({ sessionId }): Promise<ToolResult> => {
+        return fetchTool(`/exploration/${encodeURIComponent(sessionId)}/flows`);
+      },
+    }),
+
+    getExplorationApis: tool({
+      description: 'Get API endpoints discovered during one exploration session.',
+      inputSchema: z.object({
+        sessionId: z.string(),
+      }),
+      execute: async ({ sessionId }): Promise<ToolResult> => {
+        return fetchTool(`/exploration/${encodeURIComponent(sessionId)}/apis`);
+      },
+    }),
+
+    getExplorationIssues: tool({
+      description: 'Get issues discovered during one exploration session.',
+      inputSchema: z.object({
+        sessionId: z.string(),
+      }),
+      execute: async ({ sessionId }): Promise<ToolResult> => {
+        return fetchTool(`/exploration/${encodeURIComponent(sessionId)}/issues`);
       },
     }),
 
@@ -291,6 +1160,91 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       },
     }),
 
+    getAgentQueueStatus: tool({
+      description: 'Get autonomous agent queue and slot status.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/api/agents/queue-status'),
+    }),
+
+    listAgentToolCatalog: tool({
+      description: 'List tools available to custom and exploratory agents.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/api/agents/tools/catalog'),
+    }),
+
+    listAgentDefinitions: tool({
+      description: 'List custom agent definitions for the current project.',
+      inputSchema: z.object({
+        includeArchived: z.boolean().optional().default(false),
+      }),
+      execute: async ({ includeArchived }): Promise<ToolResult> => {
+        const params = projectParams();
+        params.set('include_archived', String(includeArchived ?? false));
+        return fetchTool(`/api/agents/definitions?${params}`);
+      },
+    }),
+
+    getAgentDefinition: tool({
+      description: 'Get one custom agent definition.',
+      inputSchema: z.object({
+        definitionId: z.string(),
+      }),
+      execute: async ({ definitionId }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/api/agents/definitions/${encodeURIComponent(definitionId)}?${params}`);
+      },
+    }),
+
+    getAgentRun: tool({
+      description: 'Get raw status, progress, result, and artifacts for an agent run.',
+      inputSchema: z.object({
+        runId: z.string(),
+      }),
+      execute: async ({ runId }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/api/agents/runs/${encodeURIComponent(runId)}?${params}`);
+      },
+    }),
+
+    getExplorerGeneratedSpecs: tool({
+      description: 'Get specs synthesized from an Explorer Agent run.',
+      inputSchema: z.object({
+        runId: z.string(),
+      }),
+      execute: async ({ runId }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/api/agents/exploratory/${encodeURIComponent(runId)}/specs?${params}`);
+      },
+    }),
+
+    getExplorerFlowDetails: tool({
+      description: 'Get full details for a flow discovered by Explorer Agent.',
+      inputSchema: z.object({
+        runId: z.string(),
+        flowId: z.string(),
+      }),
+      execute: async ({ runId, flowId }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/api/agents/exploratory/${encodeURIComponent(runId)}/flows/${encodeURIComponent(flowId)}?${params}`);
+      },
+    }),
+
+    getExplorerFlowSpecJob: tool({
+      description: 'Get status for an Explorer Agent flow spec/test generation job.',
+      inputSchema: z.object({
+        jobId: z.string(),
+      }),
+      execute: async ({ jobId }): Promise<ToolResult> => {
+        return fetchTool(`/api/agents/exploratory/flow-spec-jobs/${encodeURIComponent(jobId)}`);
+      },
+    }),
+
+    listExplorerSessions: tool({
+      description: 'List saved authentication sessions reusable by Explorer Agent.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/api/agents/sessions'),
+    }),
+
     getRegressionBatches: tool({
       description: 'Get regression batch results with pass/fail counts and duration. Supports pagination via limit/offset.',
       inputSchema: z.object({
@@ -305,6 +1259,42 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       },
     }),
 
+    getRegressionBatchDetail: tool({
+      description: 'Get detailed regression batch information including all runs.',
+      inputSchema: z.object({
+        batchId: z.string(),
+      }),
+      execute: async ({ batchId }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/regression/batches/${encodeURIComponent(batchId)}?${params}`);
+      },
+    }),
+
+    getSpecHistory: tool({
+      description: 'Get one spec history across regression batches.',
+      inputSchema: z.object({
+        specName: z.string(),
+        limit: z.number().optional().default(10),
+      }),
+      execute: async ({ specName, limit }): Promise<ToolResult> => {
+        const params = projectParams();
+        params.set('spec_name', specName);
+        params.set('limit', String(limit ?? 10));
+        return fetchTool(`/regression/spec-history?${params}`);
+      },
+    }),
+
+    exportRegressionBatch: tool({
+      description: 'Export a regression batch report in a supported format.',
+      inputSchema: z.object({
+        batchId: z.string(),
+        format: z.enum(['json', 'csv', 'html']).optional().default('json'),
+      }),
+      execute: async ({ batchId, format }): Promise<ToolResult> => {
+        return fetchTool(`/regression/batches/${encodeURIComponent(batchId)}/export?format=${format ?? 'json'}`);
+      },
+    }),
+
     getSecurityRunDetails: tool({
       description: 'Get detailed security scan results including findings by severity.',
       inputSchema: z.object({
@@ -312,6 +1302,16 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       }),
       execute: async ({ runId }): Promise<ToolResult> => {
         return fetchTool(`/security-testing/runs/${runId}`);
+      },
+    }),
+
+    getSecurityRunFindings: tool({
+      description: 'Get findings for one security scan run.',
+      inputSchema: z.object({
+        runId: z.string().describe('The security scan run ID'),
+      }),
+      execute: async ({ runId }): Promise<ToolResult> => {
+        return fetchTool(`/security-testing/runs/${encodeURIComponent(runId)}/findings`);
       },
     }),
 
@@ -464,10 +1464,90 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       }),
     }),
 
+    synthesizeExplorerSpecs: tool({
+      description: 'Synthesize markdown specs from a completed Explorer Agent run. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string(),
+      }),
+    }),
+
+    analyzeExplorerPrerequisites: tool({
+      description: 'Analyze Explorer Agent flows for authentication, data, and dependency prerequisites. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string(),
+        forceReanalyze: z.boolean().optional().default(false),
+      }),
+    }),
+
+    generateExplorerFlowSpec: tool({
+      description: 'Generate a markdown spec for one Explorer Agent flow. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string(),
+        flowId: z.string(),
+        forceRegenerate: z.boolean().optional().default(false),
+      }),
+    }),
+
+    generateExplorerFlowTest: tool({
+      description: 'Generate a runnable spec/test pipeline for one Explorer Agent flow. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string(),
+        flowId: z.string(),
+        forceRegenerate: z.boolean().optional().default(false),
+      }),
+    }),
+
+    updateExplorerFlow: tool({
+      description: 'Update discovered Explorer Agent flow metadata before generating specs. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string(),
+        flowId: z.string(),
+        updates: z.record(z.unknown()),
+      }),
+    }),
+
+    deleteExplorerFlow: tool({
+      description: 'Delete a discovered Explorer Agent flow. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string(),
+        flowId: z.string(),
+      }),
+    }),
+
+    saveExplorerSession: tool({
+      description: 'Save reusable Explorer Agent authentication session data. Requires approval.',
+      inputSchema: z.object({
+        sessionId: z.string(),
+        cookies: z.array(z.record(z.unknown())).default([]),
+        storage: z.record(z.unknown()).default({}),
+      }),
+    }),
+
+    deleteExplorerSession: tool({
+      description: 'Delete a saved Explorer Agent authentication session. Requires approval.',
+      inputSchema: z.object({
+        sessionId: z.string(),
+      }),
+    }),
+
     stopExploration: tool({
       description: 'Stop a running or queued exploration session.',
       inputSchema: z.object({
         sessionId: z.string().describe('The exploration session ID to stop'),
+      }),
+    }),
+
+    generateApiSpecsFromExploration: tool({
+      description: 'Generate API specs from an exploration session. Requires approval.',
+      inputSchema: z.object({
+        sessionId: z.string(),
+      }),
+    }),
+
+    generateApiTestsFromExploration: tool({
+      description: 'Generate API tests from an exploration session. Requires approval.',
+      inputSchema: z.object({
+        sessionId: z.string(),
       }),
     }),
 
@@ -496,6 +1576,60 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       }),
     }),
 
+    updateGeneratedCode: tool({
+      description: 'Update generated Playwright code for a spec. Requires approval.',
+      inputSchema: z.object({
+        specName: z.string(),
+        code: z.string(),
+      }),
+    }),
+
+    updateSpecMetadata: tool({
+      description: 'Update spec metadata such as tags, description, author, or project assignment. Requires approval.',
+      inputSchema: z.object({
+        specName: z.string(),
+        tags: z.array(z.string()).optional(),
+        description: z.string().optional(),
+        author: z.string().optional(),
+        projectId: z.string().optional(),
+      }),
+    }),
+
+    moveSpec: tool({
+      description: 'Move a spec file or folder. Requires approval.',
+      inputSchema: z.object({
+        sourcePath: z.string(),
+        destinationFolder: z.string().optional().default(''),
+        isFolder: z.boolean().optional().default(false),
+      }),
+    }),
+
+    renameSpec: tool({
+      description: 'Rename a spec file or folder. Requires approval.',
+      inputSchema: z.object({
+        oldPath: z.string(),
+        newName: z.string(),
+        isFolder: z.boolean().optional().default(false),
+      }),
+    }),
+
+    splitSpec: tool({
+      description: 'Split a multi-test spec into individual test specs. Requires approval.',
+      inputSchema: z.object({
+        specName: z.string(),
+        outputDir: z.string().optional(),
+        mode: z.enum(['individual', 'grouped']).optional().default('individual'),
+      }),
+    }),
+
+    createSpecFolder: tool({
+      description: 'Create a folder under specs. Requires approval.',
+      inputSchema: z.object({
+        folderName: z.string(),
+        parentPath: z.string().optional(),
+      }),
+    }),
+
     runRegressionBatch: tool({
       description: 'Run multiple test specs as a regression batch.',
       inputSchema: z.object({
@@ -503,10 +1637,43 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       }),
     }),
 
+    executeUiTestCoveragePlan: tool({
+      description: 'Execute a chat-created UI test coverage plan by running selected specs as a regression batch. Requires approval.',
+      inputSchema: z.object({
+        specNames: z.array(z.string()).min(1),
+        reason: z.string().optional().describe('Short explanation of the coverage plan being executed'),
+      }),
+    }),
+
     triggerSecurityScan: tool({
       description: 'Run a quick security scan on a URL.',
       inputSchema: z.object({
         url: z.string().describe('The target URL to scan'),
+      }),
+    }),
+
+    runSecurityScan: tool({
+      description: 'Run a security scan using quick, nuclei, zap, or full mode. Requires approval.',
+      inputSchema: z.object({
+        scanType: z.enum(['quick', 'nuclei', 'zap', 'full']).optional().default('quick'),
+        targetUrl: z.string().url(),
+        loginUrl: z.string().url().optional(),
+        authConfig: z.record(z.unknown()).optional(),
+        usernameKey: z.string().optional(),
+        passwordKey: z.string().optional(),
+        scope: z.enum(['origin', 'domain']).optional().default('origin'),
+        excludedPaths: z.array(z.string()).optional().default([]),
+        activeScanLevel: z.enum(['safe', 'moderate', 'aggressive']).optional().default('safe'),
+        severityFilter: z.array(z.string()).optional(),
+        templates: z.array(z.string()).optional(),
+        scanPolicy: z.string().optional(),
+      }),
+    }),
+
+    stopSecurityScan: tool({
+      description: 'Stop a running security scan. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string(),
       }),
     }),
 
@@ -647,10 +1814,586 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       },
     }),
 
+    getSchedule: tool({
+      description: 'Get details for a test schedule.',
+      inputSchema: z.object({
+        scheduleId: z.string().describe('Schedule ID'),
+      }),
+      execute: async ({ scheduleId }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/scheduling/${encodeURIComponent(pid)}/schedules/${encodeURIComponent(scheduleId)}`);
+      },
+    }),
+
+    validateCronExpression: tool({
+      description: 'Validate a cron expression and preview upcoming run times.',
+      inputSchema: z.object({
+        cronExpression: z.string().describe('5-field cron expression'),
+        timezone: z.string().optional().default('UTC'),
+      }),
+      execute: async ({ cronExpression, timezone }): Promise<ToolResult> => {
+        return fetchTool('/scheduling/validate-cron', 'POST', {
+          cron_expression: cronExpression,
+          timezone: timezone || 'UTC',
+        });
+      },
+    }),
+
+    listScheduleExecutions: tool({
+      description: 'List execution history for one schedule.',
+      inputSchema: z.object({
+        scheduleId: z.string().describe('Schedule ID'),
+        limit: z.number().optional().default(20),
+        offset: z.number().optional().default(0),
+      }),
+      execute: async ({ scheduleId, limit, offset }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        const params = new URLSearchParams({ limit: String(limit ?? 20), offset: String(offset ?? 0) });
+        return fetchTool(`/scheduling/${encodeURIComponent(pid)}/schedules/${encodeURIComponent(scheduleId)}/executions?${params}`);
+      },
+    }),
+
+    listProjectScheduleExecutions: tool({
+      description: 'List recent execution history across all schedules in the current project.',
+      inputSchema: z.object({
+        limit: z.number().optional().default(15),
+        offset: z.number().optional().default(0),
+      }),
+      execute: async ({ limit, offset }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        const params = new URLSearchParams({ limit: String(limit ?? 15), offset: String(offset ?? 0) });
+        return fetchTool(`/scheduling/${encodeURIComponent(pid)}/executions?${params}`);
+      },
+    }),
+
+    getNextScheduleRuns: tool({
+      description: 'Get upcoming run times for a schedule.',
+      inputSchema: z.object({
+        scheduleId: z.string().describe('Schedule ID'),
+        count: z.number().optional().default(5),
+      }),
+      execute: async ({ scheduleId, count }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/scheduling/${encodeURIComponent(pid)}/schedules/${encodeURIComponent(scheduleId)}/next-runs?count=${count ?? 5}`);
+      },
+    }),
+
     triggerScheduleNow: tool({
       description: 'Trigger a scheduled test to run immediately.',
       inputSchema: z.object({
-        scheduleId: z.number().describe('The schedule ID to trigger'),
+        scheduleId: z.string().describe('The schedule ID to trigger'),
+      }),
+    }),
+
+    createSchedule: tool({
+      description: 'Create a cron schedule for recurring test execution. Requires approval.',
+      inputSchema: z.object({
+        name: z.string(),
+        cronExpression: z.string().describe('5-field cron expression'),
+        description: z.string().optional(),
+        timezone: z.string().optional().default('UTC'),
+        tags: z.array(z.string()).optional(),
+        automatedOnly: z.boolean().optional().default(true),
+        browser: z.string().optional().default('chromium'),
+        hybridMode: z.boolean().optional().default(false),
+        maxIterations: z.number().optional().default(20),
+        specNames: z.array(z.string()).optional(),
+        enabled: z.boolean().optional().default(true),
+      }),
+    }),
+
+    updateSchedule: tool({
+      description: 'Update an existing cron schedule. Requires approval.',
+      inputSchema: z.object({
+        scheduleId: z.string(),
+        name: z.string().optional(),
+        cronExpression: z.string().optional(),
+        description: z.string().optional(),
+        timezone: z.string().optional(),
+        tags: z.array(z.string()).optional(),
+        automatedOnly: z.boolean().optional(),
+        browser: z.string().optional(),
+        hybridMode: z.boolean().optional(),
+        maxIterations: z.number().optional(),
+        specNames: z.array(z.string()).optional(),
+        enabled: z.boolean().optional(),
+      }),
+    }),
+
+    deleteSchedule: tool({
+      description: 'Delete a schedule and its execution records. Requires approval.',
+      inputSchema: z.object({
+        scheduleId: z.string(),
+      }),
+    }),
+
+    toggleSchedule: tool({
+      description: 'Toggle a schedule enabled/disabled. Requires approval.',
+      inputSchema: z.object({
+        scheduleId: z.string(),
+      }),
+    }),
+
+    // ===== PRD Workflow Tools =====
+
+    listPrdProjects: tool({
+      description: 'List uploaded PRD projects.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/api/prd/projects${params.toString() ? `?${params.toString()}` : ''}`);
+      },
+    }),
+
+    listPrdFeatures: tool({
+      description: 'List features extracted from a PRD project.',
+      inputSchema: z.object({
+        prdProjectId: z.string().describe('PRD project ID'),
+      }),
+      execute: async ({ prdProjectId }): Promise<ToolResult> => {
+        return fetchTool(`/api/prd/${encodeURIComponent(prdProjectId)}/features`);
+      },
+    }),
+
+    listPrdGenerations: tool({
+      description: 'List test plan generation history for a PRD project.',
+      inputSchema: z.object({
+        prdProjectId: z.string().describe('PRD project ID'),
+        limit: z.number().optional().default(50),
+      }),
+      execute: async ({ prdProjectId, limit }): Promise<ToolResult> => {
+        return fetchTool(`/api/prd/${encodeURIComponent(prdProjectId)}/generations?limit=${limit ?? 50}`);
+      },
+    }),
+
+    getPrdGenerationStatus: tool({
+      description: 'Get status for a PRD test-plan generation task.',
+      inputSchema: z.object({
+        generationId: z.number().describe('Generation ID'),
+      }),
+      execute: async ({ generationId }): Promise<ToolResult> => {
+        return fetchTool(`/api/prd/generation/${generationId}`);
+      },
+    }),
+
+    getPrdQueueStatus: tool({
+      description: 'Get PRD/browser queue status.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/api/prd/queue/status'),
+    }),
+
+    generatePrdPlan: tool({
+      description: 'Generate a test plan/spec for one PRD feature or all features. Requires approval.',
+      inputSchema: z.object({
+        prdProjectId: z.string().describe('PRD project ID'),
+        feature: z.string().optional().describe('Feature name/slug. Omit to generate for all features.'),
+        targetUrl: z.string().optional(),
+        loginUrl: z.string().optional(),
+        credentials: z.record(z.unknown()).optional(),
+      }),
+    }),
+
+    stopPrdGeneration: tool({
+      description: 'Stop a running PRD generation task. Requires approval.',
+      inputSchema: z.object({
+        generationId: z.number(),
+      }),
+    }),
+
+    generatePrdTest: tool({
+      description: 'Generate a Playwright test from a PRD-generated spec. Requires approval.',
+      inputSchema: z.object({
+        specPath: z.string(),
+        targetUrl: z.string().optional(),
+      }),
+    }),
+
+    healPrdTest: tool({
+      description: 'Heal a generated PRD Playwright test from an error log. Requires approval.',
+      inputSchema: z.object({
+        testPath: z.string(),
+        errorLog: z.string(),
+      }),
+    }),
+
+    runPrdTest: tool({
+      description: 'Run a generated PRD Playwright test with optional healing. Requires approval.',
+      inputSchema: z.object({
+        testPath: z.string(),
+        heal: z.boolean().optional().default(true),
+        maxAttempts: z.number().optional().default(3),
+      }),
+    }),
+
+    // ===== CI/CD and PR Advisor Tools =====
+
+    listCiProviders: tool({
+      description: 'List configured CI providers and their capabilities for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/projects/${encodeURIComponent(pid)}/ci/providers`);
+      },
+    }),
+
+    listCiWorkflows: tool({
+      description: 'List CI workflows for GitHub or GitLab.',
+      inputSchema: z.object({
+        provider: z.enum(['github', 'gitlab']).optional().default('github'),
+      }),
+      execute: async ({ provider }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/projects/${encodeURIComponent(pid)}/ci/workflows?provider=${provider || 'github'}`);
+      },
+    }),
+
+    listCiRuns: tool({
+      description: 'List CI runs synced into Quorvex for the current project.',
+      inputSchema: z.object({
+        provider: z.enum(['all', 'github', 'gitlab']).optional().default('all'),
+      }),
+      execute: async ({ provider }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/projects/${encodeURIComponent(pid)}/ci/runs?provider=${provider || 'all'}`);
+      },
+    }),
+
+    getCiRunDetail: tool({
+      description: 'Get CI run detail, optionally refreshing from the provider.',
+      inputSchema: z.object({
+        provider: z.enum(['github', 'gitlab']),
+        mappingId: z.number().describe('Local CI pipeline mapping ID'),
+        refresh: z.boolean().optional().default(false),
+      }),
+      execute: async ({ provider, mappingId, refresh }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/projects/${encodeURIComponent(pid)}/ci/runs/${provider}/${mappingId}?refresh=${refresh ?? false}`);
+      },
+    }),
+
+    getCiRunLogs: tool({
+      description: 'Get CI run logs or log archive URL.',
+      inputSchema: z.object({
+        provider: z.enum(['github', 'gitlab']),
+        mappingId: z.number().describe('Local CI pipeline mapping ID'),
+        jobId: z.string().optional().describe('Optional provider job ID, mainly for GitLab'),
+      }),
+      execute: async ({ provider, mappingId, jobId }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        const params = new URLSearchParams();
+        if (jobId) params.set('job_id', jobId);
+        return fetchTool(`/projects/${encodeURIComponent(pid)}/ci/runs/${provider}/${mappingId}/logs?${params}`);
+      },
+    }),
+
+    listCiAuditEvents: tool({
+      description: 'List CI integration audit events for the current project.',
+      inputSchema: z.object({
+        limit: z.number().optional().default(50),
+      }),
+      execute: async ({ limit }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/projects/${encodeURIComponent(pid)}/ci/audit-events?limit=${limit ?? 50}`);
+      },
+    }),
+
+    listPrAdvisorAnalyses: tool({
+      description: 'List recent PR Advisor impact analyses.',
+      inputSchema: z.object({
+        limit: z.number().optional().default(20),
+      }),
+      execute: async ({ limit }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/github/${encodeURIComponent(pid)}/pr-advisor/analyses?limit=${limit ?? 20}`);
+      },
+    }),
+
+    getPrAdvisorAnalysis: tool({
+      description: 'Get detailed PR Advisor analysis with changed files and selected tests.',
+      inputSchema: z.object({
+        analysisId: z.string(),
+      }),
+      execute: async ({ analysisId }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/github/${encodeURIComponent(pid)}/pr-advisor/analyses/${encodeURIComponent(analysisId)}`);
+      },
+    }),
+
+    getQualityGateConfig: tool({
+      description: 'Get GitHub PR quality gate defaults for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/github/${encodeURIComponent(pid)}/quality-gates/config`);
+      },
+    }),
+
+    listPrQualityGates: tool({
+      description: 'List recent GitHub PR quality gate runs.',
+      inputSchema: z.object({
+        limit: z.number().optional().default(20),
+      }),
+      execute: async ({ limit }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/github/${encodeURIComponent(pid)}/quality-gates/pr?limit=${limit ?? 20}`);
+      },
+    }),
+
+    getPrQualityGate: tool({
+      description: 'Get current state for a stored PR quality gate analysis.',
+      inputSchema: z.object({
+        analysisId: z.string(),
+        refreshFeedback: z.boolean().optional().default(false),
+      }),
+      execute: async ({ analysisId, refreshFeedback }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/github/${encodeURIComponent(pid)}/quality-gates/pr/${encodeURIComponent(analysisId)}?refresh_feedback=${refreshFeedback ?? false}`);
+      },
+    }),
+
+    getPrQualityGateStatus: tool({
+      description: 'Get CI-friendly quality gate status for a PR number and head SHA.',
+      inputSchema: z.object({
+        prNumber: z.number(),
+        headSha: z.string(),
+      }),
+      execute: async ({ prNumber, headSha }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        const params = new URLSearchParams({ pr_number: String(prNumber), head_sha: headSha });
+        return fetchTool(`/github/${encodeURIComponent(pid)}/quality-gates/pr/status?${params}`);
+      },
+    }),
+
+    syncCiRuns: tool({
+      description: 'Sync CI runs from configured providers. Requires approval.',
+      inputSchema: z.object({
+        provider: z.enum(['all', 'github', 'gitlab']).optional().default('all'),
+        workflowId: z.string().optional(),
+        perPage: z.number().optional().default(20),
+      }),
+    }),
+
+    dispatchCiWorkflow: tool({
+      description: 'Dispatch a GitHub workflow or GitLab pipeline. Requires approval.',
+      inputSchema: z.object({
+        provider: z.enum(['github', 'gitlab']).optional().default('github'),
+        workflowId: z.string().optional().describe('GitHub workflow ID/path/name; optional for GitLab'),
+        ref: z.string().optional().describe('Branch/ref'),
+        inputs: z.record(z.string()).optional().describe('Workflow inputs or GitLab variables'),
+      }),
+    }),
+
+    cancelCiRun: tool({
+      description: 'Cancel a synced CI run. Requires approval.',
+      inputSchema: z.object({
+        provider: z.enum(['github', 'gitlab']),
+        mappingId: z.number().describe('Local CI pipeline mapping ID'),
+      }),
+    }),
+
+    rerunCiRun: tool({
+      description: 'Rerun a synced CI run. Requires approval.',
+      inputSchema: z.object({
+        provider: z.enum(['github', 'gitlab']),
+        mappingId: z.number().describe('Local CI pipeline mapping ID'),
+        failedOnly: z.boolean().optional().default(false).describe('GitHub only: rerun failed jobs only'),
+      }),
+    }),
+
+    generateCiWorkflowChange: tool({
+      description: 'Generate a GitHub Actions workflow change request for Quorvex testing. Requires approval.',
+      inputSchema: z.object({
+        workflowName: z.string().optional().default('Quorvex Test Automation'),
+        template: z.enum(['pr-quality-gate', 'playwright-smoke', 'nightly-regression', 'release-gate']).optional().default('pr-quality-gate'),
+        prompt: z.string().optional(),
+        ref: z.string().optional(),
+        branches: z.array(z.string()).optional(),
+        browsers: z.array(z.string()).optional(),
+      }),
+    }),
+
+    openCiWorkflowPullRequest: tool({
+      description: 'Open a GitHub pull request for a generated CI workflow change request. Requires approval.',
+      inputSchema: z.object({
+        changeId: z.string(),
+        baseRef: z.string().optional(),
+        branchName: z.string().optional(),
+        title: z.string().optional(),
+        body: z.string().optional(),
+        commitMessage: z.string().optional(),
+        draft: z.boolean().optional().default(true),
+      }),
+    }),
+
+    analyzePullRequestTests: tool({
+      description: 'Analyze a configured GitHub PR and recommend impacted Quorvex tests. Requires approval because it may index repository data.',
+      inputSchema: z.object({
+        prNumber: z.number(),
+        ensureIndexed: z.boolean().optional().default(true),
+        forceReindex: z.boolean().optional().default(false),
+      }),
+    }),
+
+    runPrAdvisorRecommendedTests: tool({
+      description: 'Run tests selected by a PR Advisor analysis as a regression batch. Requires approval.',
+      inputSchema: z.object({
+        analysisId: z.string(),
+        browser: z.string().optional().default('chromium'),
+        hybrid: z.boolean().optional().default(false),
+        maxIterations: z.number().optional().default(20),
+      }),
+    }),
+
+    startPrQualityGate: tool({
+      description: 'Start a GitHub PR quality gate: analyze a PR, optionally run recommended tests, and optionally publish feedback. Requires approval.',
+      inputSchema: z.object({
+        prNumber: z.number(),
+        headSha: z.string().optional(),
+        ensureIndexed: z.boolean().optional(),
+        runRecommended: z.boolean().optional(),
+        postFeedback: z.boolean().optional(),
+        createCommitStatus: z.boolean().optional(),
+        browser: z.enum(['chromium', 'firefox', 'webkit']).optional(),
+        hybrid: z.boolean().optional(),
+        maxIterations: z.number().optional(),
+        forceReindex: z.boolean().optional(),
+      }),
+    }),
+
+    // ===== Jira and TestRail Integration Tools =====
+
+    getJiraConfig: tool({
+      description: 'Get masked Jira integration config for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/jira/${encodeURIComponent(pid)}/config`);
+      },
+    }),
+
+    testJiraConnection: tool({
+      description: 'Test the stored Jira connection for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/jira/${encodeURIComponent(pid)}/test-connection`, 'POST');
+      },
+    }),
+
+    getJiraBugReportJob: tool({
+      description: 'Get status for a Jira bug report generation job.',
+      inputSchema: z.object({
+        jobId: z.string(),
+      }),
+      execute: async ({ jobId }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/jira/${encodeURIComponent(pid)}/bug-report-jobs/${encodeURIComponent(jobId)}`);
+      },
+    }),
+
+    listJiraIssues: tool({
+      description: 'List Jira issues created from Quorvex runs for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/jira/${encodeURIComponent(pid)}/issues`);
+      },
+    }),
+
+    getJiraIssueForRun: tool({
+      description: 'Check whether a Jira issue exists for a specific test run.',
+      inputSchema: z.object({
+        runId: z.string(),
+      }),
+      execute: async ({ runId }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/jira/${encodeURIComponent(pid)}/issues/${encodeURIComponent(runId)}`);
+      },
+    }),
+
+    generateJiraBugReport: tool({
+      description: 'Generate an AI Jira bug report draft from a failed run. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string(),
+      }),
+    }),
+
+    createJiraIssue: tool({
+      description: 'Create a Jira issue from a reviewed bug report. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string(),
+        projectKey: z.string(),
+        issueTypeId: z.string(),
+        title: z.string(),
+        description: z.string(),
+        priorityName: z.string().optional(),
+        labels: z.array(z.string()).optional(),
+        attachScreenshots: z.boolean().optional().default(true),
+      }),
+    }),
+
+    getTestRailConfig: tool({
+      description: 'Get masked TestRail integration config for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/testrail/${encodeURIComponent(pid)}/config`);
+      },
+    }),
+
+    testTestRailConnection: tool({
+      description: 'Test the stored TestRail connection for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/testrail/${encodeURIComponent(pid)}/test-connection`, 'POST');
+      },
+    }),
+
+    listTestRailMappings: tool({
+      description: 'List spec-to-TestRail case mappings for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/testrail/${encodeURIComponent(pid)}/mappings`);
+      },
+    }),
+
+    getTestRailSyncPreview: tool({
+      description: 'Preview syncing a regression batch to TestRail.',
+      inputSchema: z.object({
+        batchId: z.string(),
+      }),
+      execute: async ({ batchId }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/testrail/${encodeURIComponent(pid)}/sync-preview/${encodeURIComponent(batchId)}`);
+      },
+    }),
+
+    pushTestRailCases: tool({
+      description: 'Push selected specs to TestRail as test cases. Requires approval.',
+      inputSchema: z.object({
+        specNames: z.array(z.string()).min(1),
+        testrailProjectId: z.number(),
+        testrailSuiteId: z.number(),
+        sectionId: z.number().optional(),
+      }),
+    }),
+
+    syncTestRailResults: tool({
+      description: 'Sync a completed regression batch result to TestRail. Requires approval.',
+      inputSchema: z.object({
+        batchId: z.string(),
+        testrailProjectId: z.number(),
+        testrailSuiteId: z.number(),
+        runName: z.string().optional(),
+      }),
+    }),
+
+    deleteTestRailMapping: tool({
+      description: 'Delete a spec-to-TestRail case mapping. Requires approval.',
+      inputSchema: z.object({
+        mappingId: z.number(),
       }),
     }),
 
@@ -794,6 +2537,35 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       }),
     }),
 
+    refreshRegressionBatch: tool({
+      description: 'Recalculate regression batch statistics from associated runs. Requires approval.',
+      inputSchema: z.object({
+        batchId: z.string(),
+      }),
+    }),
+
+    cancelRegressionBatch: tool({
+      description: 'Cancel all queued or running runs in a regression batch. Requires approval.',
+      inputSchema: z.object({
+        batchId: z.string(),
+      }),
+    }),
+
+    renameRegressionBatch: tool({
+      description: 'Rename a regression batch. Requires approval.',
+      inputSchema: z.object({
+        batchId: z.string(),
+        name: z.string(),
+      }),
+    }),
+
+    deleteRegressionBatch: tool({
+      description: 'Delete a regression batch while preserving associated runs. Requires approval.',
+      inputSchema: z.object({
+        batchId: z.string(),
+      }),
+    }),
+
     getRegressionFlakyTests: tool({
       description: 'Get flaky tests specific to regression batches — tests that flip between pass and fail across batches.',
       inputSchema: z.object({}),
@@ -804,6 +2576,110 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
     }),
 
     // ===== Load Testing Analysis Tools =====
+
+    listLoadSpecs: tool({
+      description: 'List load testing specs for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/load-testing/specs?${params}`);
+      },
+    }),
+
+    getLoadSpec: tool({
+      description: 'Get markdown content for a load testing spec.',
+      inputSchema: z.object({
+        specName: z.string(),
+      }),
+      execute: async ({ specName }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/load-testing/specs/${encodeURIComponent(specName)}?${params}`);
+      },
+    }),
+
+    listLoadScripts: tool({
+      description: 'List generated K6 load testing scripts.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/load-testing/scripts?${params}`);
+      },
+    }),
+
+    getLoadScript: tool({
+      description: 'Get one generated K6 load testing script.',
+      inputSchema: z.object({
+        scriptName: z.string(),
+      }),
+      execute: async ({ scriptName }): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/load-testing/scripts/${encodeURIComponent(scriptName)}?${params}`);
+      },
+    }),
+
+    listLoadTestJobs: tool({
+      description: 'List load testing background jobs.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/load-testing/jobs?${params}`);
+      },
+    }),
+
+    getLoadTestJobStatus: tool({
+      description: 'Get status for a load testing background job.',
+      inputSchema: z.object({
+        jobId: z.string(),
+      }),
+      execute: async ({ jobId }): Promise<ToolResult> => {
+        return fetchTool(`/load-testing/jobs/${encodeURIComponent(jobId)}`);
+      },
+    }),
+
+    getLoadTestJobLogs: tool({
+      description: 'Get logs for a load testing background job.',
+      inputSchema: z.object({
+        jobId: z.string(),
+      }),
+      execute: async ({ jobId }): Promise<ToolResult> => {
+        return fetchTool(`/load-testing/jobs/${encodeURIComponent(jobId)}/logs`);
+      },
+    }),
+
+    getLatestLoadRunsBySpec: tool({
+      description: 'Get latest load test runs grouped by spec.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/load-testing/runs/latest-by-spec?${params}`);
+      },
+    }),
+
+    getLoadTestRunDetails: tool({
+      description: 'Get one load test run with metrics and status.',
+      inputSchema: z.object({
+        runId: z.string(),
+      }),
+      execute: async ({ runId }): Promise<ToolResult> => {
+        return fetchTool(`/load-testing/runs/${encodeURIComponent(runId)}`);
+      },
+    }),
+
+    getLoadTestTimeseries: tool({
+      description: 'Get timeseries metrics for a load test run.',
+      inputSchema: z.object({
+        runId: z.string(),
+      }),
+      execute: async ({ runId }): Promise<ToolResult> => {
+        return fetchTool(`/load-testing/runs/${encodeURIComponent(runId)}/timeseries`);
+      },
+    }),
+
+    getLoadTestingStatus: tool({
+      description: 'Get current load testing worker/lock status.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/load-testing/status'),
+    }),
 
     compareLoadTestRuns: tool({
       description: 'Compare two load test runs side by side — response times, throughput, error rates, percentiles.',
@@ -913,6 +2789,29 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
 
     // ===== Security Testing Analysis Tools =====
 
+    createSecuritySpec: tool({
+      description: 'Create a security testing spec. Requires approval.',
+      inputSchema: z.object({
+        specName: z.string(),
+        content: z.string(),
+      }),
+    }),
+
+    updateSecuritySpec: tool({
+      description: 'Update a security testing spec. Requires approval.',
+      inputSchema: z.object({
+        specName: z.string(),
+        content: z.string(),
+      }),
+    }),
+
+    deleteSecuritySpec: tool({
+      description: 'Delete a security testing spec. Requires approval.',
+      inputSchema: z.object({
+        specName: z.string(),
+      }),
+    }),
+
     analyzeSecurityRun: tool({
       description: 'Run AI-powered analysis on a security scan — prioritized findings, remediation steps, risk assessment.',
       inputSchema: z.object({
@@ -941,6 +2840,13 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       },
     }),
 
+    generateSecuritySpecFromExploration: tool({
+      description: 'Generate a security testing spec from an exploration session. Requires approval.',
+      inputSchema: z.object({
+        sessionId: z.string().describe('Exploration session ID'),
+      }),
+    }),
+
     // ===== RTM Analysis Tools =====
 
     getRTMGaps: tool({
@@ -955,7 +2861,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
     exportRTM: tool({
       description: 'Export the requirements traceability matrix in a specified format.',
       inputSchema: z.object({
-        format: z.enum(['csv', 'json', 'html']).describe('Export format'),
+        format: z.enum(['markdown', 'csv', 'html']).describe('Export format'),
       }),
       execute: async ({ format }): Promise<ToolResult> => {
         const params = projectParams();

@@ -1,6 +1,6 @@
 .PHONY: setup setup-skills start restart dev run clean help docker-up docker-down docker-build check-env logs stop \
         autopilot-stable-up autopilot-stable-down autopilot-dev-up autopilot-status autopilot-logs \
-        prod-up prod-down prod-down-safe prod-restart prod-logs prod-build prod-build-no-cache prod-status prod-dev \
+        prod prod-up prod-down prod-down-safe prod-restart prod-logs prod-build prod-build-no-cache prod-status prod-dev \
         backup backup-full backup-status restore-list restore restore-from-minio \
         archival archival-dry-run storage-health minio-console \
         workers-up workers-down workers-scale workers-status workers-logs workers-build \
@@ -21,7 +21,7 @@ help:
 	@echo "  Setup & Run:"
 	@echo "    make setup          - Install dependencies and setup environment"
 	@echo "    make setup-skills   - Install Playwright skill dependencies"
-	@echo "    make start          - Start the dashboard stack (Docker prod-dev mode)"
+	@echo "    make start          - Start the dashboard stack with security scanners"
 	@echo "    make stop           - Stop the dashboard stack and local dev processes"
 	@echo "    make restart        - Restart the dashboard stack"
 	@echo "    make dev            - Start the UI and Backend server (development)"
@@ -34,8 +34,9 @@ help:
 	@echo "    make docker-build   - Rebuild Docker images"
 	@echo ""
 	@echo "  Docker (prod):"
+	@echo "    make prod           - Start production services"
 	@echo "    make prod-up        - Start production services"
-	@echo "    make prod-dev       - Start prod with local code (no rebuild needed!)"
+	@echo "    make prod-dev       - Start prod with local code and security scanners"
 	@echo "    make prod-down      - Stop production services"
 	@echo "    make prod-down-safe - Stop with backup first (recommended)"
 	@echo "    make prod-restart   - Restart app services (picks up mounted code changes)"
@@ -241,7 +242,7 @@ dev-k6-workers-logs:
 
 prod-up:
 	@echo "Starting production services (standard mode with VNC + nginx)..."
-	@$(PROD_COMPOSE) --profile standard --profile nginx up -d
+	@$(PROD_COMPOSE) --profile standard --profile nginx --profile backup-scheduler up -d
 	@echo ""
 	@echo "Production services started:"
 	@echo "  Dashboard:     http://localhost:3000 (direct) / http://localhost:80 (via nginx)"
@@ -249,8 +250,11 @@ prod-up:
 	@echo "  API Docs:      http://localhost:8001/docs"
 	@echo "  VNC View:      http://localhost:6080"
 	@echo "  MinIO Console: http://localhost:9001"
+	@echo "  Backup Scheduler: enabled"
 	@echo ""
 	@echo "View logs: make prod-logs"
+
+prod: prod-up
 
 prod-dev:
 	@if [ ! -f ".env.prod" ]; then \
@@ -260,12 +264,12 @@ prod-dev:
 		echo "Default admin: admin@test.com / Admin123!@#"; \
 		echo ""; \
 	fi
-	@echo "Starting production services with LOCAL CODE MOUNTING (no rebuild needed)..."
+	@echo "Starting production services with LOCAL CODE MOUNTING and security scanners..."
 	@echo ""
 	@echo "This mounts your local ./orchestrator and ./web/src directories."
 	@echo "Code changes will be reflected automatically (uvicorn --reload)."
 	@echo ""
-	@$(APP_COMPOSE) --profile standard up -d
+	@$(APP_COMPOSE) --profile standard --profile security up -d --build
 	@echo ""
 	@echo "Development mode started:"
 	@echo "  Dashboard:     http://localhost:3000"
@@ -273,13 +277,15 @@ prod-dev:
 	@echo "  API Docs:      http://localhost:8001/docs"
 	@echo "  VNC View:      http://localhost:6080"
 	@echo "  MinIO Console: http://localhost:9001"
+	@echo "  ZAP API:       http://localhost:$${ZAP_PORT:-8090}"
 	@echo ""
 	@echo "Code changes in ./orchestrator will auto-reload the backend."
+	@echo "Security Testing full scans are available after ZAP health is ready."
 	@echo "View logs: make prod-logs"
 
 prod-down:
 	@echo "Stopping production services gracefully..."
-	@$(PROD_COMPOSE) --profile standard --profile nginx --profile workers --profile k6-workers down --remove-orphans --timeout 30
+	@$(PROD_COMPOSE) --profile standard --profile nginx --profile backup-scheduler --profile workers --profile k6-workers down --remove-orphans --timeout 30
 	@echo "Production services stopped."
 
 prod-down-safe:
@@ -287,7 +293,7 @@ prod-down-safe:
 	@echo "Step 1: Running backup before shutdown..."
 	@$(PROD_COMPOSE) --profile backup-full run --rm backup-full 2>/dev/null || echo "Backup skipped (service not available)"
 	@echo "Step 2: Stopping services gracefully (30s timeout)..."
-	@$(PROD_COMPOSE) --profile standard --profile nginx --profile workers --profile k6-workers down --remove-orphans --timeout 30
+	@$(PROD_COMPOSE) --profile standard --profile nginx --profile backup-scheduler --profile workers --profile k6-workers down --remove-orphans --timeout 30
 	@echo "Step 3: Verifying shutdown..."
 	@docker ps --filter "name=quorvex" --format "{{.Names}}" | grep -q . && echo "WARNING: Some containers still running!" || echo "All containers stopped."
 	@echo "=== Safe shutdown complete ==="
@@ -308,18 +314,18 @@ prod-build:
 		echo ""; \
 	fi
 	@echo "Rebuilding production images (with cache)..."
-	@$(PROD_COMPOSE) --profile standard --profile nginx --profile k6-workers build
+	@$(PROD_COMPOSE) --profile standard --profile nginx --profile backup-scheduler --profile k6-workers build
 	@echo "Images rebuilt. Run 'make prod-up' to start."
 
 prod-build-no-cache:
 	@echo "Rebuilding production images (no cache - fresh build)..."
-	@$(PROD_COMPOSE) --profile standard --profile nginx --profile k6-workers build --no-cache
+	@$(PROD_COMPOSE) --profile standard --profile nginx --profile backup-scheduler --profile k6-workers build --no-cache
 	@echo "Images rebuilt. Run 'make prod-up' to start."
 
 prod-status:
 	@echo "Production service status:"
 	@echo ""
-	@$(PROD_COMPOSE) ps
+	@$(PROD_COMPOSE) --profile standard --profile nginx --profile backup-scheduler ps
 	@echo ""
 	@echo "Health checks:"
 	@curl -s http://localhost:8001/health 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "  Backend: Not responding"
@@ -568,8 +574,8 @@ logs:
 stop:
 	@echo "Stopping services gracefully..."
 	@# Stop Docker stacks first so Docker-owned port forwarders are not killed directly.
-	@-$(APP_COMPOSE) --profile standard --profile nginx --profile workers --profile k6-workers --profile security down --remove-orphans --timeout 30 2>/dev/null || true
-	@-$(PROD_COMPOSE) --profile standard --profile nginx --profile workers --profile k6-workers --profile security down --remove-orphans --timeout 30 2>/dev/null || true
+	@-$(APP_COMPOSE) --profile standard --profile nginx --profile backup-scheduler --profile workers --profile k6-workers --profile security down --remove-orphans --timeout 30 2>/dev/null || true
+	@-$(PROD_COMPOSE) --profile standard --profile nginx --profile backup-scheduler --profile workers --profile k6-workers --profile security down --remove-orphans --timeout 30 2>/dev/null || true
 	@-$(DOCKER_COMPOSE) --profile redis --profile k6-workers down --remove-orphans --timeout 30 2>/dev/null || true
 	@# Then stop any remaining local processes started by start-ui.sh.
 	@-lsof -ti :8001 | xargs kill -15 2>/dev/null || true

@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { GitBranch, Loader2, RefreshCw, Play, ChevronDown, ChevronUp, GitPullRequest, ShieldCheck } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
+import { Activity, ChevronDown, ChevronUp, CircleAlert, Code2, GitBranch, GitPullRequest, Loader2, Play, RefreshCw, Search, Settings, ShieldCheck } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
 import { PipelineStatusCard } from '@/components/PipelineStatusCard';
@@ -11,46 +12,74 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
 import { QualityGateCard } from './components/QualityGateCard';
 import { QualityGateDetailDrawer } from './components/QualityGateDetailDrawer';
+import { RunDetailDrawer, type CiArtifact, type CiJob, type CiRun } from './components/RunDetailDrawer';
+import { WorkflowGeneratorPanel } from './components/WorkflowGeneratorPanel';
 import type { GateState, QualityGate, QualityGateDefaults } from './components/types';
 import { FALLBACK_QUALITY_GATE_DEFAULTS, resolveQualityGateDefaults } from './components/types';
 
 type ProviderFilter = 'all' | 'gitlab' | 'github';
 
-interface Pipeline {
-    id: string;
-    provider: 'gitlab' | 'github';
-    external_pipeline_id: string;
-    external_project_id?: string;
-    status: string;
-    ref?: string;
-    external_url?: string;
-    triggered_from?: string;
-    name?: string;
-    created_at?: string;
-    started_at?: string;
-    completed_at?: string;
-    total_tests?: number;
-    passed_tests?: number;
-    failed_tests?: number;
+interface ProviderInfo {
+    provider: 'github' | 'gitlab';
+    configured: boolean;
+    repository?: string;
+    default_ref?: string;
+    base_url?: string;
+    setup_status?: string;
+    missing_requirements?: string[];
+    recommended_next_action?: {
+        label: string;
+        action: 'open_settings' | 'generate_workflow' | 'open_trigger';
+        href?: string;
+    } | null;
+    last_sync_at?: string | null;
+    capabilities?: string[];
 }
 
-interface GhWorkflow {
-    id: number;
+interface Workflow {
+    id: string;
     name: string;
     path: string;
     state: string;
+    provider: 'github' | 'gitlab';
 }
+
+const activeStatuses = ['pending', 'running', 'queued', 'waiting', 'in_progress'];
 
 export default function CiCdPage() {
     const { currentProject } = useProject();
     const projectId = currentProject?.id || (typeof window !== 'undefined' ? localStorage.getItem('selectedProjectId') : null) || 'default';
     const pid = encodeURIComponent(projectId);
 
-    const [pipelines, setPipelines] = useState<Pipeline[]>([]);
+    const [providers, setProviders] = useState<ProviderInfo[]>([]);
+    const [pipelines, setPipelines] = useState<CiRun[]>([]);
+    const [workflows, setWorkflows] = useState<Workflow[]>([]);
     const [loading, setLoading] = useState(true);
     const [syncing, setSyncing] = useState(false);
     const [filter, setFilter] = useState<ProviderFilter>('all');
     const refreshTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+    const triggerPanelRef = useRef<HTMLElement | null>(null);
+    const qualityGateRef = useRef<HTMLElement | null>(null);
+    const workflowPanelRef = useRef<HTMLDivElement | null>(null);
+    const runsRef = useRef<HTMLDivElement | null>(null);
+
+    const [showTrigger, setShowTrigger] = useState(false);
+    const [showWorkflowGenerator, setShowWorkflowGenerator] = useState(false);
+    const [triggerProvider, setTriggerProvider] = useState<'github' | 'gitlab'>('github');
+    const [triggerWorkflow, setTriggerWorkflow] = useState('');
+    const [triggerRef, setTriggerRef] = useState('');
+    const [triggerInputs, setTriggerInputs] = useState('');
+    const [triggering, setTriggering] = useState(false);
+    const [triggerError, setTriggerError] = useState('');
+
+    const [selectedRun, setSelectedRun] = useState<CiRun | null>(null);
+    const [runJobs, setRunJobs] = useState<CiJob[]>([]);
+    const [runArtifacts, setRunArtifacts] = useState<CiArtifact[]>([]);
+    const [runLoading, setRunLoading] = useState(false);
+    const [runActionLoading, setRunActionLoading] = useState('');
+    const [runError, setRunError] = useState('');
+    const [runLogs, setRunLogs] = useState<{ type: string; url?: string; content?: string } | null>(null);
+
     const [qualityGates, setQualityGates] = useState<QualityGate[]>([]);
     const [selectedGate, setSelectedGate] = useState<QualityGate | null>(null);
     const [gateFilter, setGateFilter] = useState<GateState>('all');
@@ -62,55 +91,50 @@ export default function CiCdPage() {
     const [gateError, setGateError] = useState('');
     const [qualityGateDefaults, setQualityGateDefaults] = useState<QualityGateDefaults>(FALLBACK_QUALITY_GATE_DEFAULTS);
 
-    // GitHub config state
-    const [ghConfigured, setGhConfigured] = useState(false);
-    const [ghWorkflows, setGhWorkflows] = useState<GhWorkflow[]>([]);
-    const [ghDefaultWorkflow, setGhDefaultWorkflow] = useState<string | null>(null);
-    const [ghDefaultRef, setGhDefaultRef] = useState('main');
+    const githubProvider = providers.find(p => p.provider === 'github');
+    const ghConfigured = providers.some(p => p.provider === 'github' && p.configured);
+    const glConfigured = providers.some(p => p.provider === 'gitlab' && p.configured);
+    const anyProviderConfigured = ghConfigured || glConfigured;
+    const defaultRef = providers.find(p => p.provider === triggerProvider)?.default_ref || 'main';
 
-    // Trigger panel state
-    const [showTrigger, setShowTrigger] = useState(false);
-    const [triggerWorkflow, setTriggerWorkflow] = useState('');
-    const [triggerRef, setTriggerRef] = useState('');
-    const [triggering, setTriggering] = useState(false);
-    const [triggerError, setTriggerError] = useState('');
+    const fetchProviders = useCallback(async () => {
+        const res = await fetch(`${API_BASE}/projects/${pid}/ci/providers`).catch(() => null);
+        if (res?.ok) {
+            const data = await res.json();
+            setProviders(data || []);
+            if (!data?.some((p: ProviderInfo) => p.provider === triggerProvider && p.configured)) {
+                const first = data?.find((p: ProviderInfo) => p.configured);
+                if (first) setTriggerProvider(first.provider);
+            }
+        }
+    }, [pid, triggerProvider]);
 
-    // Check GitHub config on mount
-    useEffect(() => {
-        (async () => {
-            try {
-                const res = await fetch(`${API_BASE}/github/${pid}/config`);
-                if (res.ok) {
-                    const data = await res.json();
-                    setGhConfigured(!!data.configured);
-                    if (data.default_workflow) setGhDefaultWorkflow(data.default_workflow);
-                    if (data.default_ref) setGhDefaultRef(data.default_ref);
-                    setQualityGateDefaults(resolveQualityGateDefaults(data));
-
-                    if (data.configured) {
-                        const wfRes = await fetch(`${API_BASE}/github/${pid}/remote-workflows`);
-                        if (wfRes.ok) {
-                            const wfs = await wfRes.json();
-                            setGhWorkflows(wfs || []);
-                        }
-                    }
-                }
-            } catch { /* ignore */ }
-        })();
-    }, [pid]);
+    const fetchWorkflows = useCallback(async () => {
+        if (!ghConfigured) {
+            setWorkflows([]);
+            return;
+        }
+        const res = await fetch(`${API_BASE}/projects/${pid}/ci/workflows?provider=github`).catch(() => null);
+        if (res?.ok) setWorkflows(await res.json());
+    }, [ghConfigured, pid]);
 
     const syncGithubRuns = useCallback(async () => {
-        try {
-            await fetch(`${API_BASE}/github/${pid}/sync-runs`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ per_page: 20 }),
-            });
-        } catch { /* ignore sync errors */ }
-    }, [pid]);
+        if (!anyProviderConfigured) return;
+        await fetch(`${API_BASE}/projects/${pid}/ci/runs/sync`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider: 'all', per_page: 20 }),
+        }).catch(() => null);
+    }, [anyProviderConfigured, pid]);
 
     const fetchQualityGates = useCallback(async () => {
+        if (!ghConfigured) {
+            setQualityGates([]);
+            return;
+        }
         try {
+            const configRes = await fetch(`${API_BASE}/github/${pid}/config`);
+            if (configRes.ok) setQualityGateDefaults(resolveQualityGateDefaults(await configRes.json()));
             const res = await fetch(`${API_BASE}/github/${pid}/quality-gates/pr?limit=20`);
             if (res.ok) {
                 const gates = await res.json();
@@ -118,7 +142,253 @@ export default function CiCdPage() {
                 setSelectedGate(prev => prev ? (gates.find((gate: QualityGate) => gate.id === prev.id) || prev) : prev);
             }
         } catch { /* ignore */ }
+    }, [ghConfigured, pid]);
+
+    const fetchPipelines = useCallback(async (doSync = false) => {
+        if (doSync) {
+            setSyncing(true);
+            await syncGithubRuns();
+            setSyncing(false);
+        }
+        const res = await fetch(`${API_BASE}/projects/${pid}/ci/runs?provider=all`).catch(() => null);
+        if (res?.ok) setPipelines(await res.json());
+        await fetchQualityGates();
+        setLoading(false);
+    }, [fetchQualityGates, pid, syncGithubRuns]);
+
+    useEffect(() => {
+        setLoading(true);
+        fetchProviders().finally(() => fetchPipelines(true));
+    }, [fetchProviders, fetchPipelines]);
+
+    useEffect(() => {
+        fetchWorkflows();
+    }, [fetchWorkflows]);
+
+    useEffect(() => {
+        if (githubProvider?.setup_status === 'needs_workflow') {
+            setShowWorkflowGenerator(true);
+        }
+    }, [githubProvider?.setup_status]);
+
+    useEffect(() => {
+        const hasActive = pipelines.some(p => activeStatuses.includes(p.status));
+        const hasActiveGate = qualityGates.some(g => ['running', 'analyzed'].includes(g.quality_gate?.state));
+        if (hasActive || hasActiveGate) {
+            refreshTimer.current = setInterval(() => fetchPipelines(true), 15000);
+        } else if (refreshTimer.current) {
+            clearInterval(refreshTimer.current);
+            refreshTimer.current = null;
+        }
+        return () => {
+            if (refreshTimer.current) clearInterval(refreshTimer.current);
+        };
+    }, [pipelines, qualityGates, fetchPipelines]);
+
+    const parseInputs = () => {
+        const trimmed = triggerInputs.trim();
+        if (!trimmed) return undefined;
+        if (trimmed.startsWith('{')) return JSON.parse(trimmed);
+        return Object.fromEntries(
+            trimmed
+                .split('\n')
+                .map(line => line.trim())
+                .filter(Boolean)
+                .map(line => {
+                    const [key, ...rest] = line.split('=');
+                    return [key.trim(), rest.join('=').trim()];
+                })
+                .filter(([key]) => key),
+        );
+    };
+
+    const handleTrigger = async () => {
+        setTriggering(true);
+        setTriggerError('');
+        try {
+            const res = await fetch(`${API_BASE}/projects/${pid}/ci/workflows/dispatch`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    provider: triggerProvider,
+                    workflow_id: triggerProvider === 'github' ? triggerWorkflow || undefined : undefined,
+                    ref: triggerRef || defaultRef,
+                    inputs: parseInputs(),
+                }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                setTriggerError(data.detail || `Failed (${res.status})`);
+                return;
+            }
+            setShowTrigger(false);
+            setTriggerInputs('');
+            await fetchPipelines(false);
+        } catch (e: any) {
+            setTriggerError(e.message || 'Failed to trigger workflow');
+        } finally {
+            setTriggering(false);
+        }
+    };
+
+    const loadRunDetail = useCallback(async (run: CiRun, refresh = true) => {
+        setSelectedRun(run);
+        setRunLoading(true);
+        setRunError('');
+        setRunLogs(null);
+        try {
+            const res = await fetch(`${API_BASE}/projects/${pid}/ci/runs/${run.provider}/${run.id}?refresh=${refresh ? 'true' : 'false'}`);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                setRunError(data.detail || `Failed (${res.status})`);
+                return;
+            }
+            setSelectedRun(data.run);
+            setRunJobs(data.jobs || []);
+            setRunArtifacts(data.artifacts || []);
+            setPipelines(prev => prev.map(item => item.provider === data.run.provider && String(item.id) === String(data.run.id) ? data.run : item));
+        } catch (e: any) {
+            setRunError(e.message || 'Failed to load run details');
+        } finally {
+            setRunLoading(false);
+        }
     }, [pid]);
+
+    const runAction = async (action: 'cancel' | 'rerun' | 'rerun-failed') => {
+        if (!selectedRun) return;
+        setRunActionLoading(action);
+        setRunError('');
+        try {
+            const endpoint = action === 'cancel' ? 'cancel' : 'rerun';
+            const res = await fetch(`${API_BASE}/projects/${pid}/ci/runs/${selectedRun.provider}/${selectedRun.id}/${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: endpoint === 'rerun' ? JSON.stringify({ failed_only: action === 'rerun-failed' }) : undefined,
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                setRunError(data.detail || `Action failed (${res.status})`);
+                return;
+            }
+            await loadRunDetail(selectedRun, true);
+        } catch (e: any) {
+            setRunError(e.message || 'Action failed');
+        } finally {
+            setRunActionLoading('');
+        }
+    };
+
+    const loadLogs = async (jobId?: string) => {
+        if (!selectedRun) return;
+        setRunActionLoading('logs');
+        setRunError('');
+        try {
+            const query = jobId ? `?job_id=${encodeURIComponent(jobId)}` : '';
+            const res = await fetch(`${API_BASE}/projects/${pid}/ci/runs/${selectedRun.provider}/${selectedRun.id}/logs${query}`);
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                setRunError(data.detail || `Failed to load logs (${res.status})`);
+                return;
+            }
+            setRunLogs(data);
+        } catch (e: any) {
+            setRunError(e.message || 'Failed to load logs');
+        } finally {
+            setRunActionLoading('');
+        }
+    };
+
+    const generateWorkflow = async (payload: any) => {
+        const res = await fetch(`${API_BASE}/projects/${pid}/ci/workflow-change-requests`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) return {
+            workflow_path: 'Generation failed',
+            generated_yaml: '',
+            validation_errors: [data.detail || `Failed (${res.status})`],
+            validation_warnings: [],
+        };
+        return data;
+    };
+
+    const openWorkflowPr = async (changeRequestId: string) => {
+        const res = await fetch(`${API_BASE}/projects/${pid}/ci/workflow-change-requests/${encodeURIComponent(changeRequestId)}/pull-request`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ draft: true }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `Failed to open PR (${res.status})`);
+        await fetchProviders();
+        return data;
+    };
+
+    const openTriggerPanel = (provider?: 'github' | 'gitlab') => {
+        if (provider) setTriggerProvider(provider);
+        setShowTrigger(true);
+        window.setTimeout(() => triggerPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+    };
+
+    const openWorkflowGenerator = () => {
+        setShowWorkflowGenerator(true);
+        window.setTimeout(() => workflowPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+    };
+
+    const applyProviderAction = (provider: ProviderInfo) => {
+        const action = provider.recommended_next_action;
+        if (!action) return;
+        if (action.action === 'open_settings') {
+            window.location.href = action.href || '/settings';
+            return;
+        }
+        if (action.action === 'generate_workflow') {
+            openWorkflowGenerator();
+            return;
+        }
+        if (action.action === 'open_trigger') {
+            openTriggerPanel(provider.provider);
+        }
+    };
+
+    const focusPrGate = () => {
+        qualityGateRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+
+    const focusFailures = () => {
+        setFilter('all');
+        window.setTimeout(() => runsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 0);
+    };
+
+    const startQualityGate = async () => {
+        const pr = Number(gatePrNumber);
+        if (!Number.isInteger(pr) || pr <= 0) {
+            setGateError('Enter a valid PR number');
+            return;
+        }
+        setStartingGate(true);
+        setGateError('');
+        try {
+            const res = await fetch(`${API_BASE}/github/${pid}/quality-gates/pr/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pr_number: pr, ...qualityGateDefaults }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                setGateError(data.detail || `Failed (${res.status})`);
+                return;
+            }
+            setGatePrNumber('');
+            await fetchQualityGates();
+        } catch (e: any) {
+            setGateError(e.message || 'Failed to start quality gate');
+        } finally {
+            setStartingGate(false);
+        }
+    };
 
     const loadQualityGateDetail = useCallback(async (analysisId: string, refreshFeedback = false) => {
         setGateDetailLoading(true);
@@ -145,143 +415,7 @@ export default function CiCdPage() {
     const selectQualityGate = useCallback((gate: QualityGate) => {
         setSelectedGate(gate);
         loadQualityGateDetail(gate.id);
-        if (typeof window !== 'undefined') {
-            const params = new URLSearchParams(window.location.search);
-            params.set('gate', gate.id);
-            window.history.replaceState(null, '', `/ci-cd?${params.toString()}`);
-        }
     }, [loadQualityGateDetail]);
-
-    const fetchPipelines = useCallback(async (doSync = false) => {
-        if (doSync) {
-            setSyncing(true);
-            await syncGithubRuns();
-            setSyncing(false);
-        }
-
-        try {
-            const results: Pipeline[] = [];
-
-            // Fetch GitLab pipelines
-            const glRes = await fetch(`${API_BASE}/gitlab/${pid}/pipelines`).catch(() => null);
-            if (glRes?.ok) {
-                const glData = await glRes.json();
-                results.push(...(glData || []).map((p: any) => ({ ...p, provider: 'gitlab' as const })));
-            }
-
-            // Fetch GitHub pipelines
-            const ghRes = await fetch(`${API_BASE}/github/${pid}/pipelines`).catch(() => null);
-            if (ghRes?.ok) {
-                const ghData = await ghRes.json();
-                results.push(...(ghData || []).map((p: any) => ({ ...p, provider: 'github' as const })));
-            }
-
-            // Sort by created_at desc
-            results.sort((a, b) => {
-                const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
-                const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
-                return tb - ta;
-            });
-
-            setPipelines(results);
-        } catch { /* ignore */ }
-        await fetchQualityGates();
-        setLoading(false);
-    }, [pid, syncGithubRuns, fetchQualityGates]);
-
-    // Initial load with sync
-    useEffect(() => {
-        setLoading(true);
-        fetchPipelines(true);
-    }, [fetchPipelines]);
-
-    useEffect(() => {
-        if (typeof window === 'undefined' || selectedGate || qualityGates.length === 0) return;
-        const gateId = new URLSearchParams(window.location.search).get('gate');
-        if (!gateId) return;
-        const gate = qualityGates.find(item => item.id === gateId);
-        if (gate) {
-            setSelectedGate(gate);
-            loadQualityGateDetail(gate.id);
-        }
-    }, [qualityGates, selectedGate, loadQualityGateDetail]);
-
-    // Auto-refresh every 15 seconds if any pipeline is active
-    useEffect(() => {
-        const hasActive = pipelines.some(p =>
-            ['pending', 'running', 'queued', 'waiting', 'in_progress'].includes(p.status)
-        );
-        const hasActiveGate = qualityGates.some(g => ['running', 'analyzed'].includes(g.quality_gate?.state));
-
-        if (hasActive || hasActiveGate) {
-            refreshTimer.current = setInterval(() => fetchPipelines(true), 15000);
-        } else if (refreshTimer.current) {
-            clearInterval(refreshTimer.current);
-            refreshTimer.current = null;
-        }
-
-        return () => {
-            if (refreshTimer.current) clearInterval(refreshTimer.current);
-        };
-    }, [pipelines, qualityGates, fetchPipelines]);
-
-    const handleTrigger = async () => {
-        setTriggering(true);
-        setTriggerError('');
-        try {
-            const res = await fetch(`${API_BASE}/github/${pid}/trigger-workflow`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    workflow_id: triggerWorkflow || ghDefaultWorkflow || undefined,
-                    ref: triggerRef || ghDefaultRef || 'main',
-                }),
-            });
-            if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                setTriggerError(err.detail || `Failed (${res.status})`);
-            } else {
-                setShowTrigger(false);
-                // Wait for GitHub to create the run, then sync
-                setTimeout(() => fetchPipelines(true), 2000);
-            }
-        } catch (e: any) {
-            setTriggerError(e.message || 'Failed to trigger');
-        }
-        setTriggering(false);
-    };
-
-    const startQualityGate = async () => {
-        const pr = Number(gatePrNumber);
-        if (!Number.isInteger(pr) || pr <= 0) {
-            setGateError('Enter a valid PR number');
-            return;
-        }
-        setStartingGate(true);
-        setGateError('');
-        try {
-            const res = await fetch(`${API_BASE}/github/${pid}/quality-gates/pr/start`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    pr_number: pr,
-                    ...qualityGateDefaults,
-                }),
-            });
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                setGateError(data.detail || `Failed (${res.status})`);
-                return;
-            }
-            setGatePrNumber('');
-            await fetchQualityGates();
-            setTimeout(() => fetchQualityGates(), 3000);
-        } catch (e: any) {
-            setGateError(e.message || 'Failed to start quality gate');
-        } finally {
-            setStartingGate(false);
-        }
-    };
 
     const rerunQualityGate = async () => {
         if (!selectedGate) return;
@@ -302,12 +436,8 @@ export default function CiCdPage() {
                 setGateDetailError(data.detail || `Rerun failed (${res.status})`);
                 return;
             }
-            const updated = await loadQualityGateDetail(selectedGate.id);
-            if (!updated && data.batch_id) {
-                setSelectedGate(prev => prev ? { ...prev, batch_id: data.batch_id } : prev);
-            }
+            await loadQualityGateDetail(selectedGate.id);
             await fetchQualityGates();
-            setTimeout(() => fetchQualityGates(), 3000);
         } catch (e: any) {
             setGateDetailError(e.message || 'Rerun failed');
         } finally {
@@ -315,27 +445,11 @@ export default function CiCdPage() {
         }
     };
 
-    const publishQualityGateFeedback = async () => {
-        if (!selectedGate) return;
-        setGateActionLoading('feedback');
-        await loadQualityGateDetail(selectedGate.id, true);
-        setGateActionLoading('');
-    };
-
-    const filteredPipelines = filter === 'all'
-        ? pipelines
-        : pipelines.filter(p => p.provider === filter);
-
+    const filteredPipelines = filter === 'all' ? pipelines : pipelines.filter(p => p.provider === filter);
     const activeGate = qualityGates.some(g => ['running', 'analyzed'].includes(g.quality_gate?.state));
 
     const gateCounts = useMemo(() => {
-        const counts: Record<GateState, number> = {
-            all: qualityGates.length,
-            running: 0,
-            failed: 0,
-            passed: 0,
-            'needs-full-suite': 0,
-        };
+        const counts: Record<GateState, number> = { all: qualityGates.length, running: 0, failed: 0, passed: 0, 'needs-full-suite': 0 };
         qualityGates.forEach(gate => {
             const state = gate.quality_gate?.state;
             if (state === 'running' || state === 'analyzed') counts.running += 1;
@@ -356,16 +470,35 @@ export default function CiCdPage() {
         });
     }, [qualityGates, gateFilter]);
 
-    const tabStyle = (tab: ProviderFilter): React.CSSProperties => ({
+    const providerSummary = useMemo(() => providers.map(provider => ({
+        ...provider,
+        label: provider.provider === 'github' ? 'GitHub Actions' : 'GitLab CI',
+        statusLabel: provider.setup_status === 'ready'
+            ? 'Ready'
+            : provider.setup_status === 'not_configured'
+                ? 'Not connected'
+                : 'Needs setup',
+        repositoryLabel: provider.repository || (provider.provider === 'github' ? 'No repository selected' : 'No project selected'),
+    })), [providers]);
+
+    const failedRuns = pipelines.filter(run => ['failed', 'failure'].includes(run.status));
+    const readyProviders = providers.filter(provider => provider.setup_status === 'ready');
+    const setupNeeds = providers.flatMap(provider => provider.missing_requirements || []);
+    const emptyDescription = !anyProviderConfigured
+        ? 'Connect GitHub or GitLab in Settings. After that this page can trigger runs, sync provider history, and inspect logs.'
+        : setupNeeds.includes('select_or_generate_workflow')
+            ? 'GitHub is connected, but no default workflow is selected. Generate a workflow draft or select an existing workflow in Settings.'
+            : 'Run a pipeline from the control cards above or refresh provider history after a repository push.';
+
+    const tabStyle = (tab: ProviderFilter): CSSProperties => ({
         padding: '0.6rem 1.25rem',
         cursor: 'pointer',
         border: 'none',
         borderBottom: filter === tab ? '2px solid var(--primary)' : '2px solid transparent',
         color: filter === tab ? 'var(--primary)' : 'var(--text-secondary)',
-        fontWeight: filter === tab ? 600 : 400,
+        fontWeight: filter === tab ? 700 : 500,
         background: 'transparent',
         fontSize: '0.9rem',
-        transition: 'all 0.2s var(--ease-smooth)',
     });
 
     if (loading) {
@@ -380,48 +513,22 @@ export default function CiCdPage() {
         <PageLayout tier="standard">
             <PageHeader
                 title="CI/CD Pipelines"
-                subtitle="Track pipeline executions across providers"
+                subtitle="Control provider workflows, PR gates, and release evidence"
                 icon={<GitBranch size={20} />}
                 actions={
                     <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        {ghConfigured && (
-                            <button
-                                onClick={() => setShowTrigger(!showTrigger)}
-                                style={{
-                                    padding: '0.5rem 0.75rem',
-                                    background: 'var(--primary)',
-                                    border: 'none',
-                                    borderRadius: 'var(--radius)',
-                                    cursor: 'pointer',
-                                    color: '#fff',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.4rem',
-                                    fontSize: '0.85rem',
-                                    fontWeight: 600,
-                                }}
-                            >
+                        {anyProviderConfigured && (
+                            <button type="button" onClick={() => setShowTrigger(!showTrigger)} style={primaryButtonStyle}>
                                 <Play size={14} />
                                 Trigger
                                 {showTrigger ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                             </button>
                         )}
                         <button
-                            onClick={() => { setSyncing(true); fetchPipelines(true); }}
+                            type="button"
+                            onClick={() => fetchPipelines(true)}
                             disabled={syncing}
-                            style={{
-                                padding: '0.5rem 0.75rem',
-                                background: 'transparent',
-                                border: '1px solid var(--border)',
-                                borderRadius: 'var(--radius)',
-                                cursor: syncing ? 'default' : 'pointer',
-                                color: 'var(--text-secondary)',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '0.4rem',
-                                fontSize: '0.85rem',
-                                opacity: syncing ? 0.6 : 1,
-                            }}
+                            style={secondaryButtonStyle(syncing)}
                         >
                             <RefreshCw size={14} style={syncing ? { animation: 'spin 1s linear infinite' } : undefined} />
                             {syncing ? 'Syncing...' : 'Refresh'}
@@ -430,108 +537,123 @@ export default function CiCdPage() {
                 }
             />
 
-            {/* Trigger panel */}
-            {showTrigger && ghConfigured && (
-                <div style={{
-                    padding: '1rem 1.25rem',
-                    marginBottom: '1rem',
-                    background: 'var(--surface)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius)',
-                }}>
-                    <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-end', flexWrap: 'wrap' }}>
-                        <div style={{ flex: 1, minWidth: '200px' }}>
-                            <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>
-                                Workflow
-                            </label>
-                            <select
-                                value={triggerWorkflow}
-                                onChange={e => setTriggerWorkflow(e.target.value)}
-                                style={{
-                                    width: '100%',
-                                    padding: '0.45rem 0.5rem',
-                                    background: 'var(--background)',
-                                    border: '1px solid var(--border)',
-                                    borderRadius: 'var(--radius)',
-                                    color: 'var(--text)',
-                                    fontSize: '0.85rem',
-                                }}
-                            >
-                                <option value="">{ghDefaultWorkflow ? `Default (${ghDefaultWorkflow})` : 'Select workflow...'}</option>
-                                {ghWorkflows.map(w => (
-                                    <option key={w.id} value={String(w.id)}>{w.name}</option>
+            <section style={{ ...panelStyle, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '0.85rem' }}>
+                {providerSummary.map(provider => (
+                    <div key={provider.provider} style={statusCardStyle(provider.setup_status === 'ready')}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'flex-start' }}>
+                            <div style={{ minWidth: 0 }}>
+                                <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', fontWeight: 750 }}>{provider.label}</div>
+                                <div style={{ marginTop: '0.25rem', fontSize: '1rem', fontWeight: 850 }}>{provider.statusLabel}</div>
+                            </div>
+                            <span style={provider.setup_status === 'ready' ? readyBadgeStyle : warningBadgeStyle}>
+                                {provider.setup_status === 'ready' ? 'Ready' : 'Setup'}
+                            </span>
+                        </div>
+                        <div style={{ marginTop: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45 }}>
+                            <div>{provider.repositoryLabel}</div>
+                            <div>Default ref: {provider.default_ref || 'main'}</div>
+                            <div>Last sync: {provider.last_sync_at ? new Date(provider.last_sync_at).toLocaleString() : 'No synced runs yet'}</div>
+                        </div>
+                        {(provider.missing_requirements || []).length > 0 && (
+                            <div style={{ marginTop: '0.7rem', display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                                {(provider.missing_requirements || []).slice(0, 3).map(item => (
+                                    <span key={item} style={smallTagStyle}>{formatRequirement(item)}</span>
                                 ))}
+                            </div>
+                        )}
+                        {provider.recommended_next_action && (
+                            <button type="button" onClick={() => applyProviderAction(provider)} style={{ ...secondaryButtonStyle(false), marginTop: '0.85rem', width: '100%', justifyContent: 'center' }}>
+                                <Settings size={14} />
+                                {provider.recommended_next_action.label}
+                            </button>
+                        )}
+                    </div>
+                ))}
+            </section>
+
+            <section style={{ marginBottom: '1rem' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '0.75rem' }}>
+                    <button type="button" onClick={() => openTriggerPanel(readyProviders[0]?.provider)} disabled={readyProviders.length === 0} style={taskButtonStyle(readyProviders.length === 0)}>
+                        <Play size={18} />
+                        <span style={taskTextStyle}>
+                            <strong style={taskTitleStyle}>Run pipeline</strong>
+                            <small style={taskDescriptionStyle}>Dispatch a GitHub workflow or GitLab pipeline.</small>
+                        </span>
+                    </button>
+                    <button type="button" onClick={focusPrGate} disabled={!ghConfigured} style={taskButtonStyle(!ghConfigured)}>
+                        <ShieldCheck size={18} />
+                        <span style={taskTextStyle}>
+                            <strong style={taskTitleStyle}>Start PR gate</strong>
+                            <small style={taskDescriptionStyle}>Analyze a PR and run recommended tests.</small>
+                        </span>
+                    </button>
+                    <button type="button" onClick={openWorkflowGenerator} disabled={!ghConfigured} style={taskButtonStyle(!ghConfigured)}>
+                        <Code2 size={18} />
+                        <span style={taskTextStyle}>
+                            <strong style={taskTitleStyle}>Generate workflow</strong>
+                            <small style={taskDescriptionStyle}>Create a reviewed GitHub Actions draft.</small>
+                        </span>
+                    </button>
+                    <button type="button" onClick={focusFailures} disabled={failedRuns.length === 0} style={taskButtonStyle(failedRuns.length === 0)}>
+                        <Search size={18} />
+                        <span style={taskTextStyle}>
+                            <strong style={taskTitleStyle}>Investigate failure</strong>
+                            <small style={taskDescriptionStyle}>{failedRuns.length ? `${failedRuns.length} failed run${failedRuns.length === 1 ? '' : 's'} need review.` : 'No failed runs right now.'}</small>
+                        </span>
+                    </button>
+                </div>
+            </section>
+
+            {showTrigger && anyProviderConfigured && (
+                <section ref={triggerPanelRef} style={panelStyle}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.85rem', fontWeight: 800 }}>
+                        <Activity size={16} />
+                        Run Pipeline
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem', alignItems: 'end' }}>
+                        <label style={fieldStyle}>
+                            Provider
+                            <select value={triggerProvider} onChange={e => setTriggerProvider(e.target.value as 'github' | 'gitlab')} style={inputStyle}>
+                                {ghConfigured && <option value="github">GitHub Actions</option>}
+                                {glConfigured && <option value="gitlab">GitLab CI</option>}
                             </select>
-                        </div>
-                        <div style={{ minWidth: '140px' }}>
-                            <label style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.25rem' }}>
-                                Branch
+                        </label>
+                        {triggerProvider === 'github' && (
+                            <label style={fieldStyle}>
+                                Workflow
+                                <select value={triggerWorkflow} onChange={e => setTriggerWorkflow(e.target.value)} style={inputStyle}>
+                                    <option value="">Default workflow</option>
+                                    {workflows.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+                                </select>
                             </label>
-                            <input
-                                type="text"
-                                placeholder={ghDefaultRef || 'main'}
-                                value={triggerRef}
-                                onChange={e => setTriggerRef(e.target.value)}
-                                style={{
-                                    width: '100%',
-                                    padding: '0.45rem 0.5rem',
-                                    background: 'var(--background)',
-                                    border: '1px solid var(--border)',
-                                    borderRadius: 'var(--radius)',
-                                    color: 'var(--text)',
-                                    fontSize: '0.85rem',
-                                }}
-                            />
-                        </div>
-                        <button
-                            onClick={handleTrigger}
-                            disabled={triggering}
-                            style={{
-                                padding: '0.45rem 1rem',
-                                background: 'var(--primary)',
-                                border: 'none',
-                                borderRadius: 'var(--radius)',
-                                cursor: triggering ? 'default' : 'pointer',
-                                color: '#fff',
-                                fontSize: '0.85rem',
-                                fontWeight: 600,
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '0.4rem',
-                                opacity: triggering ? 0.7 : 1,
-                            }}
-                        >
+                        )}
+                        <label style={fieldStyle}>
+                            Ref
+                            <input value={triggerRef} onChange={e => setTriggerRef(e.target.value)} placeholder={defaultRef} style={inputStyle} />
+                        </label>
+                        <label style={{ ...fieldStyle, gridColumn: 'span 2' }}>
+                            Inputs
+                            <textarea value={triggerInputs} onChange={e => setTriggerInputs(e.target.value)} rows={2} placeholder="key=value per line or JSON object" style={{ ...inputStyle, resize: 'vertical' }} />
+                        </label>
+                        <button type="button" onClick={handleTrigger} disabled={triggering} style={{ ...primaryButtonStyle, justifyContent: 'center', height: 39 }}>
                             {triggering ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Play size={14} />}
                             {triggering ? 'Running...' : 'Run'}
                         </button>
                     </div>
-                    {triggerError && (
-                        <div style={{ marginTop: '0.5rem', color: 'var(--danger)', fontSize: '0.8rem' }}>
-                            {triggerError}
-                        </div>
-                    )}
+                    {triggerError && <div style={{ marginTop: '0.5rem', color: 'var(--danger)', fontSize: '0.82rem' }}>{triggerError}</div>}
+                </section>
+            )}
+
+            {showWorkflowGenerator && (
+                <div ref={workflowPanelRef}>
+                    <WorkflowGeneratorPanel onGenerate={generateWorkflow} onOpenPr={openWorkflowPr} onClose={() => setShowWorkflowGenerator(false)} />
                 </div>
             )}
 
-            {/* PR quality gates */}
-            <section className="animate-in stagger-1" style={{
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--radius)',
-                background: 'var(--surface)',
-                marginBottom: '1.5rem',
-                overflow: 'hidden',
-            }}>
-                <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: '1rem',
-                    padding: '1rem 1.25rem',
-                    borderBottom: '1px solid var(--border)',
-                    flexWrap: 'wrap',
-                }}>
+            <section ref={qualityGateRef} className="animate-in stagger-1" style={sectionStyle}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', padding: '1rem 1.25rem', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
                     <div style={{ minWidth: 0 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 700 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 800 }}>
                             <GitPullRequest size={17} />
                             PR Quality Gates
                         </div>
@@ -541,66 +663,24 @@ export default function CiCdPage() {
                     </div>
                     {ghConfigured && (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                            <input
-                                value={gatePrNumber}
-                                onChange={e => setGatePrNumber(e.target.value)}
-                                placeholder="PR #"
-                                inputMode="numeric"
-                                style={{
-                                    width: '100px',
-                                    padding: '0.48rem 0.55rem',
-                                    border: '1px solid var(--border)',
-                                    borderRadius: 'var(--radius)',
-                                    background: 'var(--background)',
-                                    color: 'var(--text)',
-                                    fontSize: '0.85rem',
-                                }}
-                            />
-                            <button
-                                onClick={startQualityGate}
-                                disabled={startingGate}
-                                style={{
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '0.4rem',
-                                    padding: '0.5rem 0.75rem',
-                                    border: 'none',
-                                    borderRadius: 'var(--radius)',
-                                    color: '#fff',
-                                    background: 'var(--primary)',
-                                    cursor: startingGate ? 'default' : 'pointer',
-                                    fontWeight: 700,
-                                    fontSize: '0.85rem',
-                                    opacity: startingGate ? 0.7 : 1,
-                                }}
-                            >
+                            <input value={gatePrNumber} onChange={e => setGatePrNumber(e.target.value)} placeholder="PR #" inputMode="numeric" style={{ ...inputStyle, width: 100 }} />
+                            <button type="button" onClick={startQualityGate} disabled={startingGate} style={primaryButtonStyle}>
                                 {startingGate ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <ShieldCheck size={14} />}
                                 {startingGate ? 'Starting...' : 'Start Gate'}
                             </button>
                         </div>
                     )}
                 </div>
-                {gateError && (
-                    <div style={{ padding: '0.65rem 1.25rem', color: 'var(--danger)', fontSize: '0.82rem', borderBottom: '1px solid var(--border)' }}>
-                        {gateError}
-                    </div>
-                )}
+                {gateError && <div style={{ padding: '0.65rem 1.25rem', color: 'var(--danger)', fontSize: '0.82rem', borderBottom: '1px solid var(--border)' }}>{gateError}</div>}
                 {!ghConfigured ? (
                     <div style={{ padding: '1rem 1.25rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
                         Configure GitHub in Settings to start PR quality gates.
                     </div>
                 ) : qualityGates.length === 0 ? (
-                    <div style={{ padding: '1rem 1.25rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                        No PR quality gates yet.
-                    </div>
+                    <div style={{ padding: '1rem 1.25rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>No PR quality gates yet.</div>
                 ) : (
                     <>
-                        <div style={{
-                            display: 'flex',
-                            gap: '0.45rem',
-                            flexWrap: 'wrap',
-                            padding: '0.8rem 1rem 0',
-                        }}>
+                        <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', padding: '0.8rem 1rem 0' }}>
                             {[
                                 ['all', 'All'],
                                 ['running', 'Running'],
@@ -608,42 +688,17 @@ export default function CiCdPage() {
                                 ['passed', 'Passed'],
                                 ['needs-full-suite', 'Needs full suite'],
                             ].map(([value, label]) => (
-                                <button
-                                    key={value}
-                                    type="button"
-                                    onClick={() => setGateFilter(value as GateState)}
-                                    style={{
-                                        display: 'inline-flex',
-                                        alignItems: 'center',
-                                        gap: '0.35rem',
-                                        padding: '0.4rem 0.65rem',
-                                        border: gateFilter === value ? '1px solid var(--primary)' : '1px solid var(--border)',
-                                        borderRadius: '999px',
-                                        background: gateFilter === value ? 'rgba(59, 130, 246, 0.08)' : 'var(--background)',
-                                        color: gateFilter === value ? 'var(--primary)' : 'var(--text-secondary)',
-                                        cursor: 'pointer',
-                                        fontSize: '0.78rem',
-                                        fontWeight: 750,
-                                    }}
-                                >
-                                    {label}
-                                    <span style={{ color: 'inherit', opacity: 0.8 }}>{gateCounts[value as GateState]}</span>
+                                <button key={value} type="button" onClick={() => setGateFilter(value as GateState)} style={pillStyle(gateFilter === value)}>
+                                    {label} <span style={{ opacity: 0.8 }}>{gateCounts[value as GateState]}</span>
                                 </button>
                             ))}
                         </div>
                         {filteredQualityGates.length === 0 ? (
-                            <div style={{ padding: '1rem 1.25rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                                No gates match this filter.
-                            </div>
+                            <div style={{ padding: '1rem 1.25rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>No gates match this filter.</div>
                         ) : (
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '0.75rem', padding: '1rem' }}>
                                 {filteredQualityGates.map(gate => (
-                                    <QualityGateCard
-                                        key={gate.id}
-                                        gate={gate}
-                                        selected={selectedGate?.id === gate.id}
-                                        onSelect={selectQualityGate}
-                                    />
+                                    <QualityGateCard key={gate.id} gate={gate} selected={selectedGate?.id === gate.id} onSelect={selectQualityGate} />
                                 ))}
                             </div>
                         )}
@@ -656,89 +711,67 @@ export default function CiCdPage() {
                 loading={gateDetailLoading}
                 actionLoading={gateActionLoading}
                 error={gateDetailError}
-                onClose={() => {
-                    setSelectedGate(null);
-                    if (typeof window !== 'undefined') {
-                        window.history.replaceState(null, '', '/ci-cd');
-                    }
-                }}
+                onClose={() => setSelectedGate(null)}
                 onRefresh={() => selectedGate && loadQualityGateDetail(selectedGate.id)}
                 onRerun={rerunQualityGate}
-                onPublishFeedback={publishQualityGateFeedback}
+                onPublishFeedback={() => selectedGate && loadQualityGateDetail(selectedGate.id, true)}
             />
 
-            {/* Provider filter tabs */}
-            <div className="animate-in stagger-2" style={{
-                display: 'flex',
-                borderBottom: '1px solid var(--border)',
-                marginBottom: '1.5rem',
-            }}>
-                <button style={tabStyle('all')} onClick={() => setFilter('all')}>
-                    All ({pipelines.length})
-                </button>
-                <button style={tabStyle('gitlab')} onClick={() => setFilter('gitlab')}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
-                        <span style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            width: '18px',
-                            height: '18px',
-                            borderRadius: '50%',
-                            background: 'rgba(252, 109, 38, 0.15)',
-                            color: '#fc6d26',
-                            fontSize: '0.6rem',
-                            fontWeight: 700,
-                        }}>GL</span>
-                        GitLab ({pipelines.filter(p => p.provider === 'gitlab').length})
-                    </span>
-                </button>
-                <button style={tabStyle('github')} onClick={() => setFilter('github')}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
-                        <span style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            width: '18px',
-                            height: '18px',
-                            borderRadius: '50%',
-                            background: 'rgba(255, 255, 255, 0.1)',
-                            fontSize: '0.6rem',
-                            fontWeight: 700,
-                        }}>GH</span>
-                        GitHub ({pipelines.filter(p => p.provider === 'github').length})
-                    </span>
-                </button>
+            <RunDetailDrawer
+                run={selectedRun}
+                jobs={runJobs}
+                artifacts={runArtifacts}
+                loading={runLoading}
+                actionLoading={runActionLoading}
+                error={runError}
+                logs={runLogs}
+                onClose={() => setSelectedRun(null)}
+                onRefresh={() => selectedRun && loadRunDetail(selectedRun, true)}
+                onCancel={() => runAction('cancel')}
+                onRerun={failedOnly => runAction(failedOnly ? 'rerun-failed' : 'rerun')}
+                onLoadLogs={loadLogs}
+            />
+
+            <div ref={runsRef} className="animate-in stagger-2">
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
+                    <div>
+                        <h2 style={{ margin: 0, fontSize: '1rem', fontWeight: 850 }}>Pipeline Runs</h2>
+                        <div style={{ marginTop: '0.2rem', color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+                            Click a run to open jobs, artifacts, logs, rerun, or cancel controls.
+                        </div>
+                    </div>
+                    {failedRuns.length > 0 && (
+                        <span style={warningBadgeStyle}>
+                            <CircleAlert size={13} />
+                            {failedRuns.length} failed
+                        </span>
+                    )}
+                </div>
+                <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: '1.5rem' }}>
+                    <button type="button" style={tabStyle('all')} onClick={() => setFilter('all')}>All ({pipelines.length})</button>
+                    <button type="button" style={tabStyle('gitlab')} onClick={() => setFilter('gitlab')}>GitLab ({pipelines.filter(p => p.provider === 'gitlab').length})</button>
+                    <button type="button" style={tabStyle('github')} onClick={() => setFilter('github')}>GitHub ({pipelines.filter(p => p.provider === 'github').length})</button>
+                </div>
             </div>
 
-            {/* Pipeline list */}
             {filteredPipelines.length === 0 ? (
                 <EmptyState
                     icon={<GitBranch size={32} />}
-                    title={ghConfigured ? 'No workflow runs found' : 'No pipelines tracked yet'}
-                    description={ghConfigured
-                        ? 'Trigger a workflow above or push to your repository to create runs.'
-                        : 'Configure GitLab or GitHub in Settings to get started.'}
+                    title={anyProviderConfigured ? 'No workflow runs found' : 'No pipelines tracked yet'}
+                    description={emptyDescription}
                 />
             ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                     {filteredPipelines.map(pipeline => (
-                        <PipelineStatusCard key={`${pipeline.provider}-${pipeline.id || pipeline.external_pipeline_id}`} pipeline={pipeline} />
+                        <div key={`${pipeline.provider}-${pipeline.id || pipeline.external_pipeline_id}`} role="button" tabIndex={0} onClick={() => loadRunDetail(pipeline, true)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') loadRunDetail(pipeline, true); }} style={{ cursor: 'pointer' }}>
+                            <PipelineStatusCard pipeline={pipeline} />
+                        </div>
                     ))}
                 </div>
             )}
 
-            {/* Auto-refresh indicator */}
-            {(pipelines.some(p => ['pending', 'running', 'queued', 'waiting', 'in_progress'].includes(p.status)) || activeGate) && (
-                <div style={{
-                    marginTop: '1rem',
-                    padding: '0.5rem 0.75rem',
-                    fontSize: '0.75rem',
-                    color: 'var(--text-secondary)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.4rem',
-                }}>
+            {(pipelines.some(p => activeStatuses.includes(p.status)) || activeGate) && (
+                <div style={{ marginTop: '1rem', padding: '0.5rem 0.75rem', fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                     <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
                     Auto-refreshing active work every 15 seconds
                 </div>
@@ -753,3 +786,173 @@ export default function CiCdPage() {
         </PageLayout>
     );
 }
+
+const inputStyle: CSSProperties = {
+    width: '100%',
+    padding: '0.48rem 0.55rem',
+    border: '1px solid var(--border)',
+    borderRadius: 'var(--radius)',
+    background: 'var(--background)',
+    color: 'var(--text)',
+    fontSize: '0.85rem',
+};
+
+const fieldStyle: CSSProperties = {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.35rem',
+    fontSize: '0.78rem',
+    color: 'var(--text-secondary)',
+};
+
+const primaryButtonStyle: CSSProperties = {
+    padding: '0.5rem 0.75rem',
+    background: 'var(--primary)',
+    border: 'none',
+    borderRadius: 'var(--radius)',
+    cursor: 'pointer',
+    color: '#fff',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '0.4rem',
+    fontSize: '0.85rem',
+    fontWeight: 750,
+};
+
+const secondaryButtonStyle = (disabled?: boolean): CSSProperties => ({
+    padding: '0.5rem 0.75rem',
+    background: 'transparent',
+    border: '1px solid var(--border)',
+    borderRadius: 'var(--radius)',
+    cursor: disabled ? 'default' : 'pointer',
+    color: 'var(--text-secondary)',
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '0.4rem',
+    fontSize: '0.85rem',
+    opacity: disabled ? 0.6 : 1,
+});
+
+const panelStyle: CSSProperties = {
+    padding: '1rem 1.25rem',
+    marginBottom: '1rem',
+    background: 'var(--surface)',
+    border: '1px solid var(--border)',
+    borderRadius: 'var(--radius)',
+};
+
+const sectionStyle: CSSProperties = {
+    border: '1px solid var(--border)',
+    borderRadius: 'var(--radius)',
+    background: 'var(--surface)',
+    marginBottom: '1.5rem',
+    overflow: 'hidden',
+};
+
+function pillStyle(active: boolean): CSSProperties {
+    return {
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '0.35rem',
+        padding: '0.4rem 0.65rem',
+        border: active ? '1px solid var(--primary)' : '1px solid var(--border)',
+        borderRadius: '999px',
+        background: active ? 'rgba(59, 130, 246, 0.08)' : 'var(--background)',
+        color: active ? 'var(--primary)' : 'var(--text-secondary)',
+        cursor: 'pointer',
+        fontSize: '0.78rem',
+        fontWeight: 750,
+    };
+}
+
+function formatRequirement(value: string): string {
+    return value
+        .split('_')
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+}
+
+function statusCardStyle(ready: boolean): CSSProperties {
+    return {
+        border: ready ? '1px solid rgba(34, 197, 94, 0.32)' : '1px solid var(--border)',
+        borderRadius: 'var(--radius)',
+        background: 'var(--background)',
+        padding: '0.95rem',
+        minWidth: 0,
+    };
+}
+
+function taskButtonStyle(disabled: boolean): CSSProperties {
+    return {
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius)',
+        background: 'var(--surface)',
+        color: 'var(--text)',
+        padding: '0.9rem',
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: '0.75rem',
+        textAlign: 'left',
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.58 : 1,
+        minHeight: 88,
+    };
+}
+
+const readyBadgeStyle: CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '0.3rem',
+    padding: '0.25rem 0.5rem',
+    borderRadius: '999px',
+    background: 'rgba(34, 197, 94, 0.1)',
+    color: 'var(--success)',
+    fontSize: '0.72rem',
+    fontWeight: 800,
+    flexShrink: 0,
+};
+
+const warningBadgeStyle: CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: '0.3rem',
+    padding: '0.25rem 0.5rem',
+    borderRadius: '999px',
+    background: 'rgba(245, 158, 11, 0.1)',
+    color: 'var(--warning)',
+    fontSize: '0.72rem',
+    fontWeight: 800,
+    flexShrink: 0,
+};
+
+const smallTagStyle: CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    padding: '0.2rem 0.45rem',
+    borderRadius: '999px',
+    background: 'rgba(128, 128, 128, 0.1)',
+    border: '1px solid rgba(128, 128, 128, 0.15)',
+    color: 'var(--text-secondary)',
+    fontSize: '0.7rem',
+    fontWeight: 700,
+};
+
+const taskTextStyle: CSSProperties = {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.25rem',
+    minWidth: 0,
+};
+
+const taskTitleStyle: CSSProperties = {
+    display: 'block',
+    fontSize: '0.9rem',
+    lineHeight: 1.25,
+};
+
+const taskDescriptionStyle: CSSProperties = {
+    display: 'block',
+    color: 'var(--text-secondary)',
+    fontSize: '0.8rem',
+    lineHeight: 1.35,
+};

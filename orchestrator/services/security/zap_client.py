@@ -10,6 +10,7 @@ import hashlib
 import logging
 import os
 import time
+from collections.abc import Callable
 
 from circuitbreaker import circuit
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -99,7 +100,9 @@ async def run_zap_scan(
     scan_policy: str | None = None,
     spider_enabled: bool = True,
     active_scan_enabled: bool = True,
-    on_progress: callable | None = None,
+    active_scan_level: str = "safe",
+    auth_context: dict | None = None,
+    on_progress: Callable[[str], object] | None = None,
 ) -> list[dict]:
     """Run ZAP DAST scan (spider + passive + active).
 
@@ -125,7 +128,9 @@ async def run_zap_scan(
 
     logger.info(f"Starting ZAP scan: {target_url}")
 
-    # Open URL in ZAP
+    # Open URL in ZAP. Authenticated scans may pre-warm the ZAP proxy from
+    # Playwright before this function is called; this request keeps the
+    # standard unauthenticated path working too.
     if on_progress:
         await on_progress("Opening target URL in ZAP...")
     zap.urlopen(target_url)
@@ -164,9 +169,11 @@ async def run_zap_scan(
         await asyncio.sleep(1)
 
     # Active scan
-    if active_scan_enabled:
+    if active_scan_enabled and active_scan_level != "passive":
         if on_progress:
-            await on_progress("Running ZAP active scan...")
+            await on_progress(
+                "Running ZAP safe active scan..." if active_scan_level == "safe" else "Running ZAP active scan..."
+            )
 
         scan_kwargs = {"url": target_url}
         if scan_policy:

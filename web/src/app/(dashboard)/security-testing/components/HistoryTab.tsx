@@ -13,9 +13,10 @@ interface HistoryTabProps {
     runs: SecurityScanRun[];
     fetchRuns: () => Promise<void>;
     onStatusChange: (id: number, status: string, notes?: string) => void;
+    onStopScan: (runId: string) => void;
 }
 
-export default function HistoryTab({ runs, fetchRuns, onStatusChange }: HistoryTabProps) {
+export default function HistoryTab({ runs, fetchRuns, onStatusChange, onStopScan }: HistoryTabProps) {
     const [selectedRun, setSelectedRun] = useState<SecurityScanRun | null>(null);
     const [runFindings, setRunFindings] = useState<SecurityFinding[]>([]);
     const [expandedFinding, setExpandedFinding] = useState<number | null>(null);
@@ -50,9 +51,11 @@ export default function HistoryTab({ runs, fetchRuns, onStatusChange }: HistoryT
                             <th style={{ textAlign: 'left', padding: '0.75rem 0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Target</th>
                             <th style={{ textAlign: 'left', padding: '0.75rem 0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Type</th>
                             <th style={{ textAlign: 'left', padding: '0.75rem 0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Status</th>
+                            <th style={{ textAlign: 'left', padding: '0.75rem 0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Scanners</th>
                             <th style={{ textAlign: 'center', padding: '0.75rem 0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Findings</th>
                             <th style={{ textAlign: 'left', padding: '0.75rem 0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Duration</th>
                             <th style={{ textAlign: 'left', padding: '0.75rem 0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Date</th>
+                            <th style={{ textAlign: 'right', padding: '0.75rem 0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Action</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -80,7 +83,19 @@ export default function HistoryTab({ runs, fetchRuns, onStatusChange }: HistoryT
                                         {run.scan_type}
                                     </span>
                                 </td>
-                                <td style={{ padding: '0.75rem 0.5rem' }}><StatusBadge status={run.status} /></td>
+                                <td style={{ padding: '0.75rem 0.5rem' }}>
+                                    <StatusBadge status={run.status} />
+                                    {(run.stage_message || run.error_message) && (
+                                        <div style={{ fontSize: '0.72rem', color: run.error_message ? 'var(--danger)' : 'var(--text-tertiary)', marginTop: '2px', maxWidth: '220px' }}>
+                                            {run.error_message || run.stage_message}
+                                        </div>
+                                    )}
+                                </td>
+                                <td style={{ padding: '0.75rem 0.5rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                                    <span title="Quick scan">{run.quick_scan_completed ? 'Q' : '-'}</span>
+                                    <span style={{ marginLeft: '0.5rem' }} title="Nuclei scan">{run.nuclei_scan_completed ? 'N' : '-'}</span>
+                                    <span style={{ marginLeft: '0.5rem' }} title="ZAP scan">{run.zap_scan_completed ? 'Z' : '-'}</span>
+                                </td>
                                 <td style={{ padding: '0.75rem 0.5rem', textAlign: 'center' }}>
                                     <div style={{ display: 'flex', gap: '4px', justifyContent: 'center', flexWrap: 'wrap' }}>
                                         {run.critical_count > 0 && <SeverityBadge severity="critical" count={run.critical_count} />}
@@ -96,6 +111,19 @@ export default function HistoryTab({ runs, fetchRuns, onStatusChange }: HistoryT
                                 </td>
                                 <td style={{ padding: '0.75rem 0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                                     {formatDate(run.created_at)}
+                                </td>
+                                <td style={{ padding: '0.75rem 0.5rem', textAlign: 'right' }}>
+                                    {run.status === 'running' && (
+                                        <button
+                                            onClick={(e) => { e.stopPropagation(); onStopScan(run.id); }}
+                                            style={{
+                                                background: 'transparent', color: 'var(--danger)', border: '1px solid var(--border)',
+                                                borderRadius: 'var(--radius)', padding: '3px 8px', cursor: 'pointer', fontSize: '0.75rem',
+                                            }}
+                                        >
+                                            Stop
+                                        </button>
+                                    )}
                                 </td>
                             </tr>
                         ))}

@@ -93,7 +93,7 @@ services:
       REQUIRE_AUTH: ${REQUIRE_AUTH:-true}
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
       # CORS
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://host.docker.internal:3000}
       # Redis for job queue and rate limiting
       REDIS_URL: redis://redis:6379/0
       # Initial admin
@@ -104,6 +104,12 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
       MINIO_BUCKET: ${MINIO_BUCKET:-playwright-backups}
+      # Security testing
+      ZAP_HOST: zap
+      ZAP_PORT: "8090"
+      ZAP_API_KEY: ${ZAP_API_KEY:-quorvex-dev-zap-key}
+      NUCLEI_TIMEOUT_SECONDS: ${NUCLEI_TIMEOUT_SECONDS:-600}
+      SECURITY_SCAN_TIMEOUT: ${SECURITY_SCAN_TIMEOUT:-1800}
     # Note: Container starts as root to fix volume permissions, then drops to agent user via entrypoint
     volumes:
       - runs_data:/app/runs
@@ -394,7 +400,7 @@ services:
       REQUIRE_AUTH: ${REQUIRE_AUTH:-true}
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
       # CORS - comma-separated list of allowed origins
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://host.docker.internal:3000}
       # Redis for distributed rate limiting
       REDIS_URL: redis://redis:6379/0
       # Initial admin user (created on first startup only)
@@ -406,10 +412,16 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
       MINIO_BUCKET: ${MINIO_BUCKET:-playwright-backups}
       MINIO_BUCKET_ARTIFACTS: ${MINIO_BUCKET_ARTIFACTS:-playwright-artifacts}
+      # Security testing
+      ZAP_HOST: zap
+      ZAP_PORT: "8090"
+      ZAP_API_KEY: ${ZAP_API_KEY:-quorvex-dev-zap-key}
+      NUCLEI_TIMEOUT_SECONDS: ${NUCLEI_TIMEOUT_SECONDS:-600}
+      SECURITY_SCAN_TIMEOUT: ${SECURITY_SCAN_TIMEOUT:-1800}
       # Corporate proxy (for AI API calls through restricted networks)
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,db,redis,minio,backend,frontend}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,db,redis,minio,zap,backend,frontend}
     # Note: Container starts as root to fix volume permissions, then drops to agent user via entrypoint
     # supervisord manages user switching per-program (all programs run as agent)
     # Use supervisord to manage VNC stack + uvicorn
@@ -465,15 +477,15 @@ services:
       context: ./web
       dockerfile: Dockerfile
       args:
-        # Build-time env var for Next.js static generation
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8001}
+        # Optional build-time override. Leave blank to resolve from the browser host.
+        NEXT_PUBLIC_API_URL: ${QUORVEX_PUBLIC_API_URL:-}
     restart: unless-stopped
     # Note: In production with nginx, ports are exposed via nginx only
     ports:
       - "3000:3000"
     environment:
-      # Runtime env var (for server-side rendering)
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8001}
+      # Optional runtime override. Leave blank to resolve from the browser host.
+      NEXT_PUBLIC_API_URL: ${QUORVEX_PUBLIC_API_URL:-}
       # AI Assistant env vars (server-side only)
       ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN:-}
       ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
@@ -628,6 +640,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: backend
+    profiles:
+      - backup-scheduler
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-playwright}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-playwright_agent}
@@ -843,11 +857,12 @@ services:
     image: ghcr.io/zaproxy/zaproxy:stable
     restart: unless-stopped
     command: >
-      zap.sh -daemon -host 0.0.0.0 -port 8090 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.key=${ZAP_API_KEY:-}
+      zap.sh -daemon -host 0.0.0.0 -port 8090 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.key=${ZAP_API_KEY:-quorvex-dev-zap-key}
     ports:
       - "${ZAP_PORT:-8090}:8090"
     environment:
       ZAP_PORT: "8090"
+      ZAP_API_KEY: ${ZAP_API_KEY:-quorvex-dev-zap-key}
     networks:
       - playwright-network
     profiles:
@@ -861,7 +876,7 @@ services:
           memory: 1G
           cpus: '0.5'
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8090/JSON/core/view/version/" ]
+      test: [ "CMD-SHELL", "curl -f \"http://localhost:8090/JSON/core/view/version/?apikey=$${ZAP_API_KEY}\"" ]
       interval: 30s
       timeout: 10s
       retries: 3

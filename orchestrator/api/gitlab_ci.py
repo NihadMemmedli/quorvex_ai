@@ -31,7 +31,8 @@ router = APIRouter(prefix="/gitlab", tags=["gitlab"])
 
 
 class GitlabConfigRequest(BaseModel):
-    base_url: str
+    base_url: str | None = None
+    gitlab_url: str | None = None  # Backward-compatible frontend alias for base_url
     token: str | None = None  # None means keep existing
     trigger_token: str | None = None  # None means keep existing
     project_id: int | None = None  # GitLab project ID
@@ -110,6 +111,7 @@ def get_config(
     return {
         "configured": True,
         "base_url": config.get("base_url", ""),
+        "gitlab_url": config.get("base_url", ""),
         "token_masked": mask_credential(token),
         "trigger_token_masked": mask_credential(trigger_token),
         "project_id": config.get("project_id"),
@@ -128,7 +130,8 @@ def save_config(
     """Save GitLab config for a project."""
     project = _require_project(project_id, session)
 
-    if not request.base_url:
+    base_url = request.base_url or request.gitlab_url
+    if not base_url:
         raise HTTPException(status_code=400, detail="base_url is required")
 
     existing = _get_gitlab_config(project)
@@ -150,7 +153,7 @@ def save_config(
         trigger_token_encrypted = ""
 
     config = {
-        "base_url": request.base_url.rstrip("/"),
+        "base_url": base_url.rstrip("/"),
         "token_encrypted": token_encrypted,
         "trigger_token_encrypted": trigger_token_encrypted,
         "project_id": request.project_id,

@@ -7,46 +7,39 @@ import { SecurityScanRun, SecurityFinding } from './types';
 import FindingCard from './FindingCard';
 
 interface FindingsTabProps {
+    projectId: string;
     runs: SecurityScanRun[];
     onStatusChange: (id: number, status: string, notes?: string) => void;
 }
 
-export default function FindingsTab({ runs, onStatusChange }: FindingsTabProps) {
+export default function FindingsTab({ projectId, runs, onStatusChange }: FindingsTabProps) {
     const [severityFilter, setSeverityFilter] = useState<string>('all');
     const [statusFilter, setStatusFilter] = useState<string>('all');
+    const [scannerFilter, setScannerFilter] = useState<string>('all');
     const [expandedFinding, setExpandedFinding] = useState<number | null>(null);
     const [findings, setFindings] = useState<SecurityFinding[]>([]);
+    const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(false);
 
     useEffect(() => {
         const loadFindings = async () => {
-            if (runs.length === 0) return;
             setLoading(true);
             try {
-                const completedRuns = runs.filter(r => r.status === 'completed' && r.total_findings > 0).slice(0, 10);
-                const allFindings: SecurityFinding[] = [];
-
-                for (const run of completedRuns) {
-                    const url = `${API_BASE}/security-testing/runs/${run.id}/findings`;
-                    const res = await fetch(url, { headers: getAuthHeaders() });
-                    if (res.ok) {
-                        const data = await res.json();
-                        allFindings.push(...data);
-                    }
+                const params = new URLSearchParams({ project_id: projectId, limit: '200' });
+                if (severityFilter !== 'all') params.set('severity', severityFilter);
+                if (statusFilter !== 'all') params.set('status', statusFilter);
+                if (scannerFilter !== 'all') params.set('scanner', scannerFilter);
+                const res = await fetch(`${API_BASE}/security-testing/findings?${params}`, { headers: getAuthHeaders() });
+                if (res.ok) {
+                    const data = await res.json();
+                    setFindings(data.findings || []);
+                    setTotal(data.total || 0);
                 }
-
-                setFindings(allFindings);
             } catch (e) { console.error('Load findings failed:', e); }
             setLoading(false);
         };
         loadFindings();
-    }, [runs]);
-
-    const filtered = findings.filter(f => {
-        if (severityFilter !== 'all' && f.severity !== severityFilter) return false;
-        if (statusFilter !== 'all' && f.status !== statusFilter) return false;
-        return true;
-    });
+    }, [projectId, runs, severityFilter, statusFilter, scannerFilter]);
 
     return (
         <div style={cardStyle}>
@@ -84,6 +77,20 @@ export default function FindingsTab({ runs, onStatusChange }: FindingsTabProps) 
                         <option value="fixed">Fixed</option>
                         <option value="accepted_risk">Accepted Risk</option>
                     </select>
+                    <select
+                        value={scannerFilter}
+                        onChange={e => setScannerFilter(e.target.value)}
+                        style={{
+                            padding: '0.4rem 0.75rem', borderRadius: 'var(--radius)',
+                            border: '1px solid var(--border)', background: 'var(--bg)',
+                            color: 'var(--text)', fontSize: '0.85rem',
+                        }}
+                    >
+                        <option value="all">All Scanners</option>
+                        <option value="quick">Quick</option>
+                        <option value="nuclei">Nuclei</option>
+                        <option value="zap">ZAP</option>
+                    </select>
                 </div>
             </div>
 
@@ -91,14 +98,14 @@ export default function FindingsTab({ runs, onStatusChange }: FindingsTabProps) 
                 <div style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-secondary)' }}>
                     <Loader2 size={24} className="animate-spin" style={{ display: 'inline-block' }} /> Loading findings...
                 </div>
-            ) : filtered.length === 0 ? (
+            ) : findings.length === 0 ? (
                 <p style={{ color: 'var(--text-secondary)' }}>No findings match the current filters.</p>
             ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                     <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
-                        Showing {filtered.length} of {findings.length} findings
+                        Showing {findings.length} of {total} findings
                     </p>
-                    {filtered.map(finding => (
+                    {findings.map(finding => (
                         <FindingCard
                             key={`${finding.scan_id}-${finding.id}`}
                             finding={finding}

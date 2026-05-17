@@ -1,5 +1,13 @@
 import { streamText, stepCountIs, convertToModelMessages, createUIMessageStream, createUIMessageStreamResponse } from 'ai';
-import { getActiveProvider, MODEL_ID, reportRateLimit } from '@/lib/ai/provider';
+import {
+  getActiveOpenAIProvider,
+  getActiveProvider,
+  hasDirectAnthropicChatCredential,
+  hasOpenAIChatCredential,
+  MODEL_ID,
+  OPENAI_MODEL_ID,
+  reportRateLimit,
+} from '@/lib/ai/provider';
 import { buildSystemPrompt } from '@/lib/ai/system-prompt';
 import { createAssistantTools } from '@/lib/ai/tools';
 import { backendFetch } from '@/lib/ai/backend-client';
@@ -32,6 +40,12 @@ interface DatabaseConnectionSummary {
   db_type?: string;
   type?: string;
   status?: string;
+}
+
+interface PrdProjectSummary {
+  project?: string;
+  processed_at?: string;
+  feature_count?: number;
 }
 
 function supportsExtendedThinking(modelId: string) {
@@ -68,17 +82,6 @@ async function timedBackendFetch<T>(
   return res;
 }
 
-function hasDirectAnthropicChatCredential() {
-  return Boolean(
-    (
-      process.env.ANTHROPIC_AUTH_TOKENS ||
-      process.env.ANTHROPIC_API_KEY ||
-      process.env.ANTHROPIC_AUTH_TOKEN ||
-      ''
-    ).trim()
-  );
-}
-
 function getRecentMessages(messages: any[]): any[] {
   if (messages.length <= CHAT_HISTORY_MESSAGE_LIMIT) return messages;
   return messages.slice(-CHAT_HISTORY_MESSAGE_LIMIT);
@@ -108,96 +111,6 @@ function textToUIMessageResponse(text: string) {
   });
 
   return createUIMessageStreamResponse({ stream });
-}
-
-async function openAIChatFallbackResponse(messages: any[], systemPrompt: string, reason?: string) {
-  const apiKey = (process.env.OPENAI_API_KEY || '').trim();
-  if (!apiKey) {
-    return null;
-  }
-
-  const baseURL = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
-  const model = process.env.OPENAI_CHAT_MODEL || process.env.OPENAI_MODEL || 'gpt-4o-mini';
-  const modelMessages = getRecentMessages(messages)
-    .map((message: any) => {
-      const role = ['user', 'assistant', 'system'].includes(message?.role) ? message.role : 'user';
-      const content = extractMessageText(message);
-      return content ? { role, content } : null;
-    })
-    .filter(Boolean);
-
-  if (modelMessages.length === 0) {
-    return textToUIMessageResponse('Please enter a message.');
-  }
-
-  console.info('[chat/route] routing chat through OpenAI fallback', reason ? `after: ${reason}` : '');
-
-  try {
-    const response = await fetch(`${baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...modelMessages,
-        ],
-        temperature: 0.2,
-        max_tokens: 2048,
-      }),
-      signal: AbortSignal.timeout(115000),
-    });
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const message = payload?.error?.message || `OpenAI returned ${response.status}`;
-      console.warn('[chat/route] OpenAI fallback failed:', response.status, message);
-      return textToUIMessageResponse(`AI fallback is unavailable. ${message}`);
-    }
-
-    const text = payload?.choices?.[0]?.message?.content?.trim();
-    return textToUIMessageResponse(text || 'AI fallback returned an empty response.');
-  } catch (error) {
-    console.warn('[chat/route] OpenAI fallback request failed:', error);
-    return textToUIMessageResponse(extractUserMessage(error));
-  }
-}
-
-async function claudeCodeBackendResponse(messages: any[], systemPrompt: string, authToken?: string) {
-  const prompt = extractLatestUserText(messages);
-  console.info('[chat/route] routing chat through backend Claude Code bridge');
-
-  if (!prompt.trim()) {
-    return textToUIMessageResponse('Please enter a message.');
-  }
-
-  const claudeCodeRes = await backendFetch<{ text: string }>('/chat/claude-code', {
-    method: 'POST',
-    authToken,
-    timeoutMs: 115000,
-    body: {
-      prompt,
-      system_prompt: systemPrompt,
-      timeout_seconds: 110,
-    },
-  });
-
-  if (!claudeCodeRes.ok || !claudeCodeRes.data?.text) {
-    const detail = claudeCodeRes.error ? ` ${claudeCodeRes.error}` : '';
-    console.warn('[chat/route] backend Claude Code bridge failed:', claudeCodeRes.status, claudeCodeRes.error);
-    const fallback = await openAIChatFallbackResponse(messages, systemPrompt, claudeCodeRes.error);
-    if (fallback) {
-      return fallback;
-    }
-    return textToUIMessageResponse(
-      `AI backend chat is not configured or unavailable.${detail}`
-    );
-  }
-
-  return textToUIMessageResponse(claudeCodeRes.data.text);
 }
 
 function toolInputUIMessageResponse(text: string, toolName: string, input: Record<string, unknown>) {
@@ -703,6 +616,108 @@ function normalizeDatabaseConnections(data: unknown): DatabaseConnectionSummary[
   return Array.isArray(list) ? list as DatabaseConnectionSummary[] : [];
 }
 
+function normalizePrdProjects(data: unknown): PrdProjectSummary[] {
+  if (Array.isArray(data)) return data as PrdProjectSummary[];
+  if (!data || typeof data !== 'object') return [];
+  const record = data as Record<string, unknown>;
+  const list = record.projects || record.items || record.data || record.results;
+  return Array.isArray(list) ? list as PrdProjectSummary[] : [];
+}
+
+function prdProjectId(project: PrdProjectSummary): string {
+  return String(project.project || '').trim();
+}
+
+function isPrdFeatureReadIntent(
+  latestUserText: string,
+  currentPage?: string,
+  pageContext?: { section?: string }
+) {
+  const text = latestUserText.toLowerCase();
+  const prdContext = currentPage === '/prd'
+    || pageContext?.section?.toLowerCase() === 'prd'
+    || /\bprd\b/.test(text);
+  const wantsFeatures = /\b(features?|requirements?)\b/.test(text);
+  const readIntent = /\b(show|list|view|get|retrieve|display|see|current|existing)\b/.test(text);
+  const existingProject = /\b(existing|current)\s+project\b/.test(text);
+  return prdContext && wantsFeatures && (readIntent || existingProject);
+}
+
+function featureLabel(feature: unknown, index: number): string {
+  if (!feature || typeof feature !== 'object') return `Feature ${index + 1}`;
+  const record = feature as Record<string, unknown>;
+  const name = record.name || record.title || record.feature || record.slug || `Feature ${index + 1}`;
+  const requirements = Array.isArray(record.requirements) ? record.requirements.length : undefined;
+  const requirementText = requirements !== undefined ? ` - ${requirements} requirement${requirements === 1 ? '' : 's'}` : '';
+  return `${String(name)}${requirementText}`;
+}
+
+async function prdFeaturesShortcutResponse(
+  latestUserText: string,
+  projectId: string | undefined,
+  currentPage: string | undefined,
+  pageContext: { section?: string } | undefined,
+  authToken: string | undefined
+): Promise<Response | null> {
+  if (!isPrdFeatureReadIntent(latestUserText, currentPage, pageContext)) return null;
+
+  const params = new URLSearchParams();
+  if (projectId) params.set('project_id', projectId);
+  const projectsPath = `/api/prd/projects${params.toString() ? `?${params.toString()}` : ''}`;
+  const projectsRes = await backendFetch<unknown>(projectsPath, {
+    authToken,
+    timeoutMs: 10000,
+  });
+
+  if (!projectsRes.ok) {
+    return textToUIMessageResponse(
+      `I tried to load PRD projects, but the backend returned an error: ${projectsRes.error || 'unknown error'}.`
+    );
+  }
+
+  const projects = normalizePrdProjects(projectsRes.data).filter((project) => prdProjectId(project));
+  if (projects.length === 0) {
+    return textToUIMessageResponse('I do not see any PRD projects for the current project.');
+  }
+
+  if (projects.length > 1) {
+    const choices = projects
+      .slice(0, 10)
+      .map((project) => {
+        const id = prdProjectId(project);
+        const count = typeof project.feature_count === 'number' ? ` - ${project.feature_count} features` : '';
+        return `- ${id}${count}`;
+      })
+      .join('\n');
+    return textToUIMessageResponse(
+      `I found multiple PRD projects. Reply with the PRD project name to show its features.\n\n${choices}`
+    );
+  }
+
+  const selectedProject = prdProjectId(projects[0]);
+  const featuresRes = await backendFetch<{ features?: unknown[]; total?: number }>(
+    `/api/prd/${encodeURIComponent(selectedProject)}/features`,
+    { authToken, timeoutMs: 10000 }
+  );
+
+  if (!featuresRes.ok) {
+    return textToUIMessageResponse(
+      `I found PRD project "${selectedProject}", but loading its features failed: ${featuresRes.error || 'unknown error'}.`
+    );
+  }
+
+  const features = Array.isArray(featuresRes.data?.features) ? featuresRes.data.features : [];
+  if (features.length === 0) {
+    return textToUIMessageResponse(`PRD project "${selectedProject}" has no testable features yet.`);
+  }
+
+  const shown = features.slice(0, 20).map(featureLabel).join('\n- ');
+  const suffix = features.length > 20 ? `\n\nShowing 20 of ${features.length} features.` : '';
+  return textToUIMessageResponse(
+    `Features in PRD project "${selectedProject}":\n\n- ${shown}${suffix}`
+  );
+}
+
 function databaseConnectionId(connection: DatabaseConnectionSummary): string {
   return String(connection.id || connection.connection_id || '');
 }
@@ -839,6 +854,16 @@ export async function POST(req: Request) {
   // Extract auth token from request headers
   const authHeader = req.headers.get('authorization');
   const authToken = authHeader?.replace('Bearer ', '') || undefined;
+  const latestUserText = extractLatestUserText(messages);
+
+  const prdFeaturesShortcut = await prdFeaturesShortcutResponse(
+    latestUserText,
+    projectId,
+    currentPage,
+    pageContext,
+    authToken
+  );
+  if (prdFeaturesShortcut) return prdFeaturesShortcut;
 
   const missingExplorerUrl = buildExplorerAgentMissingUrlResponse(messages);
   if (missingExplorerUrl) return missingExplorerUrl;
@@ -888,7 +913,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const [modelId, ctxRes, summRes] = await Promise.all([
+  const [modelId, ctxRes, summRes, memoryRes] = await Promise.all([
     getRuntimeModelId(authToken),
     timedBackendFetch<{
       recent_runs?: number;
@@ -910,42 +935,57 @@ export async function POST(req: Request) {
       `/chat/conversations/recent-summaries${projectId ? `?project_id=${projectId}` : ''}`,
       { authToken, timeoutMs: OPTIONAL_CONTEXT_TIMEOUT_MS }
     ).catch(() => null),
+    timedBackendFetch<{
+      memories: Array<{ kind: string; summary?: string | null; content?: string; confidence?: number }>;
+    }>(
+      'agent memory',
+      `/api/memory/agent/context?${new URLSearchParams({
+        ...(projectId ? { project_id: projectId } : {}),
+        q: latestUserText || currentPage || '',
+        agent_type: 'assistant',
+        limit: '8',
+      }).toString()}`,
+      { authToken, timeoutMs: OPTIONAL_CONTEXT_TIMEOUT_MS }
+    ).catch(() => null),
   ]);
 
   const projectStats = ctxRes?.ok ? ctxRes.data : undefined;
   const recentSummaries = summRes?.ok ? summRes.data?.summaries || [] : [];
+  const agentMemory = memoryRes?.ok ? memoryRes.data?.memories || [] : [];
   const systemPrompt = buildSystemPrompt({
     projectName,
     projectId,
     currentPage,
     projectStats,
     conversationHistory: recentSummaries,
+    agentMemory,
     pageContext,
   });
 
-  if (!hasDirectAnthropicChatCredential()) {
-    const fallback = await openAIChatFallbackResponse(messages, systemPrompt, 'no direct Anthropic chat credential');
-    if (fallback) return fallback;
-    return claudeCodeBackendResponse(messages, systemPrompt, authToken);
-  }
-
   const tools = createAssistantTools(authToken, projectId);
   const recentMessages = getRecentMessages(messages);
+  const useAnthropic = hasDirectAnthropicChatCredential();
+  const useOpenAI = !useAnthropic && hasOpenAIChatCredential();
+
+  if (!useAnthropic && !useOpenAI) {
+    return textToUIMessageResponse(
+      'AI chat tools are not configured. Set ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY or OPENAI_API_KEY so the assistant can execute real platform data requests.'
+    );
+  }
 
   try {
     const modelMessages = await convertToModelMessages(recentMessages);
+    const { provider, selectedModelId, providerName } = useAnthropic
+      ? { ...getActiveProvider(), selectedModelId: modelId, providerName: 'Anthropic' }
+      : { ...getActiveOpenAIProvider(), selectedModelId: OPENAI_MODEL_ID, providerName: 'OpenAI' };
+    const supportsThinking = useAnthropic && supportsExtendedThinking(selectedModelId);
 
-    // Enable extended thinking for models that support it
-    const supportsThinking = supportsExtendedThinking(modelId);
-
-    // Use multi-key provider
-    const { provider } = getActiveProvider();
     console.info(
-      `[chat/route] routing chat through Anthropic SDK provider model=${modelId} messages=${recentMessages.length}/${messages.length}`
+      `[chat/route] routing chat through ${providerName} SDK provider model=${selectedModelId} messages=${recentMessages.length}/${messages.length}`
     );
 
     const result = streamText({
-      model: provider(modelId),
+      model: provider(selectedModelId),
       system: systemPrompt,
       messages: modelMessages,
       maxOutputTokens: 2048,
@@ -980,7 +1020,7 @@ export async function POST(req: Request) {
     const errMsg = error instanceof Error ? error.message : String(error);
     const isRateLimit = /429|rate.limit|usage.limit|quota/i.test(errMsg);
 
-    if (isRateLimit) {
+    if (isRateLimit && useAnthropic) {
       const { slot: firstSlot } = getActiveProvider();
       reportRateLimit(firstSlot ?? undefined);
 

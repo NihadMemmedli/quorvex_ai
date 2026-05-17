@@ -68,6 +68,7 @@ async def run_nuclei_scan(
     target_url: str,
     severity_filter: str | None = None,
     templates: list[str] | None = None,
+    headers: dict[str, str] | None = None,
     on_progress: callable | None = None,
 ) -> list[dict]:
     """Run Nuclei scan against target URL.
@@ -106,6 +107,11 @@ async def run_nuclei_scan(
     if templates:
         for t in templates:
             cmd.extend(["-t", t])
+
+    if headers:
+        for name, value in headers.items():
+            if value:
+                cmd.extend(["-H", f"{name}: {value}"])
 
     logger.info(f"Starting Nuclei scan: {' '.join(cmd)}")
 

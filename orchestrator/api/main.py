@@ -52,6 +52,7 @@ from . import (
     auth,
     autopilot,
     chat,
+    ci_control,
     dashboard,
     database_testing,
     exploration,
@@ -375,6 +376,7 @@ app.include_router(rtm.router)
 app.include_router(testrail.router)  # TestRail integration
 app.include_router(jira.router)  # Jira integration
 app.include_router(scheduling.router)  # Cron scheduling
+app.include_router(ci_control.router)  # Provider-neutral CI/CD control center
 app.include_router(gitlab_ci.router)  # GitLab CI/CD integration
 app.include_router(github_ci.router)  # GitHub Actions integration
 app.include_router(api_testing.router)  # API testing endpoints
@@ -390,7 +392,8 @@ app.mount("/artifacts", StaticFiles(directory=RUNS_DIR), name="artifacts")
 
 # CORS Configuration - restrict origins in production
 # Set ALLOWED_ORIGINS env var with comma-separated URLs (e.g., "https://app.company.com,http://localhost:3000")
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+DEFAULT_ALLOWED_ORIGINS = "http://localhost:3000,http://host.docker.internal:3000"
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", DEFAULT_ALLOWED_ORIGINS).split(",")
 
 app.add_middleware(
     CORSMiddleware,

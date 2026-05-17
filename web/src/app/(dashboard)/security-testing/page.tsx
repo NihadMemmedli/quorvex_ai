@@ -7,7 +7,16 @@ import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
 import { createTabStyle, getAuthHeaders, cardStyle } from '@/lib/styles';
 import { severityColor } from '@/lib/colors';
-import { SecuritySpec, SecurityScanRun, JobStatus, FindingSummary, TabType } from './components/types';
+import {
+    CredentialOption,
+    SecurityCapabilities,
+    SecuritySpec,
+    SecurityScanRun,
+    SecurityTarget,
+    JobStatus,
+    FindingSummary,
+    TabType,
+} from './components/types';
 import ScannerTab from './components/ScannerTab';
 import SpecsTab from './components/SpecsTab';
 import HistoryTab from './components/HistoryTab';
@@ -23,9 +32,18 @@ export default function SecurityTestingPage() {
     // Scanner state
     const [scanUrl, setScanUrl] = useState('');
     const [scanType, setScanType] = useState('quick');
+    const [activeScanLevel, setActiveScanLevel] = useState('safe');
+    const [authEnabled, setAuthEnabled] = useState(false);
+    const [loginUrl, setLoginUrl] = useState('');
+    const [usernameKey, setUsernameKey] = useState('');
+    const [passwordKey, setPasswordKey] = useState('');
+    const [excludedPaths, setExcludedPaths] = useState('');
     const [isScanning, setIsScanning] = useState(false);
     const [activeJobId, setActiveJobId] = useState<string | null>(null);
     const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
+    const [capabilities, setCapabilities] = useState<SecurityCapabilities | null>(null);
+    const [targets, setTargets] = useState<SecurityTarget[]>([]);
+    const [credentials, setCredentials] = useState<CredentialOption[]>([]);
 
     // Specs state
     const [specs, setSpecs] = useState<SecuritySpec[]>([]);
@@ -65,10 +83,40 @@ export default function SecurityTestingPage() {
                     total: data.total_open || 0,
                     critical: bySev.critical || 0, high: bySev.high || 0,
                     medium: bySev.medium || 0, low: bySev.low || 0, info: bySev.info || 0,
-                    open: data.total_open || 0, false_positive: 0, fixed: 0, accepted_risk: 0,
+                    open: data.by_status?.open || data.total_open || 0,
+                    false_positive: data.by_status?.false_positive || 0,
+                    fixed: data.by_status?.fixed || 0,
+                    accepted_risk: data.by_status?.accepted_risk || 0,
                 });
             }
         } catch (e) { console.error('Failed to fetch summary:', e); }
+    }, [projectId]);
+
+    const fetchCapabilities = useCallback(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/security-testing/capabilities`, { headers: getAuthHeaders() });
+            if (res.ok) setCapabilities(await res.json());
+        } catch (e) { console.error('Failed to fetch security capabilities:', e); }
+    }, []);
+
+    const fetchTargets = useCallback(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/security-testing/targets?project_id=${projectId}`, { headers: getAuthHeaders() });
+            if (res.ok) {
+                const data = await res.json();
+                setTargets(data.targets || []);
+            }
+        } catch (e) { console.error('Failed to fetch security targets:', e); }
+    }, [projectId]);
+
+    const fetchCredentials = useCallback(async () => {
+        try {
+            const res = await fetch(`${API_BASE}/projects/${projectId}/credentials?include_env=true`, { headers: getAuthHeaders() });
+            if (res.ok) {
+                const data = await res.json();
+                setCredentials(data.credentials || []);
+            }
+        } catch (e) { console.error('Failed to fetch credentials:', e); }
     }, [projectId]);
 
     // Refresh on tab change or project change
@@ -77,6 +125,13 @@ export default function SecurityTestingPage() {
         if (activeTab === 'history') fetchRuns();
         if (activeTab === 'findings') { fetchFindingSummary(); fetchRuns(); }
     }, [activeTab, projectId, fetchSpecs, fetchRuns, fetchFindingSummary]);
+
+    useEffect(() => {
+        fetchCapabilities();
+        fetchTargets();
+        fetchCredentials();
+        fetchFindingSummary();
+    }, [fetchCapabilities, fetchTargets, fetchCredentials, fetchFindingSummary]);
 
     // Track visited tabs
     useEffect(() => {
@@ -114,10 +169,25 @@ export default function SecurityTestingPage() {
         setIsScanning(true);
         setJobStatus(null);
         try {
+            const body: Record<string, unknown> = {
+                target_url: scanUrl,
+                project_id: projectId,
+                active_scan_level: activeScanLevel,
+                excluded_paths: excludedPaths.split('\n').map(p => p.trim()).filter(Boolean),
+            };
+            if (authEnabled) {
+                body.auth_config = {
+                    enabled: true,
+                    auth_type: 'login',
+                    login_url: loginUrl,
+                    username_key: usernameKey,
+                    password_key: passwordKey,
+                };
+            }
             const res = await fetch(`${API_BASE}/security-testing/scan/${scanType}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                body: JSON.stringify({ target_url: scanUrl, project_id: projectId }),
+                body: JSON.stringify(body),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -131,7 +201,7 @@ export default function SecurityTestingPage() {
             setJobStatus({ job_id: '', status: 'failed', message: String(e) });
             setIsScanning(false);
         }
-    }, [scanUrl, scanType, projectId]);
+    }, [scanUrl, scanType, projectId, activeScanLevel, excludedPaths, authEnabled, loginUrl, usernameKey, passwordKey]);
 
     const updateFindingStatus = useCallback(async (findingId: number, newStatus: string, notes?: string) => {
         try {
@@ -143,6 +213,16 @@ export default function SecurityTestingPage() {
             fetchFindingSummary();
         } catch (e) { console.error('Update finding status failed:', e); }
     }, [fetchFindingSummary]);
+
+    const stopScan = useCallback(async (runId: string) => {
+        try {
+            await fetch(`${API_BASE}/security-testing/runs/${runId}/stop`, {
+                method: 'POST',
+                headers: getAuthHeaders(),
+            });
+            fetchRuns();
+        } catch (e) { console.error('Stop security scan failed:', e); }
+    }, [fetchRuns]);
 
     // ========== Render ==========
 
@@ -214,6 +294,22 @@ export default function SecurityTestingPage() {
                     setScanType={setScanType}
                     isScanning={isScanning}
                     jobStatus={jobStatus}
+                    capabilities={capabilities}
+                    targets={targets}
+                    credentials={credentials}
+                    activeScanLevel={activeScanLevel}
+                    setActiveScanLevel={setActiveScanLevel}
+                    authEnabled={authEnabled}
+                    setAuthEnabled={setAuthEnabled}
+                    loginUrl={loginUrl}
+                    setLoginUrl={setLoginUrl}
+                    usernameKey={usernameKey}
+                    setUsernameKey={setUsernameKey}
+                    passwordKey={passwordKey}
+                    setPasswordKey={setPasswordKey}
+                    excludedPaths={excludedPaths}
+                    setExcludedPaths={setExcludedPaths}
+                    onRefreshCapabilities={fetchCapabilities}
                     onStartScan={startScan}
                 />
             )}
@@ -231,11 +327,13 @@ export default function SecurityTestingPage() {
                     runs={runs}
                     fetchRuns={fetchRuns}
                     onStatusChange={updateFindingStatus}
+                    onStopScan={stopScan}
                 />
             )}
 
             {activeTab === 'findings' && visitedTabs.has('findings') && (
                 <FindingsTab
+                    projectId={projectId}
                     runs={runs}
                     onStatusChange={updateFindingStatus}
                 />

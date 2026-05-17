@@ -182,6 +182,55 @@ class BaseAgent:
         self.allowed_tools: list[str] | None = None
         self.tools: list[str] | dict[str, str] | None = None
 
+    def _agent_memory_project_id(self) -> str | None:
+        return os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID")
+
+    def _augment_prompt_with_agent_memory(self, prompt: str) -> str:
+        if os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
+            return prompt
+        project_id = self._agent_memory_project_id()
+        if not project_id:
+            return prompt
+        try:
+            from orchestrator.memory.agent_memory import get_agent_memory_service
+
+            context = get_agent_memory_service().build_context(
+                query=prompt[:2000],
+                project_id=project_id,
+                agent_type=self.__class__.__name__,
+                limit=8,
+            )
+            if not context:
+                return prompt
+            return f"{context}\n\n---\n\n{prompt}"
+        except Exception as exc:
+            logger.debug("Agent memory retrieval skipped: %s", exc)
+            return prompt
+
+    def _capture_agent_memory(self, prompt: str, result: Any) -> None:
+        if os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
+            return
+        project_id = self._agent_memory_project_id()
+        if not project_id:
+            return
+        text = str(result or "")
+        if "remember" in prompt.lower():
+            text = f"{prompt[:1200]}\n{text}"
+        if not text.strip():
+            return
+        try:
+            from orchestrator.memory.agent_memory import get_agent_memory_service
+
+            get_agent_memory_service().capture_candidates(
+                text,
+                project_id=project_id,
+                source_type="agent_run",
+                source_id=None,
+                agent_type=self.__class__.__name__,
+            )
+        except Exception as exc:
+            logger.debug("Agent memory capture skipped: %s", exc)
+
     def _resolved_tool_config(self) -> dict[str, Any]:
         """Return tool configuration for this agent.
 
@@ -582,16 +631,23 @@ echo "done" > {done_file}
         2. Direct CLI invocation - if USE_DIRECT_CLI=true
         3. SDK-based execution - fallback
         """
+        original_prompt = prompt
+        prompt = self._augment_prompt_with_agent_memory(prompt)
+
         # First, try agent queue if Redis is available
         # This offloads execution to a separate worker process outside uvicorn
         if AGENT_QUEUE_AVAILABLE and should_use_agent_queue():
-            return await self._query_agent_via_queue(prompt, system_prompt, timeout_seconds)
+            result = await self._query_agent_via_queue(prompt, system_prompt, timeout_seconds)
+            self._capture_agent_memory(original_prompt, result)
+            return result
 
         # Try direct CLI invocation if explicitly enabled
         use_direct = os.environ.get("USE_DIRECT_CLI", "false").lower() == "true"
 
         if use_direct:
-            return await self._query_agent_direct(prompt, system_prompt, timeout_seconds)
+            result = await self._query_agent_direct(prompt, system_prompt, timeout_seconds)
+            self._capture_agent_memory(original_prompt, result)
+            return result
 
         # Use SDK by default (it handles subprocess internally)
 
@@ -714,7 +770,9 @@ echo "done" > {done_file}
             query_task = asyncio.create_task(_do_query())
 
             try:
-                return await asyncio.wait_for(query_task, timeout=timeout_seconds)
+                result = await asyncio.wait_for(query_task, timeout=timeout_seconds)
+                self._capture_agent_memory(original_prompt, result)
+                return result
             except asyncio.TimeoutError:
                 logger.warning(f"Agent query timed out after {timeout_seconds} seconds")
                 # Try to get partial result from the task
@@ -729,12 +787,16 @@ echo "done" > {done_file}
                 if partial_content:
                     logger.info(f"Recovered {len(partial_content)} characters of partial content")
                     # Wrap in special marker so caller knows it's partial
-                    return f"__TIMEOUT_PARTIAL__\n{partial_content}"
+                    result = f"__TIMEOUT_PARTIAL__\n{partial_content}"
+                    self._capture_agent_memory(original_prompt, result)
+                    return result
                 # Reraise if no partial content
                 logger.error("No partial content recovered, re-raising timeout")
                 raise
 
-        return await _do_query()
+        result = await _do_query()
+        self._capture_agent_memory(original_prompt, result)
+        return result
 
     async def run(self, config: dict[str, Any]) -> dict[str, Any]:
         """Main execution method to be implemented by subclasses"""

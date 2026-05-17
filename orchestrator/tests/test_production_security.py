@@ -87,7 +87,7 @@ class TestCORSConfiguration:
     """Test CORS configuration restricts origins properly."""
 
     def test_cors_default_localhost(self):
-        """Default CORS should allow only localhost:3000."""
+        """Default CORS should allow local browser origins."""
         # Save and clear
         original = os.environ.get("ALLOWED_ORIGINS")
         if "ALLOWED_ORIGINS" in os.environ:
@@ -95,8 +95,9 @@ class TestCORSConfiguration:
 
         try:
             # Re-evaluate the default
-            allowed = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-            assert allowed == ["http://localhost:3000"]
+            default_allowed = "http://localhost:3000,http://host.docker.internal:3000"
+            allowed = os.getenv("ALLOWED_ORIGINS", default_allowed).split(",")
+            assert allowed == ["http://localhost:3000", "http://host.docker.internal:3000"]
         finally:
             if original:
                 os.environ["ALLOWED_ORIGINS"] = original

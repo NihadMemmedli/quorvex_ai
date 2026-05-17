@@ -1,6 +1,6 @@
 'use client';
 
-import { ExternalLink, GitBranch, Clock, CheckCircle, XCircle, Loader2, AlertCircle, MinusCircle } from 'lucide-react';
+import { ChevronRight, ExternalLink, GitBranch, Clock, CheckCircle, XCircle, Loader2, AlertCircle, MinusCircle } from 'lucide-react';
 
 interface Pipeline {
     provider: 'gitlab' | 'github';
@@ -16,6 +16,11 @@ interface Pipeline {
     total_tests?: number;
     passed_tests?: number;
     failed_tests?: number;
+    action_availability?: {
+        can_cancel?: boolean;
+        can_rerun?: boolean;
+        can_fetch_logs?: boolean;
+    };
 }
 
 interface PipelineStatusCardProps {
@@ -175,6 +180,7 @@ export function PipelineStatusCard({ pipeline }: PipelineStatusCardProps) {
                     href={pipeline.external_url}
                     target="_blank"
                     rel="noopener noreferrer"
+                    onClick={event => event.stopPropagation()}
                     style={{
                         color: 'var(--text-secondary)',
                         padding: '0.3rem',
@@ -187,6 +193,19 @@ export function PipelineStatusCard({ pipeline }: PipelineStatusCardProps) {
                     <ExternalLink size={16} />
                 </a>
             )}
+
+            <span style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '0.25rem',
+                color: 'var(--primary)',
+                fontSize: '0.78rem',
+                fontWeight: 750,
+                flexShrink: 0,
+            }}>
+                Details
+                <ChevronRight size={15} />
+            </span>
 
             <style jsx>{`
                 @keyframes spin {

@@ -2,8 +2,8 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Build argument for API URL (used during Next.js build)
-ARG NEXT_PUBLIC_API_URL=http://localhost:8001
+# Optional build argument for API URL (used during Next.js build)
+ARG NEXT_PUBLIC_API_URL=
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 
 # Install dependencies based on the preferred package manager

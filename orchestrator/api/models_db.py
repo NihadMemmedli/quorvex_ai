@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Index, UniqueConstraint
+from sqlalchemy import JSON, Index, Text, UniqueConstraint
 from sqlmodel import Column, Field, SQLModel
 
 
@@ -1982,7 +1982,11 @@ class CiPipelineMapping(SQLModel, table=True):
     """Tracks CI/CD pipeline runs triggered from or received by the platform."""
 
     __tablename__ = "ci_pipeline_mappings"
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        Index("ix_ci_pipeline_project_provider_created", "project_id", "provider", "created_at"),
+        Index("ix_ci_pipeline_project_provider_external", "project_id", "provider", "external_pipeline_id", unique=True),
+        {"extend_existing": True},
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
@@ -2036,6 +2040,61 @@ class CiPipelineMapping(SQLModel, table=True):
     @artifacts.setter
     def artifacts(self, value: list[dict[str, Any]]):
         self.artifacts_json = json.dumps(value)
+
+
+class CiWorkflowChangeRequest(SQLModel, table=True):
+    """A generated CI workflow proposal awaiting human review."""
+
+    __tablename__ = "ci_workflow_change_requests"
+    __table_args__ = (
+        Index("ix_ci_workflow_change_project_created", "project_id", "created_at"),
+        Index("ix_ci_workflow_change_project_status", "project_id", "status"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    provider: str = Field(default="github", index=True)
+    workflow_name: str
+    workflow_path: str
+    ref: str | None = None
+    status: str = Field(default="draft", index=True)  # draft, proposed, opened, rejected
+    generated_yaml: str = Field(sa_column=Column(Text))
+    prompt: str | None = Field(default=None, sa_column=Column(Text))
+    validation_errors: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    validation_warnings: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    pull_request_url: str | None = None
+    pull_request_number: int | None = None
+    pull_request_branch: str | None = None
+    pull_request_base_ref: str | None = None
+    commit_sha: str | None = None
+    last_error: str | None = Field(default=None, sa_column=Column(Text))
+    created_by: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class CiAuditEvent(SQLModel, table=True):
+    """Audit trail for CI/CD actions initiated from Quorvex."""
+
+    __tablename__ = "ci_audit_events"
+    __table_args__ = (
+        Index("ix_ci_audit_project_created", "project_id", "created_at"),
+        Index("ix_ci_audit_project_action", "project_id", "action"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    provider: str = Field(index=True)
+    action: str = Field(index=True)
+    target_type: str | None = None
+    target_id: str | None = None
+    status: str = Field(default="ok", index=True)
+    actor_id: str | None = None
+    actor_email: str | None = None
+    event_metadata: dict[str, Any] | None = Field(default=None, sa_column=Column("metadata", JSON))
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
 
 
 class PrImpactAnalysis(SQLModel, table=True):
@@ -2368,6 +2427,38 @@ class ChatMessageFeedback(SQLModel, table=True):
     comment: str | None = None
     user_id: str | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class AgentMemory(SQLModel, table=True):
+    """Curated working memory for assistant and autonomous agents."""
+
+    __tablename__ = "agent_memories"
+    __table_args__ = (
+        Index("ix_agentmemory_project_status", "project_id", "status"),
+        Index("ix_agentmemory_project_kind", "project_id", "kind"),
+        Index("ix_agentmemory_user_status", "user_id", "status"),
+        Index("ix_agentmemory_source", "source_type", "source_id"),
+        Index("ix_agentmemory_last_used", "last_used_at"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    user_id: str | None = Field(default=None, index=True)
+    kind: str = Field(index=True)
+    content: str = Field(sa_column=Column(Text))
+    summary: str | None = Field(default=None, sa_column=Column(Text))
+    tags: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    confidence: float = Field(default=0.7)
+    source_type: str | None = None
+    source_id: str | None = None
+    agent_type: str | None = Field(default=None, index=True)
+    status: str = Field(default="active", index=True)
+    extra_data: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    last_used_at: datetime | None = None
+    use_count: int = Field(default=0)
 
 
 # ========== Auto Pilot Pipeline Models ==========

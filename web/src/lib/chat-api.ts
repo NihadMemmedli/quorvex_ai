@@ -62,6 +62,15 @@ export async function saveMessagesBulk(conversationId: string, messages: Array<{
   if (!res.ok) throw new Error('Failed to save messages');
 }
 
+export async function saveMessage(conversationId: string, message: { role: string; content: string; content_json?: string }): Promise<void> {
+  const res = await fetchWithAuth(`${API_BASE}/chat/conversations/${conversationId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(message),
+  });
+  if (!res.ok) throw new Error('Failed to save message');
+}
+
 export async function updateMessageContentJson(
   conversationId: string, messageId: number, contentJson: string
 ): Promise<void> {

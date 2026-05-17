@@ -38,6 +38,7 @@ anthropic==0.76.0
 passlib==1.7.4
 bcrypt==4.3.0
 python-jose==3.5.0
+python-owasp-zap-v2.4==0.1.0
 cryptography==46.0.3
 PyJWT==2.10.1
 pydantic==2.11.10

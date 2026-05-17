@@ -70,6 +70,25 @@ class SubmitFeedbackRequest(BaseModel):
     comment: str | None = None
 
 
+def _capture_chat_memory(conv: ChatConversation, role: str, content: str, message_id: int | None, user_id: str | None):
+    """Best-effort curated memory capture from saved assistant chat turns."""
+    if role not in {"user", "assistant"} or not content:
+        return
+    try:
+        from orchestrator.memory.agent_memory import get_agent_memory_service
+
+        get_agent_memory_service().capture_candidates(
+            content,
+            project_id=conv.project_id,
+            user_id=user_id,
+            source_type="chat_message",
+            source_id=str(message_id) if message_id is not None else conv.id,
+            agent_type="assistant",
+        )
+    except Exception as exc:
+        logger.debug("Chat memory capture skipped: %s", exc)
+
+
 # ---------- Conversations ----------
 
 
@@ -369,6 +388,7 @@ async def save_message(
 
     session.commit()
     session.refresh(msg)
+    _capture_chat_memory(conv, msg.role, msg.content, msg.id, user.id if user else None)
     return {
         "id": msg.id,
         "role": msg.role,
@@ -409,6 +429,9 @@ async def save_messages_bulk(
     conv.updated_at = datetime.utcnow()
     session.add(conv)
     session.commit()
+    for msg in saved:
+        session.refresh(msg)
+        _capture_chat_memory(conv, msg.role, msg.content, msg.id, user.id if user else None)
 
     return {"saved": len(saved)}
 

@@ -2114,6 +2114,23 @@ export default function SettingsPage() {
                             </div>
                         </div>
 
+                        {/* Webhook Secret */}
+                        <div className="form-group">
+                            <label className="label">Webhook Secret <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}>(Optional)</span></label>
+                            <div className="input-group">
+                                <div className="input-icon">
+                                    <Lock size={18} />
+                                </div>
+                                <input
+                                    type="text"
+                                    value={glWebhookSecret}
+                                    onChange={e => setGlWebhookSecret(e.target.value)}
+                                    placeholder="Webhook secret token"
+                                    className="input has-icon"
+                                />
+                            </div>
+                        </div>
+
                         {/* PR Quality Gate Defaults */}
                         <div style={{
                             padding: '1rem',
@@ -2220,23 +2237,6 @@ export default function SettingsPage() {
                                     lineHeight: 1.45,
                                     maxHeight: 360,
                                 }}><code>{githubActionsQualityGateYaml(ghOwner, ghRepo)}</code></pre>
-                            </div>
-                        </div>
-
-                        {/* Webhook Secret */}
-                        <div className="form-group">
-                            <label className="label">Webhook Secret <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}>(Optional)</span></label>
-                            <div className="input-group">
-                                <div className="input-icon">
-                                    <Lock size={18} />
-                                </div>
-                                <input
-                                    type="text"
-                                    value={glWebhookSecret}
-                                    onChange={e => setGlWebhookSecret(e.target.value)}
-                                    placeholder="Webhook secret token"
-                                    className="input has-icon"
-                                />
                             </div>
                         </div>
 

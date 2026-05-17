@@ -125,7 +125,7 @@ async function executeAdhocCustomAgentAction({
   actionId: string;
   args: Record<string, unknown>;
   authToken?: string;
-  body?: Record<string, unknown>;
+  body?: unknown;
   path: string;
   projectId?: string;
 }) {

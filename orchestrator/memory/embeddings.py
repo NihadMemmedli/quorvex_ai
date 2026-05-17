@@ -5,10 +5,45 @@ Handles text embeddings using OpenAI's text-embedding-3-small model.
 """
 
 import os
+import hashlib
+import math
 
 from openai import OpenAI
 
 from .config import get_config
+
+
+class LocalHashEmbeddingClient:
+    """Deterministic local fallback for memory search when OpenAI is not configured."""
+
+    def __init__(self, dimension: int | None = None):
+        config = get_config()
+        self.dimension = dimension or config.embedding_dimension
+        self.model = f"local-hash-{self.dimension}"
+        self.api_key = None
+
+    def embed(self, text: str) -> list[float]:
+        vector = [0.0] * self.dimension
+        tokens = [token for token in text.lower().split() if token]
+        if not tokens:
+            tokens = [text.lower() or "empty"]
+
+        for token in tokens:
+            digest = hashlib.sha256(token.encode("utf-8")).digest()
+            idx = int.from_bytes(digest[:4], "big") % self.dimension
+            sign = 1.0 if digest[4] % 2 == 0 else -1.0
+            vector[idx] += sign
+
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm == 0:
+            return vector
+        return [value / norm for value in vector]
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed(text) for text in texts]
+
+    def embed_query(self, query: str) -> list[float]:
+        return self.embed(query)
 
 
 class EmbeddingClient:
@@ -80,12 +115,17 @@ class EmbeddingClient:
 
 
 # Global embedding client instance
-_embedding_client: EmbeddingClient | None = None
+_embedding_client: EmbeddingClient | LocalHashEmbeddingClient | None = None
 
 
-def get_embedding_client() -> EmbeddingClient:
+def get_embedding_client() -> EmbeddingClient | LocalHashEmbeddingClient:
     """Get the global embedding client"""
     global _embedding_client
     if _embedding_client is None:
-        _embedding_client = EmbeddingClient()
+        config = get_config()
+        api_key = config.openai_api_key or os.getenv("OPENAI_API_KEY")
+        if api_key:
+            _embedding_client = EmbeddingClient(api_key=api_key)
+        else:
+            _embedding_client = LocalHashEmbeddingClient()
     return _embedding_client
