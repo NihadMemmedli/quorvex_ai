@@ -277,6 +277,37 @@ class DatabaseConnector:
             "truncated": total_count > MAX_TOTAL_ROWS,
         }
 
+    async def execute_read_query(self, sql: str, row_limit: int = 100) -> dict[str, Any]:
+        """Execute a bounded read-only viewer query and return up to row_limit rows."""
+        if not self._pool:
+            raise RuntimeError("Not connected. Call connect() first.")
+
+        self._validate_query(sql)
+        bounded_limit = max(1, min(int(row_limit or 100), 500))
+        start = time.monotonic()
+
+        async with self._pool.acquire() as conn:
+            if self.is_read_only:
+                await conn.execute("SET default_transaction_read_only = true")
+
+            try:
+                rows = await asyncio.wait_for(
+                    conn.fetch(sql),
+                    timeout=QUERY_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                raise TimeoutError(f"Query timed out after {QUERY_TIMEOUT_SECONDS}s")
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        limited_rows = rows[:bounded_limit]
+        return {
+            "row_count": len(limited_rows),
+            "total_row_count": len(rows),
+            "rows": [{k: _serialize_value(v) for k, v in dict(row).items()} for row in limited_rows],
+            "execution_time_ms": elapsed_ms,
+            "truncated": len(rows) > bounded_limit,
+        }
+
     async def close(self):
         """Close the connection pool."""
         if self._pool:

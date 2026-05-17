@@ -16,17 +16,24 @@ exploration_store_stub.get_exploration_store = lambda *args, **kwargs: None
 sys.modules.setdefault("memory", memory_stub)
 sys.modules.setdefault("memory.exploration_store", exploration_store_stub)
 
-from orchestrator.workflows.requirements_generator import RequirementsGenerator as _RequirementsGenerator
-from orchestrator.workflows.autopilot_pipeline import AutoPilotPipeline as _AutoPilotPipeline
+from orchestrator.workflows.requirements_generator import (
+    RequirementsGenerator as _RequirementsGenerator,
+)
+from orchestrator.workflows.autopilot_pipeline import (
+    AutoPilotPipeline as _AutoPilotPipeline,
+)
 from orchestrator.ai.context import SOURCE_OBSERVED
 from orchestrator.workflows.app_explorer import AppExplorer as _AppExplorer
 from orchestrator.workflows.app_explorer import ExplorationConfig as _ExplorationConfig
+from orchestrator.workflows.app_explorer import PageRecord as _PageRecord
 from orchestrator.workflows.spec_scenario_builder import (
     conservative_page_scenarios,
     render_scenario_markdown,
     scenario_from_test_idea,
 )
-from orchestrator.workflows.test_idea_generator import TestIdeaGenerator as _TestIdeaGenerator
+from orchestrator.workflows.test_idea_generator import (
+    TestIdeaGenerator as _TestIdeaGenerator,
+)
 from orchestrator.utils.agent_runner import AgentRunner as _AgentRunner
 
 
@@ -84,7 +91,11 @@ def test_fallback_ideas_use_requirements_and_flow_steps():
             {
                 "name": "User Login",
                 "steps": [
-                    {"action": "fill", "element": "Email input", "value": "user@example.com"},
+                    {
+                        "action": "fill",
+                        "element": "Email input",
+                        "value": "user@example.com",
+                    },
                     {"action": "click", "element": "Login button"},
                 ],
             }
@@ -123,7 +134,12 @@ def test_requirement_without_flow_gets_conservative_companion_ideas():
         }
     )
 
-    assert [idea.category for idea in ideas] == ["happy_path", "regression", "accessibility", "edge_case"]
+    assert [idea.category for idea in ideas] == [
+        "happy_path",
+        "regression",
+        "accessibility",
+        "edge_case",
+    ]
     assert all("Life Events page reachable" in idea.title for idea in ideas)
     assert ideas[1].suggested_steps[0] == "Navigate to https://example.com/lifeEvents"
 
@@ -162,11 +178,19 @@ def test_requirements_fallback_creates_requirement_per_flow():
 def test_autopilot_normalizes_string_flow_steps_for_persistence():
     pipeline = object.__new__(_AutoPilotPipeline)
 
-    steps = pipeline._normalize_flow_steps(["Navigate to homepage", {"action": "click", "element": "Login"}])
+    steps = pipeline._normalize_flow_steps(
+        ["Navigate to homepage", {"action": "click", "element": "Login"}]
+    )
 
     assert steps == [
         {"action": "step", "element": "Navigate to homepage"},
-        {"action": "click", "element": "Login", "ref": None, "role": None, "value": None},
+        {
+            "action": "click",
+            "element": "Login",
+            "ref": None,
+            "role": None,
+            "value": None,
+        },
     ]
 
 
@@ -235,6 +259,59 @@ def test_requirements_fallback_creates_entry_page_requirement_without_flows():
     assert "entry page is reachable" in " ".join(requirements[0].acceptance_criteria)
 
 
+def test_requirements_fallback_uses_page_artifacts_for_sparse_flows():
+    generator = object.__new__(_RequirementsGenerator)
+
+    requirements = generator._generate_fallback_requirements(
+        {
+            "entry_url": "https://my.gov.az/entities/1",
+            "pages_discovered": 12,
+            "flows_discovered": 1,
+            "flows": [
+                {
+                    "name": "Entity Detail Browse",
+                    "category": "navigation",
+                    "description": "Entity detail page is reachable.",
+                    "start_url": "https://my.gov.az/entities/1",
+                    "end_url": "https://my.gov.az/entities/1",
+                    "steps": [{"action": "navigate", "element": "entity detail"}],
+                }
+            ],
+            "pages": [
+                {
+                    "url": "https://my.gov.az/entities/1",
+                    "title": "Entity Detail",
+                    "pageType": "entity_detail",
+                    "purpose": "Shows ministry services and life events.",
+                    "actions": ["Open related life event"],
+                },
+                {
+                    "url": "https://my.gov.az/lifeEvents/2",
+                    "title": "Life Event Detail",
+                    "pageType": "life_event_detail",
+                    "purpose": "Shows related public services.",
+                    "actions": ["Open service detail"],
+                },
+                {
+                    "url": "https://my.gov.az/services/3",
+                    "title": "Service Detail",
+                    "pageType": "service_detail",
+                    "purpose": "Shows service information and application action.",
+                    "forms": [{"name": "Document verification", "submit": "Check"}],
+                },
+            ],
+            "transitions": [],
+            "api_endpoints": [],
+        }
+    )
+
+    titles = [req.title for req in requirements]
+    assert "Entity Detail Browse" in titles
+    assert "Life Event Detail Page Access" in titles
+    assert "Service Detail Form Submission" in titles
+    assert len(requirements) >= 3
+
+
 def test_test_idea_fallback_creates_entry_page_smoke_idea_without_flows():
     generator = object.__new__(_TestIdeaGenerator)
 
@@ -253,7 +330,12 @@ def test_test_idea_fallback_creates_entry_page_smoke_idea_without_flows():
     assert len(ideas) == 4
     assert ideas[0].title == "Validate application entry page availability"
     assert ideas[0].suggested_steps[0] == "Navigate to https://example.com"
-    assert {idea.category for idea in ideas} == {"coverage", "regression", "accessibility", "edge_case"}
+    assert {idea.category for idea in ideas} == {
+        "coverage",
+        "regression",
+        "accessibility",
+        "edge_case",
+    }
 
 
 def test_scenario_builder_renders_runnable_spec_from_test_idea():
@@ -304,7 +386,9 @@ def test_conservative_page_scenarios_do_not_invent_business_behavior():
 
 def test_autopilot_effective_priority_threshold_honors_checkpoint_answers():
     pipeline = object.__new__(_AutoPilotPipeline)
-    pipeline._checkpoint_answers = {"review_requirements": "Focus on critical and high only"}
+    pipeline._checkpoint_answers = {
+        "review_requirements": "Focus on critical and high only"
+    }
 
     class Config:
         priority_threshold = "low"
@@ -312,7 +396,48 @@ def test_autopilot_effective_priority_threshold_honors_checkpoint_answers():
     assert pipeline._effective_priority_threshold(Config()) == "high"
 
 
-def test_autopilot_chat_style_priority_guidance_does_not_leave_medium_tasks_pending(monkeypatch, tmp_path):
+def test_autopilot_treats_many_pages_one_flow_as_weak_exploration():
+    pipeline = object.__new__(_AutoPilotPipeline)
+
+    assert pipeline._is_weak_exploration(total_pages=38, total_flows=1)
+    assert not pipeline._is_weak_exploration(total_pages=2, total_flows=1)
+
+
+def test_autopilot_auto_retry_only_when_no_usable_evidence():
+    pipeline = object.__new__(_AutoPilotPipeline)
+
+    assert (
+        pipeline._auto_retry_reason(
+            total_pages=0,
+            total_flows=0,
+            total_transitions=0,
+            total_api_endpoints=0,
+        )
+        == "no_usable_exploration_evidence"
+    )
+    assert (
+        pipeline._auto_retry_reason(
+            total_pages=38,
+            total_flows=1,
+            total_transitions=0,
+            total_api_endpoints=0,
+        )
+        is None
+    )
+    assert (
+        pipeline._auto_retry_reason(
+            total_pages=0,
+            total_flows=0,
+            total_transitions=3,
+            total_api_endpoints=0,
+        )
+        is None
+    )
+
+
+def test_autopilot_chat_style_priority_guidance_does_not_leave_medium_tasks_pending(
+    monkeypatch, tmp_path
+):
     monkeypatch.chdir(tmp_path)
     pipeline = object.__new__(_AutoPilotPipeline)
     pipeline.session_id = "autopilot_unit"
@@ -320,18 +445,38 @@ def test_autopilot_chat_style_priority_guidance_does_not_leave_medium_tasks_pend
     pipeline._cancelled = SimpleNamespace(is_set=lambda: False)
 
     tasks = [
-        SimpleNamespace(id=1, priority="high", requirement_title="Validate Login Browse"),
-        SimpleNamespace(id=2, priority="medium", requirement_title="Validate Entities Browse"),
-        SimpleNamespace(id=3, priority="medium", requirement_title="Validate Services Browse"),
+        SimpleNamespace(
+            id=1, priority="high", requirement_title="Validate Login Browse"
+        ),
+        SimpleNamespace(
+            id=2, priority="medium", requirement_title="Validate Entities Browse"
+        ),
+        SimpleNamespace(
+            id=3, priority="medium", requirement_title="Validate Services Browse"
+        ),
     ]
     statuses = {task.id: "pending" for task in tasks}
     skipped: list[int] = []
 
     pipeline._load_open_spec_tasks = lambda: tasks
-    pipeline._generate_spec_from_task = lambda task, _specs_dir, _config: Path(f"{task.requirement_title}.md")
-    pipeline._update_spec_task = lambda task_id, status, spec_path=None, error=None: statuses.__setitem__(task_id, status)
-    pipeline._skip_spec_tasks = lambda task_ids, _reason: (skipped.extend(task_ids), [statuses.__setitem__(tid, "skipped") for tid in task_ids])
-    pipeline._count_pending_spec_tasks = lambda: sum(1 for status in statuses.values() if status == "pending")
+    pipeline._generate_spec_from_task = lambda task, _specs_dir, _config: Path(
+        f"{task.requirement_title}.md"
+    )
+    pipeline._update_spec_task = (
+        lambda task_id, status, spec_path=None, error=None: statuses.__setitem__(
+            task_id, status
+        )
+    )
+    pipeline._skip_spec_tasks = lambda task_ids, _reason: (
+        skipped.extend(task_ids),
+        [statuses.__setitem__(tid, "skipped") for tid in task_ids],
+    )
+    pipeline._count_pending_spec_tasks = lambda: sum(
+        1 for status in statuses.values() if status == "pending"
+    )
+    pipeline._count_completed_spec_tasks = lambda: sum(
+        1 for status in statuses.values() if status == "completed"
+    )
     pipeline._update_session_field = lambda *_args, **_kwargs: None
     pipeline._update_phase_step = lambda *_args, **_kwargs: None
 
@@ -346,6 +491,152 @@ def test_autopilot_chat_style_priority_guidance_does_not_leave_medium_tasks_pend
     assert result["remaining_pending_tasks"] == 0
     assert skipped == [2, 3]
     assert statuses == {1: "completed", 2: "skipped", 3: "skipped"}
+
+
+def test_autopilot_spec_generation_continues_on_partial_success(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    pipeline = object.__new__(_AutoPilotPipeline)
+    pipeline.session_id = "autopilot_unit"
+    pipeline._checkpoint_answers = {}
+    pipeline._cancelled = SimpleNamespace(is_set=lambda: False)
+
+    tasks = [
+        SimpleNamespace(id=idx, priority="high", requirement_title=f"Spec task {idx}")
+        for idx in range(1, 11)
+    ]
+    statuses = {task.id: "pending" for task in tasks}
+    errors: dict[int, str] = {}
+
+    def generate(task, _specs_dir, _config):
+        if task.id == 10:
+            raise RuntimeError("LLM returned invalid markdown")
+        return Path(f"{task.requirement_title}.md")
+
+    def update_task(task_id, status, spec_path=None, error=None):
+        statuses[task_id] = status
+        if error:
+            errors[task_id] = error
+
+    pipeline._load_open_spec_tasks = lambda: tasks
+    pipeline._generate_spec_from_task = generate
+    pipeline._update_spec_task = update_task
+    pipeline._skip_spec_tasks = lambda *_args, **_kwargs: None
+    pipeline._count_pending_spec_tasks = lambda: sum(
+        1 for status in statuses.values() if status == "pending"
+    )
+    pipeline._count_completed_spec_tasks = lambda: sum(
+        1 for status in statuses.values() if status == "completed"
+    )
+    pipeline._update_session_field = lambda *_args, **_kwargs: None
+    pipeline._update_phase_step = lambda *_args, **_kwargs: None
+
+    class Config:
+        priority_threshold = "high"
+        max_specs = 10
+
+    result = asyncio.run(pipeline._run_spec_generation_phase(Config(), phase_id=1))
+
+    assert result["status"] == "completed"
+    assert result["specs_generated"] == 9
+    assert result["batch_specs_generated"] == 9
+    assert result["failed_selected_tasks"] == 1
+    assert result["partial_success"] is True
+    assert (
+        result["warning"]
+        == "Generated 9/10 selected specs; continuing with completed specs"
+    )
+    assert statuses[10] == "failed"
+    assert "invalid markdown" in errors[10]
+
+
+def test_autopilot_spec_generation_still_fails_when_no_specs_exist(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    pipeline = object.__new__(_AutoPilotPipeline)
+    pipeline.session_id = "autopilot_unit"
+    pipeline._checkpoint_answers = {}
+    pipeline._cancelled = SimpleNamespace(is_set=lambda: False)
+
+    tasks = [
+        SimpleNamespace(id=1, priority="high", requirement_title="Spec task 1"),
+        SimpleNamespace(id=2, priority="high", requirement_title="Spec task 2"),
+    ]
+    statuses = {task.id: "pending" for task in tasks}
+
+    pipeline._load_open_spec_tasks = lambda: tasks
+    pipeline._generate_spec_from_task = lambda *_args, **_kwargs: None
+    pipeline._update_spec_task = (
+        lambda task_id, status, spec_path=None, error=None: statuses.__setitem__(
+            task_id, status
+        )
+    )
+    pipeline._skip_spec_tasks = lambda *_args, **_kwargs: None
+    pipeline._count_pending_spec_tasks = lambda: sum(
+        1 for status in statuses.values() if status == "pending"
+    )
+    pipeline._count_completed_spec_tasks = lambda: sum(
+        1 for status in statuses.values() if status == "completed"
+    )
+    pipeline._update_session_field = lambda *_args, **_kwargs: None
+    pipeline._update_phase_step = lambda *_args, **_kwargs: None
+
+    class Config:
+        priority_threshold = "high"
+        max_specs = 10
+
+    with pytest.raises(RuntimeError, match="Spec generation produced 0 specs"):
+        asyncio.run(pipeline._run_spec_generation_phase(Config(), phase_id=1))
+
+
+def test_autopilot_spec_generation_updates_cumulative_total_on_retry(
+    monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    pipeline = object.__new__(_AutoPilotPipeline)
+    pipeline.session_id = "autopilot_unit"
+    pipeline._checkpoint_answers = {}
+    pipeline._cancelled = SimpleNamespace(is_set=lambda: False)
+
+    retry_task = SimpleNamespace(
+        id=10, priority="high", requirement_title="Retried spec task"
+    )
+    statuses = {idx: "completed" for idx in range(1, 10)}
+    statuses[retry_task.id] = "failed"
+    session_updates: dict[str, int] = {}
+
+    pipeline._load_open_spec_tasks = lambda: [retry_task]
+    pipeline._generate_spec_from_task = lambda task, _specs_dir, _config: Path(
+        f"{task.requirement_title}.md"
+    )
+    pipeline._update_spec_task = (
+        lambda task_id, status, spec_path=None, error=None: statuses.__setitem__(
+            task_id, status
+        )
+    )
+    pipeline._skip_spec_tasks = lambda *_args, **_kwargs: None
+    pipeline._count_pending_spec_tasks = lambda: sum(
+        1 for status in statuses.values() if status == "pending"
+    )
+    pipeline._count_completed_spec_tasks = lambda: sum(
+        1 for status in statuses.values() if status == "completed"
+    )
+    pipeline._update_session_field = lambda field, value: session_updates.__setitem__(
+        field, value
+    )
+    pipeline._update_phase_step = lambda *_args, **_kwargs: None
+
+    class Config:
+        priority_threshold = "high"
+        max_specs = 10
+
+    result = asyncio.run(pipeline._run_spec_generation_phase(Config(), phase_id=1))
+
+    assert result["specs_generated"] == 10
+    assert result["batch_specs_generated"] == 1
+    assert result["failed_selected_tasks"] == 0
+    assert result["partial_success"] is False
+    assert session_updates["total_specs_generated"] == 10
 
 
 def test_autopilot_unique_spec_filenames_include_task_id(monkeypatch, tmp_path):
@@ -420,7 +711,9 @@ def test_autopilot_spec_tasks_keep_distinct_ideas_for_same_requirement(monkeypat
         def commit(self):
             pass
 
-    monkeypatch.setattr("orchestrator.workflows.autopilot_pipeline.Session", FakeSession)
+    monkeypatch.setattr(
+        "orchestrator.workflows.autopilot_pipeline.Session", FakeSession
+    )
 
     created = pipeline._create_spec_tasks_from_test_ideas(
         [
@@ -463,7 +756,9 @@ def test_autopilot_uses_native_generation_for_actionable_weak_evidence_spec(tmp_
     assert not pipeline._should_use_conservative_test_generation(str(spec_path))
 
 
-def test_autopilot_uses_smoke_generation_for_page_load_only_weak_evidence_spec(tmp_path):
+def test_autopilot_uses_smoke_generation_for_page_load_only_weak_evidence_spec(
+    tmp_path,
+):
     pipeline = object.__new__(_AutoPilotPipeline)
     pipeline._get_session_config = lambda: {
         "ai_quality": {"exploration": {"degraded_mode": True}}
@@ -487,12 +782,62 @@ def test_autopilot_uses_smoke_generation_for_page_load_only_weak_evidence_spec(t
     assert pipeline._should_use_conservative_test_generation(str(spec_path))
 
 
+def test_explorer_synthesizes_page_flows_when_flow_density_is_sparse():
+    explorer = object.__new__(_AppExplorer)
+    existing = []
+    pages = [
+        _PageRecord(
+            url="https://my.gov.az/entities/1",
+            title="Entity Detail",
+            page_type="entity_detail",
+            purpose="Shows ministry services and life events.",
+            actions=["Open related life event"],
+        ),
+        _PageRecord(
+            url="https://my.gov.az/services/3",
+            title="Service Detail",
+            page_type="service_detail",
+            forms=[{"name": "Document verification", "submit": "Check"}],
+        ),
+    ]
+
+    flows = explorer._synthesize_flows_from_pages(pages, existing, limit=2)
+
+    assert [flow.name for flow in flows] == [
+        "Browse Entity Detail (synthesized)",
+        "Service Detail Form Submission (synthesized)",
+    ]
+    assert flows[1].category == "form_submission"
+    assert flows[1].steps[-1]["element"] == "Check"
+
+
+def test_explorer_prompt_is_goal_bounded_not_queue_exhaustive():
+    explorer = object.__new__(_AppExplorer)
+    prompt = explorer._build_exploration_prompt(
+        _ExplorationConfig(entry_url="https://my.gov.az/", max_interactions=50)
+    )
+
+    assert "Target Page Records" in prompt
+    assert "Target Flow Records" in prompt
+    assert "Do not attempt to crawl every link" in prompt
+    assert "Stop and emit final summary" in prompt
+    assert "You MUST visit every URL" not in prompt
+    assert "UNVISITED_QUEUE is empty" not in prompt
+
+
+def test_explorer_identifies_browser_budget_stop():
+    assert _AppExplorer._is_budget_stop("Browser tool budget reached (50/50)")
+    assert not _AppExplorer._is_budget_stop("Agent timed out")
+
+
 @pytest.mark.asyncio
-async def test_explorer_rejects_unverified_output_without_fallback(tmp_path, monkeypatch):
+async def test_explorer_rejects_unverified_output_without_fallback(
+    tmp_path, monkeypatch
+):
     explorer = _AppExplorer(project_id="test")
     explorer.output_dir = tmp_path
 
-    async def fake_run(_prompt, _session_dir):
+    async def fake_run(_prompt, _session_dir, _config):
         explorer._last_agent_stats = {
             "tool_calls": 1,
             "browser_tool_calls": 1,
@@ -514,11 +859,13 @@ async def test_explorer_rejects_unverified_output_without_fallback(tmp_path, mon
 
 
 @pytest.mark.asyncio
-async def test_explorer_rejects_output_without_successful_browser_tools(tmp_path, monkeypatch):
+async def test_explorer_rejects_output_without_successful_browser_tools(
+    tmp_path, monkeypatch
+):
     explorer = _AppExplorer(project_id="test")
     explorer.output_dir = tmp_path
 
-    async def fake_run(_prompt, _session_dir):
+    async def fake_run(_prompt, _session_dir, _config):
         explorer._last_agent_stats = {
             "tool_calls": 0,
             "browser_tool_calls": 0,
@@ -532,13 +879,20 @@ async def test_explorer_rejects_output_without_successful_browser_tools(tmp_path
 
     monkeypatch.setattr(explorer, "_run_explorer_agent", fake_run)
 
+    async def no_ai_synthesis(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(explorer, "_run_flow_synthesis_pass", no_ai_synthesis)
+
     result = await explorer.explore(
         _ExplorationConfig(entry_url="https://example.com/custom-start"),
         "session_no_tools",
     )
 
     assert result.status == "failed"
-    assert "did not perform successful live browser exploration" in (result.error_message or "")
+    assert "did not perform successful live browser exploration" in (
+        result.error_message or ""
+    )
 
 
 @pytest.mark.asyncio
@@ -546,13 +900,16 @@ async def test_explorer_accepts_verified_browser_output(tmp_path, monkeypatch):
     explorer = _AppExplorer(project_id="test")
     explorer.output_dir = tmp_path
 
-    async def fake_run(_prompt, _session_dir):
+    async def fake_run(_prompt, _session_dir, _config):
         explorer._last_agent_stats = {
             "tool_calls": 2,
             "browser_tool_calls": 2,
             "successful_browser_tool_calls": 2,
         }
         return """
+```json
+{"page": {"url": "https://example.com/custom-start", "title": "Custom Start", "pageType": "content", "purpose": "Shows custom content", "keyElements": ["Custom page"], "actions": ["Open details"], "forms": [], "links": []}}
+```
 ```json
 {"transition": {"sequence": 1, "action": {"type": "navigate", "element": {"role": "page", "name": "Custom"}, "value": "https://example.com/custom-start"}, "before": {"url": "about:blank", "pageType": "blank", "keyElements": []}, "after": {"url": "https://example.com/custom-start", "pageType": "content", "keyElements": ["Custom page"]}, "transitionType": "navigation", "apiCalls": []}}
 ```
@@ -573,19 +930,79 @@ async def test_explorer_accepts_verified_browser_output(tmp_path, monkeypatch):
 
     assert result.status == "completed"
     assert result.pages_discovered == 1
+    assert result.pages[0].title == "Custom Start"
     assert [flow.name for flow in result.flows] == ["Custom Start Browse"]
     assert result.quality_summary["source_type"] == SOURCE_OBSERVED
     assert "fallback_used" not in result.quality_summary
+    assert (tmp_path / "session_verified" / "pages.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_explorer_marks_budget_stopped_output_as_partial_success(
+    tmp_path, monkeypatch
+):
+    explorer = _AppExplorer(project_id="test")
+    explorer.output_dir = tmp_path
+
+    async def fake_run(_prompt, _session_dir, _config):
+        explorer._last_agent_stats = {
+            "tool_calls": 3,
+            "browser_tool_calls": 3,
+            "successful_browser_tool_calls": 3,
+            "budget_stopped": True,
+            "max_browser_tool_calls": 3,
+        }
+        return """
+```json
+{"page": {"url": "https://example.com/a", "title": "A", "pageType": "content", "keyElements": ["A"]}}
+```
+```json
+{"transition": {"sequence": 1, "action": {"type": "navigate", "element": {"name": "A"}, "value": "https://example.com/a"}, "before": {"url": "about:blank", "pageType": "blank", "keyElements": []}, "after": {"url": "https://example.com/a", "pageType": "content", "keyElements": ["A"]}, "transitionType": "navigation", "apiCalls": []}}
+```
+```json
+{"summary": {"pagesDiscovered": 1, "flowsDiscovered": 0, "elementsInteracted": 1, "apiEndpointsFound": 0, "issuesFound": 0, "status": "completed"}}
+```
+"""
+
+    monkeypatch.setattr(explorer, "_run_explorer_agent", fake_run)
+
+    async def no_ai_synthesis(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(explorer, "_run_flow_synthesis_pass", no_ai_synthesis)
+
+    result = await explorer.explore(
+        _ExplorationConfig(entry_url="https://example.com/a", max_interactions=3),
+        "session_budget_partial",
+    )
+
+    assert result.status == "completed_partial"
+    assert "browser tool budget" in (result.error_message or "")
+    assert result.pages_discovered == 1
+    assert (tmp_path / "session_budget_partial" / "summary.json").exists()
 
 
 def test_autopilot_phase_output_guards_empty_spec_generation():
     pipeline = object.__new__(_AutoPilotPipeline)
 
-    assert pipeline._phase_has_resumable_output("spec_generation", {"specs_generated": 1})
-    assert not pipeline._phase_has_resumable_output("spec_generation", {"specs_generated": 0})
-    assert not pipeline._phase_has_resumable_output("exploration", {"exploration_ids": ["static"], "total_pages": 0, "total_flows": 0})
-    assert pipeline._phase_has_resumable_output("exploration", {"exploration_ids": ["observed"], "total_pages": 1, "total_flows": 0})
-    assert pipeline._phase_output_error("spec_generation", {}) == "Spec generation produced 0 specs"
+    assert pipeline._phase_has_resumable_output(
+        "spec_generation", {"specs_generated": 1}
+    )
+    assert not pipeline._phase_has_resumable_output(
+        "spec_generation", {"specs_generated": 0}
+    )
+    assert not pipeline._phase_has_resumable_output(
+        "exploration",
+        {"exploration_ids": ["static"], "total_pages": 0, "total_flows": 0},
+    )
+    assert pipeline._phase_has_resumable_output(
+        "exploration",
+        {"exploration_ids": ["observed"], "total_pages": 1, "total_flows": 0},
+    )
+    assert (
+        pipeline._phase_output_error("spec_generation", {})
+        == "Spec generation produced 0 specs"
+    )
 
 
 def test_autopilot_allows_legacy_category_only_validation_failure():
@@ -595,8 +1012,16 @@ def test_autopilot_allows_legacy_category_only_validation_failure():
         "validation": {
             "valid": False,
             "invalid_records": [
-                {"record_type": "flow", "index": 2, "message": "invalid category information-retrieval"},
-                {"record_type": "flow", "index": 3, "message": "invalid category static-content"},
+                {
+                    "record_type": "flow",
+                    "index": 2,
+                    "message": "invalid category information-retrieval",
+                },
+                {
+                    "record_type": "flow",
+                    "index": 3,
+                    "message": "invalid category static-content",
+                },
             ],
         },
     }
@@ -611,7 +1036,11 @@ def test_autopilot_does_not_allow_legacy_category_override_for_fallback():
         "validation": {
             "valid": False,
             "invalid_records": [
-                {"record_type": "flow", "index": 2, "message": "invalid category information-retrieval"},
+                {
+                    "record_type": "flow",
+                    "index": 2,
+                    "message": "invalid category information-retrieval",
+                },
             ],
         },
     }
@@ -705,11 +1134,19 @@ def test_autopilot_resume_metadata_allows_failed_phase_retry(monkeypatch):
     from orchestrator.api import autopilot as _autopilot_api
     from orchestrator.api.models_db import AutoPilotSession as _AutoPilotSession
 
-    monkeypatch.setattr(_autopilot_api, "_get_failed_phase", lambda _session, _session_id: "spec_generation")
+    monkeypatch.setattr(
+        _autopilot_api,
+        "_get_failed_phase",
+        lambda _session, _session_id: "spec_generation",
+    )
     _autopilot_api._running_pipelines.clear()
-    session = _AutoPilotSession(id="autopilot_test", status="failed", current_phase="spec_generation")
+    session = _AutoPilotSession(
+        id="autopilot_test", status="failed", current_phase="spec_generation"
+    )
 
-    can_resume, reason, failed_phase = _autopilot_api._get_resume_metadata(session, session=object())
+    can_resume, reason, failed_phase = _autopilot_api._get_resume_metadata(
+        session, session=object()
+    )
 
     assert can_resume is True
     assert failed_phase == "spec_generation"
@@ -721,14 +1158,45 @@ def test_autopilot_resume_metadata_rejects_completed_session(monkeypatch):
     from orchestrator.api import autopilot as _autopilot_api
     from orchestrator.api.models_db import AutoPilotSession as _AutoPilotSession
 
-    monkeypatch.setattr(_autopilot_api, "_get_failed_phase", lambda _session, _session_id: None)
+    monkeypatch.setattr(
+        _autopilot_api, "_get_failed_phase", lambda _session, _session_id: None
+    )
     session = _AutoPilotSession(id="autopilot_done", status="completed")
 
-    can_resume, reason, failed_phase = _autopilot_api._get_resume_metadata(session, session=object())
+    can_resume, reason, failed_phase = _autopilot_api._get_resume_metadata(
+        session, session=object()
+    )
 
     assert can_resume is False
     assert reason is None
     assert failed_phase is None
+
+
+def test_autopilot_live_artifacts_cover_exploration_and_test_run_dirs(
+    monkeypatch, tmp_path
+):
+    pytest.importorskip("slowapi")
+    from orchestrator.api import autopilot as _autopilot_api
+
+    runs_dir = tmp_path / "runs"
+    exploration_artifacts = runs_dir / "explorations" / "explore_live" / "artifacts"
+    test_artifacts = runs_dir / "run_live" / "artifacts"
+    exploration_artifacts.mkdir(parents=True)
+    test_artifacts.mkdir(parents=True)
+    (exploration_artifacts / "live-step-001.png").write_text("png")
+    (test_artifacts / "trace.webm").write_text("webm")
+
+    monkeypatch.setattr(_autopilot_api, "RUNS_DIR", runs_dir)
+
+    artifacts = _autopilot_api._collect_live_artifacts(
+        exploration_session_id="explore_live",
+        run_id="run_live",
+    )
+
+    paths = {artifact.path for artifact in artifacts}
+    assert "/artifacts/explorations/explore_live/artifacts/live-step-001.png" in paths
+    assert "/artifacts/run_live/artifacts/trace.webm" in paths
+    assert artifacts[0].type == "image"
 
 
 def test_normalize_idea_bounds_untrusted_fields():

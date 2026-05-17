@@ -100,4 +100,30 @@ export interface JobStatus {
     stage_message?: string;
 }
 
-export type TabType = 'connections' | 'analyzer' | 'specs' | 'history' | 'dashboard';
+export interface DbColumn {
+    column_name: string;
+    data_type: string;
+    is_nullable: string;
+    column_default?: string | null;
+    character_maximum_length?: number | null;
+    numeric_precision?: number | null;
+    numeric_scale?: number | null;
+    column_comment?: string | null;
+}
+
+export interface DbTable {
+    table_name: string;
+    estimated_rows: number;
+    comment?: string | null;
+    columns: DbColumn[];
+    constraints: Array<Record<string, unknown>>;
+}
+
+export interface DbSchema {
+    schema: string;
+    tables: DbTable[];
+    foreign_keys: Array<Record<string, unknown>>;
+    indexes: Array<Record<string, unknown>>;
+}
+
+export type TabType = 'connections' | 'viewer' | 'analyzer' | 'specs' | 'history' | 'dashboard';

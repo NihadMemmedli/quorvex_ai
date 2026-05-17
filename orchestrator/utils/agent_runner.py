@@ -74,7 +74,10 @@ except ImportError:
 
 # Browser cleanup utilities
 try:
-    from orchestrator.utils.browser_cleanup import kill_new_children, snapshot_child_pids
+    from orchestrator.utils.browser_cleanup import (
+        kill_new_children,
+        snapshot_child_pids,
+    )
 except ImportError:
     try:
         from utils.browser_cleanup import kill_new_children, snapshot_child_pids
@@ -125,7 +128,9 @@ def build_allowed_tools(base_tools: list, mcp_tools: list) -> list:
     return base_tools + [f"{prefix}{t}" for t in mcp_tools]
 
 
-def build_mcp_allowed_tools(server_hint: str, base_tools: list, mcp_tools: list) -> list:
+def build_mcp_allowed_tools(
+    server_hint: str, base_tools: list, mcp_tools: list
+) -> list:
     """Build allowed_tools for a named MCP server family."""
     prefix = get_mcp_tool_prefix(server_hint)
     return base_tools + [f"{prefix}{t}" for t in mcp_tools]
@@ -192,6 +197,7 @@ class AgentRunner:
         session_dir: Path | None = None,
         on_task_enqueued: Callable[[str], None] | None = None,
         cwd: Path | str | None = None,
+        max_browser_tool_calls: int | None = None,
     ):
         """
         Initialize the agent runner.
@@ -214,6 +220,7 @@ class AgentRunner:
             session_dir: Optional directory to save debug output
             on_task_enqueued: Optional callback fired with task_id when queued (for progress tracking)
             cwd: Optional working directory for MCP config discovery and queued execution
+            max_browser_tool_calls: Optional hard cap for completed browser tool calls
         """
         self.timeout_seconds = timeout_seconds
         self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
@@ -230,6 +237,7 @@ class AgentRunner:
         self.session_dir = session_dir
         self.on_task_enqueued = on_task_enqueued
         self.cwd = Path(cwd) if cwd else None
+        self.max_browser_tool_calls = max_browser_tool_calls
 
     def _effective_tools(self) -> list[str] | dict[str, str] | None:
         """Build the SDK/CLI tool availability set.
@@ -257,7 +265,9 @@ class AgentRunner:
         requested: list[str] = []
         for source in (self.allowed_tools, self._effective_tools()):
             if isinstance(source, list):
-                requested.extend(str(tool) for tool in source if str(tool).startswith("mcp__"))
+                requested.extend(
+                    str(tool) for tool in source if str(tool).startswith("mcp__")
+                )
         return requested
 
     def _emit_progress(self, progress: dict[str, Any]) -> None:
@@ -314,7 +324,9 @@ class AgentRunner:
             env_vars = settings_api._read_env_file()
             settings_api._apply_runtime_settings(env_vars)
         except Exception as exc:
-            logger.debug(f"Unable to refresh active AI settings for agent runner: {exc}")
+            logger.debug(
+                f"Unable to refresh active AI settings for agent runner: {exc}"
+            )
 
     def _validate_mcp_config_for_allowed_tools(self, cwd: Path | None = None) -> None:
         """Fail fast when MCP tools are requested but no matching server is configured."""
@@ -337,7 +349,9 @@ class AgentRunner:
 
         servers = config.get("mcpServers") or {}
         if not isinstance(servers, dict) or not servers:
-            raise RuntimeError(f"MCP config at {mcp_path} does not define any mcpServers")
+            raise RuntimeError(
+                f"MCP config at {mcp_path} does not define any mcpServers"
+            )
 
         configured_prefixes = {f"mcp__{name}__" for name in servers}
         missing_prefixes = sorted(
@@ -357,7 +371,9 @@ class AgentRunner:
         for server_name, server in servers.items():
             command = (server or {}).get("command")
             if not command:
-                raise RuntimeError(f"MCP server '{server_name}' in {mcp_path} has no command")
+                raise RuntimeError(
+                    f"MCP server '{server_name}' in {mcp_path} has no command"
+                )
             if os.path.isabs(command) and not Path(command).exists():
                 raise RuntimeError(
                     f"MCP server '{server_name}' command does not exist: {command}. "
@@ -435,10 +451,16 @@ class AgentRunner:
 
                     # Print periodic progress for long-running agents
                     if messages_received == 1:
-                        print("   📨 First message received (agent is responding)", flush=True)
+                        print(
+                            "   📨 First message received (agent is responding)",
+                            flush=True,
+                        )
                     elif messages_received % 50 == 0:
                         elapsed = (datetime.now() - start_time).total_seconds()
-                        print(f"   📨 {messages_received} messages ({elapsed:.0f}s elapsed)", flush=True)
+                        print(
+                            f"   📨 {messages_received} messages ({elapsed:.0f}s elapsed)",
+                            flush=True,
+                        )
 
                     # Handle tool use
                     if hasattr(message, "type"):
@@ -454,7 +476,11 @@ class AgentRunner:
                             # Log tool use
                             if self.log_tools:
                                 if tool_name.startswith("mcp__playwright"):
-                                    action = tool_name.split("__")[-1] if "__" in tool_name else tool_name
+                                    action = (
+                                        tool_name.split("__")[-1]
+                                        if "__" in tool_name
+                                        else tool_name
+                                    )
                                     print(f"   🔧 {action}...", flush=True)
                                 else:
                                     print(f"   🔧 {tool_name}...", flush=True)
@@ -467,8 +493,18 @@ class AgentRunner:
                                 {
                                     "phase": "tool_use",
                                     "tool_calls": len(tool_calls) + 1,
-                                    "browser_tool_calls": len([tc for tc in tool_calls if tc.name.startswith("mcp__playwright")])
-                                    + (1 if str(tool_name).startswith("mcp__playwright") else 0),
+                                    "browser_tool_calls": len(
+                                        [
+                                            tc
+                                            for tc in tool_calls
+                                            if tc.name.startswith("mcp__playwright")
+                                        ]
+                                    )
+                                    + (
+                                        1
+                                        if str(tool_name).startswith("mcp__playwright")
+                                        else 0
+                                    ),
                                     "interactions": len(tool_calls) + 1,
                                     "last_tool": tool_name,
                                     "updated_at": datetime.utcnow().isoformat(),
@@ -478,7 +514,9 @@ class AgentRunner:
                         elif message.type == "tool_result":
                             # Record completed tool call
                             if current_tool_name and current_tool_start:
-                                duration = (datetime.now() - current_tool_start).total_seconds() * 1000
+                                duration = (
+                                    datetime.now() - current_tool_start
+                                ).total_seconds() * 1000
                                 is_error = getattr(message, "is_error", False)
                                 tool_calls.append(
                                     ToolCall(
@@ -486,22 +524,48 @@ class AgentRunner:
                                         timestamp=current_tool_start,
                                         duration_ms=duration,
                                         success=not is_error,
-                                        error=str(getattr(message, "content", ""))[:200] if is_error else None,
+                                        error=(
+                                            str(getattr(message, "content", ""))[:200]
+                                            if is_error
+                                            else None
+                                        ),
                                         input=current_tool_input,
                                     )
+                                )
+                                completed_browser_calls = len(
+                                    [
+                                        tc
+                                        for tc in tool_calls
+                                        if tc.success
+                                        and tc.name.startswith("mcp__")
+                                        and "__browser_" in tc.name
+                                    ]
                                 )
                                 self._emit_progress(
                                     {
                                         "phase": "tool_result",
                                         "tool_calls": len(tool_calls),
                                         "browser_tool_calls": len(
-                                            [tc for tc in tool_calls if tc.name.startswith("mcp__playwright")]
+                                            [
+                                                tc
+                                                for tc in tool_calls
+                                                if tc.name.startswith("mcp__playwright")
+                                            ]
                                         ),
                                         "interactions": len(tool_calls),
                                         "last_tool": current_tool_name,
                                         "updated_at": datetime.utcnow().isoformat(),
                                     }
                                 )
+                                if (
+                                    self.max_browser_tool_calls is not None
+                                    and completed_browser_calls
+                                    >= self.max_browser_tool_calls
+                                ):
+                                    raise RuntimeError(
+                                        f"Browser tool budget reached ({completed_browser_calls}/"
+                                        f"{self.max_browser_tool_calls})"
+                                    )
                             current_tool_name = None
                             current_tool_start = None
                             current_tool_input = None
@@ -512,7 +576,9 @@ class AgentRunner:
                                 result_parts.append(text_content)
                                 text_blocks_received += 1
                                 if text_blocks_received == 1:
-                                    logger.info(f"Agent: first text output received at msg #{messages_received}")
+                                    logger.info(
+                                        f"Agent: first text output received at msg #{messages_received}"
+                                    )
 
                     # Capture content blocks
                     if hasattr(message, "content"):
@@ -530,7 +596,9 @@ class AgentRunner:
                     if hasattr(message, "result"):
                         result_parts.append(message.result)
 
-                    message_api_error_status = getattr(message, "api_error_status", None)
+                    message_api_error_status = getattr(
+                        message, "api_error_status", None
+                    )
                     if message_api_error_status is not None:
                         api_error_status = message_api_error_status
                     message_stop_reason = getattr(message, "stop_reason", None)
@@ -553,7 +621,9 @@ class AgentRunner:
 
             # Run with timeout, retrying with key rotation on 429
             rotator = get_api_key_rotator() if get_api_key_rotator else None
-            max_rotation_attempts = rotator.key_count if rotator and rotator.key_count > 1 else 0
+            max_rotation_attempts = (
+                rotator.key_count if rotator and rotator.key_count > 1 else 0
+            )
             slot = None
 
             for _rotation_attempt in range(max_rotation_attempts + 1):
@@ -608,7 +678,9 @@ class AgentRunner:
             if self.session_dir:
                 self._save_debug_output(output, tool_calls, messages_received)
 
-            logger.info(f"Agent completed: {messages_received} messages, {len(tool_calls)} tool calls, {duration:.1f}s")
+            logger.info(
+                f"Agent completed: {messages_received} messages, {len(tool_calls)} tool calls, {duration:.1f}s"
+            )
 
             agent_result = AgentResult(
                 success=True,
@@ -663,7 +735,11 @@ class AgentRunner:
                 agent_result = AgentResult(
                     success=has_output,
                     output=output,
-                    error=None if has_output else "Agent completed via cancel scope but produced no text output",
+                    error=(
+                        None
+                        if has_output
+                        else "Agent completed via cancel scope but produced no text output"
+                    ),
                     duration_seconds=duration,
                     tool_calls=tool_calls,
                     messages_received=messages_received,
@@ -754,9 +830,14 @@ class AgentRunner:
                         f"No agent workers alive — task will likely get stuck. "
                         f"queue_depth={queue_depth}, running={running}"
                     )
-                    print("   ⚠️ No agent workers detected — task may wait indefinitely", flush=True)
+                    print(
+                        "   ⚠️ No agent workers detected — task may wait indefinitely",
+                        flush=True,
+                    )
                 elif queue_depth > 0:
-                    logger.info(f"Queue status: {workers} worker(s), {queue_depth} queued, {running} running")
+                    logger.info(
+                        f"Queue status: {workers} worker(s), {queue_depth} queued, {running} running"
+                    )
             except Exception as diag_err:
                 logger.debug(f"Pre-enqueue diagnostics failed (non-fatal): {diag_err}")
 
@@ -795,7 +876,9 @@ class AgentRunner:
                 tool_calls = progress.get("tool_calls", 0)
                 last_tool = progress.get("last_tool", "")
                 interactions = progress.get("interactions", 0)
-                short_tool = last_tool.rsplit("__", 1)[-1] if "__" in last_tool else last_tool
+                short_tool = (
+                    last_tool.rsplit("__", 1)[-1] if "__" in last_tool else last_tool
+                )
                 print(
                     f"   🔄 Worker progress: {tool_calls} tools, {interactions} interactions, last={short_tool}",
                     flush=True,
@@ -813,7 +896,9 @@ class AgentRunner:
 
             duration = (datetime.now() - start_time).total_seconds()
             result_len = len(result) if result else 0
-            logger.info(f"Task completed via queue: {result_len} chars in {duration:.1f}s")
+            logger.info(
+                f"Task completed via queue: {result_len} chars in {duration:.1f}s"
+            )
 
             # Warn on empty or suspiciously short results
             if not result or not result.strip():
@@ -821,7 +906,9 @@ class AgentRunner:
                     f"Agent queue returned empty result after {duration:.1f}s — worker may have failed silently"
                 )
             elif result_len < 100:
-                logger.warning(f"Agent queue returned very short result ({result_len} chars): {result[:100]}")
+                logger.warning(
+                    f"Agent queue returned very short result ({result_len} chars): {result[:100]}"
+                )
 
             print(f"   ✅ Agent completed via queue ({duration:.1f}s)", flush=True)
 
@@ -832,7 +919,8 @@ class AgentRunner:
             # Stricter validation: very short output is suspicious
             is_short = has_output and len(stripped_output) < 50
             has_error_markers = is_short and any(
-                marker in stripped_output.lower() for marker in ("error", "failed", "exception", "traceback")
+                marker in stripped_output.lower()
+                for marker in ("error", "failed", "exception", "traceback")
             )
 
             tool_call_count = int(telemetry.get("tool_calls", 0) or 0)
@@ -843,7 +931,10 @@ class AgentRunner:
             if len(tool_names) < tool_call_count:
                 tool_names = [
                     *[str(name) for name in tool_names],
-                    *([str(telemetry.get("last_tool") or "queue_tool_call")] * (tool_call_count - len(tool_names))),
+                    *(
+                        [str(telemetry.get("last_tool") or "queue_tool_call")]
+                        * (tool_call_count - len(tool_names))
+                    ),
                 ]
             if not tool_names and browser_tool_count > 0:
                 tool_names = ["mcp__playwright-test__browser_tool"] * browser_tool_count
@@ -853,14 +944,16 @@ class AgentRunner:
                     timestamp=start_time,
                     success=True,
                 )
-                for name in tool_names[:tool_call_count or len(tool_names)]
+                for name in tool_names[: tool_call_count or len(tool_names)]
             ]
             messages_received = int(
                 telemetry.get("assistant_messages")
                 or telemetry.get("stream_events")
                 or 1
             )
-            text_blocks_received = int(telemetry.get("text_blocks") or (1 if has_output else 0))
+            text_blocks_received = int(
+                telemetry.get("text_blocks") or (1 if has_output else 0)
+            )
             api_error_status = telemetry.get("api_error_status")
             if api_error_status is not None:
                 try:
@@ -870,7 +963,9 @@ class AgentRunner:
             hook_events_received = int(telemetry.get("hook_events", 0) or 0)
             total_cost_usd = telemetry.get("total_cost_usd")
             try:
-                total_cost_usd = float(total_cost_usd) if total_cost_usd is not None else None
+                total_cost_usd = (
+                    float(total_cost_usd) if total_cost_usd is not None else None
+                )
             except (TypeError, ValueError):
                 total_cost_usd = None
 
@@ -892,8 +987,16 @@ class AgentRunner:
                     messages_received=messages_received,
                     text_blocks_received=text_blocks_received,
                     api_error_status=api_error_status,
-                    stop_reason=str(telemetry.get("stop_reason")) if telemetry.get("stop_reason") else None,
-                    session_id=str(telemetry.get("session_id")) if telemetry.get("session_id") else None,
+                    stop_reason=(
+                        str(telemetry.get("stop_reason"))
+                        if telemetry.get("stop_reason")
+                        else None
+                    ),
+                    session_id=(
+                        str(telemetry.get("session_id"))
+                        if telemetry.get("session_id")
+                        else None
+                    ),
                     total_cost_usd=total_cost_usd,
                     hook_events_received=hook_events_received,
                 )
@@ -906,14 +1009,26 @@ class AgentRunner:
             return AgentResult(
                 success=has_output,
                 output=output,
-                error=None if has_output else "Agent queue returned empty result — worker may have failed",
+                error=(
+                    None
+                    if has_output
+                    else "Agent queue returned empty result — worker may have failed"
+                ),
                 duration_seconds=duration,
                 tool_calls=synthetic_tool_calls,
                 messages_received=messages_received,
                 text_blocks_received=text_blocks_received,
                 api_error_status=api_error_status,
-                stop_reason=str(telemetry.get("stop_reason")) if telemetry.get("stop_reason") else None,
-                session_id=str(telemetry.get("session_id")) if telemetry.get("session_id") else None,
+                stop_reason=(
+                    str(telemetry.get("stop_reason"))
+                    if telemetry.get("stop_reason")
+                    else None
+                ),
+                session_id=(
+                    str(telemetry.get("session_id"))
+                    if telemetry.get("session_id")
+                    else None
+                ),
                 total_cost_usd=total_cost_usd,
                 hook_events_received=hook_events_received,
             )
@@ -937,7 +1052,10 @@ class AgentRunner:
             error_msg = str(e)
 
             # Classify the error for clearer user feedback
-            if "stuck in QUEUED" in error_msg or "no agent workers" in error_msg.lower():
+            if (
+                "stuck in QUEUED" in error_msg
+                or "no agent workers" in error_msg.lower()
+            ):
                 logger.error(f"Agent task not picked up: {error_msg}")
                 print(f"❌ No worker picked up the task: {error_msg}", flush=True)
             elif "heartbeat lost" in error_msg.lower():
@@ -998,7 +1116,9 @@ class AgentRunner:
                 }
                 for tc in tool_calls
             ]
-            (self.session_dir / "tool_calls.json").write_text(json.dumps(tool_log, indent=2))
+            (self.session_dir / "tool_calls.json").write_text(
+                json.dumps(tool_log, indent=2)
+            )
 
             # Save summary
             summary = {
@@ -1006,7 +1126,9 @@ class AgentRunner:
                 "tool_calls": len(tool_calls),
                 "output_length": len(output),
             }
-            (self.session_dir / "agent_summary.json").write_text(json.dumps(summary, indent=2))
+            (self.session_dir / "agent_summary.json").write_text(
+                json.dumps(summary, indent=2)
+            )
 
         except Exception as e:
             logger.warning(f"Failed to save debug output: {e}")

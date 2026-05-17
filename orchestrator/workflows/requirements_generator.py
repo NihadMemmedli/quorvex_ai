@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 # Add both project root and orchestrator package dir for package and standalone execution.
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -34,7 +35,10 @@ import logging
 
 from memory.exploration_store import get_exploration_store
 from orchestrator.ai.context import SOURCE_FALLBACK, SOURCE_OBSERVED, ContextBundle
-from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
+from orchestrator.ai.prompt_registry import (
+    attach_prompt_metadata,
+    build_prompt_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +89,9 @@ class RequirementsGenerator:
         self.project_id = project_id
         self.store = get_exploration_store(project_id=project_id)
 
-    async def generate_from_exploration(self, exploration_session_id: str) -> RequirementsGenerationResult:
+    async def generate_from_exploration(
+        self, exploration_session_id: str
+    ) -> RequirementsGenerationResult:
         """
         Generate requirements from an exploration session.
 
@@ -125,21 +131,37 @@ class RequirementsGenerator:
 
         # Build exploration summary for AI analysis
         exploration_summary = self._build_exploration_summary(
-            session=session, transitions=transitions, flows=flows, api_endpoints=api_endpoints
+            session=session,
+            transitions=transitions,
+            flows=flows,
+            api_endpoints=api_endpoints,
         )
 
         # Generate requirements using AI
         logger.info("Generating requirements with AI analysis...")
 
         try:
-            requirements = await self._generate_requirements_with_ai(exploration_summary)
+            requirements = await self._generate_requirements_with_ai(
+                exploration_summary
+            )
         except Exception as exc:
-            logger.warning(f"AI requirements generation failed, using flow-based fallback: {exc}")
+            logger.warning(
+                f"AI requirements generation failed, using flow-based fallback: {exc}"
+            )
             requirements = self._generate_fallback_requirements(exploration_summary)
 
         if not requirements:
-            logger.warning("AI requirements generation returned 0 requirements, using flow-based fallback")
+            logger.warning(
+                "AI requirements generation returned 0 requirements, using flow-based fallback"
+            )
             requirements = self._generate_fallback_requirements(exploration_summary)
+        elif self._requirements_are_sparse(requirements, exploration_summary):
+            logger.info(
+                "AI generated sparse requirements for broad exploration; augmenting from page/flow evidence"
+            )
+            requirements = self._augment_sparse_requirements(
+                requirements, exploration_summary
+            )
 
         self._assign_requirement_codes(requirements)
 
@@ -165,12 +187,17 @@ class RequirementsGenerator:
                 if flow_id is not None:
                     try:
                         self.store.link_requirement_source(
-                            requirement_id=stored.id, source_type="flow", source_id=flow_id, confidence=1.0
+                            requirement_id=stored.id,
+                            source_type="flow",
+                            source_id=flow_id,
+                            confidence=1.0,
                         )
                     except Exception as e:
                         logger.warning(f"Failed to link flow source '{flow_name}': {e}")
                 else:
-                    logger.debug(f"Flow '{flow_name}' not found in session, skipping source link")
+                    logger.debug(
+                        f"Flow '{flow_name}' not found in session, skipping source link"
+                    )
 
             # Link requirement to source API endpoints
             for endpoint in req.source_api_endpoints:
@@ -178,12 +205,19 @@ class RequirementsGenerator:
                 if endpoint_id is not None:
                     try:
                         self.store.link_requirement_source(
-                            requirement_id=stored.id, source_type="api_endpoint", source_id=endpoint_id, confidence=1.0
+                            requirement_id=stored.id,
+                            source_type="api_endpoint",
+                            source_id=endpoint_id,
+                            confidence=1.0,
                         )
                     except Exception as e:
-                        logger.warning(f"Failed to link API endpoint source '{endpoint}': {e}")
+                        logger.warning(
+                            f"Failed to link API endpoint source '{endpoint}': {e}"
+                        )
                 else:
-                    logger.debug(f"API endpoint '{endpoint}' not found in session, skipping source link")
+                    logger.debug(
+                        f"API endpoint '{endpoint}' not found in session, skipping source link"
+                    )
 
         # Calculate statistics
         by_category = {}
@@ -209,7 +243,9 @@ class RequirementsGenerator:
 
         return result
 
-    async def generate_from_flows(self, flows_data: list[dict[str, Any]]) -> RequirementsGenerationResult:
+    async def generate_from_flows(
+        self, flows_data: list[dict[str, Any]]
+    ) -> RequirementsGenerationResult:
         """
         Generate requirements directly from flow data (without exploration session).
 
@@ -227,12 +263,15 @@ class RequirementsGenerator:
 
         # Build summary from raw flows
         exploration_summary = {
-            "entry_url": flows_data[0].get("startUrl", "unknown") if flows_data else "unknown",
+            "entry_url": (
+                flows_data[0].get("startUrl", "unknown") if flows_data else "unknown"
+            ),
             "flows": flows_data,
             "transitions": [],
             "api_endpoints": [],
             "pages_discovered": len(
-                set(f.get("startUrl", "") for f in flows_data) | set(f.get("endUrl", "") for f in flows_data)
+                set(f.get("startUrl", "") for f in flows_data)
+                | set(f.get("endUrl", "") for f in flows_data)
             ),
             "flows_discovered": len(flows_data),
         }
@@ -241,9 +280,13 @@ class RequirementsGenerator:
         logger.info("Generating requirements with AI analysis...")
 
         try:
-            requirements = await self._generate_requirements_with_ai(exploration_summary)
+            requirements = await self._generate_requirements_with_ai(
+                exploration_summary
+            )
         except Exception as exc:
-            logger.warning(f"AI requirements generation failed, using flow-based fallback: {exc}")
+            logger.warning(
+                f"AI requirements generation failed, using flow-based fallback: {exc}"
+            )
             requirements = self._generate_fallback_requirements(exploration_summary)
 
         if not requirements:
@@ -268,7 +311,9 @@ class RequirementsGenerator:
             by_priority=by_priority,
         )
 
-    def _build_exploration_summary(self, session, transitions, flows, api_endpoints) -> dict[str, Any]:
+    def _build_exploration_summary(
+        self, session, transitions, flows, api_endpoints
+    ) -> dict[str, Any]:
         """Build a summary of exploration data for AI analysis."""
 
         # Summarize transitions
@@ -301,17 +346,31 @@ class RequirementsGenerator:
                     "is_success_path": f.is_success_path,
                     "preconditions": f.preconditions,
                     "postconditions": f.postconditions,
-                    "steps": [{"action": s.action_type, "element": s.element_name, "value": s.value} for s in steps],
+                    "steps": [
+                        {
+                            "action": s.action_type,
+                            "element": s.element_name,
+                            "value": s.value,
+                        }
+                        for s in steps
+                    ],
                 }
             )
         if not flow_summaries:
             flow_summaries = self._load_flow_artifacts(session.id)
 
+        page_summaries = self._load_page_artifacts(session.id)
+
         # Summarize API endpoints
         endpoint_summaries = []
         for e in api_endpoints:
             endpoint_summaries.append(
-                {"method": e.method, "url": e.url, "status": e.response_status, "triggered_by": e.triggered_by_action}
+                {
+                    "method": e.method,
+                    "url": e.url,
+                    "status": e.response_status,
+                    "triggered_by": e.triggered_by_action,
+                }
             )
 
         quality = self._load_exploration_quality(session.id)
@@ -323,11 +382,14 @@ class RequirementsGenerator:
             "elements_discovered": session.elements_discovered,
             "transitions": transition_summaries,
             "flows": flow_summaries,
+            "pages": page_summaries,
             "api_endpoints": endpoint_summaries,
             "quality": quality,
         }
 
-    async def _generate_requirements_with_ai(self, exploration_summary: dict[str, Any]) -> list[GeneratedRequirement]:
+    async def _generate_requirements_with_ai(
+        self, exploration_summary: dict[str, Any]
+    ) -> list[GeneratedRequirement]:
         """Use AI to generate requirements from exploration data."""
 
         anthropic_token = (
@@ -347,7 +409,10 @@ class RequirementsGenerator:
             "exploration_summary",
             exploration_summary,
             source_type=source_type,
-            confidence=(exploration_summary.get("quality", {}).get("quality_score", 100) or 100) / 100,
+            confidence=(
+                exploration_summary.get("quality", {}).get("quality_score", 100) or 100
+            )
+            / 100,
             notes="Exploration evidence is labeled so inferred/fallback data is not treated as browser-verified.",
         )
 
@@ -372,6 +437,11 @@ Rules:
 ### Discovered User Flows
 ```json
 {json.dumps(exploration_summary.get("flows", []), indent=2)}
+```
+
+### Discovered Pages
+```json
+{json.dumps(exploration_summary.get("pages", [])[:40], indent=2)}
 ```
 
 ### Discovered Transitions
@@ -446,6 +516,8 @@ Assign priority based on:
 3. Map requirements to the flows/elements that revealed them
 4. Be specific about expected behavior
 5. Number requirements sequentially (REQ-001, REQ-002, etc.)
+6. If pages greatly outnumber flows, derive requirements from distinct page purposes, forms, search/filter controls, service/detail navigation paths, and observed actions.
+7. Use generic page availability requirements only when no richer page, transition, form, or flow evidence exists.
 
 Generate the requirements now:
 """
@@ -474,13 +546,17 @@ Generate the requirements now:
         if not result.success:
             error_msg = result.error or "Unknown error"
             if result.timed_out:
-                raise RuntimeError(f"AI request timed out - try again or check API status: {error_msg}")
+                raise RuntimeError(
+                    f"AI request timed out - try again or check API status: {error_msg}"
+                )
             raise RuntimeError(f"AI requirements generation failed: {error_msg}")
 
         result_text = result.output
 
         if not result_text or not result_text.strip():
-            raise RuntimeError("AI returned empty response - check API credentials and connectivity")
+            raise RuntimeError(
+                "AI returned empty response - check API credentials and connectivity"
+            )
 
         logger.info(f"   AI response received ({len(result_text)} chars)")
 
@@ -496,7 +572,9 @@ Generate the requirements now:
 
         return requirements
 
-    def _assign_requirement_codes(self, requirements: list[GeneratedRequirement]) -> None:
+    def _assign_requirement_codes(
+        self, requirements: list[GeneratedRequirement]
+    ) -> None:
         """Assign sequential requirement codes without duplicating within a batch."""
         if not requirements:
             return
@@ -512,17 +590,29 @@ Generate the requirements now:
         for offset, req in enumerate(requirements):
             req.req_code = f"{prefix}-{start + offset:03d}"
 
-    def _generate_fallback_requirements(self, exploration_summary: dict[str, Any]) -> list[GeneratedRequirement]:
+    def _generate_fallback_requirements(
+        self, exploration_summary: dict[str, Any]
+    ) -> list[GeneratedRequirement]:
         """Generate basic requirements directly from discovered flows when AI is unavailable."""
         requirements: list[GeneratedRequirement] = []
         flows = exploration_summary.get("flows", []) or []
         endpoints = exploration_summary.get("api_endpoints", []) or []
 
+        min_expected = self._minimum_expected_requirements(exploration_summary)
+        if len(flows) < min_expected:
+            flows = self._extend_flows_with_pages(
+                flows,
+                exploration_summary.get("pages", []) or [],
+                limit=min_expected - len(flows),
+            )
         if not flows and exploration_summary.get("transitions"):
             flows = self._flows_from_transitions(exploration_summary)
         if not flows and exploration_summary.get("flows_discovered", 0) > 0:
             flows = [self._count_based_flow(exploration_summary)]
-        if not flows and (exploration_summary.get("pages_discovered", 0) > 0 or exploration_summary.get("entry_url")):
+        if not flows and (
+            exploration_summary.get("pages_discovered", 0) > 0
+            or exploration_summary.get("entry_url")
+        ):
             flows = [self._page_based_flow(exploration_summary)]
 
         for idx, flow in enumerate(flows, 1):
@@ -543,7 +633,12 @@ Generate the requirements now:
                 category = "other"
 
             is_success = bool(flow.get("is_success_path", True))
-            priority = "high" if is_success and category in {"authentication", "crud", "form_submission"} else "medium"
+            priority = (
+                "high"
+                if is_success
+                and category in {"authentication", "crud", "form_submission"}
+                else "medium"
+            )
             if not is_success:
                 priority = "medium"
 
@@ -558,19 +653,26 @@ Generate the requirements now:
                     "The system reaches the expected end state without errors",
                 ]
             if not is_success:
-                criteria.append("The system presents a clear validation or error response")
+                criteria.append(
+                    "The system presents a clear validation or error response"
+                )
 
             source_endpoints = [
                 e.get("url")
                 for e in endpoints
-                if e.get("url") and (not e.get("triggered_by") or name.lower() in str(e.get("triggered_by")).lower())
+                if e.get("url")
+                and (
+                    not e.get("triggered_by")
+                    or name.lower() in str(e.get("triggered_by")).lower()
+                )
             ][:5]
 
             requirements.append(
                 GeneratedRequirement(
                     req_code=f"REQ-{idx:03d}",
                     title=name,
-                    description=flow.get("description") or f"The system shall support the {name} user flow.",
+                    description=flow.get("description")
+                    or f"The system shall support the {name} user flow.",
                     category=category,
                     priority=priority,
                     acceptance_criteria=criteria[:8],
@@ -581,6 +683,201 @@ Generate the requirements now:
             )
 
         return requirements
+
+    def _requirements_are_sparse(
+        self,
+        requirements: list[GeneratedRequirement],
+        exploration_summary: dict[str, Any],
+    ) -> bool:
+        """Return True when broad exploration yielded too few requirements."""
+        return len(requirements) < self._minimum_expected_requirements(
+            exploration_summary
+        )
+
+    def _augment_sparse_requirements(
+        self,
+        requirements: list[GeneratedRequirement],
+        exploration_summary: dict[str, Any],
+    ) -> list[GeneratedRequirement]:
+        """Append deterministic requirements from page/flow evidence without duplicating titles."""
+        target = self._minimum_expected_requirements(exploration_summary)
+        existing_titles = {self._normalize_title(req.title) for req in requirements}
+        augmented = list(requirements)
+
+        for candidate in self._generate_fallback_requirements(exploration_summary):
+            if len(augmented) >= target:
+                break
+            key = self._normalize_title(candidate.title)
+            if key in existing_titles:
+                continue
+            existing_titles.add(key)
+            augmented.append(candidate)
+
+        return augmented
+
+    def _minimum_expected_requirements(
+        self, exploration_summary: dict[str, Any]
+    ) -> int:
+        """Conservative expected requirement count for broad observed exploration."""
+        pages = int(
+            exploration_summary.get("pages_discovered", 0)
+            or len(exploration_summary.get("pages", []) or [])
+        )
+        flow_count = len(exploration_summary.get("flows", []) or [])
+        page_capabilities = self._count_page_capabilities(
+            exploration_summary.get("pages", []) or []
+        )
+        if pages <= 1 and flow_count <= 1 and page_capabilities <= 1:
+            return 1
+        return max(1, min(15, max(flow_count, page_capabilities, pages // 4)))
+
+    @staticmethod
+    def _count_page_capabilities(pages: list[dict[str, Any]]) -> int:
+        count = 0
+        for page in pages:
+            if not isinstance(page, dict):
+                continue
+            if page.get("url"):
+                count += 1
+            count += len(page.get("forms") or [])
+            if page.get("actions"):
+                count += 1
+        return min(count, 15)
+
+    def _extend_flows_with_pages(
+        self,
+        flows: list[dict[str, Any]],
+        pages: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return flows
+        existing = {
+            (
+                self._normalize_title(flow.get("name")),
+                str(flow.get("start_url") or flow.get("startUrl") or "")
+                .rstrip("/")
+                .lower(),
+            )
+            for flow in flows
+        }
+        extended = list(flows)
+        for page in pages:
+            if len(extended) >= len(flows) + limit:
+                break
+            if not isinstance(page, dict):
+                continue
+            page_flow = self._flow_from_page(page)
+            if not page_flow:
+                continue
+            key = (
+                self._normalize_title(page_flow.get("name")),
+                str(page_flow.get("start_url") or "").rstrip("/").lower(),
+            )
+            if key in existing:
+                continue
+            existing.add(key)
+            extended.append(page_flow)
+        return extended
+
+    def _flow_from_page(self, page: dict[str, Any]) -> dict[str, Any] | None:
+        url = str(page.get("url") or "").strip()
+        if not url or url.startswith("__summary_page_"):
+            return None
+        label = self._page_label(page)
+        forms = page.get("forms") or []
+        actions = [str(item) for item in page.get("actions") or []]
+        key_elements = [
+            str(item)
+            for item in page.get("keyElements") or page.get("key_elements") or []
+        ]
+        text = " ".join(
+            [
+                label,
+                str(page.get("pageType") or page.get("page_type") or ""),
+                str(page.get("purpose") or ""),
+                *actions,
+                *key_elements,
+            ]
+        ).lower()
+
+        if forms:
+            category = "form_submission"
+            name = f"{label} Form Submission"
+            steps = [
+                {"action": "navigate", "element": url},
+                {"action": "inspect", "element": self._first_form_name(forms)},
+                {"action": "submit", "element": self._first_submit_name(forms)},
+            ]
+            description = f"Users can complete the primary form on {label}."
+        elif any(token in text for token in ("search", "filter", "query")):
+            category = "search"
+            name = f"{label} Search or Filter"
+            steps = [
+                {"action": "navigate", "element": url},
+                {
+                    "action": "interact",
+                    "element": self._first_matching(
+                        actions + key_elements, ["search", "filter", "query"]
+                    ),
+                },
+            ]
+            description = f"Users can search or filter content on {label}."
+        else:
+            category = "navigation"
+            name = f"{label} Page Access"
+            steps = [{"action": "navigate", "element": url}]
+            description = (
+                page.get("purpose") or f"Users can access and inspect {label}."
+            )
+
+        return {
+            "name": name,
+            "category": category,
+            "description": description,
+            "start_url": url,
+            "end_url": url,
+            "is_success_path": True,
+            "postconditions": [description],
+            "steps": steps,
+        }
+
+    @staticmethod
+    def _normalize_title(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+    @staticmethod
+    def _page_label(page: dict[str, Any]) -> str:
+        raw = page.get("title") or page.get("pageType") or page.get("page_type") or ""
+        if not raw:
+            path = urlparse(str(page.get("url") or "")).path.strip("/")
+            raw = path.split("/")[-1] or path or "application page"
+        label = re.sub(r"[-_]+", " ", str(raw)).strip()
+        label = re.sub(r"\s+", " ", label)
+        return (label[:80] or "application page").title()
+
+    @staticmethod
+    def _first_form_name(forms: list[dict[str, Any]]) -> str:
+        if not forms:
+            return "form"
+        form = forms[0] if isinstance(forms[0], dict) else {}
+        return str(form.get("name") or form.get("title") or "form")
+
+    @staticmethod
+    def _first_submit_name(forms: list[dict[str, Any]]) -> str:
+        if not forms:
+            return "submit button"
+        form = forms[0] if isinstance(forms[0], dict) else {}
+        return str(form.get("submit") or form.get("submitButton") or "submit button")
+
+    @staticmethod
+    def _first_matching(values: list[str], keywords: list[str]) -> str:
+        for value in values:
+            lowered = value.lower()
+            if any(keyword in lowered for keyword in keywords):
+                return value
+        return "relevant control"
 
     def _load_flow_artifacts(self, exploration_session_id: str) -> list[dict[str, Any]]:
         """Load flows.json when DB flow rows are unavailable."""
@@ -598,9 +895,37 @@ Generate the requirements now:
                 data = raw.get("flows", raw) if isinstance(raw, dict) else raw
                 if not isinstance(data, list):
                     return []
-                return [self._normalize_artifact_flow(item, idx) for idx, item in enumerate(data, 1) if isinstance(item, dict)]
+                return [
+                    self._normalize_artifact_flow(item, idx)
+                    for idx, item in enumerate(data, 1)
+                    if isinstance(item, dict)
+                ]
             except Exception as exc:
                 logger.warning(f"Failed to load flow artifacts from {path}: {exc}")
+                return []
+        return []
+
+    def _load_page_artifacts(self, exploration_session_id: str) -> list[dict[str, Any]]:
+        """Load observed page artifacts produced by the explorer."""
+        candidates = [
+            Path("runs") / "explorations" / exploration_session_id / "pages.json",
+            Path("runs") / exploration_session_id / "pages.json",
+            Path("/app/runs/explorations") / exploration_session_id / "pages.json",
+            Path("/app/runs") / exploration_session_id / "pages.json",
+        ]
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                raw = json.loads(path.read_text())
+                data = raw.get("pages", raw) if isinstance(raw, dict) else raw
+                if not isinstance(data, list):
+                    return []
+                return [
+                    item for item in data if isinstance(item, dict) and item.get("url")
+                ]
+            except Exception as exc:
+                logger.warning(f"Failed to load page artifacts from {path}: {exc}")
                 return []
         return []
 
@@ -626,19 +951,35 @@ Generate the requirements now:
                 return {}
         return {}
 
-    def _normalize_artifact_flow(self, flow: dict[str, Any], index: int) -> dict[str, Any]:
+    def _normalize_artifact_flow(
+        self, flow: dict[str, Any], index: int
+    ) -> dict[str, Any]:
         name = flow.get("name") or flow.get("title") or f"Discovered Flow {index}"
         return {
             "name": name,
             "category": flow.get("category") or "navigation",
-            "description": flow.get("description") or flow.get("outcome") or flow.get("happy_path"),
-            "start_url": flow.get("startUrl") or flow.get("start_url") or flow.get("entry_point") or "",
-            "end_url": flow.get("endUrl") or flow.get("end_url") or flow.get("exit_point") or "",
-            "step_count": flow.get("step_count") or flow.get("steps_count") or len(flow.get("steps") or []),
-            "is_success_path": flow.get("isSuccessPath", flow.get("is_success_path", True)),
+            "description": flow.get("description")
+            or flow.get("outcome")
+            or flow.get("happy_path"),
+            "start_url": flow.get("startUrl")
+            or flow.get("start_url")
+            or flow.get("entry_point")
+            or "",
+            "end_url": flow.get("endUrl")
+            or flow.get("end_url")
+            or flow.get("exit_point")
+            or "",
+            "step_count": flow.get("step_count")
+            or flow.get("steps_count")
+            or len(flow.get("steps") or []),
+            "is_success_path": flow.get(
+                "isSuccessPath", flow.get("is_success_path", True)
+            ),
             "preconditions": flow.get("preconditions") or [],
             "postconditions": flow.get("postconditions") or [],
-            "steps": self._normalize_steps(flow.get("steps") or flow.get("pages") or []),
+            "steps": self._normalize_steps(
+                flow.get("steps") or flow.get("pages") or []
+            ),
         }
 
     def _normalize_steps(self, raw_steps: Any) -> list[dict[str, Any]]:
@@ -647,7 +988,13 @@ Generate the requirements now:
         steps: list[dict[str, Any]] = []
         for step in raw_steps:
             if isinstance(step, dict):
-                action = step.get("action") or step.get("actionType") or step.get("action_type") or step.get("type") or "step"
+                action = (
+                    step.get("action")
+                    or step.get("actionType")
+                    or step.get("action_type")
+                    or step.get("type")
+                    or "step"
+                )
                 element = (
                     step.get("element")
                     or step.get("elementName")
@@ -657,7 +1004,13 @@ Generate the requirements now:
                     or step.get("action_description")
                     or action
                 )
-                steps.append({"action": str(action), "element": str(element), "value": step.get("value")})
+                steps.append(
+                    {
+                        "action": str(action),
+                        "element": str(element),
+                        "value": step.get("value"),
+                    }
+                )
             elif step is not None:
                 steps.append({"action": "step", "element": str(step)})
         return steps
@@ -670,10 +1023,16 @@ Generate the requirements now:
                 elements.append(str(element))
         return elements[:10]
 
-    def _flows_from_transitions(self, exploration_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    def _flows_from_transitions(
+        self, exploration_summary: dict[str, Any]
+    ) -> list[dict[str, Any]]:
         flows: list[dict[str, Any]] = []
-        for idx, transition in enumerate(exploration_summary.get("transitions", [])[:20], 1):
-            before_url = transition.get("before_url") or exploration_summary.get("entry_url", "")
+        for idx, transition in enumerate(
+            exploration_summary.get("transitions", [])[:20], 1
+        ):
+            before_url = transition.get("before_url") or exploration_summary.get(
+                "entry_url", ""
+            )
             after_url = transition.get("after_url") or before_url
             action = transition.get("action") or "navigate"
             element = transition.get("element") or "discovered element"
@@ -682,11 +1041,14 @@ Generate the requirements now:
                 {
                     "name": title,
                     "category": "navigation",
-                    "description": transition.get("changes") or f"User can complete {title}.",
+                    "description": transition.get("changes")
+                    or f"User can complete {title}.",
                     "start_url": before_url,
                     "end_url": after_url,
                     "is_success_path": transition.get("transition_type") != "error",
-                    "postconditions": [transition.get("changes")] if transition.get("changes") else [],
+                    "postconditions": (
+                        [transition.get("changes")] if transition.get("changes") else []
+                    ),
                     "steps": [{"action": action, "element": element}],
                 }
             )
@@ -706,7 +1068,9 @@ Generate the requirements now:
             "start_url": entry_url,
             "end_url": entry_url,
             "is_success_path": True,
-            "postconditions": ["Discovered journeys remain reachable without unexpected errors"],
+            "postconditions": [
+                "Discovered journeys remain reachable without unexpected errors"
+            ],
             "steps": [{"action": "navigate", "element": entry_url}],
         }
 
@@ -730,7 +1094,9 @@ Generate the requirements now:
             "steps": [{"action": "navigate", "element": entry_url}],
         }
 
-    def _parse_requirements_response(self, response_text: str) -> list[GeneratedRequirement]:
+    def _parse_requirements_response(
+        self, response_text: str
+    ) -> list[GeneratedRequirement]:
         """Parse requirements from AI response using robust JSON extraction."""
         from utils.json_utils import extract_json_from_markdown
 
@@ -807,7 +1173,9 @@ async def generate_requirements_from_exploration(
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Generate Requirements from Exploration")
+    parser = argparse.ArgumentParser(
+        description="Generate Requirements from Exploration"
+    )
     parser.add_argument("session_id", help="Exploration session ID")
     parser.add_argument("--project", default="default", help="Project ID")
 

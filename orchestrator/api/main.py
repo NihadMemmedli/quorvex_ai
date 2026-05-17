@@ -132,6 +132,106 @@ _MAX_CODE_CACHE_SIZE = 200
 _BACKGROUND_TASKS: list[asyncio.Task] = []
 
 
+def _clean_metadata_tags(tags: Any, *, lowercase: bool = False) -> list[str]:
+    """Normalize seed/user tags while preserving first-seen ordering."""
+    if not isinstance(tags, list):
+        return []
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        if not isinstance(tag, str):
+            continue
+        value = tag.strip()
+        if not value:
+            continue
+        if lowercase:
+            value = value.lower()
+        key = value.casefold()
+        if key in seen:
+            continue
+        cleaned.append(value)
+        seen.add(key)
+    return cleaned
+
+
+def _merge_metadata_tags(existing_tags: list[str], seed_tags: list[str]) -> list[str]:
+    merged = _clean_metadata_tags(existing_tags)
+    seen = {tag.casefold() for tag in merged}
+    for tag in _clean_metadata_tags(seed_tags, lowercase=True):
+        if tag.casefold() in seen:
+            continue
+        merged.append(tag)
+        seen.add(tag.casefold())
+    return merged
+
+
+def sync_spec_metadata_from_file(session: Session, metadata_file: Path = METADATA_FILE) -> int:
+    """Sync repo-owned metadata seed into SpecMetadata without clobbering user edits."""
+    if not metadata_file.exists():
+        return 0
+
+    try:
+        meta_dict = json.loads(metadata_file.read_text())
+    except json.JSONDecodeError as e:
+        logger.warning(f"Invalid JSON in metadata file {metadata_file}: {e}")
+        return 0
+    except OSError as e:
+        logger.warning(f"Cannot read metadata file {metadata_file}: {e}")
+        return 0
+
+    if not isinstance(meta_dict, dict):
+        logger.warning(f"Metadata file {metadata_file} must contain an object keyed by spec name")
+        return 0
+
+    changed = 0
+    for spec_name, data in meta_dict.items():
+        if not isinstance(spec_name, str) or not isinstance(data, dict):
+            logger.warning(f"Skipping invalid metadata entry for {spec_name!r}")
+            continue
+
+        seed_tags = _clean_metadata_tags(data.get("tags", []), lowercase=True)
+        meta = session.get(DBSpecMetadata, spec_name)
+        if not meta:
+            meta = DBSpecMetadata(
+                spec_name=spec_name,
+                tags_json=json.dumps(seed_tags),
+                description=data.get("description"),
+                author=data.get("author"),
+            )
+            lm = data.get("lastModified")
+            if lm:
+                try:
+                    meta.last_modified = datetime.fromisoformat(lm)
+                except ValueError:
+                    logger.warning(f"Invalid lastModified date format for {spec_name}: {lm}")
+            session.add(meta)
+            changed += 1
+            continue
+
+        merged_tags = _merge_metadata_tags(meta.tags, seed_tags)
+        if merged_tags != meta.tags:
+            meta.tags = merged_tags
+            changed += 1
+
+        if not meta.description and data.get("description"):
+            meta.description = data.get("description")
+            changed += 1
+        if not meta.author and data.get("author"):
+            meta.author = data.get("author")
+            changed += 1
+        if not meta.last_modified and data.get("lastModified"):
+            try:
+                meta.last_modified = datetime.fromisoformat(data["lastModified"])
+                changed += 1
+            except ValueError:
+                logger.warning(f"Invalid lastModified date format for {spec_name}: {data['lastModified']}")
+
+        session.add(meta)
+
+    return changed
+
+
 class SpecCache:
     """Cache for spec metadata list, invalidated when specs directory changes."""
 
@@ -876,32 +976,7 @@ def sync_data_from_files():
                 session.add(run)
 
         # 2. Sync Metadata
-        if METADATA_FILE.exists():
-            try:
-                meta_dict = json.loads(METADATA_FILE.read_text())
-                for spec_name, data in meta_dict.items():
-                    if session.get(DBSpecMetadata, spec_name):
-                        continue
-
-                    meta = DBSpecMetadata(
-                        spec_name=spec_name,
-                        tags_json=json.dumps(data.get("tags", [])),
-                        description=data.get("description"),
-                        author=data.get("author"),
-                    )
-                    # lastModified
-                    lm = data.get("lastModified")
-                    if lm:
-                        try:
-                            meta.last_modified = datetime.fromisoformat(lm)
-                        except ValueError:
-                            logger.warning(f"Invalid lastModified date format for {spec_name}: {lm}")
-
-                    session.add(meta)
-            except json.JSONDecodeError as e:
-                logger.warning(f"Invalid JSON in metadata file {METADATA_FILE}: {e}")
-            except OSError as e:
-                logger.warning(f"Cannot read metadata file {METADATA_FILE}: {e}")
+        sync_spec_metadata_from_file(session)
 
         session.commit()
     logger.info("Sync complete.")
@@ -1332,6 +1407,7 @@ async def get_agent_queue_status():
             await queue.connect()
             metrics = await queue.get_metrics()
             health = await queue.get_worker_health()
+            running_tasks = await queue.get_running_task_summaries()
             return {
                 "mode": "redis",
                 "active": metrics.get("running", 0),
@@ -1341,6 +1417,7 @@ async def get_agent_queue_status():
                 "oldest_queued_age_seconds": metrics.get("oldest_queued_age_seconds"),
                 "by_status": metrics.get("by_status", {}),
                 "worker_health": health,
+                "running_tasks": running_tasks,
             }
     except Exception as exc:
         logger.warning(f"Failed to read Redis agent queue status: {exc}")
@@ -1348,6 +1425,27 @@ async def get_agent_queue_status():
     pool = BROWSER_POOL or await get_browser_pool()
     status = await pool.get_status()
     agent_running = status["by_type"].get("agent", 0)
+    running_tasks = []
+    for request_id in status.get("running_requests", []):
+        slot = pool.get_slot(request_id)
+        if not slot or slot.operation_type.value != "agent":
+            continue
+        running_tasks.append(
+            {
+                "id": request_id,
+                "status": slot.status.value,
+                "worker_id": None,
+                "agent_type": None,
+                "operation_type": slot.operation_type.value,
+                "created_at": slot.queued_at.isoformat() if slot.queued_at else None,
+                "started_at": slot.started_at.isoformat() if slot.started_at else None,
+                "timeout_seconds": slot.max_operation_duration,
+                "heartbeat_alive": True,
+                "progress": {
+                    "activity_label": slot.description,
+                },
+            }
+        )
 
     return {
         "mode": "browser_pool",
@@ -1356,6 +1454,7 @@ async def get_agent_queue_status():
         "queued": status["queued"],
         "available": status["available"],
         "pool_status": {"total_running": status["running"], "by_type": status["by_type"]},
+        "running_tasks": running_tasks,
     }
 
 

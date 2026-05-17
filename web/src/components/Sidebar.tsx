@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
-import { Home, FileText, Play, Settings, BarChart2, ClipboardList, FlaskConical, Layers, Compass, CheckSquare, Users, Shield, Zap, Activity, Database, BrainCircuit, TrendingUp, Clock, GitBranch, GitPullRequest, ChevronRight, MessageSquare, Search, Brain, Bot, FolderOpen, PieChart, Rocket, Workflow, MousePointerClick } from 'lucide-react';
+import { Home, FileText, Play, Settings, BarChart2, ClipboardList, FlaskConical, Layers, CheckSquare, Users, Shield, Zap, Activity, Database, BrainCircuit, Clock, GitBranch, GitPullRequest, ChevronRight, Search, Brain, Bot, FolderOpen, PieChart, Rocket, Workflow, MousePointerClick } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
@@ -24,57 +24,40 @@ interface NavGroup {
 
 const topLinks: NavItem[] = [
     { href: '/', label: 'Overview', icon: Home },
-    { href: '/workflow', label: 'AI Workflows', icon: Workflow },
+    { href: '/autopilot', label: 'AutoPilot', icon: Rocket },
+    { href: '/specs', label: 'Test Specs', icon: FileText },
+    { href: '/runs', label: 'Test Runs', icon: Play },
     { href: '/dashboard', label: 'Reporting', icon: BarChart2 },
-    { href: '/assistant', label: 'AI Assistant', icon: MessageSquare },
     { href: '/projects', label: 'Projects', icon: FolderOpen },
 ];
 
 const navGroups: NavGroup[] = [
     {
-        id: 'test-management',
-        label: 'Test Management',
-        icon: FlaskConical,
+        id: 'supporting-workflows',
+        label: 'Supporting Workflows',
+        icon: Workflow,
         items: [
             { href: '/prd', label: 'PRD', icon: ClipboardList },
             { href: '/recordings', label: 'Recorder', icon: MousePointerClick },
-            { href: '/specs', label: 'Test Specs', icon: FileText },
             { href: '/templates', label: 'Templates', icon: FileText },
-            { href: '/runs', label: 'Test Runs', icon: Play },
+            { href: '/requirements', label: 'Requirements', icon: CheckSquare },
+            { href: '/rtm', label: 'RTM', icon: GitBranch },
+            { href: '/coverage', label: 'Coverage', icon: PieChart },
             { href: '/regression', label: 'Regression', icon: FlaskConical },
             { href: '/regression/batches', label: 'Batch Reports', icon: Layers },
         ],
     },
     {
-        id: 'discovery',
-        label: 'Discovery',
-        icon: Compass,
-        items: [
-            { href: '/autopilot', label: 'Auto Pilot', icon: Rocket },
-            { href: '/exploration', label: 'Discovery', icon: Compass },
-            { href: '/requirements', label: 'Requirements', icon: CheckSquare },
-            { href: '/rtm', label: 'RTM', icon: GitBranch },
-            { href: '/coverage', label: 'Coverage', icon: PieChart },
-        ],
-    },
-    {
-        id: 'specialized-testing',
-        label: 'Specialized Testing',
+        id: 'advanced-tools',
+        label: 'Advanced Tools',
         icon: Zap,
         items: [
+            { href: '/workflow', label: 'Workflow Monitor', icon: Workflow },
             { href: '/api-testing', label: 'API Testing', icon: Zap },
             { href: '/load-testing', label: 'Load Testing', icon: Activity },
             { href: '/security-testing', label: 'Security', icon: Shield },
             { href: '/database-testing', label: 'Database', icon: Database },
             { href: '/llm-testing', label: 'LLM Testing', icon: BrainCircuit },
-        ],
-    },
-    {
-        id: 'operations',
-        label: 'Operations',
-        icon: TrendingUp,
-        items: [
-            { href: '/analytics', label: 'Analytics', icon: TrendingUp },
             { href: '/schedules', label: 'Schedules', icon: Clock },
             { href: '/ci-cd', label: 'CI/CD', icon: GitBranch },
             { href: '/pr-advisor', label: 'PR Advisor', icon: GitPullRequest },
@@ -89,6 +72,10 @@ const bottomLinks: NavItem[] = [
 ];
 
 const STORAGE_KEY = 'sidebar-collapsed-groups';
+const DEFAULT_COLLAPSED_GROUPS: Record<string, boolean> = {
+    'supporting-workflows': false,
+    'advanced-tools': true,
+};
 
 function isItemActive(href: string, pathname: string): boolean {
     if (href === '/regression/batches') {
@@ -113,9 +100,9 @@ function loadCollapsedGroups(): Record<string, boolean> {
     if (typeof window === 'undefined') return {};
     try {
         const stored = localStorage.getItem(STORAGE_KEY);
-        return stored ? JSON.parse(stored) : {};
+        return stored ? { ...DEFAULT_COLLAPSED_GROUPS, ...JSON.parse(stored) } : DEFAULT_COLLAPSED_GROUPS;
     } catch {
-        return {};
+        return DEFAULT_COLLAPSED_GROUPS;
     }
 }
 

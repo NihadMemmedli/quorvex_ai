@@ -215,6 +215,40 @@ class TestTaskDetailResponse(TestTaskResponse):
     log_excerpt: str | None = None
 
 
+class AutoPilotLiveArtifactResponse(BaseModel):
+    """Live browser artifact metadata for an Auto Pilot session."""
+
+    name: str
+    path: str
+    type: str
+    modified_at: datetime | None = None
+
+
+class AutoPilotLiveResponse(BaseModel):
+    """Current live browser/progress state for an Auto Pilot session."""
+
+    active: bool = False
+    phase: str | None = None
+    activity_label: str | None = None
+    status: str | None = None
+    message: str | None = None
+    exploration_session_id: str | None = None
+    test_task_id: int | None = None
+    run_id: str | None = None
+    spec_name: str | None = None
+    current_stage: str | None = None
+    agent_task_id: str | None = None
+    last_tool: str | None = None
+    last_tool_label: str | None = None
+    tool_calls: int = 0
+    browser_tool_calls: int = 0
+    interactions: int = 0
+    recent_tools: list[dict[str, Any]] = Field(default_factory=list)
+    artifacts: list[AutoPilotLiveArtifactResponse] = Field(default_factory=list)
+    latest_image: AutoPilotLiveArtifactResponse | None = None
+    updated_at: str | None = None
+
+
 # ========== Helper Functions ==========
 
 
@@ -294,6 +328,69 @@ def _collect_task_artifacts(run_dir: Path | None) -> list[TestTaskArtifactRespon
             )
         )
     return artifacts
+
+
+def _collect_live_artifacts(
+    exploration_session_id: str | None = None,
+    run_id: str | None = None,
+) -> list[AutoPilotLiveArtifactResponse]:
+    suffix_types = {
+        ".png": "image",
+        ".jpg": "image",
+        ".jpeg": "image",
+        ".webm": "video",
+        ".mp4": "video",
+    }
+    runs_roots = [RUNS_DIR, Path("/app/runs")]
+    session_dirs: list[tuple[Path, Path]] = []
+    for root in runs_roots:
+        if exploration_session_id:
+            session_dirs.extend(
+                [
+                    (root, root / exploration_session_id),
+                    (root, root / "explorations" / exploration_session_id),
+                ]
+            )
+        if run_id:
+            session_dirs.append((root, root / run_id))
+
+    artifacts: list[AutoPilotLiveArtifactResponse] = []
+    seen: set[str] = set()
+    for root, session_dir in session_dirs:
+        if not session_dir.exists():
+            continue
+        for path in session_dir.glob("**/*"):
+            if not path.is_file():
+                continue
+            artifact_type = suffix_types.get(path.suffix.lower())
+            if not artifact_type:
+                continue
+            try:
+                resolved = str(path.resolve())
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                rel_path = path.relative_to(root)
+                modified_at = datetime.utcfromtimestamp(path.stat().st_mtime)
+            except (OSError, ValueError):
+                continue
+            artifacts.append(
+                AutoPilotLiveArtifactResponse(
+                    name=path.name,
+                    path=f"/artifacts/{rel_path}",
+                    type=artifact_type,
+                    modified_at=modified_at,
+                )
+            )
+
+    return sorted(
+        artifacts,
+        key=lambda item: (
+            item.type != "image",
+            -(item.modified_at.timestamp() if item.modified_at else 0),
+            item.name,
+        ),
+    )
 
 
 def _task_artifact_summary(task: AutoPilotTestTask) -> tuple[int, bool]:
@@ -798,6 +895,64 @@ async def get_session_detail(
     if not ap_session:
         raise HTTPException(status_code=404, detail="Auto Pilot session not found")
     return _session_to_response(ap_session, session)
+
+
+@router.get("/{session_id}/live", response_model=AutoPilotLiveResponse)
+async def get_live_browser_state(
+    session_id: str,
+    session: Session = Depends(get_session),
+):
+    """Get current live browser state for an Auto Pilot session."""
+    ap_session = session.get(AutoPilotSession, session_id)
+    if not ap_session:
+        raise HTTPException(status_code=404, detail="Auto Pilot session not found")
+
+    live = dict((ap_session.config or {}).get("live_browser") or {})
+    phase = live.get("phase") or ap_session.current_phase
+    exploration_session_id = live.get("exploration_session_id")
+    run_id = live.get("run_id")
+    test_task_id = live.get("test_task_id")
+    numeric_test_task_id: int | None = None
+    if test_task_id:
+        try:
+            numeric_test_task_id = int(test_task_id)
+        except (TypeError, ValueError):
+            numeric_test_task_id = None
+
+    if numeric_test_task_id and not run_id:
+        task = session.get(AutoPilotTestTask, numeric_test_task_id)
+        if task and task.session_id == session_id:
+            run_id = task.run_id
+
+    artifacts = _collect_live_artifacts(
+        exploration_session_id=str(exploration_session_id) if exploration_session_id else None,
+        run_id=str(run_id) if run_id else None,
+    )
+    latest_image = next((artifact for artifact in artifacts if artifact.type == "image"), None)
+    session_allows_live = ap_session.status in ("running", "awaiting_input")
+
+    return AutoPilotLiveResponse(
+        active=bool(live.get("active")) and session_allows_live,
+        phase=str(phase) if phase else None,
+        activity_label=live.get("activity_label"),
+        status=live.get("status"),
+        message=live.get("message"),
+        exploration_session_id=str(exploration_session_id) if exploration_session_id else None,
+        test_task_id=numeric_test_task_id,
+        run_id=str(run_id) if run_id else None,
+        spec_name=live.get("spec_name"),
+        current_stage=live.get("current_stage"),
+        agent_task_id=live.get("agent_task_id"),
+        last_tool=live.get("last_tool"),
+        last_tool_label=live.get("last_tool_label"),
+        tool_calls=int(live.get("tool_calls") or 0),
+        browser_tool_calls=int(live.get("browser_tool_calls") or 0),
+        interactions=int(live.get("interactions") or 0),
+        recent_tools=list(live.get("recent_tools") or []),
+        artifacts=artifacts,
+        latest_image=latest_image,
+        updated_at=live.get("updated_at"),
+    )
 
 
 @router.get("/{session_id}/phases", response_model=list[AutoPilotPhaseResponse])

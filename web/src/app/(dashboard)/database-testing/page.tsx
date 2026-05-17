@@ -1,8 +1,9 @@
 'use client';
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-    Database, Server, Search, FileCode, Clock, BarChart2,
+    Database, Server, Search, FileCode, Clock, BarChart2, CheckCircle2, Circle, ArrowRight, Table2,
 } from 'lucide-react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { useProject } from '@/contexts/ProjectContext';
@@ -11,6 +12,7 @@ import { getAuthHeaders } from '@/lib/styles';
 import { API_BASE } from '@/lib/api';
 
 import ConnectionsTab from './components/ConnectionsTab';
+import DbViewerTab from './components/DbViewerTab';
 import AnalyzerTab from './components/AnalyzerTab';
 import SpecsTab from './components/SpecsTab';
 import HistoryTab from './components/HistoryTab';
@@ -20,26 +22,56 @@ import type { DbConnection, DbSpec, DbTestRun, TabType } from './components/type
 
 export default function DatabaseTestingPage() {
     const { currentProject } = useProject();
+    const router = useRouter();
+    const searchParams = useSearchParams();
     const projectId = currentProject?.id || 'default';
 
-    const [activeTab, setActiveTab] = useState<TabType>('connections');
-    const [visited, setVisited] = useState<Set<TabType>>(new Set(['connections']));
+    const initialTab = (searchParams.get('tab') || 'connections') as TabType;
+    const normalizedInitialTab = (
+        ['connections', 'viewer', 'analyzer', 'specs', 'history', 'dashboard'].includes(initialTab) ? initialTab : 'connections'
+    ) as TabType;
+    const [activeTab, setActiveTab] = useState<TabType>(normalizedInitialTab);
+    const [visited, setVisited] = useState<Set<TabType>>(new Set(['connections', normalizedInitialTab]));
+    const [selectedConnectionId, setSelectedConnectionId] = useState(searchParams.get('connection') || '');
+    const [selectedTableName, setSelectedTableName] = useState(searchParams.get('table') || '');
 
     // Shared data state
     const [connections, setConnections] = useState<DbConnection[]>([]);
     const [specs, setSpecs] = useState<DbSpec[]>([]);
     const [runs, setRuns] = useState<DbTestRun[]>([]);
 
+    const preferredConnectionId = connections.find(c => c.id === 'dbc-demo-shop')?.id || connections[0]?.id;
+
     // Track visited tabs
+    const updateUrlState = useCallback((updates: Record<string, string | null>) => {
+        const next = new URLSearchParams(searchParams.toString());
+        Object.entries(updates).forEach(([key, value]) => {
+            if (value) next.set(key, value);
+            else next.delete(key);
+        });
+        router.replace(`/database-testing?${next.toString()}`, { scroll: false });
+    }, [router, searchParams]);
+
     const handleTabChange = useCallback((tab: TabType) => {
         setActiveTab(tab);
+        updateUrlState({ tab });
         setVisited(prev => {
             if (prev.has(tab)) return prev;
             const next = new Set(prev);
             next.add(tab);
             return next;
         });
-    }, []);
+    }, [updateUrlState]);
+
+    const handleConnectionSelect = useCallback((connectionId: string) => {
+        setSelectedConnectionId(connectionId);
+        updateUrlState({ connection: connectionId || null });
+    }, [updateUrlState]);
+
+    const handleTableSelect = useCallback((tableName: string) => {
+        setSelectedTableName(tableName);
+        updateUrlState({ table: tableName || null });
+    }, [updateUrlState]);
 
     // ========== Data Fetching ==========
 
@@ -82,11 +114,56 @@ export default function DatabaseTestingPage() {
     // Refresh on tab or project change
     useEffect(() => {
         if (activeTab === 'connections') fetchConnections();
+        if (activeTab === 'viewer') fetchConnections();
         if (activeTab === 'analyzer') fetchConnections();
         if (activeTab === 'specs') { fetchSpecs(); fetchConnections(); }
         if (activeTab === 'history') fetchRuns();
         if (activeTab === 'dashboard') { fetchConnections(); fetchRuns(); }
     }, [activeTab, projectId, fetchConnections, fetchSpecs, fetchRuns]);
+
+    useEffect(() => {
+        fetchConnections();
+        fetchSpecs();
+        fetchRuns();
+    }, [projectId, fetchConnections, fetchSpecs, fetchRuns]);
+
+    const workflowSteps = [
+        {
+            label: 'Connection',
+            detail: connections.length > 0 ? `${connections.length} ready` : 'Add or seed a database',
+            done: connections.length > 0,
+            tab: 'connections' as TabType,
+            action: connections.length > 0 ? 'View' : 'Add',
+        },
+        {
+            label: 'View DB',
+            detail: connections.length > 0 ? 'Browse schema and query safely' : 'Add a connection first',
+            done: connections.length > 0,
+            tab: 'viewer' as TabType,
+            action: 'Open',
+        },
+        {
+            label: 'Analyze',
+            detail: runs.some(r => r.run_type === 'schema_analysis') ? 'Schema run available' : 'Inspect schema health',
+            done: runs.some(r => r.run_type === 'schema_analysis'),
+            tab: 'analyzer' as TabType,
+            action: 'Analyze',
+        },
+        {
+            label: 'Run checks',
+            detail: specs.length > 0 ? `${specs.length} spec${specs.length === 1 ? '' : 's'} ready` : 'Create or generate specs',
+            done: specs.length > 0 && runs.some(r => r.run_type !== 'schema_analysis'),
+            tab: 'specs' as TabType,
+            action: specs.length > 0 ? 'Run' : 'Create',
+        },
+        {
+            label: 'Review',
+            detail: runs.length > 0 ? `${runs.length} run${runs.length === 1 ? '' : 's'} recorded` : 'Review failures and samples',
+            done: runs.length > 0,
+            tab: runs.length > 0 ? 'history' as TabType : 'dashboard' as TabType,
+            action: runs.length > 0 ? 'Open' : 'Dashboard',
+        },
+    ];
 
     return (
         <PageLayout tier="wide">
@@ -96,11 +173,72 @@ export default function DatabaseTestingPage() {
                 icon={<Database size={20} />}
             />
 
+            <div className="animate-in stagger-1" style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(5, minmax(0, 1fr))',
+                gap: '0.75rem',
+                marginBottom: '1.25rem',
+            }}>
+                {workflowSteps.map((step, index) => (
+                    <button
+                        key={step.label}
+                        onClick={() => handleTabChange(step.tab)}
+                        style={{
+                            border: '1px solid var(--border)',
+                            background: activeTab === step.tab ? 'rgba(59, 130, 246, 0.10)' : 'var(--surface)',
+                            color: 'var(--text-primary)',
+                            borderRadius: 'var(--radius)',
+                            padding: '0.85rem 1rem',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.75rem',
+                            textAlign: 'left',
+                            cursor: 'pointer',
+                            minHeight: '78px',
+                        }}
+                    >
+                        <span style={{
+                            width: '28px',
+                            height: '28px',
+                            borderRadius: '50%',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            background: step.done ? 'rgba(16, 185, 129, 0.14)' : 'rgba(148, 163, 184, 0.12)',
+                            color: step.done ? 'var(--success)' : 'var(--text-secondary)',
+                            flexShrink: 0,
+                        }}>
+                            {step.done ? <CheckCircle2 size={16} /> : <Circle size={16} />}
+                        </span>
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                            <span style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '0.2rem' }}>
+                                Step {index + 1}
+                            </span>
+                            <span style={{ display: 'block', fontSize: '0.9rem', fontWeight: 600 }}>
+                                {step.label}
+                            </span>
+                            <span style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {step.detail}
+                            </span>
+                        </span>
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.78rem', color: 'var(--primary-hover)', flexShrink: 0 }}>
+                            {step.action}
+                            <ArrowRight size={13} />
+                        </span>
+                    </button>
+                ))}
+            </div>
+
             {/* Tabs */}
             <div className="animate-in stagger-2" style={{ display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: '1.5rem' }}>
                 <button onClick={() => handleTabChange('connections')} style={createTabStyle(activeTab, 'connections')}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                         <Server size={16} /> Connections
+                    </span>
+                </button>
+                <button onClick={() => handleTabChange('viewer')} style={createTabStyle(activeTab, 'viewer')}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <Table2 size={16} /> Viewer
                     </span>
                 </button>
                 <button onClick={() => handleTabChange('analyzer')} style={createTabStyle(activeTab, 'analyzer')}>
@@ -134,11 +272,23 @@ export default function DatabaseTestingPage() {
                 />
             )}
 
+            {activeTab === 'viewer' && visited.has('viewer') && (
+                <DbViewerTab
+                    connections={connections}
+                    preferredConnectionId={preferredConnectionId}
+                    selectedConnectionId={selectedConnectionId}
+                    selectedTableName={selectedTableName}
+                    onSelectConnection={handleConnectionSelect}
+                    onSelectTable={handleTableSelect}
+                />
+            )}
+
             {activeTab === 'analyzer' && visited.has('analyzer') && (
                 <AnalyzerTab
                     connections={connections}
                     projectId={projectId}
                     onSpecsSaved={fetchSpecs}
+                    preferredConnectionId={preferredConnectionId}
                 />
             )}
 
@@ -149,6 +299,7 @@ export default function DatabaseTestingPage() {
                     projectId={projectId}
                     onRefreshSpecs={fetchSpecs}
                     onRefreshRuns={fetchRuns}
+                    preferredConnectionId={preferredConnectionId}
                 />
             )}
 

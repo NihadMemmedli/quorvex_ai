@@ -38,7 +38,9 @@ def _has_text(value: Any) -> bool:
 def is_valid_transition(record: Any) -> tuple[bool, str | None]:
     if not _has_text(getattr(record, "action_type", None)):
         return False, "missing action_type"
-    if not _has_text(getattr(record, "before_url", None)) and not _has_text(getattr(record, "after_url", None)):
+    if not _has_text(getattr(record, "before_url", None)) and not _has_text(
+        getattr(record, "after_url", None)
+    ):
         return False, "missing before_url/after_url"
     return True, None
 
@@ -46,7 +48,9 @@ def is_valid_transition(record: Any) -> tuple[bool, str | None]:
 def is_valid_flow(record: Any) -> tuple[bool, str | None]:
     if not _has_text(getattr(record, "name", None)):
         return False, "missing name"
-    if not _has_text(getattr(record, "start_url", None)) and not _has_text(getattr(record, "end_url", None)):
+    if not _has_text(getattr(record, "start_url", None)) and not _has_text(
+        getattr(record, "end_url", None)
+    ):
         return False, "missing start_url/end_url"
     steps = getattr(record, "steps", None)
     if steps is not None:
@@ -54,7 +58,9 @@ def is_valid_flow(record: Any) -> tuple[bool, str | None]:
             return False, "steps must be a list"
         for idx, step in enumerate(steps, 1):
             if isinstance(step, dict):
-                if not _has_text(step.get("action") or step.get("action_type") or step.get("type")):
+                if not _has_text(
+                    step.get("action") or step.get("action_type") or step.get("type")
+                ):
                     return False, f"step {idx} missing action"
             elif not _has_text(step):
                 return False, f"step {idx} is empty"
@@ -80,7 +86,9 @@ def validate_exploration_result(result: Any) -> dict[str, Any]:
         if valid:
             valid_counts["transitions"] += 1
         else:
-            issues.append(ValidationIssue("transition", idx, message or "invalid transition"))
+            issues.append(
+                ValidationIssue("transition", idx, message or "invalid transition")
+            )
 
     for idx, flow in enumerate(getattr(result, "flows", []) or [], 1):
         valid, message = is_valid_flow(flow)
@@ -119,7 +127,11 @@ def assess_exploration_quality(
     api_endpoints = len(getattr(result, "api_endpoints", []) or [])
     pages = int(getattr(result, "pages_discovered", 0) or 0)
     status = getattr(result, "status", "unknown")
-    structured = structured_records_count if structured_records_count is not None else transitions + flows + api_endpoints
+    structured = (
+        structured_records_count
+        if structured_records_count is not None
+        else transitions + flows + api_endpoints
+    )
 
     score = 0
     score += min(25, transitions * 5)
@@ -127,7 +139,7 @@ def assess_exploration_quality(
     score += min(15, pages * 5)
     score += min(10, api_endpoints * 3)
     score += min(20, verified_tool_calls)
-    score += 15 if status == "completed" else 0
+    score += 15 if status in {"completed", "completed_partial"} else 0
     if fallback_used:
         score -= 35
     if transitions == 0 and flows == 0:
@@ -148,7 +160,7 @@ def assess_exploration_quality(
         degraded_reasons.append("no_structured_transitions")
     if flows == 0:
         degraded_reasons.append("no_structured_flows")
-    if status != "completed":
+    if status not in {"completed", "completed_partial"}:
         degraded_reasons.append(f"status_{status}")
 
     return {

@@ -708,6 +708,51 @@ class AgentQueue:
             "oldest_queued_age_seconds": oldest_queued_age_seconds,
         }
 
+    async def get_running_task_summaries(self) -> list[dict[str, Any]]:
+        """Return sanitized summaries for currently running tasks."""
+        redis = await self._ensure_connected()
+        running_ids = sorted(await redis.smembers(self.RUNNING_KEY))
+        summaries: list[dict[str, Any]] = []
+
+        for task_id in running_ids:
+            task = await self.get_task(task_id)
+            progress = await self.get_task_progress(task_id) or {}
+            heartbeat_alive = await self.check_heartbeat(task_id)
+
+            progress_summary = {
+                key: progress.get(key)
+                for key in (
+                    "phase",
+                    "activity_label",
+                    "status",
+                    "message",
+                    "current_stage",
+                    "tool_calls",
+                    "browser_tool_calls",
+                    "interactions",
+                    "last_tool",
+                    "last_tool_label",
+                )
+                if key in progress and progress.get(key) is not None
+            }
+
+            summaries.append(
+                {
+                    "id": task_id,
+                    "status": task.status.value if task else AgentTaskStatus.RUNNING.value,
+                    "worker_id": task.worker_id if task else None,
+                    "agent_type": task.agent_type if task else None,
+                    "operation_type": task.operation_type if task else None,
+                    "created_at": task.created_at.isoformat() if task and task.created_at else None,
+                    "started_at": task.started_at.isoformat() if task and task.started_at else None,
+                    "timeout_seconds": task.timeout_seconds if task else None,
+                    "heartbeat_alive": heartbeat_alive,
+                    "progress": progress_summary,
+                }
+            )
+
+        return summaries
+
     async def get_worker_health(self) -> dict:
         """Check if any agent worker is alive using worker-level heartbeats."""
         try:

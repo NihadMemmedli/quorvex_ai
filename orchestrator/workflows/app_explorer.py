@@ -44,8 +44,14 @@ setup_claude_env()
 import logging
 
 from orchestrator.ai.context import SOURCE_OBSERVED
-from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
-from orchestrator.ai.validation import assess_exploration_quality, validate_exploration_result
+from orchestrator.ai.prompt_registry import (
+    attach_prompt_metadata,
+    build_prompt_metadata,
+)
+from orchestrator.ai.validation import (
+    assess_exploration_quality,
+    validate_exploration_result,
+)
 from utils.agent_runner import AgentRunner, get_default_timeout
 from utils.agent_tool_allowlists import get_agent_allowed_tools
 from utils.json_utils import extract_json_from_markdown
@@ -83,7 +89,9 @@ class TransitionRecord:
     after_url: str
     after_page_type: str | None
     after_elements: list[str]
-    transition_type: str  # navigation, modal_open, modal_close, inline_update, error, no_change
+    transition_type: (
+        str  # navigation, modal_open, modal_close, inline_update, error, no_change
+    )
     api_calls: list[dict[str, Any]]
     changes_description: str | None = None
 
@@ -116,6 +124,20 @@ class IssueRecord:
 
 
 @dataclass
+class PageRecord:
+    """Record of an observed page/state during exploration."""
+
+    url: str
+    title: str | None = None
+    page_type: str | None = None
+    purpose: str | None = None
+    key_elements: list[str] = field(default_factory=list)
+    forms: list[dict[str, Any]] = field(default_factory=list)
+    actions: list[str] = field(default_factory=list)
+    links: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class ExplorationResult:
     """Result of an exploration session."""
 
@@ -124,6 +146,7 @@ class ExplorationResult:
     status: str  # completed, failed, timeout, stopped
     transitions: list[TransitionRecord] = field(default_factory=list)
     flows: list[FlowRecord] = field(default_factory=list)
+    pages: list[PageRecord] = field(default_factory=list)
     api_endpoints: list[dict[str, Any]] = field(default_factory=list)
     issues: list[IssueRecord] = field(default_factory=list)
     pages_discovered: int = 0
@@ -145,9 +168,17 @@ class AppExplorer:
     explore web applications and discover their structure and behavior.
     """
 
-    def __init__(self, project_id: str = "default", on_task_enqueued=None):
+    def __init__(
+        self,
+        project_id: str = "default",
+        on_task_enqueued=None,
+        on_progress=None,
+        on_tool_use=None,
+    ):
         self.project_id = project_id
         self.on_task_enqueued = on_task_enqueued
+        self.on_progress = on_progress
+        self.on_tool_use = on_tool_use
         self.output_dir = self._ensure_output_dir()
         self._last_prompt_metadata: dict[str, Any] = {}
         self._last_agent_stats: dict[str, Any] = {}
@@ -187,7 +218,9 @@ class AppExplorer:
         logger.warning(f"Using temporary directory: {temp_dir}")
         return temp_dir
 
-    async def explore(self, config: ExplorationConfig, session_id: str | None = None) -> ExplorationResult:
+    async def explore(
+        self, config: ExplorationConfig, session_id: str | None = None
+    ) -> ExplorationResult:
         """
         Start an exploration session.
 
@@ -237,26 +270,32 @@ class AppExplorer:
             # Build the exploration prompt
             prompt = self._build_exploration_prompt(config)
             if self._last_prompt_metadata:
-                (session_dir / "prompt_metadata.json").write_text(json.dumps(self._last_prompt_metadata, indent=2))
+                (session_dir / "prompt_metadata.json").write_text(
+                    json.dumps(self._last_prompt_metadata, indent=2)
+                )
 
             # Invoke the explorer agent
             logger.info("Starting AI Explorer Agent...")
 
-            raw_output = await self._run_explorer_agent(prompt, session_dir)
+            raw_output = await self._run_explorer_agent(prompt, session_dir, config)
 
             # Log output diagnostics
             output_len = len(raw_output) if raw_output else 0
             if output_len == 0:
                 logger.error("Explorer agent returned empty output")
             elif output_len < 200:
-                logger.warning(f"Explorer agent returned very short output ({output_len} chars): {raw_output[:200]}")
+                logger.warning(
+                    f"Explorer agent returned very short output ({output_len} chars): {raw_output[:200]}"
+                )
             else:
                 logger.info(f"   Agent output: {output_len} chars")
 
             # Parse the exploration output
             logger.info("Processing exploration results...")
 
-            successful_browser_tool_calls = int(self._last_agent_stats.get("successful_browser_tool_calls", 0) or 0)
+            successful_browser_tool_calls = int(
+                self._last_agent_stats.get("successful_browser_tool_calls", 0) or 0
+            )
             if successful_browser_tool_calls <= 0:
                 raise RuntimeError(
                     "Explorer did not perform successful live browser exploration. "
@@ -277,9 +316,15 @@ class AppExplorer:
                 result.status == "failed"
                 and not result.transitions
                 and not result.flows
+                and not result.pages
+                and not result.api_endpoints
             ):
-                logger.info("   No structured exploration data parsed — attempting AI-powered recovery...")
-                recovered_objects = await self._run_ai_json_recovery(raw_output, session_dir)
+                logger.info(
+                    "   No structured exploration data parsed — attempting AI-powered recovery..."
+                )
+                recovered_objects = await self._run_ai_json_recovery(
+                    raw_output, session_dir
+                )
                 if recovered_objects:
                     result = self._parse_exploration_output(
                         raw_output=raw_output,
@@ -293,19 +338,39 @@ class AppExplorer:
                             f"{len(result.flows)} flows"
                         )
 
-            # Run AI flow synthesis pass if too few flows relative to transitions
-            min_expected = max(1, len(result.transitions) // 5)
-            if len(result.transitions) >= 1 and len(result.flows) < min_expected:
+            # Run synthesis when flow density is weak relative to observed evidence.
+            min_expected = self._minimum_expected_flows(result)
+            if (result.transitions or result.pages) and len(
+                result.flows
+            ) < min_expected:
                 logger.info(
                     f"   Running AI flow synthesis pass "
-                    f"({len(result.flows)} flows from {len(result.transitions)} transitions)..."
+                    f"({len(result.flows)} flows from {len(result.transitions)} transitions, "
+                    f"{len(result.pages)} pages)..."
                 )
-                synthesized = await self._run_flow_synthesis_pass(result.transitions, result.flows, session_dir)
+                synthesized = await self._run_flow_synthesis_pass(
+                    result.transitions,
+                    result.flows,
+                    result.pages,
+                    session_dir,
+                    min_expected=min_expected,
+                )
+                if len(result.flows) + len(synthesized) < min_expected:
+                    synthesized.extend(
+                        self._synthesize_flows_from_pages(
+                            result.pages,
+                            result.flows + synthesized,
+                            limit=min_expected - len(result.flows) - len(synthesized),
+                        )
+                    )
                 if synthesized:
                     # Deduplicate against existing flows
                     existing_keys = {
                         (
-                            f.name.replace(" (inferred)", "").replace(" (synthesized)", "").strip().lower(),
+                            f.name.replace(" (inferred)", "")
+                            .replace(" (synthesized)", "")
+                            .strip()
+                            .lower(),
                             f.start_url.strip().rstrip("/").lower(),
                             f.end_url.strip().rstrip("/").lower(),
                         )
@@ -336,7 +401,9 @@ class AppExplorer:
                 logger.info(
                     "   No structured transitions found — attempting text-based flow synthesis from raw output..."
                 )
-                text_flows = await self._run_text_flow_synthesis(raw_output, session_dir)
+                text_flows = await self._run_text_flow_synthesis(
+                    raw_output, session_dir
+                )
                 if text_flows:
                     logger.info(f"   Text synthesis produced {len(text_flows)} flows")
                     result.flows.extend(text_flows)
@@ -344,14 +411,36 @@ class AppExplorer:
                     # Fix status: text synthesis recovered usable data
                     if result.status == "failed" and text_flows:
                         result.status = "completed"
-                        result.error_message = (
-                            f"No structured JSON parsed, but text synthesis recovered {len(text_flows)} flows."
-                        )
+                        result.error_message = f"No structured JSON parsed, but text synthesis recovered {len(text_flows)} flows."
 
-            if result.status == "failed" and not result.transitions and not result.flows:
+            if (
+                result.status == "failed"
+                and not result.transitions
+                and not result.flows
+                and not result.pages
+                and not result.api_endpoints
+            ):
                 raise RuntimeError(
                     result.error_message
                     or "Explorer produced no structured transitions or flows from live browser exploration."
+                )
+
+            if (
+                self._last_agent_stats.get("budget_stopped")
+                and result.status == "completed"
+                and (
+                    result.transitions
+                    or result.flows
+                    or result.pages
+                    or result.api_endpoints
+                )
+            ):
+                result.status = "completed_partial"
+                result.error_message = (
+                    f"Stopped after browser tool budget "
+                    f"({self._last_agent_stats.get('successful_browser_tool_calls')}/"
+                    f"{self._last_agent_stats.get('max_browser_tool_calls')}); "
+                    "using collected exploration evidence."
                 )
 
             validation_summary = validate_exploration_result(result)
@@ -385,7 +474,9 @@ class AppExplorer:
             return result
 
         except asyncio.TimeoutError:
-            logger.warning(f"Exploration timed out after {config.timeout_minutes} minutes")
+            logger.warning(
+                f"Exploration timed out after {config.timeout_minutes} minutes"
+            )
             return ExplorationResult(
                 session_id=session_id,
                 entry_url=config.entry_url,
@@ -398,7 +489,10 @@ class AppExplorer:
 
             traceback.print_exc()
             return ExplorationResult(
-                session_id=session_id, entry_url=config.entry_url, status="failed", error_message=str(e)
+                session_id=session_id,
+                entry_url=config.entry_url,
+                status="failed",
+                error_message=str(e),
             )
 
     def _load_agent_prompt(self, agent_name: str) -> str | None:
@@ -444,7 +538,15 @@ Begin exploration now!"""
 
     def _get_site_type_instructions(self, entry_url: str) -> str:
         """Return site-type-specific instructions based on URL patterns."""
-        gov_patterns = [".gov", ".gov.", "government", "portal", "e-gov", "citizen", "mygov"]
+        gov_patterns = [
+            ".gov",
+            ".gov.",
+            "government",
+            "portal",
+            "e-gov",
+            "citizen",
+            "mygov",
+        ]
         if any(p in entry_url.lower() for p in gov_patterns):
             return """
 ## Government Portal Instructions
@@ -452,13 +554,23 @@ This appears to be a government portal. Apply these specific rules:
 1. Expect slow page loads (5-15 seconds). ALWAYS use `browser_wait_for(time: 5)` after navigation.
 2. Dismiss any language selector immediately by selecting the primary language.
 3. Accept all cookie/consent banners on first encounter.
-4. Use `browser_hover` on ALL top-level menu items — government megamenus are often not in the initial snapshot.
-5. Use `browser_evaluate` to extract all hrefs — many government links are JavaScript-rendered.
+4. Use `browser_hover` on visible top-level menu items that look likely to reveal major app areas.
+5. Use `browser_evaluate` to extract hrefs, then group them by path template and page type.
 6. Many links may open PDF documents — record these URLs but do not navigate into them.
-7. If a page redirects to a login page, record the redirect and continue with other URLs in your queue.
-8. Government sites often have dozens of pages — make sure your UNVISITED_QUEUE captures them all.
+7. If a page redirects to a login page, record the redirect and continue with a different representative candidate.
+8. Government sites often have dozens of similar pages — sample representative service/entity/life-event pages and stop when target evidence is collected.
 """
         return ""
+
+    @staticmethod
+    def _target_page_records(max_interactions: int) -> int:
+        """Target representative page count for one exploration pass."""
+        return max(4, min(15, max_interactions // 8))
+
+    @staticmethod
+    def _target_flow_records(max_interactions: int) -> int:
+        """Target representative flow count for one exploration pass."""
+        return max(3, min(8, max_interactions // 12))
 
     def _build_exploration_prompt(self, config: ExplorationConfig) -> str:
         """Build the prompt for the exploration agent."""
@@ -518,37 +630,33 @@ Do not explore URLs matching these patterns:
 
         strategy_instructions = {
             "goal_directed": """
-**Goal-Directed Strategy**: Explore intelligently based on importance, but cover ALL discovered URLs:
-- Build your UNVISITED_QUEUE first by mapping ALL links from the entry page
-- Visit high-priority pages first (forms, actions, login) from the queue
-- Then visit medium-priority pages (settings, help, profiles)
-- Then visit remaining pages in the queue
-- On each page: interact with forms and primary buttons before moving to next URL
-- You MUST visit every URL in your queue before you can stop
+**Goal-Directed Strategy**: Explore intelligently based on importance and representative coverage:
+- Build a candidate queue by mapping important links from the entry page
+- Prioritize distinct page types and capabilities: forms, primary actions, service/detail pages, search/filter, login, tabs, language switching, and error states
+- Sample equivalent URLs instead of crawling every similar page template
+- On each selected page: record a page object, exercise the primary action when safe, then move to a different capability
+- Stop when the evidence targets are met or no new capability appears after several actions
 """,
             "breadth_first": """
-**Breadth-First Strategy — STRICTLY ENFORCED**:
-Exploration proceeds in LEVELS. You MUST complete each level before moving to the next:
+**Breadth-First Strategy — Representative Coverage**:
+Exploration proceeds by URL levels, but samples representative pages instead of exhausting the site:
 
-LEVEL 0: The entry URL — visit it and build your UNVISITED_QUEUE from all discovered links
-LEVEL 1: Every URL discovered directly from LEVEL 0 — visit ALL before any LEVEL 2
-LEVEL 2: Every NEW URL discovered from LEVEL 1 pages — visit ALL before any LEVEL 3
-LEVEL 3+: Continue the pattern
+LEVEL 0: The entry URL — visit it and build candidate links
+LEVEL 1: Visit distinct high-value links discovered directly from LEVEL 0
+LEVEL 2+: Visit only links that expose a new page type, form, flow, or action
 
-ENFORCEMENT RULE: At each step, check "Have I visited ALL URLs at the current level?"
-- NO -> Visit the next unvisited URL at the current level
-- YES -> Advance to the next level
+Selection rule: choose the next URL that is most likely to reveal a new capability. Skip near-duplicates that share the same path template and visible controls.
 
-On each page: take a snapshot, record links, interact with 2-3 important elements, then move on.
+On each selected page: take a snapshot, emit a page record, record links, interact with 1-2 important elements, then move on.
 Track your level in each status report.
 """,
             "depth_first": """
 **Depth-First Strategy**: Follow paths deeply before backtracking:
-- Pick one user flow from UNVISITED_QUEUE and follow it completely through all sub-pages
+- Pick one high-value user flow from the candidate queue and follow it through its meaningful sub-pages
 - Record all transitions and flows along the path
 - When the path ends (dead end or loops back), backtrack and pick the next queued URL
 - Prioritize completing flows over breadth
-- You MUST still visit every URL in your queue — just in depth-first order
+- Stop after covering the target number of distinct flows/page types; do not exhaust all similar queued URLs
 """,
             "api_focused": """
 **API-Focused Strategy**: Maximize API endpoint discovery with rich data capture:
@@ -566,7 +674,9 @@ Track your level in each status report.
         is_api_focused = config.strategy == "api_focused"
 
         # Try loading the rich api-explorer agent prompt from .md file
-        api_explorer_prompt = self._load_agent_prompt("api-explorer") if is_api_focused else None
+        api_explorer_prompt = (
+            self._load_agent_prompt("api-explorer") if is_api_focused else None
+        )
 
         if is_api_focused and api_explorer_prompt:
             # Use the comprehensive api-explorer.md protocol instead of inline instructions.
@@ -696,6 +806,21 @@ Systematically explore this web application to discover:
 
             output_section = """## Output Format
 
+When you visit or inspect a page/state, output a page record:
+
+```json
+{"page": {
+  "url": "https://example.com/login",
+  "title": "Login",
+  "pageType": "login",
+  "purpose": "Allows users to authenticate",
+  "keyElements": ["Email input", "Password input", "Login button"],
+  "forms": [{"name": "Login form", "fields": ["Email", "Password"], "submit": "Login button"}],
+  "actions": ["Submit credentials", "Recover password"],
+  "links": [{"text": "Forgot password", "href": "https://example.com/reset"}]
+}}
+```
+
 After EACH interaction, output a transition record:
 
 ```json
@@ -768,6 +893,9 @@ At the END of exploration, output a summary with COUNTS ONLY (do NOT re-output f
 }}
 ```"""
 
+        target_pages = self._target_page_records(config.max_interactions)
+        target_flows = self._target_flow_records(config.max_interactions)
+
         prompt = f"""You are the App Explorer Agent.
 
 # Task: Explore the Web Application
@@ -775,6 +903,8 @@ At the END of exploration, output a summary with COUNTS ONLY (do NOT re-output f
 **Entry URL**: {config.entry_url}
 **Max Interactions**: {config.max_interactions}
 **Max Depth**: {config.max_depth} navigation levels from entry
+**Target Page Records**: {target_pages}
+**Target Flow Records**: {target_flows}
 
 {auth_section}
 
@@ -794,35 +924,40 @@ At the END of exploration, output a summary with COUNTS ONLY (do NOT re-output f
 2. Handle any popups (cookie consent, language selector) immediately
 3. Call `browser_snapshot` to see the page structure
 4. Call `browser_evaluate` with `() => Array.from(document.querySelectorAll('a[href]')).map(a => ({{text: a.textContent.trim().slice(0,50), href: a.href}})).filter(a => a.href && !a.href.startsWith('javascript:') && a.text)` to extract ALL links
-5. Hover over top-level navigation items to reveal dropdown menus, take snapshot after each hover
-6. Build your UNVISITED_QUEUE from all discovered links
-7. Output your queue before proceeding
+5. Hover over only the top-level navigation items that are visible and likely to reveal important app areas
+6. Build a CANDIDATE_QUEUE from discovered links, grouped by page type/path template
+7. Pick representative candidates. Do not attempt to crawl every link.
 
-### Step 2: Explore Each Page in the Queue
-For each URL in UNVISITED_QUEUE:
+### Step 2: Explore Representative Pages
+For each selected URL in CANDIDATE_QUEUE:
 1. Navigate to it, wait for load (`browser_wait_for` with 5s)
 2. Take snapshot + extract links (add new ones to queue)
-3. Interact with important elements (forms, buttons, search)
-4. Call `browser_network_requests` after interactions to find API calls
-5. Record transition for each interaction
-6. **Check: Did this complete a user flow? If yes, output a flow record NOW**
+3. Output one `page` JSON record that captures the page purpose, key elements, available forms/actions, and important links
+4. Interact with important elements (forms, buttons, search)
+5. Call `browser_network_requests` after interactions to find API calls
+6. Record transition for each interaction
+7. **Check: Did this complete a user flow? If yes, output a flow record NOW**
 
 ### Step 3: Budget-Aware Loop
 After each interaction, report your status and check the loop contract:
 
 ```
 STEP [N of {config.max_interactions}] — Budget remaining: [Y]
-UNVISITED_QUEUE: [M URLs remaining]
+CANDIDATE_QUEUE: [M URLs remaining]
 Continue: [reason]
 ```
 
-You MUST continue until EITHER:
-a. You have used all {config.max_interactions} interactions
-b. Your UNVISITED_QUEUE is empty AND 3 consecutive actions found nothing new
+Stop and emit final summary when ANY of these conditions is met:
+a. You have emitted at least {target_pages} page records and {target_flows} flow records
+b. You have used 80% of the {config.max_interactions} interaction budget
+c. 3 consecutive actions found no new page type, form, action, API, or flow
+d. The remaining candidates are near-duplicates of already observed page templates
 
 If you reach interaction {config.max_interactions // 2} (halfway) and have only visited
 {max(2, config.max_interactions // 10)} or fewer unique pages, switch to breadth-first:
 visit your queued URLs before exploring the current page further.
+
+When stopping, output any missing flow records you can infer from observed page records and transitions, then output the final summary. Never restart the exploration from the entry URL unless the browser lost the page entirely.
 
 {output_section}
 
@@ -838,10 +973,14 @@ visit your queued URLs before exploring the current page further.
         self._last_prompt_metadata = metadata.to_dict()
         return attach_prompt_metadata(prompt, metadata)
 
-    async def _run_explorer_agent(self, prompt: str, session_dir: Path) -> str:
+    async def _run_explorer_agent(
+        self, prompt: str, session_dir: Path, config: ExplorationConfig
+    ) -> str:
         """Run the exploration agent and capture output using AgentRunner."""
         # Get timeout from environment or use 30 minutes default
-        timeout = int(os.environ.get("EXPLORATION_TIMEOUT_SECONDS", get_default_timeout()))
+        timeout = int(
+            os.environ.get("EXPLORATION_TIMEOUT_SECONDS", get_default_timeout())
+        )
 
         logger.info(f"   Timeout: {timeout}s ({timeout // 60} minutes)")
 
@@ -896,16 +1035,22 @@ visit your queued URLs before exploring the current page further.
                     interaction_count[0] += 1
                     if interaction_count[0] % 10 == 0:
                         logger.info(f"   Interactions: {interaction_count[0]}")
+                if self.on_tool_use:
+                    self.on_tool_use(tool_name, tool_input)
 
             # Use the unified AgentRunner
-            profile_name = "api-explorer" if config.strategy == "api_focused" else "app-explorer"
+            profile_name = (
+                "api-explorer" if config.strategy == "api_focused" else "app-explorer"
+            )
             runner = AgentRunner(
                 timeout_seconds=timeout,
                 allowed_tools=get_agent_allowed_tools(profile_name),
                 log_tools=True,
                 on_tool_use=on_tool_use,
+                on_progress=self.on_progress,
                 session_dir=session_dir,
                 on_task_enqueued=self.on_task_enqueued,
+                max_browser_tool_calls=config.max_interactions,
             )
 
             result = await runner.run(prompt)
@@ -914,7 +1059,9 @@ visit your queued URLs before exploring the current page further.
                 for call in result.tool_calls
                 if call.name.startswith("mcp__") and "__browser_" in call.name
             ]
-            successful_browser_tool_calls = sum(1 for call in browser_tool_calls if call.success)
+            successful_browser_tool_calls = sum(
+                1 for call in browser_tool_calls if call.success
+            )
             self._last_agent_stats = {
                 "messages_received": result.messages_received,
                 "text_blocks_received": result.text_blocks_received,
@@ -923,6 +1070,8 @@ visit your queued URLs before exploring the current page further.
                 "successful_browser_tool_calls": successful_browser_tool_calls,
                 "duration_seconds": result.duration_seconds,
                 "timed_out": result.timed_out,
+                "budget_stopped": self._is_budget_stop(result.error),
+                "max_browser_tool_calls": config.max_interactions,
             }
 
             # Log diagnostics
@@ -941,11 +1090,23 @@ visit your queued URLs before exploring the current page further.
                         f"Messages: {result.messages_received}, Tool calls: {len(result.tool_calls)}. "
                         f"This usually means the MCP server failed to start or the model returned no response."
                     )
-                logger.warning(f"   Agent timed out - returning partial results ({len(result.output)} chars)")
+                logger.warning(
+                    f"   Agent timed out - returning partial results ({len(result.output)} chars)"
+                )
                 return result.output
 
             # Raise on agent failure (mirrors requirements_generator.py pattern)
             if not result.success and result.error:
+                if (
+                    self._is_budget_stop(result.error)
+                    and result.output
+                    and result.output.strip()
+                ):
+                    logger.warning(
+                        "   Browser tool budget reached - returning partial results "
+                        f"({len(result.output)} chars)"
+                    )
+                    return result.output
                 raise RuntimeError(f"Explorer agent failed: {result.error}")
 
             # Raise on empty output (agent ran but produced nothing)
@@ -979,14 +1140,21 @@ visit your queued URLs before exploring the current page further.
             project_root / "node_modules" / ".bin" / "playwright-mcp",
             project_root / "node_modules" / ".bin" / "mcp-server-playwright",
         ]
-        local_pkg = project_root / "node_modules" / "@playwright" / "mcp" / "package.json"
+        local_pkg = (
+            project_root / "node_modules" / "@playwright" / "mcp" / "package.json"
+        )
         min_version = os.environ.get("PLAYWRIGHT_MCP_MIN_VERSION", "0.0.75")
         if self._is_package_version_at_least(local_pkg, min_version):
             for local_bin in local_bins:
                 if local_bin.exists():
-                    return {"command": str(local_bin), "args": ["--browser", "chromium"]}
+                    return {
+                        "command": str(local_bin),
+                        "args": ["--browser", "chromium"],
+                    }
 
-        package = os.environ.get("PLAYWRIGHT_MCP_PACKAGE", f"@playwright/mcp@{min_version}")
+        package = os.environ.get(
+            "PLAYWRIGHT_MCP_PACKAGE", f"@playwright/mcp@{min_version}"
+        )
         return {"command": "npx", "args": ["-y", package, "--browser", "chromium"]}
 
     @staticmethod
@@ -1032,6 +1200,11 @@ visit your queued URLs before exploring the current page further.
         ]
         return any(indicator in lowered for indicator in indicators)
 
+    @staticmethod
+    def _is_budget_stop(error: str | None) -> bool:
+        """Return whether an agent error is the intentional browser budget stop."""
+        return bool(error and "browser tool budget reached" in error.lower())
+
     def _deduplicate_flows(self, flows: list[FlowRecord]) -> list[FlowRecord]:
         """Deduplicate flows by normalized (name, start_url, end_url) tuple. Keeps first occurrence."""
         seen = set()
@@ -1047,7 +1220,9 @@ visit your queued URLs before exploring the current page further.
                 unique_flows.append(flow)
         return unique_flows
 
-    def _deduplicate_transitions(self, transitions: list[TransitionRecord]) -> list[TransitionRecord]:
+    def _deduplicate_transitions(
+        self, transitions: list[TransitionRecord]
+    ) -> list[TransitionRecord]:
         """Deduplicate transitions by key fields. Keeps first occurrence."""
         seen = set()
         unique = []
@@ -1064,6 +1239,74 @@ visit your queued URLs before exploring the current page further.
                 seen.add(key)
                 unique.append(t)
         return unique
+
+    def _merge_page_record(
+        self, pages_by_url: dict[str, PageRecord], page: PageRecord
+    ) -> None:
+        """Merge page evidence by URL, preserving the richest observed fields."""
+        url = page.url.strip()
+        if not url or url == "about:blank":
+            return
+        existing = pages_by_url.get(url)
+        if not existing:
+            pages_by_url[url] = page
+            return
+
+        existing.title = existing.title or page.title
+        existing.page_type = existing.page_type or page.page_type
+        existing.purpose = existing.purpose or page.purpose
+        existing.key_elements = self._dedupe_strings(
+            existing.key_elements + page.key_elements
+        )
+        existing.forms = self._dedupe_dicts(existing.forms + page.forms)
+        existing.actions = self._dedupe_strings(existing.actions + page.actions)
+        existing.links = self._dedupe_dicts(existing.links + page.links)
+
+    def _merge_page_from_transition(
+        self,
+        pages_by_url: dict[str, PageRecord],
+        url: str | None,
+        page_type: str | None,
+        key_elements: list[str] | None,
+    ) -> None:
+        """Create/update a page record from transition before/after snapshots."""
+        if not url or url == "about:blank":
+            return
+        self._merge_page_record(
+            pages_by_url,
+            PageRecord(
+                url=url,
+                page_type=page_type,
+                key_elements=key_elements or [],
+            ),
+        )
+
+    @staticmethod
+    def _dedupe_strings(values: list[Any]) -> list[str]:
+        seen = set()
+        result = []
+        for value in values:
+            text = str(value).strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key not in seen:
+                seen.add(key)
+                result.append(text)
+        return result
+
+    @staticmethod
+    def _dedupe_dicts(values: list[Any]) -> list[dict[str, Any]]:
+        seen = set()
+        result = []
+        for value in values:
+            if not isinstance(value, dict):
+                continue
+            key = json.dumps(value, sort_keys=True, default=str)
+            if key not in seen:
+                seen.add(key)
+                result.append(value)
+        return result
 
     def _extract_json_objects(self, raw_output: str) -> list[dict]:
         """Extract all JSON objects from agent output using multiple strategies.
@@ -1101,10 +1344,12 @@ visit your queued URLs before exploring the current page further.
 
         # Strategy 2: Find bare JSON objects with known prefixes outside code blocks
         # Remove code blocks first to avoid double-counting
-        stripped = re.sub(r"```(?:json)?\s*\n.*?\n\s*```", "", raw_output, flags=re.DOTALL)
+        stripped = re.sub(
+            r"```(?:json)?\s*\n.*?\n\s*```", "", raw_output, flags=re.DOTALL
+        )
 
         # Look for JSON objects starting with known keys
-        bare_pattern = r'(\{"(?:transition|flow|summary|issue)"\s*:)'
+        bare_pattern = r'(\{"(?:transition|flow|summary|issue|page)"\s*:)'
         for match in re.finditer(bare_pattern, stripped):
             start = match.start()
             # Use brace-depth counting to find the matching close brace
@@ -1145,7 +1390,9 @@ visit your queued URLs before exploring the current page further.
         # Strategy 3: Rescue parse — case-insensitive keys + truncated JSON recovery
         # Only runs when Strategies 1+2 found nothing
         if not results:
-            rescue_pattern = r'(\{"(?:[Tt]ransition|[Ff]low|[Ss]ummary|[Ii]ssue)"\s*:)'
+            rescue_pattern = (
+                r'(\{"(?:[Tt]ransition|[Ff]low|[Ss]ummary|[Ii]ssue|[Pp]age)"\s*:)'
+            )
             for match in re.finditer(rescue_pattern, raw_output):
                 start = match.start()
                 # Brace-depth counting to find matching close brace
@@ -1179,7 +1426,9 @@ visit your queued URLs before exploring the current page further.
                     except json.JSONDecodeError:
                         # Try truncated JSON recovery
                         try:
-                            data = extract_json_from_markdown(f"```json\n{json_str}\n```")
+                            data = extract_json_from_markdown(
+                                f"```json\n{json_str}\n```"
+                            )
                         except (ValueError, json.JSONDecodeError):
                             continue
                     if isinstance(data, dict):
@@ -1206,7 +1455,9 @@ visit your queued URLs before exploring the current page further.
                         continue
 
             if results:
-                logger.info(f"Strategy 3 (rescue parse) recovered {len(results)} JSON objects")
+                logger.info(
+                    f"Strategy 3 (rescue parse) recovered {len(results)} JSON objects"
+                )
 
         return results
 
@@ -1226,6 +1477,8 @@ visit your queued URLs before exploring the current page further.
 
         transitions = []
         flows = []
+        pages = []
+        page_records_by_url: dict[str, PageRecord] = {}
         api_endpoints = []
         issues = []
         pages_seen = set()
@@ -1241,7 +1494,9 @@ visit your queued URLs before exploring the current page further.
 
         # Use pre-extracted objects (from AI recovery) or extract via regex strategies
         all_json_objects = (
-            pre_extracted_json if pre_extracted_json is not None else self._extract_json_objects(raw_output)
+            pre_extracted_json
+            if pre_extracted_json is not None
+            else self._extract_json_objects(raw_output)
         )
 
         for data in all_json_objects:
@@ -1298,18 +1553,29 @@ visit your queued URLs before exploring the current page further.
                                 (
                                     e
                                     for e in api_endpoints
-                                    if e["method"] == endpoint["method"] and e["url"] == endpoint["url"]
+                                    if e["method"] == endpoint["method"]
+                                    and e["url"] == endpoint["url"]
                                 ),
                                 None,
                             )
                             if existing:
                                 # Merge rich data into existing entry if it was missing
-                                if endpoint.get("request_headers") and not existing.get("request_headers"):
-                                    existing["request_headers"] = endpoint["request_headers"]
-                                if endpoint.get("request_body") and not existing.get("request_body"):
+                                if endpoint.get("request_headers") and not existing.get(
+                                    "request_headers"
+                                ):
+                                    existing["request_headers"] = endpoint[
+                                        "request_headers"
+                                    ]
+                                if endpoint.get("request_body") and not existing.get(
+                                    "request_body"
+                                ):
                                     existing["request_body"] = endpoint["request_body"]
-                                if endpoint.get("response_body") and not existing.get("response_body"):
-                                    existing["response_body"] = endpoint["response_body"]
+                                if endpoint.get("response_body") and not existing.get(
+                                    "response_body"
+                                ):
+                                    existing["response_body"] = endpoint[
+                                        "response_body"
+                                    ]
                             else:
                                 api_endpoints.append(endpoint)
                     else:
@@ -1321,7 +1587,9 @@ visit your queued URLs before exploring the current page further.
                                 "triggered_by": triggered_by,
                             }
                             if not any(
-                                e["method"] == endpoint["method"] and e["url"] == endpoint["url"] for e in api_endpoints
+                                e["method"] == endpoint["method"]
+                                and e["url"] == endpoint["url"]
+                                for e in api_endpoints
                             ):
                                 api_endpoints.append(endpoint)
 
@@ -1340,6 +1608,27 @@ visit your queued URLs before exploring the current page further.
                         postconditions=f.get("postconditions") or [],
                     )
                     flows.append(flow)
+
+                # Parse page records
+                elif "page" in data:
+                    p = data["page"]
+                    url = str(p.get("url") or "").strip()
+                    if not url or url == "about:blank":
+                        continue
+                    page = PageRecord(
+                        url=url,
+                        title=p.get("title"),
+                        page_type=p.get("pageType") or p.get("page_type"),
+                        purpose=p.get("purpose"),
+                        key_elements=p.get("keyElements")
+                        or p.get("key_elements")
+                        or [],
+                        forms=p.get("forms") or [],
+                        actions=p.get("actions") or [],
+                        links=p.get("links") or [],
+                    )
+                    self._merge_page_record(page_records_by_url, page)
+                    pages_seen.add(url)
 
                 # Parse issue records
                 elif "issue" in data:
@@ -1375,7 +1664,8 @@ visit your queued URLs before exploring the current page further.
                         issue_type="error_page",
                         severity="high",
                         url=t.after_url or t.before_url,
-                        description=t.changes_description or f"Error encountered during {t.action_type}",
+                        description=t.changes_description
+                        or f"Error encountered during {t.action_type}",
                         element=(t.action_element or {}).get("name"),
                     )
                 )
@@ -1383,11 +1673,21 @@ visit your queued URLs before exploring the current page further.
         # Deduplicate flows and transitions
         flows = self._deduplicate_flows(flows)
         transitions = self._deduplicate_transitions(transitions)
+        for t in transitions:
+            self._merge_page_from_transition(
+                page_records_by_url, t.before_url, t.before_page_type, t.before_elements
+            )
+            self._merge_page_from_transition(
+                page_records_by_url, t.after_url, t.after_page_type, t.after_elements
+            )
+        pages = list(page_records_by_url.values())
 
         # Infer flows from transitions if agent didn't emit enough
         inferred = self._infer_flows_from_transitions(transitions, flows)
         if inferred:
-            logger.info(f"   Inferred {len(inferred)} additional flows from transitions")
+            logger.info(
+                f"   Inferred {len(inferred)} additional flows from transitions"
+            )
             flows.extend(inferred)
 
         # Calculate elements discovered from transitions
@@ -1405,7 +1705,9 @@ visit your queued URLs before exploring the current page further.
 
         if not all_json_objects and raw_output.strip():
             # Agent produced output but no structured JSON data
-            logger.warning(f"Zero JSON objects from {len(raw_output)}-char output. First 500:\n{raw_output[:500]}")
+            logger.warning(
+                f"Zero JSON objects from {len(raw_output)}-char output. First 500:\n{raw_output[:500]}"
+            )
             if len(raw_output) > 500:
                 logger.warning(f"Last 500:\n{raw_output[-500:]}")
             status = "failed"
@@ -1413,11 +1715,11 @@ visit your queued URLs before exploring the current page further.
                 "Agent produced output but no structured JSON data was found. "
                 "The agent may have encountered navigation issues or been blocked by the target site."
             )
-        elif not transitions and not flows and not api_endpoints:
+        elif not transitions and not flows and not pages and not api_endpoints:
             # JSON was found but nothing useful was extracted
             status = "failed"
             error_message = (
-                "Exploration completed but discovered zero transitions, flows, and API endpoints. "
+                "Exploration completed but discovered zero pages, transitions, flows, and API endpoints. "
                 "The target site may have blocked automated access or the agent couldn't interact with the page."
             )
 
@@ -1427,6 +1729,7 @@ visit your queued URLs before exploring the current page further.
             status=status,
             transitions=transitions,
             flows=flows,
+            pages=pages,
             api_endpoints=api_endpoints,
             issues=issues,
             pages_discovered=len(pages_seen),
@@ -1450,7 +1753,11 @@ visit your queued URLs before exploring the current page further.
         existing_names = {f.name.strip().lower() for f in existing_flows}
         # Also track by (start_url, end_url) to avoid semantic duplicates
         existing_keys = {
-            (f.start_url.strip().rstrip("/").lower(), f.end_url.strip().rstrip("/").lower()) for f in existing_flows
+            (
+                f.start_url.strip().rstrip("/").lower(),
+                f.end_url.strip().rstrip("/").lower(),
+            )
+            for f in existing_flows
         }
 
         inferred_flows = []
@@ -1481,7 +1788,148 @@ visit your queued URLs before exploring the current page further.
 
         return inferred_flows
 
-    def _segment_transitions(self, transitions: list[TransitionRecord]) -> list[list[TransitionRecord]]:
+    def _minimum_expected_flows(self, result: ExplorationResult) -> int:
+        """Return a conservative lower bound for flow count based on observed breadth."""
+        pages = int(result.pages_discovered or len(result.pages) or 0)
+        transitions = len(result.transitions)
+        if pages <= 1 and transitions <= 2:
+            return 1
+        return max(
+            1, min(12, max(transitions // 5, pages // 8, 2 if pages >= 5 else 1))
+        )
+
+    def _synthesize_flows_from_pages(
+        self,
+        pages: list[PageRecord],
+        existing_flows: list[FlowRecord],
+        *,
+        limit: int,
+    ) -> list[FlowRecord]:
+        """Create page-capability flows when sparse agent output missed journeys."""
+        if limit <= 0:
+            return []
+
+        existing_keys = {
+            (
+                f.name.replace(" (synthesized)", "").strip().lower(),
+                f.start_url.strip().rstrip("/").lower(),
+                f.end_url.strip().rstrip("/").lower(),
+            )
+            for f in existing_flows
+        }
+        synthesized: list[FlowRecord] = []
+
+        for page in pages:
+            if len(synthesized) >= limit:
+                break
+            if not page.url or page.url.startswith("__summary_page_"):
+                continue
+
+            label = self._page_label(page)
+            capability_text = " ".join(
+                [
+                    label,
+                    page.page_type or "",
+                    page.purpose or "",
+                    " ".join(page.key_elements),
+                    " ".join(page.actions),
+                ]
+            ).lower()
+
+            if page.forms:
+                category = "form_submission"
+                name = f"{label} Form Submission (synthesized)"
+                steps = [
+                    {"action": "navigate", "element": "page", "value": page.url},
+                    {"action": "inspect", "element": self._first_form_name(page.forms)},
+                    {
+                        "action": "submit",
+                        "element": self._first_submit_name(page.forms),
+                    },
+                ]
+                outcome = f"User can complete the primary form on {label}"
+            elif any(term in capability_text for term in ("search", "filter", "query")):
+                category = "search"
+                name = f"{label} Search or Filter (synthesized)"
+                steps = [
+                    {"action": "navigate", "element": "page", "value": page.url},
+                    {
+                        "action": "interact",
+                        "element": self._first_relevant_control(
+                            page, ["search", "filter", "query"]
+                        ),
+                    },
+                ]
+                outcome = f"User can search or filter content on {label}"
+            else:
+                category = "navigation"
+                name = f"Browse {label} (synthesized)"
+                steps = [{"action": "navigate", "element": "page", "value": page.url}]
+                if page.actions:
+                    steps.append({"action": "inspect", "element": page.actions[0]})
+                outcome = page.purpose or f"User can reach and inspect {label}"
+
+            key = (
+                name.replace(" (synthesized)", "").strip().lower(),
+                page.url.strip().rstrip("/").lower(),
+                page.url.strip().rstrip("/").lower(),
+            )
+            if key in existing_keys:
+                continue
+            existing_keys.add(key)
+            synthesized.append(
+                FlowRecord(
+                    name=name,
+                    category=category,
+                    steps=steps,
+                    start_url=page.url,
+                    end_url=page.url,
+                    outcome=outcome,
+                    is_success_path=True,
+                    preconditions=[],
+                    postconditions=[outcome],
+                )
+            )
+
+        return synthesized
+
+    def _page_label(self, page: PageRecord) -> str:
+        raw = page.title or page.page_type or ""
+        if not raw:
+            try:
+                path = urlparse(page.url).path.strip("/")
+                raw = path.split("/")[-1] or path or "application page"
+            except Exception:
+                raw = "application page"
+        label = re.sub(r"[-_]+", " ", str(raw)).strip()
+        label = re.sub(r"\s+", " ", label)
+        return (label[:80] or "application page").title()
+
+    @staticmethod
+    def _first_form_name(forms: list[dict[str, Any]]) -> str:
+        if not forms:
+            return "form"
+        form = forms[0]
+        return str(form.get("name") or form.get("title") or "form")
+
+    @staticmethod
+    def _first_submit_name(forms: list[dict[str, Any]]) -> str:
+        if not forms:
+            return "submit button"
+        form = forms[0]
+        return str(form.get("submit") or form.get("submitButton") or "submit button")
+
+    @staticmethod
+    def _first_relevant_control(page: PageRecord, keywords: list[str]) -> str:
+        for value in page.actions + page.key_elements:
+            lowered = value.lower()
+            if any(keyword in lowered for keyword in keywords):
+                return value
+        return "relevant control"
+
+    def _segment_transitions(
+        self, transitions: list[TransitionRecord]
+    ) -> list[list[TransitionRecord]]:
         """Segment transitions into logical flow groups.
 
         Boundaries are detected by:
@@ -1503,7 +1951,8 @@ visit your queued URLs before exploring the current page further.
             url_discontinuity = (
                 prev.after_url
                 and curr.before_url
-                and prev.after_url.strip().rstrip("/").lower() != curr.before_url.strip().rstrip("/").lower()
+                and prev.after_url.strip().rstrip("/").lower()
+                != curr.before_url.strip().rstrip("/").lower()
             )
             sequence_gap = curr.sequence - prev.sequence > 3
 
@@ -1525,13 +1974,16 @@ visit your queued URLs before exploring the current page further.
         self,
         transitions: list[TransitionRecord],
         existing_flows: list[FlowRecord],
+        pages: list[PageRecord],
         session_dir: Path,
+        *,
+        min_expected: int,
     ) -> list[FlowRecord]:
         """Run a second AI pass to identify flows from transitions when too few were found.
 
         This is a pure text-analysis call (no browser tools needed) with a short timeout.
         """
-        if not transitions:
+        if not transitions and not pages:
             return []
 
         # Build a compact text representation of transitions
@@ -1543,7 +1995,8 @@ visit your queued URLs before exploring the current page further.
             api_desc = ""
             if t.api_calls:
                 api_desc = " | APIs: " + ", ".join(
-                    f"{a.get('method', '?')} {a.get('url', '?')} -> {a.get('status', '?')}" for a in t.api_calls
+                    f"{a.get('method', '?')} {a.get('url', '?')} -> {a.get('status', '?')}"
+                    for a in t.api_calls
                 )
             transition_lines.append(
                 f"  {t.sequence}. {t.action_type} on '{elem_desc}'{val} | "
@@ -1553,11 +2006,23 @@ visit your queued URLs before exploring the current page further.
             )
 
         existing_names = [f.name for f in existing_flows]
+        page_lines = []
+        for page in pages[:60]:
+            if not page.url or page.url.startswith("__summary_page_"):
+                continue
+            page_lines.append(
+                f"  - {page.url} | type={page.page_type or '?'} | title={page.title or '?'} | "
+                f"purpose={page.purpose or '?'} | elements={', '.join(page.key_elements[:8])} | "
+                f"actions={', '.join(page.actions[:6])} | forms={len(page.forms)}"
+            )
 
         prompt = f"""Analyze these browser interaction transitions and identify ALL distinct user flows.
 
 ## Transitions Recorded
-{chr(10).join(transition_lines)}
+{chr(10).join(transition_lines) if transition_lines else "No structured transitions were parsed."}
+
+## Pages Observed
+{chr(10).join(page_lines) if page_lines else "No page records were parsed."}
 
 ## Already Identified Flows
 {json.dumps(existing_names) if existing_names else "None"}
@@ -1570,7 +2035,9 @@ Do NOT repeat flows already identified. Look for:
 - Navigation patterns (browsing through sections)
 - Search flows (entering query + viewing results)
 - CRUD operations (create, read, update, delete)
+- Page capability flows when a page record shows a distinct purpose, form, search/filter control, or important action
 - Any other meaningful user journeys
+Return at least {min_expected} total flows when the page/transition evidence supports that many distinct journeys.
 
 ## Output Format
 Return ONLY a JSON array of flow objects. No other text.
@@ -1671,7 +2138,9 @@ Return ONLY a JSON array of flow objects. No other text.
         """
         # Truncate to avoid token limits — use last portion (most likely has summary info)
         max_chars = 8000
-        text_excerpt = raw_output[-max_chars:] if len(raw_output) > max_chars else raw_output
+        text_excerpt = (
+            raw_output[-max_chars:] if len(raw_output) > max_chars else raw_output
+        )
 
         prompt = f"""Analyze this browser exploration output and identify ALL user flows the agent performed.
 
@@ -1802,13 +2271,17 @@ Return ONLY a JSON array of flow objects. No other text.
                 if pos >= len(raw_output):
                     break
 
-        logger.info(f"   AI JSON recovery: processing {len(raw_output)} chars in {len(chunks)} chunk(s)")
+        logger.info(
+            f"   AI JSON recovery: processing {len(raw_output)} chars in {len(chunks)} chunk(s)"
+        )
 
         all_recovered = []
         seen_json = set()
 
         for i, chunk in enumerate(chunks):
-            chunk_label = f"chunk {i + 1}/{len(chunks)}" if len(chunks) > 1 else "full output"
+            chunk_label = (
+                f"chunk {i + 1}/{len(chunks)}" if len(chunks) > 1 else "full output"
+            )
 
             prompt = f"""You are a JSON extraction specialist. The following text is output from a browser exploration agent that was supposed to emit structured JSON records but may have formatted them incorrectly, used wrong casing, or embedded them in prose text.
 
@@ -1816,8 +2289,9 @@ Return ONLY a JSON array of flow objects. No other text.
 Extract ALL structured JSON objects from the text below. Look for:
 1. **Transition records**: Objects with a "transition" key containing action, before, after, transitionType, apiCalls
 2. **Flow records**: Objects with a "flow" key containing name, category, steps, startUrl, endUrl, outcome
-3. **Issue records**: Objects with an "issue" key containing type, severity, url, description
-4. **Summary records**: Objects with a "summary" key containing pagesDiscovered, flowsDiscovered, etc.
+3. **Page records**: Objects with a "page" key containing url, title, pageType, purpose, keyElements, forms, actions, links
+4. **Issue records**: Objects with an "issue" key containing type, severity, url, description
+5. **Summary records**: Objects with a "summary" key containing pagesDiscovered, flowsDiscovered, etc.
 
 ## Rules
 - Extract EVERY instance you find, even if the JSON is malformed — fix the structure
@@ -1832,6 +2306,8 @@ Extract ALL structured JSON objects from the text below. Look for:
 Transition: {{"transition": {{"sequence": 1, "action": {{"type": "click", "element": {{"ref": "...", "role": "button", "name": "Submit"}}, "value": null}}, "before": {{"url": "...", "pageType": "...", "keyElements": [...]}}, "after": {{"url": "...", "pageType": "...", "keyElements": [...], "changes": [...]}}, "transitionType": "navigation", "apiCalls": [...]}}}}
 
 Flow: {{"flow": {{"name": "...", "category": "authentication|crud|navigation|form_submission|search", "steps": [...], "startUrl": "...", "endUrl": "...", "outcome": "...", "isSuccessPath": true, "preconditions": [...], "postconditions": [...]}}}}
+
+Page: {{"page": {{"url": "...", "title": "...", "pageType": "...", "purpose": "...", "keyElements": [...], "forms": [...], "actions": [...], "links": [...]}}}}
 
 Issue: {{"issue": {{"type": "broken_link|error_page|accessibility|performance|usability|security|missing_content", "severity": "critical|high|medium|low", "url": "...", "description": "..."}}}}
 
@@ -1883,9 +2359,13 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
                                 seen_json.add(key)
                                 all_recovered.append(normalized)
                                 chunk_count += 1
-                    logger.info(f"   AI JSON recovery {chunk_label}: extracted {chunk_count} objects")
+                    logger.info(
+                        f"   AI JSON recovery {chunk_label}: extracted {chunk_count} objects"
+                    )
                 else:
-                    logger.warning(f"   AI JSON recovery {chunk_label}: could not parse response")
+                    logger.warning(
+                        f"   AI JSON recovery {chunk_label}: could not parse response"
+                    )
 
             except Exception as e:
                 logger.warning(f"   AI JSON recovery {chunk_label} failed: {e}")
@@ -1926,10 +2406,22 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
             steps.append(step)
 
         # Pattern: Authentication flow
-        auth_keywords = ["login", "sign in", "signin", "auth", "password", "email", "username"]
+        auth_keywords = [
+            "login",
+            "sign in",
+            "signin",
+            "auth",
+            "password",
+            "email",
+            "username",
+        ]
         has_fill = actions.count("fill") >= 1
-        has_auth_url = any(kw in url for url in urls for kw in ["login", "auth", "signin", "sign-in"])
-        has_auth_element = any(kw in elem for elem in all_elements for kw in auth_keywords)
+        has_auth_url = any(
+            kw in url for url in urls for kw in ["login", "auth", "signin", "sign-in"]
+        )
+        has_auth_element = any(
+            kw in elem for elem in all_elements for kw in auth_keywords
+        )
         has_post = "POST" in api_methods
 
         if has_fill and (has_auth_url or has_auth_element) and has_post:
@@ -1950,7 +2442,9 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
         has_click = "click" in actions
         if fill_count >= 2 and has_click:
             # Determine form type from element names
-            form_elements = [e for e, a in zip(all_elements, actions) if a == "fill" and e]
+            form_elements = [
+                e for e, a in zip(all_elements, actions) if a == "fill" and e
+            ]
             form_name = "Form Submission"
             if form_elements:
                 # Use first meaningful element name for context
@@ -1970,7 +2464,9 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
 
         # Pattern: Search (fill into search-like element + navigation/update)
         search_keywords = ["search", "query", "find", "filter"]
-        has_search_element = any(kw in elem for elem in all_elements for kw in search_keywords)
+        has_search_element = any(
+            kw in elem for elem in all_elements for kw in search_keywords
+        )
         if has_fill and has_search_element:
             return FlowRecord(
                 name="Search Flow (inferred)",
@@ -2026,16 +2522,32 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
                 {
                     "sequence": t.sequence,
                     "sourceType": result.provenance_source,
-                    "confidence": result.quality_score / 100 if result.quality_score else 0,
-                    "action": {"type": t.action_type, "element": t.action_element, "value": t.action_value},
-                    "before": {"url": t.before_url, "pageType": t.before_page_type, "keyElements": t.before_elements},
-                    "after": {"url": t.after_url, "pageType": t.after_page_type, "keyElements": t.after_elements},
+                    "confidence": (
+                        result.quality_score / 100 if result.quality_score else 0
+                    ),
+                    "action": {
+                        "type": t.action_type,
+                        "element": t.action_element,
+                        "value": t.action_value,
+                    },
+                    "before": {
+                        "url": t.before_url,
+                        "pageType": t.before_page_type,
+                        "keyElements": t.before_elements,
+                    },
+                    "after": {
+                        "url": t.after_url,
+                        "pageType": t.after_page_type,
+                        "keyElements": t.after_elements,
+                    },
                     "transitionType": t.transition_type,
                     "apiCalls": t.api_calls,
                     "changes": t.changes_description,
                 }
             )
-        (session_dir / "transitions.json").write_text(json.dumps(transitions_data, indent=2))
+        (session_dir / "transitions.json").write_text(
+            json.dumps(transitions_data, indent=2)
+        )
 
         # Save flows
         flows_data = []
@@ -2044,7 +2556,9 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
                 {
                     "name": f.name,
                     "sourceType": result.provenance_source,
-                    "confidence": result.quality_score / 100 if result.quality_score else 0,
+                    "confidence": (
+                        result.quality_score / 100 if result.quality_score else 0
+                    ),
                     "category": f.category,
                     "steps": f.steps,
                     "startUrl": f.start_url,
@@ -2057,8 +2571,31 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
             )
         (session_dir / "flows.json").write_text(json.dumps(flows_data, indent=2))
 
+        # Save pages
+        pages_data = []
+        for p in result.pages:
+            pages_data.append(
+                {
+                    "url": p.url,
+                    "title": p.title,
+                    "pageType": p.page_type,
+                    "purpose": p.purpose,
+                    "keyElements": p.key_elements,
+                    "forms": p.forms,
+                    "actions": p.actions,
+                    "links": p.links,
+                    "sourceType": result.provenance_source,
+                    "confidence": (
+                        result.quality_score / 100 if result.quality_score else 0
+                    ),
+                }
+            )
+        (session_dir / "pages.json").write_text(json.dumps(pages_data, indent=2))
+
         # Save API endpoints
-        (session_dir / "api_endpoints.json").write_text(json.dumps(result.api_endpoints, indent=2))
+        (session_dir / "api_endpoints.json").write_text(
+            json.dumps(result.api_endpoints, indent=2)
+        )
 
         # Save issues
         issues_data = []
@@ -2093,6 +2630,7 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
             "quality": result.quality_summary,
             "validation": result.validation_summary,
             "prompt": result.prompt_metadata,
+            "agentStats": self._last_agent_stats,
         }
         (session_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
@@ -2153,9 +2691,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AI-Powered App Exploration")
     parser.add_argument("url", help="Entry URL to explore")
     parser.add_argument("--project", default="default", help="Project ID")
-    parser.add_argument("--session-id", help="Session ID (auto-generated if not provided)")
-    parser.add_argument("--max-interactions", type=int, default=50, help="Maximum interactions")
-    parser.add_argument("--max-depth", type=int, default=10, help="Maximum navigation depth")
+    parser.add_argument(
+        "--session-id", help="Session ID (auto-generated if not provided)"
+    )
+    parser.add_argument(
+        "--max-interactions", type=int, default=50, help="Maximum interactions"
+    )
+    parser.add_argument(
+        "--max-depth", type=int, default=10, help="Maximum navigation depth"
+    )
     parser.add_argument(
         "--strategy",
         choices=["goal_directed", "breadth_first", "depth_first", "api_focused"],
@@ -2164,15 +2708,21 @@ if __name__ == "__main__":
     )
     parser.add_argument("--timeout", type=int, default=30, help="Timeout in minutes")
     parser.add_argument("--login-url", help="Login page URL if different from entry")
-    parser.add_argument("--exclude", action="append", default=[], help="URL patterns to exclude")
-    parser.add_argument("--focus", action="append", default=[], help="Areas to prioritize")
+    parser.add_argument(
+        "--exclude", action="append", default=[], help="URL patterns to exclude"
+    )
+    parser.add_argument(
+        "--focus", action="append", default=[], help="Areas to prioritize"
+    )
 
     args = parser.parse_args()
 
     # Check for credentials in environment
     credentials = None
     if os.environ.get("LOGIN_USERNAME") or os.environ.get("LOGIN_EMAIL"):
-        username_var = "LOGIN_EMAIL" if os.environ.get("LOGIN_EMAIL") else "LOGIN_USERNAME"
+        username_var = (
+            "LOGIN_EMAIL" if os.environ.get("LOGIN_EMAIL") else "LOGIN_USERNAME"
+        )
         password_var = "LOGIN_PASSWORD"
         credentials = {
             "username": os.environ.get(username_var, ""),

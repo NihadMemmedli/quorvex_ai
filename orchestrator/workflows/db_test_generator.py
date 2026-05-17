@@ -61,7 +61,12 @@ def _extract_checks_from_raw_sql(text: str) -> list:
     return checks
 
 
-async def generate_tests_from_schema(schema_info: dict, findings: list = None, focus_areas: list = None) -> list:
+async def generate_tests_from_schema(
+    schema_info: dict,
+    findings: list = None,
+    focus_areas: list = None,
+    instructions: str | None = None,
+) -> list:
     """
     Generate SQL data quality checks from schema metadata and analysis findings.
 
@@ -69,6 +74,7 @@ async def generate_tests_from_schema(schema_info: dict, findings: list = None, f
         schema_info: Raw introspection data
         findings: Optional list of schema analysis findings for context
         focus_areas: Optional list of focus area strings to prioritize (e.g. ["data quality", "referential integrity"])
+        instructions: Optional user request in natural language describing the desired checks
 
     Returns:
         List of check dicts with keys: check_name, check_type, table_name, column_name,
@@ -88,6 +94,15 @@ async def generate_tests_from_schema(schema_info: dict, findings: list = None, f
     if focus_areas:
         focus_text = f"\n## Focus Areas\nPrioritize generating checks for: {', '.join(focus_areas)}\n"
 
+    instruction_text = ""
+    if instructions and instructions.strip():
+        instruction_text = (
+            "\n## User Request\n"
+            "Generate checks that directly satisfy this request while staying grounded in the schema. "
+            "If the request names tables or business concepts, map them to the closest actual tables/columns.\n"
+            f"{instructions.strip()[:4000]}\n"
+        )
+
     schema_text = json.dumps(
         {"tables": tables, "foreign_keys": schema_info.get("foreign_keys", [])},
         indent=2,
@@ -104,6 +119,7 @@ IMPORTANT: You MUST respond with ONLY a valid JSON array. No explanations, no ma
 ```
 {findings_text}
 {focus_text}
+{instruction_text}
 ## Requirements
 - Generate 10-25 practical SQL checks
 - ALL queries MUST be SELECT-only (no INSERT/UPDATE/DELETE/DROP)

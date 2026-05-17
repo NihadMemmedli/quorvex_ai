@@ -13,15 +13,28 @@ import type { DbConnection, DbSpec } from './types';
 
 const CodeEditor = dynamic(() => import('@/components/CodeEditor'), { ssr: false });
 
+interface GeneratedDbCheck {
+    check_name: string;
+    check_type: string;
+    table_name?: string;
+    column_name?: string;
+    description?: string;
+    severity?: string;
+    sql_query: string;
+    expected_result?: string;
+    expect_empty?: boolean;
+}
+
 interface SpecsTabProps {
     specs: DbSpec[];
     connections: DbConnection[];
     projectId: string;
     onRefreshSpecs: () => void;
     onRefreshRuns: () => void;
+    preferredConnectionId?: string;
 }
 
-export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs, onRefreshRuns }: SpecsTabProps) {
+export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs, onRefreshRuns, preferredConnectionId }: SpecsTabProps) {
     const [selectedSpec, setSelectedSpec] = useState<DbSpec | null>(null);
     const [specContent, setSpecContent] = useState('');
     const [isCreatingSpec, setIsCreatingSpec] = useState(false);
@@ -35,13 +48,23 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
     // AI Generate state
     const [showAiGenerate, setShowAiGenerate] = useState(false);
     const [aiGenConnId, setAiGenConnId] = useState('');
-    const [aiGenFocusAreas, setAiGenFocusAreas] = useState('');
+    const [aiGenInstructions, setAiGenInstructions] = useState('');
     const [aiGenSpecName, setAiGenSpecName] = useState('');
     const [isAiGenerating, setIsAiGenerating] = useState(false);
+    const [isSavingGeneratedSpec, setIsSavingGeneratedSpec] = useState(false);
     const [aiGenJobId, setAiGenJobId] = useState<string | null>(null);
     const [aiGenProgress, setAiGenProgress] = useState('');
+    const [generatedChecks, setGeneratedChecks] = useState<GeneratedDbCheck[]>([]);
 
     const pollRef = useRef<NodeJS.Timeout | null>(null);
+
+    useEffect(() => {
+        if (specConnId || connections.length === 0) return;
+        const preferred = preferredConnectionId && connections.find(c => c.id === preferredConnectionId);
+        const selected = preferred || connections[0];
+        setSpecConnId(selected.id);
+        setAiGenConnId(selected.id);
+    }, [connections, preferredConnectionId, specConnId]);
 
     // Poll active jobs (spec run / ai generate)
     useEffect(() => {
@@ -76,22 +99,16 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
 
                             if (data.status === 'completed' && data.result) {
                                 const result = data.result as Record<string, unknown>;
-                                const generatedSpecName = result.spec_name as string;
-                                await onRefreshSpecs();
-                                if (generatedSpecName) {
-                                    await loadSpecContent({ name: generatedSpecName, path: '' });
+                                const checks = Array.isArray(result.checks) ? result.checks as GeneratedDbCheck[] : [];
+                                setGeneratedChecks(checks);
+                                if (typeof result.spec_name === 'string') {
+                                    setAiGenSpecName(result.spec_name);
                                 }
                                 if (result.execution_run_id) {
                                     onRefreshRuns();
                                 }
                                 setAiGenProgress(`Done: ${result.checks_count} checks generated`);
                                 if (aiGenConnId) setSpecConnId(aiGenConnId);
-                                setTimeout(() => {
-                                    setShowAiGenerate(false);
-                                    setAiGenProgress('');
-                                    setAiGenSpecName('');
-                                    setAiGenFocusAreas('');
-                                }, 2000);
                             } else if (data.status === 'failed') {
                                 setAiGenProgress(`Failed: ${data.error || 'Unknown error'}`);
                             }
@@ -116,7 +133,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
         poll();
         pollRef.current = setInterval(poll, 2000);
         return () => { if (pollRef.current) clearInterval(pollRef.current); };
-    }, [specJobId, aiGenJobId, onRefreshRuns, onRefreshSpecs, aiGenConnId]);
+    }, [specJobId, aiGenJobId, onRefreshRuns, aiGenConnId]);
 
     const createSpec = async () => {
         if (!newSpecName.trim() || !newSpecContent.trim()) return;
@@ -199,20 +216,21 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
         }
     };
 
-    const generateSpecWithAi = async (autoRun: boolean) => {
+    const generateSpecWithAi = async () => {
         if (!aiGenConnId) { alert('Select a connection'); return; }
+        if (!aiGenInstructions.trim()) { alert('Describe the checks you want to generate'); return; }
         setIsAiGenerating(true);
+        setGeneratedChecks([]);
         setAiGenProgress('Starting AI spec generation...');
         try {
             const body: Record<string, unknown> = {
                 connection_id: aiGenConnId,
-                auto_run: autoRun,
+                instructions: aiGenInstructions.trim(),
+                auto_run: false,
+                preview_only: true,
                 project_id: projectId,
             };
             if (aiGenSpecName.trim()) body.spec_name = aiGenSpecName.trim();
-            if (aiGenFocusAreas.trim()) {
-                body.focus_areas = aiGenFocusAreas.split(',').map(s => s.trim()).filter(Boolean);
-            }
             const res = await fetch(`${API_BASE}/database-testing/generate-spec`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
@@ -230,6 +248,39 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
             setAiGenProgress(`Error: ${String(e)}`);
             setIsAiGenerating(false);
         }
+    };
+
+    const saveGeneratedSpec = async (autoRun: boolean) => {
+        if (generatedChecks.length === 0) { alert('Generate checks first'); return; }
+        setIsSavingGeneratedSpec(true);
+        try {
+            const res = await fetch(`${API_BASE}/database-testing/generated-specs/save`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                body: JSON.stringify({
+                    checks: generatedChecks,
+                    spec_name: aiGenSpecName || undefined,
+                    project_id: projectId,
+                }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.detail || 'Failed to save generated spec');
+
+            await onRefreshSpecs();
+            const savedName = data.name as string;
+            if (savedName) {
+                await loadSpecContent({ name: savedName, path: data.path || '' });
+                if (autoRun) await runSpec(savedName);
+            }
+            setShowAiGenerate(false);
+            setGeneratedChecks([]);
+            setAiGenProgress('');
+            setAiGenSpecName('');
+            setAiGenInstructions('');
+        } catch (e) {
+            setAiGenProgress(`Error: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        setIsSavingGeneratedSpec(false);
     };
 
     return (
@@ -270,7 +321,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
                         </div>
                     </div>
 
-                    {/* AI Generate inline form */}
+                    {/* AI Generate setup */}
                     {showAiGenerate && (
                         <div style={{
                             background: 'rgba(139, 92, 246, 0.08)', border: '1px solid rgba(139, 92, 246, 0.25)',
@@ -296,12 +347,13 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
                                     style={{ ...inputStyle, fontSize: '0.8rem', padding: '0.35rem 0.5rem' }} />
                             </div>
                             <div style={{ marginBottom: '0.5rem' }}>
-                                <label style={{ fontSize: '0.75rem', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Focus Areas (optional)</label>
-                                <input type="text" value={aiGenFocusAreas}
-                                    onChange={e => setAiGenFocusAreas(e.target.value)}
+                                <label style={{ fontSize: '0.75rem', fontWeight: 500, display: 'block', marginBottom: '4px' }}>Request</label>
+                                <textarea value={aiGenInstructions}
+                                    onChange={e => setAiGenInstructions(e.target.value)}
                                     disabled={isAiGenerating}
-                                    placeholder="data quality, nulls, refs..."
-                                    style={{ ...inputStyle, fontSize: '0.8rem', padding: '0.35rem 0.5rem' }} />
+                                    rows={5}
+                                    placeholder="Example: validate active customers have valid email addresses, orders reference existing customers, and prices are never negative."
+                                    style={{ ...inputStyle, fontSize: '0.8rem', padding: '0.5rem', resize: 'vertical' }} />
                             </div>
                             {isAiGenerating ? (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 0', fontSize: '0.8rem', color: 'var(--accent)' }}>
@@ -316,25 +368,15 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
                                 </div>
                             ) : null}
                             <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                                <button onClick={() => generateSpecWithAi(false)}
-                                    disabled={isAiGenerating || !aiGenConnId}
+                                <button onClick={generateSpecWithAi}
+                                    disabled={isAiGenerating || !aiGenConnId || !aiGenInstructions.trim()}
                                     style={{
-                                        background: isAiGenerating || !aiGenConnId ? 'var(--border)' : 'var(--accent)',
+                                        background: isAiGenerating || !aiGenConnId || !aiGenInstructions.trim() ? 'var(--border)' : 'var(--accent)',
                                         color: 'white', border: 'none', borderRadius: 'var(--radius)',
-                                        padding: '4px 10px', cursor: isAiGenerating || !aiGenConnId ? 'not-allowed' : 'pointer',
+                                        padding: '4px 10px', cursor: isAiGenerating || !aiGenConnId || !aiGenInstructions.trim() ? 'not-allowed' : 'pointer',
                                         fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px',
                                     }}>
-                                    <Sparkles size={12} /> Generate
-                                </button>
-                                <button onClick={() => generateSpecWithAi(true)}
-                                    disabled={isAiGenerating || !aiGenConnId}
-                                    style={{
-                                        background: isAiGenerating || !aiGenConnId ? 'var(--border)' : 'var(--accent)',
-                                        color: 'white', border: 'none', borderRadius: 'var(--radius)',
-                                        padding: '4px 10px', cursor: isAiGenerating || !aiGenConnId ? 'not-allowed' : 'pointer',
-                                        fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px',
-                                    }}>
-                                    <Play size={12} /> Generate & Run
+                                    <Sparkles size={12} /> Generate Preview
                                 </button>
                             </div>
                         </div>
@@ -401,6 +443,67 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
                                     Cancel
                                 </button>
                             </div>
+                        </>
+                    ) : showAiGenerate ? (
+                        <>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                                <h3 style={{ fontWeight: 600 }}>Generated Spec Preview</h3>
+                                {generatedChecks.length > 0 && (
+                                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                        <button onClick={() => saveGeneratedSpec(false)}
+                                            disabled={isSavingGeneratedSpec}
+                                            style={{ ...btnPrimary, padding: '4px 12px', fontSize: '0.8rem' }}>
+                                            {isSavingGeneratedSpec ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <Save size={14} />}
+                                            Save Spec
+                                        </button>
+                                        <button onClick={() => saveGeneratedSpec(true)}
+                                            disabled={isSavingGeneratedSpec || !specConnId}
+                                            style={{ ...btnSecondary, padding: '4px 12px', fontSize: '0.8rem' }}>
+                                            <Play size={14} /> Save & Run
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                            {generatedChecks.length === 0 ? (
+                                <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                    Describe the checks in the AI Generate panel, then generate a preview.
+                                </p>
+                            ) : (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                                    {generatedChecks.map((check, idx) => (
+                                        <div key={`${check.check_name}-${idx}`} style={{
+                                            border: '1px solid var(--border)',
+                                            borderRadius: 'var(--radius)',
+                                            padding: '0.85rem',
+                                        }}>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', marginBottom: '0.5rem' }}>
+                                                <div>
+                                                    <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{check.check_name || `check_${idx + 1}`}</div>
+                                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
+                                                        {check.check_type || 'custom'} | {check.severity || 'medium'}
+                                                        {check.table_name ? ` | ${check.table_name}${check.column_name ? `.${check.column_name}` : ''}` : ''}
+                                                    </div>
+                                                </div>
+                                                <span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
+                                                    Expect empty: {String(check.expect_empty ?? true)}
+                                                </span>
+                                            </div>
+                                            {check.description && (
+                                                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginBottom: '0.5rem' }}>{check.description}</p>
+                                            )}
+                                            <pre style={{
+                                                margin: 0,
+                                                padding: '0.75rem',
+                                                background: '#1e1e1e',
+                                                color: '#d4d4d4',
+                                                borderRadius: 'var(--radius)',
+                                                overflow: 'auto',
+                                                fontSize: '0.78rem',
+                                            }}>{check.sql_query}</pre>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </>
                     ) : selectedSpec ? (
                         <>

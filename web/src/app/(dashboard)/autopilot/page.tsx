@@ -4,7 +4,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
     Rocket, Play, Pause, Square, Clock, Globe, FileText, CheckCircle2,
     AlertTriangle, Loader2, ChevronRight, ArrowLeft, RefreshCw,
-    MessageCircle, Zap, BarChart2, Target, List
+    MessageCircle, Zap, BarChart2, Target, List, Monitor, Image as ImageIcon,
+    Activity, ExternalLink
 } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
@@ -12,6 +13,7 @@ import { toast } from 'sonner';
 import { PageLayout } from '@/components/ui/page-layout';
 import { EmptyState } from '@/components/ui/empty-state';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
+import { LiveBrowserView } from '@/components/LiveBrowserView';
 
 // ============ TYPES ============
 
@@ -126,6 +128,36 @@ interface TestTaskDetail extends TestTask {
     log_excerpt: string | null;
 }
 
+interface AutoPilotLiveArtifact {
+    name: string;
+    path: string;
+    type: string;
+    modified_at: string | null;
+}
+
+interface AutoPilotLiveState {
+    active: boolean;
+    phase: string | null;
+    activity_label: string | null;
+    status: string | null;
+    message: string | null;
+    exploration_session_id: string | null;
+    test_task_id: number | null;
+    run_id: string | null;
+    spec_name: string | null;
+    current_stage: string | null;
+    agent_task_id: string | null;
+    last_tool: string | null;
+    last_tool_label: string | null;
+    tool_calls: number;
+    browser_tool_calls: number;
+    interactions: number;
+    recent_tools: Array<{ name?: string; label?: string; at?: string }>;
+    artifacts: AutoPilotLiveArtifact[];
+    latest_image: AutoPilotLiveArtifact | null;
+    updated_at: string | null;
+}
+
 // ============ STATUS COLORS ============
 
 const dark = {
@@ -219,6 +251,13 @@ function getStatusStyle(status: string): { bg: string; color: string } {
 function progressPercent(value: number | null | undefined): number {
     const numeric = typeof value === 'number' && Number.isFinite(value) ? value : 0;
     return Math.max(0, Math.min(100, numeric <= 1 ? numeric * 100 : numeric));
+}
+
+function formatTime(dateStr: string | null | undefined): string {
+    if (!dateStr) return '-';
+    const date = new Date(dateStr.endsWith('Z') ? dateStr : `${dateStr}Z`);
+    if (Number.isNaN(date.getTime())) return '-';
+    return date.toLocaleTimeString();
 }
 
 async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 15000): Promise<T> {
@@ -790,6 +829,7 @@ export default function AutoPilotPage() {
     const [questions, setQuestions] = useState<Question[]>([]);
     const [specTasks, setSpecTasks] = useState<SpecTask[]>([]);
     const [testTasks, setTestTasks] = useState<TestTask[]>([]);
+    const [liveState, setLiveState] = useState<AutoPilotLiveState | null>(null);
     const [loading, setLoading] = useState(true);
     const [starting, setStarting] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -843,12 +883,16 @@ export default function AutoPilotPage() {
 
     const fetchSessionDetail = useCallback(async (sessionId: string) => {
         try {
-            const [sessionData, phasesData, questionsData, specTasksData, testTasksData] = await Promise.all([
+            const [sessionData, phasesData, questionsData, specTasksData, testTasksData, liveData] = await Promise.all([
                 fetchJsonWithTimeout<AutoPilotSession>(`${API_BASE}/autopilot/${sessionId}`),
                 fetchJsonWithTimeout<Phase[] | { phases?: Phase[] }>(`${API_BASE}/autopilot/${sessionId}/phases`),
                 fetchJsonWithTimeout<Question[] | { questions?: Question[] }>(`${API_BASE}/autopilot/${sessionId}/questions`),
                 fetchJsonWithTimeout<SpecTask[] | { tasks?: SpecTask[] }>(`${API_BASE}/autopilot/${sessionId}/spec-tasks`),
                 fetchJsonWithTimeout<TestTask[] | { tasks?: TestTask[] }>(`${API_BASE}/autopilot/${sessionId}/test-tasks`),
+                fetchJsonWithTimeout<AutoPilotLiveState>(`${API_BASE}/autopilot/${sessionId}/live`).catch(err => {
+                    console.debug('Auto Pilot live state unavailable:', err);
+                    return null;
+                }),
             ]);
 
             setSession(sessionData);
@@ -856,6 +900,7 @@ export default function AutoPilotPage() {
             setQuestions(Array.isArray(questionsData) ? questionsData : questionsData.questions || []);
             setSpecTasks(Array.isArray(specTasksData) ? specTasksData : specTasksData.tasks || []);
             setTestTasks(Array.isArray(testTasksData) ? testTasksData : testTasksData.tasks || []);
+            setLiveState(liveData);
             setLoadError(null);
         } catch (err) {
             console.error('Failed to fetch session detail:', err);
@@ -1132,6 +1177,7 @@ export default function AutoPilotPage() {
         setQuestions([]);
         setSpecTasks([]);
         setTestTasks([]);
+        setLiveState(null);
         setSelectedTask(null);
         setTaskDetailOpen(false);
         setTaskDetailError(null);
@@ -1144,6 +1190,7 @@ export default function AutoPilotPage() {
         setQuestions([]);
         setSpecTasks([]);
         setTestTasks([]);
+        setLiveState(null);
         fetchSessions();
     };
 
@@ -1404,6 +1451,201 @@ export default function AutoPilotPage() {
                         ) : 'Submit'}
                     </button>
                 </div>
+            </div>
+        );
+    };
+
+    // -- Live Browser --
+    const renderLiveBrowserPanel = () => {
+        if (!session || !activeSessionId) return null;
+
+        const browserPhase = liveState?.phase === 'exploration' || liveState?.phase === 'test_generation';
+        const active = Boolean(liveState?.active && browserPhase && session.status === 'running');
+        const recentTools = liveState?.recent_tools || [];
+        const latestImage = liveState?.latest_image;
+        const title = liveState?.activity_label || (
+            browserPhase
+                ? PHASE_LABELS[liveState?.phase || ''] || 'Browser activity'
+                : 'Browser idle'
+        );
+
+        return (
+            <div style={{ ...cardStyle, marginBottom: '1rem', padding: 0, overflow: 'hidden' }}>
+                <div style={{
+                    padding: '1rem 1.25rem',
+                    borderBottom: `1px solid ${dark.border}`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '1rem',
+                    flexWrap: 'wrap',
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', minWidth: 0 }}>
+                        <Monitor size={18} style={{ color: active ? dark.primary : dark.textMuted, flex: '0 0 auto' }} />
+                        <div style={{ minWidth: 0 }}>
+                            <div style={{ color: dark.text, fontSize: '0.95rem', fontWeight: 800 }}>Live Browser</div>
+                            <div style={{ color: dark.textSecondary, fontSize: '0.8rem', overflowWrap: 'anywhere' }}>
+                                {title}
+                            </div>
+                        </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <StatusBadge status={active ? 'running' : (liveState?.status || session.status)} />
+                        {liveState?.updated_at && (
+                            <span style={{ color: dark.textMuted, fontSize: '0.78rem' }}>
+                                {formatTime(liveState.updated_at)}
+                            </span>
+                        )}
+                    </div>
+                </div>
+
+                <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+                    gap: '0.75rem',
+                    padding: '1rem 1.25rem',
+                    borderBottom: `1px solid ${dark.border}`,
+                    background: 'rgba(255,255,255,0.015)',
+                }}>
+                    {[
+                        { label: 'Phase', value: liveState?.phase ? PHASE_LABELS[liveState.phase] || liveState.phase : '-' },
+                        { label: 'Current Tool', value: liveState?.last_tool_label || liveState?.current_stage || '-' },
+                        { label: 'Tool Calls', value: liveState?.tool_calls ?? 0 },
+                        { label: 'Browser Actions', value: liveState?.browser_tool_calls ?? liveState?.interactions ?? 0 },
+                    ].map(item => (
+                        <div key={item.label}>
+                            <div style={{
+                                color: dark.textMuted,
+                                fontSize: '0.68rem',
+                                fontWeight: 800,
+                                textTransform: 'uppercase',
+                                letterSpacing: '0.04em',
+                                marginBottom: '0.25rem',
+                            }}>
+                                {item.label}
+                            </div>
+                            <div style={{ color: dark.text, fontSize: '0.9rem', fontWeight: 700, overflowWrap: 'anywhere' }}>
+                                {item.value}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+
+                {browserPhase ? (
+                    <div style={{ padding: '1rem 1.25rem', display: 'grid', gap: '1rem' }}>
+                        <LiveBrowserView runId={activeSessionId} isActive={active} showHeader />
+
+                        <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                            gap: '1rem',
+                        }}>
+                            <div style={{ border: `1px solid ${dark.border}`, borderRadius: '8px', overflow: 'hidden' }}>
+                                <div style={{
+                                    padding: '0.75rem 1rem',
+                                    borderBottom: `1px solid ${dark.border}`,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '0.5rem',
+                                    fontWeight: 700,
+                                    fontSize: '0.88rem',
+                                }}>
+                                    <Activity size={15} style={{ color: dark.primary }} />
+                                    Live Activity
+                                </div>
+                                {recentTools.length > 0 ? (
+                                    <div>
+                                        {recentTools.slice().reverse().map((tool, i) => (
+                                            <div
+                                                key={`${tool.name || 'tool'}-${tool.at || i}`}
+                                                style={{
+                                                    padding: '0.65rem 1rem',
+                                                    borderBottom: i === recentTools.length - 1 ? 'none' : `1px solid ${dark.border}`,
+                                                    display: 'flex',
+                                                    justifyContent: 'space-between',
+                                                    gap: '1rem',
+                                                    fontSize: '0.82rem',
+                                                }}
+                                            >
+                                                <span style={{ color: dark.text, fontWeight: 650, overflowWrap: 'anywhere' }}>
+                                                    {tool.label || tool.name || 'Tool'}
+                                                </span>
+                                                <span style={{ color: dark.textMuted, whiteSpace: 'nowrap' }}>
+                                                    {formatTime(tool.at)}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <div style={{ padding: '1rem', color: dark.textMuted, fontSize: '0.85rem' }}>
+                                        {liveState?.message || 'Waiting for browser activity.'}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div style={{ border: `1px solid ${dark.border}`, borderRadius: '8px', overflow: 'hidden' }}>
+                                <div style={{
+                                    padding: '0.75rem 1rem',
+                                    borderBottom: `1px solid ${dark.border}`,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    gap: '0.75rem',
+                                    fontWeight: 700,
+                                    fontSize: '0.88rem',
+                                }}>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <ImageIcon size={15} style={{ color: dark.cyan }} />
+                                        Latest Screenshot
+                                    </span>
+                                    {latestImage && (
+                                        <a
+                                            href={`${API_BASE}${latestImage.path}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            style={{ color: dark.primary, display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}
+                                            title="Open artifact"
+                                        >
+                                            <ExternalLink size={14} />
+                                        </a>
+                                    )}
+                                </div>
+                                {latestImage ? (
+                                    <a href={`${API_BASE}${latestImage.path}`} target="_blank" rel="noreferrer" style={{ display: 'block' }}>
+                                        <img
+                                            src={`${API_BASE}${latestImage.path}`}
+                                            alt="Latest Auto Pilot browser screenshot"
+                                            style={{
+                                                width: '100%',
+                                                height: '220px',
+                                                objectFit: 'contain',
+                                                background: '#000',
+                                                display: 'block',
+                                            }}
+                                        />
+                                    </a>
+                                ) : (
+                                    <div style={{
+                                        height: '220px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        textAlign: 'center',
+                                        color: dark.textMuted,
+                                        fontSize: '0.85rem',
+                                        padding: '1rem',
+                                    }}>
+                                        No screenshots captured yet.
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                ) : (
+                    <div style={{ padding: '1.25rem', color: dark.textMuted, fontSize: '0.86rem' }}>
+                        {liveState?.message || 'The current Auto Pilot phase does not use the browser.'}
+                    </div>
+                )}
             </div>
         );
     };
@@ -2372,6 +2614,11 @@ export default function AutoPilotPage() {
                 {/* Question Panel */}
                 <div className="animate-in stagger-3">
                     {renderQuestionPanel()}
+                </div>
+
+                {/* Live Browser */}
+                <div className="animate-in stagger-3">
+                    {renderLiveBrowserPanel()}
                 </div>
 
                 {/* Stats Cards */}

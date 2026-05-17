@@ -6,7 +6,7 @@
         workers-up workers-down workers-scale workers-status workers-logs workers-build \
         swarm-up swarm-down swarm-scale swarm-status \
         k8s-deploy k8s-delete k8s-status k8s-scale k8s-logs \
-        db-migrate db-upgrade db-downgrade db-history db-stamp \
+        db-migrate db-upgrade db-downgrade db-history db-stamp db-demo-seed \
         docker-prune volume-sizes db-vacuum health-check upgrade deps-lock \
         load-test \
         k6-workers-up k6-workers-down k6-workers-scale k6-workers-logs k6-workers-status \
@@ -107,6 +107,7 @@ help:
 	@echo "    make db-downgrade     - Roll back one migration"
 	@echo "    make db-history       - Show migration history"
 	@echo "    make db-stamp R=...   - Stamp DB at revision (for existing DBs)"
+	@echo "    make db-demo-seed     - Seed Database Testing demo content"
 	@echo ""
 	@echo "  Maintenance:"
 	@echo "    make upgrade          - Full upgrade procedure (backup, pull, migrate, restart)"
@@ -900,6 +901,16 @@ db-stamp:
 	@$(PROD_COMPOSE) exec backend alembic stamp $(R) 2>/dev/null || \
 		(source venv/bin/activate 2>/dev/null && alembic stamp $(R))
 	@echo "Database stamped at revision $(R)."
+
+db-demo-seed:
+	@echo "Seeding Database Testing demo content..."
+	@PROJECT_ID="$(or $(PROJECT),default)"; \
+	if [ -n "$(CONNECTION_HOST)" ]; then HOST_ARG="--connection-host $(CONNECTION_HOST)"; else HOST_ARG=""; fi; \
+	if [ -n "$(CONNECTION_PORT)" ]; then PORT_ARG="--connection-port $(CONNECTION_PORT)"; else PORT_ARG=""; fi; \
+	if [ -n "$(SCHEMA)" ]; then SCHEMA_ARG="--schema $(SCHEMA)"; else SCHEMA_ARG=""; fi; \
+	(source venv/bin/activate 2>/dev/null || true; \
+		DATABASE_URL="$${DATABASE_URL:-postgresql://postgres:postgres@localhost:5434/playwright_agent}" \
+		python orchestrator/scripts/seed_database_testing_demo.py --project-id "$$PROJECT_ID" $$HOST_ARG $$PORT_ARG $$SCHEMA_ARG)
 
 # ============================================================
 # Development Tools

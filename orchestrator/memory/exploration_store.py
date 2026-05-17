@@ -54,7 +54,11 @@ class ExplorationStore:
     # ========== Exploration Session Methods ==========
 
     def create_session(
-        self, session_id: str, entry_url: str, strategy: str = "goal_directed", config: dict[str, Any] | None = None
+        self,
+        session_id: str,
+        entry_url: str,
+        strategy: str = "goal_directed",
+        config: dict[str, Any] | None = None,
     ) -> ExplorationSession:
         """
         Create a new exploration session.
@@ -95,7 +99,7 @@ class ExplorationStore:
                     session.error_message = error_message
                 if status == "running" and not session.started_at:
                     session.started_at = datetime.utcnow()
-                if status in ("completed", "failed", "stopped"):
+                if status in ("completed", "completed_partial", "failed", "stopped"):
                     session.completed_at = datetime.utcnow()
                 db.commit()
                 db.refresh(session)
@@ -151,13 +155,19 @@ class ExplorationStore:
         with self._get_session() as db:
             return db.get(ExplorationSession, session_id)
 
-    def list_sessions(self, status: str | None = None, limit: int = 50) -> list[ExplorationSession]:
+    def list_sessions(
+        self, status: str | None = None, limit: int = 50
+    ) -> list[ExplorationSession]:
         """List exploration sessions."""
         with self._get_session() as db:
-            query = select(ExplorationSession).where(ExplorationSession.project_id == self.project_id)
+            query = select(ExplorationSession).where(
+                ExplorationSession.project_id == self.project_id
+            )
             if status:
                 query = query.where(ExplorationSession.status == status)
-            query = query.order_by(col(ExplorationSession.created_at).desc()).limit(limit)
+            query = query.order_by(col(ExplorationSession.created_at).desc()).limit(
+                limit
+            )
             return list(db.exec(query).all())
 
     # ========== Transition Methods ==========
@@ -299,7 +309,11 @@ class ExplorationStore:
                         element_ref=step.get("ref"),
                         element_role=step.get("role"),
                         element_name=step.get("element"),
-                        value=str(step.get("value")) if step.get("value") is not None else None,
+                        value=(
+                            str(step.get("value"))
+                            if step.get("value") is not None
+                            else None
+                        ),
                     )
                     db.add(flow_step)
 
@@ -322,7 +336,9 @@ class ExplorationStore:
     def get_project_flows(self, category: str | None = None) -> list[DiscoveredFlow]:
         """Get all flows for the project."""
         with self._get_session() as db:
-            query = select(DiscoveredFlow).where(DiscoveredFlow.project_id == self.project_id)
+            query = select(DiscoveredFlow).where(
+                DiscoveredFlow.project_id == self.project_id
+            )
             if category:
                 query = query.where(DiscoveredFlow.flow_category == category)
             query = query.order_by(col(DiscoveredFlow.created_at).desc())
@@ -331,7 +347,11 @@ class ExplorationStore:
     def get_flow_steps(self, flow_id: int) -> list[FlowStep]:
         """Get steps for a flow."""
         with self._get_session() as db:
-            query = select(FlowStep).where(FlowStep.flow_id == flow_id).order_by(FlowStep.step_number)
+            query = (
+                select(FlowStep)
+                .where(FlowStep.flow_id == flow_id)
+                .order_by(FlowStep.step_number)
+            )
             return list(db.exec(query).all())
 
     # ========== API Endpoint Methods ==========
@@ -377,13 +397,16 @@ class ExplorationStore:
                 from sqlalchemy import text
 
                 db.execute(
-                    text("UPDATE discovered_api_endpoints SET call_count = call_count + 1 WHERE id = :id"),
+                    text(
+                        "UPDATE discovered_api_endpoints SET call_count = call_count + 1 WHERE id = :id"
+                    ),
                     {"id": existing.id},
                 )
 
                 # Merge rich data if new data provided and existing fields are empty
                 if request_headers and (
-                    not existing.request_headers_json or existing.request_headers_json in ("{}", "", "null")
+                    not existing.request_headers_json
+                    or existing.request_headers_json in ("{}", "", "null")
                 ):
                     existing.request_headers_json = json.dumps(request_headers)
                 if request_body_sample and not existing.request_body_sample:
@@ -402,7 +425,9 @@ class ExplorationStore:
                 url=url,
                 request_headers_json=json.dumps(request_headers or {}),
                 request_body_sample=request_body_sample,
-                response_status=int(response_status) if response_status is not None else None,
+                response_status=(
+                    int(response_status) if response_status is not None else None
+                ),
                 response_body_sample=response_body_sample,
                 triggered_by_action=triggered_by_action,
                 first_seen=datetime.utcnow(),
@@ -461,7 +486,9 @@ class ExplorationStore:
             )
             return list(db.exec(query).all())
 
-    def update_flow(self, flow_id: int, session_id: str, **kwargs) -> DiscoveredFlow | None:
+    def update_flow(
+        self, flow_id: int, session_id: str, **kwargs
+    ) -> DiscoveredFlow | None:
         """Update a discovered flow's metadata.
 
         Args:
@@ -513,7 +540,9 @@ class ExplorationStore:
             db.commit()
             return True
 
-    def update_api_endpoint(self, endpoint_id: int, session_id: str, **kwargs) -> DiscoveredApiEndpoint | None:
+    def update_api_endpoint(
+        self, endpoint_id: int, session_id: str, **kwargs
+    ) -> DiscoveredApiEndpoint | None:
         """Update a discovered API endpoint.
 
         Args:
@@ -616,7 +645,9 @@ class ExplorationStore:
             db.refresh(requirement)
             return requirement
 
-    def get_requirements(self, category: str | None = None, status: str | None = None) -> list[Requirement]:
+    def get_requirements(
+        self, category: str | None = None, status: str | None = None
+    ) -> list[Requirement]:
         """Get requirements for the project."""
         with self._get_session() as db:
             query = select(Requirement).where(Requirement.project_id == self.project_id)
@@ -695,12 +726,19 @@ class ExplorationStore:
             return requirement
 
     def link_requirement_source(
-        self, requirement_id: int, source_type: str, source_id: int, confidence: float = 1.0
+        self,
+        requirement_id: int,
+        source_type: str,
+        source_id: int,
+        confidence: float = 1.0,
     ) -> RequirementSource:
         """Link a requirement to its source."""
         with self._get_session() as db:
             source = RequirementSource(
-                requirement_id=requirement_id, source_type=source_type, source_id=source_id, confidence=confidence
+                requirement_id=requirement_id,
+                source_type=source_type,
+                source_id=source_id,
+                confidence=confidence,
             )
             db.add(source)
             db.commit()
@@ -829,7 +867,9 @@ class ExplorationStore:
                 select(Requirement, RtmEntry)
                 .where(Requirement.project_id == self.project_id)
                 .outerjoin(
-                    RtmEntry, (Requirement.id == RtmEntry.requirement_id) & (RtmEntry.project_id == self.project_id)
+                    RtmEntry,
+                    (Requirement.id == RtmEntry.requirement_id)
+                    & (RtmEntry.project_id == self.project_id),
                 )
                 .order_by(Requirement.req_code)
             )
@@ -910,7 +950,8 @@ class ExplorationStore:
         with self._get_session() as db:
             snapshot = RtmSnapshot(
                 project_id=self.project_id,
-                snapshot_name=snapshot_name or f"Snapshot {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                snapshot_name=snapshot_name
+                or f"Snapshot {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                 total_requirements=total,
                 covered_requirements=covered,
                 partial_requirements=partial,
@@ -930,7 +971,13 @@ class ExplorationStore:
         total = len(rtm)
 
         if total == 0:
-            return {"total_requirements": 0, "covered": 0, "partial": 0, "uncovered": 0, "coverage_percentage": 0.0}
+            return {
+                "total_requirements": 0,
+                "covered": 0,
+                "partial": 0,
+                "uncovered": 0,
+                "coverage_percentage": 0.0,
+            }
 
         covered = sum(1 for r in rtm if r["coverage_status"] == "covered")
         partial = sum(1 for r in rtm if r["coverage_status"] == "partial")
@@ -975,13 +1022,16 @@ class ExplorationStore:
                 select(Requirement, RtmEntry)
                 .where(Requirement.project_id == self.project_id)
                 .outerjoin(
-                    RtmEntry, (Requirement.id == RtmEntry.requirement_id) & (RtmEntry.project_id == self.project_id)
+                    RtmEntry,
+                    (Requirement.id == RtmEntry.requirement_id)
+                    & (RtmEntry.project_id == self.project_id),
                 )
             )
 
             if search:
                 query = query.where(
-                    (Requirement.title.ilike(f"%{search}%")) | (Requirement.req_code.ilike(f"%{search}%"))
+                    (Requirement.title.ilike(f"%{search}%"))
+                    | (Requirement.req_code.ilike(f"%{search}%"))
                 )
             if category:
                 query = query.where(Requirement.category == category)
@@ -1011,7 +1061,11 @@ class ExplorationStore:
                 entries = req_entries_map.get(req_id, [])
                 item_coverage = self._calculate_coverage_status(entries)
 
-                if coverage_status and coverage_status != "all" and item_coverage != coverage_status:
+                if (
+                    coverage_status
+                    and coverage_status != "all"
+                    and item_coverage != coverage_status
+                ):
                     continue
 
                 all_items.append(
@@ -1055,11 +1109,21 @@ class ExplorationStore:
 
         with self._get_session() as db:
             # Count total requirements
-            total_query = select(func.count()).where(Requirement.project_id == self.project_id).select_from(Requirement)
+            total_query = (
+                select(func.count())
+                .where(Requirement.project_id == self.project_id)
+                .select_from(Requirement)
+            )
             total = db.exec(total_query).one()
 
             if total == 0:
-                return {"total_requirements": 0, "covered": 0, "partial": 0, "uncovered": 0, "coverage_percentage": 0.0}
+                return {
+                    "total_requirements": 0,
+                    "covered": 0,
+                    "partial": 0,
+                    "uncovered": 0,
+                    "coverage_percentage": 0.0,
+                }
 
             # Subquery: for each requirement, get the best mapping_type
             # full(3) > partial(2) > suggested(1) > none(0)
@@ -1092,12 +1156,16 @@ class ExplorationStore:
                     ).label("cov_status"),
                 )
                 .select_from(Requirement)
-                .outerjoin(coverage_sub, Requirement.id == coverage_sub.c.requirement_id)
+                .outerjoin(
+                    coverage_sub, Requirement.id == coverage_sub.c.requirement_id
+                )
                 .where(Requirement.project_id == self.project_id)
                 .subquery()
             )
 
-            stats_query = select(func.count().label("cnt"), inner.c.cov_status).group_by(inner.c.cov_status)
+            stats_query = select(
+                func.count().label("cnt"), inner.c.cov_status
+            ).group_by(inner.c.cov_status)
 
             results = db.exec(stats_query).all()
 
@@ -1125,9 +1193,15 @@ class ExplorationStore:
 _exploration_store: ExplorationStore | None = None
 
 
-def get_exploration_store(project_id: str = "default", force_refresh: bool = False) -> ExplorationStore:
+def get_exploration_store(
+    project_id: str = "default", force_refresh: bool = False
+) -> ExplorationStore:
     """Get the exploration store instance."""
     global _exploration_store
-    if _exploration_store is None or force_refresh or _exploration_store.project_id != project_id:
+    if (
+        _exploration_store is None
+        or force_refresh
+        or _exploration_store.project_id != project_id
+    ):
         _exploration_store = ExplorationStore(project_id=project_id)
     return _exploration_store

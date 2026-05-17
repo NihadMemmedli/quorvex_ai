@@ -111,16 +111,29 @@ class SuggestRequest(BaseModel):
 
 class ApproveSuggestionsRequest(BaseModel):
     suggestions: list
-    spec_name: str
+    spec_name: str | None = None
     project_id: str | None = "default"
 
 
 class GenerateSpecRequest(BaseModel):
     connection_id: str
     spec_name: str | None = None
+    instructions: str | None = None
     focus_areas: list[str] | None = None
     auto_run: bool = False
+    preview_only: bool = False
     project_id: str | None = "default"
+
+
+class SaveGeneratedSpecRequest(BaseModel):
+    checks: list
+    spec_name: str | None = None
+    project_id: str | None = "default"
+
+
+class QueryDatabaseRequest(BaseModel):
+    sql: str
+    limit: int = 100
 
 
 # ========== Helper Functions ==========
@@ -165,6 +178,58 @@ def _generate_conn_id() -> str:
 
 def _generate_run_id() -> str:
     return f"dbt-{uuid.uuid4().hex[:8]}"
+
+
+def _default_spec_name(seed: str) -> str:
+    import re
+
+    slug = re.sub(r"[^a-z0-9]+", "-", seed.lower()).strip("-")[:64] or "database-spec"
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M")
+    return f"ai-generated-{slug}-{timestamp}.md"
+
+
+def _normalize_spec_name(spec_name: str | None, seed: str) -> str:
+    name = spec_name.strip() if spec_name else _default_spec_name(seed)
+    return name if name.endswith(".md") else f"{name}.md"
+
+
+def _checks_to_markdown(spec_name: str, checks: list) -> str:
+    lines = [f"# Database Quality Checks: {spec_name.replace('.md', '')}", ""]
+    for i, check in enumerate(checks, 1):
+        if not isinstance(check, dict):
+            continue
+        lines.append(f"## Check {i}: {check.get('check_name', f'check_{i}')}")
+        if check.get("description"):
+            lines.append(f"**Description**: {check['description']}")
+        lines.append(f"**Type**: {check.get('check_type', 'custom')}")
+        lines.append(f"**Severity**: {check.get('severity', 'medium')}")
+        if check.get("table_name"):
+            lines.append(f"**Table**: {check['table_name']}")
+        if check.get("column_name"):
+            lines.append(f"**Column**: {check['column_name']}")
+        lines.append(f"**Expect Empty**: {check.get('expect_empty', True)}")
+        lines.append("")
+        lines.append("```sql")
+        lines.append(check.get("sql_query", "SELECT 1"))
+        lines.append("```")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _limit_read_query(sql: str, limit: int) -> str:
+    clean_sql = sql.strip().rstrip(";").strip()
+    if not clean_sql:
+        raise HTTPException(status_code=400, detail="Query is empty")
+    if ";" in clean_sql:
+        raise HTTPException(status_code=400, detail="Only one read-only statement is allowed")
+
+    bounded_limit = max(1, min(int(limit or 100), 500))
+    upper = clean_sql.upper()
+    if upper.startswith(("SELECT", "WITH")):
+        return f"SELECT * FROM ({clean_sql}) AS qvx_query LIMIT {bounded_limit}"
+    if upper.startswith("EXPLAIN"):
+        return clean_sql
+    return clean_sql
 
 
 def _mask_connection(conn: DbConnection) -> dict:
@@ -753,7 +818,7 @@ async def _run_suggestion_job(job_id: str, run_id: str, project_id: str):
 
         _db_jobs[job_id]["status"] = "completed"
         _db_jobs[job_id]["completed_at"] = time.time()
-        _db_jobs[job_id]["result"] = {"suggestions_count": len(suggestions)}
+        _db_jobs[job_id]["result"] = {"suggestions_count": len(suggestions), "suggestions": suggestions}
 
     except ImportError:
         logger.error("db_test_generator workflow not available")
@@ -772,10 +837,12 @@ async def _run_generate_spec_job(
     conn_id: str,
     spec_name: str,
     project_id: str,
+    instructions: str | None = None,
     focus_areas: list[str] | None = None,
     auto_run: bool = False,
+    preview_only: bool = False,
 ):
-    """Background task: introspect schema → AI analyze → AI generate checks → save as spec."""
+    """Background task: introspect schema -> AI analyze -> AI generate checks -> preview or save."""
     _db_jobs[job_id]["status"] = "running"
     _db_jobs[job_id]["started_at"] = time.time()
 
@@ -822,6 +889,7 @@ async def _run_generate_spec_job(
             schema_data,
             findings=findings,
             focus_areas=focus_areas,
+            instructions=instructions,
         )
 
         if not checks:
@@ -829,41 +897,28 @@ async def _run_generate_spec_job(
 
         # Stage 5: Format as markdown spec
         _db_jobs[job_id]["stage_message"] = f"Formatting {len(checks)} checks as spec..."
-        lines = [f"# Database Quality Checks: {spec_name.replace('.md', '')}", ""]
-        for i, check in enumerate(checks, 1):
-            lines.append(f"## Check {i}: {check.get('check_name', f'check_{i}')}")
-            if check.get("description"):
-                lines.append(f"**Description**: {check['description']}")
-            lines.append(f"**Type**: {check.get('check_type', 'custom')}")
-            lines.append(f"**Severity**: {check.get('severity', 'medium')}")
-            if check.get("table_name"):
-                lines.append(f"**Table**: {check['table_name']}")
-            if check.get("column_name"):
-                lines.append(f"**Column**: {check['column_name']}")
-            lines.append(f"**Expect Empty**: {check.get('expect_empty', True)}")
-            lines.append("")
-            lines.append("```sql")
-            lines.append(check.get("sql_query", "SELECT 1"))
-            lines.append("```")
-            lines.append("")
-
-        content = "\n".join(lines)
-
-        # Stage 6: Save spec file
-        _db_jobs[job_id]["stage_message"] = "Saving spec file..."
-        specs_dir = _get_specs_dir(project_id)
-        target = specs_dir / spec_name
-        target.write_text(content, encoding="utf-8")
-        logger.info(f"AI-generated spec saved: {target}")
+        content = _checks_to_markdown(spec_name, checks)
 
         job_result: dict = {
             "spec_name": spec_name,
             "checks_count": len(checks),
             "tables_analyzed": tables_count,
+            "checks": checks,
+            "content": content,
+            "preview_only": preview_only,
         }
 
+        # Stage 6: Save spec file unless caller asked for a review preview first
+        if not preview_only:
+            _db_jobs[job_id]["stage_message"] = "Saving spec file..."
+            specs_dir = _get_specs_dir(project_id)
+            target = specs_dir / spec_name
+            target.write_text(content, encoding="utf-8")
+            logger.info(f"AI-generated spec saved: {target}")
+            job_result["path"] = str(target.relative_to(BASE_DIR))
+
         # Stage 7 (optional): Auto-run
-        if auto_run:
+        if auto_run and not preview_only:
             _db_jobs[job_id]["stage_message"] = f"Executing {len(checks)} checks..."
             try:
                 from workflows.db_spec_parser import parse_spec_to_checks
@@ -965,7 +1020,9 @@ async def _run_generate_spec_job(
         _db_jobs[job_id]["status"] = "completed"
         _db_jobs[job_id]["completed_at"] = time.time()
         _db_jobs[job_id]["result"] = job_result
-        _db_jobs[job_id]["stage_message"] = "Spec generated successfully"
+        _db_jobs[job_id]["stage_message"] = (
+            "Spec preview generated successfully" if preview_only else "Spec generated successfully"
+        )
 
     except Exception as e:
         logger.error(f"Generate spec job failed: {e}")
@@ -1115,6 +1172,59 @@ async def test_connection(conn_id: str):
                 session.commit()
 
         raise HTTPException(status_code=400, detail=f"Connection test failed: {e}")
+
+
+# ========== Database Viewer Endpoints ==========
+
+
+@router.get("/connections/{conn_id}/schema")
+async def get_connection_schema(conn_id: str):
+    """Introspect a connection and return its live schema without creating a run."""
+    with Session(engine) as session:
+        conn = session.get(DbConnection, conn_id)
+        if not conn:
+            raise HTTPException(status_code=404, detail=f"Connection '{conn_id}' not found")
+        connector = _get_connector(conn)
+
+    try:
+        await connector.connect()
+        try:
+            schema_data = await connector.introspect_schema()
+        finally:
+            await connector.close()
+        return {
+            "connection_id": conn_id,
+            "schema": schema_data,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Schema introspection failed: {e}")
+
+
+@router.post("/connections/{conn_id}/query")
+async def query_connection(conn_id: str, req: QueryDatabaseRequest):
+    """Run a bounded read-only query for the DB viewer."""
+    with Session(engine) as session:
+        conn = session.get(DbConnection, conn_id)
+        if not conn:
+            raise HTTPException(status_code=404, detail=f"Connection '{conn_id}' not found")
+        connector = _get_connector(conn)
+
+    sql = _limit_read_query(req.sql, req.limit)
+    try:
+        await connector.connect()
+        try:
+            result = await connector.execute_read_query(sql, req.limit)
+        finally:
+            await connector.close()
+        return {
+            "connection_id": conn_id,
+            "sql": sql,
+            **result,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Query failed: {e}")
 
 
 # ========== Schema Analysis Endpoints ==========
@@ -1357,7 +1467,7 @@ async def start_full_pipeline(conn_id: str, req: RunFullRequest):
 
 
 @router.post("/suggest/{run_id}")
-async def start_suggestions(run_id: str, req: SuggestRequest):
+async def start_suggestions(run_id: str, req: SuggestRequest | None = None):
     """Generate test suggestions from schema findings."""
     _cleanup_old_jobs()
 
@@ -1369,7 +1479,7 @@ async def start_suggestions(run_id: str, req: SuggestRequest):
             raise HTTPException(status_code=400, detail="No schema snapshot available. Run schema analysis first.")
 
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    project_id = req.project_id or "default"
+    project_id = (req.project_id if req else None) or "default"
 
     _db_jobs[job_id] = {
         "job_id": job_id,
@@ -1409,31 +1519,13 @@ async def approve_suggestions(run_id: str, req: ApproveSuggestionsRequest):
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
     project_id = req.project_id or "default"
-    spec_name = req.spec_name if req.spec_name.endswith(".md") else f"{req.spec_name}.md"
-
-    # Build spec content from suggestions
-    lines = [f"# Database Quality Checks: {spec_name.replace('.md', '')}", ""]
-    for i, suggestion in enumerate(req.suggestions, 1):
-        lines.append(f"## Check {i}: {suggestion.get('check_name', f'check_{i}')}")
-        if suggestion.get("description"):
-            lines.append(f"**Description**: {suggestion['description']}")
-        lines.append(f"**Type**: {suggestion.get('check_type', 'custom')}")
-        lines.append(f"**Severity**: {suggestion.get('severity', 'medium')}")
-        if suggestion.get("table_name"):
-            lines.append(f"**Table**: {suggestion['table_name']}")
-        if suggestion.get("column_name"):
-            lines.append(f"**Column**: {suggestion['column_name']}")
-        lines.append(f"**Expect Empty**: {suggestion.get('expect_empty', True)}")
-        lines.append("")
-        lines.append("```sql")
-        lines.append(suggestion.get("sql_query", "SELECT 1"))
-        lines.append("```")
-        lines.append("")
-
-    content = "\n".join(lines)
+    spec_name = _normalize_spec_name(req.spec_name, run.spec_name or run.connection_id or "suggestions")
+    content = _checks_to_markdown(spec_name, req.suggestions)
 
     specs_dir = _get_specs_dir(project_id)
     target = specs_dir / spec_name
+    if target.exists():
+        raise HTTPException(status_code=409, detail=f"Spec '{spec_name}' already exists")
     target.write_text(content, encoding="utf-8")
 
     logger.info(f"Saved approved suggestions as spec: {target}")
@@ -1450,7 +1542,7 @@ async def approve_suggestions(run_id: str, req: ApproveSuggestionsRequest):
 
 @router.post("/generate-spec")
 async def generate_spec(req: GenerateSpecRequest):
-    """Generate a database test spec using AI: introspect → analyze → generate checks → save."""
+    """Generate a database test spec using AI: introspect -> analyze -> generate checks -> save."""
     _cleanup_old_jobs()
 
     project_id = req.project_id or "default"
@@ -1462,19 +1554,11 @@ async def generate_spec(req: GenerateSpecRequest):
             raise HTTPException(status_code=404, detail=f"Connection '{req.connection_id}' not found")
         conn_name = conn.name
 
-    # Auto-generate spec name if not provided
-    if req.spec_name:
-        spec_name = req.spec_name if req.spec_name.endswith(".md") else f"{req.spec_name}.md"
-    else:
-        import re
-
-        slug = re.sub(r"[^a-z0-9]+", "-", conn_name.lower()).strip("-")
-        timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M")
-        spec_name = f"ai-generated-{slug}-{timestamp}.md"
+    spec_name = _normalize_spec_name(req.spec_name, conn_name)
 
     # Check for duplicate spec name
     specs_dir = _get_specs_dir(project_id)
-    if (specs_dir / spec_name).exists():
+    if not req.preview_only and (specs_dir / spec_name).exists():
         raise HTTPException(status_code=409, detail=f"Spec '{spec_name}' already exists")
 
     job_id = f"job-{uuid.uuid4().hex[:8]}"
@@ -1495,12 +1579,38 @@ async def generate_spec(req: GenerateSpecRequest):
             conn_id=req.connection_id,
             spec_name=spec_name,
             project_id=project_id,
+            instructions=req.instructions,
             focus_areas=req.focus_areas,
             auto_run=req.auto_run,
+            preview_only=req.preview_only,
         )
     )
 
     return {"job_id": job_id, "spec_name": spec_name, "status": "pending"}
+
+
+@router.post("/generated-specs/save")
+async def save_generated_spec(req: SaveGeneratedSpecRequest):
+    """Save reviewed generated checks as a database spec markdown file."""
+    project_id = req.project_id or "default"
+    spec_name = _normalize_spec_name(req.spec_name, "database-spec")
+    if not req.checks:
+        raise HTTPException(status_code=400, detail="No checks provided")
+
+    specs_dir = _get_specs_dir(project_id)
+    target = specs_dir / spec_name
+    if target.exists():
+        raise HTTPException(status_code=409, detail=f"Spec '{spec_name}' already exists")
+
+    content = _checks_to_markdown(spec_name, req.checks)
+    target.write_text(content, encoding="utf-8")
+
+    return {
+        "name": spec_name,
+        "path": str(target.relative_to(BASE_DIR)),
+        "checks_count": len(req.checks),
+        "message": "Generated spec saved",
+    }
 
 
 # ========== Job Tracking + History Endpoints ==========

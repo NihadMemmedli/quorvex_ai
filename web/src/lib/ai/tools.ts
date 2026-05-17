@@ -40,6 +40,8 @@ export const MUTATING_TOOL_CONFIGS: Record<string, { label: string }> = {
   triageSecurityFinding: { label: 'Triage Security Finding' },
   suggestLlmSpecImprovements: { label: 'Suggest LLM Spec Improvements' },
   suggestDbFixes: { label: 'Suggest DB Fixes' },
+  generateDatabaseSpec: { label: 'Generate Database Spec' },
+  saveGeneratedDatabaseSpec: { label: 'Save Generated Database Spec' },
   createApiSpec: { label: 'Create API Spec' },
   updateApiSpec: { label: 'Update API Spec' },
   deleteApiSpec: { label: 'Delete API Spec' },
@@ -718,6 +720,42 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       },
     }),
 
+    listDatabaseConnections: tool({
+      description: 'List configured database testing connections for the current project. Use this before generating database specs when the connection ID is unknown.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/database-testing/connections?${params}`);
+      },
+    }),
+
+    listDatabaseSpecs: tool({
+      description: 'List database testing specs for the current project.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/database-testing/specs?${params}`);
+      },
+    }),
+
+    getDatabaseJobStatus: tool({
+      description: 'Get the status of a database testing background job by job ID, including AI database spec generation jobs.',
+      inputSchema: z.object({
+        jobId: z.string().describe('The database testing job ID returned by generation or run actions'),
+      }),
+      execute: async ({ jobId }): Promise<ToolResult> => {
+        return fetchTool(`/database-testing/jobs/${encodeURIComponent(jobId)}`);
+      },
+    }),
+
+    saveGeneratedDatabaseSpec: tool({
+      description: 'Save reviewed database checks returned by a database spec generation job as a database spec. Confirm before use.',
+      inputSchema: z.object({
+        specName: z.string().optional().describe('Optional database spec file name'),
+        checks: z.array(z.record(z.string(), z.unknown())).min(1).describe('Generated check objects to save'),
+      }),
+    }),
+
     // ===== Regression Analysis Tools =====
 
     compareBatches: tool({
@@ -1003,6 +1041,15 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       description: 'Get AI-powered fix suggestions for failed database quality checks.',
       inputSchema: z.object({
         runId: z.string().describe('The database test run ID with failures'),
+      }),
+    }),
+
+    generateDatabaseSpec: tool({
+      description: 'Generate a database testing spec from a configured database connection and natural-language instructions. Requires user approval and always starts with auto_run=false.',
+      inputSchema: z.object({
+        connectionId: z.string().describe('The database connection ID to inspect'),
+        instructions: z.string().describe('Natural-language instructions for what the generated database spec should cover'),
+        specName: z.string().optional().describe('Optional generated spec name'),
       }),
     }),
 

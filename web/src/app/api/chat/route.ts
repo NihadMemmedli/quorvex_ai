@@ -24,6 +24,16 @@ interface AgentRunSummary {
   result?: Record<string, unknown> | null;
 }
 
+interface DatabaseConnectionSummary {
+  id?: string;
+  connection_id?: string;
+  name?: string;
+  database?: string;
+  db_type?: string;
+  type?: string;
+  status?: string;
+}
+
 function supportsExtendedThinking(modelId: string) {
   return process.env.ANTHROPIC_ENABLE_CHAT_THINKING === 'true' && (
     modelId.includes('claude-4') ||
@@ -659,6 +669,121 @@ function buildApiTestAction(messages: any[]): { text: string; toolName: string; 
   return null;
 }
 
+function isDatabaseSpecGenerationIntent(text: string): boolean {
+  const databaseIntent = /\b(db|database|sql|postgres|postgresql|mysql|sqlite|mssql|oracle|schema)\b/i.test(text);
+  const specIntent = /\b(spec|test spec|testing spec|quality checks?|data quality|validation checks?)\b/i.test(text);
+  const generationIntent = /\b(generate|create|make|build|draft|prepare)\b/i.test(text);
+  return databaseIntent && specIntent && generationIntent;
+}
+
+function extractDatabaseConnectionId(text: string): string | null {
+  const explicit = text.match(/\b(?:connection|conn)(?:\s+id)?\s*(?:is|=|:|#)\s*["'`]?([a-z0-9][a-z0-9_-]{2,})["'`]?/i)
+    || text.match(/\b(?:connection|conn)\s+id\s+["'`]?([a-z0-9][a-z0-9_-]{2,})["'`]?/i);
+  if (explicit?.[1]) {
+    return explicit[1];
+  }
+
+  const uuid = text.match(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i);
+  return uuid?.[0] || null;
+}
+
+function extractDatabaseSpecName(text: string): string | null {
+  const fileName = text.match(/\b[a-z0-9][a-z0-9._/-]*\.md\b/i);
+  if (fileName?.[0]) return fileName[0];
+
+  const explicit = text.match(/\b(?:spec\s+name|name\s+it|called|named)\s*(?:is|=|:)?\s*["'`]?([a-z0-9][a-z0-9._/-]{2,})["'`]?/i);
+  return explicit?.[1] || null;
+}
+
+function normalizeDatabaseConnections(data: unknown): DatabaseConnectionSummary[] {
+  if (Array.isArray(data)) return data as DatabaseConnectionSummary[];
+  if (!data || typeof data !== 'object') return [];
+  const record = data as Record<string, unknown>;
+  const list = record.connections || record.items || record.data || record.results;
+  return Array.isArray(list) ? list as DatabaseConnectionSummary[] : [];
+}
+
+function databaseConnectionId(connection: DatabaseConnectionSummary): string {
+  return String(connection.id || connection.connection_id || '');
+}
+
+function databaseConnectionLabel(connection: DatabaseConnectionSummary): string {
+  const id = databaseConnectionId(connection);
+  const name = connection.name || connection.database || 'Unnamed connection';
+  const type = connection.db_type || connection.type;
+  const status = connection.status ? ` (${connection.status})` : '';
+  return `${name}${type ? ` [${type}]` : ''}${id ? ` - ${id}` : ''}${status}`;
+}
+
+async function buildDatabaseSpecGenerationResponse(
+  messages: any[],
+  projectId?: string,
+  authToken?: string
+): Promise<Response | null> {
+  const latestUserText = extractLatestUserText(messages);
+  const conversationText = messages.map(extractMessageText).filter(Boolean).join('\n');
+  const combinedText = `${conversationText}\n${latestUserText}`;
+  if (!isDatabaseSpecGenerationIntent(combinedText)) return null;
+  if (/\b(api|openapi|swagger|endpoint|http\s+request|rest)\b/i.test(latestUserText)) return null;
+
+  const mentionedConnectionId = extractDatabaseConnectionId(combinedText);
+  const specName = extractDatabaseSpecName(combinedText);
+  const instructions = latestUserText.trim() || 'Generate a database testing spec from this connection.';
+
+  if (mentionedConnectionId) {
+    return toolInputUIMessageResponse(
+      'I prepared the database spec generation action below. Approve it to generate the spec without auto-running it.',
+      'generateDatabaseSpec',
+      {
+        connectionId: mentionedConnectionId,
+        instructions,
+        specName: specName || undefined,
+      }
+    );
+  }
+
+  const params = new URLSearchParams();
+  if (projectId) params.set('project_id', projectId);
+  const path = `/database-testing/connections${params.toString() ? `?${params}` : ''}`;
+  const res = await backendFetch<unknown>(path, {
+    authToken,
+    timeoutMs: OPTIONAL_CONTEXT_TIMEOUT_MS,
+  });
+
+  if (!res.ok) {
+    return textToUIMessageResponse(
+      `I need a database connection before I can prepare that approval action, but I could not load the connection list: ${res.error || 'unknown error'}.`
+    );
+  }
+
+  const connections = normalizeDatabaseConnections(res.data).filter(databaseConnectionId);
+  if (connections.length === 1) {
+    return toolInputUIMessageResponse(
+      'I found one database connection and prepared the spec generation action below. Approve it to generate the spec without auto-running it.',
+      'generateDatabaseSpec',
+      {
+        connectionId: databaseConnectionId(connections[0]),
+        instructions,
+        specName: specName || undefined,
+      }
+    );
+  }
+
+  if (connections.length === 0) {
+    return textToUIMessageResponse(
+      'I do not see any configured database connections. Add a connection on /database-testing, then ask me to generate the database spec again.'
+    );
+  }
+
+  const choices = connections
+    .slice(0, 10)
+    .map((connection) => `- ${databaseConnectionLabel(connection)}`)
+    .join('\n');
+  return textToUIMessageResponse(
+    `Which database connection should I use?\n\n${choices}\n\nReply with the connection ID and I will prepare the approval action.`
+  );
+}
+
 /** Extract a user-friendly message from various error shapes */
 function extractUserMessage(error: unknown): string {
   const msg = error instanceof Error ? error.message : String(error);
@@ -750,6 +875,9 @@ export async function POST(req: Request) {
       apiTestAction.input
     );
   }
+
+  const databaseSpecGeneration = await buildDatabaseSpecGenerationResponse(messages, projectId, authToken);
+  if (databaseSpecGeneration) return databaseSpecGeneration;
 
   const autoPilotStartInput = buildAutoPilotStartInput(messages);
   if (autoPilotStartInput) {
