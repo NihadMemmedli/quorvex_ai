@@ -17,10 +17,15 @@ from .models_auth import ProjectMember, RefreshToken, User  # noqa: F401
 # Import all DB models to ensure they're registered with SQLModel metadata
 # This must happen before create_all() is called
 from .models_db import (  # noqa: F401
-    AgentRun,
     AgentDefinition,
     AgentMemory,
+    AgentRun,
     AgentToolDefinition,
+    AutonomousApproval,
+    AutonomousFinding,
+    AutonomousMission,
+    AutonomousMissionRun,
+    AutonomousTestProposal,
     ApplicationMap,
     ArchiveJob,
     AutoPilotPhase,
@@ -32,6 +37,11 @@ from .models_db import (  # noqa: F401
     # AI Chat models
     ChatConversation,
     ChatMessage,
+    CiAuditEvent,
+    CiPipelineMapping,
+    CiTestSubset,
+    CiTestSubsetItem,
+    CiWorkflowChangeRequest,
     CoverageGap,
     CoverageMetric,
     # Scheduling models
@@ -91,6 +101,9 @@ from .models_db import (  # noqa: F401
     TestrailCaseMapping,
     TestrailRunMapping,
     TestRun,
+    WorkflowDefinition,
+    WorkflowRun,
+    WorkflowRunStep,
 )
 
 # Database URL configuration
@@ -408,6 +421,234 @@ def _run_migrations():
                 )
             except Exception as e:
                 logger.debug(f"Index may already exist on agent_definitions: {e}")
+
+        timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+        if "workflow_definitions" not in inspector.get_table_names():
+            conn.execute(
+                text(f"""
+                CREATE TABLE workflow_definitions (
+                    id VARCHAR PRIMARY KEY,
+                    project_id VARCHAR,
+                    name VARCHAR NOT NULL,
+                    description VARCHAR NOT NULL DEFAULT '',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    steps_json TEXT NOT NULL DEFAULT '[]',
+                    status VARCHAR NOT NULL DEFAULT 'active',
+                    created_by VARCHAR,
+                    created_at {timestamp_type},
+                    updated_at {timestamp_type}
+                )
+                """)
+            )
+            logger.info("Created table: workflow_definitions")
+        else:
+            wf_cols = {col["name"] for col in inspector.get_columns("workflow_definitions")}
+            if "steps_json" not in wf_cols:
+                conn.execute(text("ALTER TABLE workflow_definitions ADD COLUMN steps_json TEXT NOT NULL DEFAULT '[]'"))
+                if "steps" in wf_cols:
+                    conn.execute(text("UPDATE workflow_definitions SET steps_json = COALESCE(CAST(steps AS TEXT), '[]')"))
+                logger.info("Added column: workflow_definitions.steps_json")
+            if "created_by" not in wf_cols:
+                conn.execute(text("ALTER TABLE workflow_definitions ADD COLUMN created_by VARCHAR"))
+                logger.info("Added column: workflow_definitions.created_by")
+            if "version" not in wf_cols:
+                conn.execute(text("ALTER TABLE workflow_definitions ADD COLUMN version INTEGER NOT NULL DEFAULT 1"))
+                logger.info("Added column: workflow_definitions.version")
+
+        if "workflow_runs" not in inspector.get_table_names():
+            conn.execute(
+                text(f"""
+                CREATE TABLE workflow_runs (
+                    id VARCHAR PRIMARY KEY,
+                    workflow_id VARCHAR,
+                    definition_id VARCHAR NOT NULL,
+                    project_id VARCHAR,
+                    status VARCHAR NOT NULL DEFAULT 'queued',
+                    current_step_index INTEGER NOT NULL DEFAULT 0,
+                    progress FLOAT NOT NULL DEFAULT 0,
+                    inputs_json TEXT NOT NULL DEFAULT '{{}}',
+                    context_json TEXT NOT NULL DEFAULT '{{}}',
+                    result_json TEXT,
+                    error_message TEXT,
+                    triggered_by VARCHAR,
+                    created_at {timestamp_type},
+                    started_at {timestamp_type},
+                    completed_at {timestamp_type},
+                    updated_at {timestamp_type}
+                )
+                """)
+            )
+            logger.info("Created table: workflow_runs")
+        else:
+            run_cols = {col["name"] for col in inspector.get_columns("workflow_runs")}
+            if "workflow_id" not in run_cols:
+                conn.execute(text("ALTER TABLE workflow_runs ADD COLUMN workflow_id VARCHAR"))
+                conn.execute(text("UPDATE workflow_runs SET workflow_id = definition_id WHERE workflow_id IS NULL"))
+                logger.info("Added column: workflow_runs.workflow_id")
+            if "definition_id" not in run_cols:
+                conn.execute(text("ALTER TABLE workflow_runs ADD COLUMN definition_id VARCHAR"))
+                if "workflow_id" in run_cols:
+                    conn.execute(text("UPDATE workflow_runs SET definition_id = workflow_id WHERE definition_id IS NULL"))
+                logger.info("Added column: workflow_runs.definition_id")
+            if "progress" not in run_cols:
+                conn.execute(text("ALTER TABLE workflow_runs ADD COLUMN progress FLOAT NOT NULL DEFAULT 0"))
+                logger.info("Added column: workflow_runs.progress")
+            if "inputs_json" not in run_cols:
+                conn.execute(text("ALTER TABLE workflow_runs ADD COLUMN inputs_json TEXT NOT NULL DEFAULT '{}'"))
+                if "input_data" in run_cols:
+                    conn.execute(text("UPDATE workflow_runs SET inputs_json = COALESCE(CAST(input_data AS TEXT), '{}')"))
+                logger.info("Added column: workflow_runs.inputs_json")
+            if "context_json" not in run_cols:
+                conn.execute(text("ALTER TABLE workflow_runs ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'"))
+                logger.info("Added column: workflow_runs.context_json")
+            if "result_json" not in run_cols:
+                conn.execute(text("ALTER TABLE workflow_runs ADD COLUMN result_json TEXT"))
+                if "result_data" in run_cols:
+                    conn.execute(text("UPDATE workflow_runs SET result_json = CAST(result_data AS TEXT) WHERE result_data IS NOT NULL"))
+                logger.info("Added column: workflow_runs.result_json")
+            if "triggered_by" not in run_cols:
+                conn.execute(text("ALTER TABLE workflow_runs ADD COLUMN triggered_by VARCHAR"))
+                logger.info("Added column: workflow_runs.triggered_by")
+
+        if "workflow_run_steps" not in inspector.get_table_names():
+            bool_default = "FALSE" if db_type == "postgresql" else "0"
+            pk_type = "SERIAL PRIMARY KEY" if db_type == "postgresql" else "INTEGER PRIMARY KEY AUTOINCREMENT"
+            conn.execute(
+                text(f"""
+                CREATE TABLE workflow_run_steps (
+                    id {pk_type},
+                    run_id VARCHAR NOT NULL,
+                    workflow_id VARCHAR,
+                    definition_id VARCHAR NOT NULL,
+                    step_index INTEGER NOT NULL DEFAULT 0,
+                    step_order INTEGER NOT NULL,
+                    step_id VARCHAR NOT NULL DEFAULT 'step',
+                    step_key VARCHAR NOT NULL,
+                    step_type VARCHAR NOT NULL,
+                    name VARCHAR NOT NULL DEFAULT '',
+                    label VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL DEFAULT 'pending',
+                    continue_on_error BOOLEAN NOT NULL DEFAULT {bool_default},
+                    input_json TEXT NOT NULL DEFAULT '{{}}',
+                    output_json TEXT,
+                    error_message TEXT,
+                    external_kind VARCHAR,
+                    external_id VARCHAR,
+                    created_at {timestamp_type},
+                    started_at {timestamp_type},
+                    completed_at {timestamp_type},
+                    updated_at {timestamp_type}
+                )
+                """)
+            )
+            logger.info("Created table: workflow_run_steps")
+        else:
+            step_cols = {col["name"] for col in inspector.get_columns("workflow_run_steps")}
+            if "workflow_id" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN workflow_id VARCHAR"))
+                conn.execute(text("UPDATE workflow_run_steps SET workflow_id = definition_id WHERE workflow_id IS NULL"))
+                logger.info("Added column: workflow_run_steps.workflow_id")
+            if "definition_id" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN definition_id VARCHAR"))
+                if "workflow_id" in step_cols:
+                    conn.execute(text("UPDATE workflow_run_steps SET definition_id = workflow_id WHERE definition_id IS NULL"))
+                logger.info("Added column: workflow_run_steps.definition_id")
+            if "step_index" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN step_index INTEGER NOT NULL DEFAULT 0"))
+                if "step_order" in step_cols:
+                    conn.execute(text("UPDATE workflow_run_steps SET step_index = step_order"))
+                logger.info("Added column: workflow_run_steps.step_index")
+            if "step_order" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN step_order INTEGER NOT NULL DEFAULT 0"))
+                if "step_index" in step_cols:
+                    conn.execute(text("UPDATE workflow_run_steps SET step_order = step_index"))
+                logger.info("Added column: workflow_run_steps.step_order")
+            if "step_id" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN step_id VARCHAR NOT NULL DEFAULT 'step'"))
+                if "step_key" in step_cols:
+                    conn.execute(text("UPDATE workflow_run_steps SET step_id = step_key WHERE step_key IS NOT NULL"))
+                logger.info("Added column: workflow_run_steps.step_id")
+            if "step_key" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN step_key VARCHAR NOT NULL DEFAULT 'step'"))
+                if "step_id" in step_cols:
+                    conn.execute(text("UPDATE workflow_run_steps SET step_key = step_id WHERE step_id IS NOT NULL"))
+                logger.info("Added column: workflow_run_steps.step_key")
+            if "name" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN name VARCHAR NOT NULL DEFAULT ''"))
+                if "label" in step_cols:
+                    conn.execute(text("UPDATE workflow_run_steps SET name = label WHERE label IS NOT NULL"))
+                logger.info("Added column: workflow_run_steps.name")
+            if "label" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN label VARCHAR NOT NULL DEFAULT ''"))
+                if "name" in step_cols:
+                    conn.execute(text("UPDATE workflow_run_steps SET label = name WHERE name IS NOT NULL"))
+                logger.info("Added column: workflow_run_steps.label")
+            if "continue_on_error" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN continue_on_error BOOLEAN NOT NULL DEFAULT FALSE"))
+                logger.info("Added column: workflow_run_steps.continue_on_error")
+            if "input_json" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN input_json TEXT NOT NULL DEFAULT '{}'"))
+                if "input_data" in step_cols:
+                    conn.execute(text("UPDATE workflow_run_steps SET input_json = COALESCE(CAST(input_data AS TEXT), '{}')"))
+                logger.info("Added column: workflow_run_steps.input_json")
+            if "output_json" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN output_json TEXT"))
+                if "output_data" in step_cols:
+                    conn.execute(text("UPDATE workflow_run_steps SET output_json = CAST(output_data AS TEXT) WHERE output_data IS NOT NULL"))
+                logger.info("Added column: workflow_run_steps.output_json")
+            if "external_kind" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN external_kind VARCHAR"))
+                logger.info("Added column: workflow_run_steps.external_kind")
+            if "external_id" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN external_id VARCHAR"))
+                logger.info("Added column: workflow_run_steps.external_id")
+            if "created_at" not in step_cols:
+                default_now = "CURRENT_TIMESTAMP"
+                conn.execute(text(f"ALTER TABLE workflow_run_steps ADD COLUMN created_at {timestamp_type} NOT NULL DEFAULT {default_now}"))
+                logger.info("Added column: workflow_run_steps.created_at")
+
+        try:
+            if "workflow_definitions" in inspector.get_table_names():
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_workflow_definitions_project_status "
+                        "ON workflow_definitions (project_id, status)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_workflow_definitions_project_updated "
+                        "ON workflow_definitions (project_id, updated_at)"
+                    )
+                )
+            if "workflow_runs" in inspector.get_table_names():
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_workflow_runs_project_status "
+                        "ON workflow_runs (project_id, status)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_workflow_runs_definition_created "
+                        "ON workflow_runs (definition_id, created_at)"
+                    )
+                )
+            if "workflow_run_steps" in inspector.get_table_names():
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_workflow_run_steps_run_order "
+                        "ON workflow_run_steps (run_id, step_order)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_workflow_run_steps_external "
+                        "ON workflow_run_steps (external_kind, external_id)"
+                    )
+                )
+        except Exception as e:
+            logger.debug(f"Index may already exist on workflow tables: {e}")
 
         # Add title_embedding_json to requirements table for deduplication
         if "requirements" in inspector.get_table_names():

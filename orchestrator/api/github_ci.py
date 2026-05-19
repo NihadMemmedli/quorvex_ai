@@ -83,6 +83,7 @@ class PrAdvisorRunRequest(BaseModel):
     browser: str = "chromium"
     hybrid: bool = False
     max_iterations: int = 20
+    spec_names: list[str] | None = None
 
 
 class PrQualityGateStartRequest(BaseModel):
@@ -368,6 +369,52 @@ async def list_remote_workflows(
                 "state": w.get("state", ""),
             }
             for w in workflows
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        await client.close()
+
+
+@router.get("/{project_id}/pull-requests")
+async def list_pull_requests(
+    project_id: str,
+    state: str = "open",
+    limit: int = 30,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """List pull requests from the configured GitHub repository."""
+    project = _require_project(project_id, session)
+    config = _get_github_config(project)
+    if not config:
+        raise HTTPException(status_code=400, detail="GitHub not configured for this project")
+
+    owner = config.get("owner", "")
+    repo = config.get("repo", "")
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="owner and repo must be configured")
+
+    normalized_state = state if state in {"open", "closed", "all"} else "open"
+    safe_limit = max(1, min(int(limit or 30), 100))
+    client = await _build_client(project)
+    try:
+        pulls = await client.list_pull_requests(owner, repo, state=normalized_state, limit=safe_limit)
+        return [
+            {
+                "number": pr.get("number"),
+                "title": pr.get("title", ""),
+                "state": pr.get("state", ""),
+                "draft": bool(pr.get("draft", False)),
+                "html_url": pr.get("html_url", ""),
+                "user": (pr.get("user") or {}).get("login"),
+                "base_ref": (pr.get("base") or {}).get("ref"),
+                "head_ref": (pr.get("head") or {}).get("ref"),
+                "head_sha": (pr.get("head") or {}).get("sha"),
+                "updated_at": pr.get("updated_at"),
+                "created_at": pr.get("created_at"),
+            }
+            for pr in pulls
         ]
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -888,8 +935,7 @@ def _start_recommended_batch(
     session: Session,
 ) -> dict[str, Any]:
     """Create and start the regression batch selected by PR analysis."""
-    selected = session.exec(select(PrSelectedTest).where(PrSelectedTest.analysis_id == analysis.id)).all()
-    spec_names = [t.spec_name for t in selected]
+    spec_names = _selected_spec_names_for_analysis(session=session, analysis=analysis, requested=getattr(request, "spec_names", None))
     if not spec_names:
         return {"batch_created": False, "reason": "Analysis has no selected tests to run"}
 
@@ -947,7 +993,33 @@ def _start_recommended_batch(
         "batch_id": result.batch_id,
         "run_ids": result.run_ids,
         "count": len(result.run_ids),
+        "spec_names": spec_names,
     }
+
+
+def _selected_spec_names_for_analysis(
+    *,
+    session: Session,
+    analysis: PrImpactAnalysis,
+    requested: list[str] | None = None,
+) -> list[str]:
+    selected = session.exec(select(PrSelectedTest).where(PrSelectedTest.analysis_id == analysis.id)).all()
+    available = [t.spec_name for t in selected]
+    if not requested:
+        return available
+
+    requested_clean = []
+    for spec in requested:
+        cleaned = str(spec or "").strip()
+        if cleaned and cleaned not in requested_clean:
+            requested_clean.append(cleaned)
+    unknown = sorted(set(requested_clean) - set(available))
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Requested specs are not part of this PR analysis selection: {', '.join(unknown)}",
+        )
+    return [spec for spec in available if spec in requested_clean]
 
 
 def _batch_payload(batch: RegressionBatch | None, session: Session) -> dict[str, Any] | None:
@@ -1468,6 +1540,7 @@ async def run_pr_advisor_recommendation(
         "batch_id": result["batch_id"],
         "run_ids": result["run_ids"],
         "count": result["count"],
+        "spec_names": result.get("spec_names", []),
         "analysis_id": analysis_id,
     }
 

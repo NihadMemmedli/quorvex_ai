@@ -81,8 +81,13 @@ if [ ! -f ".env" ]; then
 
 # [REQUIRED] Claude API Configuration
 ANTHROPIC_AUTH_TOKEN=your-token-here
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-20250514
+ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+ANTHROPIC_MODEL=glm-5.1
+ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1
+ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5-turbo
+ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.5-air
+ANTHROPIC_CHAT_MODEL=glm-5-turbo
+API_TIMEOUT_MS=3000000
 
 # [OPTIONAL] Memory System (requires OpenAI key for embeddings)
 MEMORY_ENABLED=false

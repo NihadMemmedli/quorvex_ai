@@ -8,10 +8,11 @@ Quorvex AI is an AI-powered test automation platform that converts natural langu
 
 ### What AI providers does Quorvex AI support?
 
-Quorvex AI uses the Anthropic Claude API as its primary AI provider. Supported connection methods:
+Quorvex AI uses Anthropic-compatible APIs, with Z.ai GLM Coding Plan as the default. Supported connection methods:
 
 | Method | `ANTHROPIC_BASE_URL` |
 |--------|---------------------|
+| Z.ai GLM Coding Plan | `https://api.z.ai/api/anthropic` |
 | Anthropic direct | `https://api.anthropic.com` |
 | OpenRouter | `https://openrouter.ai/api` |
 | Custom proxy | Any API-compatible endpoint |

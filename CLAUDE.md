@@ -149,7 +149,7 @@ All backend code uses `logging.getLogger(__name__)`. Configuration in `orchestra
 **AI/LLM (required)**:
 - `ANTHROPIC_AUTH_TOKEN` - API authentication token
 - `ANTHROPIC_BASE_URL` - API endpoint (anthropic direct, openrouter, or custom proxy)
-- `ANTHROPIC_DEFAULT_SONNET_MODEL` - Model ID (e.g., `claude-sonnet-4-20250514`)
+- `ANTHROPIC_DEFAULT_SONNET_MODEL` - Model ID (default: `glm-5-turbo` for Z.ai GLM Coding Plan)
 - `OPENAI_API_KEY` - For memory system embeddings (optional)
 
 **Authentication**:

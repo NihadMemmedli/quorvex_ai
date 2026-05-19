@@ -77,6 +77,10 @@ class AgentWorker:
         self._process_lock = threading.Lock()
         self._running_processes: dict[str, subprocess.Popen] = {}
         self._cancelled_task_ids: set[str] = set()
+        self._pause_lock = threading.Lock()
+        self._paused_task_ids: set[str] = set()
+        self._pause_started_at: dict[str, float] = {}
+        self._paused_duration_seconds: dict[str, float] = {}
         self._last_execution_telemetry: dict[str, object] = {}
 
         # Setup environment
@@ -209,6 +213,91 @@ class AgentWorker:
         except asyncio.CancelledError:
             pass
 
+    async def _pause_monitor_loop(self, task_id: str, interval: float = 0.5):
+        """Suspend/resume the active CLI process when the Redis pause flag changes."""
+        import signal
+
+        try:
+            while True:
+                paused_requested = await self.queue.is_paused(task_id)
+                with self._process_lock:
+                    proc = self._running_processes.get(task_id)
+
+                if paused_requested:
+                    if proc and proc.poll() is None:
+                        with self._pause_lock:
+                            already_paused = task_id in self._paused_task_ids
+                            if not already_paused:
+                                self._paused_task_ids.add(task_id)
+                                self._pause_started_at[task_id] = time.time()
+                        if not already_paused:
+                            logger.info(f"Task {task_id} pause detected; sending SIGSTOP to Claude CLI process group")
+                            try:
+                                os.killpg(os.getpgid(proc.pid), signal.SIGSTOP)
+                            except (ProcessLookupError, OSError):
+                                try:
+                                    proc.send_signal(signal.SIGSTOP)
+                                except (ProcessLookupError, OSError):
+                                    pass
+
+                    with self._progress_lock:
+                        self._current_progress.update(
+                            {
+                                "status": "paused",
+                                "phase": "paused",
+                                "message": "Agent is paused",
+                            }
+                        )
+                        progress_snapshot = {
+                            **dict(self._current_progress),
+                        }
+                    await self.queue.update_heartbeat(task_id, progress=progress_snapshot)
+                    await asyncio.sleep(interval)
+                    continue
+
+                with self._pause_lock:
+                    was_paused = task_id in self._paused_task_ids
+                    pause_started = self._pause_started_at.pop(task_id, None)
+                    if was_paused:
+                        self._paused_task_ids.discard(task_id)
+                        if pause_started is not None:
+                            self._paused_duration_seconds[task_id] = (
+                                self._paused_duration_seconds.get(task_id, 0.0)
+                                + max(0.0, time.time() - pause_started)
+                            )
+
+                if was_paused and proc and proc.poll() is None:
+                    logger.info(f"Task {task_id} resume detected; sending SIGCONT to Claude CLI process group")
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGCONT)
+                    except (ProcessLookupError, OSError):
+                        try:
+                            proc.send_signal(signal.SIGCONT)
+                        except (ProcessLookupError, OSError):
+                            pass
+                    with self._progress_lock:
+                        self._current_progress.update(
+                            {
+                                "status": "running",
+                                "phase": "running",
+                                "message": "Agent is running",
+                            }
+                        )
+
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            pass
+
+    def _effective_elapsed_seconds(self, task_id: str, start_time: float) -> float:
+        """Return elapsed runtime excluding paused duration."""
+        now = time.time()
+        with self._pause_lock:
+            paused_duration = self._paused_duration_seconds.get(task_id, 0.0)
+            pause_started = self._pause_started_at.get(task_id)
+            if pause_started is not None:
+                paused_duration += max(0.0, now - pause_started)
+        return max(0.0, now - start_time - paused_duration)
+
     async def _execute_task(self, task: AgentTask):
         """Execute an agent task using the Claude CLI with 429 retry and key rotation."""
         # Reset progress tracking for this task
@@ -218,6 +307,7 @@ class AgentWorker:
         # Start heartbeat to signal we're alive
         heartbeat = asyncio.create_task(self._heartbeat_loop(task.id))
         cancel_monitor = asyncio.create_task(self._cancel_monitor_loop(task.id))
+        pause_monitor = asyncio.create_task(self._pause_monitor_loop(task.id))
         # Send initial heartbeat immediately
         await self.queue.update_heartbeat(task.id, progress=dict(self._current_progress))
 
@@ -349,15 +439,24 @@ class AgentWorker:
 
         finally:
             cancel_monitor.cancel()
+            pause_monitor.cancel()
             heartbeat.cancel()
             try:
                 await cancel_monitor
             except asyncio.CancelledError:
                 pass
             try:
+                await pause_monitor
+            except asyncio.CancelledError:
+                pass
+            try:
                 await heartbeat
             except asyncio.CancelledError:
                 pass
+            with self._pause_lock:
+                self._paused_task_ids.discard(task.id)
+                self._pause_started_at.pop(task.id, None)
+                self._paused_duration_seconds.pop(task.id, None)
             # Emergency submit if result was never recorded
             if not _result_submitted:
                 logger.warning(f"Task {task.id}: result not submitted, emergency submit")
@@ -650,9 +749,9 @@ class AgentWorker:
 
             # Wait for process with timeout
             while True:
-                elapsed = time.time() - start_time
+                elapsed = self._effective_elapsed_seconds(task_id, start_time)
                 if elapsed > timeout_seconds:
-                    logger.warning(f"[CLI] Timeout after {elapsed:.1f}s, killing process group")
+                    logger.warning(f"[CLI] Timeout after {elapsed:.1f}s active runtime, killing process group")
                     try:
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                     except (ProcessLookupError, OSError):
@@ -708,9 +807,12 @@ class AgentWorker:
                 self._running_processes.pop(task_id, None)
 
         raw_output = "".join(output_chunks)
-        elapsed = time.time() - start_time
+        elapsed = self._effective_elapsed_seconds(task_id, start_time)
+        with self._pause_lock:
+            paused_duration = self._paused_duration_seconds.get(task_id, 0.0)
         exit_code = proc.returncode if proc else None
         stream_stats["exit_code"] = exit_code
+        stream_stats["paused_duration_seconds"] = paused_duration
         logger.info(f"[CLI] Completed in {elapsed:.1f}s, exit_code={exit_code}, collected {len(raw_output)} chars")
 
         with self._progress_lock:

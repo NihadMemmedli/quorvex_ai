@@ -64,6 +64,12 @@ exclude_docs: |
 nav:
   - Home:
       - Overview: index.md
+  - Why Quorvex:
+      - Comparisons: comparisons/index.md
+      - vs Shortest: comparisons/vs-shortest.md
+      - vs Octomind: comparisons/vs-octomind.md
+      - vs testRigor: comparisons/vs-testrigor.md
+      - Why We Built This: comparisons/why-we-built-this.md
   - Tutorials:
       - Getting Started: tutorials/getting-started.md
       - Your First API Test: tutorials/first-api-test.md
@@ -83,6 +89,7 @@ nav:
           - Mobile Testing: guides/mobile-testing.md
           - LLM Evaluation: guides/llm-testing.md
       - Discovery & Coverage:
+          - AutoPilot & Autonomous Agents: guides/autopilot-agents.md
           - Exploration & Requirements: guides/exploration-requirements.md
           - Regression Batches: guides/regression-batches.md
           - Scheduling Runs: guides/scheduling.md
@@ -118,3 +125,5 @@ nav:
       - Security Model: explanation/security-model.md
   - Community:
       - Roadmap: community/roadmap.md
+      - Good First Issues: community/good-first-issues.md
+      - Launch Kit: community/launch-kit.md

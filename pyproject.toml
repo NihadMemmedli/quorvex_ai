@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "playwright-agent"
+name = "quorvex-ai"
 version = "1.0.0"
-description = "Natural language to Playwright test script converter"
+description = "Self-hosted AI testing agents that turn specs into validated Playwright tests"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -37,6 +37,7 @@ Documentation = "https://nihadmemmedli.github.io/quorvex_ai/"
 Changelog = "https://github.com/NihadMemmedli/quorvex_ai/blob/main/CHANGELOG.md"
 
 [project.scripts]
+quorvex = "orchestrator.cli:main"
 playwright-agent = "orchestrator.cli:main"
 
 [tool.setuptools.packages.find]

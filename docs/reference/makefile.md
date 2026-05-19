@@ -8,6 +8,7 @@ Complete reference for all `make` targets in Quorvex AI.
 |---------|-------------|---------------|---------|
 | `make setup` | Install Python venv, Node deps, Playwright browsers, database | -- | `make setup` |
 | `make setup-skills` | Install Playwright skill dependencies (npm + Chromium) | `.claude/skills/playwright` directory | `make setup-skills` |
+| `make start` | Start the dashboard stack via `make prod-dev` | Docker, `.env.prod` | `make start` |
 | `make dev` | Start backend API (port 8001) + frontend (port 3000) | `make setup` | `make dev` |
 | `make run SPEC=...` | Run a specific test spec via CLI (native pipeline) | `make setup`, venv | `make run SPEC=specs/login.md` |
 | `make run-skill S=...` | Run a Playwright skill script | `make setup-skills`, venv | `make run-skill S=path/to/script.js` |
@@ -46,8 +47,25 @@ Complete reference for all `make` targets in Quorvex AI.
 |---------|------|-------------|
 | Dashboard | 3000 (direct), 80 (nginx) | Next.js frontend |
 | API | 8001 | FastAPI backend |
+| API Docs | 8001/docs | Swagger UI |
+| PostgreSQL | internal, host depends on compose file | Primary production database |
+| Redis | internal | Queues, workers, rate limiting, distributed execution |
 | VNC View | 6080 | Live browser view (websockify) |
+| MinIO API | 9000 | S3-compatible artifact and backup storage |
 | MinIO Console | 9001 | Object storage admin |
+
+!!! warning
+    `.env.prod.example` contains development-friendly defaults. Change `JWT_SECRET_KEY`, database passwords, MinIO passwords, and initial admin credentials before using `make prod-up` for a real deployment.
+
+## Auto Pilot Runtime
+
+| Command | Description | Prerequisites | Example |
+|---------|-------------|---------------|---------|
+| `make autopilot-stable-up` | Start the stable local Auto Pilot stack with lower concurrency and no backend reload | Docker, `.env.prod`, 12 GB+ Docker memory | `make autopilot-stable-up` |
+| `make autopilot-stable-down` | Stop the stable Auto Pilot stack | Docker | `make autopilot-stable-down` |
+| `make autopilot-dev-up` | Start Auto Pilot in dev mode via `make prod-dev` | Docker, `.env.prod` | `make autopilot-dev-up` |
+| `make autopilot-status` | Show service status, container memory, and backend health | Docker | `make autopilot-status` |
+| `make autopilot-logs` | Tail Auto Pilot backend and frontend logs | Docker | `make autopilot-logs` |
 
 ## Backup & Recovery
 
@@ -133,6 +151,7 @@ Default namespace: `K8S_NAMESPACE=quorvex` (overridable).
 | `make db-downgrade` | Roll back one migration | PostgreSQL, Alembic | `make db-downgrade` |
 | `make db-history` | Show migration history | PostgreSQL, Alembic | `make db-history` |
 | `make db-stamp R=...` | Stamp DB at revision (for existing DBs) | PostgreSQL, Alembic | `make db-stamp R=001` |
+| `make db-demo-seed` | Seed Database Testing demo content | PostgreSQL dev database | `make db-demo-seed` |
 
 ## Linting & Testing
 
@@ -181,27 +200,11 @@ Default namespace: `K8S_NAMESPACE=quorvex` (overridable).
 | `make stop` | Stop all running services (graceful then force) | -- | `make stop` |
 | `make clean` | Remove run artifacts and logs (`runs/*`, `api.log`, `web.log`) | -- | `make clean` |
 
-## Pitch Deck
-
-| Command | Description | Prerequisites | Example |
-|---------|-------------|---------------|---------|
-| `make pitch-deck` | Generate PPTX + PDF from pitch-deck-presentation.md | marp-cli | `make pitch-deck` |
-| `make pitch-deck-html` | Generate HTML preview | marp-cli | `make pitch-deck-html` |
-
-## Demo Video
-
-| Command | Description | Prerequisites | Example |
-|---------|-------------|---------------|---------|
-| `make demo-video` | Full pipeline: record + voice + assemble | Playwright, ElevenLabs, FFmpeg | `make demo-video` |
-| `make demo-record` | Record dashboard tour (Playwright) | Playwright | `make demo-record` |
-| `make demo-voice` | Generate AI voiceover (ElevenLabs) | ElevenLabs API key | `make demo-voice` |
-| `make demo-assemble` | Assemble final MP4 videos (FFmpeg) | FFmpeg | `make demo-assemble` |
-
 ## Makefile Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DOCKER_COMPOSE` | `docker-compose` | Docker Compose command |
+| `DOCKER_COMPOSE` | `docker compose` | Docker Compose command |
 | `PROD_COMPOSE` | `docker compose --env-file .env.prod -f docker-compose.prod.yml` | Production compose command |
 | `WORKERS` | `4` | Default browser worker count |
 | `K6_WORKERS` | `1` | Default K6 worker count |

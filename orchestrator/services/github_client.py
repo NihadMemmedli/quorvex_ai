@@ -197,15 +197,26 @@ class GithubClient:
         state: str = "open",
         head: str | None = None,
         base: str | None = None,
+        limit: int = 30,
     ) -> list[dict[str, Any]]:
         """List pull requests, optionally filtered by head/base."""
-        params: dict[str, Any] = {"state": state, "per_page": 30}
-        if head:
-            params["head"] = head
-        if base:
-            params["base"] = base
-        data = await self._request("GET", f"repos/{owner}/{repo}/pulls", params=params)
-        return data if isinstance(data, list) else []
+        safe_limit = max(1, min(int(limit or 30), 100))
+        pulls: list[dict[str, Any]] = []
+        page = 1
+        while len(pulls) < safe_limit:
+            params: dict[str, Any] = {"state": state, "per_page": min(100, safe_limit - len(pulls)), "page": page}
+            if head:
+                params["head"] = head
+            if base:
+                params["base"] = base
+            data = await self._request("GET", f"repos/{owner}/{repo}/pulls", params=params)
+            if not isinstance(data, list) or not data:
+                break
+            pulls.extend(data)
+            if len(data) < params["per_page"]:
+                break
+            page += 1
+        return pulls[:safe_limit]
 
     async def list_pull_request_files(self, owner: str, repo: str, pr_number: int) -> list[dict[str, Any]]:
         """List files changed by a pull request, following GitHub pagination."""

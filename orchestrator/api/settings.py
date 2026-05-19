@@ -31,7 +31,9 @@ MODEL_ENV_KEYS = (
     "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 )
+DEFAULT_ANTHROPIC_BASE_URL = "https://api.z.ai/api/anthropic"
 
 
 def _read_env_file() -> dict:
@@ -103,6 +105,8 @@ def _is_masked_api_key(api_key: str | None) -> bool:
 def _infer_provider(base_url: str | None) -> str:
     """Infer the configured provider from the base URL."""
     base_url_lower = (base_url or "").lower()
+    if "api.z.ai" in base_url_lower or "bigmodel.cn" in base_url_lower:
+        return "zai"
     if "openrouter.ai" in base_url_lower:
         return "openrouter"
     if "anthropic.com" in base_url_lower or not base_url_lower:
@@ -113,7 +117,7 @@ def _infer_provider(base_url: str | None) -> str:
 def _active_settings(env_vars: dict[str, str] | None = None) -> dict[str, str]:
     """Return the currently active AI settings, preferring .env then process env."""
     env_vars = env_vars if env_vars is not None else _read_env_file()
-    base_url = env_vars.get("ANTHROPIC_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", "")
+    base_url = env_vars.get("ANTHROPIC_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL", DEFAULT_ANTHROPIC_BASE_URL)
     model_name = next(
         (model for key in MODEL_ENV_KEYS if (model := env_vars.get(key))),
         "",
@@ -210,7 +214,7 @@ async def test_settings_connection():
     """Test the currently active runtime AI settings without exposing secrets."""
     active = _active_settings()
     api_key = active["api_key"]
-    base_url = (active["base_url"] or "https://api.anthropic.com").rstrip("/")
+    base_url = (active["base_url"] or DEFAULT_ANTHROPIC_BASE_URL).rstrip("/")
     model_name = active["model_name"]
     provider = active["llm_provider"]
 

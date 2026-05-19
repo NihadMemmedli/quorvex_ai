@@ -145,7 +145,7 @@ export const MODEL_ID =
   process.env.ANTHROPIC_CHAT_MODEL ||
   process.env.ANTHROPIC_MODEL ||
   process.env.ANTHROPIC_DEFAULT_SONNET_MODEL ||
-  'claude-sonnet-4-6';
+  'glm-5-turbo';
 
 export const OPENAI_MODEL_ID =
   process.env.OPENAI_CHAT_MODEL ||

@@ -2,7 +2,7 @@
 
 A curated list of improvements that new contributors can pick up without deep knowledge of the entire system. Each issue is scoped to be completable in 1-4 hours.
 
-Before starting, read [CONTRIBUTING.md](../../CONTRIBUTING.md) for setup instructions, code style, and PR guidelines.
+Before starting, read the [contributing guide](https://github.com/NihadMemmedli/quorvex_ai/blob/main/CONTRIBUTING.md) for setup instructions, code style, and PR guidelines.
 
 ---
 
@@ -26,9 +26,9 @@ Before starting, read [CONTRIBUTING.md](../../CONTRIBUTING.md) for setup instruc
 
 ---
 
-### 2. Add Practical Examples to the CLI Reference
+### 2. Add More Practical Examples to the CLI Reference
 
-**Description:** The CLI (`orchestrator/cli.py`) has grown to support several flags (`--hybrid`, `--skill-mode`, `--standard-pipeline`, `--prd`, `--run-skill`, `--feature`) but the CLI reference doc at `docs/reference/cli.md` may not include practical usage examples for each. For each CLI flag, add a short example showing a real invocation and what it does. Cross-reference with `cli.py`'s argparse definitions to ensure completeness.
+**Description:** The CLI (`orchestrator/cli.py`) has grown to support browser, mobile, PRD, exploration, requirements, RTM, API, validation, and skill execution workflows. The reference doc covers the main command families, but it can use more real-world examples for common team workflows. Add examples for one focused workflow, such as authenticated exploration, mobile Appium runs, PRD-to-tests, or API edge-case generation. Cross-reference with `cli.py`'s argparse definitions to ensure accuracy.
 
 **Difficulty:** Easy
 
@@ -43,14 +43,15 @@ Before starting, read [CONTRIBUTING.md](../../CONTRIBUTING.md) for setup instruc
 
 ---
 
-### 3. Expand the Troubleshooting Guide with Docker-Specific Issues
+### 3. Expand the Troubleshooting Guide with More Production Issues
 
-**Description:** The troubleshooting guide at `docs/guides/troubleshooting.md` covers some common problems but is missing entries for Docker/production issues that real users hit. Add entries for at least these scenarios:
+**Description:** The troubleshooting guide at `docs/guides/troubleshooting.md` covers common local, Docker, browser pool, and production issues. Add entries for additional real-world operations scenarios, such as:
 
-- PostgreSQL migration failures when switching from SQLite (boolean `DEFAULT 0` vs `DEFAULT FALSE`)
-- Browser pool exhaustion (all slots occupied, new runs stuck in queue)
-- `make prod-dev` backend crash loops caused by Alembic migration conflicts
-- Container rebuild not picking up file changes (Docker layer caching with `COPY . /app`)
+- Temporal unavailable for autonomous missions
+- Long-running agent missions stuck or repeatedly retrying
+- K6 workers alive but not picking up queued jobs
+- MinIO backups succeeding locally but failing to upload
+- ZAP daemon reachable from host but not from the backend container
 
 Each entry should follow the existing format: symptom, cause, solution.
 

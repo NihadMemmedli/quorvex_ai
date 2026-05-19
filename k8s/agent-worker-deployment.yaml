@@ -37,6 +37,41 @@ spec:
             secretKeyRef:
               name: quorvex-secrets
               key: anthropic-token
+        - name: ANTHROPIC_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: anthropic-base-url
+        - name: ANTHROPIC_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: anthropic-model
+        - name: ANTHROPIC_DEFAULT_OPUS_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: anthropic-opus-model
+        - name: ANTHROPIC_DEFAULT_SONNET_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: anthropic-sonnet-model
+        - name: ANTHROPIC_DEFAULT_HAIKU_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: anthropic-haiku-model
+        - name: ANTHROPIC_CHAT_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: anthropic-chat-model
+        - name: API_TIMEOUT_MS
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: api-timeout-ms
         - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:

@@ -71,12 +71,14 @@ services:
       ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:?Set ANTHROPIC_BASE_URL in .env.prod}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-4-7}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-6}
-      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-claude-sonnet-4-6}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-glm-5.1}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-glm-5.1}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-glm-5-turbo}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-glm-4.5-air}
+      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-glm-5-turbo}
       ANTHROPIC_ENABLE_CHAT_THINKING: ${ANTHROPIC_ENABLE_CHAT_THINKING:-false}
+      API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Browser workers mode (no local browsers)
@@ -96,6 +98,10 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://host.docker.internal:3000}
       # Redis for job queue and rate limiting
       REDIS_URL: redis://redis:6379/0
+      # Temporal for autonomous testing missions
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
       # Initial admin
       INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
@@ -126,6 +132,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      temporal:
+        condition: service_started
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
       interval: 30s
@@ -165,12 +173,14 @@ services:
       ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:?Set ANTHROPIC_BASE_URL in .env.prod}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-4-7}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-6}
-      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-claude-sonnet-4-6}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-glm-5.1}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-glm-5.1}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-glm-5-turbo}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-glm-4.5-air}
+      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-glm-5-turbo}
       ANTHROPIC_ENABLE_CHAT_THINKING: ${ANTHROPIC_ENABLE_CHAT_THINKING:-false}
+      API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Worker settings
@@ -211,6 +221,57 @@ services:
         reservations:
           memory: 512M
           cpus: '0.5'
+    networks:
+      - playwright-network
+    profiles:
+      - workers
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  autonomous-mission-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: unless-stopped
+    command: python -m orchestrator.services.autonomous_mission_worker
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-playwright}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-playwright_agent}
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-glm-5.1}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-glm-5.1}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-glm-5-turbo}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-glm-4.5-air}
+      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-glm-5-turbo}
+      API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - runs_data:/app/runs
+      - logs_data:/app/logs
+      - data_dir:/app/data
+      - test_results:/app/test-results
+      - ${SPECS_DIR:-./specs}:/app/specs
+      - ${PRDS_DIR:-./prds}:/app/prds
+      - ${TESTS_DIR:-./tests}:/app/tests
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
     networks:
       - playwright-network
     profiles:
@@ -338,6 +399,42 @@ services:
     networks:
       - playwright-network
 
+  temporal:
+    image: temporalio/auto-setup:1.24
+    restart: unless-stopped
+    ports:
+      - "${TEMPORAL_PORT:-7233}:7233"
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-playwright}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD}
+      POSTGRES_SEEDS: db
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - playwright-network
+    profiles:
+      - standard
+      - workers
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    restart: unless-stopped
+    ports:
+      - "${TEMPORAL_UI_PORT:-8233}:8080"
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: ${TEMPORAL_CORS_ORIGINS:-http://localhost:3000}
+    depends_on:
+      - temporal
+    networks:
+      - playwright-network
+    profiles:
+      - standard
+      - workers
+
   # Standard backend with VNC and browsers (default mode)
   # Use: make prod-up (no profile needed)
   backend:
@@ -362,12 +459,14 @@ services:
       ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:?Set ANTHROPIC_BASE_URL in .env.prod}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-claude-opus-4-7}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-6}
-      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-claude-sonnet-4-6}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-glm-5.1}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-glm-5.1}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-glm-5-turbo}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-glm-4.5-air}
+      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-glm-5-turbo}
       ANTHROPIC_ENABLE_CHAT_THINKING: ${ANTHROPIC_ENABLE_CHAT_THINKING:-false}
+      API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # VNC mode: headed browser on virtual display
@@ -403,6 +502,11 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://host.docker.internal:3000}
       # Redis for distributed rate limiting
       REDIS_URL: redis://redis:6379/0
+      # Temporal for autonomous testing missions
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
+      AUTONOMOUS_MISSION_WORKER_ENABLED: ${AUTONOMOUS_MISSION_WORKER_ENABLED:-true}
       # Initial admin user (created on first startup only)
       INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
@@ -450,6 +554,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      temporal:
+        condition: service_started
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
       interval: 30s
@@ -493,10 +599,11 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-4o-mini}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-opus-4-7}
-      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-claude-sonnet-4-6}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-glm-5.1}
+      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-glm-5-turbo}
       ANTHROPIC_ENABLE_CHAT_THINKING: ${ANTHROPIC_ENABLE_CHAT_THINKING:-false}
+      API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
       INTERNAL_API_URL: http://backend:8001
     # Note: Frontend works with either 'backend' (standard) or 'backend-slim' (workers)
     # Both expose the same API on port 8001

@@ -29,7 +29,9 @@ sys.modules.setdefault("slowapi", slowapi)
 sys.modules.setdefault("slowapi.errors", slowapi_errors)
 sys.modules.setdefault("slowapi.util", slowapi_util)
 
-from orchestrator.api.github_ci import _quality_gate_status, _serialize_quality_gate
+from fastapi import HTTPException
+
+from orchestrator.api.github_ci import _quality_gate_status, _selected_spec_names_for_analysis, _serialize_quality_gate
 from orchestrator.api.models_db import PrImpactAnalysis, PrQualityGateRun, PrSelectedTest, RegressionBatch
 from orchestrator.api.models_db import TestRun as DBTestRun
 from orchestrator.services.quality_gate import ci_status_payload, sync_gate_run_state
@@ -169,6 +171,43 @@ def test_ci_status_payload_exposes_exit_code_for_terminal_pass():
         assert payload["terminal"] is True
         assert payload["passed"] is True
         assert payload["exit_code"] == 0
+
+
+def test_pr_advisor_subset_selection_filters_to_requested_specs():
+    with _session() as session:
+        analysis = _analysis()
+        session.add(analysis)
+        session.add(PrSelectedTest(analysis_id=analysis.id, spec_name="checkout.md", reason="Checkout changed"))
+        session.add(PrSelectedTest(analysis_id=analysis.id, spec_name="billing.md", reason="Billing changed"))
+        session.commit()
+
+        selected = _selected_spec_names_for_analysis(
+            session=session,
+            analysis=analysis,
+            requested=["billing.md"],
+        )
+
+        assert selected == ["billing.md"]
+
+
+def test_pr_advisor_subset_selection_rejects_unknown_specs():
+    with _session() as session:
+        analysis = _analysis()
+        session.add(analysis)
+        session.add(PrSelectedTest(analysis_id=analysis.id, spec_name="checkout.md", reason="Checkout changed"))
+        session.commit()
+
+        try:
+            _selected_spec_names_for_analysis(
+                session=session,
+                analysis=analysis,
+                requested=["not-selected.md"],
+            )
+        except HTTPException as exc:
+            assert exc.status_code == 400
+            assert "not part of this PR analysis" in str(exc.detail)
+        else:
+            raise AssertionError("Expected unknown subset spec to be rejected")
 
 
 def test_quality_gate_run_unique_identity_blocks_duplicate_pr_sha():

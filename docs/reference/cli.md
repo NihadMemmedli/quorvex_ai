@@ -36,6 +36,11 @@ make run SPEC=specs/your-test.md
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--browser` | `chromium` / `firefox` / `webkit` | `chromium` | Browser to run tests on |
+| `--target` | `browser` / `mobile` | `browser` | Automation target. Browser uses Playwright; mobile uses Appium |
+| `--platform` | `ios` / `android` | `ios` | Mobile platform when `--target mobile` is used |
+| `--appium-server-url` | URL | -- | Remote or local Appium server URL for mobile runs |
+| `--capabilities-file` | path | -- | Path to an Appium capabilities JSON file |
+| `--mobile-smoke` | flag | `false` | Run the built-in mobile smoke flow for the spec |
 | `--project-id` | string | derived from spec folder | Project ID for memory system isolation |
 | `--no-memory` | flag | `false` | Disable memory system for this run |
 | `--run-dir` | path | `runs/TIMESTAMP/` | Specific directory to store run artifacts |
@@ -43,6 +48,9 @@ make run SPEC=specs/your-test.md
 | `--interactive` / `-i` | flag | `false` | Enable interactive mode (plan review and step confirmation) |
 | `--max-iterations` | int | `20` | Maximum healing iterations (used with `--hybrid`) |
 | `--memory-stats` | flag | `false` | Show memory system statistics and exit |
+| `--validate-only` | flag | `false` | Validate spec format, template includes, and target URL reachability without running the pipeline |
+| `--dry-run` | flag | `false` | Alias for `--validate-only` |
+| `--validate-timeout` | int | `10` | URL reachability timeout in seconds for validation mode |
 
 ## PRD Options
 
@@ -125,6 +133,26 @@ python orchestrator/cli.py specs/login.md --try-code tests/generated/login.spec.
 
 # Disable memory
 python orchestrator/cli.py specs/login.md --no-memory
+
+# Validate a spec in CI without generating or running tests
+python orchestrator/cli.py specs/login.md --validate-only
+```
+
+### Mobile Testing
+
+```bash
+# Run the built-in iOS Safari smoke flow
+python orchestrator/cli.py specs/mobile-login.md \
+  --target mobile \
+  --platform ios \
+  --mobile-smoke
+
+# Use an explicit Appium server and capabilities file
+python orchestrator/cli.py specs/mobile-checkout.md \
+  --target mobile \
+  --platform android \
+  --appium-server-url http://127.0.0.1:4723 \
+  --capabilities-file appium-capabilities.json
 ```
 
 ### PRD Processing
@@ -172,6 +200,22 @@ python orchestrator/cli.py --generate-rtm --project-id my-project
 # Export RTM
 python orchestrator/cli.py --rtm-export markdown --output rtm.md
 python orchestrator/cli.py --rtm-export csv --output rtm.csv
+```
+
+### API Testing
+
+```bash
+# Generate API tests from an OpenAPI file or URL
+python orchestrator/cli.py openapi.yaml --api-tests
+
+# Force API mode for a markdown spec
+python orchestrator/cli.py specs/api-login.md --api
+
+# Generate edge-case and security-oriented API specs
+python orchestrator/cli.py openapi.yaml --api-tests --generate-edge-cases
+
+# Generate API tests from an exploration session
+python orchestrator/cli.py --generate-api-tests --from-exploration SESSION_ID
 ```
 
 ### Skill Execution

@@ -91,11 +91,29 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     confirmationRequired: true,
     getPath: () => '/api/agents/definitions',
     getBody: (args, pid) => ({
-      name: `Ad-hoc QA Agent - ${hostnameLabel(String(args.url || 'website'))}`,
-      description: `Chat-created custom QA agent for ${args.url || 'the requested website'}.`,
-      system_prompt: ADHOC_CUSTOM_AGENT_SYSTEM_PROMPT,
+      name: customAgentName(args),
+      description: customAgentDescription(args),
+      system_prompt: customAgentSystemPrompt(args),
       timeout_seconds: clampTimeoutSeconds(args.timeoutSeconds),
-      tool_ids: ADHOC_CUSTOM_AGENT_TOOL_IDS,
+      tool_ids: customAgentToolIds(args),
+      model: typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined,
+      project_id: pid || 'default',
+    }),
+  },
+  createCustomAgentDefinition: {
+    label: 'Save Custom Agent',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/api/agents/definitions',
+    getBody: (args, pid) => ({
+      name: customAgentName(args),
+      description: customAgentDescription(args),
+      system_prompt: customAgentDefinitionSystemPrompt(args),
+      timeout_seconds: clampTimeoutSeconds(args.timeoutSeconds),
+      tool_ids: customAgentToolIds(args),
+      model: typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined,
       project_id: pid || 'default',
     }),
   },
@@ -964,6 +982,108 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     confirmationRequired: true,
     getPath: (args) => `/autopilot/${args.sessionId}/cancel`,
   },
+  createWorkflow: {
+    label: 'Create Custom Workflow',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: () => '/workflows/definitions',
+    getBody: (args, pid) => ({
+      name: args.name,
+      description: args.description || '',
+      project_id: pid || 'default',
+      steps: workflowSteps(args),
+    }),
+  },
+  updateWorkflow: {
+    label: 'Update Custom Workflow',
+    method: 'PUT',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/workflows/definitions/${encodeURIComponent(String(args.workflowId))}?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => ({
+      name: args.name || undefined,
+      description: args.description || undefined,
+      steps: args.steps ? workflowSteps(args) : undefined,
+      status: args.isEnabled === false ? 'archived' : undefined,
+    }),
+  },
+  duplicateWorkflow: {
+    label: 'Duplicate Custom Workflow',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/workflows/definitions/${encodeURIComponent(String(args.workflowId))}/duplicate`,
+  },
+  archiveWorkflow: {
+    label: 'Archive Custom Workflow',
+    method: 'DELETE',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/workflows/definitions/${encodeURIComponent(String(args.workflowId))}?project_id=${encodeURIComponent(pid || 'default')}`,
+  },
+  startWorkflow: {
+    label: 'Start Custom Workflow',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/workflows/definitions/${encodeURIComponent(String(args.workflowId))}/runs?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => ({
+      inputs: args.inputs || args.parameters || {},
+      triggered_by: 'chat',
+      start_step_key: args.startStepKey || undefined,
+    }),
+  },
+  startWorkflowFromStep: {
+    label: 'Start Custom Workflow From Step',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/workflows/definitions/${encodeURIComponent(String(args.workflowId))}/runs?project_id=${encodeURIComponent(pid || 'default')}`,
+    getBody: (args) => ({
+      inputs: args.inputs || args.parameters || {},
+      triggered_by: 'chat',
+      start_step_key: args.startStepKey,
+    }),
+  },
+  retryWorkflowFailedStep: {
+    label: 'Retry Custom Workflow Failed Step',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/steps/${encodeURIComponent(String(args.stepId))}/retry`,
+  },
+  pauseWorkflowRun: {
+    label: 'Pause Custom Workflow Run',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/pause`,
+  },
+  resumeWorkflowRun: {
+    label: 'Resume Custom Workflow Run',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/resume`,
+  },
+  cancelWorkflowRun: {
+    label: 'Cancel Custom Workflow Run',
+    method: 'POST',
+    risk: 'destructive',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/cancel`,
+  },
   createProject: {
     label: 'Create Project',
     method: 'POST',
@@ -1201,7 +1321,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       provider: args.provider || 'github',
       workflow_id: args.workflowId || undefined,
       ref: args.ref || undefined,
-      inputs: args.inputs || undefined,
+      inputs: buildCiWorkflowInputs(args),
     }),
   },
   cancelCiRun: {
@@ -1232,10 +1352,13 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       provider: 'github',
       workflow_name: args.workflowName || 'Quorvex Test Automation',
       template: args.template || 'pr-quality-gate',
+      quality_gate_mode: args.qualityGateMode || 'backend-async',
       prompt: args.prompt || undefined,
       ref: args.ref || undefined,
       branches: args.branches || undefined,
       browsers: args.browsers || undefined,
+      artifact_retention_days: args.artifactRetentionDays ?? 14,
+      wait_timeout_minutes: args.waitTimeoutMinutes ?? 120,
     }),
   },
   openCiWorkflowPullRequest: {
@@ -1252,6 +1375,95 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       body: args.body || undefined,
       commit_message: args.commitMessage || undefined,
       draft: args.draft ?? true,
+    }),
+  },
+  updateCiProviderDefaults: {
+    label: 'Update CI Provider Defaults',
+    method: 'PATCH',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/providers/defaults`,
+    getBody: (args) => ({
+      provider: args.provider,
+      repository: args.repository || undefined,
+      owner: args.owner || undefined,
+      repo: args.repo || undefined,
+      gitlab_project_id: args.gitlabProjectId || undefined,
+      base_url: args.baseUrl || undefined,
+      default_ref: args.defaultRef || undefined,
+      default_workflow: args.defaultWorkflow || undefined,
+    }),
+  },
+  createCiTestSubset: {
+    label: 'Create CI Test Subset',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (_args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/test-subsets`,
+    getBody: (args) => ({
+      name: args.name,
+      description: args.description || undefined,
+      mode: args.mode || 'both',
+      default_browser: args.defaultBrowser || 'chromium',
+      base_url_secret: args.baseUrlSecret || 'APP_BASE_URL',
+      items: buildCiTestSubsetItems(args.items),
+    }),
+  },
+  updateCiTestSubset: {
+    label: 'Update CI Test Subset',
+    method: 'PATCH',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/test-subsets/${encodeURIComponent(String(args.subsetId))}`,
+    getBody: (args) => ({
+      name: args.name || undefined,
+      description: args.description || undefined,
+      mode: args.mode || undefined,
+      default_browser: args.defaultBrowser || undefined,
+      base_url_secret: args.baseUrlSecret || undefined,
+      items: Array.isArray(args.items) ? buildCiTestSubsetItems(args.items) : undefined,
+    }),
+  },
+  deleteCiTestSubset: {
+    label: 'Delete CI Test Subset',
+    method: 'DELETE',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/test-subsets/${encodeURIComponent(String(args.subsetId))}`,
+  },
+  openCiTestSubsetPullRequest: {
+    label: 'Open CI Test Subset Pull Request',
+    method: 'POST',
+    risk: 'high',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/test-subsets/${encodeURIComponent(String(args.subsetId))}/pull-request`,
+    getBody: (args) => ({
+      base_ref: args.baseRef || undefined,
+      branch_name: args.branchName || undefined,
+      title: args.title || undefined,
+      body: args.body || undefined,
+      workflow_name: args.workflowName || undefined,
+      commit_message: args.commitMessage || undefined,
+      draft: args.draft ?? true,
+    }),
+  },
+  dispatchCiTestSubset: {
+    label: 'Dispatch CI Test Subset',
+    method: 'POST',
+    risk: 'medium',
+    requiredRole: 'editor',
+    confirmationRequired: true,
+    getPath: (args, pid) => `/projects/${encodeURIComponent(pid || 'default')}/ci/test-subsets/${encodeURIComponent(String(args.subsetId))}/dispatch`,
+    getBody: (args) => ({
+      workflow_id: args.workflowId || undefined,
+      ref: args.ref || undefined,
+      browser: args.browser || undefined,
+      base_url: args.baseUrl || undefined,
     }),
   },
   analyzePullRequestTests: {
@@ -1278,6 +1490,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       browser: args.browser || 'chromium',
       hybrid: args.hybrid ?? false,
       max_iterations: args.maxIterations ?? 20,
+      spec_names: Array.isArray(args.specNames) ? args.specNames : undefined,
     }),
   },
   startPrQualityGate: {
@@ -1376,6 +1589,37 @@ export const ADHOC_CUSTOM_AGENT_TOOL_IDS = [
   'browser_wait',
   'browser_navigate_back',
   'browser_close',
+];
+
+export const ALL_CUSTOM_AGENT_TOOL_IDS = [
+  'read_file',
+  'list_files',
+  'glob_files',
+  'grep_files',
+  'write_file',
+  'edit_file',
+  'multi_edit_file',
+  'bash',
+  ...ADHOC_CUSTOM_AGENT_TOOL_IDS,
+  'browser_drag',
+  'browser_evaluate',
+  'browser_upload',
+  'browser_dialog',
+  'browser_generate_locator',
+  'browser_verify_element',
+  'browser_verify_list',
+  'browser_verify_text',
+  'browser_verify_value',
+  'browser_resume',
+  'browser_start_tracing',
+  'browser_stop_tracing',
+  'test_list',
+  'test_run',
+  'planner_setup_page',
+  'planner_save_plan',
+  'generator_setup_page',
+  'generator_read_log',
+  'generator_write_test',
 ];
 
 export const ADHOC_CUSTOM_AGENT_SYSTEM_PROMPT = [
@@ -1526,9 +1770,106 @@ export function buildAdhocCustomAgentRunBody(args: Record<string, unknown>, proj
     project_id: projectId || 'default',
     config: {
       source: 'chat_adhoc_custom_agent',
+      agent_name: typeof args.agentName === 'string' ? args.agentName.trim() || undefined : undefined,
       focus_areas: focusAreas.length > 0 ? focusAreas : undefined,
+      target_service_count: typeof args.targetServiceCount === 'number' ? args.targetServiceCount : undefined,
+      require_observed_evidence: args.requireObservedEvidence ?? true,
+      public_only: args.publicOnly ?? true,
+      requested_tools: customAgentToolIds(args),
+      chat_draft: {
+        description: typeof args.description === 'string' ? args.description : undefined,
+        output_goals: Array.isArray(args.outputGoals) ? args.outputGoals : undefined,
+      },
     },
   };
+}
+
+function customAgentName(args: Record<string, unknown>) {
+  if (typeof args.agentName === 'string' && args.agentName.trim()) {
+    return args.agentName.trim().slice(0, 120);
+  }
+  return `Ad-hoc QA Agent - ${hostnameLabel(String(args.url || 'website'))}`;
+}
+
+function customAgentDescription(args: Record<string, unknown>) {
+  if (typeof args.description === 'string' && args.description.trim()) {
+    return args.description.trim().slice(0, 500);
+  }
+  return `Chat-created custom QA agent for ${args.url || 'the requested website'}.`;
+}
+
+function customAgentSystemPrompt(args: Record<string, unknown>) {
+  if (typeof args.systemPrompt === 'string' && args.systemPrompt.trim()) {
+    return args.systemPrompt.trim();
+  }
+  return ADHOC_CUSTOM_AGENT_SYSTEM_PROMPT;
+}
+
+function customAgentDefinitionSystemPrompt(args: Record<string, unknown>) {
+  const base = customAgentSystemPrompt(args);
+  if (typeof args.prompt !== 'string' || !args.prompt.trim()) return base;
+  return [
+    base,
+    '',
+    'Default operating brief for this saved agent:',
+    args.prompt.trim(),
+  ].join('\n');
+}
+
+function customAgentToolIds(args: Record<string, unknown>) {
+  const requested = Array.isArray(args.toolIds) ? args.toolIds : ADHOC_CUSTOM_AGENT_TOOL_IDS;
+  const valid = requested
+    .filter((toolId): toolId is string => typeof toolId === 'string' && ALL_CUSTOM_AGENT_TOOL_IDS.includes(toolId));
+  return Array.from(new Set(valid.length > 0 ? valid : ADHOC_CUSTOM_AGENT_TOOL_IDS));
+}
+
+function buildCiWorkflowInputs(args: Record<string, unknown>) {
+  const inputs: Record<string, string> = {};
+  if (args.inputs && typeof args.inputs === 'object' && !Array.isArray(args.inputs)) {
+    for (const [key, value] of Object.entries(args.inputs as Record<string, unknown>)) {
+      if (typeof value === 'string') inputs[key] = value;
+    }
+  }
+
+  const subsetInputs: Array<[string, unknown]> = [
+    ['suite', args.suite],
+    ['browser', args.browser],
+    ['pytest_marker', args.pytestMarker],
+    ['test_path', args.testPath],
+    ['playwright_grep', args.playwrightGrep],
+    ['base_url', args.baseUrl],
+  ];
+  for (const [key, value] of subsetInputs) {
+    if (typeof value === 'string' && value.trim()) inputs[key] = value.trim();
+  }
+
+  return Object.keys(inputs).length > 0 ? inputs : undefined;
+}
+
+function buildCiTestSubsetItems(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const record = item as Record<string, unknown>;
+      const specName = typeof record.specName === 'string' ? record.specName.trim() : '';
+      if (!specName) return null;
+      return {
+        spec_name: specName,
+        target_path: typeof record.targetPath === 'string' && record.targetPath.trim() ? record.targetPath.trim() : undefined,
+      };
+    })
+    .filter(Boolean);
+}
+
+function workflowSteps(args: Record<string, unknown>) {
+  const steps = Array.isArray(args.steps) ? args.steps : undefined;
+  if (steps) return steps;
+  const definition = args.definition;
+  if (definition && typeof definition === 'object' && Array.isArray((definition as Record<string, unknown>).steps)) {
+    return (definition as Record<string, unknown>).steps;
+  }
+  return [];
 }
 
 function clampTimeoutSeconds(value: unknown) {

@@ -30,14 +30,21 @@ from orchestrator.api.ci_control import (
     WorkflowGenerateRequest,
     _action_availability,
     _provider_setup,
+    _validate_github_dispatch_inputs,
+    _require_existing_provider_config,
     _safe_branch_segment,
     _serialize_workflow_change,
+    _split_github_repository,
     _validate_workflow_request,
     _render_github_workflow,
+    _render_subset_workflow,
+    _subset_manifest,
+    _validate_ci_subset_target_path,
     _validate_workflow_yaml,
 )
+from fastapi import HTTPException
 from orchestrator.api.gitlab_ci import GitlabConfigRequest
-from orchestrator.api.models_db import CiPipelineMapping, CiWorkflowChangeRequest
+from orchestrator.api.models_db import CiPipelineMapping, CiTestSubset, CiTestSubsetItem, CiWorkflowChangeRequest
 from orchestrator.services.github_client import GithubClient
 
 
@@ -58,6 +65,150 @@ def test_github_workflow_generation_uses_safe_defaults():
     assert "pull-requests: write" in yaml
     assert errors == []
     assert warnings == []
+
+
+def test_github_quality_gate_blocking_workflow_polls_status_and_exits():
+    request = WorkflowGenerateRequest(
+        workflow_name="Quorvex Blocking PR Gate",
+        template="pr-quality-gate",
+        quality_gate_mode="backend-blocking",
+        wait_timeout_minutes=30,
+    )
+
+    _path, yaml = _render_github_workflow(request)
+    errors, _warnings = _validate_workflow_yaml(yaml)
+
+    assert errors == []
+    assert "quality-gates/pr/start" in yaml
+    assert "quality-gates/pr/status" in yaml
+    assert "exit \"$exit_code\"" in yaml
+    assert "timeout-minutes: 30" in yaml
+
+
+def test_runner_subset_workflow_generation_uses_typed_inputs_and_safe_runner_jobs():
+    request = WorkflowGenerateRequest(
+        workflow_name="Quorvex Runner Subset Tests",
+        template="runner-subset-tests",
+        branches=["main", "master"],
+    )
+
+    path, yaml = _render_github_workflow(request)
+    errors, warnings = _validate_workflow_yaml(yaml)
+
+    assert path == ".github/workflows/quorvex-subset-tests.yml"
+    assert errors == []
+    assert warnings == []
+    assert "pull_request_target" not in yaml
+    assert "type: choice" in yaml
+    assert "python-unit" in yaml
+    assert "playwright-generated" in yaml
+    assert "permissions:\n  contents: read" in yaml
+    assert "npx playwright test --project" in yaml
+
+
+def test_runner_subset_dispatch_inputs_are_sanitized():
+    inputs = _validate_github_dispatch_inputs(
+        "quorvex-subset-tests.yml",
+        {
+            "suite": "playwright-generated",
+            "browser": "firefox",
+            "pytest_marker": "not integration",
+            "test_path": "tests/generated/login.spec.ts",
+            "playwright_grep": "@smoke",
+            "base_url": "https://example.test",
+        },
+    )
+
+    assert inputs == {
+        "suite": "playwright-generated",
+        "browser": "firefox",
+        "pytest_marker": "not integration",
+        "test_path": "tests/generated/login.spec.ts",
+        "playwright_grep": "@smoke",
+        "base_url": "https://example.test",
+    }
+
+
+def test_runner_subset_dispatch_inputs_reject_unsafe_path():
+    try:
+        _validate_github_dispatch_inputs(
+            "quorvex-subset-tests.yml",
+            {"suite": "python-unit", "test_path": "../../etc/passwd; rm -rf /"},
+        )
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "test_path" in str(exc.detail)
+    else:
+        raise AssertionError("Expected unsafe test_path to be rejected")
+
+
+def test_runner_subset_dispatch_inputs_reject_unknown_suite():
+    try:
+        _validate_github_dispatch_inputs("runner-subset-tests", {"suite": "shell"})
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "Unsupported runner subset suite" in str(exc.detail)
+    else:
+        raise AssertionError("Expected unknown suite to be rejected")
+
+
+def test_ci_subset_target_path_validation_accepts_generated_tests_only():
+    assert _validate_ci_subset_target_path("tests/generated/login.spec.ts") == "tests/generated/login.spec.ts"
+    assert _validate_ci_subset_target_path("tests/e2e/smoke.test.ts") == "tests/e2e/smoke.test.ts"
+
+    for unsafe in ["../login.spec.ts", "orchestrator/tests/test_app.py", "tests/generated/login.js", "tests/generated/a;rm.spec.ts"]:
+        try:
+            _validate_ci_subset_target_path(unsafe)
+        except HTTPException as exc:
+            assert exc.status_code == 400
+        else:
+            raise AssertionError(f"Expected unsafe target path to be rejected: {unsafe}")
+
+
+def test_ci_subset_manifest_contains_committed_target_paths():
+    subset = CiTestSubset(project_id="project-1", name="Checkout Smoke", slug="checkout-smoke", mode="both")
+    item = CiTestSubsetItem(
+        subset_id=subset.id,
+        spec_name="checkout.md",
+        code_path="tests/generated/checkout.spec.ts",
+        target_path="tests/generated/checkout.spec.ts",
+        content_hash="abc123",
+        tags=["smoke"],
+    )
+
+    manifest = _subset_manifest(subset, [item])
+
+    assert '"slug": "checkout-smoke"' in manifest
+    assert '"mode": "both"' in manifest
+    assert '"target_path": "tests/generated/checkout.spec.ts"' in manifest
+
+
+def test_ci_subset_workflow_runs_committed_subset_and_pr_impact_fallback():
+    subset = CiTestSubset(
+        project_id="project-1",
+        name="Checkout Smoke",
+        slug="checkout-smoke",
+        mode="both",
+        default_browser="firefox",
+    )
+
+    yaml = _render_subset_workflow(subset)
+    errors, warnings = _validate_workflow_yaml(yaml)
+
+    assert errors == []
+    assert warnings == []
+    assert "pull_request_target" not in yaml
+    assert ".quorvex/test-subsets/checkout-smoke.json" in yaml
+    assert "pr-advisor/analyze" in yaml
+    assert "quorvex-selected-tests.txt" in yaml
+    assert 'npx playwright test --project="$BROWSER"' in yaml
+    assert "default: firefox" in yaml
+
+
+def test_non_subset_workflow_dispatch_allows_existing_arbitrary_inputs():
+    inputs = _validate_github_dispatch_inputs("deploy.yml", {"environment": "staging"})
+
+    assert inputs == {"environment": "staging"}
 
 
 def test_workflow_validation_blocks_dangerous_patterns():
@@ -151,6 +302,28 @@ def test_provider_setup_recommends_workflow_generation_for_github_without_defaul
     assert setup["setup_status"] == "needs_workflow"
     assert "select_or_generate_workflow" in setup["missing_requirements"]
     assert setup["recommended_next_action"]["action"] == "generate_workflow"
+
+
+def test_chat_defaults_update_requires_existing_secret_config():
+    try:
+        _require_existing_provider_config("github", {"owner": "acme", "repo": "app"})
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "access token in Settings" in str(exc.detail)
+    else:
+        raise AssertionError("Expected missing token to be rejected")
+
+
+def test_split_github_repository_requires_owner_repo_format():
+    assert _split_github_repository("acme/app") == ("acme", "app")
+
+    try:
+        _split_github_repository("acme")
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert "owner/repo" in str(exc.detail)
+    else:
+        raise AssertionError("Expected invalid repository format to be rejected")
 
 
 def test_workflow_change_can_open_pr_when_github_ready_and_yaml_valid():
@@ -271,3 +444,5 @@ def test_github_client_list_pull_requests_filters_by_head_and_base():
     assert params["state"] == "open"
     assert params["head"] == "acme:quorvex/ci"
     assert params["base"] == "main"
+    assert params["per_page"] == 30
+    assert params["page"] == 1

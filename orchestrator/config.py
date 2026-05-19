@@ -65,10 +65,12 @@ class AppSettings(BaseSettings):
     anthropic_auth_token: str = ""
     anthropic_api_key: str = ""
     claude_code_oauth_token: str = ""
-    anthropic_base_url: str = ""
-    anthropic_model: str = ""
-    anthropic_default_opus_model: str = ""
-    anthropic_default_sonnet_model: str = ""
+    anthropic_base_url: str = "https://api.z.ai/api/anthropic"
+    anthropic_model: str = "glm-5.1"
+    anthropic_default_opus_model: str = "glm-5.1"
+    anthropic_default_sonnet_model: str = "glm-5-turbo"
+    anthropic_default_haiku_model: str = "glm-4.5-air"
+    api_timeout_ms: int = 3000000
     openai_api_key: str | None = None
 
     # --- Database ---
@@ -94,6 +96,11 @@ class AppSettings(BaseSettings):
 
     # --- Redis ---
     redis_url: str | None = None
+
+    # --- Temporal Autonomous Missions ---
+    temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    temporal_task_queue: str = "quorvex-autonomous-missions"
 
     # --- MinIO Storage ---
     minio_endpoint: str | None = None

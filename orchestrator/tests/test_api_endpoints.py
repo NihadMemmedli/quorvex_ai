@@ -160,6 +160,131 @@ class TestRunEndpoints:
                     session.commit()
 
 
+class TestAgentRunControlEndpoints:
+    """Test autonomous agent pause/resume API endpoints."""
+
+    def test_cancel_run_before_task_exists(self, client):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+
+        run_id = f"agent-control-{uuid4()}"
+        with Session(engine) as session:
+            run = AgentRun(id=run_id, agent_type="custom", status="running", config_json='{"prompt":"inspect"}')
+            session.add(run)
+            session.commit()
+
+        try:
+            response = client.post(f"/api/agents/runs/{run_id}/cancel")
+            assert response.status_code == 200
+            cancelled = response.json()
+            assert cancelled["status"] == "cancelled"
+            assert cancelled["progress"]["phase"] == "cancelled"
+            assert cancelled["progress"]["cancelled_from"] == "running"
+        finally:
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
+
+    def test_cancel_paused_run_before_task_exists(self, client):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+
+        run_id = f"agent-control-{uuid4()}"
+        with Session(engine) as session:
+            run = AgentRun(id=run_id, agent_type="custom", status="paused", config_json='{"prompt":"inspect"}')
+            run.progress = {"phase": "paused", "status": "paused", "paused_from": "running"}
+            session.add(run)
+            session.commit()
+
+        try:
+            response = client.post(f"/api/agents/runs/{run_id}/cancel")
+            assert response.status_code == 200
+            cancelled = response.json()
+            assert cancelled["status"] == "cancelled"
+            assert cancelled["progress"]["phase"] == "cancelled"
+            assert cancelled["progress"]["cancelled_from"] == "paused"
+        finally:
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
+
+    def test_cancel_completed_agent_run_returns_conflict(self, client):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+
+        run_id = f"agent-control-{uuid4()}"
+        with Session(engine) as session:
+            run = AgentRun(id=run_id, agent_type="custom", status="completed", config_json="{}")
+            session.add(run)
+            session.commit()
+
+        try:
+            response = client.post(f"/api/agents/runs/{run_id}/cancel")
+            assert response.status_code == 409
+            data = response.json()
+            assert "detail" in data
+        finally:
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
+
+    def test_pause_resume_run_before_task_exists(self, client):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+
+        run_id = f"agent-control-{uuid4()}"
+        with Session(engine) as session:
+            run = AgentRun(id=run_id, agent_type="custom", status="running", config_json='{"prompt":"inspect"}')
+            session.add(run)
+            session.commit()
+
+        pause_response = client.post(f"/api/agents/runs/{run_id}/pause")
+        assert pause_response.status_code == 200
+        paused = pause_response.json()
+        assert paused["status"] == "paused"
+        assert paused["progress"]["phase"] == "paused"
+        assert paused["progress"]["paused_from"] == "running"
+
+        resume_response = client.post(f"/api/agents/runs/{run_id}/resume")
+        assert resume_response.status_code == 200
+        resumed = resume_response.json()
+        assert resumed["status"] == "running"
+        assert resumed["progress"]["phase"] == "resumed"
+
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            if run:
+                session.delete(run)
+                session.commit()
+
+    def test_pause_completed_agent_run_returns_conflict(self, client):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+
+        run_id = f"agent-control-{uuid4()}"
+        with Session(engine) as session:
+            run = AgentRun(id=run_id, agent_type="custom", status="completed", config_json="{}")
+            session.add(run)
+            session.commit()
+
+        response = client.post(f"/api/agents/runs/{run_id}/pause")
+        assert response.status_code == 409
+        data = response.json()
+        assert "detail" in data
+
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            if run:
+                session.delete(run)
+                session.commit()
+
+
 class TestSpecEndpoints:
     """Test spec-related endpoints."""
 
@@ -281,6 +406,7 @@ class TestAISettings:
                     "ANTHROPIC_AUTH_TOKENS=old-key,backup-key",
                     "ANTHROPIC_DEFAULT_OPUS_MODEL=old-model",
                     "ANTHROPIC_DEFAULT_SONNET_MODEL=old-model",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL=old-model",
                     "ANTHROPIC_MODEL=old-model",
                     "ANTHROPIC_BASE_URL=https://api.anthropic.com",
                 ]
@@ -323,6 +449,7 @@ class TestAISettings:
         assert "ANTHROPIC_AUTH_TOKENS" not in os.environ
         assert os.environ["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-test-model"
         assert os.environ["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "claude-test-model"
+        assert os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-test-model"
         assert os.environ["ANTHROPIC_MODEL"] == "claude-test-model"
         assert fake_rotator.initialized is True
 
@@ -332,6 +459,7 @@ class TestAISettings:
         assert env_vars["ANTHROPIC_AUTH_TOKENS"] == ""
         assert env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-test-model"
         assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "claude-test-model"
+        assert env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-test-model"
         assert env_vars["ANTHROPIC_MODEL"] == "claude-test-model"
 
     def test_agent_runner_refreshes_runtime_ai_settings(self, tmp_path, monkeypatch):
@@ -376,6 +504,7 @@ class TestAISettings:
                     "ANTHROPIC_API_KEY=real-existing-key",
                     "ANTHROPIC_DEFAULT_OPUS_MODEL=old-model",
                     "ANTHROPIC_DEFAULT_SONNET_MODEL=old-model",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL=old-model",
                     "ANTHROPIC_MODEL=old-model",
                     "ANTHROPIC_BASE_URL=https://api.anthropic.com",
                 ]
@@ -402,10 +531,12 @@ class TestAISettings:
         assert env_vars["ANTHROPIC_API_KEY"] == "real-existing-key"
         assert env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "new-model"
         assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "new-model"
+        assert env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "new-model"
         assert env_vars["ANTHROPIC_MODEL"] == "new-model"
         assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "real-existing-key"
         assert os.environ["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "new-model"
         assert os.environ["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "new-model"
+        assert os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "new-model"
         assert os.environ["ANTHROPIC_MODEL"] == "new-model"
 
     def test_settings_test_connection_uses_active_runtime_settings(self, client, tmp_path, monkeypatch):
@@ -460,6 +591,63 @@ class TestAISettings:
         assert calls[0]["url"] == "https://api.anthropic.com/v1/messages"
         assert calls[0]["headers"]["x-api-key"] == "test-secret-key"
         assert calls[0]["json"]["model"] == "claude-test-model"
+
+    def test_settings_detects_zai_provider_and_uses_anthropic_messages_endpoint(self, client, tmp_path, monkeypatch):
+        """Z.ai should be treated as an Anthropic-compatible provider."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "ANTHROPIC_AUTH_TOKEN=zai-secret-key",
+                    "ANTHROPIC_MODEL=glm-5.1",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5-turbo",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.5-air",
+                    "ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+
+        calls = []
+
+        class FakeResponse:
+            status_code = 200
+            text = '{"ok":true}'
+
+        class FakeClient:
+            def __init__(self, timeout):
+                self.timeout = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, headers, json):
+                calls.append({"url": url, "headers": headers, "json": json})
+                return FakeResponse()
+
+        monkeypatch.setattr(settings_api.httpx, "AsyncClient", FakeClient)
+
+        settings_response = client.get("/settings")
+        assert settings_response.status_code == 200
+        assert settings_response.json()["llm_provider"] == "zai"
+
+        response = client.post("/settings/test-connection")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["model_name"] == "glm-5.1"
+        assert data["base_url"] == "https://api.z.ai/api/anthropic"
+        assert calls[0]["url"] == "https://api.z.ai/api/anthropic/v1/messages"
+        assert calls[0]["headers"]["x-api-key"] == "zai-secret-key"
+        assert calls[0]["json"]["model"] == "glm-5.1"
 
     def test_settings_test_connection_uses_claude_code_when_api_key_missing(self, client, tmp_path, monkeypatch):
         """POST /settings/test-connection should support local Claude Code subscription auth."""

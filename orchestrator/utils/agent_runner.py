@@ -852,6 +852,8 @@ class AgentRunner:
             "ANTHROPIC_MODEL",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "API_TIMEOUT_MS",
         ]
         env_vars = {}
         for key in keys:

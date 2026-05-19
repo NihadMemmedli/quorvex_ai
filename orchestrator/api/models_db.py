@@ -202,6 +202,186 @@ class AgentDefinition(SQLModel, table=True):
         self.tool_ids_json = json.dumps(value)
 
 
+class WorkflowDefinition(SQLModel, table=True):
+    """Reusable custom workflow made of ordered, typed action steps."""
+
+    __tablename__ = "workflow_definitions"
+    __table_args__ = (
+        Index("ix_workflow_definitions_project_status", "project_id", "status"),
+        Index("ix_workflow_definitions_project_updated", "project_id", "updated_at"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    name: str
+    description: str = ""
+    version: int = 1
+    steps_json: str = "[]"
+    status: str = "active"  # active, archived
+    created_by: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def steps(self) -> list[dict[str, Any]]:
+        try:
+            value = json.loads(self.steps_json or "[]")
+            return value if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @steps.setter
+    def steps(self, value: list[dict[str, Any]]):
+        self.steps_json = json.dumps(value)
+
+
+class WorkflowRun(SQLModel, table=True):
+    """Execution state for a saved custom workflow."""
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        Index("ix_workflow_runs_project_status", "project_id", "status"),
+        Index("ix_workflow_runs_definition_created", "definition_id", "created_at"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    # Legacy schema compatibility: older databases used workflow_id before
+    # definition_id. Keep it populated for migrated tables with NOT NULL
+    # constraints.
+    workflow_id: str | None = Field(default=None, foreign_key="workflow_definitions.id", index=True)
+    definition_id: str = Field(foreign_key="workflow_definitions.id", index=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    status: str = "queued"  # queued, running, awaiting_input, paused, completed, failed, cancelled
+    current_step_index: int = 0
+    progress: float = 0.0
+    inputs_json: str = "{}"
+    context_json: str = "{}"
+    result_json: str | None = None
+    error_message: str | None = None
+    triggered_by: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def inputs(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.inputs_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @inputs.setter
+    def inputs(self, value: dict[str, Any]):
+        self.inputs_json = json.dumps(value)
+
+    def __init__(self, **data: Any):
+        super().__init__(**data)
+        if self.workflow_id is None and self.definition_id:
+            self.workflow_id = self.definition_id
+
+    @property
+    def context(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.context_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @context.setter
+    def context(self, value: dict[str, Any]):
+        self.context_json = json.dumps(value)
+
+    @property
+    def result(self) -> dict[str, Any] | None:
+        if not self.result_json:
+            return None
+        try:
+            value = json.loads(self.result_json)
+            return value if isinstance(value, dict) else {"value": value}
+        except json.JSONDecodeError:
+            return None
+
+    @result.setter
+    def result(self, value: dict[str, Any] | None):
+        self.result_json = json.dumps(value) if value is not None else None
+
+
+class WorkflowRunStep(SQLModel, table=True):
+    """Persisted state for one step in a custom workflow run."""
+
+    __tablename__ = "workflow_run_steps"
+    __table_args__ = (
+        Index("ix_workflow_run_steps_run_order", "run_id", "step_order"),
+        Index("ix_workflow_run_steps_external", "external_kind", "external_id"),
+        {"extend_existing": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    run_id: str = Field(foreign_key="workflow_runs.id", index=True)
+    # Legacy schema compatibility for pre-custom-workflow-refresh tables.
+    workflow_id: str | None = Field(default=None, foreign_key="workflow_definitions.id", index=True)
+    definition_id: str = Field(foreign_key="workflow_definitions.id", index=True)
+    step_index: int = 0
+    step_order: int
+    step_id: str = ""
+    step_key: str
+    step_type: str
+    name: str = ""
+    label: str
+    status: str = "pending"  # pending, running, awaiting_input, paused, completed, failed, skipped, cancelled
+    continue_on_error: bool = False
+    input_json: str = "{}"
+    output_json: str | None = None
+    error_message: str | None = None
+    external_kind: str | None = None
+    external_id: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def input(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.input_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def __init__(self, **data: Any):
+        super().__init__(**data)
+        if self.workflow_id is None and self.definition_id:
+            self.workflow_id = self.definition_id
+        if self.step_id == "" and self.step_key:
+            self.step_id = self.step_key
+        if self.name == "" and self.label:
+            self.name = self.label
+        if self.step_index == 0 and self.step_order:
+            self.step_index = self.step_order
+
+    @input.setter
+    def input(self, value: dict[str, Any]):
+        self.input_json = json.dumps(value)
+
+    @property
+    def output(self) -> dict[str, Any] | None:
+        if not self.output_json:
+            return None
+        try:
+            value = json.loads(self.output_json)
+            return value if isinstance(value, dict) else {"value": value}
+        except json.JSONDecodeError:
+            return None
+
+    @output.setter
+    def output(self, value: dict[str, Any] | None):
+        self.output_json = json.dumps(value) if value is not None else None
+
+
 # ========== Phase 1: Coverage and Memory Models ==========
 
 
@@ -1975,6 +2155,292 @@ class ScheduleExecution(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+# ========== Autonomous Testing Missions ==========
+
+
+class AutonomousMission(SQLModel, table=True):
+    """Persistent 24/7 autonomous testing mission configuration."""
+
+    __tablename__ = "autonomous_missions"
+    __table_args__ = (
+        Index("ix_autonomous_missions_project_status", "project_id", "status"),
+        Index("ix_autonomous_missions_project_type", "project_id", "mission_type"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    name: str
+    description: str | None = None
+    mission_type: str = Field(default="mixed", index=True)  # coverage, exploration, regression, flake_triage, mixed
+    status: str = Field(default="paused", index=True)  # paused, running, completed, cancelled, error
+
+    target_urls_json: str = "[]"
+    schedule_cron: str | None = None
+    timezone: str = "UTC"
+    autonomy_level: str = "draft_validate"
+    approval_policy: str = "approval_required"
+    max_runtime_minutes: int = 60
+    max_iterations: int = 0  # 0 means unbounded until cancelled
+    max_llm_budget_usd: float | None = None
+    budget_used_usd: float = 0.0
+    config_json: str = "{}"
+
+    latest_workflow_id: str | None = None
+    latest_run_id: str | None = None
+    last_run_at: datetime | None = None
+    next_run_at: datetime | None = None
+    last_error: str | None = None
+    total_runs: int = 0
+    total_findings: int = 0
+
+    created_by: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def target_urls(self) -> list[str]:
+        try:
+            value = json.loads(self.target_urls_json or "[]")
+            return [str(item) for item in value if item]
+        except json.JSONDecodeError:
+            return []
+
+    @target_urls.setter
+    def target_urls(self, value: list[str]):
+        self.target_urls_json = json.dumps(value)
+
+    @property
+    def config(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.config_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @config.setter
+    def config(self, value: dict[str, Any]):
+        self.config_json = json.dumps(value)
+
+
+class AutonomousMissionRun(SQLModel, table=True):
+    """One durable execution iteration of an autonomous testing mission."""
+
+    __tablename__ = "autonomous_mission_runs"
+    __table_args__ = (
+        Index("ix_autonomous_runs_mission_created", "mission_id", "created_at"),
+        Index("ix_autonomous_runs_project_status", "project_id", "status"),
+        Index("ix_autonomous_runs_workflow", "workflow_id"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    mission_id: str = Field(foreign_key="autonomous_missions.id", index=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    workflow_id: str | None = None
+    mission_type: str = "mixed"
+    trigger_type: str = "temporal"  # manual, temporal, schedule, webhook
+    status: str = Field(default="queued", index=True)  # queued, running, completed, failed, cancelled
+    current_stage: str | None = None
+    summary_json: str = "{}"
+    artifacts_json: str = "[]"
+    error_message: str | None = None
+    budget_used_usd: float = 0.0
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def summary(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.summary_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @summary.setter
+    def summary(self, value: dict[str, Any]):
+        self.summary_json = json.dumps(value)
+
+    @property
+    def artifacts(self) -> list[dict[str, Any]]:
+        try:
+            value = json.loads(self.artifacts_json or "[]")
+            return value if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @artifacts.setter
+    def artifacts(self, value: list[dict[str, Any]]):
+        self.artifacts_json = json.dumps(value)
+
+
+class AutonomousFinding(SQLModel, table=True):
+    """Validated internal finding produced by an autonomous mission."""
+
+    __tablename__ = "autonomous_findings"
+    __table_args__ = (
+        Index("ix_autonomous_findings_project_status", "project_id", "status"),
+        Index("ix_autonomous_findings_mission_created", "mission_id", "created_at"),
+        Index("ix_autonomous_findings_dedupe", "project_id", "dedupe_key"),
+        UniqueConstraint("project_id", "dedupe_key", name="uq_autonomous_findings_project_dedupe"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    mission_id: str = Field(foreign_key="autonomous_missions.id", index=True)
+    run_id: str | None = Field(default=None, foreign_key="autonomous_mission_runs.id", index=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    finding_type: str = Field(index=True)  # coverage_gap, bug, flake, security, exploration
+    severity: str = "medium"
+    title: str
+    description: str = Field(sa_column=Column(Text))
+    status: str = Field(default="open", index=True)  # open, awaiting_approval, approved, rejected, resolved
+    confidence: float = 0.7
+    dedupe_key: str = Field(index=True)
+    evidence_json: str = "{}"
+    source_type: str | None = None
+    source_id: str | None = None
+    approval_required: bool = True
+    external_issue_url: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def evidence(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.evidence_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @evidence.setter
+    def evidence(self, value: dict[str, Any]):
+        self.evidence_json = json.dumps(value)
+
+
+class AutonomousTestProposal(SQLModel, table=True):
+    """Approval-gated generated test artifact proposed by an autonomous mission."""
+
+    __tablename__ = "autonomous_test_proposals"
+    __table_args__ = (
+        Index("ix_autonomous_test_proposals_project_status", "project_id", "approval_status"),
+        Index("ix_autonomous_test_proposals_mission_created", "mission_id", "created_at"),
+        Index("ix_autonomous_test_proposals_dedupe", "project_id", "dedupe_key"),
+        UniqueConstraint("project_id", "dedupe_key", name="uq_autonomous_test_proposals_project_dedupe"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    mission_id: str = Field(foreign_key="autonomous_missions.id", index=True)
+    run_id: str | None = Field(default=None, foreign_key="autonomous_mission_runs.id", index=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    finding_id: str | None = Field(default=None, foreign_key="autonomous_findings.id", index=True)
+    coverage_gap_id: int | None = Field(default=None, foreign_key="coverage_gaps.id", index=True)
+    approval_id: str | None = Field(default=None, foreign_key="autonomous_approvals.id", index=True)
+
+    title: str
+    target_url: str | None = None
+    route: str | None = None
+    test_type: str = Field(index=True)  # e2e, api, regression, security, accessibility, unit
+    rationale: str = Field(sa_column=Column(Text))
+    generated_spec_content: str = Field(sa_column=Column(Text))
+    suggested_file_path: str
+    risk_level: str = "medium"
+    approval_status: str = Field(default="pending", index=True)  # pending, approved, rejected, materialized
+    dedupe_key: str = Field(index=True)
+    source_type: str | None = None
+    source_id: str | None = None
+    source_metadata_json: str = "{}"
+    materialized_file_path: str | None = None
+    materialization_result_json: str | None = None
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    rejected_by: str | None = None
+    rejected_at: datetime | None = None
+    materialized_by: str | None = None
+    materialized_at: datetime | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def source_metadata(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.source_metadata_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @source_metadata.setter
+    def source_metadata(self, value: dict[str, Any]):
+        self.source_metadata_json = json.dumps(value)
+
+    @property
+    def materialization_result(self) -> dict[str, Any] | None:
+        if not self.materialization_result_json:
+            return None
+        try:
+            value = json.loads(self.materialization_result_json)
+            return value if isinstance(value, dict) else {"value": value}
+        except json.JSONDecodeError:
+            return None
+
+    @materialization_result.setter
+    def materialization_result(self, value: dict[str, Any] | None):
+        self.materialization_result_json = json.dumps(value) if value is not None else None
+
+
+class AutonomousApproval(SQLModel, table=True):
+    """Human approval gate for high-impact autonomous actions."""
+
+    __tablename__ = "autonomous_approvals"
+    __table_args__ = (
+        Index("ix_autonomous_approvals_project_status", "project_id", "status"),
+        Index("ix_autonomous_approvals_mission_status", "mission_id", "status"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    mission_id: str = Field(foreign_key="autonomous_missions.id", index=True)
+    run_id: str | None = Field(default=None, foreign_key="autonomous_mission_runs.id", index=True)
+    finding_id: str | None = Field(default=None, foreign_key="autonomous_findings.id", index=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    action_type: str = "external_issue"  # external_issue, persist_test, quarantine_test
+    status: str = Field(default="pending", index=True)  # pending, approved, rejected, expired
+    requested_payload_json: str = "{}"
+    response_json: str | None = None
+    decided_by: str | None = None
+    requested_at: datetime = Field(default_factory=datetime.utcnow)
+    decided_at: datetime | None = None
+
+    @property
+    def requested_payload(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.requested_payload_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @requested_payload.setter
+    def requested_payload(self, value: dict[str, Any]):
+        self.requested_payload_json = json.dumps(value)
+
+    @property
+    def response(self) -> dict[str, Any] | None:
+        if not self.response_json:
+            return None
+        try:
+            value = json.loads(self.response_json)
+            return value if isinstance(value, dict) else {"value": value}
+        except json.JSONDecodeError:
+            return None
+
+    @response.setter
+    def response(self, value: dict[str, Any] | None):
+        self.response_json = json.dumps(value) if value is not None else None
+
+
 # ========== CI/CD Pipeline Integration Models ==========
 
 
@@ -2095,6 +2561,52 @@ class CiAuditEvent(SQLModel, table=True):
     actor_email: str | None = None
     event_metadata: dict[str, Any] | None = Field(default=None, sa_column=Column("metadata", JSON))
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
+class CiTestSubset(SQLModel, table=True):
+    """Named set of generated tests that can be installed into CI."""
+
+    __tablename__ = "ci_test_subsets"
+    __table_args__ = (
+        UniqueConstraint("project_id", "slug", name="uq_ci_test_subset_project_slug"),
+        Index("ix_ci_test_subset_project_created", "project_id", "created_at"),
+        Index("ix_ci_test_subset_project_slug", "project_id", "slug"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    name: str
+    slug: str = Field(index=True)
+    description: str | None = None
+    mode: str = Field(default="both", index=True)  # manual, pr-impact, both
+    default_browser: str = "chromium"
+    base_url_secret: str = "APP_BASE_URL"
+    created_by: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class CiTestSubsetItem(SQLModel, table=True):
+    """One generated test file selected into a CI subset."""
+
+    __tablename__ = "ci_test_subset_items"
+    __table_args__ = (
+        UniqueConstraint("subset_id", "spec_name", name="uq_ci_test_subset_item_spec"),
+        Index("ix_ci_test_subset_items_subset", "subset_id"),
+        Index("ix_ci_test_subset_items_spec", "spec_name"),
+        {"extend_existing": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    subset_id: str = Field(foreign_key="ci_test_subsets.id", index=True)
+    spec_name: str = Field(index=True)
+    code_path: str
+    target_path: str
+    content_hash: str
+    tags: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    categories: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class PrImpactAnalysis(SQLModel, table=True):

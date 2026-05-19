@@ -34,8 +34,13 @@ services:
       # AI/LLM Configuration (from .env)
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
       - ANTHROPIC_AUTH_TOKENS=${ANTHROPIC_AUTH_TOKENS:-}
-      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}
-      - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-20250514}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-glm-5.1}
+      - ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL:-glm-5.1}
+      - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL:-glm-5-turbo}
+      - ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL:-glm-4.5-air}
+      - ANTHROPIC_CHAT_MODEL=${ANTHROPIC_CHAT_MODEL:-glm-5-turbo}
+      - API_TIMEOUT_MS=${API_TIMEOUT_MS:-3000000}
       # Memory System
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - MEMORY_ENABLED=${MEMORY_ENABLED:-true}
@@ -44,6 +49,10 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/playwright_agent
       # Redis (for K6 distributed mode when using --profile k6-workers)
       - REDIS_URL=${REDIS_URL:-}
+      # Temporal (for autonomous testing missions)
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_NAMESPACE=${TEMPORAL_NAMESPACE:-default}
+      - TEMPORAL_TASK_QUEUE=${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
       # Test Credentials (pass through from .env)
       - LOGIN_USERNAME=${LOGIN_USERNAME:-}
       - LOGIN_PASSWORD=${LOGIN_PASSWORD:-}
@@ -58,7 +67,49 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      temporal:
+        condition: service_started
     entrypoint: python -m uvicorn orchestrator.api.main:app --host 0.0.0.0 --port 8001 --reload
+    networks:
+      - playwright-network
+    restart: unless-stopped
+
+  autonomous-mission-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quorvex-autonomous-mission-worker
+    command: python -m orchestrator.services.autonomous_mission_worker
+    volumes:
+      - ./runs:/app/runs
+      - ./specs:/app/specs
+      - ./tests:/app/tests
+      - ./data:/app/data
+      - ./orchestrator:/app/orchestrator
+      - ./.claude:/app/.claude
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/playwright_agent
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_NAMESPACE=${TEMPORAL_NAMESPACE:-default}
+      - TEMPORAL_TASK_QUEUE=${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - ANTHROPIC_AUTH_TOKENS=${ANTHROPIC_AUTH_TOKENS:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-glm-5.1}
+      - ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL:-glm-5.1}
+      - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL:-glm-5-turbo}
+      - ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL:-glm-4.5-air}
+      - ANTHROPIC_CHAT_MODEL=${ANTHROPIC_CHAT_MODEL:-glm-5-turbo}
+      - API_TIMEOUT_MS=${API_TIMEOUT_MS:-3000000}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - MEMORY_ENABLED=${MEMORY_ENABLED:-true}
+      - CHROMADB_PERSIST_DIRECTORY=/app/data/chromadb
+    depends_on:
+      db:
+        condition: service_healthy
+      temporal:
+        condition: service_started
     networks:
       - playwright-network
     restart: unless-stopped
@@ -128,6 +179,38 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    container_name: quorvex-temporal-dev
+    ports:
+      - "7233:7233"
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=postgres
+      - POSTGRES_PWD=postgres
+      - POSTGRES_SEEDS=db
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - playwright-network
+    restart: unless-stopped
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    container_name: quorvex-temporal-ui-dev
+    ports:
+      - "8233:8080"
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    depends_on:
+      - temporal
+    networks:
+      - playwright-network
+    restart: unless-stopped
 
   # K6 Load Test Worker (dev mode with auto-mounted code)
   k6-workers:

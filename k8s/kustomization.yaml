@@ -12,11 +12,13 @@ resources:
   - pvc.yaml
   - redis.yaml
   - postgres-deployment.yaml
+  - temporal-deployment.yaml
   - backend-deployment.yaml
   - frontend-deployment.yaml
   - browser-worker-deployment.yaml
   - minio-deployment.yaml
   - agent-worker-deployment.yaml
+  - autonomous-mission-worker-deployment.yaml
   - k6-worker-deployment.yaml
   - zap-deployment.yaml
   - backup-cronjob.yaml

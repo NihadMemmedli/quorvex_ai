@@ -11,6 +11,7 @@ import {
 import { buildSystemPrompt } from '@/lib/ai/system-prompt';
 import { createAssistantTools } from '@/lib/ai/tools';
 import { backendFetch } from '@/lib/ai/backend-client';
+import { routeAssistantIntent } from '@/lib/ai/intent-router';
 
 export const maxDuration = 120;
 const OPTIONAL_CONTEXT_TIMEOUT_MS = 1500;
@@ -231,6 +232,114 @@ function extractFocusAreas(text: string): string[] {
     .slice(0, 5);
 }
 
+const DEFAULT_CHAT_CUSTOM_AGENT_TOOL_IDS = [
+  'browser_navigate',
+  'browser_snapshot',
+  'browser_click',
+  'browser_type',
+  'browser_select',
+  'browser_press_key',
+  'browser_hover',
+  'browser_network',
+  'browser_console',
+  'browser_screenshot',
+  'browser_wait',
+  'browser_navigate_back',
+  'browser_close',
+];
+
+const EXPLICIT_HIGH_RISK_TOOL_IDS: Array<{ pattern: RegExp; toolIds: string[] }> = [
+  { pattern: /\b(write|create|save|modify|edit)\s+(files?|specs?|tests?|code|artifact)\b/i, toolIds: ['write_file', 'edit_file'] },
+  { pattern: /\b(shell|bash|command line|terminal|npm|pytest|playwright test)\b/i, toolIds: ['bash'] },
+  { pattern: /\b(upload|attach file|file upload)\b/i, toolIds: ['browser_upload'] },
+  { pattern: /\b(javascript|evaluate|localstorage|sessionstorage|dom script)\b/i, toolIds: ['browser_evaluate'] },
+];
+
+function hostnameLabel(rawUrl: string) {
+  try {
+    return new URL(rawUrl).hostname.replace(/^www\./, '').slice(0, 48) || 'website';
+  } catch {
+    return 'website';
+  }
+}
+
+function extractMinimumServiceCount(text: string): number | undefined {
+  const numeric = text.match(/\b(?:at\s+least|minimum|min\.?|no\s+fewer\s+than)\s+(\d+)\s+(?:services?|flows?|scenarios?|pages?)\b/i);
+  if (numeric?.[1]) return Number(numeric[1]);
+
+  const direct = text.match(/\b(\d+)\s+(?:services?|flows?|scenarios?|pages?)\b/i);
+  if (direct?.[1] && /\b(deep|deeper|inside|analy[sz]e|inspect|explore)\b/i.test(text)) {
+    return Number(direct[1]);
+  }
+  return undefined;
+}
+
+function inferCustomAgentToolIds(text: string): string[] {
+  const toolIds = new Set(DEFAULT_CHAT_CUSTOM_AGENT_TOOL_IDS);
+  for (const rule of EXPLICIT_HIGH_RISK_TOOL_IDS) {
+    if (rule.pattern.test(text)) {
+      rule.toolIds.forEach((toolId) => toolIds.add(toolId));
+    }
+  }
+  if (/\b(assert|verify|validate|locator|selector)\b/i.test(text)) {
+    toolIds.add('browser_generate_locator');
+    toolIds.add('browser_verify_element');
+    toolIds.add('browser_verify_text');
+  }
+  if (/\b(trace|tracing)\b/i.test(text)) {
+    toolIds.add('browser_start_tracing');
+    toolIds.add('browser_stop_tracing');
+  }
+  return Array.from(toolIds);
+}
+
+function buildCustomAgentSystemPrompt(text: string) {
+  const mustNotInvent = /\b(do\s+not|don't|dont|without)\s+(invent|assume|hallucinate|make up)|\bnot invent\b/i.test(text);
+  return [
+    'You are a focused QA automation agent.',
+    'Use only the granted tools and stay within the requested scope.',
+    'Inspect the target from observable UI, network, console, and page behavior.',
+    'Use public unauthenticated pages only unless credentials are explicitly provided.',
+    mustNotInvent
+      ? 'Do not invent requirements, flows, pages, findings, data, or expected behavior. Mark unknowns as unknown and cite observed evidence.'
+      : 'Base findings and test ideas on observed behavior and clearly separate evidence from assumptions.',
+    'Report pages checked, flows/scenarios observed, findings, test ideas, evidence, requirements inferred from observations, and follow-up actions.',
+    'Do not modify external data unless the user explicitly requested that action.',
+  ].join(' ');
+}
+
+function buildCustomAgentRunPrompt(targetUrl: string, text: string, focusAreas: string[]) {
+  const targetServiceCount = extractMinimumServiceCount(text);
+  const wantsRequirements = /\brequirements?\b/i.test(text);
+  const wantsScenarios = /\b(flows?|scenarios?|journeys?)\b/i.test(text);
+  const mustNotInvent = /\b(do\s+not|don't|dont|without)\s+(invent|assume|hallucinate|make up)|\bnot invent\b/i.test(text);
+  const deepRun = /\b(longer|deep|deeper|crawl|inside|at least|minimum|many|different)\b/i.test(text);
+
+  const lines = [
+    `Inspect ${targetUrl}.`,
+    targetServiceCount ? `Go deeper into at least ${targetServiceCount} observed services or service-category paths before summarizing.` : '',
+    deepRun && !targetServiceCount ? 'Go deeper than a smoke check: inspect linked pages, alternate paths, edge cases, and negative states where observable.' : '',
+    wantsScenarios ? 'Analyze different observed flows, scenarios, branches, and failure/empty states.' : '',
+    wantsRequirements ? 'Extract requirements only when they are directly supported by observed UI text, behavior, network calls, or page structure.' : '',
+    mustNotInvent ? 'Do not invent anything. If a requirement, expected result, or scenario is not observable, mark it as unknown or a follow-up.' : '',
+    'Use public unauthenticated pages only unless credentials are explicitly provided.',
+    focusAreas.length > 0 ? `Focus areas: ${focusAreas.join(', ')}.` : '',
+    'Capture pages checked, observed flows, findings, test ideas, evidence, inferred requirements, and follow-up actions.',
+    '',
+    'Original user request:',
+    text.trim().slice(0, 3000),
+  ];
+
+  return lines.filter(Boolean).join('\n');
+}
+
+function customAgentSaveOnlyIntent(text: string): boolean {
+  const saveIntent = /\b(save|store|create|build|define)\b.*\b(custom\s+agent|agent definition|reusable agent|template)\b/i.test(text)
+    || /\b(custom\s+agent|agent definition|reusable agent|template)\b.*\b(save|store|create|build|define)\b/i.test(text);
+  const runIntent = /\b(run|start|launch|kick off|begin|execute|inspect now|go ahead|approve)\b/i.test(text);
+  return saveIntent && !runIntent;
+}
+
 function buildAdhocCustomAgentStartAction(messages: any[]): { text: string; toolName: string; input: Record<string, unknown> } | null {
   const latestUserText = extractLatestUserText(messages);
   const conversationText = messages.map(extractMessageText).filter(Boolean).join('\n');
@@ -246,21 +355,30 @@ function buildAdhocCustomAgentStartAction(messages: any[]): { text: string; tool
   if (!startIntent && !latestHasUrl) return null;
 
   const focusAreas = extractFocusAreas(conversationText);
-  const prompt = [
-    `Inspect ${targetUrl} and gather actionable QA test ideas from observed behavior.`,
-    'Use public unauthenticated pages only unless credentials are explicitly provided.',
-    'Capture pages checked, findings, test ideas, evidence, and follow-up actions.',
-    focusAreas.length > 0 ? `Focus areas: ${focusAreas.join(', ')}.` : '',
-  ].filter(Boolean).join(' ');
+  const promptSource = latestUserText.trim() || conversationText.trim();
+  const targetServiceCount = extractMinimumServiceCount(promptSource);
+  const prompt = buildCustomAgentRunPrompt(targetUrl, promptSource, focusAreas);
+  const saveOnly = customAgentSaveOnlyIntent(latestUserText);
+  const agentName = `QA Agent - ${hostnameLabel(targetUrl)}`;
 
   return {
-    text: 'I prepared a real custom agent start action below. Approve it to create the agent and start the run from the chatbot.',
-    toolName: 'startAdhocCustomAgent',
+    text: saveOnly
+      ? 'I prepared an editable custom agent definition below. Review the prompt and tools, then approve to save it.'
+      : 'I prepared an editable custom agent start action below. Review the prompt and tools, then approve to create the agent and start the run.',
+    toolName: saveOnly ? 'createCustomAgentDefinition' : 'startAdhocCustomAgent',
     input: {
       url: targetUrl,
+      agentName,
+      description: `Chat-created custom QA agent for ${targetUrl}.`,
+      systemPrompt: buildCustomAgentSystemPrompt(promptSource),
       prompt,
+      toolIds: inferCustomAgentToolIds(promptSource),
       focusAreas: focusAreas.length > 0 ? focusAreas : undefined,
-      timeoutSeconds: 1800,
+      targetServiceCount,
+      requireObservedEvidence: true,
+      publicOnly: true,
+      outputGoals: ['pages_checked', 'flows', 'scenarios', 'findings', 'test_ideas', 'evidence', 'requirements', 'follow_up_actions'],
+      timeoutSeconds: targetServiceCount && targetServiceCount >= 7 ? 3600 : 1800,
     },
   };
 }
@@ -855,66 +973,33 @@ export async function POST(req: Request) {
   const authHeader = req.headers.get('authorization');
   const authToken = authHeader?.replace('Bearer ', '') || undefined;
   const latestUserText = extractLatestUserText(messages);
+  const useAnthropic = hasDirectAnthropicChatCredential();
+  const useOpenAI = !useAnthropic && hasOpenAIChatCredential();
+  let routedModelId: string | undefined;
 
-  const prdFeaturesShortcut = await prdFeaturesShortcutResponse(
-    latestUserText,
-    projectId,
-    currentPage,
-    pageContext,
-    authToken
-  );
-  if (prdFeaturesShortcut) return prdFeaturesShortcut;
+  if (useAnthropic || useOpenAI) {
+    routedModelId = useAnthropic ? await getRuntimeModelId(authToken) : OPENAI_MODEL_ID;
+    const { provider } = useAnthropic ? getActiveProvider() : getActiveOpenAIProvider();
+    const intentRoute = await routeAssistantIntent({
+      messages,
+      projectId,
+      currentPage,
+      pageContext,
+      authToken,
+      model: provider(routedModelId),
+    });
 
-  const missingExplorerUrl = buildExplorerAgentMissingUrlResponse(messages);
-  if (missingExplorerUrl) return missingExplorerUrl;
+    if (intentRoute?.kind === 'clarify') {
+      return textToUIMessageResponse(intentRoute.text);
+    }
 
-  const missingCustomAgentUrl = buildAdhocCustomAgentMissingUrlResponse(messages);
-  if (missingCustomAgentUrl) return missingCustomAgentUrl;
-
-  const customAgentAction = buildAdhocCustomAgentStartAction(messages);
-  if (customAgentAction) {
-    return toolInputUIMessageResponse(
-      customAgentAction.text,
-      customAgentAction.toolName,
-      customAgentAction.input
-    );
-  }
-
-  const discoveryAgentAction = buildDiscoveryAgentStartAction(messages, currentPage, pageContext);
-  if (discoveryAgentAction) {
-    return toolInputUIMessageResponse(
-      discoveryAgentAction.text,
-      discoveryAgentAction.toolName,
-      discoveryAgentAction.input
-    );
-  }
-
-  const explorerStatus = await explorerAgentStatusResponse(messages, projectId, authToken);
-  if (explorerStatus) return explorerStatus;
-
-  const apiTestAction = buildApiTestAction(messages);
-  if (apiTestAction) {
-    return toolInputUIMessageResponse(
-      apiTestAction.text,
-      apiTestAction.toolName,
-      apiTestAction.input
-    );
-  }
-
-  const databaseSpecGeneration = await buildDatabaseSpecGenerationResponse(messages, projectId, authToken);
-  if (databaseSpecGeneration) return databaseSpecGeneration;
-
-  const autoPilotStartInput = buildAutoPilotStartInput(messages);
-  if (autoPilotStartInput) {
-    return toolInputUIMessageResponse(
-      'I prepared the real Auto Pilot start action below. Approve it to start the run from the chatbot.',
-      'startAutoPilot',
-      autoPilotStartInput
-    );
+    if (intentRoute?.kind === 'action') {
+      return toolInputUIMessageResponse(intentRoute.text, intentRoute.toolName, intentRoute.input);
+    }
   }
 
   const [modelId, ctxRes, summRes, memoryRes] = await Promise.all([
-    getRuntimeModelId(authToken),
+    routedModelId ? Promise.resolve(routedModelId) : getRuntimeModelId(authToken),
     timedBackendFetch<{
       recent_runs?: number;
       recent_failures?: number;
@@ -964,8 +1049,6 @@ export async function POST(req: Request) {
 
   const tools = createAssistantTools(authToken, projectId);
   const recentMessages = getRecentMessages(messages);
-  const useAnthropic = hasDirectAnthropicChatCredential();
-  const useOpenAI = !useAnthropic && hasOpenAIChatCredential();
 
   if (!useAnthropic && !useOpenAI) {
     return textToUIMessageResponse(

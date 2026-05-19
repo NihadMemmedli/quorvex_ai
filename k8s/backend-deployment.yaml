@@ -49,7 +49,32 @@ spec:
           valueFrom:
             configMapKeyRef:
               name: quorvex-config
+              key: anthropic-sonnet-model
+        - name: ANTHROPIC_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
               key: anthropic-model
+        - name: ANTHROPIC_DEFAULT_OPUS_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: anthropic-opus-model
+        - name: ANTHROPIC_DEFAULT_HAIKU_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: anthropic-haiku-model
+        - name: ANTHROPIC_CHAT_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: anthropic-chat-model
+        - name: API_TIMEOUT_MS
+          valueFrom:
+            configMapKeyRef:
+              name: quorvex-config
+              key: api-timeout-ms
         - name: OPENAI_API_KEY
           valueFrom:
             secretKeyRef:
@@ -85,6 +110,12 @@ spec:
           value: "1800"
         - name: REDIS_URL
           value: "redis://redis:6379/0"
+        - name: TEMPORAL_ADDRESS
+          value: "temporal:7233"
+        - name: TEMPORAL_NAMESPACE
+          value: "default"
+        - name: TEMPORAL_TASK_QUEUE
+          value: "quorvex-autonomous-missions"
         - name: BROWSER_WORKERS_ENABLED
           value: "true"
         - name: PLAYWRIGHT_WORKERS

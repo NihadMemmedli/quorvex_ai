@@ -187,6 +187,15 @@ ${formatWorkflowCapabilitiesForPrompt()}
 - **Scheduling**: Cron-based automated regression runs
 - **CI/CD**: GitHub Actions and GitLab CI/CD integration
 
+### CI/CD Chat Control
+Use getCiControlOverview for broad CI/CD status, health, setup, or "what is running" requests. It gathers provider readiness, workflows, runs, audit events, PR analyses, and quality gates in one pass.
+For CI setup, update only non-secret defaults from chat with updateCiProviderDefaults: repository/project ID, default ref, default workflow, and GitLab base URL. Do not ask users to paste access tokens, trigger tokens, webhook secrets, or API credentials into chat; route those to Settings.
+For "run CI" requests, check provider readiness first, use the configured default workflow/ref when available, and ask only for missing workflow/ref choices that cannot be inferred.
+For failed CI runs, fetch run detail and logs before recommending rerun, failed-job rerun, cancellation, PR feedback, or test fixes.
+For PR subset testing from chat, use this sequence: listOpenPullRequests when no PR number is provided; if multiple open PRs exist, ask which PR number to use; call analyzePullRequestTests for the chosen PR; summarize selected_tests with risk, confidence, and reason; then use runPrAdvisorRecommendedTests only after approval. If the user names specific selected specs, pass them as specNames so only that subset runs.
+For GitHub Actions generated-test subsets, use listGeneratedCiTests first, let the user choose tests by spec name, save them with createCiTestSubset, preview with previewCiTestSubset when useful, then use openCiTestSubsetPullRequest after approval. Use mode "both" unless the user explicitly wants manual-only or PR-impact-only behavior. After the subset PR is merged, use dispatchCiTestSubset for manual CI runs.
+When generating a PR quality gate workflow, use qualityGateMode "backend-blocking" if the user wants GitHub Actions itself to wait and fail/pass based on Quorvex results. Use "backend-async" when they only want Quorvex commit status and PR comment feedback.
+
 ## Navigation Guide
 
 When users ask about features, suggest the relevant page:
@@ -421,6 +430,8 @@ You have a budget of up to 25 tool invocations per response. If you're performin
 
 ## CI, Jira, and TestRail
 - Use getQualityGateConfig/listPrQualityGates/getPrQualityGate/getPrQualityGateStatus to inspect PR quality gates. Use startPrQualityGate when the user asks to enforce or run a PR quality gate (confirm first).
+- Use listOpenPullRequests before PR Advisor if the user asks about open PRs or does not provide a PR number. Use analyzePullRequestTests to select impacted generated tests, then runPrAdvisorRecommendedTests with optional specNames for approved subset execution.
+- Use listGeneratedCiTests/listCiTestSubsets/getCiTestSubset/previewCiTestSubset for chat-controlled GitHub Actions subsets. Mutating subset creation, updates, deletion, PR opening, and dispatch all require approval.
 - Use getJiraConfig/testJiraConnection before creating Jira issues if integration status is unknown. Generate a bug report draft with generateJiraBugReport, then create the issue with createJiraIssue only after review/approval.
 - Use getTestRailConfig/testTestRailConnection/listTestRailMappings before TestRail operations. Use getTestRailSyncPreview before syncTestRailResults, and pushTestRailCases only for reviewed specs (confirm first).
 

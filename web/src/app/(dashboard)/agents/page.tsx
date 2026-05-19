@@ -1,6 +1,6 @@
 'use client';
 import { useState, useEffect, useRef } from 'react';
-import { Bot, FileText, Play, Terminal, ChevronRight, CheckCircle2, AlertTriangle, Loader2, Clock, RotateCcw, Lock, Globe, Settings, Download, List, Sparkles, Zap, ArrowRight, Info, X, RefreshCw, Scissors, ExternalLink, Plus, Save, Trash2, Wrench, MessageSquare, Bug, Lightbulb, Eye } from 'lucide-react';
+import { Bot, FileText, Play, Pause, Terminal, ChevronRight, CheckCircle2, AlertTriangle, Loader2, Clock, RotateCcw, Lock, Globe, Settings, Download, List, Sparkles, Zap, ArrowRight, Info, X, RefreshCw, Scissors, ExternalLink, Plus, Save, Trash2, Wrench, MessageSquare, Bug, Lightbulb, Eye, Video as VideoIcon, Monitor, Image as ImageIcon } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
@@ -130,6 +130,132 @@ function getArtifactUrl(artifact: AgentArtifact) {
     return `${API_BASE}${artifact.path}`;
 }
 
+function AgentRunCapturePanel({
+    activeRun,
+    mode,
+}: {
+    activeRun: AgentRun;
+    mode: 'live' | 'recording';
+}) {
+    const artifacts = activeRun.artifacts || [];
+    const latestVideo = sortArtifactsByModifiedAt(artifacts.filter(artifact => artifact.type === 'video'))[0];
+    const latestImage = sortArtifactsByModifiedAt(artifacts.filter(artifact => artifact.type === 'image'))[0];
+
+    if (!latestVideo && !latestImage && mode === 'recording') {
+        return null;
+    }
+
+    return (
+        <div style={{
+            border: '1px solid var(--border)',
+            borderRadius: '8px',
+            overflow: 'hidden',
+            background: 'var(--surface-hover)'
+        }}>
+            <div style={{
+                padding: '0.75rem 1rem',
+                borderBottom: '1px solid var(--border)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '0.75rem'
+            }}>
+                <h4 style={{
+                    margin: 0,
+                    fontSize: '0.9rem',
+                    fontWeight: 600,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.5rem'
+                }}>
+                    {mode === 'live' ? <Monitor size={16} /> : <VideoIcon size={16} />}
+                    {mode === 'live' ? 'Live Capture' : 'Recording'}
+                </h4>
+                {latestVideo && (
+                    <a
+                        href={getArtifactUrl(latestVideo)}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '0.35rem',
+                            color: 'var(--primary)',
+                            fontSize: '0.8rem',
+                            textDecoration: 'none',
+                            flexShrink: 0
+                        }}
+                    >
+                        Open <ExternalLink size={13} />
+                    </a>
+                )}
+            </div>
+
+            <div style={{ padding: '1rem' }}>
+                {latestVideo ? (
+                    <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: '#000' }}>
+                        <video
+                            controls
+                            preload="metadata"
+                            src={getArtifactUrl(latestVideo)}
+                            style={{ width: '100%', display: 'block', aspectRatio: '16/9', background: '#000' }}
+                        />
+                        <div style={{
+                            padding: '0.65rem 0.85rem',
+                            background: 'var(--surface)',
+                            borderTop: '1px solid var(--border)',
+                            fontSize: '0.82rem',
+                            color: 'var(--text-secondary)',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis'
+                        }}>
+                            {latestVideo.name}
+                        </div>
+                    </div>
+                ) : latestImage ? (
+                    <div>
+                        <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '0.4rem',
+                            color: 'var(--text-secondary)',
+                            fontSize: '0.82rem',
+                            marginBottom: '0.75rem'
+                        }}>
+                            <ImageIcon size={14} />
+                            Latest screenshot
+                        </div>
+                        <img
+                            src={getArtifactUrl(latestImage)}
+                            alt="Latest agent browser screenshot"
+                            style={{
+                                width: '100%',
+                                display: 'block',
+                                borderRadius: '8px',
+                                border: '1px solid var(--border)',
+                                background: 'var(--background)'
+                            }}
+                        />
+                    </div>
+                ) : (
+                    <div style={{
+                        minHeight: '90px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'var(--text-secondary)',
+                        fontSize: '0.9rem',
+                        textAlign: 'center'
+                    }}>
+                        Waiting for the first browser capture...
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
 function getStructuredReport(run: AgentRun): StructuredAgentReport {
     return run.result?.structured_report || {
         summary: run.result?.summary || 'Custom agent completed. Review the raw output for details.',
@@ -156,6 +282,15 @@ function reportStatusColor(value?: string) {
     if (normalized.includes('issue') || normalized.includes('failed') || normalized.includes('error')) return 'var(--danger)';
     if (normalized.includes('load') || normalized.includes('pass')) return 'var(--success)';
     return 'var(--text-secondary)';
+}
+
+const LIVE_AGENT_STATUSES = new Set(['running', 'pending', 'queued', 'paused']);
+
+function agentStatusTone(status?: string) {
+    if (status === 'completed') return { bg: 'var(--success-muted)', color: 'var(--success)' };
+    if (status === 'failed' || status === 'cancelled' || status === 'timeout') return { bg: 'var(--danger-muted)', color: 'var(--danger)' };
+    if (status === 'paused') return { bg: 'rgba(245, 158, 11, 0.12)', color: 'var(--warning)' };
+    return { bg: 'var(--primary-glow)', color: 'var(--primary)' };
 }
 
 function itemPrompt(run: AgentRun, item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test idea') {
@@ -424,6 +559,7 @@ export default function AgentsPage() {
 
     // UI state
     const [isStarting, setIsStarting] = useState(false);
+    const [runControlPending, setRunControlPending] = useState<'pause' | 'resume' | 'cancel' | null>(null);
     const [isSynthesizing, setIsSynthesizing] = useState(false);
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [sessions, setSessions] = useState<any[]>([]);
@@ -530,7 +666,7 @@ export default function AgentsPage() {
                 setActiveRun(data);
 
                 // If actively running, keep polling
-                if (data.status === 'running' || data.status === 'pending') {
+                if (LIVE_AGENT_STATUSES.has(data.status)) {
                     // Continue polling
                 } else {
                     // Run completed or failed - do one final fetch to get the result
@@ -977,6 +1113,27 @@ export default function AgentsPage() {
         }
     };
 
+    const controlAgentRun = async (action: 'pause' | 'resume' | 'cancel') => {
+        if (!activeRun) return;
+        setRunControlPending(action);
+        try {
+            const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
+            const res = await fetch(`${API_BASE}/api/agents/runs/${activeRun.id}/${action}${projectQuery}`, {
+                method: 'POST',
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.detail || `Failed to ${action} agent run`);
+            }
+            setActiveRun(data);
+            await fetchHistory();
+        } catch (e: any) {
+            alert(e.message || `Failed to ${action} agent run`);
+        } finally {
+            setRunControlPending(null);
+        }
+    };
+
     const handleSynthesize = async () => {
         if (!selectedRunId || !activeRun || activeRun.agent_type !== 'exploratory') {
             alert("Please select a completed exploratory run");
@@ -1063,7 +1220,9 @@ export default function AgentsPage() {
                                         {run.config?.url?.replace('https://', '') || 'No URL'}
                                     </div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', marginTop: '0.25rem' }}>
-                                        {run.status === 'running' ? <Loader2 size={12} className="spin" color="var(--primary)" /> :
+                                        {run.status === 'running' || run.status === 'queued' || run.status === 'pending' ? <Loader2 size={12} className="spin" color="var(--primary)" /> :
+                                            run.status === 'paused' ? <Pause size={12} color="var(--warning)" /> :
+                                            run.status === 'cancelled' ? <X size={12} color="var(--danger)" /> :
                                             run.status === 'failed' ? <AlertTriangle size={12} color="var(--danger)" /> :
                                                 <CheckCircle2 size={12} color="var(--success)" />}
                                         <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{run.status}</span>
@@ -1517,18 +1676,51 @@ export default function AgentsPage() {
 
                 {/* Right Column: Output */}
                 <div className="card" style={{ padding: '0', display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-                    <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
                         <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>
                             {activeRun ? `Result: ${activeRun.config?.agent_name || activeRun.config?.url || 'Unknown'}` : 'Agent Output'}
                         </h3>
                         {activeRun && (
-                            <span style={{
-                                fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '12px',
-                                background: activeRun.status === 'completed' ? 'var(--success-muted)' : activeRun.status === 'failed' ? 'var(--danger-muted)' : 'var(--primary-glow)',
-                                color: activeRun.status === 'completed' ? 'var(--success)' : activeRun.status === 'failed' ? 'var(--danger)' : 'var(--primary)'
-                            }}>
-                                {activeRun.status}
-                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+                                {LIVE_AGENT_STATUSES.has(activeRun.status) && activeRun.status !== 'paused' && (
+                                    <button
+                                        onClick={() => controlAgentRun('pause')}
+                                        disabled={runControlPending !== null}
+                                        title="Pause agent"
+                                        style={{ border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--text)', borderRadius: '6px', padding: '0.35rem 0.55rem', cursor: runControlPending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600, opacity: runControlPending ? 0.65 : 1 }}
+                                    >
+                                        {runControlPending === 'pause' ? <Loader2 className="spin" size={14} /> : <Pause size={14} />} Pause
+                                    </button>
+                                )}
+                                {activeRun.status === 'paused' && (
+                                    <button
+                                        onClick={() => controlAgentRun('resume')}
+                                        disabled={runControlPending !== null}
+                                        title="Resume agent"
+                                        style={{ border: '1px solid var(--primary)', background: 'var(--primary)', color: 'white', borderRadius: '6px', padding: '0.35rem 0.55rem', cursor: runControlPending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600, opacity: runControlPending ? 0.65 : 1 }}
+                                    >
+                                        {runControlPending === 'resume' ? <Loader2 className="spin" size={14} /> : <Play size={14} />} Resume
+                                    </button>
+                                )}
+                                {LIVE_AGENT_STATUSES.has(activeRun.status) && (
+                                    <button
+                                        onClick={() => controlAgentRun('cancel')}
+                                        disabled={runControlPending !== null}
+                                        title="Cancel agent"
+                                        style={{ border: '1px solid var(--danger)', background: 'var(--danger-muted)', color: 'var(--danger)', borderRadius: '6px', padding: '0.35rem 0.55rem', cursor: runControlPending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600, opacity: runControlPending ? 0.65 : 1 }}
+                                    >
+                                        {runControlPending === 'cancel' ? <Loader2 className="spin" size={14} /> : <X size={14} />} Cancel
+                                    </button>
+                                )}
+                                <span style={{
+                                    fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '12px',
+                                    background: agentStatusTone(activeRun.status).bg,
+                                    color: agentStatusTone(activeRun.status).color,
+                                    textTransform: 'capitalize'
+                                }}>
+                                    {activeRun.status}
+                                </span>
+                            </div>
                         )}
                     </div>
 
@@ -1538,7 +1730,27 @@ export default function AgentsPage() {
                                 <Bot size={64} style={{ marginBottom: '1rem' }} />
                                 <p>Select a run from history or start a new one.</p>
                             </div>
-                        ) : ['running', 'pending', 'queued'].includes(activeRun.status) && activeRun.agent_type === 'custom' ? (
+                        ) : LIVE_AGENT_STATUSES.has(activeRun.status) && activeRun.agent_type === 'exploratory' ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                {activeRun.status === 'paused' && (
+                                    <div style={{ padding: '0.9rem 1rem', background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.35)', borderRadius: '8px', color: 'var(--warning)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <Pause size={16} /> Agent is paused. Resume to continue from the current state.
+                                    </div>
+                                )}
+
+                                <LiveBrowserView
+                                    runId={activeRun.id}
+                                    isActive={activeRun.status !== 'paused'}
+                                    showHeader
+                                />
+                                <AgentRunCapturePanel activeRun={activeRun} mode="live" />
+                                <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem', textAlign: 'center' }}>
+                                    {activeRun.status === 'paused'
+                                        ? 'Resume to continue from the current state.'
+                                        : `Explorer agent is working. This may take up to ${timeLimitMinutes} minutes.`}
+                                </p>
+                            </div>
+                        ) : LIVE_AGENT_STATUSES.has(activeRun.status) && activeRun.agent_type === 'custom' ? (
                             (() => {
                                 const progress = activeRun.progress || {};
                                 const selectedTools = activeRun.config?.selected_tools || [];
@@ -1574,8 +1786,14 @@ export default function AgentsPage() {
                                             </div>
                                         </div>
 
+                                        {activeRun.status === 'paused' && (
+                                            <div style={{ padding: '0.9rem 1rem', background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.35)', borderRadius: '8px', color: 'var(--warning)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                <Pause size={16} /> Agent is paused. Resume to continue from the current browser and CLI state.
+                                            </div>
+                                        )}
+
                                         {hasBrowserTools ? (
-                                            <LiveBrowserView runId={activeRun.id} isActive={true} showHeader />
+                                            <LiveBrowserView runId={activeRun.id} isActive={activeRun.status !== 'paused'} showHeader />
                                         ) : (
                                             <div style={{ padding: '1.25rem', background: 'var(--surface-hover)', border: '1px solid var(--border)', borderRadius: '10px', color: 'var(--text-secondary)', textAlign: 'center' }}>
                                                 This custom agent does not have browser tools selected. Follow its tool activity below.
@@ -1632,12 +1850,14 @@ export default function AgentsPage() {
                                     </div>
                                 );
                             })()
-                        ) : ['running', 'pending', 'queued'].includes(activeRun.status) ? (
+                        ) : LIVE_AGENT_STATUSES.has(activeRun.status) ? (
                             <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)' }}>
-                                <Loader2 size={48} className="spin" style={{ marginBottom: '1rem', color: 'var(--primary)' }} />
-                                <p>Agent is working...</p>
+                                {activeRun.status === 'paused' ? <Pause size={48} style={{ marginBottom: '1rem', color: 'var(--warning)' }} /> : <Loader2 size={48} className="spin" style={{ marginBottom: '1rem', color: 'var(--primary)' }} />}
+                                <p>{activeRun.status === 'paused' ? 'Agent is paused.' : 'Agent is working...'}</p>
                                 <p style={{ fontSize: '0.9rem', marginTop: '0.5rem' }}>
-                                    This may take up to {activeRun.agent_type === 'custom' ? Math.ceil((activeRun.config?.timeout_seconds || 1800) / 60) : timeLimitMinutes} minutes.
+                                    {activeRun.status === 'paused'
+                                        ? 'Resume to continue from the current state.'
+                                        : `This may take up to ${activeRun.agent_type === 'custom' ? Math.ceil((activeRun.config?.timeout_seconds || 1800) / 60) : timeLimitMinutes} minutes.`}
                                 </p>
                             </div>
                         ) : activeRun.status === 'failed' ? (
@@ -1688,6 +1908,8 @@ export default function AgentsPage() {
                                             </div>
                                         ) : (
                                             <>
+                                                <AgentRunCapturePanel activeRun={activeRun} mode="recording" />
+
                                                 {/* Main Summary Card */}
                                                 <div style={{ padding: '1.5rem', background: 'linear-gradient(135deg, var(--primary-glow) 0%, rgba(192, 132, 252, 0.1) 100%)', borderRadius: '12px', border: '1px solid rgba(59, 130, 246, 0.2)' }}>
                                                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem' }}>

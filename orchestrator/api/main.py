@@ -48,6 +48,7 @@ from utils.project_utils import derive_project_id_from_url
 
 from . import (
     analytics,
+    autonomous,
     api_testing,
     auth,
     autopilot,
@@ -75,6 +76,7 @@ from . import (
     settings,
     testrail,
     users,
+    workflows,
 )
 from .db import engine, get_database_type, get_session, init_db, is_parallel_mode_available
 from .middleware.rate_limit import limiter, rate_limit_exceeded_handler
@@ -388,6 +390,8 @@ app.include_router(analytics.router)  # Analytics dashboard
 app.include_router(health.router)  # Storage health endpoints
 app.include_router(chat.router)  # AI assistant chat endpoints
 app.include_router(autopilot.router)  # Auto Pilot pipeline endpoints
+app.include_router(autonomous.router)  # Persistent autonomous testing missions
+app.include_router(workflows.router)  # Custom workflow endpoints
 app.mount("/artifacts", StaticFiles(directory=RUNS_DIR), name="artifacts")
 
 # CORS Configuration - restrict origins in production
@@ -5984,6 +5988,66 @@ def _filter_agent_run_project(run: AgentRun, project_id: str | None) -> None:
             raise HTTPException(status_code=404, detail="Run not found")
 
 
+AGENT_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timeout"}
+AGENT_ACTIVE_STATUSES = {"queued", "pending", "running", "paused"}
+
+
+async def _wait_if_agent_run_paused(run_id: str, poll_interval: float = 0.5) -> bool:
+    """Block background execution while the user-visible run is paused.
+
+    Returns False if the run became terminal or disappeared while waiting.
+    """
+    while True:
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            if not run or run.status in AGENT_TERMINAL_STATUSES:
+                return False
+            if run.status != "paused":
+                return True
+        await asyncio.sleep(poll_interval)
+
+
+def _mark_agent_run_paused(run: AgentRun, message: str = "Agent is paused") -> None:
+    previous_status = run.status if run.status != "paused" else (run.progress or {}).get("paused_from")
+    run.status = "paused"
+    run.progress = {
+        **(run.progress or {}),
+        "phase": "paused",
+        "status": "paused",
+        "paused_from": previous_status if previous_status in AGENT_ACTIVE_STATUSES else "queued",
+        "message": message,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _mark_agent_run_cancelled(run: AgentRun, message: str = "Agent cancelled") -> None:
+    previous_status = run.status
+    run.status = "cancelled"
+    run.progress = {
+        **(run.progress or {}),
+        "phase": "cancelled",
+        "status": "cancelled",
+        "cancelled_from": previous_status if previous_status in AGENT_ACTIVE_STATUSES else None,
+        "message": message,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _serialize_agent_run(run: AgentRun) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "agent_type": run.agent_type,
+        "status": run.status,
+        "created_at": run.created_at.isoformat(),
+        "config": run.config,
+        "result": run.result,
+        "project_id": run.project_id,
+        "progress": run.progress,
+        "agent_task_id": run.agent_task_id,
+        "artifacts": _collect_agent_run_artifacts(run.id) if run.agent_type in ("exploratory", "custom") else [],
+    }
+
+
 def _sync_agent_tool_catalog(session: Session) -> list[AgentToolDefinition]:
     """Upsert the built-in selectable tool catalog."""
     now = datetime.utcnow()
@@ -6226,6 +6290,9 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
     await check_system_available("agent run")
 
     try:
+        if not await _wait_if_agent_run_paused(run_id):
+            return
+
         async with pool.browser_slot(
             request_id=run_id, operation_type=BrowserOpType.AGENT, description=f"Agent: {agent_type}"
         ) as acquired:
@@ -6239,6 +6306,9 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         run.result = {"error": "Timeout waiting for browser slot"}
                         session.add(run)
                         session.commit()
+                return
+
+            if not await _wait_if_agent_run_paused(run_id):
                 return
 
             # Update status to "running" now that we have a slot
@@ -6261,6 +6331,14 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 agent = ExploratoryAgent()
                 run_dir = exploration._prepare_exploration_mcp_config(run_id)
                 agent.agent_cwd = str(run_dir)
+                agent.on_task_enqueued = lambda task_id: _update_agent_run_progress(
+                    run_id,
+                    {
+                        "phase": "queued",
+                        "message": "Agent task queued for worker",
+                        "agent_task_id": task_id,
+                    },
+                )
 
                 # Inject project_id from URL if not present
                 if "project_id" not in config:
@@ -6268,6 +6346,8 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
 
                 # Pass run_id to agent for file storage
                 config["run_id"] = run_id
+                if not await _wait_if_agent_run_paused(run_id):
+                    return
                 result = await agent.run(config)
 
                 # Note: Persistence is now handled within ExploratoryAgent.run() -> _process_results()
@@ -6425,6 +6505,8 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     on_progress=_on_custom_progress,
                     cwd=run_dir,
                 )
+                if not await _wait_if_agent_run_paused(run_id):
+                    return
                 agent_result = await runner.run("\n".join(prompt_parts))
                 artifacts = _collect_agent_run_artifacts(run_id)
                 structured_report = _build_custom_agent_structured_report(
@@ -6472,7 +6554,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             # Update DB success
             with Session(engine) as session:
                 run = session.get(AgentRun, run_id)
-                if run:
+                if run and run.status not in AGENT_TERMINAL_STATUSES:
                     run.status = "completed"
                     run.result = result
                     session.add(run)
@@ -6496,7 +6578,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
         # Update DB failure
         with Session(engine) as session:
             run = session.get(AgentRun, run_id)
-            if run:
+            if run and run.status not in AGENT_TERMINAL_STATUSES:
                 run.status = "failed"
                 run.result = {"error": str(e)}
                 run.progress = {
@@ -6790,18 +6872,130 @@ def get_agent_run(
 
     _filter_agent_run_project(r, project_id)
 
-    return {
-        "id": r.id,
-        "agent_type": r.agent_type,
-        "status": r.status,
-        "created_at": r.created_at.isoformat(),
-        "config": r.config,
-        "result": r.result,
-        "project_id": r.project_id,
-        "progress": r.progress,
-        "agent_task_id": r.agent_task_id,
-        "artifacts": _collect_agent_run_artifacts(r.id) if r.agent_type in ("exploratory", "custom") else [],
+    return _serialize_agent_run(r)
+
+
+@app.post("/api/agents/runs/{id}/pause")
+async def pause_agent_run(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(get_current_user_optional),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+    await _ensure_agent_write_access(run.project_id, current_user, session)
+
+    if run.status in AGENT_TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Cannot pause a {run.status} run")
+    if run.status == "paused":
+        return _serialize_agent_run(run)
+
+    if run.agent_task_id:
+        try:
+            from orchestrator.services.agent_queue import get_agent_queue
+
+            queue = get_agent_queue()
+            await queue.connect()
+            paused = await queue.pause_task(run.agent_task_id)
+        except Exception as exc:
+            logger.warning("Failed to pause agent task %s for run %s: %s", run.agent_task_id, run.id, exc)
+            raise HTTPException(status_code=503, detail=f"Failed to pause agent task: {exc}") from exc
+        if not paused:
+            raise HTTPException(status_code=409, detail="Agent task is no longer pauseable")
+
+    _mark_agent_run_paused(run)
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return _serialize_agent_run(run)
+
+
+@app.post("/api/agents/runs/{id}/resume")
+async def resume_agent_run(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(get_current_user_optional),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+    await _ensure_agent_write_access(run.project_id, current_user, session)
+
+    if run.status in AGENT_TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Cannot resume a {run.status} run")
+    if run.status != "paused":
+        return _serialize_agent_run(run)
+
+    resumed_status = None
+    if run.agent_task_id:
+        try:
+            from orchestrator.services.agent_queue import get_agent_queue
+
+            queue = get_agent_queue()
+            await queue.connect()
+            resumed = await queue.resume_task(run.agent_task_id)
+            task = await queue.get_task(run.agent_task_id)
+            resumed_status = task.status.value if task else None
+        except Exception as exc:
+            logger.warning("Failed to resume agent task %s for run %s: %s", run.agent_task_id, run.id, exc)
+            raise HTTPException(status_code=503, detail=f"Failed to resume agent task: {exc}") from exc
+        if not resumed:
+            raise HTTPException(status_code=409, detail="Agent task is no longer resumable")
+
+    paused_from = (run.progress or {}).get("paused_from")
+    run.status = resumed_status if resumed_status in {"queued", "running"} else (paused_from if paused_from in {"queued", "running", "pending"} else "queued")
+    run.progress = {
+        **(run.progress or {}),
+        "phase": "resumed",
+        "status": run.status,
+        "message": "Agent resumed",
+        "updated_at": datetime.utcnow().isoformat(),
     }
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return _serialize_agent_run(run)
+
+
+@app.post("/api/agents/runs/{id}/cancel")
+async def cancel_agent_run(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(get_current_user_optional),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+    await _ensure_agent_write_access(run.project_id, current_user, session)
+
+    if run.status in AGENT_TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Cannot cancel a {run.status} run")
+
+    if run.agent_task_id:
+        try:
+            from orchestrator.services.agent_queue import get_agent_queue
+
+            queue = get_agent_queue()
+            await queue.connect()
+            cancelled = await queue.cancel_task(run.agent_task_id)
+        except Exception as exc:
+            logger.warning("Failed to cancel agent task %s for run %s: %s", run.agent_task_id, run.id, exc)
+            raise HTTPException(status_code=503, detail=f"Failed to cancel agent task: {exc}") from exc
+        if not cancelled:
+            logger.warning("Agent task %s for run %s was not cancellable; marking run cancelled", run.agent_task_id, run.id)
+
+    _mark_agent_run_cancelled(run)
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    return _serialize_agent_run(run)
 
 
 @app.get("/api/agents/runs/{id}/report")

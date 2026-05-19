@@ -73,11 +73,19 @@ export const ASSISTANT_WORKFLOW_CAPABILITIES: AssistantWorkflowCapability[] = [
     actions: ['create schedule', 'update schedule', 'toggle schedule', 'delete schedule', 'run schedule now'],
   },
   {
+    section: 'Custom Workflows',
+    page: '/workflow',
+    status: 'supported',
+    read: ['workflow definitions', 'workflow catalog', 'recent workflow runs', 'workflow run steps'],
+    actions: ['create workflow', 'update workflow', 'duplicate workflow', 'archive workflow', 'start workflow', 'start workflow from a specific step', 'retry failed workflow step', 'pause/resume/cancel workflow run'],
+  },
+  {
     section: 'CI/CD and PR Advisor',
     page: '/ci-cd',
     status: 'supported',
-    read: ['CI providers', 'workflows', 'runs', 'logs', 'audit events', 'PR analyses', 'quality gates'],
-    actions: ['sync CI runs', 'dispatch workflow', 'cancel run', 'rerun run', 'generate workflow change', 'open workflow PR', 'analyze PR', 'run recommended tests', 'start PR quality gate'],
+    read: ['CI providers', 'workflows', 'runs', 'logs', 'audit events', 'open pull requests', 'PR analyses', 'quality gates'],
+    actions: ['configure non-secret provider defaults', 'sync CI runs', 'dispatch workflow', 'cancel run', 'rerun run', 'generate workflow change', 'open workflow PR', 'analyze PR', 'run all or subset recommended tests', 'start PR quality gate'],
+    missing: ['CI access tokens, trigger tokens, and webhook secrets stay in Settings'],
   },
   {
     section: 'External Integrations',

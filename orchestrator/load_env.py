@@ -68,7 +68,8 @@ def setup_claude_env():
     active_model = (
         os.environ.get("ANTHROPIC_MODEL")
         or os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
-        or os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", "")
+        or os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+        or os.environ.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
     )
 
     # Return the key AI-related env vars for logging purposes
@@ -77,6 +78,8 @@ def setup_claude_env():
         "ANTHROPIC_MODEL": active_model,
         "ANTHROPIC_DEFAULT_OPUS_MODEL": os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL", ""),
         "ANTHROPIC_DEFAULT_SONNET_MODEL": os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", ""),
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": os.environ.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
+        "API_TIMEOUT_MS": os.environ.get("API_TIMEOUT_MS", ""),
         "ANTHROPIC_AUTH_TOKEN": "***" if os.environ.get("ANTHROPIC_AUTH_TOKEN") else "",
     }
 

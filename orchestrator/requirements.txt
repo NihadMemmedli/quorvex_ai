@@ -47,6 +47,7 @@ tiktoken>=0.7.0
 
 # Scheduling (Cron-based regression runs)
 APScheduler>=3.10.0
+temporalio>=1.9.0
 
 # Resilience (circuit breakers, retry logic)
 tenacity>=8.0.0

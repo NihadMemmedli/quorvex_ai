@@ -6,9 +6,11 @@ the existing /github and /gitlab APIs remain available for compatibility.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 import yaml
@@ -22,19 +24,40 @@ from .github_ci import (
     _build_client as _build_github_client,
     _get_github_config,
     _require_project,
+    _save_github_config,
     _update_mapping_from_run,
 )
 from .gitlab_ci import _build_client as _build_gitlab_client
-from .gitlab_ci import _get_gitlab_config
+from .gitlab_ci import _get_gitlab_config, _save_gitlab_config
 from .middleware.auth import get_current_user_optional
 from .middleware.permissions import EDIT_ROLES, VIEW_ROLES, check_project_access
 from .models_auth import User
-from .models_db import CiAuditEvent, CiPipelineMapping, CiWorkflowChangeRequest
+from .models_db import CiAuditEvent, CiPipelineMapping, CiTestSubset, CiTestSubsetItem, CiWorkflowChangeRequest, SpecMetadata
 from ..services.github_client import GithubError
+from ..services.batch_executor import BASE_DIR, SPECS_DIR, _get_try_code_path
 
 router = APIRouter(prefix="/projects/{project_id}/ci", tags=["ci-control"])
 
 Provider = Literal["github", "gitlab"]
+
+RUNNER_SUBSET_SUITES = {
+    "auto",
+    "python-unit",
+    "python-integration",
+    "frontend-typecheck",
+    "frontend-lint",
+    "playwright-generated",
+    "playwright-e2e",
+    "all-safe",
+}
+RUNNER_SUBSET_BROWSERS = {"chromium", "firefox", "webkit"}
+RUNNER_SUBSET_MARKERS = {"not integration", "integration"}
+RUNNER_SUBSET_INPUT_KEYS = {"suite", "browser", "pytest_marker", "test_path", "playwright_grep", "base_url"}
+RUNNER_SUBSET_WORKFLOW_IDS = {
+    "quorvex-subset-tests.yml",
+    ".github/workflows/quorvex-subset-tests.yml",
+    "runner-subset-tests",
+}
 
 
 class DispatchWorkflowRequest(BaseModel):
@@ -57,7 +80,14 @@ class SyncRunsRequest(BaseModel):
 class WorkflowGenerateRequest(BaseModel):
     provider: Provider = "github"
     workflow_name: str = "Quorvex Test Automation"
-    template: Literal["pr-quality-gate", "playwright-smoke", "nightly-regression", "release-gate"] = "pr-quality-gate"
+    template: Literal[
+        "pr-quality-gate",
+        "playwright-smoke",
+        "nightly-regression",
+        "release-gate",
+        "runner-subset-tests",
+    ] = "pr-quality-gate"
+    quality_gate_mode: Literal["backend-async", "backend-blocking"] = "backend-async"
     prompt: str | None = None
     ref: str | None = None
     target_url_secret: str = "APP_BASE_URL"
@@ -67,6 +97,7 @@ class WorkflowGenerateRequest(BaseModel):
     branches: list[str] | None = None
     browsers: list[str] | None = None
     artifact_retention_days: int = 14
+    wait_timeout_minutes: int = 120
 
 
 class WorkflowPullRequestRequest(BaseModel):
@@ -76,6 +107,52 @@ class WorkflowPullRequestRequest(BaseModel):
     body: str | None = None
     commit_message: str | None = None
     draft: bool = True
+
+
+class TestSubsetItemRequest(BaseModel):
+    spec_name: str
+    target_path: str | None = None
+
+
+class TestSubsetCreateRequest(BaseModel):
+    name: str
+    description: str | None = None
+    mode: Literal["manual", "pr-impact", "both"] = "both"
+    default_browser: Literal["chromium", "firefox", "webkit"] = "chromium"
+    base_url_secret: str = "APP_BASE_URL"
+    items: list[TestSubsetItemRequest]
+
+
+class TestSubsetUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    mode: Literal["manual", "pr-impact", "both"] | None = None
+    default_browser: Literal["chromium", "firefox", "webkit"] | None = None
+    base_url_secret: str | None = None
+    items: list[TestSubsetItemRequest] | None = None
+
+
+class TestSubsetPullRequestRequest(WorkflowPullRequestRequest):
+    workflow_name: str | None = None
+    commit_message: str | None = None
+
+
+class TestSubsetDispatchRequest(BaseModel):
+    workflow_id: str | None = None
+    ref: str | None = None
+    browser: Literal["chromium", "firefox", "webkit"] | None = None
+    base_url: str | None = None
+
+
+class UpdateProviderDefaultsRequest(BaseModel):
+    provider: Provider
+    repository: str | None = None
+    owner: str | None = None
+    repo: str | None = None
+    gitlab_project_id: int | None = None
+    base_url: str | None = None
+    default_ref: str | None = None
+    default_workflow: str | None = None
 
 
 def _actor(user: User | None) -> tuple[str | None, str | None]:
@@ -201,6 +278,451 @@ def _action_availability(mapping: CiPipelineMapping) -> dict[str, Any]:
     }
 
 
+def _slugify_subset_name(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+    return slug[:64].strip("-") or "generated-tests"
+
+
+def _validate_secret_name(value: str, *, label: str = "secret") -> str:
+    secret = (value or "").strip() or "APP_BASE_URL"
+    if not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,99}", secret):
+        raise HTTPException(status_code=400, detail=f"{label} must be an uppercase GitHub secret or variable name")
+    return secret
+
+
+def _validate_ci_subset_target_path(value: str) -> str:
+    path = value.strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="target_path is required")
+    if len(path) > 180:
+        raise HTTPException(status_code=400, detail="target_path must be 180 characters or fewer")
+    if path.startswith("/") or "\\" in path or "\n" in path or "\r" in path:
+        raise HTTPException(status_code=400, detail="target_path must be a safe repo-relative path")
+    if re.search(r"[;&|`$<>(){}]", path):
+        raise HTTPException(status_code=400, detail="target_path contains unsupported shell characters")
+    parts = [part for part in path.split("/") if part]
+    if any(part == ".." for part in parts):
+        raise HTTPException(status_code=400, detail="target_path must not contain parent directory segments")
+    if not path.startswith(("tests/generated/", "tests/e2e/")):
+        raise HTTPException(status_code=400, detail="target_path must be under tests/generated or tests/e2e")
+    if not path.endswith((".spec.ts", ".test.ts")):
+        raise HTTPException(status_code=400, detail="target_path must be a Playwright .spec.ts or .test.ts file")
+    return path
+
+
+def _default_target_path(code_path: Path) -> str:
+    try:
+        rel = code_path.resolve().relative_to(BASE_DIR.resolve()).as_posix()
+    except ValueError:
+        rel = f"tests/generated/{code_path.name}"
+    if rel.startswith(("tests/generated/", "tests/e2e/")):
+        return _validate_ci_subset_target_path(rel)
+    return _validate_ci_subset_target_path(f"tests/generated/{code_path.name}")
+
+
+def _spec_allowed_for_project(meta: SpecMetadata | None, project_id: str) -> bool:
+    if not meta or not meta.project_id:
+        return True
+    if project_id == "default":
+        return meta.project_id in (None, "default")
+    return meta.project_id in (project_id, "default")
+
+
+def _resolve_generated_test(
+    *,
+    project_id: str,
+    spec_name: str,
+    target_path: str | None,
+    session: Session,
+) -> dict[str, Any]:
+    cleaned = spec_name.strip()
+    if not cleaned or cleaned.startswith("/") or ".." in Path(cleaned).parts:
+        raise HTTPException(status_code=400, detail=f"Invalid spec name: {spec_name}")
+    spec_path = SPECS_DIR / cleaned
+    if not spec_path.exists() or not spec_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Spec not found: {cleaned}")
+    meta = session.get(SpecMetadata, cleaned)
+    if not _spec_allowed_for_project(meta, project_id):
+        raise HTTPException(status_code=404, detail=f"Spec not found in this project: {cleaned}")
+    code = _get_try_code_path(cleaned, spec_path)
+    if not code:
+        raise HTTPException(status_code=404, detail=f"No generated test found for spec: {cleaned}")
+    code_path = Path(code)
+    if not code_path.exists() or not code_path.is_file():
+        raise HTTPException(status_code=404, detail=f"Generated test file is missing for spec: {cleaned}")
+    content = code_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        rel_code_path = code_path.resolve().relative_to(BASE_DIR.resolve()).as_posix()
+    except ValueError:
+        rel_code_path = code_path.name
+    resolved_target = _validate_ci_subset_target_path(target_path) if target_path else _default_target_path(code_path)
+    return {
+        "spec_name": cleaned,
+        "code_path": rel_code_path,
+        "target_path": resolved_target,
+        "content": content,
+        "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "tags": meta.tags if meta else [],
+        "categories": [],
+        "last_modified": code_path.stat().st_mtime,
+    }
+
+
+def _generated_ci_tests(project_id: str, session: Session) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if not SPECS_DIR.exists():
+        return records
+    for spec_path in sorted(SPECS_DIR.glob("**/*.md")):
+        spec_name = spec_path.relative_to(SPECS_DIR).as_posix()
+        meta = session.get(SpecMetadata, spec_name)
+        if not _spec_allowed_for_project(meta, project_id):
+            continue
+        code = _get_try_code_path(spec_name, spec_path)
+        if not code:
+            continue
+        code_path = Path(code)
+        if not code_path.exists() or not code_path.is_file():
+            continue
+        content = code_path.read_text(encoding="utf-8", errors="replace")
+        try:
+            rel_code_path = code_path.resolve().relative_to(BASE_DIR.resolve()).as_posix()
+        except ValueError:
+            rel_code_path = code_path.name
+        records.append(
+            {
+                "spec_name": spec_name,
+                "code_path": rel_code_path,
+                "target_path": _default_target_path(code_path),
+                "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "tags": meta.tags if meta else [],
+                "categories": [],
+                "last_modified": code_path.stat().st_mtime,
+            }
+        )
+    return records
+
+
+def _serialize_subset_item(item: CiTestSubsetItem) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "spec_name": item.spec_name,
+        "code_path": item.code_path,
+        "target_path": item.target_path,
+        "content_hash": item.content_hash,
+        "tags": item.tags or [],
+        "categories": item.categories or [],
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+def _subset_items(session: Session, subset_id: str) -> list[CiTestSubsetItem]:
+    return session.exec(
+        select(CiTestSubsetItem)
+        .where(CiTestSubsetItem.subset_id == subset_id)
+        .order_by(CiTestSubsetItem.spec_name)
+    ).all()
+
+
+def _serialize_subset(subset: CiTestSubset, session: Session, *, include_items: bool = True) -> dict[str, Any]:
+    items = _subset_items(session, subset.id) if include_items else []
+    return {
+        "id": subset.id,
+        "project_id": subset.project_id,
+        "name": subset.name,
+        "slug": subset.slug,
+        "description": subset.description,
+        "mode": subset.mode,
+        "default_browser": subset.default_browser,
+        "base_url_secret": subset.base_url_secret,
+        "item_count": len(items),
+        "items": [_serialize_subset_item(item) for item in items] if include_items else None,
+        "created_at": subset.created_at.isoformat() if subset.created_at else None,
+        "updated_at": subset.updated_at.isoformat() if subset.updated_at else None,
+    }
+
+
+def _apply_subset_items(
+    *,
+    subset: CiTestSubset,
+    project_id: str,
+    item_requests: list[TestSubsetItemRequest],
+    session: Session,
+) -> list[CiTestSubsetItem]:
+    if not item_requests:
+        raise HTTPException(status_code=400, detail="At least one generated test must be selected")
+
+    seen_specs: set[str] = set()
+    seen_paths: set[str] = set()
+    resolved: list[dict[str, Any]] = []
+    for item_request in item_requests:
+        item = _resolve_generated_test(
+            project_id=project_id,
+            spec_name=item_request.spec_name,
+            target_path=item_request.target_path,
+            session=session,
+        )
+        if item["spec_name"] in seen_specs:
+            raise HTTPException(status_code=400, detail=f"Duplicate spec selected: {item['spec_name']}")
+        if item["target_path"] in seen_paths:
+            raise HTTPException(status_code=400, detail=f"Duplicate target path selected: {item['target_path']}")
+        seen_specs.add(item["spec_name"])
+        seen_paths.add(item["target_path"])
+        resolved.append(item)
+
+    for existing in _subset_items(session, subset.id):
+        session.delete(existing)
+    session.flush()
+
+    rows: list[CiTestSubsetItem] = []
+    for item in resolved:
+        row = CiTestSubsetItem(
+            subset_id=subset.id,
+            spec_name=item["spec_name"],
+            code_path=item["code_path"],
+            target_path=item["target_path"],
+            content_hash=item["content_hash"],
+            tags=item["tags"],
+            categories=item["categories"],
+        )
+        session.add(row)
+        rows.append(row)
+    return rows
+
+
+def _subset_manifest(subset: CiTestSubset, items: list[CiTestSubsetItem]) -> str:
+    manifest = {
+        "schema_version": 1,
+        "name": subset.name,
+        "slug": subset.slug,
+        "mode": subset.mode,
+        "default_browser": subset.default_browser,
+        "base_url_secret": subset.base_url_secret,
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "tests": [
+            {
+                "spec_name": item.spec_name,
+                "source_path": item.code_path,
+                "target_path": item.target_path,
+                "content_hash": item.content_hash,
+                "tags": item.tags or [],
+                "categories": item.categories or [],
+            }
+            for item in items
+        ],
+    }
+    return json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+
+
+def _render_subset_workflow(subset: CiTestSubset, *, workflow_name: str | None = None) -> str:
+    name = workflow_name or f"Quorvex {subset.name}"
+    manifest_path = f".quorvex/test-subsets/{subset.slug}.json"
+    return f"""name: {name}
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      subset_slug:
+        description: Quorvex subset slug
+        required: false
+        type: string
+        default: {subset.slug}
+      browser:
+        description: Playwright browser
+        required: true
+        type: choice
+        default: {subset.default_browser}
+        options:
+          - chromium
+          - firefox
+          - webkit
+      base_url:
+        description: Optional BASE_URL override
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  quorvex-generated-subset:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    env:
+      QUORVEX_API_URL: ${{{{ secrets.QUORVEX_API_URL }}}}
+      QUORVEX_API_TOKEN: ${{{{ secrets.QUORVEX_API_TOKEN }}}}
+      QUORVEX_PROJECT_ID: ${{{{ vars.QUORVEX_PROJECT_ID || 'default' }}}}
+      BASE_URL: ${{{{ inputs.base_url || secrets.{subset.base_url_secret} }}}}
+      BROWSER: ${{{{ inputs.browser || '{subset.default_browser}' }}}}
+      SUBSET_MANIFEST: {manifest_path}
+      SUBSET_MODE: {subset.mode}
+      PR_NUMBER: ${{{{ github.event.pull_request.number || '' }}}}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+          npx playwright install --with-deps "$BROWSER"
+
+      - name: Select Quorvex generated tests
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const manifestPath = process.env.SUBSET_MANIFEST;
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+          const allTests = Array.isArray(manifest.tests) ? manifest.tests : [];
+          let selected = allTests;
+          const canAskQuorvex = process.env.GITHUB_EVENT_NAME === 'pull_request'
+            && process.env.SUBSET_MODE !== 'manual'
+            && process.env.QUORVEX_API_URL
+            && process.env.QUORVEX_API_TOKEN
+            && process.env.PR_NUMBER;
+
+          async function main() {{
+            if (canAskQuorvex) {{
+              try {{
+                const response = await fetch(`${{process.env.QUORVEX_API_URL.replace(/\\/$/, '')}}/github/${{process.env.QUORVEX_PROJECT_ID}}/pr-advisor/analyze`, {{
+                  method: 'POST',
+                  headers: {{
+                    'Authorization': `Bearer ${{process.env.QUORVEX_API_TOKEN}}`,
+                    'Content-Type': 'application/json',
+                  }},
+                  body: JSON.stringify({{ pr_number: Number(process.env.PR_NUMBER), ensure_indexed: true }}),
+                }});
+                if (response.ok) {{
+                  const analysis = await response.json();
+                  const recommended = new Set((analysis.selected_tests || []).flatMap((test) => [
+                    test.spec_name,
+                    test.test_path,
+                    test.target_path,
+                  ].filter(Boolean)));
+                  const narrowed = allTests.filter((test) => recommended.has(test.spec_name) || recommended.has(test.target_path));
+                  if (narrowed.length > 0) selected = narrowed;
+                }} else {{
+                  console.log(`Quorvex PR Advisor returned ${{response.status}}; falling back to saved subset.`);
+                }}
+              }} catch (error) {{
+                console.log(`Quorvex PR Advisor unavailable; falling back to saved subset: ${{error.message}}`);
+              }}
+            }}
+            if (selected.length === 0) {{
+              throw new Error('The Quorvex subset manifest has no tests.');
+            }}
+            fs.writeFileSync('quorvex-selected-tests.txt', selected.map((test) => test.target_path).join('\\n') + '\\n');
+            console.log(`Selected ${{selected.length}} Quorvex generated test file(s).`);
+          }}
+
+          main().catch((error) => {{
+            console.error(error);
+            process.exit(1);
+          }});
+          NODE
+
+      - name: Run selected Playwright tests
+        run: |
+          set -euo pipefail
+          mapfile -t tests < quorvex-selected-tests.txt
+          npx playwright test --project="$BROWSER" "${{tests[@]}}"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quorvex-playwright-report-${{{{ env.BROWSER }}}}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14
+"""
+
+
+def _playwright_config_scaffold() -> str:
+    return """import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './tests',
+  timeout: 30_000,
+  expect: { timeout: 5_000 },
+  reporter: [['html', { open: 'never' }], ['list']],
+  use: {
+    baseURL: process.env.BASE_URL || process.env.APP_BASE_URL || 'http://localhost:3000',
+    trace: 'on-first-retry',
+    screenshot: 'only-on-failure',
+  },
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+    { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+  ],
+});
+"""
+
+
+def _package_json_scaffold() -> str:
+    return json.dumps(
+        {
+            "scripts": {"test:e2e": "playwright test"},
+            "devDependencies": {"@playwright/test": "^1.50.0"},
+        },
+        indent=2,
+    ) + "\n"
+
+
+def _subset_pr_body(subset: CiTestSubset, item_count: int) -> str:
+    return (
+        "This draft PR was generated from Quorvex AI's chat-controlled CI subset workflow.\n\n"
+        f"Subset: `{subset.name}` (`{subset.slug}`)\n"
+        f"Mode: `{subset.mode}`\n"
+        f"Generated tests: `{item_count}`\n\n"
+        "Before merging, confirm repository settings when PR-impact narrowing is desired:\n"
+        "- `QUORVEX_API_URL` secret\n"
+        "- `QUORVEX_API_TOKEN` secret\n"
+        "- `QUORVEX_PROJECT_ID` repository variable when the project is not `default`\n"
+        f"- `{subset.base_url_secret}` secret for the application base URL\n"
+    )
+
+
+async def _write_files_to_branch(
+    *,
+    client,
+    owner: str,
+    repo: str,
+    branch_name: str,
+    files: dict[str, str],
+    message: str,
+) -> list[dict[str, str]]:
+    changed: list[dict[str, str]] = []
+    for path, content in files.items():
+        existing = await client.get_content_metadata(owner, repo, path, ref=branch_name)
+        update = await client.create_or_update_file(
+            owner,
+            repo,
+            path,
+            content=content,
+            message=message,
+            branch=branch_name,
+            sha=(existing or {}).get("sha"),
+        )
+        changed.append(
+            {
+                "path": path,
+                "sha": ((update.get("content") or {}).get("sha") if isinstance(update, dict) else None) or "",
+            }
+        )
+    return changed
+
+
 def _upsert_pipeline_mapping(
     session: Session,
     *,
@@ -307,6 +829,25 @@ def _provider_setup(
     }
 
 
+def _split_github_repository(repository: str | None) -> tuple[str | None, str | None]:
+    if not repository:
+        return None, None
+    parts = [part.strip() for part in repository.strip().split("/") if part.strip()]
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="GitHub repository must use owner/repo format")
+    return parts[0], parts[1]
+
+
+def _require_existing_provider_config(provider: Provider, config: dict[str, Any] | None) -> dict[str, Any]:
+    if not config or not config.get("token_encrypted"):
+        label = "GitHub" if provider == "github" else "GitLab"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Add the {label} access token in Settings before chat can update non-secret CI defaults",
+        )
+    return dict(config)
+
+
 @router.get("/providers")
 async def list_providers(
     project_id: str,
@@ -336,6 +877,493 @@ async def list_providers(
             **_provider_setup(provider="gitlab", config=gitlab, session=session, project_id=project_id),
         },
     ]
+
+
+@router.patch("/providers/defaults")
+async def update_provider_defaults(
+    project_id: str,
+    request: UpdateProviderDefaultsRequest,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """Update non-secret provider defaults from chat or the control center.
+
+    Secret material still has to be entered through Settings; this endpoint only
+    accepts repository/project selection and default workflow/ref metadata.
+    """
+    await _require_edit(project_id, current_user, session)
+    project = _require_project(project_id, session)
+
+    if request.provider == "github":
+        config = _require_existing_provider_config("github", _get_github_config(project))
+        repo_owner, repo_name = _split_github_repository(request.repository)
+        owner = request.owner or repo_owner
+        repo = request.repo or repo_name
+        if owner is not None:
+            config["owner"] = owner
+        if repo is not None:
+            config["repo"] = repo
+        if request.default_ref is not None:
+            config["default_ref"] = request.default_ref or "main"
+        if request.default_workflow is not None:
+            config["default_workflow"] = request.default_workflow or None
+        _save_github_config(project, config, session)
+        provider_config = config
+    else:
+        config = _require_existing_provider_config("gitlab", _get_gitlab_config(project))
+        if request.gitlab_project_id is not None:
+            config["project_id"] = request.gitlab_project_id
+        if request.base_url is not None:
+            config["base_url"] = request.base_url.rstrip("/")
+        if request.default_ref is not None:
+            config["default_ref"] = request.default_ref or "main"
+        _save_gitlab_config(project, config, session)
+        provider_config = config
+
+    _audit(
+        session,
+        project_id=project_id,
+        provider=request.provider,
+        action="update_defaults",
+        target_type="provider",
+        target_id=request.provider,
+        user=current_user,
+        metadata={
+            "fields": sorted(
+                key
+                for key, value in request.model_dump(exclude={"provider"}).items()
+                if value is not None
+            )
+        },
+    )
+    session.commit()
+    return {
+        "status": "updated",
+        "provider": request.provider,
+        **_provider_setup(provider=request.provider, config=provider_config, session=session, project_id=project_id),
+    }
+
+
+@router.get("/generated-tests")
+async def list_generated_ci_tests(
+    project_id: str,
+    search: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    """List generated Playwright tests that can be saved into a CI subset."""
+    await _require_view(project_id, current_user, session)
+    _require_project(project_id, session)
+    records = _generated_ci_tests(project_id, session)
+    if search:
+        needle = search.lower().strip()
+        records = [
+            record
+            for record in records
+            if needle in record["spec_name"].lower()
+            or needle in record["code_path"].lower()
+            or needle in record["target_path"].lower()
+        ]
+    total = len(records)
+    return {
+        "tests": records[offset : offset + limit],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + limit < total,
+    }
+
+
+@router.get("/test-subsets")
+async def list_test_subsets(
+    project_id: str,
+    include_items: bool = Query(True),
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    await _require_view(project_id, current_user, session)
+    _require_project(project_id, session)
+    subsets = session.exec(
+        select(CiTestSubset)
+        .where(CiTestSubset.project_id == project_id)
+        .order_by(CiTestSubset.updated_at.desc())
+    ).all()
+    return [_serialize_subset(subset, session, include_items=include_items) for subset in subsets]
+
+
+@router.post("/test-subsets")
+async def create_test_subset(
+    project_id: str,
+    request: TestSubsetCreateRequest,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    await _require_edit(project_id, current_user, session)
+    _require_project(project_id, session)
+    name = request.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Subset name is required")
+    slug = _slugify_subset_name(name)
+    existing = session.exec(
+        select(CiTestSubset).where(CiTestSubset.project_id == project_id, CiTestSubset.slug == slug)
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"A CI test subset named '{name}' already exists")
+    actor_id, _actor_email = _actor(current_user)
+    subset = CiTestSubset(
+        project_id=project_id,
+        name=name,
+        slug=slug,
+        description=request.description,
+        mode=request.mode,
+        default_browser=request.default_browser,
+        base_url_secret=_validate_secret_name(request.base_url_secret, label="base_url_secret"),
+        created_by=actor_id,
+    )
+    session.add(subset)
+    session.flush()
+    _apply_subset_items(subset=subset, project_id=project_id, item_requests=request.items, session=session)
+    _audit(
+        session,
+        project_id=project_id,
+        provider="github",
+        action="create_test_subset",
+        target_type="ci_test_subset",
+        target_id=subset.id,
+        user=current_user,
+        metadata={"slug": subset.slug, "item_count": len(request.items), "mode": subset.mode},
+    )
+    session.commit()
+    session.refresh(subset)
+    return _serialize_subset(subset, session)
+
+
+@router.get("/test-subsets/{subset_id}")
+async def get_test_subset(
+    project_id: str,
+    subset_id: str,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    await _require_view(project_id, current_user, session)
+    subset = session.get(CiTestSubset, subset_id)
+    if not subset or subset.project_id != project_id:
+        raise HTTPException(status_code=404, detail="CI test subset not found")
+    return _serialize_subset(subset, session)
+
+
+@router.patch("/test-subsets/{subset_id}")
+async def update_test_subset(
+    project_id: str,
+    subset_id: str,
+    request: TestSubsetUpdateRequest,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    await _require_edit(project_id, current_user, session)
+    subset = session.get(CiTestSubset, subset_id)
+    if not subset or subset.project_id != project_id:
+        raise HTTPException(status_code=404, detail="CI test subset not found")
+    if request.name is not None:
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Subset name is required")
+        new_slug = _slugify_subset_name(name)
+        if new_slug != subset.slug:
+            conflict = session.exec(
+                select(CiTestSubset).where(CiTestSubset.project_id == project_id, CiTestSubset.slug == new_slug)
+            ).first()
+            if conflict:
+                raise HTTPException(status_code=409, detail=f"A CI test subset named '{name}' already exists")
+            subset.slug = new_slug
+        subset.name = name
+    if request.description is not None:
+        subset.description = request.description
+    if request.mode is not None:
+        subset.mode = request.mode
+    if request.default_browser is not None:
+        subset.default_browser = request.default_browser
+    if request.base_url_secret is not None:
+        subset.base_url_secret = _validate_secret_name(request.base_url_secret, label="base_url_secret")
+    if request.items is not None:
+        _apply_subset_items(subset=subset, project_id=project_id, item_requests=request.items, session=session)
+    subset.updated_at = datetime.utcnow()
+    session.add(subset)
+    _audit(
+        session,
+        project_id=project_id,
+        provider="github",
+        action="update_test_subset",
+        target_type="ci_test_subset",
+        target_id=subset.id,
+        user=current_user,
+        metadata={"slug": subset.slug, "items_replaced": request.items is not None},
+    )
+    session.commit()
+    session.refresh(subset)
+    return _serialize_subset(subset, session)
+
+
+@router.delete("/test-subsets/{subset_id}")
+async def delete_test_subset(
+    project_id: str,
+    subset_id: str,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    await _require_edit(project_id, current_user, session)
+    subset = session.get(CiTestSubset, subset_id)
+    if not subset or subset.project_id != project_id:
+        raise HTTPException(status_code=404, detail="CI test subset not found")
+    for item in _subset_items(session, subset.id):
+        session.delete(item)
+    session.delete(subset)
+    _audit(
+        session,
+        project_id=project_id,
+        provider="github",
+        action="delete_test_subset",
+        target_type="ci_test_subset",
+        target_id=subset_id,
+        user=current_user,
+    )
+    session.commit()
+    return {"status": "deleted"}
+
+
+@router.post("/test-subsets/{subset_id}/preview")
+async def preview_test_subset(
+    project_id: str,
+    subset_id: str,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    await _require_view(project_id, current_user, session)
+    subset = session.get(CiTestSubset, subset_id)
+    if not subset or subset.project_id != project_id:
+        raise HTTPException(status_code=404, detail="CI test subset not found")
+    items = _subset_items(session, subset.id)
+    return {
+        "subset": _serialize_subset(subset, session),
+        "manifest_path": f".quorvex/test-subsets/{subset.slug}.json",
+        "workflow_path": ".github/workflows/quorvex-subset-tests.yml",
+        "files": [
+            {"path": item.target_path, "source_path": item.code_path, "content_hash": item.content_hash}
+            for item in items
+        ],
+    }
+
+
+@router.post("/test-subsets/{subset_id}/pull-request")
+async def open_test_subset_pull_request(
+    project_id: str,
+    subset_id: str,
+    request: TestSubsetPullRequestRequest,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    await _require_edit(project_id, current_user, session)
+    project = _require_project(project_id, session)
+    subset = session.get(CiTestSubset, subset_id)
+    if not subset or subset.project_id != project_id:
+        raise HTTPException(status_code=404, detail="CI test subset not found")
+    items = _subset_items(session, subset.id)
+    if not items:
+        raise HTTPException(status_code=400, detail="CI test subset has no generated tests")
+
+    config = _get_github_config(project)
+    if not config:
+        raise HTTPException(status_code=400, detail="GitHub is not configured")
+    owner, repo = _github_repo(config)
+    base_ref = (request.base_ref or config.get("default_ref") or "main").strip() or "main"
+    branch_name = request.branch_name or f"quorvex/ci-subset-{_safe_branch_segment(subset.slug)}-{subset.id[:8]}"
+    branch_name = _safe_branch_segment(branch_name)
+    title = request.title or f"Add Quorvex CI subset: {subset.name}"
+    commit_message = request.commit_message or f"Add Quorvex CI subset {subset.name}"
+    body = request.body or _subset_pr_body(subset, len(items))
+
+    files: dict[str, str] = {}
+    for item in items:
+        source = BASE_DIR / item.code_path
+        if not source.exists() or not source.is_file():
+            raise HTTPException(status_code=404, detail=f"Generated test file is missing: {item.code_path}")
+        content = source.read_text(encoding="utf-8", errors="replace")
+        files[item.target_path] = content
+        new_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if new_hash != item.content_hash:
+            item.content_hash = new_hash
+            session.add(item)
+    files[f".quorvex/test-subsets/{subset.slug}.json"] = _subset_manifest(subset, items)
+    files[".github/workflows/quorvex-subset-tests.yml"] = _render_subset_workflow(
+        subset,
+        workflow_name=request.workflow_name,
+    )
+
+    client = await _build_github_client(project)
+    changed_files: list[dict[str, str]] = []
+    try:
+        base = await client.get_ref(owner, repo, f"heads/{base_ref}")
+        base_sha = ((base.get("object") or {}).get("sha") or "").strip()
+        if not base_sha:
+            raise HTTPException(status_code=502, detail="GitHub base branch did not return a commit SHA")
+        try:
+            await client.create_ref(owner, repo, f"heads/{branch_name}", base_sha)
+        except GithubError as exc:
+            if exc.status_code != 422:
+                raise
+
+        package_meta = await client.get_content_metadata(owner, repo, "package.json", ref=branch_name)
+        if not package_meta:
+            files["package.json"] = _package_json_scaffold()
+        playwright_meta = await client.get_content_metadata(owner, repo, "playwright.config.ts", ref=branch_name)
+        if not playwright_meta:
+            files["playwright.config.ts"] = _playwright_config_scaffold()
+
+        changed_files = await _write_files_to_branch(
+            client=client,
+            owner=owner,
+            repo=repo,
+            branch_name=branch_name,
+            files=files,
+            message=commit_message,
+        )
+
+        existing_prs = await client.list_pull_requests(owner, repo, head=f"{owner}:{branch_name}", base=base_ref)
+        if existing_prs:
+            pr = existing_prs[0]
+        else:
+            try:
+                pr = await client.create_pull_request(
+                    owner,
+                    repo,
+                    title=title,
+                    head=branch_name,
+                    base=base_ref,
+                    body=body,
+                    draft=request.draft,
+                )
+            except GithubError as exc:
+                if exc.status_code != 422:
+                    raise
+                existing_prs = await client.list_pull_requests(owner, repo, head=f"{owner}:{branch_name}", base=base_ref)
+                if not existing_prs:
+                    raise
+                pr = existing_prs[0]
+    except GithubError as exc:
+        detail = str(exc)
+        if exc.status_code == 403:
+            detail = "GitHub rejected the request. Check that the token can write repository contents and pull requests."
+        elif exc.status_code == 404:
+            detail = "GitHub repository, branch, or base ref was not found."
+        elif exc.status_code == 422:
+            detail = f"GitHub could not create the subset pull request: {exc}"
+        _audit(
+            session,
+            project_id=project_id,
+            provider="github",
+            action="open_test_subset_pr",
+            target_type="ci_test_subset",
+            target_id=subset.id,
+            status="failed",
+            user=current_user,
+            metadata={"error": detail, "branch": branch_name},
+        )
+        session.commit()
+        raise HTTPException(status_code=502, detail=detail) from exc
+    finally:
+        await client.close()
+
+    subset.updated_at = datetime.utcnow()
+    session.add(subset)
+    _audit(
+        session,
+        project_id=project_id,
+        provider="github",
+        action="open_test_subset_pr",
+        target_type="ci_test_subset",
+        target_id=subset.id,
+        user=current_user,
+        metadata={
+            "branch": branch_name,
+            "base_ref": base_ref,
+            "pull_request_number": pr.get("number"),
+            "changed_files": [item["path"] for item in changed_files],
+        },
+    )
+    session.commit()
+    return {
+        "status": "opened",
+        "subset": _serialize_subset(subset, session),
+        "pull_request_url": pr.get("html_url"),
+        "pull_request_number": pr.get("number"),
+        "branch": branch_name,
+        "base_ref": base_ref,
+        "workflow_path": ".github/workflows/quorvex-subset-tests.yml",
+        "manifest_path": f".quorvex/test-subsets/{subset.slug}.json",
+        "changed_files": changed_files,
+    }
+
+
+@router.post("/test-subsets/{subset_id}/dispatch")
+async def dispatch_test_subset_workflow(
+    project_id: str,
+    subset_id: str,
+    request: TestSubsetDispatchRequest,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    await _require_edit(project_id, current_user, session)
+    project = _require_project(project_id, session)
+    subset = session.get(CiTestSubset, subset_id)
+    if not subset or subset.project_id != project_id:
+        raise HTTPException(status_code=404, detail="CI test subset not found")
+    config = _get_github_config(project)
+    if not config:
+        raise HTTPException(status_code=400, detail="GitHub is not configured")
+    owner, repo = _github_repo(config)
+    workflow_id = request.workflow_id or config.get("default_workflow") or "quorvex-subset-tests.yml"
+    ref = request.ref or config.get("default_ref") or "main"
+    inputs: dict[str, str] = {
+        "subset_slug": subset.slug,
+        "browser": request.browser or subset.default_browser,
+    }
+    if request.base_url:
+        inputs["base_url"] = _validate_runner_subset_base_url(request.base_url)
+    client = await _build_github_client(project)
+    try:
+        await client.trigger_workflow(owner, repo, workflow_id, ref, inputs=inputs)
+        runs = await client.get_workflow_runs(owner, repo, workflow_id=workflow_id, per_page=5)
+        latest = _latest_run_after_dispatch(runs, workflow_id, ref)
+        mapping = CiPipelineMapping(
+            project_id=project_id,
+            provider="github",
+            external_pipeline_id=str((latest or {}).get("id") or f"pending-{workflow_id}-{ref}-{datetime.utcnow().timestamp()}"),
+            external_project_id=f"{owner}/{repo}",
+            external_url=(latest or {}).get("html_url", ""),
+            ref=ref,
+            triggered_from="dashboard",
+            status="pending",
+        )
+        if latest:
+            _update_mapping_from_run(mapping, latest)
+        session.add(mapping)
+        _audit(
+            session,
+            project_id=project_id,
+            provider="github",
+            action="dispatch_test_subset",
+            target_type="ci_test_subset",
+            target_id=subset.id,
+            user=current_user,
+            metadata={"workflow_id": workflow_id, "ref": ref, "subset_slug": subset.slug},
+        )
+        session.commit()
+        session.refresh(mapping)
+        return {"status": "triggered", "subset": _serialize_subset(subset, session, include_items=False), "run": _serialize_mapping(mapping)}
+    finally:
+        await client.close()
 
 
 @router.get("/workflows")
@@ -546,9 +1574,10 @@ async def dispatch_workflow(
     ref = request.ref or config.get("default_ref") or "main"
     if not workflow_id:
         raise HTTPException(status_code=400, detail="workflow_id is required")
+    workflow_inputs = _validate_github_dispatch_inputs(workflow_id, request.inputs)
     client = await _build_github_client(project)
     try:
-        await client.trigger_workflow(owner, repo, workflow_id, ref, inputs=request.inputs)
+        await client.trigger_workflow(owner, repo, workflow_id, ref, inputs=workflow_inputs)
         runs = await client.get_workflow_runs(owner, repo, workflow_id=workflow_id, per_page=5)
         latest = _latest_run_after_dispatch(runs, workflow_id, ref)
         mapping = CiPipelineMapping(
@@ -572,7 +1601,11 @@ async def dispatch_workflow(
             target_type="workflow",
             target_id=str(workflow_id),
             user=current_user,
-            metadata={"ref": ref, "input_keys": sorted((request.inputs or {}).keys())},
+            metadata={
+                "ref": ref,
+                "input_keys": sorted((workflow_inputs or {}).keys()),
+                "suite": (workflow_inputs or {}).get("suite"),
+            },
         )
         session.commit()
         session.refresh(mapping)
@@ -881,6 +1914,96 @@ def _browsers(browsers: list[str] | None) -> list[str]:
     return cleaned or ["chromium"]
 
 
+def _is_runner_subset_workflow(workflow_id: str | None, inputs: dict[str, str] | None) -> bool:
+    workflow_key = str(workflow_id or "").strip().lower()
+    return workflow_key in RUNNER_SUBSET_WORKFLOW_IDS or bool((inputs or {}).keys() & RUNNER_SUBSET_INPUT_KEYS)
+
+
+def _validate_runner_subset_path(value: str) -> str:
+    path = value.strip()
+    if not path:
+        return ""
+    if len(path) > 180:
+        raise HTTPException(status_code=400, detail="test_path must be 180 characters or fewer")
+    if path.startswith("/") or "\\" in path or "\n" in path or "\r" in path:
+        raise HTTPException(status_code=400, detail="test_path must be a safe repo-relative path")
+    if re.search(r"[;&|`$<>(){}]", path):
+        raise HTTPException(status_code=400, detail="test_path contains unsupported shell characters")
+    parts = [part for part in path.split("/") if part]
+    if any(part == ".." for part in parts):
+        raise HTTPException(status_code=400, detail="test_path must not contain parent directory segments")
+    allowed_prefixes = ("orchestrator/tests/", "tests/generated/", "tests/e2e/")
+    if not path.startswith(allowed_prefixes):
+        raise HTTPException(
+            status_code=400,
+            detail="test_path must be under orchestrator/tests, tests/generated, or tests/e2e",
+        )
+    return path
+
+
+def _validate_runner_subset_grep(value: str) -> str:
+    grep = value.strip()
+    if not grep:
+        return ""
+    if len(grep) > 120 or "\n" in grep or "\r" in grep:
+        raise HTTPException(status_code=400, detail="playwright_grep must be a single line up to 120 characters")
+    if re.search(r"[;&|`$<>(){}]", grep):
+        raise HTTPException(status_code=400, detail="playwright_grep contains unsupported shell characters")
+    return grep
+
+
+def _validate_runner_subset_base_url(value: str) -> str:
+    url = value.strip()
+    if not url:
+        return ""
+    if len(url) > 200 or "\n" in url or "\r" in url:
+        raise HTTPException(status_code=400, detail="base_url must be a single line up to 200 characters")
+    if not re.fullmatch(r"https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+", url):
+        raise HTTPException(status_code=400, detail="base_url must be an http or https URL")
+    return url
+
+
+def _validate_github_dispatch_inputs(workflow_id: str | None, inputs: dict[str, str] | None) -> dict[str, str] | None:
+    if not inputs:
+        return inputs
+    for key, value in inputs.items():
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", key):
+            raise HTTPException(status_code=400, detail=f"Workflow input '{key}' has an unsupported name")
+        if len(str(value)) > 500:
+            raise HTTPException(status_code=400, detail=f"Workflow input '{key}' is too long")
+
+    if not _is_runner_subset_workflow(workflow_id, inputs):
+        return inputs
+
+    unknown = sorted(set(inputs) - RUNNER_SUBSET_INPUT_KEYS)
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unsupported runner subset workflow inputs: {', '.join(unknown)}")
+
+    sanitized: dict[str, str] = {}
+    suite = (inputs.get("suite") or "auto").strip()
+    if suite not in RUNNER_SUBSET_SUITES:
+        raise HTTPException(status_code=400, detail=f"Unsupported runner subset suite: {suite}")
+    sanitized["suite"] = suite
+
+    browser = (inputs.get("browser") or "chromium").strip()
+    if browser not in RUNNER_SUBSET_BROWSERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported runner subset browser: {browser}")
+    sanitized["browser"] = browser
+
+    marker = (inputs.get("pytest_marker") or "not integration").strip()
+    if marker not in RUNNER_SUBSET_MARKERS:
+        raise HTTPException(status_code=400, detail=f"Unsupported pytest_marker: {marker}")
+    sanitized["pytest_marker"] = marker
+
+    if "test_path" in inputs:
+        sanitized["test_path"] = _validate_runner_subset_path(inputs["test_path"])
+    if "playwright_grep" in inputs:
+        sanitized["playwright_grep"] = _validate_runner_subset_grep(inputs["playwright_grep"])
+    if "base_url" in inputs:
+        sanitized["base_url"] = _validate_runner_subset_base_url(inputs["base_url"])
+    return sanitized
+
+
 def _validate_workflow_request(request: WorkflowGenerateRequest) -> list[str]:
     errors: list[str] = []
     if "\n" in request.workflow_name or "\r" in request.workflow_name:
@@ -899,13 +2022,324 @@ def _validate_workflow_request(request: WorkflowGenerateRequest) -> list[str]:
     return errors
 
 
+def _render_runner_subset_workflow(name: str, branches: str, retention: int) -> str:
+    return f"""name: {name}
+
+on:
+  pull_request:
+    branches: [{branches}]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Test subset to run
+        required: true
+        type: choice
+        default: auto
+        options:
+          - auto
+          - python-unit
+          - python-integration
+          - frontend-typecheck
+          - frontend-lint
+          - playwright-generated
+          - playwright-e2e
+          - all-safe
+      browser:
+        description: Playwright browser
+        required: true
+        type: choice
+        default: chromium
+        options:
+          - chromium
+          - firefox
+          - webkit
+      pytest_marker:
+        description: Pytest marker expression
+        required: true
+        type: choice
+        default: not integration
+        options:
+          - not integration
+          - integration
+      test_path:
+        description: Optional safe repo-relative test path
+        required: false
+        type: string
+      playwright_grep:
+        description: Optional Playwright grep
+        required: false
+        type: string
+      base_url:
+        description: Optional BASE_URL for Playwright
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  select-suite:
+    runs-on: ubuntu-latest
+    outputs:
+      suite: ${{{{ steps.select.outputs.suite }}}}
+      browser: ${{{{ steps.select.outputs.browser }}}}
+      pytest_marker: ${{{{ steps.select.outputs.pytest_marker }}}}
+      test_path: ${{{{ steps.select.outputs.test_path }}}}
+      playwright_grep: ${{{{ steps.select.outputs.playwright_grep }}}}
+      base_url: ${{{{ steps.select.outputs.base_url }}}}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: select
+        env:
+          EVENT_NAME: ${{{{ github.event_name }}}}
+          BASE_SHA: ${{{{ github.event.pull_request.base.sha || '' }}}}
+          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}
+          INPUT_SUITE: ${{{{ inputs.suite || '' }}}}
+          INPUT_BROWSER: ${{{{ inputs.browser || '' }}}}
+          INPUT_PYTEST_MARKER: ${{{{ inputs.pytest_marker || '' }}}}
+          INPUT_TEST_PATH: ${{{{ inputs.test_path || '' }}}}
+          INPUT_PLAYWRIGHT_GREP: ${{{{ inputs.playwright_grep || '' }}}}
+          INPUT_BASE_URL: ${{{{ inputs.base_url || '' }}}}
+        run: |
+          set -euo pipefail
+
+          suite="${{INPUT_SUITE:-auto}}"
+          browser="${{INPUT_BROWSER:-chromium}}"
+          pytest_marker="${{INPUT_PYTEST_MARKER:-not integration}}"
+          test_path="${{INPUT_TEST_PATH:-}}"
+          playwright_grep="${{INPUT_PLAYWRIGHT_GREP:-}}"
+          base_url="${{INPUT_BASE_URL:-}}"
+
+          case "$suite" in
+            auto|python-unit|python-integration|frontend-typecheck|frontend-lint|playwright-generated|playwright-e2e|all-safe) ;;
+            *) echo "Unsupported suite: $suite" >&2; exit 64 ;;
+          esac
+          case "$browser" in chromium|firefox|webkit) ;; *) echo "Unsupported browser: $browser" >&2; exit 64 ;; esac
+          case "$pytest_marker" in "not integration"|integration) ;; *) echo "Unsupported pytest marker: $pytest_marker" >&2; exit 64 ;; esac
+
+          if [ -n "$test_path" ]; then
+            if [ "${{#test_path}}" -gt 180 ] || [[ "$test_path" == /* ]] || [[ "$test_path" == *..* ]] || [[ "$test_path" == *\\\\* ]] || [[ "$test_path" =~ [\\;\\&\\|\\`\\$\\<\\>\\(\\)\\{{\\}}] ]]; then
+              echo "Unsafe test_path: $test_path" >&2
+              exit 64
+            fi
+            case "$test_path" in
+              orchestrator/tests/*|tests/generated/*|tests/e2e/*) ;;
+              *) echo "test_path must be under orchestrator/tests, tests/generated, or tests/e2e" >&2; exit 64 ;;
+            esac
+          fi
+
+          if [ -n "$playwright_grep" ]; then
+            if [ "${{#playwright_grep}}" -gt 120 ] || [[ "$playwright_grep" =~ [\\;\\&\\|\\`\\$\\<\\>\\(\\)\\{{\\}}] ]]; then
+              echo "Unsafe playwright_grep input" >&2
+              exit 64
+            fi
+          fi
+
+          if [ -n "$base_url" ]; then
+            if [ "${{#base_url}}" -gt 200 ] || [[ ! "$base_url" =~ ^https?:// ]]; then
+              echo "base_url must be an http or https URL up to 200 characters" >&2
+              exit 64
+            fi
+          fi
+
+          if [ "$suite" = "auto" ] && [ "$EVENT_NAME" = "pull_request" ]; then
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > /tmp/changed-files.txt || git diff --name-only HEAD^ HEAD > /tmp/changed-files.txt
+            if grep -Eq '^(Dockerfile|docker-compose|package-lock.json|package.json|pyproject.toml|requirements|requirements\\.|orchestrator/requirements|playwright\\.config\\.ts|\\.github/workflows/)' /tmp/changed-files.txt; then
+              suite="all-safe"
+            elif grep -Eq '^(orchestrator/|alembic\\.ini)' /tmp/changed-files.txt; then
+              suite="python-unit"
+            elif grep -Eq '^web/' /tmp/changed-files.txt; then
+              suite="frontend-typecheck"
+            elif grep -Eq '^tests/generated/' /tmp/changed-files.txt; then
+              suite="playwright-generated"
+            elif grep -Eq '^tests/e2e/' /tmp/changed-files.txt; then
+              suite="playwright-e2e"
+            else
+              suite="python-unit"
+            fi
+          elif [ "$suite" = "auto" ]; then
+            suite="all-safe"
+          fi
+
+          {{
+            echo "suite=$suite"
+            echo "browser=$browser"
+            echo "pytest_marker=$pytest_marker"
+            echo "test_path=$test_path"
+            echo "playwright_grep=$playwright_grep"
+            echo "base_url=$base_url"
+          }} >> "$GITHUB_OUTPUT"
+
+  python-tests:
+    needs: select-suite
+    if: contains(fromJSON('["python-unit","python-integration","all-safe"]'), needs.select-suite.outputs.suite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./orchestrator
+    env:
+      JWT_SECRET_KEY: test-secret-key-for-ci
+      REQUIRE_AUTH: "false"
+      DATABASE_URL: sqlite:///./test.db
+      SELECTED_SUITE: ${{{{ needs.select-suite.outputs.suite }}}}
+      PYTEST_MARKER: ${{{{ needs.select-suite.outputs.pytest_marker }}}}
+      TEST_PATH: ${{{{ needs.select-suite.outputs.test_path }}}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: python -m pip install --upgrade pip
+      - run: if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - run: pip install pytest pytest-asyncio
+      - name: Run pytest subset
+        run: |
+          set -euo pipefail
+          marker="$PYTEST_MARKER"
+          if [ "$SELECTED_SUITE" = "python-integration" ]; then
+            marker="integration"
+          elif [ "$SELECTED_SUITE" = "all-safe" ]; then
+            marker="not integration"
+          fi
+          target="tests"
+          if [[ "$TEST_PATH" == orchestrator/tests/* ]]; then
+            target="${{TEST_PATH#orchestrator/}}"
+          fi
+          if [ "$marker" = "not integration" ]; then
+            python -m pytest "$target" -v -m "$marker" --ignore=tests/integration
+          else
+            python -m pytest "$target" -v -m "$marker"
+          fi
+
+  frontend-checks:
+    needs: select-suite
+    if: contains(fromJSON('["frontend-typecheck","frontend-lint","all-safe"]'), needs.select-suite.outputs.suite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Type check frontend
+        if: contains(fromJSON('["frontend-typecheck","all-safe"]'), needs.select-suite.outputs.suite)
+        run: npx tsc --noEmit
+      - name: Lint frontend
+        if: needs.select-suite.outputs.suite == 'frontend-lint'
+        run: npm run lint
+
+  playwright-tests:
+    needs: select-suite
+    if: contains(fromJSON('["playwright-generated","playwright-e2e","all-safe"]'), needs.select-suite.outputs.suite)
+    runs-on: ubuntu-latest
+    env:
+      SELECTED_SUITE: ${{{{ needs.select-suite.outputs.suite }}}}
+      BROWSER: ${{{{ needs.select-suite.outputs.browser }}}}
+      TEST_PATH: ${{{{ needs.select-suite.outputs.test_path }}}}
+      PLAYWRIGHT_GREP: ${{{{ needs.select-suite.outputs.playwright_grep }}}}
+      BASE_URL: ${{{{ needs.select-suite.outputs.base_url }}}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps "$BROWSER"
+      - name: Run Playwright subset
+        run: |
+          set -euo pipefail
+          cmd=(npx playwright test --project="$BROWSER")
+          if [[ "$TEST_PATH" == tests/generated/* || "$TEST_PATH" == tests/e2e/* ]]; then
+            cmd+=("$TEST_PATH")
+          elif [ "$SELECTED_SUITE" = "playwright-generated" ]; then
+            cmd+=(tests/generated)
+          elif [ "$SELECTED_SUITE" = "playwright-e2e" ]; then
+            cmd+=(tests/e2e)
+          fi
+          if [ -n "$PLAYWRIGHT_GREP" ]; then
+            cmd+=(--grep "$PLAYWRIGHT_GREP")
+          fi
+          "${{cmd[@]}}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-subset-${{{{ needs.select-suite.outputs.browser }}}}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: {retention}
+"""
+
+
 def _render_github_workflow(request: WorkflowGenerateRequest) -> tuple[str, str]:
     name = request.workflow_name.strip() or "Quorvex Test Automation"
-    path = f".github/workflows/{_safe_workflow_slug(name)}.yml"
+    path = ".github/workflows/quorvex-subset-tests.yml" if request.template == "runner-subset-tests" else f".github/workflows/{_safe_workflow_slug(name)}.yml"
     branches = ", ".join(_branches(request.branches))
     retention = max(1, min(int(request.artifact_retention_days), 90))
     if request.template == "pr-quality-gate":
-        yaml = f"""name: {name}
+        timeout_minutes = max(5, min(int(request.wait_timeout_minutes or 120), 720))
+        if request.quality_gate_mode == "backend-blocking":
+            yaml = f"""name: {name}
+
+on:
+  pull_request:
+    branches: [{branches}]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: write
+
+jobs:
+  quorvex-quality-gate:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: {timeout_minutes}
+    steps:
+      - name: Start and wait for Quorvex PR quality gate
+        if: github.event_name == 'pull_request'
+        env:
+          QUORVEX_API_URL: ${{{{ secrets.{request.api_url_secret} }}}}
+          QUORVEX_API_TOKEN: ${{{{ secrets.{request.api_token_secret} }}}}
+          QUORVEX_PROJECT_ID: ${{{{ vars.{request.project_id_variable} || 'default' }}}}
+          PR_NUMBER: ${{{{ github.event.pull_request.number }}}}
+          HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
+        run: |
+          curl -fsS -X POST "$QUORVEX_API_URL/github/$QUORVEX_PROJECT_ID/quality-gates/pr/start" \\
+            -H "Authorization: Bearer $QUORVEX_API_TOKEN" \\
+            -H "Content-Type: application/json" \\
+            -d '{{"pr_number": '${{PR_NUMBER}}', "head_sha": "'${{HEAD_SHA}}'", "ensure_indexed": true, "run_recommended": true, "post_feedback": true, "create_commit_status": true}}'
+
+          deadline=$((SECONDS + {timeout_minutes} * 60))
+          while true; do
+            status_json=$(curl -fsS "$QUORVEX_API_URL/github/$QUORVEX_PROJECT_ID/quality-gates/pr/status?pr_number=$PR_NUMBER&head_sha=$HEAD_SHA" \\
+              -H "Authorization: Bearer $QUORVEX_API_TOKEN")
+            echo "$status_json"
+            terminal=$(python -c 'import json,sys; print(str(json.load(sys.stdin).get("terminal", False)).lower())' <<< "$status_json")
+            if [ "$terminal" = "true" ]; then
+              exit_code=$(python -c 'import json,sys; print(json.load(sys.stdin).get("exit_code", 1))' <<< "$status_json")
+              exit "$exit_code"
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "Timed out waiting for Quorvex quality gate."
+              exit 1
+            fi
+            sleep 10
+          done
+"""
+        else:
+            yaml = f"""name: {name}
 
 on:
   pull_request:
@@ -935,6 +2369,8 @@ jobs:
             -H "Content-Type: application/json" \\
             -d '{{"pr_number": ${{{{ github.event.pull_request.number }}}}, "head_sha": "${{{{ github.event.pull_request.head.sha }}}}", "ensure_indexed": true, "run_recommended": true, "post_feedback": true, "create_commit_status": true}}'
 """
+    elif request.template == "runner-subset-tests":
+        yaml = _render_runner_subset_workflow(name, branches, retention)
     elif request.template == "nightly-regression":
         yaml = f"""name: {name}
 

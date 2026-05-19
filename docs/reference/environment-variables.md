@@ -6,10 +6,20 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `ANTHROPIC_AUTH_TOKEN` | -- | Yes | Authentication token for the Claude API |
-| `ANTHROPIC_BASE_URL` | -- | Yes | API endpoint URL (Anthropic direct, OpenRouter, or custom proxy) |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | -- | Yes | Model ID (e.g., `claude-sonnet-4-20250514`) |
+| `ANTHROPIC_AUTH_TOKEN` | -- | Yes | Authentication token for the Anthropic-compatible provider, Z.ai by default |
+| `ANTHROPIC_AUTH_TOKENS` | -- | No | Comma-separated token pool for API key rotation |
+| `ANTHROPIC_API_KEY` | copied from `ANTHROPIC_AUTH_TOKEN` when configured | No | Anthropic SDK-compatible key name used by some runtime paths |
+| `CLAUDE_CODE_OAUTH_TOKEN` | -- | No | Claude Code OAuth token for Docker/dev setups that authenticate through Claude Code |
+| `ANTHROPIC_BASE_URL` | `https://api.z.ai/api/anthropic` | Yes | API endpoint URL (Z.ai, Anthropic direct, OpenRouter, or custom proxy) |
+| `ANTHROPIC_MODEL` | `glm-5.1` | Yes | Active model override used by selected agent paths |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `glm-5.1` | No | Claude Code / Agent SDK Opus alias target |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `glm-5-turbo` | Yes | Claude Code / Agent SDK Sonnet alias target |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `glm-4.5-air` | No | Claude Code / Agent SDK Haiku alias target |
+| `ANTHROPIC_CHAT_MODEL` | `glm-5-turbo` | No | Optional chat model override for assistant/chat features |
+| `API_TIMEOUT_MS` | `3000000` | No | Claude Code API timeout used by the Z.ai GLM Coding Plan |
 | `OPENAI_API_KEY` | -- | No | OpenAI API key for memory system embeddings |
+| `OPENAI_BASE_URL` | -- | No | Optional OpenAI-compatible endpoint for embedding/chat clients |
+| `OPENAI_CHAT_MODEL` | -- | No | Optional OpenAI chat model override for features that use OpenAI-compatible chat calls |
 
 ## Database
 
@@ -30,6 +40,9 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | `REDIS_URL` | -- | No | Redis URL for distributed rate limiting. Format: `redis://host:6379/0` |
 | `INITIAL_ADMIN_EMAIL` | -- | No | Email for initial admin user (first startup only) |
 | `INITIAL_ADMIN_PASSWORD` | -- | No | Password for initial admin user |
+
+!!! warning
+    `.env.prod.example` includes development defaults for local evaluation. Change `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, `MINIO_ROOT_PASSWORD`, and initial admin credentials before exposing a production deployment.
 
 ## Playwright / Browser
 
@@ -140,6 +153,7 @@ When `VNC_ENABLED=true`, parallel browser execution is limited to 1 instance.
 | `K6_MAX_VUS` | `1000` | No | Safety limit on virtual users |
 | `K6_MAX_DURATION` | `5m` | No | Max test duration |
 | `K6_TIMEOUT_SECONDS` | `3600` | No | Process timeout |
+| `K6_WORKER_ID` | generated UUID suffix | No | Identifier used by K6 worker containers |
 
 ## Security Testing
 
@@ -151,6 +165,16 @@ When `VNC_ENABLED=true`, parallel browser execution is limited to 1 instance.
 | `ZAP_PROXY_ENABLED` | `false` | No | Enable passive mode (Playwright tests proxy through ZAP) |
 | `NUCLEI_TIMEOUT_SECONDS` | `600` | No | Nuclei scan timeout |
 | `SECURITY_SCAN_TIMEOUT` | `1800` | No | Overall scan timeout |
+
+## Temporal / Autonomous Missions
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `TEMPORAL_ADDRESS` | configured in app settings | Autonomous missions with Temporal | Temporal frontend address |
+| `TEMPORAL_NAMESPACE` | configured in app settings | No | Temporal namespace for autonomous mission workflows |
+| `TEMPORAL_TASK_QUEUE` | configured in app settings | No | Task queue consumed by the autonomous mission worker |
+
+Temporal-backed missions support durable long-running and recurring autonomous agent workflows. If Temporal is not reachable, mission APIs report that durable orchestration is unavailable.
 
 ## Frontend
 

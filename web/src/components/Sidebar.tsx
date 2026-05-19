@@ -25,6 +25,7 @@ interface NavGroup {
 const topLinks: NavItem[] = [
     { href: '/', label: 'Overview', icon: Home },
     { href: '/autopilot', label: 'AutoPilot', icon: Rocket },
+    { href: '/autonomous', label: 'Autonomous', icon: Bot },
     { href: '/specs', label: 'Test Specs', icon: FileText },
     { href: '/runs', label: 'Test Runs', icon: Play },
     { href: '/dashboard', label: 'Reporting', icon: BarChart2 },
@@ -92,6 +93,9 @@ function isItemActive(href: string, pathname: string): boolean {
     }
     if (href === '/assistant') {
         return pathname === href;
+    }
+    if (href === '/autonomous') {
+        return pathname === href || pathname.startsWith('/autonomous/');
     }
     return pathname === href;
 }

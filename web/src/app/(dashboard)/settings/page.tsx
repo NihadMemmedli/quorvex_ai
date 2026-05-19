@@ -90,10 +90,10 @@ export default function SettingsPage() {
     const { currentProject } = useProject();
     const { user } = useAuth();
     const [settings, setSettings] = useState({
-        llm_provider: 'anthropic',
+        llm_provider: 'zai',
         api_key: '',
-        base_url: '',
-        model_name: ''
+        base_url: 'https://api.z.ai/api/anthropic',
+        model_name: 'glm-5.1'
     });
     const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>({
         parallelism: 2,
@@ -427,6 +427,9 @@ export default function SettingsPage() {
             if (value === 'openrouter') {
                 updates.base_url = 'https://openrouter.ai/api';
                 updates.model_name = 'meta-llama/llama-3.2-3b-instruct:free';
+            } else if (value === 'zai') {
+                updates.base_url = 'https://api.z.ai/api/anthropic';
+                updates.model_name = 'glm-5.1';
             } else if (value === 'anthropic') {
                 updates.base_url = 'https://api.anthropic.com';
                 updates.model_name = 'claude-3-5-sonnet-20240620';
@@ -1156,6 +1159,7 @@ export default function SettingsPage() {
                             onChange={handleChange}
                             className="input has-icon"
                         >
+                            <option value="zai">Z.ai GLM Coding Plan</option>
                             <option value="anthropic">Anthropic (Claude)</option>
                             <option value="openrouter">OpenRouter (Free Models Available)</option>
                             <option value="custom">Custom</option>
@@ -1174,7 +1178,13 @@ export default function SettingsPage() {
                             name="api_key"
                             value={settings.api_key}
                             onChange={handleChange}
-                            placeholder={settings.llm_provider === 'openrouter' ? 'sk-or-v1-...' : 'sk-...'}
+                            placeholder={
+                                settings.llm_provider === 'openrouter'
+                                    ? 'sk-or-v1-...'
+                                    : settings.llm_provider === 'zai'
+                                        ? 'your_zai_api_key'
+                                        : 'sk-...'
+                            }
                             className="input has-icon"
                             style={{ paddingRight: '2.5rem' }}
                         />
@@ -1203,7 +1213,13 @@ export default function SettingsPage() {
                             name="base_url"
                             value={settings.base_url}
                             onChange={handleChange}
-                            placeholder={settings.llm_provider === 'openrouter' ? 'https://openrouter.ai/api' : 'https://api.anthropic.com'}
+                            placeholder={
+                                settings.llm_provider === 'openrouter'
+                                    ? 'https://openrouter.ai/api'
+                                    : settings.llm_provider === 'zai'
+                                        ? 'https://api.z.ai/api/anthropic'
+                                        : 'https://api.anthropic.com'
+                            }
                             className="input has-icon"
                         />
                     </div>
@@ -1232,7 +1248,9 @@ export default function SettingsPage() {
                             placeholder={
                                 settings.llm_provider === 'openrouter'
                                     ? 'meta-llama/llama-3.2-3b-instruct:free'
-                                    : 'claude-3-5-sonnet-20240620'
+                                    : settings.llm_provider === 'zai'
+                                        ? 'glm-5.1'
+                                        : 'claude-3-5-sonnet-20240620'
                             }
                             className="input has-icon"
                         />
@@ -1246,7 +1264,7 @@ export default function SettingsPage() {
                     )}
                     {settings.llm_provider !== 'openrouter' && (
                         <p className="helper-text" style={{ marginTop: '0.5rem' }}>
-                            Used by browser agents and mirrored to the Claude model env vars.
+                            Used by browser agents and mirrored to the Anthropic-compatible model env vars.
                         </p>
                     )}
                 </div>

@@ -467,11 +467,11 @@ async def update_message_content_json(
 
 async def _generate_ai_title(user_message: str, assistant_message: str = "") -> str:
     """Generate a concise conversation title using AI."""
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic")
     auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     model = os.environ.get("ANTHROPIC_MODEL") or os.environ.get(
         "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "claude-sonnet-4-20250514",
+        "glm-5-turbo",
     )
 
     if not auth_token:

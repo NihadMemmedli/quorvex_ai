@@ -231,7 +231,8 @@ type TrackedJobKind =
   | 'database-job'
   | 'prd-generation'
   | 'regression-batch'
-  | 'test-run';
+  | 'test-run'
+  | 'workflow-run';
 
 interface TrackedChatJob {
   key: string;
@@ -388,6 +389,11 @@ function makeTrackedJob(
     id = stringValue(data, ['run_id', 'runId', 'id']) || stringValue(args, ['runId']);
     statusPath = `/runs/${encodeURIComponent(id || '')}`;
     pagePath = id ? `/runs/${encodeURIComponent(id)}` : '/runs';
+  } else if (toolName === 'startWorkflow') {
+    kind = 'workflow-run';
+    id = stringValue(data, ['run_id', 'runId', 'id']);
+    statusPath = `/workflows/runs/${encodeURIComponent(id || '')}`;
+    pagePath = '/workflow';
   }
 
   if (!kind || !id || !statusPath.includes(encodeURIComponent(id))) return null;

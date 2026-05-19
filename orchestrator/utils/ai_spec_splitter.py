@@ -10,6 +10,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 # Add orchestrator to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -22,9 +23,49 @@ class AISpecSplitter:
     """
     Extract test cases from any markdown spec format using an LLM.
 
-    Uses the OpenAI-compatible API (ANTHROPIC_BASE_URL) with the configured
+    Uses the configured Anthropic-compatible API endpoint with the configured
     model. This is a simple "markdown in, JSON out" task - no MCP tools needed.
     """
+
+    @staticmethod
+    def _call_text_model(api_key: str, base_url: str, model: str, prompt: str) -> str:
+        """Call the configured text model and return the response text."""
+        base_url = base_url.rstrip("/")
+        if "openrouter.ai" in base_url.lower():
+            from openai import OpenAI
+
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+            )
+            if not response or not response.choices:
+                raise RuntimeError("AI returned empty choices - check API credentials and model availability")
+            return response.choices[0].message.content or ""
+
+        import httpx
+
+        response = httpx.post(
+            f"{base_url}/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": 4096,
+                "temperature": 0.0,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=60.0,
+        )
+        response.raise_for_status()
+        data: dict[str, Any] = response.json()
+        content = data.get("content") or []
+        text_parts = [block.get("text", "") for block in content if isinstance(block, dict) and block.get("type") == "text"]
+        return "\n".join(part for part in text_parts if part)
 
     @classmethod
     def extract_test_cases(cls, content: str, spec_name: str = "") -> list[dict]:
@@ -51,7 +92,7 @@ class AISpecSplitter:
         base_url = os.environ.get("ANTHROPIC_BASE_URL")
         model = os.environ.get("ANTHROPIC_MODEL") or os.environ.get(
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "claude-sonnet-4-20250514",
+            "glm-5-turbo",
         )
 
         if not api_key:
@@ -59,25 +100,13 @@ class AISpecSplitter:
         if not base_url:
             raise RuntimeError("ANTHROPIC_BASE_URL not set. Configure AI credentials in .env file or settings.")
 
-        # Use OpenAI-compatible API (same pattern as prd_processor.py)
-        from openai import OpenAI
-
-        client = OpenAI(api_key=api_key, base_url=base_url)
-
         prompt = cls._build_extraction_prompt(content, spec_name)
 
         print(f"   Calling AI to extract test cases from {spec_name or 'spec'}...")
         sys.stdout.flush()
 
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-            )
-            if not response or not response.choices:
-                raise RuntimeError("AI returned empty choices - check API credentials and model availability")
-            result_text = response.choices[0].message.content
+            result_text = cls._call_text_model(api_key, base_url, model, prompt)
         except RuntimeError:
             raise  # Re-raise our own errors
         except Exception as e:
@@ -119,7 +148,7 @@ class AISpecSplitter:
         base_url = os.environ.get("ANTHROPIC_BASE_URL")
         model = os.environ.get("ANTHROPIC_MODEL") or os.environ.get(
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "claude-sonnet-4-20250514",
+            "glm-5-turbo",
         )
 
         if not api_key:
@@ -127,24 +156,13 @@ class AISpecSplitter:
         if not base_url:
             raise RuntimeError("ANTHROPIC_BASE_URL not set. Configure AI credentials in .env file or settings.")
 
-        from openai import OpenAI
-
-        client = OpenAI(api_key=api_key, base_url=base_url)
-
         prompt = cls._build_grouping_prompt(content, spec_name)
 
         print(f"   Calling AI to extract and group test cases from {spec_name or 'spec'}...")
         sys.stdout.flush()
 
         try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-            )
-            if not response or not response.choices:
-                raise RuntimeError("AI returned empty choices - check API credentials and model availability")
-            result_text = response.choices[0].message.content
+            result_text = cls._call_text_model(api_key, base_url, model, prompt)
         except RuntimeError:
             raise
         except Exception as e:

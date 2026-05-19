@@ -10,9 +10,14 @@ data:
   # API URL for frontend
   api-url: "http://backend:8001"
 
-  # Anthropic configuration
-  anthropic-base-url: "https://api.anthropic.com"
-  anthropic-model: "claude-3-sonnet-20240229"
+  # Z.ai GLM Coding Plan configuration (Anthropic-compatible)
+  anthropic-base-url: "https://api.z.ai/api/anthropic"
+  anthropic-model: "glm-5.1"
+  anthropic-opus-model: "glm-5.1"
+  anthropic-sonnet-model: "glm-5-turbo"
+  anthropic-haiku-model: "glm-4.5-air"
+  anthropic-chat-model: "glm-5-turbo"
+  api-timeout-ms: "3000000"
 
   # Database configuration
   postgres-db: "playwright_agent"

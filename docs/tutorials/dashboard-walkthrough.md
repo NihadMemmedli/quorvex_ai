@@ -52,6 +52,10 @@ The left sidebar organizes the dashboard into sections:
 | | Runs | View test execution history and details |
 | | Regression | Batch execution of multiple tests |
 | | Templates | Reusable spec fragments |
+| **Agents** | AutoPilot | Interactive agent sessions for app discovery, task generation, and test creation |
+| | Autonomous | Recurring or long-running autonomous testing missions with approval gates |
+| | Agents | Custom agent definitions, runs, tool access, and reports |
+| | Workflow | Custom multi-step workflow automation |
 | **Discovery** | Exploration | AI-powered app discovery sessions |
 | | Requirements | Structured requirements from exploration |
 | | RTM | Requirements Traceability Matrix |
@@ -64,6 +68,7 @@ The left sidebar organizes the dashboard into sections:
 | **Operations** | Dashboard | Analytics and reporting overview |
 | | Schedules | Cron-based automated test runs |
 | | CI/CD | GitHub Actions and GitLab CI integration |
+| | PR Advisor | Changed-file impact analysis, recommended test subsets, and quality gates |
 | | Analytics | Cross-feature trends and insights |
 | **System** | Memory | Stored selector patterns from past runs |
 | | PRD | PDF requirements document processing |
@@ -233,6 +238,7 @@ In this tutorial, you:
 - Explored the Specs page for managing test specifications
 - Viewed test execution history on the Runs page
 - Started a batch regression run
+- Saw where AutoPilot, autonomous missions, PRD, requirements, RTM, specialized testing, CI/CD, and PR advisor workflows live
 - Initiated an AI exploration session
 - Reviewed analytics on the Dashboard page
 - Configured project settings and credentials

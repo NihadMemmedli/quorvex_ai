@@ -75,7 +75,7 @@ docker-compose -f docker-compose.minimal.yml down
 docker-compose up -d
 ```
 
-You'll need to migrate data from SQLite to PostgreSQL. See [main README](README.md#database-migration) for migration guides.
+You'll need to migrate data from SQLite to PostgreSQL. See the [deployment guide](docs/guides/deployment.md) and [on-premises deployment guide](docs/guides/company-deployment.md) for full-stack database and migration operations.
 
 ## Troubleshooting
 

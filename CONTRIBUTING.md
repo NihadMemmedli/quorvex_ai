@@ -23,7 +23,7 @@ This guide will help you get started.
 
 ## Code of Conduct
 
-This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By participating, you agree to uphold a welcoming, inclusive, and respectful environment.
+This project follows the [Quorvex AI Code of Conduct](CODE_OF_CONDUCT.md). By participating, you agree to uphold a respectful, constructive environment.
 
 ---
 
@@ -88,8 +88,13 @@ Edit `.env` and set your AI provider credentials at minimum:
 
 ```env
 ANTHROPIC_AUTH_TOKEN=your-api-key
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-20250514
+ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+ANTHROPIC_MODEL=glm-5.1
+ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1
+ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5-turbo
+ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.5-air
+ANTHROPIC_CHAT_MODEL=glm-5-turbo
+API_TIMEOUT_MS=3000000
 ```
 
 ### 4. Start Development Servers
@@ -332,7 +337,7 @@ If a CI check fails on something unrelated to your changes, note it in your PR a
 
 - **Questions**: Open a [GitHub Discussion](https://github.com/NihadMemmedli/quorvex_ai/discussions)
 - **Bug reports**: Open a [GitHub Issue](https://github.com/NihadMemmedli/quorvex_ai/issues)
-- **Architecture questions**: Check [docs/architecture/](docs/architecture/) for system design details
-- **API reference**: See [docs/api-reference/](docs/api-reference/) for endpoint documentation
+- **Architecture questions**: Check [docs/explanation/](docs/explanation/) for system design details
+- **API reference**: See [docs/reference/](docs/reference/) for endpoint documentation
 
 Thank you for contributing to Quorvex AI!

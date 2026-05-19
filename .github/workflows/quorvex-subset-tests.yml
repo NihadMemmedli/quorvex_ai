@@ -1,0 +1,254 @@
+name: Quorvex Runner Subset Tests
+
+on:
+  pull_request:
+    branches: [main, master]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Test subset to run
+        required: true
+        type: choice
+        default: auto
+        options:
+          - auto
+          - python-unit
+          - python-integration
+          - frontend-typecheck
+          - frontend-lint
+          - playwright-generated
+          - playwright-e2e
+          - all-safe
+      browser:
+        description: Playwright browser
+        required: true
+        type: choice
+        default: chromium
+        options:
+          - chromium
+          - firefox
+          - webkit
+      pytest_marker:
+        description: Pytest marker expression
+        required: true
+        type: choice
+        default: not integration
+        options:
+          - not integration
+          - integration
+      test_path:
+        description: Optional safe repo-relative test path
+        required: false
+        type: string
+      playwright_grep:
+        description: Optional Playwright grep
+        required: false
+        type: string
+      base_url:
+        description: Optional BASE_URL for Playwright
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  select-suite:
+    runs-on: ubuntu-latest
+    outputs:
+      suite: ${{ steps.select.outputs.suite }}
+      browser: ${{ steps.select.outputs.browser }}
+      pytest_marker: ${{ steps.select.outputs.pytest_marker }}
+      test_path: ${{ steps.select.outputs.test_path }}
+      playwright_grep: ${{ steps.select.outputs.playwright_grep }}
+      base_url: ${{ steps.select.outputs.base_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          INPUT_SUITE: ${{ inputs.suite || '' }}
+          INPUT_BROWSER: ${{ inputs.browser || '' }}
+          INPUT_PYTEST_MARKER: ${{ inputs.pytest_marker || '' }}
+          INPUT_TEST_PATH: ${{ inputs.test_path || '' }}
+          INPUT_PLAYWRIGHT_GREP: ${{ inputs.playwright_grep || '' }}
+          INPUT_BASE_URL: ${{ inputs.base_url || '' }}
+        run: |
+          set -euo pipefail
+
+          suite="${INPUT_SUITE:-auto}"
+          browser="${INPUT_BROWSER:-chromium}"
+          pytest_marker="${INPUT_PYTEST_MARKER:-not integration}"
+          test_path="${INPUT_TEST_PATH:-}"
+          playwright_grep="${INPUT_PLAYWRIGHT_GREP:-}"
+          base_url="${INPUT_BASE_URL:-}"
+
+          case "$suite" in
+            auto|python-unit|python-integration|frontend-typecheck|frontend-lint|playwright-generated|playwright-e2e|all-safe) ;;
+            *) echo "Unsupported suite: $suite" >&2; exit 64 ;;
+          esac
+          case "$browser" in chromium|firefox|webkit) ;; *) echo "Unsupported browser: $browser" >&2; exit 64 ;; esac
+          case "$pytest_marker" in "not integration"|integration) ;; *) echo "Unsupported pytest marker: $pytest_marker" >&2; exit 64 ;; esac
+
+          if [ -n "$test_path" ]; then
+            if [ "${#test_path}" -gt 180 ] || [[ "$test_path" == /* ]] || [[ "$test_path" == *..* ]] || [[ "$test_path" == *\\* ]] || [[ "$test_path" =~ [\;\&\|\`\$\<\>\(\)\{\}] ]]; then
+              echo "Unsafe test_path: $test_path" >&2
+              exit 64
+            fi
+            case "$test_path" in
+              orchestrator/tests/*|tests/generated/*|tests/e2e/*) ;;
+              *) echo "test_path must be under orchestrator/tests, tests/generated, or tests/e2e" >&2; exit 64 ;;
+            esac
+          fi
+
+          if [ -n "$playwright_grep" ]; then
+            if [ "${#playwright_grep}" -gt 120 ] || [[ "$playwright_grep" =~ [\;\&\|\`\$\<\>\(\)\{\}] ]]; then
+              echo "Unsafe playwright_grep input" >&2
+              exit 64
+            fi
+          fi
+
+          if [ -n "$base_url" ]; then
+            if [ "${#base_url}" -gt 200 ] || [[ ! "$base_url" =~ ^https?:// ]]; then
+              echo "base_url must be an http or https URL up to 200 characters" >&2
+              exit 64
+            fi
+          fi
+
+          if [ "$suite" = "auto" ] && [ "$EVENT_NAME" = "pull_request" ]; then
+            git diff --name-only "$BASE_SHA" "$HEAD_SHA" > /tmp/changed-files.txt || git diff --name-only HEAD^ HEAD > /tmp/changed-files.txt
+            if grep -Eq '^(Dockerfile|docker-compose|package-lock.json|package.json|pyproject.toml|requirements|requirements\.|orchestrator/requirements|playwright\.config\.ts|\.github/workflows/)' /tmp/changed-files.txt; then
+              suite="all-safe"
+            elif grep -Eq '^(orchestrator/|alembic\.ini)' /tmp/changed-files.txt; then
+              suite="python-unit"
+            elif grep -Eq '^web/' /tmp/changed-files.txt; then
+              suite="frontend-typecheck"
+            elif grep -Eq '^tests/generated/' /tmp/changed-files.txt; then
+              suite="playwright-generated"
+            elif grep -Eq '^tests/e2e/' /tmp/changed-files.txt; then
+              suite="playwright-e2e"
+            else
+              suite="python-unit"
+            fi
+          elif [ "$suite" = "auto" ]; then
+            suite="all-safe"
+          fi
+
+          {
+            echo "suite=$suite"
+            echo "browser=$browser"
+            echo "pytest_marker=$pytest_marker"
+            echo "test_path=$test_path"
+            echo "playwright_grep=$playwright_grep"
+            echo "base_url=$base_url"
+          } >> "$GITHUB_OUTPUT"
+
+  python-tests:
+    needs: select-suite
+    if: contains(fromJSON('["python-unit","python-integration","all-safe"]'), needs.select-suite.outputs.suite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./orchestrator
+    env:
+      JWT_SECRET_KEY: test-secret-key-for-ci
+      REQUIRE_AUTH: "false"
+      DATABASE_URL: sqlite:///./test.db
+      SELECTED_SUITE: ${{ needs.select-suite.outputs.suite }}
+      PYTEST_MARKER: ${{ needs.select-suite.outputs.pytest_marker }}
+      TEST_PATH: ${{ needs.select-suite.outputs.test_path }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: python -m pip install --upgrade pip
+      - run: if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - run: pip install pytest pytest-asyncio
+      - name: Run pytest subset
+        run: |
+          set -euo pipefail
+          marker="$PYTEST_MARKER"
+          if [ "$SELECTED_SUITE" = "python-integration" ]; then
+            marker="integration"
+          elif [ "$SELECTED_SUITE" = "all-safe" ]; then
+            marker="not integration"
+          fi
+          target="tests"
+          if [[ "$TEST_PATH" == orchestrator/tests/* ]]; then
+            target="${TEST_PATH#orchestrator/}"
+          fi
+          if [ "$marker" = "not integration" ]; then
+            python -m pytest "$target" -v -m "$marker" --ignore=tests/integration
+          else
+            python -m pytest "$target" -v -m "$marker"
+          fi
+
+  frontend-checks:
+    needs: select-suite
+    if: contains(fromJSON('["frontend-typecheck","frontend-lint","all-safe"]'), needs.select-suite.outputs.suite)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Type check frontend
+        if: contains(fromJSON('["frontend-typecheck","all-safe"]'), needs.select-suite.outputs.suite)
+        run: npx tsc --noEmit
+      - name: Lint frontend
+        if: needs.select-suite.outputs.suite == 'frontend-lint'
+        run: npm run lint
+
+  playwright-tests:
+    needs: select-suite
+    if: contains(fromJSON('["playwright-generated","playwright-e2e","all-safe"]'), needs.select-suite.outputs.suite)
+    runs-on: ubuntu-latest
+    env:
+      SELECTED_SUITE: ${{ needs.select-suite.outputs.suite }}
+      BROWSER: ${{ needs.select-suite.outputs.browser }}
+      TEST_PATH: ${{ needs.select-suite.outputs.test_path }}
+      PLAYWRIGHT_GREP: ${{ needs.select-suite.outputs.playwright_grep }}
+      BASE_URL: ${{ needs.select-suite.outputs.base_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps "$BROWSER"
+      - name: Run Playwright subset
+        run: |
+          set -euo pipefail
+          cmd=(npx playwright test --project="$BROWSER")
+          if [[ "$TEST_PATH" == tests/generated/* || "$TEST_PATH" == tests/e2e/* ]]; then
+            cmd+=("$TEST_PATH")
+          elif [ "$SELECTED_SUITE" = "playwright-generated" ]; then
+            cmd+=(tests/generated)
+          elif [ "$SELECTED_SUITE" = "playwright-e2e" ]; then
+            cmd+=(tests/e2e)
+          fi
+          if [ -n "$PLAYWRIGHT_GREP" ]; then
+            cmd+=(--grep "$PLAYWRIGHT_GREP")
+          fi
+          "${cmd[@]}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-subset-${{ needs.select-suite.outputs.browser }}
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 14

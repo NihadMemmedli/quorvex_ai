@@ -5,14 +5,34 @@ import { ASSISTANT_WORKFLOW_CAPABILITIES } from './workflow-capabilities';
 
 type ToolResult = Record<string, unknown> | null;
 
+const RUNNER_SUBSET_SUITES = [
+  'auto',
+  'python-unit',
+  'python-integration',
+  'frontend-typecheck',
+  'frontend-lint',
+  'playwright-generated',
+  'playwright-e2e',
+  'all-safe',
+] as const;
+
+const RUNNER_SUBSET_BROWSERS = ['chromium', 'firefox', 'webkit'] as const;
+const RUNNER_SUBSET_MARKERS = ['not integration', 'integration'] as const;
+const CI_TEST_SUBSET_MODES = ['manual', 'pr-impact', 'both'] as const;
+const CI_TEST_SUBSET_ITEM_SCHEMA = z.object({
+  specName: z.string().describe('Quorvex spec name, e.g. folder/login.md'),
+  targetPath: z.string().optional().describe('Optional repo-relative Playwright test path under tests/generated or tests/e2e'),
+});
+
 const CHAT_CONTROL_DOMAINS = [
   { domain: 'Core UI testing', status: 'supported', tools: ['listTestSpecs', 'createTestSpec', 'runTestSpec', 'getRunLogs', 'healFailedRun', 'runRegressionBatch'] },
   { domain: 'Coverage planning', status: 'supported', tools: ['planUiTestCoverage', 'getRTMSummary', 'getRTMGaps', 'getCoverageGaps', 'getTestSuggestions'] },
+  { domain: 'Custom workflows', status: 'supported', tools: ['listWorkflows', 'listWorkflowCatalog', 'getWorkflow', 'createWorkflow', 'updateWorkflow', 'duplicateWorkflow', 'archiveWorkflow', 'startWorkflow', 'startWorkflowFromStep', 'getWorkflowStatus', 'retryWorkflowFailedStep', 'pauseWorkflowRun', 'resumeWorkflowRun', 'cancelWorkflowRun'] },
   { domain: 'Explorer Agent', status: 'supported', tools: ['startExplorerAgent', 'getAgentRun', 'getExplorerGeneratedSpecs', 'generateExplorerFlowTest'] },
   { domain: 'Discovery exploration', status: 'supported', tools: ['startDiscoveryExploration', 'getExplorationDetails', 'getExplorationFlows', 'generateApiTestsFromExploration'] },
   { domain: 'Specs and artifacts', status: 'supported', tools: ['getSpecContent', 'getSpecGeneratedCode', 'moveSpec', 'renameSpec', 'splitSpec'] },
   { domain: 'Regression operations', status: 'supported', tools: ['getRegressionBatchDetail', 'cancelRegressionBatch', 'getSpecHistory', 'exportRegressionBatch'] },
-  { domain: 'Integrations follow-through', status: 'partial', tools: ['generateJiraBugReport', 'createJiraIssue', 'pushTestRailCases', 'syncTestRailResults'], missing: ['Jira/TestRail/GitHub credential setup remains dashboard-led by default'] },
+  { domain: 'Integrations follow-through', status: 'partial', tools: ['generateJiraBugReport', 'createJiraIssue', 'pushTestRailCases', 'syncTestRailResults', 'createCiTestSubset', 'openCiTestSubsetPullRequest'], missing: ['Jira/TestRail/GitHub credential setup remains dashboard-led by default'] },
   { domain: 'Admin and users', status: 'partial', tools: ['listProjectMembers', 'listProjects'], missing: ['User invite, disable, and role management are intentionally not chat-mutatable in this pass'] },
 ];
 
@@ -24,6 +44,7 @@ export const MUTATING_TOOL_CONFIGS: Record<string, { label: string }> = {
   startExploration: { label: 'Start Exploration' },
   startExplorerAgent: { label: 'Start Explorer Agent' },
   startAdhocCustomAgent: { label: 'Start Custom Agent' },
+  createCustomAgentDefinition: { label: 'Save Custom Agent' },
   startCustomAgentFromReport: { label: 'Start Custom Agent From Report' },
   synthesizeExplorerSpecs: { label: 'Synthesize Explorer Specs' },
   analyzeExplorerPrerequisites: { label: 'Analyze Explorer Prerequisites' },
@@ -109,6 +130,16 @@ export const MUTATING_TOOL_CONFIGS: Record<string, { label: string }> = {
   answerAutoPilotQuestion: { label: 'Answer Auto Pilot Question' },
   stopAutoPilotTestTask: { label: 'Stop Auto Pilot Test Task' },
   cancelAutoPilot: { label: 'Cancel Auto Pilot' },
+  createWorkflow: { label: 'Create Custom Workflow' },
+  updateWorkflow: { label: 'Update Custom Workflow' },
+  duplicateWorkflow: { label: 'Duplicate Custom Workflow' },
+  archiveWorkflow: { label: 'Archive Custom Workflow' },
+  startWorkflow: { label: 'Start Custom Workflow' },
+  startWorkflowFromStep: { label: 'Start Custom Workflow From Step' },
+  retryWorkflowFailedStep: { label: 'Retry Custom Workflow Failed Step' },
+  pauseWorkflowRun: { label: 'Pause Custom Workflow Run' },
+  resumeWorkflowRun: { label: 'Resume Custom Workflow Run' },
+  cancelWorkflowRun: { label: 'Cancel Custom Workflow Run' },
   createProject: { label: 'Create Project' },
   updateProject: { label: 'Update Project' },
   deleteProject: { label: 'Delete Project' },
@@ -135,6 +166,12 @@ export const MUTATING_TOOL_CONFIGS: Record<string, { label: string }> = {
   rerunCiRun: { label: 'Rerun CI Run' },
   generateCiWorkflowChange: { label: 'Generate CI Workflow Change' },
   openCiWorkflowPullRequest: { label: 'Open CI Workflow Pull Request' },
+  updateCiProviderDefaults: { label: 'Update CI Provider Defaults' },
+  createCiTestSubset: { label: 'Create CI Test Subset' },
+  updateCiTestSubset: { label: 'Update CI Test Subset' },
+  deleteCiTestSubset: { label: 'Delete CI Test Subset' },
+  openCiTestSubsetPullRequest: { label: 'Open CI Test Subset Pull Request' },
+  dispatchCiTestSubset: { label: 'Dispatch CI Test Subset' },
   analyzePullRequestTests: { label: 'Analyze Pull Request Tests' },
   runPrAdvisorRecommendedTests: { label: 'Run PR Advisor Recommended Tests' },
   startPrQualityGate: { label: 'Start PR Quality Gate' },
@@ -2027,12 +2064,134 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
 
     // ===== CI/CD and PR Advisor Tools =====
 
+    getCiControlOverview: tool({
+      description: 'Get a chat-native CI/CD overview: provider readiness, workflows, synced runs, audit activity, PR analyses, and quality gates.',
+      inputSchema: z.object({
+        provider: z.enum(['all', 'github', 'gitlab']).optional().default('all'),
+        includeAudit: z.boolean().optional().default(true),
+        limit: z.number().optional().default(20),
+      }),
+      execute: async ({ provider, includeAudit, limit }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        const encoded = encodeURIComponent(pid);
+        const selected = provider || 'all';
+        const runProvider = selected === 'all' ? 'all' : selected;
+        const max = Math.max(1, Math.min(Number(limit ?? 20), 50));
+        const providers = await fetchTool(`/projects/${encoded}/ci/providers`) as Record<string, unknown>[] | Record<string, unknown>;
+        const providerList = Array.isArray(providers) ? providers : [];
+        const shouldFetchGithub = selected !== 'gitlab' && providerList.some((item) => item.provider === 'github' && item.configured && item.setup_status !== 'needs_repository');
+        const shouldFetchGitlab = selected !== 'github' && providerList.some((item) => item.provider === 'gitlab' && item.configured && item.setup_status !== 'needs_project');
+        const [githubWorkflows, gitlabWorkflows, runs, auditEvents, prAnalyses, qualityGates, openPullRequests] = await Promise.all([
+          shouldFetchGithub ? fetchTool(`/projects/${encoded}/ci/workflows?provider=github`) : Promise.resolve([]),
+          shouldFetchGitlab ? fetchTool(`/projects/${encoded}/ci/workflows?provider=gitlab`) : Promise.resolve([]),
+          fetchTool(`/projects/${encoded}/ci/runs?provider=${runProvider}`),
+          includeAudit ? fetchTool(`/projects/${encoded}/ci/audit-events?limit=${max}`) : Promise.resolve([]),
+          selected !== 'gitlab' ? fetchTool(`/github/${encoded}/pr-advisor/analyses?limit=${max}`) : Promise.resolve([]),
+          selected !== 'gitlab' ? fetchTool(`/github/${encoded}/quality-gates/pr?limit=${max}`) : Promise.resolve([]),
+          shouldFetchGithub ? fetchTool(`/github/${encoded}/pull-requests?state=open&limit=${max}`) : Promise.resolve([]),
+        ]);
+        const workflows = [
+          ...(Array.isArray(githubWorkflows) ? githubWorkflows : []),
+          ...(Array.isArray(gitlabWorkflows) ? gitlabWorkflows : []),
+        ];
+        const runList = Array.isArray(runs) ? runs : [];
+        const activeRuns = runList.filter((run) => ['pending', 'running', 'queued', 'waiting', 'in_progress'].includes(String((run as Record<string, unknown>).status || '').toLowerCase()));
+        const failedRuns = runList.filter((run) => ['failed', 'failure'].includes(String((run as Record<string, unknown>).status || '').toLowerCase()));
+        return {
+          status: failedRuns.length > 0 ? 'attention' : activeRuns.length > 0 ? 'running' : 'ready',
+          provider: selected,
+          providers: providerList,
+          workflows,
+          runs: runList,
+          audit_events: Array.isArray(auditEvents) ? auditEvents : [],
+          pr_analyses: Array.isArray(prAnalyses) ? prAnalyses : [],
+          quality_gates: Array.isArray(qualityGates) ? qualityGates : [],
+          open_pull_requests: Array.isArray(openPullRequests) ? openPullRequests : [],
+          summary: {
+            providers: providerList.length,
+            workflows: workflows.length,
+            runs: runList.length,
+            active_runs: activeRuns.length,
+            failed_runs: failedRuns.length,
+            open_pull_requests: Array.isArray(openPullRequests) ? openPullRequests.length : 0,
+          },
+        } as ToolResult;
+      },
+    }),
+
+    listOpenPullRequests: tool({
+      description: 'List pull requests from the configured GitHub repository for the current project. Use this before PR Advisor when the user has not provided a PR number.',
+      inputSchema: z.object({
+        state: z.enum(['open', 'closed', 'all']).optional().default('open'),
+        limit: z.number().optional().default(30),
+      }),
+      execute: async ({ state, limit }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        const params = new URLSearchParams({
+          state: state || 'open',
+          limit: String(Math.max(1, Math.min(Number(limit ?? 30), 100))),
+        });
+        return fetchTool(`/github/${encodeURIComponent(pid)}/pull-requests?${params}`);
+      },
+    }),
+
     listCiProviders: tool({
       description: 'List configured CI providers and their capabilities for the current project.',
       inputSchema: z.object({}),
       execute: async (): Promise<ToolResult> => {
         const pid = projectId || 'default';
         return fetchTool(`/projects/${encodeURIComponent(pid)}/ci/providers`);
+      },
+    }),
+
+    listGeneratedCiTests: tool({
+      description: 'List generated Playwright tests that can be selected into a chat-controlled GitHub Actions subset.',
+      inputSchema: z.object({
+        search: z.string().optional(),
+        limit: z.number().optional().default(100),
+        offset: z.number().optional().default(0),
+      }),
+      execute: async ({ search, limit, offset }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        const params = new URLSearchParams({
+          limit: String(Math.max(1, Math.min(Number(limit ?? 100), 500))),
+          offset: String(Math.max(0, Number(offset ?? 0))),
+        });
+        if (search) params.set('search', search);
+        return fetchTool(`/projects/${encodeURIComponent(pid)}/ci/generated-tests?${params}`);
+      },
+    }),
+
+    listCiTestSubsets: tool({
+      description: 'List saved chat-controlled CI test subsets for generated Playwright tests.',
+      inputSchema: z.object({
+        includeItems: z.boolean().optional().default(true),
+      }),
+      execute: async ({ includeItems }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/projects/${encodeURIComponent(pid)}/ci/test-subsets?include_items=${includeItems ?? true}`);
+      },
+    }),
+
+    getCiTestSubset: tool({
+      description: 'Get one saved CI test subset with selected generated test items.',
+      inputSchema: z.object({
+        subsetId: z.string(),
+      }),
+      execute: async ({ subsetId }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/projects/${encodeURIComponent(pid)}/ci/test-subsets/${encodeURIComponent(subsetId)}`);
+      },
+    }),
+
+    previewCiTestSubset: tool({
+      description: 'Preview files Quorvex will commit for a saved CI test subset.',
+      inputSchema: z.object({
+        subsetId: z.string(),
+      }),
+      execute: async ({ subsetId }): Promise<ToolResult> => {
+        const pid = projectId || 'default';
+        return fetchTool(`/projects/${encodeURIComponent(pid)}/ci/test-subsets/${encodeURIComponent(subsetId)}/preview`, 'POST');
       },
     }),
 
@@ -2180,6 +2339,12 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         workflowId: z.string().optional().describe('GitHub workflow ID/path/name; optional for GitLab'),
         ref: z.string().optional().describe('Branch/ref'),
         inputs: z.record(z.string()).optional().describe('Workflow inputs or GitLab variables'),
+        suite: z.enum(RUNNER_SUBSET_SUITES).optional().describe('Runner subset workflow input: test suite to run. Use with runner-subset-tests/quorvex-subset-tests.yml.'),
+        browser: z.enum(RUNNER_SUBSET_BROWSERS).optional().describe('Runner subset workflow input: Playwright browser for generated/E2E suites.'),
+        pytestMarker: z.enum(RUNNER_SUBSET_MARKERS).optional().describe('Runner subset workflow input: pytest marker expression for Python suites.'),
+        testPath: z.string().optional().describe('Runner subset workflow input: specific pytest path or Playwright test path.'),
+        playwrightGrep: z.string().optional().describe('Runner subset workflow input: grep expression for Playwright suites.'),
+        baseUrl: z.string().optional().describe('Runner subset workflow input: app base URL override for Playwright suites.'),
       }),
     }),
 
@@ -2204,11 +2369,14 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       description: 'Generate a GitHub Actions workflow change request for Quorvex testing. Requires approval.',
       inputSchema: z.object({
         workflowName: z.string().optional().default('Quorvex Test Automation'),
-        template: z.enum(['pr-quality-gate', 'playwright-smoke', 'nightly-regression', 'release-gate']).optional().default('pr-quality-gate'),
+        template: z.enum(['pr-quality-gate', 'playwright-smoke', 'nightly-regression', 'release-gate', 'runner-subset-tests']).optional().default('pr-quality-gate'),
+        qualityGateMode: z.enum(['backend-async', 'backend-blocking']).optional().default('backend-async').describe('For PR quality gates: backend-async starts Quorvex and returns; backend-blocking waits in GitHub Actions until Quorvex passes or fails.'),
         prompt: z.string().optional(),
         ref: z.string().optional(),
         branches: z.array(z.string()).optional(),
         browsers: z.array(z.string()).optional(),
+        artifactRetentionDays: z.number().optional().default(14),
+        waitTimeoutMinutes: z.number().optional().default(120),
       }),
     }),
 
@@ -2225,6 +2393,77 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       }),
     }),
 
+    updateCiProviderDefaults: tool({
+      description: 'Update non-secret CI provider defaults such as repository/project selection, default ref, or default workflow. Requires approval. Tokens and webhook secrets must still be configured in Settings.',
+      inputSchema: z.object({
+        provider: z.enum(['github', 'gitlab']),
+        repository: z.string().optional().describe('GitHub repository in owner/repo format'),
+        owner: z.string().optional().describe('GitHub owner/org'),
+        repo: z.string().optional().describe('GitHub repository name'),
+        gitlabProjectId: z.number().optional().describe('GitLab project ID'),
+        baseUrl: z.string().optional().describe('GitLab base URL, e.g. https://gitlab.com'),
+        defaultRef: z.string().optional().describe('Default branch or ref'),
+        defaultWorkflow: z.string().optional().describe('GitHub workflow ID/path/name to use by default'),
+      }),
+    }),
+
+    createCiTestSubset: tool({
+      description: 'Save a named subset of generated Playwright tests for GitHub Actions PR runs. Requires approval.',
+      inputSchema: z.object({
+        name: z.string(),
+        description: z.string().optional(),
+        mode: z.enum(CI_TEST_SUBSET_MODES).optional().default('both').describe('manual runs saved subset only; pr-impact asks PR Advisor; both falls back to saved subset when no PR-impact selection is available.'),
+        defaultBrowser: z.enum(RUNNER_SUBSET_BROWSERS).optional().default('chromium'),
+        baseUrlSecret: z.string().optional().default('APP_BASE_URL'),
+        items: z.array(CI_TEST_SUBSET_ITEM_SCHEMA).min(1),
+      }),
+    }),
+
+    updateCiTestSubset: tool({
+      description: 'Update a saved generated-test CI subset. Requires approval.',
+      inputSchema: z.object({
+        subsetId: z.string(),
+        name: z.string().optional(),
+        description: z.string().optional(),
+        mode: z.enum(CI_TEST_SUBSET_MODES).optional(),
+        defaultBrowser: z.enum(RUNNER_SUBSET_BROWSERS).optional(),
+        baseUrlSecret: z.string().optional(),
+        items: z.array(CI_TEST_SUBSET_ITEM_SCHEMA).optional(),
+      }),
+    }),
+
+    deleteCiTestSubset: tool({
+      description: 'Delete a saved generated-test CI subset. Requires approval.',
+      inputSchema: z.object({
+        subsetId: z.string(),
+      }),
+    }),
+
+    openCiTestSubsetPullRequest: tool({
+      description: 'Open a draft GitHub PR that commits selected generated tests, subset manifest, Playwright scaffold when missing, and the GitHub Actions workflow. Requires approval.',
+      inputSchema: z.object({
+        subsetId: z.string(),
+        baseRef: z.string().optional(),
+        branchName: z.string().optional(),
+        title: z.string().optional(),
+        body: z.string().optional(),
+        workflowName: z.string().optional(),
+        commitMessage: z.string().optional(),
+        draft: z.boolean().optional().default(true),
+      }),
+    }),
+
+    dispatchCiTestSubset: tool({
+      description: 'Dispatch the installed GitHub Actions workflow for a saved generated-test subset. Requires approval.',
+      inputSchema: z.object({
+        subsetId: z.string(),
+        workflowId: z.string().optional(),
+        ref: z.string().optional(),
+        browser: z.enum(RUNNER_SUBSET_BROWSERS).optional(),
+        baseUrl: z.string().optional(),
+      }),
+    }),
+
     analyzePullRequestTests: tool({
       description: 'Analyze a configured GitHub PR and recommend impacted Quorvex tests. Requires approval because it may index repository data.',
       inputSchema: z.object({
@@ -2235,9 +2474,10 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
     }),
 
     runPrAdvisorRecommendedTests: tool({
-      description: 'Run tests selected by a PR Advisor analysis as a regression batch. Requires approval.',
+      description: 'Run tests selected by a PR Advisor analysis as a regression batch. Optionally provide specNames to run only a subset of the selected tests. Requires approval.',
       inputSchema: z.object({
         analysisId: z.string(),
+        specNames: z.array(z.string()).optional().describe('Optional subset of selected spec names to run. Must be part of the PR Advisor selected tests.'),
         browser: z.string().optional().default('chromium'),
         hybrid: z.boolean().optional().default(false),
         maxIterations: z.number().optional().default(20),
@@ -3024,6 +3264,170 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       description: 'Generate API edge case and security tests from an API spec.',
       inputSchema: z.object({
         specPath: z.string().describe('Relative API spec path'),
+      }),
+    }),
+
+    // ===== Custom Workflow Tools =====
+
+    listWorkflows: tool({
+      description: 'List custom workflow definitions and recent workflow runs for the current project. Use for /workflow status, custom workflow inventory, or recent custom workflow activity.',
+      inputSchema: z.object({
+        status: z.string().optional().describe('Optional run status filter, e.g. running, paused, completed, failed, cancelled'),
+        limit: z.number().optional().default(20).describe('Maximum definitions/runs to return'),
+        includeCatalog: z.boolean().optional().default(false).describe('Include workflow catalog/templates in the response'),
+      }),
+      execute: async ({ status, limit, includeCatalog }): Promise<ToolResult> => {
+        const params = projectParams();
+        params.set('limit', String(limit ?? 20));
+        if (status) params.set('status', status);
+        const [overview, definitions, runs, catalog] = await Promise.all([
+          fetchTool(`/workflows?${params}`),
+          fetchTool(`/workflows/definitions?${params}`),
+          fetchTool(`/workflows/runs?${params}`),
+          includeCatalog ? fetchTool(`/workflows/catalog?${params}`) : Promise.resolve(null),
+        ]);
+        return {
+          overview,
+          definitions,
+          runs,
+          catalog: includeCatalog ? catalog : undefined,
+        } as ToolResult;
+      },
+    }),
+
+    listWorkflowCatalog: tool({
+      description: 'List available custom workflow catalog templates and capabilities.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => {
+        const params = projectParams();
+        return fetchTool(`/workflows/catalog?${params}`);
+      },
+    }),
+
+    getWorkflow: tool({
+      description: 'Get one custom workflow definition and optionally its recent runs.',
+      inputSchema: z.object({
+        workflowId: z.string().describe('Custom workflow definition ID'),
+        includeRuns: z.boolean().optional().default(true),
+      }),
+      execute: async ({ workflowId, includeRuns }): Promise<ToolResult> => {
+        const params = projectParams();
+        const [definition, runs] = await Promise.all([
+          fetchTool(`/workflows/definitions/${encodeURIComponent(workflowId)}?${params}`),
+          includeRuns ? fetchTool(`/workflows/definitions/${encodeURIComponent(workflowId)}/runs?${params}`) : Promise.resolve(null),
+        ]);
+        return { definition, runs: includeRuns ? runs : undefined } as ToolResult;
+      },
+    }),
+
+    createWorkflow: tool({
+      description: 'Create a reusable custom workflow definition. Requires approval.',
+      inputSchema: z.object({
+        name: z.string().describe('Workflow name'),
+        description: z.string().optional(),
+        definition: z.record(z.unknown()).optional().describe('Structured workflow definition/configuration'),
+        steps: z.array(z.record(z.unknown())).optional().describe('Workflow steps if the backend accepts step arrays'),
+        trigger: z.record(z.unknown()).optional().describe('Optional trigger configuration'),
+        config: z.record(z.unknown()).optional().describe('Optional execution/configuration settings'),
+        tags: z.array(z.string()).optional(),
+        isEnabled: z.boolean().optional().default(true),
+      }),
+    }),
+
+    updateWorkflow: tool({
+      description: 'Update a custom workflow definition. Requires approval.',
+      inputSchema: z.object({
+        workflowId: z.string().describe('Custom workflow definition ID'),
+        name: z.string().optional(),
+        description: z.string().optional(),
+        definition: z.record(z.unknown()).optional(),
+        steps: z.array(z.record(z.unknown())).optional(),
+        trigger: z.record(z.unknown()).optional(),
+        config: z.record(z.unknown()).optional(),
+        tags: z.array(z.string()).optional(),
+        isEnabled: z.boolean().optional(),
+      }),
+    }),
+
+    duplicateWorkflow: tool({
+      description: 'Duplicate a custom workflow definition. Requires approval.',
+      inputSchema: z.object({
+        workflowId: z.string().describe('Custom workflow definition ID to duplicate'),
+      }),
+    }),
+
+    archiveWorkflow: tool({
+      description: 'Archive a custom workflow definition for the current project. Requires approval.',
+      inputSchema: z.object({
+        workflowId: z.string().describe('Custom workflow definition ID to archive'),
+      }),
+    }),
+
+    startWorkflow: tool({
+      description: 'Start a custom workflow run from a saved workflow definition. Requires approval.',
+      inputSchema: z.object({
+        workflowId: z.string().describe('Custom workflow definition ID'),
+        inputs: z.record(z.unknown()).optional().describe('Workflow input values'),
+        parameters: z.record(z.unknown()).optional().describe('Optional run parameters'),
+        context: z.record(z.unknown()).optional().describe('Optional execution context'),
+        startStepKey: z.string().optional().describe('Optional workflow step key to start from'),
+        idempotencyKey: z.string().optional().describe('Optional client idempotency key'),
+      }),
+    }),
+
+    startWorkflowFromStep: tool({
+      description: 'Start a custom workflow run from a specific step key. Requires approval.',
+      inputSchema: z.object({
+        workflowId: z.string().describe('Custom workflow definition ID'),
+        startStepKey: z.string().describe('Workflow step key to start from'),
+        inputs: z.record(z.unknown()).optional().describe('Workflow input values'),
+        parameters: z.record(z.unknown()).optional().describe('Optional run parameters'),
+      }),
+    }),
+
+    getWorkflowStatus: tool({
+      description: 'Get status for a custom workflow run, including its step list.',
+      inputSchema: z.object({
+        runId: z.string().describe('Custom workflow run ID'),
+        includeSteps: z.boolean().optional().default(true),
+      }),
+      execute: async ({ runId, includeSteps }): Promise<ToolResult> => {
+        const params = projectParams();
+        const [run, steps] = await Promise.all([
+          fetchTool(`/workflows/runs/${encodeURIComponent(runId)}?${params}`),
+          includeSteps ? fetchTool(`/workflows/runs/${encodeURIComponent(runId)}/steps?${params}`) : Promise.resolve(null),
+        ]);
+        return { run, steps: includeSteps ? steps : undefined } as ToolResult;
+      },
+    }),
+
+    retryWorkflowFailedStep: tool({
+      description: 'Retry a failed step within a custom workflow run. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string().describe('Custom workflow run ID'),
+        stepId: z.string().describe('Failed workflow run step ID to retry'),
+      }),
+    }),
+
+    pauseWorkflowRun: tool({
+      description: 'Pause a running custom workflow run. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string().describe('Custom workflow run ID to pause'),
+      }),
+    }),
+
+    resumeWorkflowRun: tool({
+      description: 'Resume a paused custom workflow run. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string().describe('Custom workflow run ID to resume'),
+      }),
+    }),
+
+    cancelWorkflowRun: tool({
+      description: 'Cancel a running or queued custom workflow run. Requires approval.',
+      inputSchema: z.object({
+        runId: z.string().describe('Custom workflow run ID to cancel'),
+        reason: z.string().optional().describe('Optional cancellation reason'),
       }),
     }),
 

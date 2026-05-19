@@ -42,6 +42,7 @@ class AgentTaskStatus(str, Enum):
 
     QUEUED = "queued"
     RUNNING = "running"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     TIMEOUT = "timeout"
@@ -154,6 +155,7 @@ class AgentQueue:
     CHANNEL_KEY = "playwright:agents:notifications"
     HEARTBEAT_PREFIX = "playwright:agents:heartbeat:"
     CANCEL_PREFIX = "playwright:agents:cancel:"
+    PAUSE_PREFIX = "playwright:agents:pause:"
     WORKER_HEARTBEAT_PREFIX = "playwright:agents:worker_alive:"
     WORKER_HEARTBEAT_TTL_SECONDS = 30
 
@@ -411,21 +413,37 @@ class AgentQueue:
         """
         redis = await self._ensure_connected()
         start_time = datetime.utcnow()
+        paused_started_at: datetime | None = None
+        paused_total_seconds = 0.0
         stale_heartbeat_checks = 0
         queued_warning_logged = False
         last_progress_log = 0.0  # timestamp of last progress log
         last_progress_payload: dict[str, Any] | None = None
 
-        while (datetime.utcnow() - start_time).total_seconds() < timeout:
+        while True:
+            now = datetime.utcnow()
+            active_elapsed = (now - start_time).total_seconds() - paused_total_seconds
+            if paused_started_at is not None:
+                active_elapsed -= (now - paused_started_at).total_seconds()
+            if active_elapsed >= timeout:
+                break
+
             task = await self.get_task(task_id)
             if task:
+                if task.status == AgentTaskStatus.PAUSED:
+                    if paused_started_at is None:
+                        paused_started_at = now
+                elif paused_started_at is not None:
+                    paused_total_seconds += (now - paused_started_at).total_seconds()
+                    paused_started_at = None
+
                 if task.status == AgentTaskStatus.COMPLETED:
                     return task.result
                 elif task.status in (AgentTaskStatus.FAILED, AgentTaskStatus.TIMEOUT, AgentTaskStatus.CANCELLED):
                     error_msg = task.error or f"Task {task.status.value}"
                     raise RuntimeError(error_msg)
 
-                elapsed = (datetime.utcnow() - start_time).total_seconds()
+                elapsed = max(0.0, active_elapsed)
 
                 # --- QUEUED state monitoring ---
                 if task.status == AgentTaskStatus.QUEUED:
@@ -459,7 +477,7 @@ class AgentQueue:
                             )
 
                 # --- RUNNING state monitoring ---
-                if task.status == AgentTaskStatus.RUNNING:
+                if task.status in (AgentTaskStatus.RUNNING, AgentTaskStatus.PAUSED):
                     progress = await self.get_task_progress(task_id)
                     if progress and progress != last_progress_payload:
                         last_progress_payload = progress
@@ -483,7 +501,9 @@ class AgentQueue:
                             )
                         last_progress_log = elapsed
 
-                    # Check heartbeat (after initial grace period)
+                    # Check heartbeat (after initial grace period). A paused
+                    # task still has an alive worker heartbeat even though the
+                    # child process is SIGSTOPed.
                     if elapsed > 60:
                         is_alive = await self.check_heartbeat(task_id)
                         if not is_alive:
@@ -520,6 +540,59 @@ class AgentQueue:
         await self.cancel_task(task_id)
         raise asyncio.TimeoutError(f"Agent task timed out after {timeout}s")
 
+    async def pause_task(self, task_id: str) -> bool:
+        """Pause a queued or running task.
+
+        Queued tasks are removed from the FIFO and can be requeued on resume.
+        Running tasks remain in the running set so the owning worker keeps
+        responsibility for resuming or cancelling the child process.
+        """
+        redis = await self._ensure_connected()
+        task = await self.get_task(task_id)
+        if not task or task.status not in (AgentTaskStatus.QUEUED, AgentTaskStatus.RUNNING):
+            return False
+
+        if task.status == AgentTaskStatus.QUEUED:
+            await redis.lrem(self.QUEUE_KEY, 0, task_id)
+        task.status = AgentTaskStatus.PAUSED
+        task.telemetry = {
+            **(task.telemetry or {}),
+            "pause_requested_at": datetime.utcnow().isoformat(),
+            "paused_from": task.worker_id and "running" or "queued",
+        }
+
+        async with redis.pipeline(transaction=True) as pipe:
+            pipe.hset(self.TASKS_KEY, task_id, json.dumps(task.to_dict()))
+            pipe.set(f"{self.PAUSE_PREFIX}{task_id}", "1", ex=max(task.timeout_seconds + 86400, 86400))
+            await pipe.execute()
+
+        logger.info(f"Paused agent task {task_id}")
+        return True
+
+    async def resume_task(self, task_id: str) -> bool:
+        """Resume a paused task."""
+        redis = await self._ensure_connected()
+        task = await self.get_task(task_id)
+        if not task or task.status != AgentTaskStatus.PAUSED:
+            return False
+
+        was_running = bool(task.worker_id and task.started_at and await redis.sismember(self.RUNNING_KEY, task_id))
+        task.status = AgentTaskStatus.RUNNING if was_running else AgentTaskStatus.QUEUED
+        task.telemetry = {
+            **(task.telemetry or {}),
+            "resume_requested_at": datetime.utcnow().isoformat(),
+        }
+
+        async with redis.pipeline(transaction=True) as pipe:
+            pipe.hset(self.TASKS_KEY, task_id, json.dumps(task.to_dict()))
+            pipe.delete(f"{self.PAUSE_PREFIX}{task_id}")
+            if not was_running:
+                pipe.rpush(self.QUEUE_KEY, task_id)
+            await pipe.execute()
+
+        logger.info(f"Resumed agent task {task_id} as {task.status.value}")
+        return True
+
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a queued or running task."""
         redis = await self._ensure_connected()
@@ -528,7 +601,7 @@ class AgentQueue:
         await redis.lrem(self.QUEUE_KEY, 0, task_id)
 
         task = await self.get_task(task_id)
-        if task and task.status in (AgentTaskStatus.QUEUED, AgentTaskStatus.RUNNING):
+        if task and task.status in (AgentTaskStatus.QUEUED, AgentTaskStatus.RUNNING, AgentTaskStatus.PAUSED):
             task.status = AgentTaskStatus.CANCELLED
             task.completed_at = datetime.utcnow()
             task.error = "Task cancelled"
@@ -536,6 +609,7 @@ class AgentQueue:
             await redis.srem(self.RUNNING_KEY, task_id)
             # Set cancel flag for worker to detect
             await redis.set(f"{self.CANCEL_PREFIX}{task_id}", "1", ex=3600)
+            await redis.delete(f"{self.PAUSE_PREFIX}{task_id}")
             logger.info(f"Cancelled agent task {task_id}")
             return True
         return False
@@ -544,6 +618,11 @@ class AgentQueue:
         """Check if a task has been cancelled."""
         redis = await self._ensure_connected()
         return await redis.exists(f"{self.CANCEL_PREFIX}{task_id}") > 0
+
+    async def is_paused(self, task_id: str) -> bool:
+        """Check if a task has been paused."""
+        redis = await self._ensure_connected()
+        return await redis.exists(f"{self.PAUSE_PREFIX}{task_id}") > 0
 
     # ==========================================
     # Consumer Methods (Agent Worker)
@@ -572,6 +651,12 @@ class AgentQueue:
                 task_data = await redis.hget(self.TASKS_KEY, task_id)
                 if task_data:
                     task = AgentTask.from_dict(json.loads(task_data))
+                    if task.status == AgentTaskStatus.PAUSED:
+                        logger.info(f"Worker {self._worker_id} skipped paused task {task_id}")
+                        return None
+                    if task.status != AgentTaskStatus.QUEUED:
+                        logger.info(f"Worker {self._worker_id} skipped task {task_id} in status {task.status.value}")
+                        return None
                     task.status = AgentTaskStatus.RUNNING
                     task.worker_id = self._worker_id
                     task.started_at = datetime.utcnow()
@@ -627,6 +712,16 @@ class AgentQueue:
                 )
                 await redis.srem(self.RUNNING_KEY, task_id)
                 return
+            if task.status == AgentTaskStatus.PAUSED:
+                logger.info(
+                    f"Task {task_id} is paused, deferring {'completed' if success else 'failed'} result"
+                )
+                while await self.is_paused(task_id):
+                    await asyncio.sleep(0.5)
+                task = await self.get_task(task_id)
+                if not task or task.status == AgentTaskStatus.CANCELLED:
+                    await redis.srem(self.RUNNING_KEY, task_id)
+                    return
 
             task.status = AgentTaskStatus.COMPLETED if success else AgentTaskStatus.FAILED
             task.completed_at = datetime.utcnow()

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
+import type { CSSProperties, Dispatch, SetStateAction } from 'react';
 import {
   ThreadPrimitive,
   ComposerPrimitive,
@@ -1052,6 +1053,525 @@ const AutoPilotStatusToolUI = makeAssistantToolUI({
   },
 });
 
+function ciArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.filter((item) => item && typeof item === 'object') as Array<Record<string, unknown>> : [];
+}
+
+function ciStatusLabel(value: unknown) {
+  return compactLabel(String(value || 'unknown'));
+}
+
+function ciProviderName(value: unknown) {
+  const provider = String(value || '').toLowerCase();
+  return provider === 'gitlab' ? 'GitLab' : provider === 'github' ? 'GitHub' : compactLabel(provider || 'provider');
+}
+
+function CiStatusBadge({ status }: { status: unknown }) {
+  const value = String(status || 'unknown');
+  return (
+    <span style={{
+      display: 'inline-flex',
+      alignItems: 'center',
+      padding: '0.15rem 0.45rem',
+      borderRadius: '999px',
+      fontSize: '0.68rem',
+      fontWeight: 600,
+      background: `color-mix(in srgb, ${statusColor(value)} 14%, transparent)`,
+      color: statusColor(value),
+      whiteSpace: 'nowrap',
+    }}>
+      {ciStatusLabel(value)}
+    </span>
+  );
+}
+
+function CiMetric({ label, value, tone }: { label: string; value: unknown; tone?: string }) {
+  return (
+    <div style={{ padding: '0.55rem', background: 'var(--code-bg)', borderRadius: '6px', minWidth: 0 }}>
+      <div style={{ fontSize: '0.68rem', color: 'var(--text-secondary)', marginBottom: '0.15rem' }}>{label}</div>
+      <div style={{
+        fontSize: '0.9rem',
+        fontWeight: 700,
+        color: tone || 'var(--text)',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }} title={String(value ?? '-')}>
+        {String(value ?? '-')}
+      </div>
+    </div>
+  );
+}
+
+function CiProvidersPanel({ providers }: { providers: Array<Record<string, unknown>> }) {
+  if (providers.length === 0) {
+    return <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>No CI providers are configured yet.</div>;
+  }
+  return (
+    <div style={{ display: 'grid', gap: '0.5rem' }}>
+      {providers.map((provider) => {
+        const missing = Array.isArray(provider.missing_requirements) ? provider.missing_requirements as string[] : [];
+        const next = asRecord(provider.recommended_next_action);
+        const setupStatus = String(provider.setup_status || (provider.configured ? 'ready' : 'not_configured'));
+        return (
+          <div key={String(provider.provider)} style={{
+            padding: '0.65rem',
+            background: 'var(--code-bg)',
+            border: '1px solid var(--border)',
+            borderRadius: '6px',
+          }}>
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.35rem' }}>
+              <strong style={{ fontSize: '0.85rem' }}>{ciProviderName(provider.provider)}</strong>
+              <CiStatusBadge status={setupStatus} />
+              <span style={{ marginLeft: 'auto', fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
+                {String(provider.repository || provider.base_url || '')}
+              </span>
+            </div>
+            {missing.length > 0 && (
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+                Missing: {missing.map((item) => compactLabel(item)).join(', ')}
+              </div>
+            )}
+            {Boolean(next.label) && (
+              <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: 'var(--primary)' }}>
+                Next: {String(next.label)}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CiRunsPanel({ runs }: { runs: Array<Record<string, unknown>> }) {
+  if (runs.length === 0) {
+    return <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>No synced CI runs found.</div>;
+  }
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', fontSize: '0.78rem' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <thead>
+          <tr style={{ background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
+            <th style={{ padding: '0.5rem', textAlign: 'left' }}>Run</th>
+            <th style={{ padding: '0.5rem', textAlign: 'left' }}>Provider</th>
+            <th style={{ padding: '0.5rem', textAlign: 'left' }}>Status</th>
+            <th style={{ padding: '0.5rem', textAlign: 'left' }}>Tests</th>
+          </tr>
+        </thead>
+        <tbody>
+          {runs.slice(0, 8).map((run, index) => {
+            const passed = run.passed_tests ?? run.passed;
+            const failed = run.failed_tests ?? run.failed;
+            return (
+              <tr key={`${run.provider}-${run.id || run.external_pipeline_id || index}`} style={{ borderBottom: index < Math.min(runs.length, 8) - 1 ? '1px solid var(--border)' : 'none' }}>
+                <td style={{ padding: '0.5rem', minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {String(run.name || run.external_pipeline_id || run.id || 'Run')}
+                  </div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.7rem' }}>{String(run.ref || '-')}</div>
+                </td>
+                <td style={{ padding: '0.5rem' }}>{ciProviderName(run.provider)}</td>
+                <td style={{ padding: '0.5rem' }}><CiStatusBadge status={run.status} /></td>
+                <td style={{ padding: '0.5rem', color: 'var(--text-secondary)' }}>
+                  {String(passed ?? '-')} / {String(failed ?? '-')}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CiWorkflowsPanel({ workflows }: { workflows: Array<Record<string, unknown>> }) {
+  if (workflows.length === 0) {
+    return <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>No workflows found for the configured provider.</div>;
+  }
+  return (
+    <div style={{ display: 'grid', gap: '0.45rem' }}>
+      {workflows.slice(0, 8).map((workflow, index) => (
+        <div key={`${workflow.provider}-${workflow.id || workflow.path || index}`} style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr auto',
+          gap: '0.5rem',
+          padding: '0.6rem',
+          background: 'var(--code-bg)',
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+        }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {String(workflow.name || workflow.id || 'Workflow')}
+            </div>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.7rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {String(workflow.path || workflow.id || '')}
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>{ciProviderName(workflow.provider)}</span>
+            <CiStatusBadge status={workflow.state || 'active'} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CiOverviewCard({ result, title = 'CI/CD Control' }: { result: unknown; title?: string }) {
+  const data = asRecord(result);
+  if (data.error) return <ToolError message={String(data.error)} />;
+  const providers = ciArray(data.providers);
+  const workflows = ciArray(data.workflows);
+  const runs = ciArray(data.runs);
+  const gates = ciArray(data.quality_gates);
+  const openPullRequests = ciArray(data.open_pull_requests);
+  const summary = asRecord(data.summary);
+  return (
+    <div style={{
+      padding: '0.75rem',
+      background: 'var(--surface)',
+      border: '1px solid var(--border)',
+      borderRadius: '8px',
+      marginTop: '0.5rem',
+      fontSize: '0.85rem',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.65rem' }}>
+        <strong>{title}</strong>
+        <CiStatusBadge status={data.status || 'ready'} />
+        <Link href="/ci-cd" style={{ marginLeft: 'auto', color: 'var(--primary)', fontSize: '0.75rem' }}>
+          Open CI/CD &rarr;
+        </Link>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(95px, 1fr))', gap: '0.5rem', marginBottom: '0.75rem' }}>
+        <CiMetric label="Providers" value={summary.providers ?? providers.length} />
+        <CiMetric label="Workflows" value={summary.workflows ?? workflows.length} />
+        <CiMetric label="Runs" value={summary.runs ?? runs.length} />
+        <CiMetric label="Active" value={summary.active_runs ?? 0} tone="var(--warning)" />
+        <CiMetric label="Failed" value={summary.failed_runs ?? 0} tone={Number(summary.failed_runs ?? 0) > 0 ? 'var(--danger)' : 'var(--text)'} />
+        <CiMetric label="Open PRs" value={summary.open_pull_requests ?? openPullRequests.length} />
+        <CiMetric label="Quality Gates" value={gates.length} />
+      </div>
+      <div style={{ display: 'grid', gap: '0.75rem' }}>
+        <section>
+          <div style={{ fontWeight: 600, fontSize: '0.78rem', marginBottom: '0.4rem' }}>Providers</div>
+          <CiProvidersPanel providers={providers} />
+        </section>
+        {workflows.length > 0 && (
+          <section>
+            <div style={{ fontWeight: 600, fontSize: '0.78rem', marginBottom: '0.4rem' }}>Workflows</div>
+            <CiWorkflowsPanel workflows={workflows} />
+          </section>
+        )}
+        {runs.length > 0 && (
+          <section>
+            <div style={{ fontWeight: 600, fontSize: '0.78rem', marginBottom: '0.4rem' }}>Recent Runs</div>
+            <CiRunsPanel runs={runs} />
+          </section>
+        )}
+        {openPullRequests.length > 0 && (
+          <section>
+            <div style={{ fontWeight: 600, fontSize: '0.78rem', marginBottom: '0.4rem' }}>Open Pull Requests</div>
+            <PrListPanel pulls={openPullRequests} />
+          </section>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const CiOverviewToolUI = makeAssistantToolUI({
+  toolName: 'getCiControlOverview',
+  render: ({ result }) => {
+    if (!result) return <ToolLoading name="Loading CI/CD overview..." />;
+    return <CiOverviewCard result={result} />;
+  },
+});
+
+const CiProvidersToolUI = makeAssistantToolUI({
+  toolName: 'listCiProviders',
+  render: ({ result }) => {
+    if (!result) return <ToolLoading name="Loading CI providers..." />;
+    const providers = ciArray(result);
+    if (asRecord(result).error) return <ToolError message={String(asRecord(result).error)} />;
+    return (
+      <div style={{ padding: '0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', marginTop: '0.5rem' }}>
+        <div style={{ fontWeight: 600, fontSize: '0.85rem', marginBottom: '0.5rem' }}>CI Providers</div>
+        <CiProvidersPanel providers={providers} />
+      </div>
+    );
+  },
+});
+
+const CiWorkflowsToolUI = makeAssistantToolUI({
+  toolName: 'listCiWorkflows',
+  render: ({ result }) => {
+    if (!result) return <ToolLoading name="Loading CI workflows..." />;
+    if (asRecord(result).error) return <ToolError message={String(asRecord(result).error)} />;
+    return (
+      <div style={{ padding: '0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', marginTop: '0.5rem' }}>
+        <div style={{ fontWeight: 600, fontSize: '0.85rem', marginBottom: '0.5rem' }}>CI Workflows</div>
+        <CiWorkflowsPanel workflows={ciArray(result)} />
+      </div>
+    );
+  },
+});
+
+const CiRunsToolUI = makeAssistantToolUI({
+  toolName: 'listCiRuns',
+  render: ({ result }) => {
+    if (!result) return <ToolLoading name="Loading CI runs..." />;
+    if (asRecord(result).error) return <ToolError message={String(asRecord(result).error)} />;
+    return (
+      <div style={{ padding: '0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', marginTop: '0.5rem' }}>
+        <div style={{ fontWeight: 600, fontSize: '0.85rem', marginBottom: '0.5rem' }}>CI Runs</div>
+        <CiRunsPanel runs={ciArray(result)} />
+      </div>
+    );
+  },
+});
+
+const CiRunDetailToolUI = makeAssistantToolUI({
+  toolName: 'getCiRunDetail',
+  render: ({ result }) => {
+    if (!result) return <ToolLoading name="Loading CI run detail..." />;
+    const data = asRecord(result);
+    if (data.error) return <ToolError message={String(data.error)} />;
+    const run = asRecord(data.run);
+    const jobs = ciArray(data.jobs);
+    const artifacts = ciArray(data.artifacts);
+    return (
+      <div style={{ padding: '0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', marginTop: '0.5rem', fontSize: '0.85rem' }}>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.65rem' }}>
+          <strong>{String(run.name || run.external_pipeline_id || run.id || 'CI run')}</strong>
+          <CiStatusBadge status={run.status} />
+          {Boolean(run.external_url) && <a href={String(run.external_url)} target="_blank" rel="noreferrer" style={{ marginLeft: 'auto', color: 'var(--primary)', fontSize: '0.75rem' }}>Provider &rarr;</a>}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(105px, 1fr))', gap: '0.5rem', marginBottom: '0.75rem' }}>
+          <CiMetric label="Provider" value={ciProviderName(run.provider)} />
+          <CiMetric label="Ref" value={run.ref || '-'} />
+          <CiMetric label="Passed" value={run.passed_tests ?? '-'} tone="var(--success)" />
+          <CiMetric label="Failed" value={run.failed_tests ?? '-'} tone={Number(run.failed_tests ?? 0) > 0 ? 'var(--danger)' : 'var(--text)'} />
+          <CiMetric label="Jobs" value={jobs.length} />
+          <CiMetric label="Artifacts" value={artifacts.length} />
+        </div>
+        {jobs.length > 0 && <CiRunsPanel runs={jobs.map((job) => ({ ...job, provider: run.provider, ref: job.stage || job.name }))} />}
+      </div>
+    );
+  },
+});
+
+const CiRunLogsToolUI = makeAssistantToolUI({
+  toolName: 'getCiRunLogs',
+  render: ({ result }) => {
+    if (!result) return <ToolLoading name="Loading CI logs..." />;
+    const data = asRecord(result);
+    if (data.error) return <ToolError message={String(data.error)} />;
+    if (data.type === 'archive_url' && data.url) {
+      return (
+        <div style={{ padding: '0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', marginTop: '0.5rem', fontSize: '0.85rem' }}>
+          <strong>CI Logs</strong>
+          <div style={{ marginTop: '0.35rem', color: 'var(--text-secondary)' }}>GitHub returned a downloadable log archive.</div>
+          <a href={String(data.url)} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', marginTop: '0.5rem', color: 'var(--primary)', fontSize: '0.8rem' }}>Open log archive &rarr;</a>
+        </div>
+      );
+    }
+    const content = String(data.content || '');
+    return (
+      <div style={{ marginTop: '0.5rem', border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden' }}>
+        <div style={{ padding: '0.5rem 0.75rem', background: 'var(--surface)', borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: '0.8rem' }}>CI Logs</div>
+        <pre style={{ margin: 0, padding: '0.75rem', maxHeight: '280px', overflow: 'auto', background: 'var(--code-bg)', color: 'var(--text)', fontSize: '0.75rem', whiteSpace: 'pre-wrap' }}>
+          {content || 'No log content returned.'}
+        </pre>
+      </div>
+    );
+  },
+});
+
+const CiWorkflowChangeToolUI = makeAssistantToolUI({
+  toolName: 'generateCiWorkflowChange',
+  render: ({ result }) => {
+    if (!result) return <ToolLoading name="Generating workflow change..." />;
+    const data = asRecord(result);
+    if (data.error) return <ToolError message={String(data.error)} />;
+    const errors = Array.isArray(data.validation_errors) ? data.validation_errors as unknown[] : [];
+    const warnings = Array.isArray(data.validation_warnings) ? data.validation_warnings as unknown[] : [];
+    return (
+      <div style={{ padding: '0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', marginTop: '0.5rem', fontSize: '0.85rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+          <strong>{String(data.workflow_name || 'Generated workflow')}</strong>
+          <CiStatusBadge status={errors.length ? 'blocked' : data.status || 'draft'} />
+        </div>
+        <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginBottom: '0.5rem' }}>
+          {String(data.workflow_path || '')}
+        </div>
+        {errors.length > 0 && <ToolError message={`Validation errors: ${errors.map(String).join('; ')}`} />}
+        {warnings.length > 0 && (
+          <div style={{ padding: '0.55rem', background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.22)', borderRadius: '6px', color: 'var(--text-secondary)', fontSize: '0.78rem', marginBottom: '0.5rem' }}>
+            Warnings: {warnings.map(String).join('; ')}
+          </div>
+        )}
+        {Boolean(data.pull_request_url) && <a href={String(data.pull_request_url)} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.78rem' }}>Open pull request &rarr;</a>}
+        {Boolean(data.generated_yaml) && (
+          <details style={{ marginTop: '0.5rem' }}>
+            <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)', fontSize: '0.78rem' }}>Preview workflow YAML</summary>
+            <pre style={{ marginTop: '0.45rem', padding: '0.65rem', maxHeight: '260px', overflow: 'auto', background: 'var(--code-bg)', borderRadius: '6px', fontSize: '0.72rem', whiteSpace: 'pre-wrap' }}>
+              {String(data.generated_yaml)}
+            </pre>
+          </details>
+        )}
+      </div>
+    );
+  },
+});
+
+function PrListPanel({ pulls }: { pulls: Array<Record<string, unknown>> }) {
+  if (pulls.length === 0) {
+    return <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>No pull requests found.</div>;
+  }
+  return (
+    <div style={{ display: 'grid', gap: '0.5rem' }}>
+      {pulls.slice(0, 10).map((pr) => (
+        <div key={String(pr.number)} style={{
+          padding: '0.65rem',
+          background: 'var(--code-bg)',
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+          fontSize: '0.8rem',
+        }}>
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', marginBottom: '0.25rem' }}>
+            <strong>#{String(pr.number || '?')}</strong>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{String(pr.title || 'Untitled PR')}</span>
+            <CiStatusBadge status={pr.draft ? 'draft' : pr.state || 'open'} />
+          </div>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '0.72rem' }}>
+            {String(pr.head_ref || '-')} &rarr; {String(pr.base_ref || '-')}
+            {pr.user ? ` · ${String(pr.user)}` : ''}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SelectedTestsPanel({ tests }: { tests: Array<Record<string, unknown>> }) {
+  if (tests.length === 0) {
+    return <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>No selected generated tests.</div>;
+  }
+  return (
+    <div style={{ display: 'grid', gap: '0.45rem' }}>
+      {tests.slice(0, 12).map((test, index) => (
+        <div key={`${test.spec_name || index}`} style={{
+          padding: '0.6rem',
+          background: 'var(--code-bg)',
+          border: '1px solid var(--border)',
+          borderRadius: '6px',
+          fontSize: '0.78rem',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', marginBottom: '0.25rem' }}>
+            <strong style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {String(test.spec_name || test.test_path || 'Selected test')}
+            </strong>
+            <CiStatusBadge status={test.risk_level || 'selected'} />
+            <span style={{ marginLeft: 'auto', color: 'var(--text-secondary)', fontSize: '0.7rem' }}>
+              {String(test.confidence || '')}
+            </span>
+          </div>
+          <div style={{ color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+            {String(test.reason || 'Selected by PR impact analysis')}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PrAnalysisCard({ result, title = 'PR Advisor Analysis' }: { result: unknown; title?: string }) {
+  const data = asRecord(result);
+  if (data.error) return <ToolError message={String(data.error)} />;
+  const selectedTests = ciArray(data.selected_tests);
+  return (
+    <div style={{ padding: '0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', marginTop: '0.5rem', fontSize: '0.85rem' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.65rem' }}>
+        <strong>{title}</strong>
+        {Boolean(data.pr_number) && <span style={{ color: 'var(--text-secondary)', fontSize: '0.78rem' }}>PR #{String(data.pr_number)}</span>}
+        <CiStatusBadge status={data.risk_level || data.status || 'analyzed'} />
+        <Link href="/pr-advisor" style={{ marginLeft: 'auto', color: 'var(--primary)', fontSize: '0.75rem' }}>
+          Open PR Advisor &rarr;
+        </Link>
+      </div>
+      {Boolean(data.summary) && (
+        <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', lineHeight: 1.45, marginBottom: '0.65rem' }}>
+          {String(data.summary)}
+        </div>
+      )}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(105px, 1fr))', gap: '0.5rem', marginBottom: '0.75rem' }}>
+        <CiMetric label="Changed Files" value={data.changed_files_count ?? '-'} />
+        <CiMetric label="Selected" value={`${String(data.selected_tests_count ?? selectedTests.length)}/${String(data.total_candidate_tests ?? '-')}`} />
+        <CiMetric label="Confidence" value={data.confidence || '-'} />
+        <CiMetric label="Saved" value={data.saved_tests_count ?? '-'} />
+      </div>
+      <div style={{ fontWeight: 600, fontSize: '0.78rem', marginBottom: '0.4rem' }}>Selected Generated Tests</div>
+      <SelectedTestsPanel tests={selectedTests} />
+    </div>
+  );
+}
+
+const OpenPullRequestsToolUI = makeAssistantToolUI({
+  toolName: 'listOpenPullRequests',
+  render: ({ result }) => {
+    if (!result) return <ToolLoading name="Loading open pull requests..." />;
+    if (asRecord(result).error) return <ToolError message={String(asRecord(result).error)} />;
+    return (
+      <div style={{ padding: '0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', marginTop: '0.5rem' }}>
+        <div style={{ fontWeight: 600, fontSize: '0.85rem', marginBottom: '0.5rem' }}>Pull Requests</div>
+        <PrListPanel pulls={ciArray(result)} />
+      </div>
+    );
+  },
+});
+
+const PrAdvisorAnalysesToolUI = makeAssistantToolUI({
+  toolName: 'listPrAdvisorAnalyses',
+  render: ({ result }) => {
+    if (!result) return <ToolLoading name="Loading PR analyses..." />;
+    if (asRecord(result).error) return <ToolError message={String(asRecord(result).error)} />;
+    const analyses = ciArray(result);
+    return (
+      <div style={{ padding: '0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', marginTop: '0.5rem' }}>
+        <div style={{ fontWeight: 600, fontSize: '0.85rem', marginBottom: '0.5rem' }}>Recent PR Analyses</div>
+        {analyses.length === 0 ? (
+          <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>No PR Advisor analyses yet.</div>
+        ) : (
+          <div style={{ display: 'grid', gap: '0.45rem' }}>
+            {analyses.slice(0, 8).map((analysis) => (
+              <div key={String(analysis.id)} style={{ padding: '0.6rem', background: 'var(--code-bg)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '0.78rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                  <strong>PR #{String(analysis.pr_number || '?')}</strong>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{String(analysis.title || analysis.summary || '')}</span>
+                  <CiStatusBadge status={analysis.risk_level || 'analyzed'} />
+                </div>
+                <div style={{ color: 'var(--text-secondary)', marginTop: '0.2rem' }}>
+                  Selected {String(analysis.selected_tests_count ?? 0)} of {String(analysis.total_candidate_tests ?? '-')} generated tests
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  },
+});
+
+const PrAdvisorAnalysisToolUI = makeAssistantToolUI({
+  toolName: 'getPrAdvisorAnalysis',
+  render: ({ result }) => {
+    if (!result) return <ToolLoading name="Loading PR analysis..." />;
+    return <PrAnalysisCard result={result} />;
+  },
+});
+
 // ===== Generic Tool UI (Wildcard - must be registered last) =====
 
 const toolPageMap: Record<string, string> = {
@@ -1079,6 +1599,7 @@ const toolPageMap: Record<string, string> = {
   getAgentRunReport: '/agents',
   searchAgentReports: '/agents',
   startAdhocCustomAgent: '/agents',
+  createCustomAgentDefinition: '/agents',
   startCustomAgentFromReport: '/agents',
   createTestSpecFromAgentReport: '/specs',
   getRequirements: '/requirements',
@@ -1281,18 +1802,30 @@ const toolPageMap: Record<string, string> = {
   healPrdTest: '/prd',
   runPrdTest: '/prd',
   // CI/CD and PR Advisor tools
+  getCiControlOverview: '/ci-cd',
+  listOpenPullRequests: '/pr-advisor',
   listCiProviders: '/ci-cd',
   listCiWorkflows: '/ci-cd',
   listCiRuns: '/ci-cd',
   getCiRunDetail: '/ci-cd',
   getCiRunLogs: '/ci-cd',
   listCiAuditEvents: '/ci-cd',
+  listGeneratedCiTests: '/ci-cd',
+  listCiTestSubsets: '/ci-cd',
+  getCiTestSubset: '/ci-cd',
+  previewCiTestSubset: '/ci-cd',
   syncCiRuns: '/ci-cd',
   dispatchCiWorkflow: '/ci-cd',
   cancelCiRun: '/ci-cd',
   rerunCiRun: '/ci-cd',
   generateCiWorkflowChange: '/ci-cd',
   openCiWorkflowPullRequest: '/ci-cd',
+  updateCiProviderDefaults: '/ci-cd',
+  createCiTestSubset: '/ci-cd',
+  updateCiTestSubset: '/ci-cd',
+  deleteCiTestSubset: '/ci-cd',
+  openCiTestSubsetPullRequest: '/ci-cd',
+  dispatchCiTestSubset: '/ci-cd',
   analyzePullRequestTests: '/pr-advisor',
   listPrAdvisorAnalyses: '/pr-advisor',
   getPrAdvisorAnalysis: '/pr-advisor',
@@ -1370,6 +1903,268 @@ const toolPageMap: Record<string, string> = {
   deleteTestRailMapping: '/settings',
 };
 
+type AgentToolOption = {
+  id: string;
+  label: string;
+  description?: string;
+  category: string;
+  risk?: string;
+};
+
+const DEFAULT_CUSTOM_AGENT_TOOL_IDS = [
+  'browser_navigate',
+  'browser_snapshot',
+  'browser_click',
+  'browser_type',
+  'browser_select',
+  'browser_press_key',
+  'browser_hover',
+  'browser_network',
+  'browser_console',
+  'browser_screenshot',
+  'browser_wait',
+  'browser_navigate_back',
+  'browser_close',
+];
+
+function normalizeCustomAgentArgs(args: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...args,
+    agentName: typeof args.agentName === 'string' ? args.agentName : 'Custom QA Agent',
+    description: typeof args.description === 'string' ? args.description : '',
+    url: typeof args.url === 'string' ? args.url : '',
+    systemPrompt: typeof args.systemPrompt === 'string' ? args.systemPrompt : '',
+    prompt: typeof args.prompt === 'string' ? args.prompt : '',
+    timeoutSeconds: typeof args.timeoutSeconds === 'number' ? args.timeoutSeconds : Number(args.timeoutSeconds || 1800),
+    toolIds: Array.isArray(args.toolIds) && args.toolIds.every((toolId) => typeof toolId === 'string')
+      ? args.toolIds
+      : DEFAULT_CUSTOM_AGENT_TOOL_IDS,
+  };
+}
+
+function groupedAgentTools(tools: AgentToolOption[]) {
+  return tools.reduce<Record<string, AgentToolOption[]>>((acc, tool) => {
+    const category = tool.category || 'Other';
+    acc[category] = acc[category] || [];
+    acc[category].push(tool);
+    return acc;
+  }, {});
+}
+
+const approvalInputStyle: CSSProperties = {
+  width: '100%',
+  padding: '0.45rem 0.5rem',
+  borderRadius: '6px',
+  border: '1px solid var(--input-border)',
+  background: 'var(--input-bg)',
+  color: 'var(--text)',
+  fontSize: '0.78rem',
+};
+
+const approvalTextareaStyle: CSSProperties = {
+  ...approvalInputStyle,
+  resize: 'vertical',
+  lineHeight: 1.45,
+};
+
+function CustomAgentApprovalEditor({
+  args,
+  setArgs,
+  tools,
+  toolsLoading,
+  toolsExpanded,
+  setToolsExpanded,
+  disabled,
+}: {
+  args: Record<string, unknown>;
+  setArgs: Dispatch<SetStateAction<Record<string, unknown>>>;
+  tools: AgentToolOption[];
+  toolsLoading: boolean;
+  toolsExpanded: boolean;
+  setToolsExpanded: (value: boolean) => void;
+  disabled: boolean;
+}) {
+  const selectedToolIds = Array.isArray(args.toolIds) ? args.toolIds.filter((id): id is string => typeof id === 'string') : [];
+  const toolGroups = groupedAgentTools(tools);
+
+  const updateField = (key: string, value: unknown) => {
+    setArgs((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const toggleTool = (toolId: string) => {
+    setArgs((prev) => {
+      const current = Array.isArray(prev.toolIds) ? prev.toolIds.filter((id): id is string => typeof id === 'string') : [];
+      return {
+        ...prev,
+        toolIds: current.includes(toolId) ? current.filter((id) => id !== toolId) : [...current, toolId],
+      };
+    });
+  };
+
+  const toggleCategory = (categoryTools: AgentToolOption[]) => {
+    const ids = categoryTools.map((tool) => tool.id);
+    const allSelected = ids.every((id) => selectedToolIds.includes(id));
+    setArgs((prev) => {
+      const current = Array.isArray(prev.toolIds) ? prev.toolIds.filter((id): id is string => typeof id === 'string') : [];
+      return {
+        ...prev,
+        toolIds: allSelected
+          ? current.filter((id) => !ids.includes(id))
+          : Array.from(new Set([...current, ...ids])),
+      };
+    });
+  };
+
+  return (
+    <div style={{
+      padding: '0.65rem',
+      background: 'var(--code-bg)',
+      borderRadius: '6px',
+      marginBottom: '0.65rem',
+      fontSize: '0.75rem',
+    }}>
+      <div style={{ display: 'grid', gap: '0.55rem' }}>
+        <label style={{ display: 'grid', gap: '0.25rem' }}>
+          <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Agent name</span>
+          <input
+            value={String(args.agentName || '')}
+            onChange={(e) => updateField('agentName', e.target.value)}
+            disabled={disabled}
+            style={approvalInputStyle}
+          />
+        </label>
+
+        <label style={{ display: 'grid', gap: '0.25rem' }}>
+          <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Target URL</span>
+          <input
+            value={String(args.url || '')}
+            onChange={(e) => updateField('url', e.target.value)}
+            disabled={disabled}
+            style={approvalInputStyle}
+          />
+        </label>
+
+        <label style={{ display: 'grid', gap: '0.25rem' }}>
+          <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Task prompt</span>
+          <textarea
+            value={String(args.prompt || '')}
+            onChange={(e) => updateField('prompt', e.target.value)}
+            disabled={disabled}
+            rows={8}
+            style={approvalTextareaStyle}
+          />
+        </label>
+
+        <label style={{ display: 'grid', gap: '0.25rem' }}>
+          <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>System prompt</span>
+          <textarea
+            value={String(args.systemPrompt || '')}
+            onChange={(e) => updateField('systemPrompt', e.target.value)}
+            disabled={disabled}
+            rows={5}
+            style={approvalTextareaStyle}
+          />
+        </label>
+
+        <label style={{ display: 'grid', gap: '0.25rem' }}>
+          <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Timeout seconds</span>
+          <input
+            type="number"
+            min={60}
+            max={7200}
+            value={Number(args.timeoutSeconds || 1800)}
+            onChange={(e) => updateField('timeoutSeconds', Number(e.target.value || 1800))}
+            disabled={disabled}
+            style={approvalInputStyle}
+          />
+        </label>
+
+        <div>
+          <button
+            type="button"
+            onClick={() => setToolsExpanded(!toolsExpanded)}
+            disabled={disabled}
+            style={{
+              width: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '0.5rem',
+              border: '1px solid var(--border)',
+              borderRadius: '6px',
+              padding: '0.45rem 0.55rem',
+              background: 'var(--surface-hover)',
+              color: 'var(--text)',
+              cursor: disabled ? 'not-allowed' : 'pointer',
+              fontSize: '0.75rem',
+              fontWeight: 600,
+            }}
+          >
+            <span>Tools selected: {selectedToolIds.length}</span>
+            <ChevronDown size={14} style={{ transform: toolsExpanded ? 'rotate(180deg)' : 'rotate(0deg)' }} />
+          </button>
+
+          {toolsExpanded && (
+            <div style={{
+              maxHeight: '280px',
+              overflowY: 'auto',
+              border: '1px solid var(--border)',
+              borderRadius: '6px',
+              padding: '0.5rem',
+              marginTop: '0.45rem',
+              background: 'var(--surface)',
+            }}>
+              {toolsLoading && <div style={{ color: 'var(--text-secondary)' }}>Loading tools...</div>}
+              {!toolsLoading && tools.length === 0 && (
+                <div style={{ color: 'var(--text-secondary)' }}>Tool catalog unavailable. Default selected tool IDs will be used.</div>
+              )}
+              {Object.entries(toolGroups).map(([category, categoryTools]) => (
+                <div key={category} style={{ marginBottom: '0.7rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '0.3rem' }}>
+                    <span style={{ color: 'var(--text-secondary)', fontWeight: 700, textTransform: 'uppercase', fontSize: '0.68rem' }}>
+                      {category} ({categoryTools.length})
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => toggleCategory(categoryTools)}
+                      disabled={disabled}
+                      style={{ border: 'none', background: 'transparent', color: 'var(--primary)', cursor: disabled ? 'not-allowed' : 'pointer', fontSize: '0.68rem' }}
+                    >
+                      {categoryTools.every((tool) => selectedToolIds.includes(tool.id)) ? 'Clear' : 'Select all'}
+                    </button>
+                  </div>
+                  {categoryTools.map((tool) => (
+                    <label key={tool.id} style={{ display: 'flex', gap: '0.45rem', alignItems: 'flex-start', marginBottom: '0.38rem', cursor: disabled ? 'not-allowed' : 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedToolIds.includes(tool.id)}
+                        onChange={() => toggleTool(tool.id)}
+                        disabled={disabled}
+                        style={{ marginTop: '0.1rem' }}
+                      />
+                      <span style={{ flex: 1 }}>
+                        <span style={{ fontWeight: 600 }}>{tool.label}</span>
+                        <span style={{
+                          marginLeft: '0.35rem',
+                          color: tool.risk === 'high' || tool.risk === 'destructive' ? 'var(--danger)' : tool.risk === 'medium' ? 'var(--warning)' : 'var(--success)',
+                          fontSize: '0.68rem',
+                        }}>
+                          {tool.risk || 'low'}
+                        </span>
+                        {tool.description && <span style={{ display: 'block', color: 'var(--text-secondary)', lineHeight: 1.35 }}>{tool.description}</span>}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ApprovalCard({ toolName, args, addResult, toolCallId }: {
   toolName: string;
   args: Record<string, unknown>;
@@ -1377,12 +2172,41 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
   toolCallId?: string;
 }) {
   const [status, setStatus] = useState<'pending' | 'executing' | 'done'>('pending');
+  const [customArgs, setCustomArgs] = useState<Record<string, unknown>>(() => normalizeCustomAgentArgs(args));
+  const [agentTools, setAgentTools] = useState<AgentToolOption[]>([]);
+  const [toolsLoading, setToolsLoading] = useState(false);
+  const [toolsExpanded, setToolsExpanded] = useState(true);
   const { currentProject } = useProject();
   const { persistToolResult, registerTrackedJob } = useChatContext();
   const config = MUTATING_TOOL_CONFIGS[toolName];
   const label = config?.label || toolName;
+  const isCustomAgentApproval = toolName === 'startAdhocCustomAgent' || toolName === 'createCustomAgentDefinition';
 
-  const displayArgs = Object.entries(args || {}).filter(
+  useEffect(() => {
+    if (!isCustomAgentApproval) return;
+    setCustomArgs(normalizeCustomAgentArgs(args));
+  }, [args, isCustomAgentApproval]);
+
+  useEffect(() => {
+    if (!isCustomAgentApproval) return;
+    let cancelled = false;
+    setToolsLoading(true);
+    fetchWithAuth(`${API_BASE}/api/agents/tools/catalog`)
+      .then(async (res) => {
+        const data = await res.json().catch(() => ({}));
+        if (!cancelled && res.ok) setAgentTools(Array.isArray(data.tools) ? data.tools : []);
+      })
+      .catch(() => {
+        if (!cancelled) setAgentTools([]);
+      })
+      .finally(() => {
+        if (!cancelled) setToolsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [isCustomAgentApproval]);
+
+  const approvalArgs = isCustomAgentApproval ? customArgs : args;
+  const displayArgs = Object.entries(approvalArgs || {}).filter(
     ([k]) => !k.startsWith('_')
   );
   const displayValue = (key: string, val: unknown): string => {
@@ -1395,7 +2219,7 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
   const handleApprove = async () => {
     setStatus('executing');
     try {
-      const enrichedArgs = { ...args, _projectId: currentProject?.id };
+      const enrichedArgs = { ...approvalArgs, _projectId: currentProject?.id };
       const pendingRes = await fetchWithAuth('/api/chat/pending-action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1471,7 +2295,17 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
         <span style={{ fontWeight: 600, fontSize: '0.85rem' }}>{label}</span>
       </div>
 
-      {displayArgs.length > 0 && (
+      {isCustomAgentApproval ? (
+        <CustomAgentApprovalEditor
+          args={customArgs}
+          setArgs={setCustomArgs}
+          tools={agentTools}
+          toolsLoading={toolsLoading}
+          toolsExpanded={toolsExpanded}
+          setToolsExpanded={setToolsExpanded}
+          disabled={status !== 'pending'}
+        />
+      ) : displayArgs.length > 0 && (
         <div style={{
           padding: '0.5rem',
           background: 'var(--code-bg)',
@@ -1717,6 +2551,18 @@ function buildToolResultSummary(toolName: string, data: Record<string, unknown>)
   ];
   for (const [label, keys] of arrayRows) {
     addRow(rows, label, countArrayField(data, keys));
+  }
+
+  if (toolName.toLowerCase().includes('ci') || toolName.toLowerCase().includes('qualitygate')) {
+    const run = asRecord(data.run);
+    const source = Object.keys(run).length > 0 ? run : data;
+    addRow(rows, 'Provider', source.provider ? ciProviderName(source.provider) : undefined);
+    addRow(rows, 'Ref', stringField(source, ['ref', 'base_ref', 'branch']));
+    addRow(rows, 'Run', stringField(source, ['external_pipeline_id', 'run_id', 'id']));
+    addRow(rows, 'Workflow', stringField(source, ['workflow_name', 'workflow_path', 'default_workflow']));
+    addRow(rows, 'PR', stringField(data, ['pull_request_url', 'pull_request_number']));
+    addRow(rows, 'Passed', numberField(source, ['passed_tests', 'passed']));
+    addRow(rows, 'Failed', numberField(source, ['failed_tests', 'failed']), Number(source.failed_tests ?? source.failed ?? 0) > 0 ? 'var(--danger)' : undefined);
   }
 
   return {
@@ -2470,6 +3316,7 @@ const toolFollowUps: Record<string, string[]> = {
   // Auto Pilot
   startAutoPilot: ['Check Auto Pilot status', 'List all Auto Pilot sessions', 'View Auto Pilot dashboard'],
   startAdhocCustomAgent: ['View agent run', 'Check agent status', 'Show custom agent reports'],
+  createCustomAgentDefinition: ['Open agents dashboard', 'Run saved custom agent', 'Show custom agent reports'],
   getAutoPilotStatus: ['Answer a pending question', 'Pause Auto Pilot', 'Check status again later'],
   pauseAutoPilot: ['Resume Auto Pilot', 'Check Auto Pilot status', 'View Auto Pilot dashboard'],
   resumeAutoPilot: ['Check Auto Pilot status', 'View Auto Pilot dashboard'],
@@ -2498,12 +3345,23 @@ const toolFollowUps: Record<string, string[]> = {
   listPrdFeatures: ['Generate test plan', 'Show PRD generations', 'Check queue status'],
   getPrdGenerationStatus: ['Generate Playwright test', 'Stop generation', 'Show generation history'],
   generatePrdPlan: ['Check generation status', 'Show PRD generations', 'Open PRD page'],
-  listCiProviders: ['List CI workflows', 'Sync CI runs', 'Show CI runs'],
+  getCiControlOverview: ['List CI workflows', 'Sync CI runs', 'Show failed CI logs'],
+  listOpenPullRequests: ['Analyze a PR', 'Run selected generated tests', 'Open PR Advisor'],
+  listCiProviders: ['List CI workflows', 'Sync CI runs', 'Update CI defaults'],
   listCiWorkflows: ['Dispatch workflow', 'Generate workflow change', 'List CI runs'],
+  listGeneratedCiTests: ['Create CI test subset', 'Preview selected tests', 'Open CI/CD'],
+  listCiTestSubsets: ['Open subset PR', 'Dispatch subset workflow', 'List generated CI tests'],
+  getCiTestSubset: ['Preview subset files', 'Open subset PR', 'Dispatch subset workflow'],
+  previewCiTestSubset: ['Open subset PR', 'Update subset', 'Open CI/CD'],
   listCiRuns: ['Show CI run detail', 'Get CI logs', 'Sync CI runs'],
   getCiRunDetail: ['Get CI logs', 'Rerun CI run', 'Cancel CI run'],
   getCiRunLogs: ['Show CI run detail', 'Rerun CI run', 'Open CI/CD'],
   generateCiWorkflowChange: ['Open workflow PR', 'List CI workflows', 'Open CI/CD'],
+  createCiTestSubset: ['Open subset PR', 'Preview subset files', 'List generated CI tests'],
+  updateCiTestSubset: ['Open subset PR', 'Preview subset files', 'List subsets'],
+  openCiTestSubsetPullRequest: ['Open CI/CD', 'List subsets', 'Set default workflow'],
+  dispatchCiTestSubset: ['Sync CI runs', 'Show CI run detail', 'Open CI/CD'],
+  updateCiProviderDefaults: ['Show CI/CD overview', 'List workflows', 'Open CI/CD'],
   listPrAdvisorAnalyses: ['Analyze a PR', 'Run recommended tests', 'Show latest analysis'],
   getPrAdvisorAnalysis: ['Run recommended tests', 'Show changed files', 'Open PR Advisor'],
   analyzePullRequestTests: ['Run recommended tests', 'Show analysis details', 'Open PR Advisor'],
@@ -3491,6 +4349,16 @@ export function AssistantThread({ className }: { className?: string }) {
       <ScheduleListToolUI />
       <LlmAnalyticsToolUI />
       <AutoPilotStatusToolUI />
+      <CiOverviewToolUI />
+      <CiProvidersToolUI />
+      <CiWorkflowsToolUI />
+      <CiRunsToolUI />
+      <CiRunDetailToolUI />
+      <CiRunLogsToolUI />
+      <CiWorkflowChangeToolUI />
+      <OpenPullRequestsToolUI />
+      <PrAdvisorAnalysesToolUI />
+      <PrAdvisorAnalysisToolUI />
 
       {isLoadingHistory ? (
         <div style={{ flex: 1, overflow: 'hidden', padding: '1rem 0' }}>

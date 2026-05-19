@@ -114,8 +114,13 @@ Quorvex AI uses an AI model to generate tests. Open the environment file for you
     ```bash title=".env.prod"
     # Required: AI/LLM configuration
     ANTHROPIC_AUTH_TOKEN=your-api-token-here
-    ANTHROPIC_BASE_URL=https://api.anthropic.com
-    ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-20250514
+    ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+    ANTHROPIC_MODEL=glm-5.1
+    ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1
+    ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5-turbo
+    ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.5-air
+    ANTHROPIC_CHAT_MODEL=glm-5-turbo
+    API_TIMEOUT_MS=3000000
     ```
 
     After editing `.env.prod`, restart the backend to pick up the change:
@@ -129,8 +134,13 @@ Quorvex AI uses an AI model to generate tests. Open the environment file for you
     ```bash title=".env"
     # Required: AI/LLM configuration
     ANTHROPIC_AUTH_TOKEN=your-api-token-here
-    ANTHROPIC_BASE_URL=https://api.anthropic.com
-    ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-20250514
+    ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+    ANTHROPIC_MODEL=glm-5.1
+    ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1
+    ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5-turbo
+    ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.5-air
+    ANTHROPIC_CHAT_MODEL=glm-5-turbo
+    API_TIMEOUT_MS=3000000
     ```
 
 Replace `your-api-token-here` with your actual API token.
@@ -148,8 +158,8 @@ Checking environment configuration...
 
   + .env file exists
   + ANTHROPIC_AUTH_TOKEN is configured
-  + ANTHROPIC_BASE_URL: https://api.anthropic.com
-  + Model: claude-sonnet-4-20250514
+  + ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
+  + Model: glm-5.1
   - OPENAI_API_KEY not set (memory system limited)
 
   + Python virtual environment exists

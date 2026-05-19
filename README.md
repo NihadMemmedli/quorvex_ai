@@ -1,10 +1,10 @@
 <p align="center">
   <h1 align="center">Quorvex AI</h1>
   <p align="center">
-    <strong>Write tests in plain English. AI handles the rest.</strong>
+    <strong>Self-hosted AI testing agents that turn specs into validated Playwright tests.</strong>
   </p>
   <p align="center">
-    Write tests in plain English. Get production-ready Playwright code automatically.
+    Generate code you can inspect, commit, and run in CI without runtime AI dependency.
   </p>
   <p align="center">
     <a href="https://github.com/NihadMemmedli/quorvex_ai/stargazers"><img src="https://img.shields.io/github/stars/NihadMemmedli/quorvex_ai?style=social" alt="GitHub Stars"></a>
@@ -31,15 +31,68 @@
 
 ---
 
-Quorvex AI transforms natural language test specifications into validated, self-healing Playwright tests. Point an AI agent at your application, describe what to test in plain English, and get production-ready TypeScript test code that actually passes. When tests break due to UI changes, the self-healing pipeline automatically detects and fixes selector failures -- no manual maintenance required.
+Quorvex AI is a self-hosted AI testing platform for QA and engineering teams. Its core workflow is simple: describe a user flow, let an agent explore the real app, and get a validated Playwright test you can keep as normal code.
+
+The same foundation expands into PRD-to-tests, API checks, K6 load tests, security scans, database quality checks, mobile smoke flows, LLM evaluation suites, CI quality gates, and autonomous coverage discovery. Generated tests run as normal code, and the self-healing pipeline can repair selector and timing failures when the UI changes.
+
+![Quorvex AI Demo](docs/assets/demo.gif)
+*Plain-English specs become validated test code through planning, browser execution, and healing.*
+
+## Start Here
+
+| Path | Best for | Link |
+|---|---|---|
+| Watch the demo | Understand the workflow in under a minute | [Demo GIF](docs/assets/demo.gif) |
+| Try the focused path | Generate your first Playwright test without reading the full platform docs | [Minimal README](README.minimal.md) |
+| Run the full stack | Use the dashboard, queues, storage, and integrations locally | [Getting Started](https://nihadmemmedli.github.io/quorvex_ai/tutorials/getting-started/) |
+
 ### Why Quorvex AI?
 
-- **Stop writing Playwright boilerplate** -- Describe tests in plain English, get production-ready TypeScript. No more wrestling with selectors, waits, and page objects by hand.
-- **Tests that fix themselves** -- The self-healing pipeline detects broken selectors and repairs them automatically. UI changes no longer mean hours of test maintenance.
-- **Beyond UI testing** -- Load testing, security scanning, API testing, database quality checks, and LLM evaluation -- all in one platform, all driven by AI.
+- **Move from specs to coverage faster** -- Describe a flow, upload a PRD, import OpenAPI, or let AutoPilot explore the app. Quorvex turns the result into executable tests and traceability.
+- **Run long-lived testing agents** -- Use autonomous missions for recurring or 24/7-style exploration when backed by the scheduler, Temporal worker, queues, and monitored infrastructure.
+- **Generate code you can keep** -- Output is Playwright, WebdriverIO/Appium, or K6 code where appropriate, so teams can inspect, run, commit, and extend it without runtime AI dependency.
+- **Cover more than UI happy paths** -- API, load, security, database, mobile, LLM, regression, analytics, CI/CD, TestRail, Jira, and PR advisor workflows live in one self-hosted platform.
 
 ![Dashboard Screenshot](docs/assets/dashboard-screenshot.png)
 *Web dashboard for managing specs, monitoring execution trends, and analyzing test results.*
+
+---
+
+## Input to Output
+
+Quorvex starts with a markdown spec like this:
+
+```markdown
+# Test: Login Form Validation
+
+## Steps
+1. Navigate to https://the-internet.herokuapp.com/login
+2. Enter "tomsmith" into the Username field
+3. Enter "SuperSecretPassword!" into the Password field
+4. Click the "Login" button
+5. Verify the page displays "Secure Area" heading
+6. Click the "Logout" button
+7. Verify the user is redirected back to the login page
+```
+
+It produces maintainable Playwright code:
+
+```ts
+import { test, expect } from '@playwright/test';
+
+test('logs in with valid credentials and logs out', async ({ page }) => {
+  await page.goto('https://the-internet.herokuapp.com/login');
+  await expect(page.getByRole('heading', { name: 'Login Page' })).toBeVisible();
+  await page.getByLabel('Username').fill('tomsmith');
+  await page.getByLabel('Password').fill('SuperSecretPassword!');
+  await page.getByRole('button', { name: 'Login' }).click();
+  await expect(page.getByRole('heading', { name: 'Secure Area' })).toBeVisible();
+  await page.getByRole('link', { name: 'Logout' }).click();
+  await expect(page.getByRole('heading', { name: 'Login Page' })).toBeVisible();
+});
+```
+
+See the full example spec and generated output in [`demo/`](demo/).
 
 ---
 
@@ -71,6 +124,8 @@ No local setup required -- open a fully configured development environment in yo
 | Open source | ✅ (MIT) | ✅ | Freemium | ❌ ($450+/mo) | ✅ |
 
 > **Generate once, run forever** -- Unlike tools that burn AI tokens on every test run, Quorvex AI outputs stable Playwright code. Subsequent runs execute natively with zero AI cost.
+>
+> Comparison notes are based on publicly available product documentation and repository information as of May 2026. See the detailed comparison pages for rationale and source context.
 
 [Detailed comparisons](docs/comparisons/index.md) | [Why we built this](docs/comparisons/why-we-built-this.md)
 
@@ -78,32 +133,15 @@ No local setup required -- open a fully configured development environment in yo
 
 ## Features
 
-### Core Test Automation
-- **Natural Language to Playwright** -- Write test specs in markdown, get validated TypeScript tests
-- **Self-Healing Tests** -- Automatic detection and repair of broken selectors and timeouts
-- **Visual Regression Testing** -- Pixel-level screenshot comparison with baseline management
-- **Template System** -- Reusable spec templates with `@include` directives and selector hints
-
-### AI-Powered Discovery
-- **App Exploration** -- Autonomous browser-based discovery of pages, flows, forms, and error states
-- **Requirements Generation** -- AI extracts structured requirements from exploration data
-- **Requirements Traceability Matrix (RTM)** -- Maps requirements to test specs with coverage scoring
-- **Coverage Analysis** -- Identifies untested requirements and suggests new test specs
-
-### Beyond UI Testing
-- **API Testing** -- OpenAPI/Swagger import with AI-generated HTTP test suites and self-healing
-- **Load Testing** -- K6-based performance testing with AI-generated scripts and distributed execution
-- **Security Testing** -- Multi-tier scanning (quick checks, Nuclei, ZAP DAST) with AI-powered remediation
-- **Database Testing** -- PostgreSQL schema analysis and data quality checks with AI suggestions
-- **LLM Evaluation** -- Test AI providers against structured suites with A/B prompt comparison
-
-### Enterprise Ready
-- **Multi-Project Isolation** -- Separate specs, runs, and configurations per project
-- **Authentication & RBAC** -- User management with role-based access control
-- **CI/CD Integration** -- GitHub Actions and GitLab CI pipeline generation
-- **TestRail & Jira** -- Bidirectional sync for test cases and issue tracking
-- **Cron Scheduling** -- Automated regression runs with execution history
-- **Browser Pool** -- Managed concurrent browser instances with FIFO queuing
+| Area | What Quorvex AI supports |
+|---|---|
+| Test generation | Plain-English specs to Playwright, native validation, Smart Check reuse, hybrid healing, visual regression, reusable `@include` templates |
+| AutoPilot & agents | App discovery, live browser state, generated task artifacts, custom agent definitions, persistent autonomous missions, recurring or long-running operation, approval gates |
+| Requirements & coverage | PRD upload, feature extraction, requirements generation, duplicate detection, RTM, coverage gaps, suggested tests |
+| Specialized testing | OpenAPI/API testing, K6 load testing, quick/Nuclei/ZAP security scans, database quality checks, LLM evaluation, Appium mobile smoke flows |
+| Quality intelligence | Regression batches, flaky test detection, pass-rate trends, failure classification, analytics, generated reports |
+| Integrations | GitHub Actions, GitLab CI, PR advisor, quality gates, workflow PRs, TestRail sync, Jira issue creation |
+| Operations | Project isolation, RBAC, encrypted credentials, schedules, browser pools, Redis queues, MinIO storage, backup, archival, Docker/Swarm/Kubernetes assets |
 
 ---
 
@@ -230,15 +268,20 @@ cp .env.example .env
 
 Quorvex AI requires an Anthropic-compatible API provider. Three options are supported:
 
-#### Option 1: Anthropic Direct (Recommended)
+#### Option 1: Z.ai GLM Coding Plan (Recommended Default)
 
 ```env
-ANTHROPIC_AUTH_TOKEN=sk-ant-your-api-key
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-20250514
+ANTHROPIC_AUTH_TOKEN=your-z-ai-token
+ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
+ANTHROPIC_MODEL=glm-5.1
+ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1
+ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5-turbo
+ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.5-air
+ANTHROPIC_CHAT_MODEL=glm-5-turbo
+API_TIMEOUT_MS=3000000
 ```
 
-Sign up at [console.anthropic.com](https://console.anthropic.com) to get an API key.
+Create a key in the [Z.ai API Keys](https://docs.z.ai/devpack/tool/claude) flow. Claude Code and the Claude Agent SDK still use Anthropic-compatible environment variable names.
 
 #### Option 2: OpenRouter (Free Models Available)
 
@@ -258,17 +301,17 @@ Popular free models on OpenRouter:
 | `google/gemini-2.0-flash-exp:free` | Google | 1M | Fast responses |
 | `qwen/qwen-2.5-7b-instruct:free` | Alibaba | 32k | Coding assistance |
 
-> Free models have rate limits. For production use, consider paid models or Anthropic direct.
+> Free models have rate limits. For production use, consider paid models or Z.ai/Anthropic direct.
 
-#### Option 3: Z.ai
+#### Option 3: Anthropic Direct
 
 ```env
-ANTHROPIC_AUTH_TOKEN=your-z-ai-token
-ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
-ANTHROPIC_DEFAULT_SONNET_MODEL=glm-4.7
+ANTHROPIC_AUTH_TOKEN=sk-ant-your-api-key
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-20250514
 ```
 
-See [Z.ai integration guide](https://docs.z.ai/scenario-example/develop-tools/claude) for setup instructions.
+Sign up at [console.anthropic.com](https://console.anthropic.com) to get an API key.
 
 ### Optional Configuration
 
@@ -292,7 +335,7 @@ BROWSER_SLOT_TIMEOUT=3600
 AGENT_TIMEOUT_SECONDS=1800
 ```
 
-For the complete list of environment variables, see the [Environment Variables Guide](docs/guides/environment-variables.md).
+For the complete list of environment variables, see the [Environment Variables Reference](docs/reference/environment-variables.md).
 
 ---
 
@@ -527,7 +570,7 @@ mkdocs serve
 | Test timeout on complex pages | Use `--hybrid` or increase exploration depth |
 | "Module not found" errors | Re-run `make setup` to reinstall dependencies |
 
-For more diagnostics, see [docs/troubleshooting.md](docs/troubleshooting.md).
+For more diagnostics, see the [Troubleshooting Guide](docs/guides/troubleshooting.md).
 
 ---
 
