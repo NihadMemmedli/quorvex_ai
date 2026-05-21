@@ -41,6 +41,7 @@ from sqlmodel import Session, SQLModel, select
 from orchestrator.api import autonomous as autonomous_api
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import (
+    AutonomousAgentWorkItem,
     AutonomousApproval,
     AutonomousFinding,
     AutonomousMission,
@@ -54,6 +55,7 @@ from orchestrator.services.autonomous_activities import (
     complete_mission_run,
     create_mission_run,
     execute_mission_iteration,
+    fail_mission_run,
     load_mission_policy,
 )
 
@@ -163,6 +165,48 @@ def test_complete_mission_run_persists_summary():
     assert run.completed_at is not None
 
 
+def test_create_mission_run_is_idempotent_for_workflow_iteration():
+    _ensure_tables()
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session)
+        mission_id = mission.id
+
+    payload = {"mission_id": mission_id, "workflow_id": "wf-idempotent", "iteration_index": 1}
+    first_run_id = create_mission_run(payload)
+    second_run_id = create_mission_run(payload)
+
+    with Session(engine) as session:
+        mission_db = session.get(AutonomousMission, mission_id)
+        runs = session.exec(select(AutonomousMissionRun).where(AutonomousMissionRun.mission_id == mission_id)).all()
+
+    assert first_run_id == second_run_id
+    assert len(runs) == 1
+    assert mission_db.total_runs == 1
+
+
+def test_fail_mission_run_pauses_after_consecutive_failures():
+    _ensure_tables()
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session)
+        mission.config = {"max_consecutive_failures": 2}
+        session.add(mission)
+        session.commit()
+        mission_id = mission.id
+
+    first_run_id = create_mission_run({"mission_id": mission_id, "workflow_id": "wf-fail-1"})
+    fail_mission_run({"mission_id": mission_id, "run_id": first_run_id, "error": "Transient browser crash"})
+    second_run_id = create_mission_run({"mission_id": mission_id, "workflow_id": "wf-fail-2"})
+    fail_mission_run({"mission_id": mission_id, "run_id": second_run_id, "error": "Repeated browser crash"})
+
+    with Session(engine) as session:
+        mission_db = session.get(AutonomousMission, mission_id)
+
+    assert mission_db.status == "paused"
+    assert mission_db.health_status == "blocked"
+    assert mission_db.paused_reason == "consecutive_failures"
+    assert mission_db.consecutive_failures == 2
+
+
 def test_execute_mission_iteration_creates_proposal_for_approved_finding():
     _ensure_tables()
     with Session(engine) as session:
@@ -209,6 +253,119 @@ def test_execute_mission_iteration_creates_proposal_for_approved_finding():
     assert proposals[0].finding_id == finding_id
     assert proposals[0].target_url == "https://example.com/profile"
     assert proposals[0].approval_status == "pending"
+
+
+def test_execute_mission_iteration_creates_parallel_team_work_items(monkeypatch):
+    _ensure_tables()
+
+    def fake_enqueue(session, mission, item):
+        item.agent_task_id = f"agent-task-{item.role}"
+        item.status = "running"
+        item.attempt_count += 1
+        item.progress = {"phase": "queued", "message": "fake queued"}
+        session.add(item)
+        session.commit()
+        return True
+
+    monkeypatch.setattr("orchestrator.services.autonomous_activities._enqueue_agent_work_item", fake_enqueue)
+
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        mission.config = {
+            "whole_app_team": True,
+            "max_parallel_agents": 2,
+            "roles": ["surface_mapper", "requirements_analyst", "rtm_mapper"],
+        }
+        session.add(mission)
+        session.commit()
+        mission_id = mission.id
+
+    run_id = create_mission_run({"mission_id": mission_id, "workflow_id": "wf-team"})
+    summary = execute_mission_iteration({"mission_id": mission_id, "run_id": run_id, "workflow_id": "wf-team"})
+
+    assert summary["work_items_created"] == 3
+    assert summary["work_items_enqueued"] == 2
+    assert summary["team"]["running_count"] == 2
+
+    with Session(engine) as session:
+        items = session.exec(select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)).all()
+
+    assert {item.role for item in items} == {"surface_mapper", "requirements_analyst", "rtm_mapper"}
+    assert len([item for item in items if item.status == "running"]) == 2
+
+
+def test_work_item_api_lists_retries_and_cancels():
+    _ensure_tables()
+    app = FastAPI()
+    app.include_router(autonomous_api.router)
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        item = AutonomousAgentWorkItem(
+            id=f"amwork-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            role="surface_mapper",
+            objective="Map the app surface.",
+            status="failed",
+            error_message="Worker failed",
+        )
+        session.add(item)
+        session.commit()
+        project_id = mission.project_id
+        mission_id = mission.id
+        item_id = item.id
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        listed = client.get(f"/autonomous/{project_id}/missions/{mission_id}/work-items")
+        assert listed.status_code == 200
+        assert listed.json()[0]["id"] == item_id
+
+        project_listed = client.get(f"/autonomous/{project_id}/work-items?limit=8")
+        assert project_listed.status_code == 200
+        assert project_listed.json()[0]["id"] == item_id
+
+        retried = client.post(f"/autonomous/{project_id}/work-items/{item_id}/retry")
+        assert retried.status_code == 200
+        assert retried.json()["status"] == "queued"
+        assert retried.json()["agent_task_id"] is None
+
+        cancelled = client.post(f"/autonomous/{project_id}/work-items/{item_id}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "cancelled"
+
+
+def test_mission_status_endpoint_reports_health_and_blocking_approvals():
+    _ensure_tables()
+    app = FastAPI()
+    app.include_router(autonomous_api.router)
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session)
+        mission.status = "paused"
+        mission.health_status = "blocked"
+        mission.paused_reason = "pending_approval_limit"
+        mission.next_action = "Review pending approvals before resuming the mission."
+        approval = AutonomousApproval(
+            id=f"amappr-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            action_type="persist_test",
+            status="pending",
+        )
+        session.add(mission)
+        session.add(approval)
+        session.commit()
+        project_id = mission.project_id
+        mission_id = mission.id
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get(f"/autonomous/{project_id}/missions/{mission_id}/status")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["mission"]["health_status"] == "blocked"
+    assert payload["pending_approval_count"] == 1
+    assert payload["blocking_approvals"][0]["action_type"] == "persist_test"
+    assert "Review pending approvals" in payload["next_action"]
 
 
 def test_test_proposal_api_approve_reject_and_materialize(monkeypatch, tmp_path):

@@ -236,6 +236,41 @@ class WorkflowDefinition(SQLModel, table=True):
         self.steps_json = json.dumps(value)
 
 
+class WorkflowDefinitionRevision(SQLModel, table=True):
+    """Immutable snapshot of a workflow definition at a specific version."""
+
+    __tablename__ = "workflow_definition_revisions"
+    __table_args__ = (
+        Index("ix_workflow_revisions_definition_version", "definition_id", "version"),
+        Index("ix_workflow_revisions_project_created", "project_id", "created_at"),
+        UniqueConstraint("definition_id", "version", name="uq_workflow_revision_definition_version"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    definition_id: str = Field(foreign_key="workflow_definitions.id", index=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    version: int = Field(default=1, index=True)
+    name: str
+    description: str = ""
+    steps_json: str = "[]"
+    change_summary: str = ""
+    created_by: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def steps(self) -> list[dict[str, Any]]:
+        try:
+            value = json.loads(self.steps_json or "[]")
+            return value if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @steps.setter
+    def steps(self, value: list[dict[str, Any]]):
+        self.steps_json = json.dumps(value)
+
+
 class WorkflowRun(SQLModel, table=True):
     """Execution state for a saved custom workflow."""
 
@@ -252,15 +287,24 @@ class WorkflowRun(SQLModel, table=True):
     # constraints.
     workflow_id: str | None = Field(default=None, foreign_key="workflow_definitions.id", index=True)
     definition_id: str = Field(foreign_key="workflow_definitions.id", index=True)
+    revision_id: str | None = Field(default=None, foreign_key="workflow_definition_revisions.id", index=True)
+    definition_version: int = 1
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
     status: str = "queued"  # queued, running, awaiting_input, paused, completed, failed, cancelled
     current_step_index: int = 0
     progress: float = 0.0
     inputs_json: str = "{}"
     context_json: str = "{}"
+    recovery_policy_json: str = "{}"
     result_json: str | None = None
     error_message: str | None = None
     triggered_by: str | None = None
+    trigger_type: str = "manual"  # manual, schedule, assistant, api, webhook
+    trigger_id: str | None = Field(default=None, index=True)
+    temporal_workflow_id: str | None = Field(default=None, index=True)
+    temporal_run_id: str | None = None
+    heartbeat_at: datetime | None = None
+    pause_reason: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -294,6 +338,18 @@ class WorkflowRun(SQLModel, table=True):
     @context.setter
     def context(self, value: dict[str, Any]):
         self.context_json = json.dumps(value)
+
+    @property
+    def recovery_policy(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.recovery_policy_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @recovery_policy.setter
+    def recovery_policy(self, value: dict[str, Any]):
+        self.recovery_policy_json = json.dumps(value)
 
     @property
     def result(self) -> dict[str, Any] | None:
@@ -330,12 +386,23 @@ class WorkflowRunStep(SQLModel, table=True):
     step_id: str = ""
     step_key: str
     step_type: str
+    step_type_version: int = 1
+    step_config_json: str = "{}"
     name: str = ""
     label: str
     status: str = "pending"  # pending, running, awaiting_input, paused, completed, failed, skipped, cancelled
     continue_on_error: bool = False
+    attempt_count: int = 0
+    max_attempts: int = 1
+    retry_backoff_seconds: int = 0
+    recovery_action: str = "fail"  # fail, retry, skip, pause, notify
+    skipped_reason: str | None = None
     input_json: str = "{}"
+    rendered_input_json: str = "{}"
+    context_snapshot_json: str = "{}"
+    input_resolution_json: str = "[]"
     output_json: str | None = None
+    output_validation_errors_json: str = "[]"
     error_message: str | None = None
     external_kind: str | None = None
     external_id: str | None = None
@@ -363,9 +430,49 @@ class WorkflowRunStep(SQLModel, table=True):
         if self.step_index == 0 and self.step_order:
             self.step_index = self.step_order
 
+    @property
+    def step_config(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.step_config_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @step_config.setter
+    def step_config(self, value: dict[str, Any]):
+        self.step_config_json = json.dumps(value)
+
     @input.setter
     def input(self, value: dict[str, Any]):
         self.input_json = json.dumps(value)
+
+    @property
+    def rendered_input(self) -> dict[str, Any]:
+        return _json_object(self.rendered_input_json)
+
+    @rendered_input.setter
+    def rendered_input(self, value: dict[str, Any]):
+        self.rendered_input_json = json.dumps(value)
+
+    @property
+    def context_snapshot(self) -> dict[str, Any]:
+        return _json_object(self.context_snapshot_json)
+
+    @context_snapshot.setter
+    def context_snapshot(self, value: dict[str, Any]):
+        self.context_snapshot_json = json.dumps(value)
+
+    @property
+    def input_resolution(self) -> list[dict[str, Any]]:
+        try:
+            value = json.loads(self.input_resolution_json or "[]")
+            return value if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @input_resolution.setter
+    def input_resolution(self, value: list[dict[str, Any]]):
+        self.input_resolution_json = json.dumps(value)
 
     @property
     def output(self) -> dict[str, Any] | None:
@@ -380,6 +487,256 @@ class WorkflowRunStep(SQLModel, table=True):
     @output.setter
     def output(self, value: dict[str, Any] | None):
         self.output_json = json.dumps(value) if value is not None else None
+
+    @property
+    def output_validation_errors(self) -> list[str]:
+        try:
+            value = json.loads(self.output_validation_errors_json or "[]")
+            return [str(item) for item in value]
+        except json.JSONDecodeError:
+            return []
+
+    @output_validation_errors.setter
+    def output_validation_errors(self, value: list[str]):
+        self.output_validation_errors_json = json.dumps(value)
+
+
+class WorkflowSchedule(SQLModel, table=True):
+    """Recurring trigger configuration for custom workflows."""
+
+    __tablename__ = "workflow_schedules"
+    __table_args__ = (
+        Index("ix_workflow_schedules_project_enabled", "project_id", "enabled"),
+        Index("ix_workflow_schedules_definition_enabled", "definition_id", "enabled"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: f"wfs-{uuid.uuid4().hex[:8]}", primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    definition_id: str = Field(foreign_key="workflow_definitions.id", index=True)
+    revision_id: str | None = Field(default=None, foreign_key="workflow_definition_revisions.id", index=True)
+    name: str
+    description: str = ""
+    cron_expression: str
+    timezone: str = "UTC"
+    inputs_json: str = "{}"
+    start_step_key: str | None = None
+    enabled: bool = True
+    status: str = "active"  # active, paused, error
+    last_error: str | None = None
+    notify_on_completion: bool = False
+    notify_on_failure: bool = True
+    notify_on_review_needed: bool = True
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
+    last_run_status: str | None = None
+    last_run_id: str | None = Field(default=None, foreign_key="workflow_runs.id", index=True)
+    total_executions: int = 0
+    successful_executions: int = 0
+    failed_executions: int = 0
+    avg_duration_seconds: float | None = None
+    created_by: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def inputs(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.inputs_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @inputs.setter
+    def inputs(self, value: dict[str, Any]):
+        self.inputs_json = json.dumps(value)
+
+    @property
+    def success_rate(self) -> float:
+        if self.total_executions == 0:
+            return 0.0
+        return round((self.successful_executions / self.total_executions) * 100, 1)
+
+
+class WorkflowScheduleExecution(SQLModel, table=True):
+    """One scheduled custom workflow execution."""
+
+    __tablename__ = "workflow_schedule_executions"
+    __table_args__ = (
+        Index("ix_workflow_schedule_exec_schedule_created", "schedule_id", "created_at"),
+        Index("ix_workflow_schedule_exec_run", "workflow_run_id"),
+        {"extend_existing": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    schedule_id: str = Field(foreign_key="workflow_schedules.id", index=True)
+    workflow_run_id: str | None = Field(default=None, foreign_key="workflow_runs.id", index=True)
+    status: str = "pending"  # pending, running, completed, failed, skipped
+    trigger_type: str = "schedule"  # schedule, manual
+    error_message: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    duration_seconds: int | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class WorkflowEvent(SQLModel, table=True):
+    """Append-only workflow operational event."""
+
+    __tablename__ = "workflow_events"
+    __table_args__ = (
+        Index("ix_workflow_events_project_created", "project_id", "created_at"),
+        Index("ix_workflow_events_run_created", "run_id", "created_at"),
+        Index("ix_workflow_events_type_created", "event_type", "created_at"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    definition_id: str | None = Field(default=None, foreign_key="workflow_definitions.id", index=True)
+    run_id: str | None = Field(default=None, foreign_key="workflow_runs.id", index=True)
+    step_id: int | None = Field(default=None, foreign_key="workflow_run_steps.id", index=True)
+    schedule_id: str | None = Field(default=None, foreign_key="workflow_schedules.id", index=True)
+    event_type: str = Field(index=True)
+    severity: str = "info"
+    message: str = ""
+    payload_json: str = "{}"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.payload_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @payload.setter
+    def payload(self, value: dict[str, Any]):
+        self.payload_json = json.dumps(value)
+
+
+class WorkflowNotification(SQLModel, table=True):
+    """User-visible workflow notification derived from workflow events."""
+
+    __tablename__ = "workflow_notifications"
+    __table_args__ = (
+        Index("ix_workflow_notifications_project_read", "project_id", "read_at"),
+        Index("ix_workflow_notifications_event", "event_id"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    event_id: str | None = Field(default=None, foreign_key="workflow_events.id", index=True)
+    channel: str = "in_app"
+    title: str
+    body: str = ""
+    target_url: str | None = None
+    read_at: datetime | None = None
+    delivered_at: datetime | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class WorkflowStepType(SQLModel, table=True):
+    """Versioned workflow step registry entry used by the custom workflow runner."""
+
+    __tablename__ = "workflow_step_types"
+    __table_args__ = (
+        Index("ix_workflow_step_types_project_status", "project_id", "status"),
+        Index("ix_workflow_step_types_type_version", "type", "version"),
+        UniqueConstraint("project_id", "type", "version", name="uq_workflow_step_type_project_type_version"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    type: str = Field(index=True)
+    version: int = 1
+    label: str
+    description: str = ""
+    required_json: str = "[]"
+    input_schema_json: str = "{}"
+    ui_schema_json: str = "{}"
+    output_schema_json: str = "{}"
+    default_input_json: str = "{}"
+    category: str = "Utility"
+    risk_level: str = "low"
+    is_async: bool = False
+    auto_wait_defaults_json: str = "{}"
+    handler_kind: str = "builtin"
+    handler_config_json: str = "{}"
+    status: str = "active"  # active, disabled
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def required(self) -> list[str]:
+        try:
+            value = json.loads(self.required_json or "[]")
+            return [str(item) for item in value if item]
+        except json.JSONDecodeError:
+            return []
+
+    @required.setter
+    def required(self, value: list[str]):
+        self.required_json = json.dumps(value)
+
+    @property
+    def input_schema(self) -> dict[str, Any]:
+        return _json_object(self.input_schema_json)
+
+    @input_schema.setter
+    def input_schema(self, value: dict[str, Any]):
+        self.input_schema_json = json.dumps(value)
+
+    @property
+    def ui_schema(self) -> dict[str, Any]:
+        return _json_object(self.ui_schema_json)
+
+    @ui_schema.setter
+    def ui_schema(self, value: dict[str, Any]):
+        self.ui_schema_json = json.dumps(value)
+
+    @property
+    def output_schema(self) -> dict[str, Any]:
+        return _json_object(self.output_schema_json)
+
+    @output_schema.setter
+    def output_schema(self, value: dict[str, Any]):
+        self.output_schema_json = json.dumps(value)
+
+    @property
+    def default_input(self) -> dict[str, Any]:
+        return _json_object(self.default_input_json)
+
+    @default_input.setter
+    def default_input(self, value: dict[str, Any]):
+        self.default_input_json = json.dumps(value)
+
+    @property
+    def auto_wait_defaults(self) -> dict[str, Any]:
+        return _json_object(self.auto_wait_defaults_json)
+
+    @auto_wait_defaults.setter
+    def auto_wait_defaults(self, value: dict[str, Any]):
+        self.auto_wait_defaults_json = json.dumps(value)
+
+    @property
+    def handler_config(self) -> dict[str, Any]:
+        return _json_object(self.handler_config_json)
+
+    @handler_config.setter
+    def handler_config(self, value: dict[str, Any]):
+        self.handler_config_json = json.dumps(value)
+
+
+def _json_object(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
+        return {}
 
 
 # ========== Phase 1: Coverage and Memory Models ==========
@@ -2191,6 +2548,12 @@ class AutonomousMission(SQLModel, table=True):
     last_run_at: datetime | None = None
     next_run_at: datetime | None = None
     last_error: str | None = None
+    health_status: str = Field(default="healthy", index=True)  # healthy, degraded, blocked, offline
+    paused_reason: str | None = None
+    consecutive_failures: int = 0
+    last_heartbeat_at: datetime | None = None
+    current_stage: str | None = None
+    next_action: str | None = None
     total_runs: int = 0
     total_findings: int = 0
 
@@ -2244,6 +2607,7 @@ class AutonomousMissionRun(SQLModel, table=True):
     current_stage: str | None = None
     summary_json: str = "{}"
     artifacts_json: str = "[]"
+    checkpoint_json: str = "{}"
     error_message: str | None = None
     budget_used_usd: float = 0.0
     started_at: datetime | None = None
@@ -2274,6 +2638,100 @@ class AutonomousMissionRun(SQLModel, table=True):
     @artifacts.setter
     def artifacts(self, value: list[dict[str, Any]]):
         self.artifacts_json = json.dumps(value)
+
+    @property
+    def checkpoint(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.checkpoint_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @checkpoint.setter
+    def checkpoint(self, value: dict[str, Any]):
+        self.checkpoint_json = json.dumps(value)
+
+
+class AutonomousAgentWorkItem(SQLModel, table=True):
+    """Durable child work item assigned to one autonomous mission agent."""
+
+    __tablename__ = "autonomous_agent_work_items"
+    __table_args__ = (
+        Index("ix_autonomous_work_items_mission_status", "mission_id", "status"),
+        Index("ix_autonomous_work_items_project_status", "project_id", "status"),
+        Index("ix_autonomous_work_items_agent_task", "agent_task_id"),
+        Index("ix_autonomous_work_items_role_status", "role", "status"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    mission_id: str = Field(foreign_key="autonomous_missions.id", index=True)
+    run_id: str | None = Field(default=None, foreign_key="autonomous_mission_runs.id", index=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    role: str = Field(index=True)
+    objective: str = Field(sa_column=Column(Text))
+    assigned_surface_json: str = "[]"
+    status: str = Field(default="queued", index=True)  # queued, running, completed, failed, blocked, cancelled
+    priority: int = Field(default=50, index=True)
+    agent_task_id: str | None = Field(default=None, index=True)
+    progress_json: str = "{}"
+    artifacts_json: str = "[]"
+    result_json: str = "{}"
+    error_message: str | None = None
+    attempt_count: int = 0
+    budget_used_usd: float = 0.0
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def assigned_surface(self) -> list[str]:
+        try:
+            value = json.loads(self.assigned_surface_json or "[]")
+            return [str(item) for item in value if item]
+        except json.JSONDecodeError:
+            return []
+
+    @assigned_surface.setter
+    def assigned_surface(self, value: list[str]):
+        self.assigned_surface_json = json.dumps(value)
+
+    @property
+    def progress(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.progress_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @progress.setter
+    def progress(self, value: dict[str, Any]):
+        self.progress_json = json.dumps(value)
+
+    @property
+    def artifacts(self) -> list[dict[str, Any]]:
+        try:
+            value = json.loads(self.artifacts_json or "[]")
+            return value if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @artifacts.setter
+    def artifacts(self, value: list[dict[str, Any]]):
+        self.artifacts_json = json.dumps(value)
+
+    @property
+    def result(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.result_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @result.setter
+    def result(self, value: dict[str, Any]):
+        self.result_json = json.dumps(value)
 
 
 class AutonomousFinding(SQLModel, table=True):

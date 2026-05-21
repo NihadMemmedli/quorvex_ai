@@ -77,6 +77,9 @@ class AgentTask:
     max_budget_usd: float | None = None  # Optional spend cap
     task_budget: dict[str, int] | None = None  # Optional token budget
     include_hook_events: bool = False  # Stream hook lifecycle events
+    owner_type: str | None = None  # Logical owner, e.g. autopilot or agent_run
+    owner_id: str | None = None
+    owner_label: str | None = None
     telemetry: dict[str, Any] = field(default_factory=dict)  # Structured execution diagnostics
 
     def to_dict(self) -> dict:
@@ -105,6 +108,9 @@ class AgentTask:
             "max_budget_usd": self.max_budget_usd,
             "task_budget": self.task_budget,
             "include_hook_events": self.include_hook_events,
+            "owner_type": self.owner_type,
+            "owner_id": self.owner_id,
+            "owner_label": self.owner_label,
             "telemetry": self.telemetry,
         }
 
@@ -135,6 +141,9 @@ class AgentTask:
             max_budget_usd=data.get("max_budget_usd"),
             task_budget=data.get("task_budget"),
             include_hook_events=bool(data.get("include_hook_events", False)),
+            owner_type=data.get("owner_type"),
+            owner_id=data.get("owner_id"),
+            owner_label=data.get("owner_label"),
             telemetry=data.get("telemetry") or {},
         )
 
@@ -243,6 +252,9 @@ class AgentQueue:
         max_budget_usd: float | None = None,
         task_budget: dict[str, int] | None = None,
         include_hook_events: bool = False,
+        owner_type: str | None = None,
+        owner_id: str | None = None,
+        owner_label: str | None = None,
     ) -> str:
         """
         Add an agent task to the queue.
@@ -286,6 +298,9 @@ class AgentQueue:
             max_budget_usd=max_budget_usd,
             task_budget=task_budget,
             include_hook_events=include_hook_events,
+            owner_type=owner_type,
+            owner_id=owner_id,
+            owner_label=owner_label,
         )
 
         # Atomic store + enqueue
@@ -705,10 +720,12 @@ class AgentQueue:
         if task_data:
             task = AgentTask.from_dict(json.loads(task_data))
 
-            # Don't overwrite CANCELLED status
-            if task.status == AgentTaskStatus.CANCELLED:
+            # Don't overwrite terminal states set by cancellation/cleanup.
+            if task.status in (AgentTaskStatus.CANCELLED, AgentTaskStatus.TIMEOUT) or (
+                task.status == AgentTaskStatus.FAILED and task.completed_at is not None
+            ):
                 logger.info(
-                    f"Task {task_id} was cancelled, not overwriting with {'completed' if success else 'failed'}"
+                    f"Task {task_id} is already {task.status.value}, not overwriting with {'completed' if success else 'failed'}"
                 )
                 await redis.srem(self.RUNNING_KEY, task_id)
                 return
@@ -813,6 +830,7 @@ class AgentQueue:
             task = await self.get_task(task_id)
             progress = await self.get_task_progress(task_id) or {}
             heartbeat_alive = await self.check_heartbeat(task_id)
+            owner_state = await self._get_owner_state(task) if task else None
 
             progress_summary = {
                 key: progress.get(key)
@@ -842,6 +860,12 @@ class AgentQueue:
                     "started_at": task.started_at.isoformat() if task and task.started_at else None,
                     "timeout_seconds": task.timeout_seconds if task else None,
                     "heartbeat_alive": heartbeat_alive,
+                    "owner_type": task.owner_type if task else None,
+                    "owner_id": task.owner_id if task else None,
+                    "owner_label": task.owner_label if task else None,
+                    "owner_status": owner_state.get("status") if owner_state else None,
+                    "owner_terminal": bool(owner_state and owner_state.get("terminal")),
+                    "orphaned": (not heartbeat_alive) or bool(owner_state and owner_state.get("terminal")),
                     "progress": progress_summary,
                 }
             )
@@ -879,6 +903,204 @@ class AgentQueue:
                 "error": str(e),
             }
 
+    async def _get_owner_state(self, task: AgentTask) -> dict[str, Any] | None:
+        """Return lifecycle state for the task owner, if one is known."""
+        if not task.owner_type or not task.owner_id:
+            return None
+
+        terminal_statuses = {"completed", "failed", "cancelled", "error", "stopped"}
+        try:
+            from sqlmodel import Session
+
+            from orchestrator.api.db import engine
+            from orchestrator.api.models_db import AgentRun, AutoPilotSession, AutonomousAgentWorkItem, AutonomousMission
+
+            with Session(engine) as session:
+                if task.owner_type == "autopilot":
+                    owner = session.get(AutoPilotSession, task.owner_id)
+                elif task.owner_type == "agent_run":
+                    owner = session.get(AgentRun, task.owner_id)
+                elif task.owner_type == "autonomous_work_item":
+                    owner = session.get(AutonomousAgentWorkItem, task.owner_id)
+                    if owner and owner.mission_id:
+                        mission = session.get(AutonomousMission, owner.mission_id)
+                        if mission and mission.status in {"cancelled", "completed"}:
+                            return {
+                                "type": task.owner_type,
+                                "id": task.owner_id,
+                                "label": task.owner_label,
+                                "status": mission.status,
+                                "terminal": True,
+                            }
+                else:
+                    owner = None
+
+                if not owner:
+                    return {
+                        "type": task.owner_type,
+                        "id": task.owner_id,
+                        "label": task.owner_label,
+                        "status": "missing",
+                        "terminal": True,
+                    }
+
+                status = str(getattr(owner, "status", "") or "unknown")
+                return {
+                    "type": task.owner_type,
+                    "id": task.owner_id,
+                    "label": task.owner_label,
+                    "status": status,
+                    "terminal": status in terminal_statuses,
+                }
+        except Exception as exc:
+            logger.debug("Failed to resolve owner for agent task %s: %s", task.id, exc)
+            return None
+
+    async def _finish_task_for_cleanup(
+        self,
+        redis,
+        task: AgentTask,
+        status: AgentTaskStatus,
+        error: str,
+    ) -> None:
+        """Move a queued/running task to a terminal state and signal any worker to stop."""
+        now = datetime.utcnow()
+        task.status = status
+        task.completed_at = now
+        task.error = error
+        await redis.hset(self.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+        await redis.lrem(self.QUEUE_KEY, 0, task.id)
+        await redis.srem(self.RUNNING_KEY, task.id)
+        await redis.set(f"{self.CANCEL_PREFIX}{task.id}", "1", ex=3600)
+        await redis.delete(f"{self.PAUSE_PREFIX}{task.id}")
+        await redis.delete(f"{self.HEARTBEAT_PREFIX}{task.id}")
+
+    async def cleanup_orphaned_and_stale_tasks(self, max_age_minutes: int = 45) -> dict[str, int]:
+        """Clean tasks whose worker, owner, or timeout state is no longer valid."""
+        redis = await self._ensure_connected()
+        now = datetime.utcnow()
+        cutoff = now - timedelta(minutes=max_age_minutes)
+        counts = {
+            "cancelled_orphaned": 0,
+            "timed_out": 0,
+            "terminal_owner": 0,
+            "orphaned_queued": 0,
+            "missing_task_refs": 0,
+            "skipped_active": 0,
+        }
+
+        running_ids = await redis.smembers(self.RUNNING_KEY)
+        for task_id in running_ids:
+            task = await self.get_task(task_id)
+            if not task:
+                await redis.srem(self.RUNNING_KEY, task_id)
+                counts["missing_task_refs"] += 1
+                continue
+
+            if task.status == AgentTaskStatus.PAUSED:
+                owner_state = await self._get_owner_state(task)
+                if owner_state and owner_state.get("terminal"):
+                    owner_status = owner_state.get("status")
+                    status = AgentTaskStatus.CANCELLED if owner_status == "cancelled" else AgentTaskStatus.FAILED
+                    await self._finish_task_for_cleanup(
+                        redis,
+                        task,
+                        status,
+                        f"Agent task stopped because owner {task.owner_type}:{task.owner_id} is {owner_status}",
+                    )
+                    counts["terminal_owner"] += 1
+                else:
+                    counts["skipped_active"] += 1
+                continue
+
+            if task.status != AgentTaskStatus.RUNNING:
+                await redis.srem(self.RUNNING_KEY, task_id)
+                counts["cancelled_orphaned"] += 1
+                continue
+
+            owner_state = await self._get_owner_state(task)
+            owner_terminal = bool(owner_state and owner_state.get("terminal"))
+            started_at = task.started_at or task.created_at
+            elapsed_seconds = (now - started_at).total_seconds() if started_at else 0
+            task_timeout = max(1, int(task.timeout_seconds or 1800))
+            heartbeat_alive = await self.check_heartbeat(task_id)
+
+            if owner_terminal:
+                owner_status = owner_state.get("status") if owner_state else "terminal"
+                status = AgentTaskStatus.CANCELLED if owner_status == "cancelled" else AgentTaskStatus.FAILED
+                await self._finish_task_for_cleanup(
+                    redis,
+                    task,
+                    status,
+                    f"Agent task stopped because owner {task.owner_type}:{task.owner_id} is {owner_status}",
+                )
+                counts["terminal_owner"] += 1
+            elif elapsed_seconds > task_timeout:
+                await self._finish_task_for_cleanup(
+                    redis,
+                    task,
+                    AgentTaskStatus.TIMEOUT,
+                    f"Agent task timed out after {task_timeout} seconds",
+                )
+                counts["timed_out"] += 1
+            elif task.started_at and task.started_at < cutoff:
+                await self._finish_task_for_cleanup(
+                    redis,
+                    task,
+                    AgentTaskStatus.TIMEOUT,
+                    f"Agent task timed out after {max_age_minutes} minutes (stale cleanup)",
+                )
+                counts["timed_out"] += 1
+            elif not heartbeat_alive and elapsed_seconds > 120:
+                await self._finish_task_for_cleanup(
+                    redis,
+                    task,
+                    AgentTaskStatus.FAILED,
+                    "Agent task heartbeat was lost",
+                )
+                counts["cancelled_orphaned"] += 1
+            else:
+                counts["skipped_active"] += 1
+
+        all_tasks = await redis.hgetall(self.TASKS_KEY)
+        queue_members = await redis.lrange(self.QUEUE_KEY, 0, -1)
+        queue_set = set(queue_members)
+
+        for task_id, task_data_str in all_tasks.items():
+            try:
+                task = AgentTask.from_dict(json.loads(task_data_str))
+            except Exception:
+                continue
+
+            if task.status not in (AgentTaskStatus.QUEUED, AgentTaskStatus.PAUSED):
+                continue
+
+            owner_state = await self._get_owner_state(task)
+            if owner_state and owner_state.get("terminal"):
+                owner_status = owner_state.get("status")
+                status = AgentTaskStatus.CANCELLED if owner_status == "cancelled" else AgentTaskStatus.FAILED
+                await self._finish_task_for_cleanup(
+                    redis,
+                    task,
+                    status,
+                    f"Agent task stopped because owner {task.owner_type}:{task.owner_id} is {owner_status}",
+                )
+                counts["terminal_owner"] += 1
+                continue
+
+            if task.status == AgentTaskStatus.QUEUED and task_id not in queue_set:
+                age_minutes = (now - task.created_at).total_seconds() / 60 if task.created_at else 0
+                if age_minutes > 5:
+                    await self._finish_task_for_cleanup(
+                        redis,
+                        task,
+                        AgentTaskStatus.FAILED,
+                        "Orphaned task: found in QUEUED state but missing from queue list",
+                    )
+                    counts["orphaned_queued"] += 1
+
+        return counts
+
     async def cleanup_orphaned_tasks(self, grace_seconds: int = 15) -> int:
         """Clean up all 'running' tasks on startup.
 
@@ -913,8 +1135,10 @@ class AgentQueue:
                 cleaned += 1
                 logger.warning(f"Cleaned orphaned task {task_id} (started={task.started_at})")
 
+        cleanup_counts = await self.cleanup_orphaned_and_stale_tasks()
+        cleaned += sum(v for k, v in cleanup_counts.items() if k != "skipped_active")
         if cleaned:
-            logger.info(f"Startup cleanup: cleared {cleaned} orphaned running tasks")
+            logger.info(f"Startup cleanup: cleared {cleaned} orphaned/stale agent tasks")
         return cleaned
 
     async def flush_queue(self) -> dict:
@@ -965,50 +1189,10 @@ class AgentQueue:
         Default 45 min, provides buffer above 30-min agent timeout.
         Also detects tasks in QUEUED status that are missing from the queue list.
         """
-        redis = await self._ensure_connected()
-        cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
-        cleaned = 0
-
-        # Clean up stale running tasks
-        running_ids = await redis.smembers(self.RUNNING_KEY)
-        for task_id in running_ids:
-            task = await self.get_task(task_id)
-            if task and task.started_at and task.started_at < cutoff:
-                task.status = AgentTaskStatus.TIMEOUT
-                task.completed_at = datetime.utcnow()
-                task.error = f"Task timed out after {max_age_minutes} minutes (stale cleanup)"
-
-                await redis.hset(self.TASKS_KEY, task_id, json.dumps(task.to_dict()))
-                await redis.srem(self.RUNNING_KEY, task_id)
-                # Also clean up heartbeat key
-                await redis.delete(f"{self.HEARTBEAT_PREFIX}{task_id}")
-                cleaned += 1
-                logger.warning(f"Cleaned up stale task {task_id}")
-
-        # Detect orphaned queued tasks (in QUEUED status but missing from queue list)
-        all_tasks = await redis.hgetall(self.TASKS_KEY)
-        queue_members = await redis.lrange(self.QUEUE_KEY, 0, -1)
-        queue_set = set(queue_members)
-
-        for task_id, task_data_str in all_tasks.items():
-            try:
-                task_data = json.loads(task_data_str)
-                if task_data.get("status") == "queued" and task_id not in queue_set:
-                    created = task_data.get("created_at")
-                    if created:
-                        created_dt = datetime.fromisoformat(created)
-                        age_minutes = (datetime.utcnow() - created_dt).total_seconds() / 60
-                        if age_minutes > 5:  # Grace period of 5 minutes
-                            task = AgentTask.from_dict(task_data)
-                            task.status = AgentTaskStatus.FAILED
-                            task.completed_at = datetime.utcnow()
-                            task.error = "Orphaned task: found in QUEUED state but missing from queue list"
-                            await redis.hset(self.TASKS_KEY, task_id, json.dumps(task.to_dict()))
-                            cleaned += 1
-                            logger.warning(f"Cleaned orphaned queued task {task_id} (age: {age_minutes:.0f}m)")
-            except (json.JSONDecodeError, ValueError):
-                continue
-
+        counts = await self.cleanup_orphaned_and_stale_tasks(max_age_minutes=max_age_minutes)
+        cleaned = sum(v for k, v in counts.items() if k != "skipped_active")
+        if cleaned:
+            logger.warning("Cleaned agent queue tasks: %s", counts)
         return cleaned
 
     async def cleanup_completed_tasks(self, max_age_hours: int = 24) -> int:

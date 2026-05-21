@@ -72,6 +72,11 @@ const bottomLinks: NavItem[] = [
     { href: '/settings', label: 'Settings', icon: Settings },
 ];
 
+const adminLinks: NavItem[] = [
+    { href: '/admin/users', label: 'User Management', icon: Users },
+    { href: '/admin/workflow-step-types', label: 'Step Registry', icon: Workflow },
+];
+
 const STORAGE_KEY = 'sidebar-collapsed-groups';
 const DEFAULT_COLLAPSED_GROUPS: Record<string, boolean> = {
     'supporting-workflows': false,
@@ -473,37 +478,7 @@ export function Sidebar() {
                             Admin
                         </div>
 
-                        <Link
-                            href="/admin/users"
-                            className="sidebar-admin-item sidebar-nav-item"
-                            style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '0.65rem',
-                                padding: '0.55rem 0.75rem',
-                                borderRadius: 'var(--radius-sm)',
-                                position: 'relative',
-                                background: (pathname === '/admin/users' || pathname.startsWith('/admin/users/'))
-                                    ? 'linear-gradient(90deg, rgba(245, 158, 11, 0.1), rgba(245, 158, 11, 0.03))'
-                                    : 'transparent',
-                                color: (pathname === '/admin/users' || pathname.startsWith('/admin/users/'))
-                                    ? '#f59e0b' : 'var(--text-secondary)',
-                                fontWeight: (pathname === '/admin/users' || pathname.startsWith('/admin/users/')) ? 600 : 500,
-                                fontSize: '0.875rem',
-                                letterSpacing: '-0.01em',
-                                transition: 'all 0.2s var(--ease-smooth)',
-                                textDecoration: 'none',
-                                borderLeft: (pathname === '/admin/users' || pathname.startsWith('/admin/users/'))
-                                    ? '3px solid #f59e0b'
-                                    : '3px solid transparent',
-                                boxShadow: (pathname === '/admin/users' || pathname.startsWith('/admin/users/'))
-                                    ? '-1px 0 8px rgba(245, 158, 11, 0.15)'
-                                    : 'none',
-                            }}
-                        >
-                            <Users size={18} style={{ flexShrink: 0 }} />
-                            <span>User Management</span>
-                        </Link>
+                        {adminLinks.map(link => renderNavItem(link, true))}
                     </>
                 )}
             </nav>

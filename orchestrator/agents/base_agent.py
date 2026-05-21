@@ -181,6 +181,9 @@ class BaseAgent:
         self.agent_tool_profile: str | None = None
         self.allowed_tools: list[str] | None = None
         self.tools: list[str] | dict[str, str] | None = None
+        self.owner_type: str | None = None
+        self.owner_id: str | None = None
+        self.owner_label: str | None = None
 
     def _agent_memory_project_id(self) -> str | None:
         return os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID")
@@ -569,6 +572,9 @@ echo "done" > {done_file}
                 allowed_tools=tool_config["allowed_tools"],
                 tools=tool_config.get("tools"),
                 permission_mode=self._resolved_permission_mode(),
+                owner_type=self.owner_type,
+                owner_id=self.owner_id,
+                owner_label=self.owner_label,
             )
 
             logger.info(f"[QUEUE] Task enqueued: {task_id}, waiting for result...")

@@ -14,6 +14,7 @@ type WorkflowDefinition = {
     type: string;
     label?: string;
     input?: Record<string, unknown>;
+    continue_on_error?: boolean;
   }>;
 };
 
@@ -93,6 +94,11 @@ test.describe('Workflow creation dashboard', () => {
       await autopilotStep.getByPlaceholder('https://example.com').fill('https://example.com');
       await autopilotStep.getByRole('spinbutton').nth(0).fill('1');
       await autopilotStep.getByRole('spinbutton').nth(1).fill('1');
+      const continueOnErrorSwitch = autopilotStep.getByRole('switch', { name: 'Continue if this step fails' });
+      await expect(continueOnErrorSwitch).toHaveAttribute('aria-checked', 'false');
+      await continueOnErrorSwitch.click();
+      await expect(continueOnErrorSwitch).toHaveAttribute('aria-checked', 'true');
+      await expect(continueOnErrorSwitch).toHaveCSS('background-color', 'rgb(59, 130, 246)');
 
       const createResponsePromise = page.waitForResponse(response =>
         response.url() === `${API_BASE}/workflows/definitions` &&
@@ -115,6 +121,7 @@ test.describe('Workflow creation dashboard', () => {
       });
       expect(createPayload.steps.map(step => step.key)).toEqual(['autopilot', 'wait_autopilot', 'review']);
       expect(createPayload.steps.map(step => step.type)).toEqual(['start_autopilot', 'wait_for_status', 'review_gate']);
+      expect(createPayload.steps[0].continue_on_error).toBe(true);
 
       const createdDefinition = await createResponse.json() as WorkflowDefinition;
       createdDefinitionId = createdDefinition.id;
@@ -136,6 +143,16 @@ test.describe('Workflow creation dashboard', () => {
         description: workflowDescription,
       });
       expect(persistedDefinition?.steps.map(step => step.type)).toEqual(['start_autopilot', 'wait_for_status', 'review_gate']);
+      expect(persistedDefinition?.steps[0].continue_on_error).toBe(true);
+
+      await workflowCard.getByRole('button', { name: /run from a specific step/i }).click();
+      await page.getByRole('menuitem', { name: 'Edit workflow' }).click();
+      await expect(page.getByRole('heading', { name: 'Edit workflow' })).toBeVisible();
+      const reloadedAutopilotStep = page.locator('article').filter({ hasText: 'Run AutoPilot' }).first();
+      await expect(reloadedAutopilotStep.getByRole('switch', { name: 'Continue if this step fails' })).toHaveAttribute('aria-checked', 'true');
+
+      await page.getByRole('button', { name: /Library/ }).click();
+      await expect(page.getByRole('heading', { name: 'Workflow library' })).toBeVisible();
 
       await workflowCard.getByRole('button', { name: /run from a specific step/i }).click();
       const startResponsePromise = page.waitForResponse(response =>
@@ -196,6 +213,132 @@ test.describe('Workflow creation dashboard', () => {
     }
   });
 
+  test('guides users through missing custom agent setup', async ({ page }) => {
+    await page.route(`${API_BASE}/api/agents/definitions**`, async route => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: '[]',
+      });
+    });
+
+    await loginThroughUi(page);
+
+    await page.getByRole('button', { name: 'New workflow' }).click();
+    await expect(page.getByRole('heading', { name: 'Create workflow' })).toBeVisible();
+
+    const builder = page.locator('main');
+    await builder.getByRole('textbox').nth(0).fill(`Custom Agent UX ${Date.now()}`);
+    await page.getByRole('button', { name: /Start Custom Agent/i }).click();
+
+    const customAgentStep = page.locator('article').filter({ hasText: 'Start Custom Agent' }).first();
+    await expect(customAgentStep.getByText('No agents available')).toBeVisible();
+    await expect(customAgentStep.getByText('Create or activate an agent definition before using this step.')).toBeVisible();
+    await expect(customAgentStep.getByRole('link', { name: 'Manage agents' })).toHaveAttribute('href', '/agents');
+    await expect(customAgentStep.getByText('Type: start custom agent')).toHaveCount(0);
+    await expect(customAgentStep.getByRole('button', { name: 'Advanced' })).toBeVisible();
+
+    await customAgentStep.getByRole('button', { name: 'Advanced' }).click();
+    await expect(customAgentStep.getByRole('button', { name: 'Hide advanced' })).toBeVisible();
+    await expect(customAgentStep.getByText('Edit raw step input JSON.')).toBeVisible();
+
+    const waitStep = page.locator('article').filter({ hasText: 'Wait for Start Custom Agent' }).first();
+    await expect(waitStep.getByText(/Depends on: Start Custom Agent|Depends on: Run Custom Agent/)).toBeVisible();
+    await expect(waitStep.getByText(/Waits for: Start Custom Agent|Waits for: Run Custom Agent/)).toBeVisible();
+
+    await page.getByRole('button', { name: 'Create Workflow' }).click();
+    await expect(page.getByText('Choose an agent before creating this workflow.').first()).toBeVisible();
+  });
+
+  test('auto-connects generation steps to matching earlier async outputs', async ({ page }) => {
+    await loginThroughUi(page);
+
+    await page.getByRole('button', { name: 'New workflow' }).click();
+    await expect(page.getByRole('heading', { name: 'Create workflow' })).toBeVisible();
+
+    await page.getByRole('button', { name: 'Start Exploration' }).click();
+    const waitStep = page.locator('article').filter({ hasText: 'Wait for Start Exploration' }).first();
+    await waitStep.getByRole('button', { name: /Add Generate Requirements/i }).click();
+
+    const requirementsStep = page.locator('article').filter({ hasText: 'Generate Requirements' }).first();
+    await expect(requirementsStep.getByText('Use Start Exploration output')).toBeVisible();
+    await expect(requirementsStep.getByText('Connected to Start Exploration.')).toBeVisible();
+    await expect(requirementsStep.getByDisplayValue('{{steps.exploration_1.external_id}}')).toHaveCount(0);
+    await expect(requirementsStep.getByText('Add Start Exploration before Generate Requirements')).toHaveCount(0);
+  });
+
+  test('archives a workflow from the library menu and hides it from the active list', async ({ page, request }) => {
+    const workflowName = `Archive Workflow ${Date.now()}`;
+    const token = await getAccessToken(request);
+    const headers = { Authorization: `Bearer ${token}` };
+    let createdDefinitionId: string | undefined;
+
+    try {
+      const createResponse = await request.post(`${API_BASE}/workflows/definitions`, {
+        headers,
+        data: {
+          name: workflowName,
+          description: 'Created by the workflow archive E2E test.',
+          project_id: 'default',
+          steps: [
+            {
+              key: 'autopilot',
+              type: 'start_autopilot',
+              label: 'Run AutoPilot',
+              input: { entry_urls: ['https://example.com'], max_interactions: 1, max_specs: 1 },
+            },
+            {
+              key: 'wait_autopilot',
+              type: 'wait_for_status',
+              label: 'Wait for AutoPilot',
+              input: { source_step: 'autopilot', timeout_seconds: 30, poll_seconds: 5 },
+            },
+            {
+              key: 'review',
+              type: 'review_gate',
+              label: 'Review Results',
+              input: { question: 'Review the current workflow state before continuing.' },
+            },
+          ],
+        },
+      });
+      expect(createResponse.ok()).toBeTruthy();
+
+      const createdDefinition = await createResponse.json() as WorkflowDefinition;
+      createdDefinitionId = createdDefinition.id;
+
+      await loginThroughUi(page);
+
+      const workflowCard = page.locator('article').filter({ hasText: workflowName }).first();
+      await expect(workflowCard).toBeVisible();
+
+      await workflowCard.getByRole('button', { name: /run from a specific step/i }).click();
+      const archiveResponsePromise = page.waitForResponse(response =>
+        response.url() === `${API_BASE}/workflows/definitions/${createdDefinitionId}?project_id=default` &&
+        response.request().method() === 'DELETE',
+      );
+      await page.getByRole('menuitem', { name: 'Archive workflow' }).click();
+      const archiveResponse = await archiveResponsePromise;
+      expect(archiveResponse.ok()).toBeTruthy();
+
+      await expect(workflowCard).toBeHidden();
+
+      const definitionsResponse = await request.get(`${API_BASE}/workflows/definitions?project_id=default`, {
+        headers,
+      });
+      expect(definitionsResponse.ok()).toBeTruthy();
+      const definitions = await definitionsResponse.json() as WorkflowDefinition[];
+      expect(definitions.some(definition => definition.id === createdDefinitionId)).toBeFalsy();
+    } finally {
+      if (createdDefinitionId) {
+        await request.delete(`${API_BASE}/workflows/definitions/${createdDefinitionId}?project_id=default`, {
+          headers,
+          failOnStatusCode: false,
+        });
+      }
+    }
+  });
+
   test('creates a workflow from a QA template with guided fields', async ({ page, request }) => {
     const workflowName = `Template Workflow ${Date.now()}`;
     let createdDefinitionId: string | undefined;
@@ -206,7 +349,7 @@ test.describe('Workflow creation dashboard', () => {
       await page.getByRole('button', { name: /Templates \(/ }).click();
       await expect(page.getByRole('heading', { name: 'Workflow templates' })).toBeVisible();
 
-      const templateCard = page.locator('article').filter({ hasText: 'Explore To Requirements' }).first();
+      const templateCard = page.locator('article').filter({ hasText: 'Explore Requirements Review' }).first();
       await templateCard.getByRole('button', { name: 'Use template' }).click();
       await expect(page.getByRole('heading', { name: 'Create workflow' })).toBeVisible();
 
@@ -218,7 +361,9 @@ test.describe('Workflow creation dashboard', () => {
       await explorationStep.getByRole('spinbutton').fill('1');
 
       const requirementsStep = page.locator('article').filter({ hasText: 'Generate Requirements' }).first();
-      await expect(requirementsStep.getByDisplayValue('{{steps.explore.external_id}}')).toBeVisible();
+      await expect(requirementsStep.getByText('Use Explore Application output')).toBeVisible();
+      await expect(requirementsStep.getByText('Connected to Explore Application.')).toBeVisible();
+      await expect(requirementsStep.getByDisplayValue('{{steps.explore.external_id}}')).toHaveCount(0);
 
       const createResponsePromise = page.waitForResponse(response =>
         response.url() === `${API_BASE}/workflows/definitions` &&

@@ -22,6 +22,7 @@ from orchestrator.api.models_db import (  # noqa: F401
     AgentRun,
     ApplicationMap,
     ArchiveJob,
+    AutonomousAgentWorkItem,
     AutonomousApproval,
     AutonomousFinding,
     AutonomousMission,
@@ -55,6 +56,15 @@ from orchestrator.api.models_db import (  # noqa: F401
     TestrailCaseMapping,
     TestrailRunMapping,
     TestRun,
+    WorkflowDefinition,
+    WorkflowDefinitionRevision,
+    WorkflowEvent,
+    WorkflowNotification,
+    WorkflowRun,
+    WorkflowRunStep,
+    WorkflowSchedule,
+    WorkflowScheduleExecution,
+    WorkflowStepType,
 )
 
 # Alembic Config object

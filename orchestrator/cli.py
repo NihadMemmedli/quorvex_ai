@@ -557,6 +557,11 @@ def main():
     parser.add_argument("--split-output-dir", help="Output directory for split specs (default: <spec-name>-tests/)")
     parser.add_argument("--memory-stats", action="store_true", help="Show memory system statistics and exit")
     parser.add_argument(
+        "--sync-workflow-step-types",
+        action="store_true",
+        help="Sync built-in workflow step registry metadata and exit.",
+    )
+    parser.add_argument(
         "--validate-only",
         action="store_true",
         help="Validate spec only: check format, template includes, and target URL reachability (no pipeline run). Useful for CI.",
@@ -634,6 +639,19 @@ def main():
     parser.add_argument("--native-generator", action="store_true", help=argparse.SUPPRESS)
 
     args = parser.parse_args()
+
+    if args.sync_workflow_step_types:
+        from sqlmodel import Session
+
+        from orchestrator.api.db import engine, init_db
+        from orchestrator.services.workflow_step_registry import sync_builtin_workflow_step_types
+
+        os.environ.setdefault("JWT_SECRET_KEY", "workflow-step-registry-sync-local-secret")
+        init_db()
+        with Session(engine) as session:
+            synced = sync_builtin_workflow_step_types(session)
+        print(f"Synced {len(synced)} built-in workflow step types.")
+        sys.exit(0)
 
     # --- MEMORY STATS COMMAND ---
     if args.memory_stats:

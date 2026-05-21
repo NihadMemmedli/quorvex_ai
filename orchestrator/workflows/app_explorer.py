@@ -174,11 +174,17 @@ class AppExplorer:
         on_task_enqueued=None,
         on_progress=None,
         on_tool_use=None,
+        owner_type: str | None = None,
+        owner_id: str | None = None,
+        owner_label: str | None = None,
     ):
         self.project_id = project_id
         self.on_task_enqueued = on_task_enqueued
         self.on_progress = on_progress
         self.on_tool_use = on_tool_use
+        self.owner_type = owner_type
+        self.owner_id = owner_id
+        self.owner_label = owner_label
         self.output_dir = self._ensure_output_dir()
         self._last_prompt_metadata: dict[str, Any] = {}
         self._last_agent_stats: dict[str, Any] = {}
@@ -1051,6 +1057,9 @@ When stopping, output any missing flow records you can infer from observed page 
                 session_dir=session_dir,
                 on_task_enqueued=self.on_task_enqueued,
                 max_browser_tool_calls=config.max_interactions,
+                owner_type=self.owner_type,
+                owner_id=self.owner_id,
+                owner_label=self.owner_label,
             )
 
             result = await runner.run(prompt)

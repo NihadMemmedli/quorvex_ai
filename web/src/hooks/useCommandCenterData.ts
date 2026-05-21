@@ -74,8 +74,18 @@ export interface AgentQueueSummary {
     queued?: number;
     workers_alive?: number;
     stale_running?: number;
+    linked_tasks?: number;
+    background_tasks?: number;
+    orphaned_tasks?: number;
     oldest_queued_age_seconds?: number | null;
     by_status?: Record<string, number>;
+    browser_pool?: {
+        max_browsers?: number;
+        running?: number;
+        queued?: number;
+        available?: number;
+        by_type?: Record<string, number>;
+    };
     running_tasks?: AgentQueueTaskSummary[];
 }
 
@@ -89,6 +99,12 @@ export interface AgentQueueTaskSummary {
     started_at?: string | null;
     timeout_seconds?: number | null;
     heartbeat_alive?: boolean;
+    owner_type?: string | null;
+    owner_id?: string | null;
+    owner_label?: string | null;
+    owner_status?: string | null;
+    owner_terminal?: boolean;
+    orphaned?: boolean;
     progress?: {
         phase?: string;
         activity_label?: string;

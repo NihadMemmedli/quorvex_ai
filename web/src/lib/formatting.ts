@@ -2,11 +2,25 @@
  * Shared formatting utilities used across testing module pages.
  */
 
+export function parseDateMs(dateStr?: string | null): number | null {
+    if (!dateStr) return null;
+    const trimmed = dateStr.trim();
+    if (!trimmed) return null;
+    const hasTimezone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(trimmed);
+    const normalized = hasTimezone ? trimmed : `${trimmed}Z`;
+    const parsed = new Date(normalized).getTime();
+    if (Number.isFinite(parsed)) return parsed;
+    const fallback = new Date(trimmed).getTime();
+    return Number.isFinite(fallback) ? fallback : null;
+}
+
 export function timeAgo(dateStr: string): string {
     const now = Date.now();
-    const then = new Date(dateStr).getTime();
+    const then = parseDateMs(dateStr);
+    if (then === null) return '-';
     const diff = Math.max(0, now - then);
     const seconds = Math.floor(diff / 1000);
+    if (seconds < 10) return 'just now';
     if (seconds < 60) return `${seconds}s ago`;
     const minutes = Math.floor(seconds / 60);
     if (minutes < 60) return `${minutes}m ago`;
@@ -17,7 +31,8 @@ export function timeAgo(dateStr: string): string {
 }
 
 export function formatDate(dateStr: string): string {
-    return new Date(dateStr).toLocaleString();
+    const parsed = parseDateMs(dateStr);
+    return parsed === null ? '-' : new Date(parsed).toLocaleString();
 }
 
 export function formatDuration(seconds?: number): string {
@@ -37,6 +52,8 @@ export function formatBytes(bytes: number): string {
 }
 
 export function formatTimestamp(ts: string): string {
-    const d = new Date(ts);
+    const parsed = parseDateMs(ts);
+    if (parsed === null) return '-';
+    const d = new Date(parsed);
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }

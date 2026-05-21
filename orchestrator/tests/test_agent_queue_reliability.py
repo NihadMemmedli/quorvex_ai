@@ -2,7 +2,7 @@ import json
 import sys
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -52,8 +52,17 @@ class _MemoryRedis:
     async def hget(self, key, field):
         return self.hashes.get(key, {}).get(field)
 
+    async def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
     async def hset(self, key, field, value):
         self.hashes.setdefault(key, {})[field] = value
+
+    async def lrange(self, key, start, end):
+        values = self.lists.get(key, [])
+        if end == -1:
+            end = len(values) - 1
+        return values[start : end + 1]
 
     async def lrem(self, key, count, value):
         values = self.lists.get(key, [])
@@ -64,8 +73,15 @@ class _MemoryRedis:
     async def rpush(self, key, value):
         self.lists.setdefault(key, []).append(value)
 
+    async def lpop(self, key):
+        values = self.lists.get(key, [])
+        return values.pop(0) if values else None
+
     async def sadd(self, key, value):
         self.sets.setdefault(key, set()).add(value)
+
+    async def smembers(self, key):
+        return set(self.sets.get(key, set()))
 
     async def srem(self, key, value):
         self.sets.setdefault(key, set()).discard(value)
@@ -75,6 +91,9 @@ class _MemoryRedis:
 
     async def set(self, key, value, ex=None):
         self.values[key] = value
+
+    async def get(self, key):
+        return self.values.get(key)
 
     async def delete(self, key):
         self.values.pop(key, None)
@@ -104,6 +123,9 @@ def test_agent_task_round_trips_execution_telemetry():
         max_budget_usd=0.25,
         task_budget={"total": 25000},
         include_hook_events=True,
+        owner_type="autopilot",
+        owner_id="autopilot-test",
+        owner_label="AutoPilot test",
         telemetry={
             "worker_id": "worker-1",
             "tool_calls": 4,
@@ -123,6 +145,9 @@ def test_agent_task_round_trips_execution_telemetry():
     assert restored.max_budget_usd == 0.25
     assert restored.task_budget == {"total": 25000}
     assert restored.include_hook_events is True
+    assert restored.owner_type == "autopilot"
+    assert restored.owner_id == "autopilot-test"
+    assert restored.owner_label == "AutoPilot test"
     assert restored.telemetry["worker_id"] == "worker-1"
     assert restored.telemetry["tool_calls"] == 4
     assert restored.telemetry["interactions"] == 2
@@ -228,6 +253,89 @@ async def test_cancel_running_task_sets_cancel_flag_and_removes_running_membersh
     assert await queue.is_cancelled(task.id) is True
 
 
+@pytest.mark.asyncio
+async def test_cleanup_times_out_running_task_by_task_timeout():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    started_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=10)
+    task = AgentTask(
+        id="agent-timeout",
+        prompt="inspect",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-1",
+        started_at=started_at,
+        timeout_seconds=60,
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.sadd(queue.RUNNING_KEY, task.id)
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks()
+
+    cleaned = await queue.get_task(task.id)
+    assert counts["timed_out"] == 1
+    assert cleaned.status == AgentTaskStatus.TIMEOUT
+    assert await redis.sismember(queue.RUNNING_KEY, task.id) is False
+    assert await queue.is_cancelled(task.id) is True
+
+
+@pytest.mark.asyncio
+async def test_cleanup_cancels_task_when_owner_is_terminal():
+    redis = _MemoryRedis()
+
+    class OwnerTerminalQueue(_MemoryQueue):
+        async def _get_owner_state(self, task):
+            return {
+                "type": task.owner_type,
+                "id": task.owner_id,
+                "label": task.owner_label,
+                "status": "failed",
+                "terminal": True,
+            }
+
+    queue = OwnerTerminalQueue(redis)
+    task = AgentTask(
+        id="agent-terminal-owner",
+        prompt="inspect",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-1",
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+        owner_type="autopilot",
+        owner_id="autopilot-failed",
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.sadd(queue.RUNNING_KEY, task.id)
+    await queue.update_heartbeat(task.id)
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks()
+
+    cleaned = await queue.get_task(task.id)
+    assert counts["terminal_owner"] == 1
+    assert cleaned.status == AgentTaskStatus.FAILED
+    assert await redis.sismember(queue.RUNNING_KEY, task.id) is False
+    assert await queue.is_cancelled(task.id) is True
+
+
+@pytest.mark.asyncio
+async def test_cleanup_fails_queued_task_missing_from_queue_list():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=10)
+    task = AgentTask(
+        id="agent-orphaned-queued",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        created_at=created_at,
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks()
+
+    cleaned = await queue.get_task(task.id)
+    assert counts["orphaned_queued"] == 1
+    assert cleaned.status == AgentTaskStatus.FAILED
+    assert await queue.is_cancelled(task.id) is True
+
+
 def test_worker_effective_elapsed_excludes_paused_duration():
     worker = AgentWorker.__new__(AgentWorker)
     worker._pause_lock = threading.Lock()
@@ -297,6 +405,12 @@ async def test_running_task_summaries_are_sanitized():
             "started_at": started_at.isoformat(),
             "timeout_seconds": 1800,
             "heartbeat_alive": True,
+            "owner_type": None,
+            "owner_id": None,
+            "owner_label": None,
+            "owner_status": None,
+            "owner_terminal": False,
+            "orphaned": False,
             "progress": {
                 "activity_label": "Exploring https://example.test",
                 "tool_calls": 3,

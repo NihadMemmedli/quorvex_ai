@@ -24,6 +24,7 @@ import {
     Square,
     Target,
     UploadCloud,
+    Users,
     Workflow,
     XCircle,
 } from 'lucide-react';
@@ -34,11 +35,21 @@ import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
 
+interface MissionStatusDetails {
+    status?: string | null;
+    state?: string | null;
+    value?: string | null;
+    team_summary?: unknown;
+    active_work_items?: unknown;
+    blocked_work_items?: unknown;
+    coverage_summary?: unknown;
+}
+
 interface Mission {
     id: string;
     name: string;
     mission_type: string;
-    status: string;
+    status: string | MissionStatusDetails;
     schedule_cron?: string | null;
     target_urls?: string[];
     autonomy_level: string;
@@ -47,9 +58,22 @@ interface Mission {
     last_run_at?: string | null;
     next_run_at?: string | null;
     last_error?: string | null;
+    health_status?: string | null;
+    paused_reason?: string | null;
+    consecutive_failures?: number;
+    last_heartbeat_at?: string | null;
+    current_stage?: string | null;
+    next_action?: string | null;
     total_runs: number;
     total_findings: number;
     budget_used_usd: number;
+    max_iterations?: number;
+    max_runtime_minutes?: number;
+    max_llm_budget_usd?: number | null;
+    team_summary?: unknown;
+    active_work_items?: unknown;
+    blocked_work_items?: unknown;
+    coverage_summary?: unknown;
     created_at: string;
 }
 
@@ -96,6 +120,21 @@ interface TestProposal {
     created_at?: string | null;
 }
 
+interface WorkItem {
+    id: string;
+    mission_id?: string | null;
+    mission_name?: string | null;
+    title?: string | null;
+    summary?: string | null;
+    status?: string | null;
+    lane?: string | null;
+    priority?: string | number | null;
+    owner_agent?: string | null;
+    blocked_reason?: string | null;
+    updated_at?: string | null;
+    created_at?: string | null;
+}
+
 const DEFAULT_FORM: MissionForm = {
     name: '',
     description: '',
@@ -104,7 +143,7 @@ const DEFAULT_FORM: MissionForm = {
     schedule_cron: '',
     timezone: 'UTC',
     max_runtime_minutes: 30,
-    max_iterations: 10,
+    max_iterations: 0,
     max_llm_budget_usd: 5,
 };
 
@@ -138,15 +177,37 @@ const QUICK_START_TEMPLATES: Array<{
     icon: ReactNode;
 }> = [
     {
+        label: 'Whole App Team',
+        mission_type: 'mixed',
+        description: 'Coordinate a compact team across app-wide discovery and coverage.',
+        schedule_cron: '',
+        max_runtime_minutes: 35,
+        max_iterations: 0,
+        max_llm_budget_usd: 8,
+        capability: 'Starts a small autonomous team for whole-app discovery, active work lanes, blockers, and coverage follow-up.',
+        icon: <Users size={16} />,
+    },
+    {
         label: 'Exploration',
         mission_type: 'exploration',
         description: 'Map key pages, flows, and interaction paths.',
         schedule_cron: '0 9 * * 1-5',
         max_runtime_minutes: 30,
-        max_iterations: 10,
+        max_iterations: 0,
         max_llm_budget_usd: 5,
         capability: 'Maps known coverage gaps into reviewable exploration proposals.',
         icon: <Compass size={16} />,
+    },
+    {
+        label: 'Continuous Watch',
+        mission_type: 'mixed',
+        description: 'Run around the clock with approval-gated findings.',
+        schedule_cron: '',
+        max_runtime_minutes: 45,
+        max_iterations: 0,
+        max_llm_budget_usd: 10,
+        capability: 'Keeps recurring exploration, coverage review, regression watch, and flake triage alive until paused.',
+        icon: <Workflow size={16} />,
     },
     {
         label: 'Coverage Gaps',
@@ -154,7 +215,7 @@ const QUICK_START_TEMPLATES: Array<{
         description: 'Look for untested routes and missing assertions.',
         schedule_cron: '0 10 * * 1-5',
         max_runtime_minutes: 25,
-        max_iterations: 8,
+        max_iterations: 0,
         max_llm_budget_usd: 4,
         capability: 'Finds untested routes and turns gaps into approval-gated test proposals.',
         icon: <ClipboardCheck size={16} />,
@@ -165,7 +226,7 @@ const QUICK_START_TEMPLATES: Array<{
         description: 'Revisit important paths on a recurring cadence.',
         schedule_cron: '0 8 * * 1-5',
         max_runtime_minutes: 20,
-        max_iterations: 6,
+        max_iterations: 0,
         max_llm_budget_usd: 3,
         capability: 'Captures a recurring regression intent while deeper execution hooks mature.',
         icon: <ShieldCheck size={16} />,
@@ -176,11 +237,17 @@ const QUICK_START_TEMPLATES: Array<{
         description: 'Investigate unstable specs and timing-sensitive flows.',
         schedule_cron: '0 12 * * 1-5',
         max_runtime_minutes: 20,
-        max_iterations: 6,
+        max_iterations: 0,
         max_llm_budget_usd: 3,
         capability: 'Records flake triage intent and keeps the approval flow ready for proposals.',
         icon: <Gauge size={16} />,
     },
+];
+
+const SCHEDULE_PRESETS = [
+    { label: 'Continuous', cron: '' },
+    { label: 'Business hours', cron: '0 9-17 * * 1-5' },
+    { label: 'Daily', cron: '0 9 * * *' },
 ];
 
 function getStoredProjectId() {
@@ -210,6 +277,16 @@ function normalizeProposals(data: unknown): TestProposal[] {
     return [];
 }
 
+function normalizeWorkItems(data: unknown): WorkItem[] {
+    if (Array.isArray(data)) return data as WorkItem[];
+    if (data && typeof data === 'object') {
+        const payload = data as { work_items?: unknown; items?: unknown };
+        if (Array.isArray(payload.work_items)) return payload.work_items as WorkItem[];
+        if (Array.isArray(payload.items)) return payload.items as WorkItem[];
+    }
+    return [];
+}
+
 function splitTargetUrls(value: string): string[] {
     return value
         .split(/[\n,]/)
@@ -227,12 +304,29 @@ function formatCurrency(value: number) {
     return currencyFormatter.format(value || 0);
 }
 
+function formatLimit(value?: number | null) {
+    return value === 0 ? 'Unlimited' : String(value ?? '-');
+}
+
 function formatMissionType(value: string) {
     return value.replace(/_/g, ' ');
 }
 
-function getStatusStyle(status: string) {
-    const normalized = status.toLowerCase();
+function getMissionStatusText(status: Mission['status']) {
+    if (typeof status === 'string') return status;
+    return status.status || status.state || status.value || 'unknown';
+}
+
+function getMissionStatusDetails(mission: Mission): MissionStatusDetails {
+    return typeof mission.status === 'object' && mission.status ? mission.status : {};
+}
+
+function getMissionField(mission: Mission, field: keyof Pick<MissionStatusDetails, 'team_summary' | 'active_work_items' | 'blocked_work_items' | 'coverage_summary'>) {
+    return mission[field] ?? getMissionStatusDetails(mission)[field];
+}
+
+function getStatusStyle(status: Mission['status'] | string | null | undefined) {
+    const normalized = getMissionStatusText(status || 'unknown').toLowerCase();
     if (['running', 'active'].includes(normalized)) {
         return { color: 'var(--primary)', background: 'var(--primary-glow)' };
     }
@@ -246,6 +340,24 @@ function getStatusStyle(status: string) {
         return { color: 'var(--success)', background: 'var(--success-muted)' };
     }
     return { color: 'var(--text-secondary)', background: 'rgba(128,128,128,0.12)' };
+}
+
+function getHealthStyle(status?: string | null) {
+    const normalized = (status || 'healthy').toLowerCase();
+    if (normalized === 'healthy') {
+        return { color: 'var(--success)', background: 'var(--success-muted)' };
+    }
+    if (normalized === 'degraded') {
+        return { color: 'var(--warning)', background: 'var(--warning-muted)' };
+    }
+    if (normalized === 'blocked' || normalized === 'offline') {
+        return { color: 'var(--danger)', background: 'var(--danger-muted)' };
+    }
+    return { color: 'var(--text-secondary)', background: 'rgba(128,128,128,0.12)' };
+}
+
+function formatReason(value?: string | null) {
+    return value ? value.replace(/_/g, ' ') : null;
 }
 
 function getRiskStyle(risk: string) {
@@ -262,20 +374,20 @@ function getRiskStyle(risk: string) {
     return { color: 'var(--text-secondary)', background: 'rgba(128,128,128,0.12)' };
 }
 
-function canStart(status: string) {
-    return ['draft', 'created', 'idle', 'scheduled', 'completed', 'failed', 'error', 'cancelled'].includes(status.toLowerCase());
+function canStart(status: Mission['status']) {
+    return ['draft', 'created', 'idle', 'scheduled', 'completed', 'failed', 'error', 'cancelled'].includes(getMissionStatusText(status).toLowerCase());
 }
 
-function canPause(status: string) {
-    return ['running', 'active'].includes(status.toLowerCase());
+function canPause(status: Mission['status']) {
+    return ['running', 'active'].includes(getMissionStatusText(status).toLowerCase());
 }
 
-function canResume(status: string) {
-    return status.toLowerCase() === 'paused';
+function canResume(status: Mission['status']) {
+    return getMissionStatusText(status).toLowerCase() === 'paused';
 }
 
-function canCancel(status: string) {
-    return !['cancelled', 'completed'].includes(status.toLowerCase());
+function canCancel(status: Mission['status']) {
+    return !['cancelled', 'completed'].includes(getMissionStatusText(status).toLowerCase());
 }
 
 function getProposalTarget(proposal: TestProposal) {
@@ -288,16 +400,51 @@ function compactSpecPreview(content?: string | null) {
     return compact.length > 260 ? `${compact.slice(0, 260)}...` : compact;
 }
 
+function asCompactText(value: unknown, fallback = '-'): string {
+    if (value === null || value === undefined || value === '') return fallback;
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (Array.isArray(value)) {
+        if (value.length === 0) return fallback;
+        return value
+            .slice(0, 3)
+            .map(item => asCompactText(item, ''))
+            .filter(Boolean)
+            .join(', ');
+    }
+    if (typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        return String(record.summary || record.label || record.title || record.description || Object.entries(record)
+            .slice(0, 3)
+            .map(([key, item]) => `${key}: ${asCompactText(item, '')}`)
+            .join(', ') || fallback);
+    }
+    return fallback;
+}
+
+function getWorkItemCount(value: unknown) {
+    if (Array.isArray(value)) return value.length;
+    if (typeof value === 'number') return value;
+    if (value && typeof value === 'object') {
+        const record = value as Record<string, unknown>;
+        const count = record.count ?? record.total;
+        if (typeof count === 'number') return count;
+        if (Array.isArray(record.items)) return record.items.length;
+    }
+    return 0;
+}
+
 export default function AutonomousMissionsPage() {
     const { currentProject, isLoading: projectLoading } = useProject();
     const projectId = currentProject?.id || getStoredProjectId() || 'default';
     const encodedProjectId = encodeURIComponent(projectId);
     const missionsUrl = `${API_BASE}/autonomous/${encodedProjectId}/missions`;
     const proposalsUrl = `${API_BASE}/autonomous/${encodedProjectId}/proposals`;
+    const workItemsUrl = `${API_BASE}/autonomous/${encodedProjectId}/work-items?limit=8`;
 
     const [missions, setMissions] = useState<Mission[]>([]);
     const [approvals, setApprovals] = useState<Approval[]>([]);
     const [proposals, setProposals] = useState<TestProposal[]>([]);
+    const [workItems, setWorkItems] = useState<WorkItem[]>([]);
     const [proposalFilter, setProposalFilter] = useState<ProposalFilter>(getInitialProposalFilter);
     const [proposalLoadError, setProposalLoadError] = useState<string | null>(null);
     const [approvalsLoadError, setApprovalsLoadError] = useState<string | null>(null);
@@ -360,9 +507,27 @@ export default function AutonomousMissionsPage() {
         }
     }, [proposalFilter, proposalsUrl]);
 
+    const fetchWorkItems = useCallback(async () => {
+        try {
+            const response = await fetchWithAuth(workItemsUrl);
+            if (response.status === 404 || response.status === 405) {
+                setWorkItems([]);
+                return;
+            }
+            if (!response.ok) {
+                throw new Error(await response.text() || 'Failed to load work items');
+            }
+            const data = await response.json();
+            setWorkItems(normalizeWorkItems(data));
+        } catch (err) {
+            console.error('Failed to load autonomous work items:', err);
+            setWorkItems([]);
+        }
+    }, [workItemsUrl]);
+
     const refreshAll = useCallback(async () => {
-        await Promise.all([fetchMissions(), fetchApprovals(), fetchProposals()]);
-    }, [fetchApprovals, fetchMissions, fetchProposals]);
+        await Promise.all([fetchMissions(), fetchApprovals(), fetchProposals(), fetchWorkItems()]);
+    }, [fetchApprovals, fetchMissions, fetchProposals, fetchWorkItems]);
 
     useEffect(() => {
         setLoading(true);
@@ -411,9 +576,11 @@ export default function AutonomousMissionsPage() {
                 acc.findings += mission.total_findings || 0;
                 acc.budget += mission.budget_used_usd || 0;
                 if (canPause(mission.status)) acc.running += 1;
+                acc.activeWorkItems += getWorkItemCount(getMissionField(mission, 'active_work_items'));
+                acc.blockedWorkItems += getWorkItemCount(getMissionField(mission, 'blocked_work_items'));
                 return acc;
             },
-            { runs: 0, findings: 0, budget: 0, running: 0 }
+            { runs: 0, findings: 0, budget: 0, running: 0, activeWorkItems: 0, blockedWorkItems: 0 }
         );
     }, [missions]);
 
@@ -426,6 +593,8 @@ export default function AutonomousMissionsPage() {
         { label: 'Running', value: totals.running, icon: <Play size={16} /> },
         { label: 'Runs', value: totals.runs, icon: <RotateCcw size={16} /> },
         { label: 'Findings', value: totals.findings, icon: <AlertCircle size={16} /> },
+        { label: 'Active Work', value: workItems.length || totals.activeWorkItems, icon: <Workflow size={16} /> },
+        { label: 'Blocked', value: totals.blockedWorkItems, icon: <AlertCircle size={16} /> },
         { label: 'Approvals', value: approvals.length, icon: <CheckCircle size={16} /> },
         { label: 'Proposals', value: proposals.length, icon: <FileText size={16} /> },
         { label: 'Budget', value: formatCurrency(totals.budget), icon: <DollarSign size={16} /> },
@@ -450,6 +619,7 @@ export default function AutonomousMissionsPage() {
         setCreating(true);
         setError(null);
         try {
+            const isWholeAppTeam = selectedTemplate?.label === 'Whole App Team';
             const payload = {
                 name: form.name.trim(),
                 description: form.description.trim() || undefined,
@@ -462,6 +632,27 @@ export default function AutonomousMissionsPage() {
                 max_llm_budget_usd: form.max_llm_budget_usd,
                 autonomy_level: 'draft_validate',
                 approval_policy: 'approval_required',
+                config: isWholeAppTeam ? {
+                    whole_app_team: true,
+                    team_mode: 'whole_app',
+                    mission_template: 'whole_app_team',
+                    max_parallel_agents: 2,
+                    loop_delay_seconds: 300,
+                    max_pending_approvals: 25,
+                    roles: [
+                        'surface_mapper',
+                        'explorer',
+                        'requirements_analyst',
+                        'rtm_mapper',
+                        'spec_writer',
+                        'regression_scout',
+                        'flake_triager',
+                    ],
+                    completion_target: {
+                        rtm_coverage_percentage: 95,
+                        critical_gaps: 0,
+                    },
+                } : {},
             };
 
             const response = await fetchWithAuth(missionsUrl, {
@@ -727,6 +918,50 @@ export default function AutonomousMissionsPage() {
                 </div>
             )}
 
+            {workItems.length > 0 && (
+                <section className="am-panel">
+                    <div className="am-section-title-row">
+                        <div className="am-section-heading">
+                            <Workflow size={17} style={{ color: 'var(--primary)' }} />
+                            <div>
+                                <h2>Recent Work Items</h2>
+                                <p>{workItems.length} latest team lane updates</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div className="am-work-item-list">
+                        {workItems.map((item, index) => {
+                            const status = item.status || item.lane || 'open';
+                            const statusStyle = getStatusStyle(status);
+                            const missionName = item.mission_name || missions.find(mission => mission.id === item.mission_id)?.name;
+                            return (
+                                <div key={item.id || `${item.mission_id || 'work'}:${index}`} className="am-work-item">
+                                    <div style={{ minWidth: 0 }}>
+                                        <div className="am-work-item-title">
+                                            {item.title || item.summary || 'Untitled work item'}
+                                        </div>
+                                        <div className="am-work-item-meta">
+                                            {missionName && <span>{missionName}</span>}
+                                            {item.owner_agent && <span>{item.owner_agent}</span>}
+                                            {item.priority && <span>{item.priority}</span>}
+                                            <span>{formatDate(item.updated_at || item.created_at)}</span>
+                                        </div>
+                                        {item.blocked_reason && (
+                                            <div className="am-work-item-blocker">
+                                                {item.blocked_reason}
+                                            </div>
+                                        )}
+                                    </div>
+                                    <span className="am-pill" style={{ color: statusStyle.color, background: statusStyle.background }}>
+                                        {status.replace(/_/g, ' ')}
+                                    </span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </section>
+            )}
+
             {showCreatePanel && (
                 <form
                     onSubmit={handleCreate}
@@ -866,7 +1101,7 @@ export default function AutonomousMissionsPage() {
                                 <div className="am-summary-list">
                                     <div>
                                         <span>Lifecycle</span>
-                                        <strong>Created paused</strong>
+                                        <strong>{form.max_iterations === 0 ? '24/7 until paused' : `${form.max_iterations} runs`}</strong>
                                     </div>
                                     <div>
                                         <span>Autonomy</span>
@@ -876,6 +1111,10 @@ export default function AutonomousMissionsPage() {
                                         <span>Approval</span>
                                         <strong>Required</strong>
                                     </div>
+                                    <div>
+                                        <span>Cadence</span>
+                                        <strong>{form.schedule_cron.trim() ? form.schedule_cron : 'Continuous wait loop'}</strong>
+                                    </div>
                                 </div>
                             </div>
 
@@ -883,6 +1122,18 @@ export default function AutonomousMissionsPage() {
                                 <div className="am-fieldset-heading">
                                     <CalendarClock size={15} />
                                     <span>Schedule</span>
+                                </div>
+                                <div className="am-preset-row" aria-label="Schedule presets">
+                                    {SCHEDULE_PRESETS.map(preset => (
+                                        <button
+                                            key={preset.label}
+                                            type="button"
+                                            className={form.schedule_cron === preset.cron ? 'am-preset is-active' : 'am-preset'}
+                                            onClick={() => setForm(prev => ({ ...prev, schedule_cron: preset.cron }))}
+                                        >
+                                            {preset.label}
+                                        </button>
+                                    ))}
                                 </div>
                                 <div className="am-form-grid am-form-grid-compact">
                                     <label className="am-field">
@@ -924,11 +1175,11 @@ export default function AutonomousMissionsPage() {
                                         />
                                     </label>
                                     <label className="am-field">
-                                        <span>Max Iterations <small>runs</small></span>
+                                        <span>Max Iterations <small>0 = unlimited</small></span>
                                         <input
                                             name="mission-max-iterations"
                                             type="number"
-                                            min={1}
+                                            min={0}
                                             value={form.max_iterations}
                                             onChange={event => setForm(prev => ({ ...prev, max_iterations: Number(event.target.value) }))}
                                         />
@@ -994,6 +1245,13 @@ export default function AutonomousMissionsPage() {
                     <div className="am-mission-grid">
                     {missions.map(mission => {
                         const statusStyle = getStatusStyle(mission.status);
+                        const healthStyle = getHealthStyle(mission.health_status);
+                        const statusText = getMissionStatusText(mission.status);
+                        const teamSummary = getMissionField(mission, 'team_summary');
+                        const activeWorkItems = getMissionField(mission, 'active_work_items');
+                        const blockedWorkItems = getMissionField(mission, 'blocked_work_items');
+                        const coverageSummary = getMissionField(mission, 'coverage_summary');
+                        const hasTeamStatus = Boolean(teamSummary || activeWorkItems || blockedWorkItems || coverageSummary);
                         return (
                             <div key={mission.id} className="am-mission-card">
                                 <div className="am-card-header">
@@ -1005,18 +1263,14 @@ export default function AutonomousMissionsPage() {
                                             {formatMissionType(mission.mission_type)}
                                         </div>
                                     </div>
-                                    <span style={{
-                                        padding: '0.18rem 0.55rem',
-                                        borderRadius: '999px',
-                                        color: statusStyle.color,
-                                        background: statusStyle.background,
-                                        fontSize: '0.72rem',
-                                        fontWeight: 700,
-                                        textTransform: 'capitalize',
-                                        flexShrink: 0,
-                                    }}>
-                                        {mission.status.replace(/_/g, ' ')}
-                                    </span>
+                                    <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', justifyContent: 'flex-end', flexShrink: 0 }}>
+                                        <span className="am-pill" style={{ color: healthStyle.color, background: healthStyle.background }}>
+                                            {mission.health_status || 'healthy'}
+                                        </span>
+                                        <span className="am-pill" style={{ color: statusStyle.color, background: statusStyle.background }}>
+                                            {statusText.replace(/_/g, ' ')}
+                                        </span>
+                                    </div>
                                 </div>
 
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
@@ -1046,7 +1300,7 @@ export default function AutonomousMissionsPage() {
                                     {[
                                         { label: 'Runs', value: mission.total_runs || 0 },
                                         { label: 'Findings', value: mission.total_findings || 0 },
-                                        { label: 'Budget', value: formatCurrency(mission.budget_used_usd || 0) },
+                                        { label: 'Limit', value: formatLimit(mission.max_iterations) },
                                     ].map(item => (
                                         <div key={item.label} className="am-mini-stat">
                                             <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{item.value}</div>
@@ -1076,6 +1330,50 @@ export default function AutonomousMissionsPage() {
                                     </div>
                                 </div>
 
+                                <div className="am-health-panel">
+                                    <div>
+                                        <span>Stage</span>
+                                        <strong>{formatReason(mission.current_stage) || 'idle'}</strong>
+                                    </div>
+                                    <div>
+                                        <span>Heartbeat</span>
+                                        <strong>{formatDate(mission.last_heartbeat_at)}</strong>
+                                    </div>
+                                    <div>
+                                        <span>Budget</span>
+                                        <strong>{formatCurrency(mission.budget_used_usd || 0)}</strong>
+                                    </div>
+                                    <div>
+                                        <span>Failures</span>
+                                        <strong>{mission.consecutive_failures || 0}</strong>
+                                    </div>
+                                </div>
+
+                                {hasTeamStatus && (
+                                    <div className="am-team-panel">
+                                        <div className="am-team-summary">
+                                            <Users size={14} />
+                                            <span>{asCompactText(teamSummary, 'Team status pending')}</span>
+                                        </div>
+                                        <div className="am-work-lanes">
+                                            <div>
+                                                <span>Active</span>
+                                                <strong>{getWorkItemCount(activeWorkItems)}</strong>
+                                                <small>{asCompactText(activeWorkItems, 'No active items')}</small>
+                                            </div>
+                                            <div>
+                                                <span>Blocked</span>
+                                                <strong>{getWorkItemCount(blockedWorkItems)}</strong>
+                                                <small>{asCompactText(blockedWorkItems, 'No blockers')}</small>
+                                            </div>
+                                            <div>
+                                                <span>Coverage</span>
+                                                <strong>{asCompactText(coverageSummary, 'Pending')}</strong>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
                                 <div style={{
                                     color: 'var(--text-tertiary)',
                                     fontSize: '0.75rem',
@@ -1088,6 +1386,16 @@ export default function AutonomousMissionsPage() {
                                     {mission.schedule_cron && <span>{mission.schedule_cron}</span>}
                                     {mission.latest_run_id && <span>Run {mission.latest_run_id}</span>}
                                 </div>
+
+                                {(mission.paused_reason || mission.next_action) && (
+                                    <div className="am-mission-note">
+                                        <Workflow size={14} />
+                                        <span>
+                                            {formatReason(mission.paused_reason) || mission.next_action}
+                                            {mission.paused_reason && mission.next_action ? `: ${mission.next_action}` : ''}
+                                        </span>
+                                    </div>
+                                )}
 
                                 {mission.last_error && (
                                     <div className="am-mission-error">
@@ -1617,6 +1925,30 @@ export default function AutonomousMissionsPage() {
                     margin-bottom: 0.6rem;
                 }
 
+                .am-preset-row {
+                    display: flex;
+                    gap: 0.4rem;
+                    flex-wrap: wrap;
+                    margin-bottom: 0.65rem;
+                }
+
+                .am-preset {
+                    padding: 0.28rem 0.55rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius-sm);
+                    background: transparent;
+                    color: var(--text-secondary);
+                    font-size: 0.72rem;
+                    font-weight: 700;
+                    cursor: pointer;
+                }
+
+                .am-preset.is-active {
+                    color: var(--primary);
+                    background: var(--primary-glow);
+                    border-color: rgba(59, 130, 246, 0.28);
+                }
+
                 .am-form-grid {
                     display: grid;
                     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1685,6 +2017,7 @@ export default function AutonomousMissionsPage() {
                 .am-field textarea:focus,
                 .am-button:focus-visible,
                 .am-filter:focus-visible,
+                .am-preset:focus-visible,
                 .am-template-button:focus-visible,
                 .am-template-choice:focus-visible {
                     border-color: var(--primary);
@@ -1905,6 +2238,62 @@ export default function AutonomousMissionsPage() {
                     overflow-wrap: anywhere;
                 }
 
+                .am-mission-note {
+                    display: grid;
+                    grid-template-columns: auto minmax(0, 1fr);
+                    gap: 0.45rem;
+                    align-items: start;
+                    padding: 0.6rem;
+                    border: 1px solid rgba(59, 130, 246, 0.24);
+                    border-radius: var(--radius-sm);
+                    background: var(--primary-glow);
+                    color: var(--primary);
+                    font-size: 0.76rem;
+                    line-height: 1.35;
+                    overflow-wrap: anywhere;
+                }
+
+                .am-work-item-list {
+                    display: grid;
+                    gap: 0.6rem;
+                }
+
+                .am-work-item {
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) auto;
+                    gap: 0.75rem;
+                    align-items: start;
+                    padding: 0.75rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius-sm);
+                    background: rgba(255, 255, 255, 0.018);
+                    min-width: 0;
+                }
+
+                .am-work-item-title {
+                    color: var(--text);
+                    font-size: 0.88rem;
+                    font-weight: 750;
+                    overflow-wrap: anywhere;
+                }
+
+                .am-work-item-meta {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 0.45rem;
+                    margin-top: 0.25rem;
+                    color: var(--text-tertiary);
+                    font-size: 0.74rem;
+                }
+
+                .am-work-item-blocker {
+                    margin-top: 0.45rem;
+                    color: var(--danger);
+                    font-size: 0.76rem;
+                    line-height: 1.35;
+                    overflow-wrap: anywhere;
+                }
+
                 .am-mission-grid {
                     display: grid;
                     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
@@ -1936,6 +2325,101 @@ export default function AutonomousMissionsPage() {
                     border-radius: var(--radius-sm);
                     background: rgba(255, 255, 255, 0.018);
                     min-width: 0;
+                }
+
+                .am-health-panel {
+                    display: grid;
+                    grid-template-columns: repeat(4, minmax(0, 1fr));
+                    gap: 0.5rem;
+                    padding: 0.65rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius-sm);
+                    background: rgba(255, 255, 255, 0.018);
+                }
+
+                .am-health-panel span,
+                .am-health-panel strong {
+                    display: block;
+                    min-width: 0;
+                }
+
+                .am-health-panel span {
+                    color: var(--text-tertiary);
+                    font-size: 0.7rem;
+                }
+
+                .am-health-panel strong {
+                    margin-top: 0.15rem;
+                    color: var(--text-secondary);
+                    font-size: 0.74rem;
+                    font-weight: 650;
+                    overflow-wrap: anywhere;
+                    text-transform: capitalize;
+                }
+
+                .am-team-panel {
+                    display: grid;
+                    gap: 0.55rem;
+                    padding: 0.7rem;
+                    border: 1px solid rgba(59, 130, 246, 0.2);
+                    border-radius: var(--radius-sm);
+                    background: rgba(59, 130, 246, 0.055);
+                }
+
+                .am-team-summary {
+                    display: grid;
+                    grid-template-columns: auto minmax(0, 1fr);
+                    gap: 0.45rem;
+                    align-items: start;
+                    color: var(--text-secondary);
+                    font-size: 0.78rem;
+                    line-height: 1.4;
+                    overflow-wrap: anywhere;
+                }
+
+                .am-work-lanes {
+                    display: grid;
+                    grid-template-columns: repeat(3, minmax(0, 1fr));
+                    gap: 0.5rem;
+                }
+
+                .am-work-lanes > div {
+                    min-width: 0;
+                    padding: 0.55rem;
+                    border: 1px solid rgba(255, 255, 255, 0.06);
+                    border-radius: var(--radius-sm);
+                    background: rgba(0, 0, 0, 0.08);
+                }
+
+                .am-work-lanes span,
+                .am-work-lanes strong,
+                .am-work-lanes small {
+                    display: block;
+                    min-width: 0;
+                }
+
+                .am-work-lanes span {
+                    color: var(--text-tertiary);
+                    font-size: 0.68rem;
+                    font-weight: 700;
+                    text-transform: uppercase;
+                    letter-spacing: 0.04em;
+                }
+
+                .am-work-lanes strong {
+                    margin-top: 0.16rem;
+                    color: var(--text);
+                    font-size: 0.82rem;
+                    font-weight: 750;
+                    overflow-wrap: anywhere;
+                }
+
+                .am-work-lanes small {
+                    margin-top: 0.16rem;
+                    color: var(--text-secondary);
+                    font-size: 0.7rem;
+                    line-height: 1.3;
+                    overflow-wrap: anywhere;
                 }
 
                 .am-filter-row {
@@ -2042,6 +2526,7 @@ export default function AutonomousMissionsPage() {
 
                 @media (max-width: 900px) {
                     .am-create-grid,
+                    .am-work-item,
                     .am-proposal-card,
                     .am-inline-item {
                         grid-template-columns: 1fr;
@@ -2057,6 +2542,8 @@ export default function AutonomousMissionsPage() {
                 @media (max-width: 640px) {
                     .am-stat-grid,
                     .am-mission-grid,
+                    .am-health-panel,
+                    .am-work-lanes,
                     .am-template-picker {
                         grid-template-columns: 1fr;
                     }

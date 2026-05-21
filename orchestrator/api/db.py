@@ -21,13 +21,14 @@ from .models_db import (  # noqa: F401
     AgentMemory,
     AgentRun,
     AgentToolDefinition,
+    ApplicationMap,
+    ArchiveJob,
+    AutonomousAgentWorkItem,
     AutonomousApproval,
     AutonomousFinding,
     AutonomousMission,
     AutonomousMissionRun,
     AutonomousTestProposal,
-    ApplicationMap,
-    ArchiveJob,
     AutoPilotPhase,
     AutoPilotQuestion,
     # Auto Pilot pipeline models
@@ -73,11 +74,11 @@ from .models_db import (  # noqa: F401
     # OpenAPI import history
     OpenApiImportHistory,
     PrChangedFile,
+    PrdGenerationResult,
     PrImpactAnalysis,
+    Project,
     PrQualityGateRun,
     PrSelectedTest,
-    PrdGenerationResult,
-    Project,
     RecordingSession,
     RegressionBatch,
     RepoIndexedFile,
@@ -94,16 +95,22 @@ from .models_db import (  # noqa: F401
     SecurityScanRun,
     SpecMetadata,
     StorageStats,
-    TestPattern,
     TestExecutionHistory,
     TestImpactMap,
+    TestPattern,
     # TestRail integration models
     TestrailCaseMapping,
     TestrailRunMapping,
     TestRun,
     WorkflowDefinition,
+    WorkflowDefinitionRevision,
+    WorkflowEvent,
+    WorkflowNotification,
     WorkflowRun,
     WorkflowRunStep,
+    WorkflowSchedule,
+    WorkflowScheduleExecution,
+    WorkflowStepType,
 )
 
 # Database URL configuration
@@ -187,7 +194,7 @@ def _run_migrations():
     db_type = get_database_type()
     inspector = inspect(engine)
 
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         # Check and add new columns to testrun table
         if "testrun" in inspector.get_table_names():
             existing_columns = {col["name"] for col in inspector.get_columns("testrun")}
@@ -423,6 +430,7 @@ def _run_migrations():
                 logger.debug(f"Index may already exist on agent_definitions: {e}")
 
         timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+        boolean_false = "false" if db_type == "postgresql" else "0"
         if "workflow_definitions" not in inspector.get_table_names():
             conn.execute(
                 text(f"""
@@ -509,6 +517,21 @@ def _run_migrations():
             if "triggered_by" not in run_cols:
                 conn.execute(text("ALTER TABLE workflow_runs ADD COLUMN triggered_by VARCHAR"))
                 logger.info("Added column: workflow_runs.triggered_by")
+            workflow_run_operation_columns = {
+                "revision_id": "VARCHAR",
+                "definition_version": "INTEGER NOT NULL DEFAULT 1",
+                "recovery_policy_json": "TEXT NOT NULL DEFAULT '{}'",
+                "trigger_type": "VARCHAR NOT NULL DEFAULT 'manual'",
+                "trigger_id": "VARCHAR",
+                "temporal_workflow_id": "VARCHAR",
+                "temporal_run_id": "VARCHAR",
+                "heartbeat_at": timestamp_type,
+                "pause_reason": "VARCHAR",
+            }
+            for column_name, column_type in workflow_run_operation_columns.items():
+                if column_name not in run_cols:
+                    conn.execute(text(f"ALTER TABLE workflow_runs ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: workflow_runs.%s", column_name)
 
         if "workflow_run_steps" not in inspector.get_table_names():
             bool_default = "FALSE" if db_type == "postgresql" else "0"
@@ -525,12 +548,18 @@ def _run_migrations():
                     step_id VARCHAR NOT NULL DEFAULT 'step',
                     step_key VARCHAR NOT NULL,
                     step_type VARCHAR NOT NULL,
+                    step_type_version INTEGER NOT NULL DEFAULT 1,
+                    step_config_json TEXT NOT NULL DEFAULT '{{}}',
                     name VARCHAR NOT NULL DEFAULT '',
                     label VARCHAR NOT NULL,
                     status VARCHAR NOT NULL DEFAULT 'pending',
                     continue_on_error BOOLEAN NOT NULL DEFAULT {bool_default},
                     input_json TEXT NOT NULL DEFAULT '{{}}',
+                    rendered_input_json TEXT NOT NULL DEFAULT '{{}}',
+                    context_snapshot_json TEXT NOT NULL DEFAULT '{{}}',
+                    input_resolution_json TEXT NOT NULL DEFAULT '[]',
                     output_json TEXT,
+                    output_validation_errors_json TEXT NOT NULL DEFAULT '[]',
                     error_message TEXT,
                     external_kind VARCHAR,
                     external_id VARCHAR,
@@ -573,6 +602,12 @@ def _run_migrations():
                 if "step_id" in step_cols:
                     conn.execute(text("UPDATE workflow_run_steps SET step_key = step_id WHERE step_id IS NOT NULL"))
                 logger.info("Added column: workflow_run_steps.step_key")
+            if "step_type_version" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN step_type_version INTEGER NOT NULL DEFAULT 1"))
+                logger.info("Added column: workflow_run_steps.step_type_version")
+            if "step_config_json" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN step_config_json TEXT NOT NULL DEFAULT '{}'"))
+                logger.info("Added column: workflow_run_steps.step_config_json")
             if "name" not in step_cols:
                 conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN name VARCHAR NOT NULL DEFAULT ''"))
                 if "label" in step_cols:
@@ -591,20 +626,46 @@ def _run_migrations():
                 if "input_data" in step_cols:
                     conn.execute(text("UPDATE workflow_run_steps SET input_json = COALESCE(CAST(input_data AS TEXT), '{}')"))
                 logger.info("Added column: workflow_run_steps.input_json")
+            if "rendered_input_json" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN rendered_input_json TEXT NOT NULL DEFAULT '{}'"))
+                logger.info("Added column: workflow_run_steps.rendered_input_json")
+            if "context_snapshot_json" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN context_snapshot_json TEXT NOT NULL DEFAULT '{}'"))
+                logger.info("Added column: workflow_run_steps.context_snapshot_json")
+            if "input_resolution_json" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN input_resolution_json TEXT NOT NULL DEFAULT '[]'"))
+                logger.info("Added column: workflow_run_steps.input_resolution_json")
             if "output_json" not in step_cols:
                 conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN output_json TEXT"))
                 if "output_data" in step_cols:
                     conn.execute(text("UPDATE workflow_run_steps SET output_json = CAST(output_data AS TEXT) WHERE output_data IS NOT NULL"))
                 logger.info("Added column: workflow_run_steps.output_json")
+            if "output_validation_errors_json" not in step_cols:
+                conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN output_validation_errors_json TEXT NOT NULL DEFAULT '[]'"))
+                logger.info("Added column: workflow_run_steps.output_validation_errors_json")
             if "external_kind" not in step_cols:
                 conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN external_kind VARCHAR"))
                 logger.info("Added column: workflow_run_steps.external_kind")
             if "external_id" not in step_cols:
                 conn.execute(text("ALTER TABLE workflow_run_steps ADD COLUMN external_id VARCHAR"))
                 logger.info("Added column: workflow_run_steps.external_id")
+            workflow_step_operation_columns = {
+                "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "max_attempts": "INTEGER NOT NULL DEFAULT 1",
+                "retry_backoff_seconds": "INTEGER NOT NULL DEFAULT 0",
+                "recovery_action": "VARCHAR NOT NULL DEFAULT 'fail'",
+                "skipped_reason": "VARCHAR",
+            }
+            for column_name, column_type in workflow_step_operation_columns.items():
+                if column_name not in step_cols:
+                    conn.execute(text(f"ALTER TABLE workflow_run_steps ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: workflow_run_steps.%s", column_name)
             if "created_at" not in step_cols:
-                default_now = "CURRENT_TIMESTAMP"
-                conn.execute(text(f"ALTER TABLE workflow_run_steps ADD COLUMN created_at {timestamp_type} NOT NULL DEFAULT {default_now}"))
+                if db_type == "sqlite":
+                    conn.execute(text(f"ALTER TABLE workflow_run_steps ADD COLUMN created_at {timestamp_type}"))
+                    conn.execute(text("UPDATE workflow_run_steps SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL"))
+                else:
+                    conn.execute(text(f"ALTER TABLE workflow_run_steps ADD COLUMN created_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP"))
                 logger.info("Added column: workflow_run_steps.created_at")
 
         try:
@@ -649,6 +710,65 @@ def _run_migrations():
                 )
         except Exception as e:
             logger.debug(f"Index may already exist on workflow tables: {e}")
+
+        if "workflow_step_types" not in inspector.get_table_names():
+            conn.execute(
+                text(f"""
+                CREATE TABLE workflow_step_types (
+                    id VARCHAR PRIMARY KEY,
+                    project_id VARCHAR,
+                    type VARCHAR NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    label VARCHAR NOT NULL,
+                    description VARCHAR NOT NULL DEFAULT '',
+                    required_json TEXT NOT NULL DEFAULT '[]',
+                    input_schema_json TEXT NOT NULL DEFAULT '{{}}',
+                    ui_schema_json TEXT NOT NULL DEFAULT '{{}}',
+                    output_schema_json TEXT NOT NULL DEFAULT '{{}}',
+                    default_input_json TEXT NOT NULL DEFAULT '{{}}',
+                    category VARCHAR NOT NULL DEFAULT 'Utility',
+                    risk_level VARCHAR NOT NULL DEFAULT 'low',
+                    is_async BOOLEAN NOT NULL DEFAULT {boolean_false},
+                    auto_wait_defaults_json TEXT NOT NULL DEFAULT '{{}}',
+                    handler_kind VARCHAR NOT NULL DEFAULT 'builtin',
+                    handler_config_json TEXT NOT NULL DEFAULT '{{}}',
+                    status VARCHAR NOT NULL DEFAULT 'active',
+                    created_at {timestamp_type},
+                    updated_at {timestamp_type}
+                )
+                """)
+            )
+            logger.info("Created table: workflow_step_types")
+
+        if "workflow_step_types" in inspect(conn).get_table_names():
+            step_type_columns = {col["name"] for col in inspector.get_columns("workflow_step_types")}
+            if "category" not in step_type_columns:
+                conn.execute(text("ALTER TABLE workflow_step_types ADD COLUMN category VARCHAR NOT NULL DEFAULT 'Utility'"))
+                logger.info("Added column: workflow_step_types.category")
+            if "risk_level" not in step_type_columns:
+                conn.execute(text("ALTER TABLE workflow_step_types ADD COLUMN risk_level VARCHAR NOT NULL DEFAULT 'low'"))
+                logger.info("Added column: workflow_step_types.risk_level")
+            if "is_async" not in step_type_columns:
+                conn.execute(text(f"ALTER TABLE workflow_step_types ADD COLUMN is_async BOOLEAN NOT NULL DEFAULT {boolean_false}"))
+                logger.info("Added column: workflow_step_types.is_async")
+            if "auto_wait_defaults_json" not in step_type_columns:
+                conn.execute(text("ALTER TABLE workflow_step_types ADD COLUMN auto_wait_defaults_json TEXT NOT NULL DEFAULT '{}'"))
+                logger.info("Added column: workflow_step_types.auto_wait_defaults_json")
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_workflow_step_types_project_status "
+                        "ON workflow_step_types (project_id, status)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_workflow_step_types_type_version "
+                        "ON workflow_step_types (type, version)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Index may already exist on workflow_step_types: {e}")
 
         # Add title_embedding_json to requirements table for deduplication
         if "requirements" in inspector.get_table_names():
@@ -704,6 +824,53 @@ def _run_migrations():
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_project_members_user_id ON project_members (user_id)"))
             except Exception as e:
                 logger.debug(f"Index creation note: {e}")
+
+        timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+
+        if "autonomous_missions" in inspector.get_table_names():
+            mission_columns = {col["name"] for col in inspector.get_columns("autonomous_missions")}
+            if "health_status" not in mission_columns:
+                conn.execute(
+                    text("ALTER TABLE autonomous_missions ADD COLUMN health_status VARCHAR NOT NULL DEFAULT 'healthy'")
+                )
+                logger.info("Added column: autonomous_missions.health_status")
+            if "paused_reason" not in mission_columns:
+                conn.execute(text("ALTER TABLE autonomous_missions ADD COLUMN paused_reason VARCHAR"))
+                logger.info("Added column: autonomous_missions.paused_reason")
+            if "consecutive_failures" not in mission_columns:
+                conn.execute(
+                    text("ALTER TABLE autonomous_missions ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0")
+                )
+                logger.info("Added column: autonomous_missions.consecutive_failures")
+            if "last_heartbeat_at" not in mission_columns:
+                conn.execute(
+                    text(f"ALTER TABLE autonomous_missions ADD COLUMN last_heartbeat_at {timestamp_type}")
+                )
+                logger.info("Added column: autonomous_missions.last_heartbeat_at")
+            if "current_stage" not in mission_columns:
+                conn.execute(text("ALTER TABLE autonomous_missions ADD COLUMN current_stage VARCHAR"))
+                logger.info("Added column: autonomous_missions.current_stage")
+            if "next_action" not in mission_columns:
+                conn.execute(text("ALTER TABLE autonomous_missions ADD COLUMN next_action VARCHAR"))
+                logger.info("Added column: autonomous_missions.next_action")
+
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_autonomous_missions_health_status "
+                        "ON autonomous_missions (health_status)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Index may already exist on autonomous_missions: {e}")
+
+        if "autonomous_mission_runs" in inspector.get_table_names():
+            run_columns = {col["name"] for col in inspector.get_columns("autonomous_mission_runs")}
+            if "checkpoint_json" not in run_columns:
+                conn.execute(
+                    text("ALTER TABLE autonomous_mission_runs ADD COLUMN checkpoint_json TEXT NOT NULL DEFAULT '{}'")
+                )
+                logger.info("Added column: autonomous_mission_runs.checkpoint_json")
 
         # ===== Production Data Management - Performance Indexes =====
 
@@ -1070,20 +1237,76 @@ def _create_initial_admin_if_configured(session: Session):
         # Don't re-raise - init_db should continue
 
 
-def _run_alembic_migrations():
+def _build_alembic_config():
+    from alembic.config import Config
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    alembic_cfg = Config(str(project_root / "alembic.ini"))
+    alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
+    return alembic_cfg
+
+
+def _stamp_alembic_head():
+    from alembic import command
+
+    command.stamp(_build_alembic_config(), "head")
+    logger.info("Alembic version stamped to head after legacy schema sync.")
+
+
+def _get_alembic_version() -> str | None:
+    from sqlalchemy import inspect, text
+    from sqlalchemy.exc import SQLAlchemyError
+
+    inspector = inspect(engine)
+    if "alembic_version" not in inspector.get_table_names():
+        return None
+    try:
+        with engine.connect() as conn:
+            return conn.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).scalar_one_or_none()
+    except SQLAlchemyError as exc:
+        logger.warning(f"Could not read Alembic version: {exc}")
+        return None
+
+
+def _has_legacy_alembic_drift() -> bool:
+    """Detect databases stamped at 001 after schema was already partially migrated."""
+    from sqlalchemy import inspect
+
+    if _get_alembic_version() != "001":
+        return False
+
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "testrun" in tables:
+        testrun_indexes = {idx["name"] for idx in inspector.get_indexes("testrun")}
+        if "ix_testrun_spec_name" in testrun_indexes:
+            return True
+
+    post_baseline_tables = {
+        "agent_memories",
+        "autonomous_missions",
+        "ci_pipeline_mappings",
+        "openapi_import_history",
+        "workflow_definitions",
+    }
+    return bool(tables & post_baseline_tables)
+
+
+def _run_alembic_migrations() -> bool:
     """Run Alembic migrations for PostgreSQL databases.
 
     For fresh databases: runs all migrations from scratch.
     For existing databases: stamps current revision if alembic_version
     table doesn't exist, then upgrades to head.
+
+    Returns True when startup must run the legacy sync path and stamp head
+    afterwards, because the database was baseline-stamped after later schema
+    objects had already been created.
     """
     from alembic import command
-    from alembic.config import Config
     from sqlalchemy import inspect
 
-    project_root = Path(__file__).resolve().parent.parent.parent
-    alembic_cfg = Config(str(project_root / "alembic.ini"))
-    alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
+    alembic_cfg = _build_alembic_config()
 
     inspector = inspect(engine)
     tables = inspector.get_table_names()
@@ -1093,11 +1316,20 @@ def _run_alembic_migrations():
         logger.info("Existing database detected, stamping Alembic baseline (001)...")
         command.stamp(alembic_cfg, "001")
         logger.info("Alembic baseline stamped. Future migrations will run normally.")
-    else:
-        # Fresh database or already using Alembic - run all pending migrations
-        logger.info("Running Alembic migrations to head...")
-        command.upgrade(alembic_cfg, "head")
-        logger.info("Alembic migrations complete.")
+        return _has_legacy_alembic_drift()
+
+    if _has_legacy_alembic_drift():
+        logger.warning(
+            "Alembic is stamped at 001, but post-baseline schema objects already exist. "
+            "Skipping normal upgrade so legacy schema sync can repair drift before stamping head."
+        )
+        return True
+
+    # Fresh database or already using Alembic - run all pending migrations
+    logger.info("Running Alembic migrations to head...")
+    command.upgrade(alembic_cfg, "head")
+    logger.info("Alembic migrations complete.")
+    return False
 
 
 def init_db():
@@ -1113,8 +1345,9 @@ def init_db():
 
     if get_database_type() == "postgresql":
         # PostgreSQL: use Alembic for schema management
+        should_stamp_head_after_sync = False
         try:
-            _run_alembic_migrations()
+            should_stamp_head_after_sync = _run_alembic_migrations()
         except Exception as e:
             logger.warning(f"Alembic migration failed, falling back to create_all: {e}")
 
@@ -1130,6 +1363,8 @@ def init_db():
         # Run legacy migrations for any columns not yet in Alembic
         logger.info("Running legacy column migrations...")
         _run_migrations()
+        if should_stamp_head_after_sync:
+            _stamp_alembic_head()
     else:
         # SQLite: use create_all + legacy migrations (no Alembic)
         try:

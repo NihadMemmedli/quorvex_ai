@@ -198,6 +198,9 @@ class AgentRunner:
         on_task_enqueued: Callable[[str], None] | None = None,
         cwd: Path | str | None = None,
         max_browser_tool_calls: int | None = None,
+        owner_type: str | None = None,
+        owner_id: str | None = None,
+        owner_label: str | None = None,
     ):
         """
         Initialize the agent runner.
@@ -221,6 +224,9 @@ class AgentRunner:
             on_task_enqueued: Optional callback fired with task_id when queued (for progress tracking)
             cwd: Optional working directory for MCP config discovery and queued execution
             max_browser_tool_calls: Optional hard cap for completed browser tool calls
+            owner_type: Optional logical owner type for queue lifecycle cleanup
+            owner_id: Optional logical owner ID for queue lifecycle cleanup
+            owner_label: Optional human-readable owner label for queue diagnostics
         """
         self.timeout_seconds = timeout_seconds
         self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
@@ -238,6 +244,9 @@ class AgentRunner:
         self.on_task_enqueued = on_task_enqueued
         self.cwd = Path(cwd) if cwd else None
         self.max_browser_tool_calls = max_browser_tool_calls
+        self.owner_type = owner_type
+        self.owner_id = owner_id
+        self.owner_label = owner_label
 
     def _effective_tools(self) -> list[str] | dict[str, str] | None:
         """Build the SDK/CLI tool availability set.
@@ -915,6 +924,9 @@ class AgentRunner:
                 max_budget_usd=self.max_budget_usd,
                 task_budget=self.task_budget,
                 include_hook_events=self.include_hook_events,
+                owner_type=self.owner_type,
+                owner_id=self.owner_id,
+                owner_label=self.owner_label,
             )
 
             logger.info(f"Task enqueued: {task_id}, waiting for result...")

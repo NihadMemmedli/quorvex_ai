@@ -227,6 +227,7 @@ function SessionRow({ session, compact = false }: { session: AutoPilotSessionSum
 }
 
 function AgentTaskRow({ task }: { task: AgentQueueTaskSummary }) {
+    const isOrphaned = task.orphaned || task.owner_terminal || task.heartbeat_alive === false;
     return (
         <div
             className="command-agent-row"
@@ -251,13 +252,13 @@ function AgentTaskRow({ task }: { task: AgentQueueTaskSummary }) {
                         minHeight: 24,
                         padding: '0.2rem 0.5rem',
                         borderRadius: '999px',
-                        background: task.heartbeat_alive === false ? 'rgba(239, 68, 68, 0.12)' : 'rgba(59, 130, 246, 0.12)',
-                        color: task.heartbeat_alive === false ? '#ef4444' : '#3b82f6',
+                        background: isOrphaned ? 'rgba(239, 68, 68, 0.12)' : 'rgba(59, 130, 246, 0.12)',
+                        color: isOrphaned ? '#ef4444' : '#3b82f6',
                         fontSize: '0.7rem',
                         fontWeight: 750,
                         whiteSpace: 'nowrap',
                     }}>
-                        {task.heartbeat_alive === false ? 'Stale task' : 'Worker task'}
+                        {isOrphaned ? 'Orphaned task' : task.owner_label || 'Worker task'}
                     </span>
                 </div>
                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginTop: '0.35rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -310,14 +311,22 @@ export default function Home() {
     const rtmCoverage = workflowProgress?.rtmCoverage ?? 0;
     const totalFailures = sessions.reduce((sum, session) => sum + (session.total_tests_failed || 0), 0);
     const runningTasks = queue?.running_tasks ?? [];
+    const activeSessionIds = new Set(activeSessions.map(session => session.id));
     const linkedTaskIds = new Set(
         activeSessions
             .map(session => session.config?.live_browser?.agent_task_id)
             .filter((id): id is string => Boolean(id))
     );
-    const backgroundAgentTasks = runningTasks.filter(task => !linkedTaskIds.has(task.id));
+    const backgroundAgentTasks = runningTasks.filter(task => {
+        if (task.orphaned || task.owner_terminal || task.heartbeat_alive === false) return true;
+        if (linkedTaskIds.has(task.id)) return false;
+        if (task.owner_type === 'autopilot' && task.owner_id && activeSessionIds.has(task.owner_id)) return false;
+        return true;
+    });
     const unlistedBackgroundTaskCount = Math.max(0, (queue?.active ?? 0) - linkedTaskIds.size - backgroundAgentTasks.length);
     const backgroundAgentTaskCount = backgroundAgentTasks.length + unlistedBackgroundTaskCount;
+    const browserSlotsRunning = queue?.browser_pool?.running ?? 0;
+    const orphanedTaskCount = queue?.orphaned_tasks ?? runningTasks.filter(task => task.orphaned).length;
     const queueSourceLabel = queue?.mode === 'redis' ? 'Redis workers' : queue?.mode === 'browser_pool' ? 'Browser pool' : 'Worker pool';
     const nextAction = (() => {
         const pendingQuestion = pendingQuestions[0];
@@ -486,10 +495,14 @@ export default function Home() {
                                 </div>
                                 <Bot size={22} style={{ color: 'var(--primary)' }} />
                             </div>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.65rem' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.65rem' }}>
                                 <div>
-                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Running tasks</div>
+                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Agent tasks</div>
                                     <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{queue?.active ?? 0}</div>
+                                </div>
+                                <div>
+                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Browser slots</div>
+                                    <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{browserSlotsRunning}</div>
                                 </div>
                                 <div>
                                     <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Queued</div>
@@ -500,10 +513,12 @@ export default function Home() {
                                     <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{queue?.workers_alive ?? 0}</div>
                                 </div>
                             </div>
-                            <div style={{ color: backgroundAgentTaskCount > 0 ? '#f59e0b' : 'var(--text-secondary)', fontSize: '0.76rem', marginTop: '0.75rem', lineHeight: 1.35 }}>
-                                {backgroundAgentTaskCount > 0
+                            <div style={{ color: orphanedTaskCount > 0 ? '#ef4444' : backgroundAgentTaskCount > 0 ? '#f59e0b' : 'var(--text-secondary)', fontSize: '0.76rem', marginTop: '0.75rem', lineHeight: 1.35 }}>
+                                {orphanedTaskCount > 0
+                                    ? `${orphanedTaskCount} orphaned task${orphanedTaskCount === 1 ? '' : 's'} need cleanup.`
+                                    : backgroundAgentTaskCount > 0
                                     ? `${backgroundAgentTaskCount} running task${backgroundAgentTaskCount === 1 ? ' is' : 's are'} not tied to visible AutoPilot work.`
-                                    : `${queueSourceLabel} available for agent execution.`}
+                                    : `${queueSourceLabel}: ${queue?.active ?? 0} task${(queue?.active ?? 0) === 1 ? '' : 's'}, ${browserSlotsRunning} browser slot${browserSlotsRunning === 1 ? '' : 's'} active.`}
                                 {(queue?.stale_running ?? 0) > 0 ? ` ${queue?.stale_running} stale.` : ''}
                             </div>
                         </div>

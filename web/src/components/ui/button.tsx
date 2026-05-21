@@ -78,6 +78,16 @@ const variantStyles: Record<string, React.CSSProperties> = {
     },
 }
 
+const baseButtonStyle: React.CSSProperties = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '0.45rem',
+    lineHeight: 1,
+    verticalAlign: 'middle',
+    whiteSpace: 'nowrap',
+}
+
 export interface ButtonProps
     extends React.ButtonHTMLAttributes<HTMLButtonElement>,
     VariantProps<typeof buttonVariants> {
@@ -91,7 +101,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         return (
             <Comp
                 className={cn(buttonVariants({ variant, size, className }))}
-                style={{ ...variantStyles[v], ...style }}
+                style={{ ...baseButtonStyle, ...variantStyles[v], ...style }}
                 ref={ref}
                 {...props}
             />

@@ -112,6 +112,34 @@ def add_schedule_job(schedule_id: str, cron_expression: str, timezone_str: str =
     logger.info(f"Added/updated cron job for schedule {schedule_id}: {cron_expression} ({timezone_str})")
 
 
+def add_workflow_schedule_job(schedule_id: str, cron_expression: str, timezone_str: str = "UTC"):
+    """Add or replace a cron job for a custom workflow schedule."""
+    if not _scheduler:
+        raise RuntimeError("Scheduler not initialized, cannot add workflow schedule job")
+
+    parts = cron_expression.strip().split()
+    if len(parts) != 5:
+        raise ValueError(f"Invalid cron expression: expected 5 fields, got {len(parts)}")
+
+    trigger = CronTrigger(
+        minute=parts[0],
+        hour=parts[1],
+        day=parts[2],
+        month=parts[3],
+        day_of_week=parts[4],
+        timezone=timezone_str,
+    )
+    _scheduler.add_job(
+        execute_workflow_schedule,
+        trigger=trigger,
+        id=schedule_id,
+        args=[schedule_id, None, "schedule"],
+        replace_existing=True,
+        name=f"workflow-schedule:{schedule_id}",
+    )
+    logger.info("Added/updated custom workflow schedule %s: %s (%s)", schedule_id, cron_expression, timezone_str)
+
+
 def remove_schedule_job(schedule_id: str):
     """Remove a scheduled job."""
     if not _scheduler:
@@ -208,6 +236,220 @@ def get_next_n_run_times(cron_expression: str, timezone_str: str = "UTC", count:
         next_time = next_time + timedelta(seconds=1)
 
     return times
+
+
+async def execute_workflow_schedule(schedule_id: str, execution_id: int | None = None, trigger_type: str = "schedule"):
+    """Execute a custom workflow schedule by creating and launching a workflow run."""
+    from sqlmodel import Session
+
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import (
+        WorkflowDefinition,
+        WorkflowDefinitionRevision,
+        WorkflowRun,
+        WorkflowSchedule,
+        WorkflowScheduleExecution,
+    )
+    from orchestrator.services.temporal_client import TemporalUnavailableError, start_custom_workflow_run
+    from orchestrator.services.workflow_operations import emit_workflow_event, ensure_workflow_revision
+    from orchestrator.services.workflow_runner import create_workflow_run_steps, launch_workflow_run
+
+    logger.info("Executing custom workflow schedule %s", schedule_id)
+    with Session(engine) as session:
+        schedule = session.get(WorkflowSchedule, schedule_id)
+        if not schedule:
+            logger.error("Workflow schedule %s not found", schedule_id)
+            return
+        if not schedule.enabled and trigger_type != "manual":
+            logger.info("Workflow schedule %s is disabled, skipping", schedule_id)
+            if execution_id is not None:
+                execution = session.get(WorkflowScheduleExecution, execution_id)
+                if execution:
+                    execution.status = "skipped"
+                    execution.error_message = "Schedule is disabled"
+                    execution.completed_at = datetime.now(timezone.utc)
+                    session.add(execution)
+                    session.commit()
+            return
+        definition = session.get(WorkflowDefinition, schedule.definition_id)
+        if not definition or definition.status == "archived":
+            schedule.status = "error"
+            schedule.last_error = "Workflow definition not found"
+            session.add(schedule)
+            session.commit()
+            return
+        if execution_id is None:
+            execution = WorkflowScheduleExecution(
+                schedule_id=schedule.id,
+                status="running",
+                trigger_type=trigger_type,
+                started_at=datetime.now(timezone.utc),
+            )
+            session.add(execution)
+            session.commit()
+            session.refresh(execution)
+            execution_id = execution.id
+        else:
+            execution = session.get(WorkflowScheduleExecution, execution_id)
+            if execution:
+                execution.status = "running"
+                execution.started_at = execution.started_at or datetime.now(timezone.utc)
+                session.add(execution)
+                session.commit()
+
+        revision = session.get(WorkflowDefinitionRevision, schedule.revision_id) if schedule.revision_id else None
+        if not revision or revision.definition_id != definition.id:
+            revision = ensure_workflow_revision(session, definition)
+            schedule.revision_id = revision.id
+            session.add(schedule)
+        run = WorkflowRun(
+            definition_id=definition.id,
+            workflow_id=definition.id,
+            revision_id=revision.id,
+            definition_version=revision.version,
+            project_id=definition.project_id,
+            status="queued",
+            triggered_by=f"schedule:{schedule.id}",
+            trigger_type="schedule",
+            trigger_id=schedule.id,
+        )
+        run.inputs = schedule.inputs
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        create_workflow_run_steps(session, definition, run, start_step_key=schedule.start_step_key, steps_override=revision.steps)
+        execution = session.get(WorkflowScheduleExecution, execution_id)
+        if execution:
+            execution.workflow_run_id = run.id
+            session.add(execution)
+        schedule.last_run_at = datetime.now(timezone.utc)
+        schedule.last_run_id = run.id
+        schedule.total_executions += 1
+        schedule.last_error = None
+        schedule.status = "active"
+        session.add(schedule)
+        emit_workflow_event(
+            session,
+            event_type="workflow.schedule_started",
+            message=f"Workflow schedule {schedule.name} started run {run.id}.",
+            run=run,
+            schedule=schedule,
+            notify=False,
+        )
+        session.commit()
+        run_id = run.id
+
+    try:
+        temporal = await start_custom_workflow_run(run_id)
+        with Session(engine) as session:
+            run = session.get(WorkflowRun, run_id)
+            if run:
+                run.temporal_workflow_id = temporal.workflow_id
+                run.temporal_run_id = temporal.run_id
+                session.add(run)
+                session.commit()
+    except TemporalUnavailableError:
+        await launch_workflow_run(run_id)
+
+    asyncio.create_task(_monitor_workflow_schedule_execution(schedule_id, execution_id, run_id))
+
+
+async def _monitor_workflow_schedule_execution(schedule_id: str, execution_id: int | None, run_id: str):
+    from sqlmodel import Session, select
+
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import WorkflowEvent, WorkflowRun, WorkflowSchedule, WorkflowScheduleExecution
+    from orchestrator.services.workflow_operations import avg_duration, emit_workflow_event, workflow_duration_seconds
+
+    if execution_id is None:
+        return
+    deadline = datetime.now(timezone.utc) + timedelta(hours=12)
+    terminal = {"completed", "failed", "cancelled"}
+    while datetime.now(timezone.utc) < deadline:
+        with Session(engine) as session:
+            run = session.get(WorkflowRun, run_id)
+            if run and run.status in {"awaiting_input", "paused"}:
+                execution = session.get(WorkflowScheduleExecution, execution_id)
+                schedule = session.get(WorkflowSchedule, schedule_id)
+                if schedule:
+                    existing_review_event = session.exec(
+                        select(WorkflowEvent)
+                        .where(WorkflowEvent.schedule_id == schedule_id)
+                        .where(WorkflowEvent.run_id == run_id)
+                        .where(WorkflowEvent.event_type == "workflow.schedule_review_needed")
+                    ).first()
+                    schedule.last_run_status = run.status
+                    session.add(schedule)
+                    if not existing_review_event:
+                        emit_workflow_event(
+                            session,
+                            event_type="workflow.schedule_review_needed",
+                            message=f"Workflow schedule {schedule.name} run needs review.",
+                            severity="warning",
+                            run=run,
+                            schedule=schedule,
+                            notify=schedule.notify_on_review_needed,
+                        )
+                if execution:
+                    execution.status = "running"
+                    session.add(execution)
+                session.commit()
+            if run and run.status in terminal:
+                execution = session.get(WorkflowScheduleExecution, execution_id)
+                schedule = session.get(WorkflowSchedule, schedule_id)
+                duration = workflow_duration_seconds(run)
+                if execution:
+                    execution.status = "completed" if run.status == "completed" else "failed"
+                    execution.completed_at = datetime.now(timezone.utc)
+                    execution.duration_seconds = duration
+                    execution.error_message = run.error_message
+                    session.add(execution)
+                if schedule:
+                    schedule.last_run_status = run.status
+                    if run.status == "completed":
+                        schedule.successful_executions += 1
+                    else:
+                        schedule.failed_executions += 1
+                    schedule.avg_duration_seconds = avg_duration(schedule.avg_duration_seconds, duration)
+                    if run.status == "completed":
+                        emit_workflow_event(
+                            session,
+                            event_type="workflow.schedule_completed",
+                            message=f"Workflow schedule {schedule.name} run completed.",
+                            run=run,
+                            schedule=schedule,
+                            notify=schedule.notify_on_completion,
+                        )
+                    else:
+                        schedule.last_error = run.error_message
+                        emit_workflow_event(
+                            session,
+                            event_type="workflow.schedule_failed",
+                            message=f"Workflow schedule {schedule.name} run failed: {run.error_message or run.status}",
+                            severity="error",
+                            run=run,
+                            schedule=schedule,
+                            notify=schedule.notify_on_failure,
+                        )
+                    session.add(schedule)
+                session.commit()
+                return
+        await asyncio.sleep(5)
+
+    with Session(engine) as session:
+        execution = session.get(WorkflowScheduleExecution, execution_id)
+        schedule = session.get(WorkflowSchedule, schedule_id)
+        if execution:
+            execution.status = "failed"
+            execution.error_message = "Timed out waiting for scheduled workflow completion"
+            execution.completed_at = datetime.now(timezone.utc)
+            session.add(execution)
+        if schedule:
+            schedule.failed_executions += 1
+            schedule.last_run_status = "failed"
+            schedule.last_error = "Timed out waiting for scheduled workflow completion"
+            session.add(schedule)
+        session.commit()
 
 
 async def _execute_scheduled_batch(schedule_id: str, execution_id: int = None):
@@ -460,6 +702,110 @@ async def cleanup_stale_executions():
         logger.debug(f"Stale execution cleanup skipped: {e}")
 
 
+async def reconcile_workflow_schedule_executions():
+    """Finalize workflow schedule executions that survived a process restart."""
+    from sqlmodel import Session, select
+
+    from orchestrator.api.db import engine
+    from orchestrator.api.models_db import WorkflowEvent, WorkflowRun, WorkflowSchedule, WorkflowScheduleExecution
+    from orchestrator.services.workflow_operations import avg_duration, emit_workflow_event, workflow_duration_seconds
+
+    terminal = {"completed", "failed", "cancelled"}
+    now = datetime.utcnow()
+    reconciled = 0
+    with Session(engine) as session:
+        executions = session.exec(
+            select(WorkflowScheduleExecution).where(WorkflowScheduleExecution.status.in_(["pending", "running"]))
+        ).all()
+        for execution in executions:
+            schedule = session.get(WorkflowSchedule, execution.schedule_id)
+            run = session.get(WorkflowRun, execution.workflow_run_id) if execution.workflow_run_id else None
+            if not schedule:
+                execution.status = "failed"
+                execution.error_message = "Workflow schedule no longer exists"
+                execution.completed_at = now
+                session.add(execution)
+                reconciled += 1
+                continue
+            if not run:
+                age_seconds = (now - execution.created_at).total_seconds() if execution.created_at else 0
+                if age_seconds > 300:
+                    execution.status = "failed"
+                    execution.error_message = "No workflow run was created for this execution"
+                    execution.completed_at = now
+                    schedule.failed_executions += 1
+                    schedule.last_run_status = "failed"
+                    schedule.last_error = execution.error_message
+                    session.add(execution)
+                    session.add(schedule)
+                    reconciled += 1
+                continue
+            if run.status in {"awaiting_input", "paused"}:
+                schedule.last_run_status = run.status
+                session.add(schedule)
+                existing = session.exec(
+                    select(WorkflowEvent)
+                    .where(WorkflowEvent.schedule_id == schedule.id)
+                    .where(WorkflowEvent.run_id == run.id)
+                    .where(WorkflowEvent.event_type == "workflow.schedule_review_needed")
+                ).first()
+                if not existing:
+                    emit_workflow_event(
+                        session,
+                        event_type="workflow.schedule_review_needed",
+                        message=f"Workflow schedule {schedule.name} run needs review.",
+                        severity="warning",
+                        run=run,
+                        schedule=schedule,
+                        notify=schedule.notify_on_review_needed,
+                    )
+                continue
+            if run.status not in terminal:
+                continue
+
+            execution.status = "completed" if run.status == "completed" else "failed"
+            execution.completed_at = execution.completed_at or now
+            execution.duration_seconds = workflow_duration_seconds(run)
+            execution.error_message = run.error_message
+            schedule.last_run_status = run.status
+            schedule.avg_duration_seconds = avg_duration(schedule.avg_duration_seconds, execution.duration_seconds)
+            if run.status == "completed":
+                schedule.successful_executions += 1
+                event_type = "workflow.schedule_completed"
+                notify = schedule.notify_on_completion
+                message = f"Workflow schedule {schedule.name} run completed."
+                severity = "info"
+            else:
+                schedule.failed_executions += 1
+                schedule.last_error = run.error_message or run.status
+                event_type = "workflow.schedule_failed"
+                notify = schedule.notify_on_failure
+                message = f"Workflow schedule {schedule.name} run failed: {run.error_message or run.status}"
+                severity = "error"
+            existing = session.exec(
+                select(WorkflowEvent)
+                .where(WorkflowEvent.schedule_id == schedule.id)
+                .where(WorkflowEvent.run_id == run.id)
+                .where(WorkflowEvent.event_type == event_type)
+            ).first()
+            if not existing:
+                emit_workflow_event(
+                    session,
+                    event_type=event_type,
+                    message=message,
+                    severity=severity,
+                    run=run,
+                    schedule=schedule,
+                    notify=notify,
+                )
+            session.add(execution)
+            session.add(schedule)
+            reconciled += 1
+        session.commit()
+    if reconciled:
+        logger.info("Reconciled %d workflow schedule execution(s)", reconciled)
+
+
 def _on_job_error(event):
     """Handle APScheduler job errors."""
     logger.error(f"Scheduler job error: {event.job_id} - {event.exception}", exc_info=event.traceback)
@@ -480,10 +826,11 @@ async def restore_schedules_from_db():
     from sqlmodel import Session, select
 
     from orchestrator.api.db import engine
-    from orchestrator.api.models_db import CronSchedule
+    from orchestrator.api.models_db import CronSchedule, WorkflowSchedule
 
     with Session(engine) as session:
         schedules = session.exec(select(CronSchedule).where(CronSchedule.enabled == True)).all()
+        workflow_schedules = session.exec(select(WorkflowSchedule).where(WorkflowSchedule.enabled == True)).all()
 
     restored = 0
     for schedule in schedules:
@@ -492,6 +839,12 @@ async def restore_schedules_from_db():
             restored += 1
         except Exception as e:
             logger.error(f"Failed to restore schedule {schedule.id}: {e}")
+    for schedule in workflow_schedules:
+        try:
+            add_workflow_schedule_job(schedule.id, schedule.cron_expression, schedule.timezone)
+            restored += 1
+        except Exception as e:
+            logger.error("Failed to restore workflow schedule %s: %s", schedule.id, e)
 
     if restored:
         logger.info(f"Restored {restored} schedules from database")

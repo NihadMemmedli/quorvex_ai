@@ -17,6 +17,13 @@ const STATUS_ICONS: Record<string, React.ReactNode> = {
     cancelled: <XCircle size={12} />,
 };
 
+function statusLabel(status: string) {
+    return status
+        .replace(/_/g, ' ')
+        .toLowerCase()
+        .replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
 export const StatusBadge = React.memo(function StatusBadge({ status }: StatusBadgeProps) {
     const color = statusColor(status);
     const icon = STATUS_ICONS[status?.toLowerCase()];
@@ -24,12 +31,12 @@ export const StatusBadge = React.memo(function StatusBadge({ status }: StatusBad
     return (
         <span style={{
             display: 'inline-flex', alignItems: 'center', gap: '4px',
-            padding: '2px 10px', borderRadius: '9999px', fontSize: '0.75rem', fontWeight: 600,
+            padding: '2px 9px', borderRadius: '9999px', fontSize: '0.75rem', fontWeight: 650,
             color, background: `${color}18`,
             transition: 'all 0.2s var(--ease-smooth)',
         }}>
             {icon}
-            {status.toUpperCase()}
+            {statusLabel(status)}
         </span>
     );
 });

@@ -1006,6 +1006,15 @@ async def startup_event():
     setup_logging(level="INFO", console=True)
     logger.info("Logging re-initialized after uvicorn startup + Alembic migrations")
 
+    try:
+        from orchestrator.services.workflow_step_registry import sync_builtin_workflow_step_types
+
+        with Session(engine) as session:
+            synced_steps = sync_builtin_workflow_step_types(session)
+        logger.info("Workflow step registry synced: %d built-in step types", len(synced_steps))
+    except Exception as exc:
+        logger.warning("Workflow step registry sync failed during startup: %s", exc)
+
     # Initialize ProcessManager and cleanup orphaned processes from previous runs
     PROCESS_MANAGER = get_process_manager()
     # Clear stale asyncio task references from previous server instance
@@ -1124,10 +1133,15 @@ async def startup_event():
 
     # Initialize cron scheduler
     try:
-        from orchestrator.services.scheduler import init_scheduler, restore_schedules_from_db
+        from orchestrator.services.scheduler import (
+            init_scheduler,
+            reconcile_workflow_schedule_executions,
+            restore_schedules_from_db,
+        )
 
         init_scheduler(engine)
         await restore_schedules_from_db()
+        await reconcile_workflow_schedule_executions()
         _BACKGROUND_TASKS.append(asyncio.create_task(_schedule_execution_watchdog()))
         logger.info("Started cron scheduler and execution watchdog")
     except Exception as e:
@@ -1415,6 +1429,11 @@ async def get_agent_queue_status():
             metrics = await queue.get_metrics()
             health = await queue.get_worker_health()
             running_tasks = await queue.get_running_task_summaries()
+            pool = BROWSER_POOL or await get_browser_pool()
+            browser_pool_status = await pool.get_status()
+            linked_tasks = [task for task in running_tasks if task.get("owner_type")]
+            background_tasks = [task for task in running_tasks if not task.get("owner_type")]
+            orphaned_tasks = [task for task in running_tasks if task.get("orphaned")]
             return {
                 "mode": "redis",
                 "active": metrics.get("running", 0),
@@ -1425,6 +1444,10 @@ async def get_agent_queue_status():
                 "by_status": metrics.get("by_status", {}),
                 "worker_health": health,
                 "running_tasks": running_tasks,
+                "linked_tasks": len(linked_tasks),
+                "background_tasks": len(background_tasks),
+                "orphaned_tasks": len(orphaned_tasks),
+                "browser_pool": browser_pool_status,
             }
     except Exception as exc:
         logger.warning(f"Failed to read Redis agent queue status: {exc}")
@@ -1488,6 +1511,29 @@ async def flush_agent_queue():
         }
     except Exception as e:
         logger.error(f"Queue flush failed: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/agents/queue-clean-orphans")
+async def clean_orphaned_agent_queue_tasks():
+    """Cancel only agent tasks whose owner, heartbeat, or timeout state is invalid."""
+    try:
+        from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
+
+        if not REDIS_AVAILABLE or not should_use_agent_queue():
+            return {"status": "skipped", "message": "Agent queue not active (no Redis)"}
+
+        queue = get_agent_queue()
+        await queue.connect()
+        result = await queue.cleanup_orphaned_and_stale_tasks()
+        cleaned = sum(v for k, v in result.items() if k != "skipped_active")
+        return {
+            "status": "success",
+            "cleaned": cleaned,
+            **result,
+        }
+    except Exception as e:
+        logger.error(f"Orphan queue cleanup failed: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
 
 
@@ -4184,15 +4230,25 @@ async def _schedule_execution_watchdog():
 
     # On first run, clean up stale executions from previous server instances
     try:
-        from orchestrator.services.scheduler import cleanup_stale_executions
+        from orchestrator.services.scheduler import (
+            cleanup_stale_executions,
+            reconcile_workflow_schedule_executions,
+        )
 
         await cleanup_stale_executions()
+        await reconcile_workflow_schedule_executions()
     except Exception as e:
         logger.debug(f"Stale execution cleanup on startup: {e}")
 
     while True:
         try:
             await asyncio.sleep(30)
+            try:
+                from orchestrator.services.scheduler import reconcile_workflow_schedule_executions
+
+                await reconcile_workflow_schedule_executions()
+            except Exception as e:
+                logger.debug(f"Workflow schedule reconciliation skipped: {e}")
 
             now = datetime.utcnow()
 
@@ -6085,7 +6141,26 @@ def _serialize_agent_tool(tool: AgentToolDefinition) -> dict[str, Any]:
     }
 
 
-def _serialize_agent_definition(definition: AgentDefinition) -> dict[str, Any]:
+AGENT_RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "destructive": 3}
+
+
+def _serialize_agent_definition(
+    definition: AgentDefinition,
+    tools_by_id: dict[str, AgentToolDefinition] | None = None,
+) -> dict[str, Any]:
+    selected_tools: list[dict[str, Any]] = []
+    if tools_by_id is not None:
+        selected_tools = [
+            _serialize_agent_tool(tools_by_id[tool_id])
+            for tool_id in definition.tool_ids
+            if tool_id in tools_by_id
+        ]
+    risk_level = "low"
+    if selected_tools:
+        risk_level = max(
+            (str(tool.get("risk") or "low") for tool in selected_tools),
+            key=lambda risk: AGENT_RISK_ORDER.get(risk, 0),
+        )
     return {
         "id": definition.id,
         "project_id": definition.project_id,
@@ -6095,6 +6170,8 @@ def _serialize_agent_definition(definition: AgentDefinition) -> dict[str, Any]:
         "model": definition.model,
         "timeout_seconds": definition.timeout_seconds,
         "tool_ids": definition.tool_ids,
+        "tools": selected_tools,
+        "risk_level": risk_level,
         "status": definition.status,
         "created_at": definition.created_at.isoformat(),
         "updated_at": definition.updated_at.isoformat(),
@@ -6329,6 +6406,9 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             result = {}
             if agent_type == "exploratory":
                 agent = ExploratoryAgent()
+                agent.owner_type = "agent_run"
+                agent.owner_id = run_id
+                agent.owner_label = f"Agent run {run_id}"
                 run_dir = exploration._prepare_exploration_mcp_config(run_id)
                 agent.agent_cwd = str(run_dir)
                 agent.on_task_enqueued = lambda task_id: _update_agent_run_progress(
@@ -6413,9 +6493,15 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
 
             elif agent_type == "writer":
                 agent = SpecWriterAgent()
+                agent.owner_type = "agent_run"
+                agent.owner_id = run_id
+                agent.owner_label = f"Agent run {run_id}"
                 result = await agent.run(config)
             elif agent_type == "spec-synthesis":
                 agent = SpecSynthesisAgent()
+                agent.owner_type = "agent_run"
+                agent.owner_id = run_id
+                agent.owner_label = f"Agent run {run_id}"
                 result = await agent.run(config)
             elif agent_type == "custom":
                 from utils.agent_runner import AgentRunner
@@ -6504,6 +6590,9 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     on_tool_use=_on_custom_tool_use,
                     on_progress=_on_custom_progress,
                     cwd=run_dir,
+                    owner_type="agent_run",
+                    owner_id=run_id,
+                    owner_label=f"Agent run {run_id}",
                 )
                 if not await _wait_if_agent_run_paused(run_id):
                     return
@@ -6657,6 +6746,8 @@ def list_agent_definitions(
     include_archived: bool = Query(default=False),
     session: Session = Depends(get_session),
 ):
+    tools = _sync_agent_tool_catalog(session)
+    tools_by_id = {tool.id: tool for tool in tools}
     statement = select(AgentDefinition).order_by(AgentDefinition.updated_at.desc())
     if not include_archived:
         statement = statement.where(AgentDefinition.status == "active")
@@ -6665,7 +6756,7 @@ def list_agent_definitions(
             statement = statement.where((AgentDefinition.project_id == project_id) | (AgentDefinition.project_id == None))
         else:
             statement = statement.where(AgentDefinition.project_id == project_id)
-    return [_serialize_agent_definition(item) for item in session.exec(statement).all()]
+    return [_serialize_agent_definition(item, tools_by_id) for item in session.exec(statement).all()]
 
 
 @app.post("/api/agents/definitions")
@@ -6703,7 +6794,9 @@ def get_agent_definition(
     project_id: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    return _serialize_agent_definition(_get_agent_definition_or_404(definition_id, project_id, session))
+    tools = _sync_agent_tool_catalog(session)
+    tools_by_id = {tool.id: tool for tool in tools}
+    return _serialize_agent_definition(_get_agent_definition_or_404(definition_id, project_id, session), tools_by_id)
 
 
 @app.put("/api/agents/definitions/{definition_id}")

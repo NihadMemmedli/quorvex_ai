@@ -955,6 +955,36 @@ async def get_live_browser_state(
     )
 
 
+async def _cancel_live_agent_task(ap_session: AutoPilotSession, reason: str) -> None:
+    """Cancel any Redis agent task linked to this session's live browser state."""
+    config = dict(ap_session.config or {})
+    live = dict(config.get("live_browser") or {})
+    task_id = live.get("agent_task_id")
+
+    if task_id:
+        try:
+            from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
+
+            if REDIS_AVAILABLE and should_use_agent_queue():
+                queue = get_agent_queue()
+                await queue.connect()
+                await queue.cancel_task(str(task_id))
+        except Exception as exc:
+            logger.warning("Failed to cancel AutoPilot agent task %s for %s: %s", task_id, ap_session.id, exc)
+
+    if live:
+        live.update(
+            {
+                "active": False,
+                "status": reason,
+                "message": f"Auto Pilot {reason}",
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        )
+        config["live_browser"] = live
+        ap_session.config = config
+
+
 @router.get("/{session_id}/phases", response_model=list[AutoPilotPhaseResponse])
 async def get_session_phases(
     session_id: str,
@@ -1152,6 +1182,8 @@ async def pause_session(
             logger.warning(f"Error pausing pipeline {session_id}: {e}")
         task.cancel()
 
+    await _cancel_live_agent_task(ap_session, "paused")
+
     now = datetime.utcnow()
     ap_session.status = "paused"
     ap_session.completed_at = None
@@ -1296,6 +1328,8 @@ async def cancel_session(
             logger.warning(f"Error calling pipeline.cancel() for {session_id}: {e}")
         task.cancel()
         _running_pipelines.pop(session_id, None)
+
+    await _cancel_live_agent_task(ap_session, "cancelled")
 
     # Update session
     now = datetime.utcnow()

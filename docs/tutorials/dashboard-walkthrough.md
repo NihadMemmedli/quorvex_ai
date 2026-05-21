@@ -77,6 +77,12 @@ The left sidebar organizes the dashboard into sections:
 
 The **project selector** at the top of the sidebar lets you switch between projects. All pages filter data to the currently selected project.
 
+### Workflow Templates vs Manual Steps
+
+On the **Workflow** page, start with a template for common paths such as exploration to requirements, custom agent review, or regression review. Templates create an editable workflow with waits and review gates already connected.
+
+Use the manual step catalog for unusual sequences, project-specific checks, or custom chains from previous workflow outputs. The builder stores output tokens in the workflow definition, but the UI exposes them through "Use output from..." selectors where possible.
+
 ## Step 3: Specs Page
 
 Click **Specs** in the sidebar. This is where you manage test specifications.

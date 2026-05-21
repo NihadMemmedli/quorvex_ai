@@ -857,6 +857,7 @@ export default function AutoPilotPage() {
     const [answeringQuestionId, setAnsweringQuestionId] = useState<number | null>(null);
     const [submittedQuestionIds, setSubmittedQuestionIds] = useState<Set<number>>(() => new Set());
     const submittedQuestionIdsRef = useRef<Set<number>>(new Set());
+    const urlStateReady = useRef(false);
 
     // Countdown timer ref
     const countdownRef = useRef<NodeJS.Timeout | null>(null);
@@ -914,6 +915,25 @@ export default function AutoPilotPage() {
     }, [fetchSessions]);
 
     const sessionStatus = session?.status;
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const sessionId = new URLSearchParams(window.location.search).get('sessionId');
+        if (sessionId) {
+            setActiveSessionId(sessionId);
+            void fetchSessionDetail(sessionId);
+        }
+        urlStateReady.current = true;
+    }, [fetchSessionDetail]);
+
+    useEffect(() => {
+        if (!urlStateReady.current || typeof window === 'undefined') return;
+        const params = new URLSearchParams(window.location.search);
+        if (activeSessionId) params.set('sessionId', activeSessionId);
+        else params.delete('sessionId');
+        const next = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}`;
+        window.history.replaceState(null, '', next);
+    }, [activeSessionId]);
 
     // Polling for active session
     useEffect(() => {

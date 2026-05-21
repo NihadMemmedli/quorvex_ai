@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -15,6 +16,7 @@ from sqlmodel import Session, col, select
 
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import (
+    AutonomousAgentWorkItem,
     AutonomousApproval,
     AutonomousFinding,
     AutonomousMission,
@@ -28,6 +30,21 @@ logger = logging.getLogger(__name__)
 
 MAX_PROPOSALS_PER_ITERATION = 5
 VALID_TEST_TYPES = {"e2e", "api", "regression", "security", "accessibility", "unit"}
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
+DEFAULT_MAX_PENDING_APPROVALS = 25
+DEFAULT_MAX_PARALLEL_AGENTS = 2
+DEFAULT_WORK_ITEM_BATCH_SIZE = 7
+WORK_ITEM_ACTIVE_STATUSES = {"queued", "running"}
+WORK_ITEM_TERMINAL_STATUSES = {"completed", "failed", "blocked", "cancelled"}
+WHOLE_APP_TEAM_ROLES = (
+    "surface_mapper",
+    "explorer",
+    "requirements_analyst",
+    "rtm_mapper",
+    "spec_writer",
+    "regression_scout",
+    "flake_triager",
+)
 
 
 def _utcnow() -> datetime:
@@ -49,6 +66,11 @@ def _mission_snapshot(mission: AutonomousMission) -> dict[str, Any]:
         "budget_used_usd": mission.budget_used_usd,
         "approval_policy": mission.approval_policy,
         "autonomy_level": mission.autonomy_level,
+        "total_runs": mission.total_runs,
+        "health_status": mission.health_status,
+        "paused_reason": mission.paused_reason,
+        "consecutive_failures": mission.consecutive_failures,
+        "config": mission.config,
     }
 
 
@@ -66,12 +88,20 @@ def create_mission_run(payload: dict[str, Any]) -> str:
     mission_id = payload["mission_id"]
     workflow_id = payload.get("workflow_id")
     trigger_type = payload.get("trigger_type", "temporal")
+    iteration_index = payload.get("iteration_index")
     with Session(engine) as session:
         mission = session.get(AutonomousMission, mission_id)
         if not mission:
             raise ValueError(f"Autonomous mission not found: {mission_id}")
 
-        run_id = f"amrun-{uuid.uuid4().hex[:12]}"
+        if iteration_index is not None:
+            raw_run_key = f"{mission_id}|{workflow_id or ''}|{iteration_index}"
+            run_id = f"amrun-{hashlib.sha256(raw_run_key.encode('utf-8')).hexdigest()[:12]}"
+            existing = session.get(AutonomousMissionRun, run_id)
+            if existing:
+                return existing.id
+        else:
+            run_id = f"amrun-{uuid.uuid4().hex[:12]}"
         now = _utcnow()
         run = AutonomousMissionRun(
             id=run_id,
@@ -86,6 +116,11 @@ def create_mission_run(payload: dict[str, Any]) -> str:
             updated_at=now,
         )
         mission.status = "running"
+        mission.health_status = "healthy"
+        mission.paused_reason = None
+        mission.current_stage = "planning"
+        mission.next_action = "Planning the next mission iteration."
+        mission.last_heartbeat_at = now
         mission.latest_workflow_id = workflow_id
         mission.latest_run_id = run_id
         mission.last_run_at = now
@@ -118,8 +153,14 @@ def execute_mission_iteration(payload: dict[str, Any]) -> dict[str, Any]:
 
         now = _utcnow()
         run.current_stage = "analyzing"
+        run.checkpoint = {"stage": "analyzing", "updated_at": now.isoformat()}
         run.updated_at = now
+        mission.current_stage = "analyzing"
+        mission.next_action = "Analyzing project coverage and prior findings."
+        mission.last_heartbeat_at = now
+        mission.health_status = "healthy"
         session.add(run)
+        session.add(mission)
         session.commit()
 
         summary: dict[str, Any] = {
@@ -129,10 +170,29 @@ def execute_mission_iteration(payload: dict[str, Any]) -> dict[str, Any]:
             "findings_created": 0,
             "approvals_created": 0,
             "test_proposals_created": 0,
+            "work_items_created": 0,
+            "work_items_enqueued": 0,
+            "work_items_completed": 0,
+            "work_items_blocked": 0,
             "notes": [],
         }
 
+        if _whole_app_team_enabled(mission):
+            _update_run_checkpoint(session, mission, run, "team_supervising")
+            team_summary = _run_parallel_team_supervisor(session, mission, run)
+            for key in ("work_items_created", "work_items_enqueued", "work_items_completed", "work_items_blocked"):
+                summary[key] += int(team_summary.get(key, 0) or 0)
+            if team_summary.get("findings_created"):
+                summary["findings_created"] += int(team_summary["findings_created"])
+            summary["team"] = team_summary
+            summary["notes"].append(
+                f"Team supervisor active: {team_summary.get('active_count', 0)} active, "
+                f"{team_summary.get('completed_count', 0)} completed, "
+                f"{team_summary.get('blocked_count', 0)} blocked work item(s)."
+            )
+
         if mission.mission_type in {"coverage", "mixed", "exploration"}:
+            _update_run_checkpoint(session, mission, run, "coverage_gap_review")
             coverage_summary = _create_coverage_gap_artifacts(session, mission, run)
             summary["findings_created"] += coverage_summary["findings_created"]
             summary["approvals_created"] += coverage_summary["approvals_created"]
@@ -150,15 +210,383 @@ def execute_mission_iteration(payload: dict[str, Any]) -> dict[str, Any]:
             summary["notes"].append(f"Generated {approved_finding_count} pending test proposal(s) from approved findings.")
 
         if mission.mission_type in {"regression", "mixed"}:
+            _update_run_checkpoint(session, mission, run, "regression_watch_ready")
             summary["notes"].append("Regression mission ledger is ready; existing batch execution can be attached as a next activity.")
 
         if mission.mission_type in {"flake_triage", "mixed"}:
+            _update_run_checkpoint(session, mission, run, "flake_triage_ready")
             summary["notes"].append("Flake triage will use parsed Playwright JSON retries and historical TestExecutionHistory.")
 
         if mission.mission_type not in {"coverage", "exploration", "regression", "flake_triage", "mixed"}:
             summary["notes"].append(f"Unknown mission type '{mission.mission_type}' recorded without execution.")
 
         return summary
+
+
+def _update_run_checkpoint(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+    stage: str,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    now = _utcnow()
+    checkpoint = {"stage": stage, "updated_at": now.isoformat()}
+    if extra:
+        checkpoint.update(extra)
+    run.current_stage = stage
+    run.checkpoint = checkpoint
+    run.updated_at = now
+    mission.current_stage = stage
+    mission.last_heartbeat_at = now
+    mission.next_action = _stage_next_action(stage)
+    session.add(run)
+    session.add(mission)
+    session.commit()
+
+
+def _stage_next_action(stage: str) -> str:
+    return {
+        "team_supervising": "Coordinating the autonomous agent team and collecting child results.",
+        "coverage_gap_review": "Reviewing unresolved coverage gaps for proposal candidates.",
+        "regression_watch_ready": "Regression watch is ready for deeper execution hooks.",
+        "flake_triage_ready": "Flake triage is ready for retry-history analysis.",
+        "sleeping": "Waiting for the next scheduled mission run.",
+    }.get(stage, f"Mission stage: {stage.replace('_', ' ')}.")
+
+
+def _whole_app_team_enabled(mission: AutonomousMission) -> bool:
+    config = mission.config or {}
+    return bool(
+        config.get("whole_app_team")
+        or config.get("team_mode") == "whole_app"
+        or config.get("mission_template") == "whole_app_team"
+    )
+
+
+def _team_roles(mission: AutonomousMission) -> list[str]:
+    config = mission.config or {}
+    roles = config.get("roles")
+    if isinstance(roles, list):
+        selected = [str(role).strip() for role in roles if str(role).strip()]
+        if selected:
+            return selected[:12]
+    return list(WHOLE_APP_TEAM_ROLES)
+
+
+def _max_parallel_agents(mission: AutonomousMission) -> int:
+    configured = _config_int(mission.config, "max_parallel_agents", DEFAULT_MAX_PARALLEL_AGENTS)
+    return max(1, min(configured, 12))
+
+
+def _run_parallel_team_supervisor(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+) -> dict[str, Any]:
+    summary = {
+        "roles": _team_roles(mission),
+        "max_parallel_agents": _max_parallel_agents(mission),
+        "work_items_created": 0,
+        "work_items_enqueued": 0,
+        "work_items_completed": 0,
+        "work_items_blocked": 0,
+        "findings_created": 0,
+        "active_count": 0,
+        "completed_count": 0,
+        "blocked_count": 0,
+    }
+    summary["work_items_completed"] = _sync_agent_work_items(session, mission)
+    if summary["work_items_completed"]:
+        summary["findings_created"] = _create_findings_from_completed_work_items(session, mission, run)
+
+    existing = session.exec(
+        select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission.id)
+    ).all()
+    if not existing:
+        for index, role in enumerate(summary["roles"]):
+            item = AutonomousAgentWorkItem(
+                id=f"amwork-{uuid.uuid4().hex[:12]}",
+                mission_id=mission.id,
+                run_id=run.id,
+                project_id=mission.project_id,
+                role=role,
+                objective=_role_objective(role, mission),
+                assigned_surface_json=json.dumps(_role_surface(role, mission)),
+                status="queued",
+                priority=10 + index,
+            )
+            item.progress = {"phase": "created", "message": "Waiting for an available agent worker."}
+            session.add(item)
+            summary["work_items_created"] += 1
+        session.commit()
+
+    running_count = _count_work_items(session, mission.id, {"running"})
+    available_slots = max(0, summary["max_parallel_agents"] - running_count)
+    if available_slots:
+        pending = session.exec(
+            select(AutonomousAgentWorkItem)
+            .where(
+                AutonomousAgentWorkItem.mission_id == mission.id,
+                AutonomousAgentWorkItem.status == "queued",
+                AutonomousAgentWorkItem.agent_task_id == None,  # noqa: E711
+            )
+            .order_by(col(AutonomousAgentWorkItem.priority).asc(), col(AutonomousAgentWorkItem.created_at).asc())
+            .limit(min(DEFAULT_WORK_ITEM_BATCH_SIZE, available_slots))
+        ).all()
+        for item in pending:
+            if _enqueue_agent_work_item(session, mission, item):
+                summary["work_items_enqueued"] += 1
+            else:
+                summary["work_items_blocked"] += 1
+
+    summary["active_count"] = _count_work_items(session, mission.id, WORK_ITEM_ACTIVE_STATUSES)
+    summary["running_count"] = _count_work_items(session, mission.id, {"running"})
+    summary["completed_count"] = _count_work_items(session, mission.id, {"completed"})
+    summary["blocked_count"] = _count_work_items(session, mission.id, {"blocked", "failed"})
+    _update_mission_team_progress(session, mission)
+    return summary
+
+
+def _count_work_items(session: Session, mission_id: str, statuses: set[str]) -> int:
+    if not statuses:
+        return 0
+    return len(
+        session.exec(
+            select(AutonomousAgentWorkItem).where(
+                AutonomousAgentWorkItem.mission_id == mission_id,
+                col(AutonomousAgentWorkItem.status).in_(tuple(statuses)),
+            )
+        ).all()
+    )
+
+
+def _role_surface(role: str, mission: AutonomousMission) -> list[str]:
+    target_urls = mission.target_urls or ["http://localhost:3000"]
+    if role in {"requirements_analyst", "rtm_mapper", "spec_writer", "flake_triager"}:
+        return []
+    return target_urls
+
+
+def _role_objective(role: str, mission: AutonomousMission) -> str:
+    target_text = ", ".join(mission.target_urls or ["the configured application"])
+    objectives = {
+        "surface_mapper": f"Map the reachable web application surface for {target_text}: routes, menus, forms, auth boundaries, and major flows.",
+        "explorer": f"Explore high-value user journeys in {target_text}, looking for broken flows, missing states, and untested paths.",
+        "requirements_analyst": "Write or refine functional requirements from exploration evidence, grouped by feature and priority.",
+        "rtm_mapper": "Map requirements to existing specs/tests and identify critical RTM gaps that need proposals.",
+        "spec_writer": "Draft approval-gated test specs for the highest-value uncovered requirements without writing repository files.",
+        "regression_scout": "Review recent runs and important app paths to propose recurring regression coverage.",
+        "flake_triager": "Review unstable or timing-sensitive tests and propose flake triage findings.",
+    }
+    return objectives.get(role, f"Perform autonomous QA work for role {role} on {target_text}.")
+
+
+def _agent_prompt_for_work_item(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> str:
+    surfaces = item.assigned_surface or mission.target_urls
+    return f"""You are the {item.role} agent in a Quorvex autonomous QA team.
+
+Mission: {mission.name}
+Objective: {item.objective}
+Target surfaces: {', '.join(surfaces or ['project data and known app artifacts'])}
+
+Work only by inspecting the app/project through available tools. Do not write repository files.
+Return a concise report with these sections:
+- summary
+- findings
+- requirements
+- rtm_candidates
+- test_proposals
+- blockers
+
+Every proposed file or repository change must be a proposal only. The human approval flow will materialize files later.
+"""
+
+
+def _enqueue_agent_work_item(
+    session: Session,
+    mission: AutonomousMission,
+    item: AutonomousAgentWorkItem,
+) -> bool:
+    try:
+        from orchestrator.services.agent_queue import get_agent_queue
+
+        async def _enqueue() -> str:
+            queue = get_agent_queue()
+            await queue.connect()
+            try:
+                return await queue.enqueue_task(
+                    prompt=_agent_prompt_for_work_item(mission, item),
+                    timeout_seconds=max(300, min(mission.max_runtime_minutes * 60, 7200)),
+                    agent_type=item.role,
+                    operation_type="autonomous_mission",
+                    allowed_tools=["*"],
+                    max_budget_usd=mission.max_llm_budget_usd,
+                    owner_type="autonomous_work_item",
+                    owner_id=item.id,
+                    owner_label=f"{mission.name}: {item.role}",
+                )
+            finally:
+                await queue.disconnect()
+
+        task_id = asyncio.run(_enqueue())
+    except Exception as exc:
+        now = _utcnow()
+        item.status = "blocked"
+        item.error_message = f"Unable to enqueue agent task: {exc}"
+        item.completed_at = now
+        item.updated_at = now
+        item.progress = {"phase": "blocked", "message": item.error_message}
+        session.add(item)
+        session.commit()
+        logger.warning("Failed to enqueue autonomous work item %s: %s", item.id, exc)
+        return False
+
+    now = _utcnow()
+    item.agent_task_id = task_id
+    item.status = "running"
+    item.attempt_count += 1
+    item.started_at = item.started_at or now
+    item.updated_at = now
+    item.progress = {"phase": "queued", "message": "Agent task has been queued.", "agent_task_id": task_id}
+    session.add(item)
+    session.commit()
+    return True
+
+
+def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
+    running_items = session.exec(
+        select(AutonomousAgentWorkItem).where(
+            AutonomousAgentWorkItem.mission_id == mission.id,
+            AutonomousAgentWorkItem.status == "running",
+            AutonomousAgentWorkItem.agent_task_id != None,  # noqa: E711
+        )
+    ).all()
+    if not running_items:
+        return 0
+    try:
+        from orchestrator.services.agent_queue import AgentTaskStatus, get_agent_queue
+
+        async def _load_tasks(task_ids: list[str]):
+            queue = get_agent_queue()
+            await queue.connect()
+            try:
+                return [await queue.get_task(task_id) for task_id in task_ids]
+            finally:
+                await queue.disconnect()
+
+        tasks = asyncio.run(_load_tasks([str(item.agent_task_id) for item in running_items if item.agent_task_id]))
+        task_by_id = {task.id: task for task in tasks if task}
+    except Exception as exc:
+        logger.debug("Unable to sync autonomous agent work items: %s", exc)
+        return 0
+
+    completed_count = 0
+    now = _utcnow()
+    for item in running_items:
+        task = task_by_id.get(str(item.agent_task_id))
+        if not task:
+            continue
+        telemetry = task.telemetry or {}
+        if task.status.value == "running":
+            item.progress = {
+                **item.progress,
+                "phase": "running",
+                "message": "Agent is running.",
+                "tool_calls": telemetry.get("tool_calls"),
+                "last_tool": telemetry.get("last_tool"),
+            }
+            item.updated_at = now
+            session.add(item)
+            continue
+        if task.status == AgentTaskStatus.COMPLETED:
+            item.status = "completed"
+            item.completed_at = task.completed_at or now
+            item.result = {
+                "output": task.result or "",
+                "telemetry": telemetry,
+            }
+            item.artifacts = [{"type": "agent_report", "label": f"{item.role} report", "content": task.result or ""}]
+            item.progress = {"phase": "completed", "message": "Agent completed this assignment."}
+            item.budget_used_usd = float(telemetry.get("total_cost_usd") or 0.0)
+            item.updated_at = now
+            completed_count += 1
+            session.add(item)
+        elif task.status in {AgentTaskStatus.FAILED, AgentTaskStatus.TIMEOUT, AgentTaskStatus.CANCELLED}:
+            item.status = "cancelled" if task.status == AgentTaskStatus.CANCELLED else "failed"
+            item.error_message = task.error or f"Agent task {task.status.value}"
+            item.completed_at = task.completed_at or now
+            item.progress = {"phase": item.status, "message": item.error_message}
+            item.updated_at = now
+            session.add(item)
+    if completed_count:
+        mission.budget_used_usd += sum(item.budget_used_usd for item in running_items if item.status == "completed")
+        mission.updated_at = now
+        session.add(mission)
+    session.commit()
+    return completed_count
+
+
+def _create_findings_from_completed_work_items(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+) -> int:
+    created = 0
+    items = session.exec(
+        select(AutonomousAgentWorkItem).where(
+            AutonomousAgentWorkItem.mission_id == mission.id,
+            AutonomousAgentWorkItem.status == "completed",
+        )
+    ).all()
+    for item in items:
+        result = item.result or {}
+        output = str(result.get("output") or "").strip()
+        if not output:
+            continue
+        dedupe_key = hashlib.sha256(f"{mission.project_id}|work_item|{item.id}|finding".encode("utf-8")).hexdigest()[:32]
+        existing = session.exec(
+            select(AutonomousFinding).where(
+                AutonomousFinding.project_id == mission.project_id,
+                AutonomousFinding.dedupe_key == dedupe_key,
+            )
+        ).first()
+        if existing:
+            continue
+        title = f"{_title_case(item.role)} agent report"
+        finding = AutonomousFinding(
+            id=f"amfind-{uuid.uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            finding_type="exploration" if item.role in {"surface_mapper", "explorer"} else "coverage_gap",
+            severity="medium",
+            title=title,
+            description=output[:8000],
+            status="open",
+            confidence=0.75,
+            dedupe_key=dedupe_key,
+            source_type="autonomous_work_item",
+            source_id=item.id,
+            approval_required=True,
+        )
+        finding.evidence = {"work_item_id": item.id, "role": item.role, "assigned_surface": item.assigned_surface}
+        session.add(finding)
+        created += 1
+    if created:
+        mission.total_findings += created
+        session.add(mission)
+        session.commit()
+    return created
+
+
+def _update_mission_team_progress(session: Session, mission: AutonomousMission) -> None:
+    mission.current_stage = "team_supervising"
+    mission.next_action = _stage_next_action("team_supervising")
+    mission.last_heartbeat_at = _utcnow()
+    mission.updated_at = mission.last_heartbeat_at
+    session.add(mission)
+    session.commit()
 
 
 def _create_coverage_gap_artifacts(
@@ -536,6 +964,12 @@ def complete_mission_run(payload: dict[str, Any]) -> None:
         mission = session.get(AutonomousMission, run.mission_id)
         if mission:
             mission.status = "running"
+            mission.health_status = "healthy"
+            mission.paused_reason = None
+            mission.consecutive_failures = 0
+            mission.current_stage = "idle"
+            mission.next_action = "Waiting for the next scheduled mission run."
+            mission.last_heartbeat_at = now
             mission.last_error = None
             mission.updated_at = now
             session.add(mission)
@@ -552,6 +986,8 @@ def fail_mission_run(payload: dict[str, Any]) -> None:
         if run_id:
             run = session.get(AutonomousMissionRun, run_id)
             if run:
+                if run.status == "failed":
+                    return
                 run.status = "failed"
                 run.current_stage = "failed"
                 run.error_message = error
@@ -561,7 +997,20 @@ def fail_mission_run(payload: dict[str, Any]) -> None:
         if mission_id:
             mission = session.get(AutonomousMission, mission_id)
             if mission:
-                mission.status = "error"
+                mission.consecutive_failures += 1
+                max_failures = _config_int(mission.config, "max_consecutive_failures", DEFAULT_MAX_CONSECUTIVE_FAILURES)
+                if mission.consecutive_failures >= max_failures:
+                    mission.status = "paused"
+                    mission.health_status = "blocked"
+                    mission.paused_reason = "consecutive_failures"
+                    mission.next_action = "Inspect the latest run error, then resume the mission."
+                else:
+                    mission.status = "error"
+                    mission.health_status = "degraded"
+                    mission.paused_reason = None
+                    mission.next_action = "The workflow will retry on the next scheduled iteration."
+                mission.current_stage = "failed"
+                mission.last_heartbeat_at = now
                 mission.last_error = error
                 mission.updated_at = now
                 session.add(mission)
@@ -575,8 +1024,37 @@ def update_mission_status(payload: dict[str, Any]) -> None:
         mission = session.get(AutonomousMission, mission_id)
         if not mission:
             return
+        now = _utcnow()
         mission.status = status
-        mission.updated_at = _utcnow()
+        if "health_status" in payload:
+            mission.health_status = payload["health_status"]
+        if "paused_reason" in payload:
+            mission.paused_reason = payload["paused_reason"]
+        if "current_stage" in payload:
+            mission.current_stage = payload["current_stage"]
+        if "next_action" in payload:
+            mission.next_action = payload["next_action"]
+        mission.last_heartbeat_at = now
+        mission.updated_at = now
+        session.add(mission)
+        session.commit()
+
+
+def update_mission_heartbeat(payload: dict[str, Any]) -> None:
+    mission_id = payload["mission_id"]
+    with Session(engine) as session:
+        mission = session.get(AutonomousMission, mission_id)
+        if not mission:
+            return
+        now = _utcnow()
+        stage = payload.get("current_stage")
+        if stage:
+            mission.current_stage = stage
+            mission.next_action = payload.get("next_action") or _stage_next_action(stage)
+        if payload.get("health_status"):
+            mission.health_status = payload["health_status"]
+        mission.last_heartbeat_at = now
+        mission.updated_at = now
         session.add(mission)
         session.commit()
 
@@ -588,7 +1066,21 @@ def compute_next_delay_seconds(mission_id: str) -> int:
         if not mission:
             return 0
         if not mission.schedule_cron:
-            return 24 * 60 * 60
+            now_naive = _utcnow()
+            delay_seconds = (
+                _config_int(mission.config, "loop_delay_seconds", 300)
+                if _whole_app_team_enabled(mission)
+                else 24 * 60 * 60
+            )
+            delay_seconds = max(30, min(delay_seconds, 24 * 60 * 60))
+            mission.next_run_at = now_naive + timedelta(seconds=delay_seconds)
+            mission.current_stage = "sleeping"
+            mission.next_action = _stage_next_action("sleeping")
+            mission.last_heartbeat_at = now_naive
+            mission.updated_at = now_naive
+            session.add(mission)
+            session.commit()
+            return delay_seconds
         try:
             from orchestrator.services.scheduler import get_next_n_run_times
 
@@ -600,10 +1092,32 @@ def compute_next_delay_seconds(mission_id: str) -> int:
             if next_run.tzinfo is None:
                 next_run = next_run.replace(tzinfo=timezone.utc)
             mission.next_run_at = next_run.replace(tzinfo=None)
-            mission.updated_at = _utcnow()
+            mission.current_stage = "sleeping"
+            mission.next_action = _stage_next_action("sleeping")
+            mission.last_heartbeat_at = _utcnow()
+            mission.updated_at = mission.last_heartbeat_at
             session.add(mission)
             session.commit()
             return max(1, int((next_run - now).total_seconds()))
         except Exception as exc:
             logger.warning("Failed to compute next autonomous mission delay for %s: %s", mission_id, exc)
             return 24 * 60 * 60
+
+
+def count_pending_mission_approvals(mission_id: str) -> int:
+    with Session(engine) as session:
+        return len(
+            session.exec(
+                select(AutonomousApproval).where(
+                    AutonomousApproval.mission_id == mission_id,
+                    AutonomousApproval.status == "pending",
+                )
+            ).all()
+        )
+
+
+def _config_int(config: dict[str, Any], key: str, default: int) -> int:
+    try:
+        return max(1, int(config.get(key, default)))
+    except (TypeError, ValueError):
+        return default

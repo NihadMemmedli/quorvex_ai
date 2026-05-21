@@ -212,6 +212,14 @@ class AutoPilotPipeline:
             # Check cancellation
             if self._cancelled.is_set():
                 self._update_session_status("cancelled")
+                self._update_live_browser_state(
+                    {
+                        "active": False,
+                        "phase": phase_name,
+                        "status": "cancelled",
+                        "message": "Auto Pilot cancelled",
+                    }
+                )
                 summary["status"] = "cancelled"
                 return summary
 
@@ -276,6 +284,14 @@ class AutoPilotPipeline:
 
                 self._fail_phase_record(phase_record_id, "Cancelled")
                 self._update_session_status("cancelled")
+                self._update_live_browser_state(
+                    {
+                        "active": False,
+                        "phase": phase_name,
+                        "status": "cancelled",
+                        "message": "Auto Pilot cancelled",
+                    }
+                )
                 summary["status"] = "cancelled"
                 return summary
 
@@ -284,6 +300,14 @@ class AutoPilotPipeline:
                 logger.error(f"Phase {phase_name} failed: {error_msg}", exc_info=True)
                 self._fail_phase_record(phase_record_id, error_msg)
                 self._update_session_status("failed", error=error_msg)
+                self._update_live_browser_state(
+                    {
+                        "active": False,
+                        "phase": phase_name,
+                        "status": "failed",
+                        "message": error_msg[:300],
+                    }
+                )
                 summary["status"] = "failed"
                 summary["error"] = error_msg
                 summary["failed_phase"] = phase_name
@@ -630,6 +654,9 @@ class AutoPilotPipeline:
                 on_task_enqueued=on_task_enqueued,
                 on_progress=on_progress,
                 on_tool_use=on_tool_use,
+                owner_type="autopilot",
+                owner_id=self.session_id,
+                owner_label=f"AutoPilot {self.session_id}",
             )
             result = await explorer.explore(explore_config, explore_session_id)
             self._store_exploration_results(
