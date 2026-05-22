@@ -1021,6 +1021,7 @@ export async function POST(req: Request) {
       { authToken, timeoutMs: OPTIONAL_CONTEXT_TIMEOUT_MS }
     ).catch(() => null),
     timedBackendFetch<{
+      context?: string;
       memories: Array<{ kind: string; summary?: string | null; content?: string; confidence?: number }>;
     }>(
       'agent memory',
@@ -1037,6 +1038,7 @@ export async function POST(req: Request) {
   const projectStats = ctxRes?.ok ? ctxRes.data : undefined;
   const recentSummaries = summRes?.ok ? summRes.data?.summaries || [] : [];
   const agentMemory = memoryRes?.ok ? memoryRes.data?.memories || [] : [];
+  const agentMemoryContext = memoryRes?.ok ? memoryRes.data?.context || '' : '';
   const systemPrompt = buildSystemPrompt({
     projectName,
     projectId,
@@ -1044,6 +1046,7 @@ export async function POST(req: Request) {
     projectStats,
     conversationHistory: recentSummaries,
     agentMemory,
+    agentMemoryContext,
     pageContext,
   });
 

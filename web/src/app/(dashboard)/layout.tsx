@@ -17,15 +17,30 @@ export default function DashboardLayout({
         <ProtectedRoute>
             <ChatProvider>
                 <CommandPaletteProvider>
-                    <div style={{ display: 'flex' }}>
+                    <div className="dashboard-shell" style={{ display: 'flex' }}>
                         <Sidebar />
-                        <main style={{ flex: 1, padding: '1.5rem 2rem', overflowY: 'auto', height: '100vh' }}>
+                        <main className="dashboard-main" style={{ flex: 1, padding: '1.5rem 2rem', overflowY: 'auto', height: '100vh', minWidth: 0 }}>
                             <NextStepBanner />
                             {children}
                         </main>
                     </div>
                     <ChatBubble />
                     <CommandPalette />
+                    <style jsx global>{`
+                        @media (max-width: 760px) {
+                            .dashboard-shell {
+                                display: block !important;
+                            }
+
+                            .dashboard-shell > aside {
+                                display: none !important;
+                            }
+
+                            .dashboard-main {
+                                padding: 1rem !important;
+                            }
+                        }
+                    `}</style>
                 </CommandPaletteProvider>
             </ChatProvider>
         </ProtectedRoute>

@@ -33,8 +33,8 @@ export function PageHeader({
                 </div>
             )}
             <header className={`page-header animate-in stagger-1 ${className}`}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1rem' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                <div className="page-header-inner" style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '1rem' }}>
+                    <div className="page-header-title-block" style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0 }}>
                         {icon && (
                             <div style={{
                                 width: '40px',
@@ -62,12 +62,25 @@ export function PageHeader({
                         </div>
                     </div>
                     {actions && (
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+                        <div className="page-header-actions" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0, flexWrap: 'wrap' }}>
                             {actions}
                         </div>
                     )}
                 </div>
             </header>
+            <style jsx>{`
+                @media (max-width: 640px) {
+                    .page-header-inner {
+                        flex-direction: column;
+                        align-items: stretch !important;
+                    }
+
+                    .page-header-actions {
+                        width: 100%;
+                        flex-shrink: 1 !important;
+                    }
+                }
+            `}</style>
         </>
     );
 }

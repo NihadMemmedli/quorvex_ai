@@ -45,6 +45,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
 import { StatusBadge } from '@/components/shared/StatusBadge';
+import { LiveBrowserView } from '@/components/LiveBrowserView';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -66,6 +67,10 @@ type WorkflowTab = 'templates' | 'library' | 'builder' | 'runs' | 'schedules' | 
 type RunFilter = 'active' | 'failed' | 'completed' | 'all';
 type LibraryStatusFilter = 'all' | 'active' | 'failed' | 'completed' | 'never_run';
 type LibrarySort = 'updated' | 'last_run' | 'name';
+type ScheduleRevisionMode = 'latest' | 'pinned';
+type AuditSeverityFilter = 'all' | 'info' | 'warning' | 'error';
+type AuditOrder = 'asc' | 'desc';
+type WorkflowGroup = 'discover' | 'build' | 'operate';
 
 interface WorkflowDefinition {
   id: string;
@@ -105,6 +110,7 @@ interface WorkflowRun {
   started_at?: string | null;
   completed_at?: string | null;
   updated_at: string;
+  heartbeat_at?: string | null;
   definition?: { name?: string };
   steps?: WorkflowRunStep[];
   inputs?: Record<string, unknown>;
@@ -113,6 +119,7 @@ interface WorkflowRun {
   trigger_type?: string | null;
   trigger_id?: string | null;
   temporal_workflow_id?: string | null;
+  temporal_run_id?: string | null;
   pause_reason?: string | null;
 }
 
@@ -121,6 +128,7 @@ interface WorkflowSchedule {
   project_id?: string | null;
   definition_id: string;
   revision_id?: string | null;
+  revision_mode?: ScheduleRevisionMode;
   name: string;
   description?: string;
   cron_expression: string;
@@ -165,6 +173,97 @@ interface WorkflowNotification {
   read_at?: string | null;
   delivered_at?: string | null;
   created_at: string;
+}
+
+interface WorkflowEvent {
+  id: string;
+  project_id?: string | null;
+  definition_id?: string | null;
+  run_id?: string | null;
+  step_id?: number | null;
+  schedule_id?: string | null;
+  event_type: string;
+  severity: string;
+  message: string;
+  payload?: Record<string, unknown>;
+  created_at: string;
+}
+
+interface WorkflowTemporalActivity {
+  activity_id: string;
+  activity_type?: string | null;
+  status: string;
+  scheduled_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  attempt_count?: number;
+  last_failure?: string | null;
+  scheduled_event_id?: number | null;
+  started_event_id?: number | null;
+  last_event_type?: string | null;
+  failure_type?: string | null;
+  failure_message?: string | null;
+  failure_stack_trace?: string | null;
+  timeout_type?: string | null;
+}
+
+interface WorkflowDiagnostics {
+  run_id: string;
+  temporal_workflow_id?: string | null;
+  temporal_run_id?: string | null;
+  temporal_ui_url?: string | null;
+  temporal_available: boolean;
+  temporal_error?: string | null;
+  temporal_namespace?: string | null;
+  workflow_status?: string | null;
+  workflow_started_at?: string | null;
+  workflow_closed_at?: string | null;
+  history_event_count?: number;
+  history_first_event_at?: string | null;
+  history_last_event_at?: string | null;
+  close_event_type?: string | null;
+  activities: WorkflowTemporalActivity[];
+  summary: {
+    total_activities: number;
+    failed_activities: number;
+    retry_count: number;
+    last_failure?: string | null;
+  };
+}
+
+interface WorkflowTemporalHealth {
+  available: boolean;
+  status: 'healthy' | 'unavailable';
+  address: string;
+  namespace: string;
+  task_queue: string;
+  error?: string | null;
+}
+
+interface ParsedTemporalStepActivity {
+  runId: string;
+  stepOrder: number;
+  stepKey: string;
+  stepId: number;
+  attempt: number;
+  activity: WorkflowTemporalActivity;
+}
+
+interface WorkflowRollbackPreview {
+  definition_id: string;
+  current_version: number;
+  target_version: number;
+  target_revision_id: string;
+  diff: {
+    added: WorkflowStep[];
+    removed: WorkflowStep[];
+    renamed: Array<{ from: string; to: string; current: WorkflowStep; target: WorkflowStep }>;
+    reordered: Array<{ key: string; current_index: number; target_index: number }>;
+    changed: Array<{ key: string; current: WorkflowStep; target: WorkflowStep }>;
+    summary: Record<string, number>;
+  };
+  current_steps: WorkflowStep[];
+  target_steps: WorkflowStep[];
 }
 
 interface WorkflowRevision {
@@ -215,9 +314,115 @@ interface WorkflowRunStep {
   external_kind?: string | null;
   external_id?: string | null;
   error_message?: string | null;
+  attempt_count?: number;
+  max_attempts?: number;
+  retry_backoff_seconds?: number;
+  recovery_action?: 'fail' | 'retry' | 'skip' | 'pause' | 'notify';
+  skipped_reason?: string | null;
   started_at?: string | null;
   completed_at?: string | null;
   updated_at?: string | null;
+  duration_seconds?: number | null;
+  summary?: string | null;
+}
+
+interface WorkflowRunFinding {
+  id: string;
+  workflow_run_id?: string;
+  workflow_step_id?: number | null;
+  step_key?: string | null;
+  source_kind?: string | null;
+  source_run_id?: string | null;
+  severity: string;
+  category?: string | null;
+  title: string;
+  description?: string | null;
+  evidence?: string | null;
+  recommendation?: string | null;
+  status?: string | null;
+  raw?: Record<string, unknown>;
+}
+
+interface WorkflowRunArtifact {
+  id?: string;
+  name?: string;
+  path?: string;
+  url?: string;
+  type?: string;
+  source_step_id?: number | null;
+  step_key?: string | null;
+  source_kind?: string | null;
+  [key: string]: unknown;
+}
+
+interface WorkflowRunTimelineItem {
+  type: string;
+  status: string;
+  title: string;
+  message?: string | null;
+  step_id?: number | null;
+  step_key?: string | null;
+  created_at?: string | null;
+}
+
+interface WorkflowRunHealth {
+  current_step_id?: number | null;
+  current_step_key?: string | null;
+  current_step_label?: string | null;
+  current_step_status?: string | null;
+  next_action?: string | null;
+  last_message?: string | null;
+  status_counts?: Record<string, number>;
+  finding_counts?: Record<string, number>;
+  finding_count?: number;
+  artifact_count?: number;
+  event_count?: number;
+  step_count?: number;
+  last_event_at?: string | null;
+  heartbeat_at?: string | null;
+}
+
+interface WorkflowRunExternalChild {
+  kind: string;
+  id: string;
+  step_id?: number | null;
+  step_key?: string | null;
+  status?: string | null;
+  summary?: string | null;
+  agent_type?: string | null;
+  progress?: WorkflowChildProgress | null;
+  artifacts?: WorkflowRunArtifact[];
+  latest_image?: WorkflowRunArtifact | null;
+  agent_task_id?: string | null;
+}
+
+interface WorkflowChildProgress {
+  phase?: string | null;
+  status?: string | null;
+  message?: string | null;
+  current_stage?: string | null;
+  activity_label?: string | null;
+  tool_calls?: number | null;
+  browser_tool_calls?: number | null;
+  interactions?: number | null;
+  last_tool?: string | null;
+  last_tool_label?: string | null;
+  recent_tools?: Array<{ name?: string; label?: string; at?: string | null }>;
+  has_browser_tools?: boolean | null;
+  updated_at?: string | null;
+  agent_task_id?: string | null;
+}
+
+interface WorkflowRunDebug {
+  run: WorkflowRun;
+  steps: WorkflowRunStep[];
+  events: WorkflowEvent[];
+  temporal?: WorkflowDiagnostics | null;
+  timeline: WorkflowRunTimelineItem[];
+  findings: WorkflowRunFinding[];
+  artifacts: WorkflowRunArtifact[];
+  external_children: WorkflowRunExternalChild[];
+  health: WorkflowRunHealth;
 }
 
 interface WorkflowInputResolution {
@@ -398,6 +603,8 @@ interface WorkflowTemplate {
   tags?: string[];
   risk_level?: string;
   estimated_duration_minutes?: number;
+  sort_order?: number;
+  updated_at?: string;
   step_types?: string[];
   steps: WorkflowStep[];
 }
@@ -433,9 +640,15 @@ type DraftStatus = 'idle' | 'dirty' | 'saved' | 'restored';
 
 const activeStatuses = ['queued', 'running', 'awaiting_input', 'paused'];
 const terminalStatuses = ['completed', 'failed', 'cancelled'];
+const agentTerminalStatuses = [...terminalStatuses, 'timeout', 'error'];
 const attentionStatuses = ['failed', 'error', 'timeout', 'cancelled'];
 const catalogCategoryOrder = ['Discovery', 'Generation', 'Execution', 'Agent', 'Review', 'Utility'];
 const workflowDraftSchemaVersion = 1;
+const workflowGroupTabs: Record<WorkflowGroup, WorkflowTab[]> = {
+  discover: ['templates', 'library'],
+  build: ['builder'],
+  operate: ['runs', 'schedules', 'notifications'],
+};
 
 const AUTO_PILOT_PHASE_LABELS: Record<string, string> = {
   exploration: 'Exploration',
@@ -447,11 +660,37 @@ const AUTO_PILOT_PHASE_LABELS: Record<string, string> = {
 };
 
 function isWorkflowTab(value: string | null): value is WorkflowTab {
-  return value === 'templates' || value === 'library' || value === 'builder' || value === 'runs';
+  return value === 'templates'
+    || value === 'library'
+    || value === 'builder'
+    || value === 'runs'
+    || value === 'schedules'
+    || value === 'notifications';
+}
+
+function workflowGroupForTab(tab: WorkflowTab): WorkflowGroup {
+  if (tab === 'builder') return 'build';
+  if (tab === 'runs' || tab === 'schedules' || tab === 'notifications') return 'operate';
+  return 'discover';
+}
+
+function workflowTabLabel(tab: WorkflowTab) {
+  if (tab === 'templates') return 'Templates';
+  if (tab === 'library') return 'Library';
+  if (tab === 'builder') return 'Guided builder';
+  if (tab === 'runs') return 'Runs';
+  if (tab === 'schedules') return 'Schedules';
+  return 'Alerts';
 }
 
 function pretty(value: string) {
   return value.replace(/_/g, ' ');
+}
+
+function toolLabel(toolName?: string | null) {
+  if (!toolName) return 'Waiting';
+  const short = toolName.includes('__') ? toolName.split('__').pop() || toolName : toolName;
+  return short.replace(/^browser_/, '').replace(/_/g, ' ');
 }
 
 function progress(value: number) {
@@ -492,6 +731,103 @@ function compactJson(value: unknown) {
   }
 }
 
+function _outputSummaryClient(output?: Record<string, unknown> | null) {
+  if (!output) return '';
+  const candidates: unknown[] = [output.summary, output.message, output.status_message, output.error_message];
+  const result = output.result;
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    const record = result as Record<string, unknown>;
+    candidates.push(record.summary, record.message, record.error_message);
+  }
+  const structured = output.structured_report;
+  if (structured && typeof structured === 'object' && !Array.isArray(structured)) {
+    const record = structured as Record<string, unknown>;
+    candidates.push(record.summary, record.title);
+  }
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return '';
+}
+
+async function copyText(text: string) {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  if (typeof document === 'undefined') {
+    throw new Error('Clipboard API is unavailable');
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  textarea.style.top = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const copied = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  if (!copied) throw new Error('Clipboard copy failed');
+}
+
+function temporalUiUrl(workflowId?: string | null, runId?: string | null, configuredUrl?: string | null, namespace?: string | null) {
+  if (!workflowId) return '';
+  let base = configuredUrl || process.env.NEXT_PUBLIC_TEMPORAL_UI_URL || '';
+  if (!base && typeof window !== 'undefined') {
+    base = `${window.location.protocol}//${window.location.hostname}:8233`;
+  }
+  if (!base) return '';
+  const trimmed = base.replace(/\/$/, '');
+  const workflowPath = `/namespaces/${encodeURIComponent(namespace || 'default')}/workflows/${encodeURIComponent(workflowId)}`;
+  return `${trimmed}${workflowPath}${runId ? `/${encodeURIComponent(runId)}/history` : ''}`;
+}
+
+function parseTemporalStepActivity(activity: WorkflowTemporalActivity, runId?: string | null): ParsedTemporalStepActivity | null {
+  if (activity.activity_type !== 'execute_custom_workflow_step' || !runId) return null;
+  const prefix = `custom-workflow-step-${runId}-`;
+  if (!activity.activity_id.startsWith(prefix)) return null;
+  const rest = activity.activity_id.slice(prefix.length);
+  const match = rest.match(/^(\d+)-(.+)-(\d+)-attempt-(\d+)$/);
+  if (!match) return null;
+  return {
+    runId,
+    stepOrder: Number(match[1]),
+    stepKey: match[2],
+    stepId: Number(match[3]),
+    attempt: Number(match[4]),
+    activity,
+  };
+}
+
+function eventLabel(eventType: string) {
+  return pretty(eventType.replace(/^workflow\./, '').replace(/^schedule_/, 'schedule_'));
+}
+
+type RunStepRecovery = {
+  recovery_action?: 'fail' | 'retry' | 'skip' | 'pause' | 'notify';
+  max_attempts?: number;
+  retry_backoff_seconds?: number;
+};
+
+function recoveryPolicyLabel(step: RunStepRecovery) {
+  if (step.recovery_action === 'retry') {
+    return `Retry ${step.max_attempts || 1}x${step.retry_backoff_seconds ? ` / ${step.retry_backoff_seconds}s` : ''}`;
+  }
+  if (step.recovery_action === 'skip') return 'Skip on failure';
+  if (step.recovery_action === 'pause') return 'Pause on failure';
+  if (step.recovery_action === 'notify') return 'Notify on failure';
+  return 'Fail on failure';
+}
+
+function recoveryPolicyTitle(step: RunStepRecovery) {
+  if (step.recovery_action === 'retry') return `Retry this step before failing. Max attempts: ${step.max_attempts || 1}. Backoff: ${step.retry_backoff_seconds || 0}s.`;
+  if (step.recovery_action === 'skip') return 'Skip this step and continue if it fails.';
+  if (step.recovery_action === 'pause') return 'Pause the workflow for operator review if this step fails.';
+  if (step.recovery_action === 'notify') return 'Notify operators and fail the workflow if this step fails.';
+  return 'Fail the workflow if this step fails.';
+}
+
 function externalStatusFromStep(step: WorkflowRunStep) {
   const output = step.output || {};
   const status = output.status;
@@ -517,9 +853,55 @@ function externalLabel(kind?: string | null) {
 function externalHref(kind?: string | null, id?: string | null) {
   if (!kind || !id) return null;
   if (kind === 'autopilot') return `/autopilot?sessionId=${encodeURIComponent(id)}`;
+  if (kind === 'agent_run') return `/agents?runId=${encodeURIComponent(id)}`;
   if (kind === 'test_run') return `/runs/${encodeURIComponent(id)}`;
   if (kind === 'regression_batch') return `/regression/batches/${encodeURIComponent(id)}`;
+  if (kind === 'security_scan') return `/security-testing?runId=${encodeURIComponent(id)}`;
+  if (kind === 'load_test_run') return `/load-testing?runId=${encodeURIComponent(id)}`;
+  if (kind === 'database_test_run') return `/database-testing?runId=${encodeURIComponent(id)}`;
+  if (kind === 'api_test_run') return `/api-testing?runId=${encodeURIComponent(id)}`;
   return null;
+}
+
+function artifactHref(artifact?: WorkflowRunArtifact | AutoPilotLiveArtifact | null) {
+  const href = artifact?.path || ('url' in (artifact || {}) ? (artifact as WorkflowRunArtifact).url : undefined);
+  if (!href) return '';
+  return String(href).startsWith('/artifacts') ? `${API_BASE}${href}` : String(href);
+}
+
+function sortedArtifactsByModifiedAt(artifacts: WorkflowRunArtifact[] = []) {
+  return [...artifacts].sort((a, b) => timestamp(String(b.modified_at || '')) - timestamp(String(a.modified_at || '')));
+}
+
+function severityRank(severity?: string | null) {
+  const value = String(severity || '').toLowerCase();
+  if (['critical', 'blocker'].includes(value)) return 5;
+  if (['high', 'error', 'failed'].includes(value)) return 4;
+  if (['medium', 'warning'].includes(value)) return 3;
+  if (['low'].includes(value)) return 2;
+  return 1;
+}
+
+function findingSeverityLabel(counts?: Record<string, number>) {
+  if (!counts || Object.keys(counts).length === 0) return 'No findings';
+  return Object.entries(counts)
+    .sort((a, b) => severityRank(b[0]) - severityRank(a[0]))
+    .map(([severity, count]) => `${count} ${pretty(severity)}`)
+    .join(' · ');
+}
+
+function stepOutputCount(step: WorkflowRunStep, key: 'findings' | 'artifacts') {
+  const output = step.output || {};
+  const sources: unknown[] = [output[key]];
+  const result = output.result;
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    sources.push((result as Record<string, unknown>)[key]);
+  }
+  const structured = output.structured_report;
+  if (structured && typeof structured === 'object' && !Array.isArray(structured)) {
+    sources.push((structured as Record<string, unknown>)[key]);
+  }
+  return sources.reduce<number>((total, source) => total + (Array.isArray(source) ? source.length : source ? 1 : 0), 0);
 }
 
 function timestamp(value?: string | null) {
@@ -761,25 +1143,6 @@ const workflowFilterActiveStyle: React.CSSProperties = {
   borderColor: 'rgba(59,130,246,0.45)',
 };
 
-function createWorkflowTabStyle(activeTab: string, tab: string): React.CSSProperties {
-  const isActive = activeTab === tab;
-  return {
-    height: 44,
-    padding: '0 20px',
-    cursor: 'pointer',
-    borderTop: 'none',
-    borderRight: 'none',
-    borderLeft: 'none',
-    borderBottom: isActive ? '2px solid var(--primary)' : '2px solid transparent',
-    color: isActive ? 'var(--text)' : 'var(--text-secondary)',
-    fontWeight: isActive ? 700 : 500,
-    background: 'transparent',
-    fontSize: '0.9rem',
-    transition: 'all 0.2s var(--ease-smooth)',
-    whiteSpace: 'nowrap',
-  };
-}
-
 function WorkflowSkeleton() {
   return (
     <div style={{ display: 'grid', gap: '0.85rem' }}>
@@ -814,6 +1177,7 @@ export default function WorkflowPage() {
   const [catalogCategory, setCatalogCategory] = useState('All');
   const [templateSearch, setTemplateSearch] = useState('');
   const [templateCategory, setTemplateCategory] = useState('All');
+  const [templatePreview, setTemplatePreview] = useState<WorkflowTemplate | null>(null);
   const [autoAddWaitSteps, setAutoAddWaitSteps] = useState(true);
   const [libraryStatusFilter, setLibraryStatusFilter] = useState<LibraryStatusFilter>('all');
   const [librarySort, setLibrarySort] = useState<LibrarySort>('updated');
@@ -836,13 +1200,30 @@ export default function WorkflowPage() {
   const [selectedRunStepId, setSelectedRunStepId] = useState<number | null>(null);
   const [selectedRunDetails, setSelectedRunDetails] = useState<WorkflowRun | null>(null);
   const [runDetailLoading, setRunDetailLoading] = useState(false);
+  const [runDebugById, setRunDebugById] = useState<Record<string, WorkflowRunDebug>>({});
+  const [runEventsById, setRunEventsById] = useState<Record<string, WorkflowEvent[]>>({});
+  const [runDiagnosticsById, setRunDiagnosticsById] = useState<Record<string, WorkflowDiagnostics>>({});
+  const [runDiagnosticsLoading, setRunDiagnosticsLoading] = useState(false);
+  const [temporalHealth, setTemporalHealth] = useState<WorkflowTemporalHealth | null>(null);
+  const [auditFilters, setAuditFilters] = useState<{
+    q: string;
+    severity: AuditSeverityFilter;
+    eventType: string;
+    order: AuditOrder;
+  }>({ q: '', severity: 'all', eventType: 'all', order: 'asc' });
   const [scheduleDialogDefinition, setScheduleDialogDefinition] = useState<WorkflowDefinition | null>(null);
+  const [editingSchedule, setEditingSchedule] = useState<WorkflowSchedule | null>(null);
+  const [scheduleEventsById, setScheduleEventsById] = useState<Record<string, WorkflowEvent[]>>({});
+  const [rollbackPreview, setRollbackPreview] = useState<WorkflowRollbackPreview | null>(null);
+  const [rollbackPreviewDefinition, setRollbackPreviewDefinition] = useState<WorkflowDefinition | null>(null);
   const [scheduleForm, setScheduleForm] = useState({
     name: '',
     description: '',
     cron_expression: '0 8 * * 1-5',
     timezone: 'UTC',
     start_step_key: '',
+    revision_mode: 'pinned' as ScheduleRevisionMode,
+    revision_id: '',
     enabled: true,
     notify_on_completion: false,
     notify_on_failure: true,
@@ -909,6 +1290,31 @@ export default function WorkflowPage() {
     return output.external_kind === 'autopilot' && typeof output.external_id === 'string' ? output.external_id : '';
   }, [autoPilotStep]);
 
+  const temporalExecutionBlocked = !temporalHealth?.available;
+  const temporalBlockedMessage = temporalHealth?.error || 'Temporal is unavailable; workflow execution is disabled.';
+
+  const temporalActivitiesByStepId = useMemo(() => {
+    const diagnostics = selectedRun ? runDiagnosticsById[selectedRun.id] : null;
+    const mapped = new Map<number, ParsedTemporalStepActivity[]>();
+    (diagnostics?.activities || []).forEach(activity => {
+      const parsed = parseTemporalStepActivity(activity, selectedRun?.id);
+      if (!parsed) return;
+      const current = mapped.get(parsed.stepId) || [];
+      current.push(parsed);
+      current.sort((a, b) => a.attempt - b.attempt || String(a.activity.scheduled_at || '').localeCompare(String(b.activity.scheduled_at || '')));
+      mapped.set(parsed.stepId, current);
+    });
+    return mapped;
+  }, [runDiagnosticsById, selectedRun]);
+
+  const latestTemporalActivityByStepId = useMemo(() => {
+    const mapped = new Map<number, ParsedTemporalStepActivity>();
+    temporalActivitiesByStepId.forEach((activities, stepId) => {
+      if (activities.length > 0) mapped.set(stepId, activities[activities.length - 1]);
+    });
+    return mapped;
+  }, [temporalActivitiesByStepId]);
+
   const filteredRuns = useMemo(() => {
     if (runFilter === 'active') return runs.filter(run => activeStatuses.includes(run.status));
     if (runFilter === 'failed') return runs.filter(run => run.status === 'failed');
@@ -969,6 +1375,29 @@ export default function WorkflowPage() {
       });
   }, [definitions, latestRunByDefinition, librarySearch, librarySort, libraryStatusFilter]);
 
+  const activeGroup = workflowGroupForTab(activeTab);
+
+  const builderIssueSummary = useMemo(() => {
+    const errorCount = Object.values(validation.steps).reduce((total, items) => total + items.length, 0)
+      + Object.values(validation.fieldErrors || {}).reduce((total, fields) => total + Object.values(fields).flat().length, 0)
+      + (validation.form ? 1 : 0);
+    const warningCount = Object.values(validation.warnings || {}).reduce((total, items) => total + items.length, 0);
+    const asyncWithoutWait = steps.filter((step, index) => {
+      const metadata = catalog.find(item => item.type === step.type);
+      if (!metadata?.is_async) return false;
+      return steps[index + 1]?.type !== 'wait_for_status';
+    }).length;
+    return { errorCount, warningCount, asyncWithoutWait };
+  }, [catalog, steps, validation]);
+
+  const templateCompatibility = useCallback((template: WorkflowTemplate) => {
+    const availableTypes = new Set(catalog.map(item => item.type));
+    const missingStepTypes = Array.from(new Set((template.step_types || template.steps.map(step => step.type))
+      .filter(type => !availableTypes.has(type))));
+    const asyncSteps = template.steps.filter(step => catalog.find(item => item.type === step.type)?.is_async).length;
+    return { missingStepTypes, asyncSteps };
+  }, [catalog]);
+
   const load = useCallback(async (initial = false) => {
     setError(null);
     setCatalogError(null);
@@ -980,10 +1409,11 @@ export default function WorkflowPage() {
       fetch(`${API_BASE}/workflows/catalog${projectParam}`),
       fetch(`${API_BASE}/api/agents/definitions${projectParam}`),
     ]);
-    const [schedulesResult, analyticsResult, notificationsResult] = await Promise.allSettled([
+    const [schedulesResult, analyticsResult, notificationsResult, temporalHealthResult] = await Promise.allSettled([
       fetch(`${API_BASE}/workflows/schedules${projectParam}`),
       fetch(`${API_BASE}/workflows/analytics${projectParam}`),
       fetch(`${API_BASE}/workflows/notifications${projectParam}`),
+      fetch(`${API_BASE}/workflows/temporal/health`),
     ]);
 
     if (defsResult.status !== 'fulfilled' || !defsResult.value.ok) {
@@ -1004,6 +1434,18 @@ export default function WorkflowPage() {
     if (notificationsResult.status === 'fulfilled' && notificationsResult.value.ok) {
       setNotifications(await notificationsResult.value.json());
     }
+    if (temporalHealthResult.status === 'fulfilled' && temporalHealthResult.value.ok) {
+      setTemporalHealth(await temporalHealthResult.value.json());
+    } else {
+      setTemporalHealth({
+        available: false,
+        status: 'unavailable',
+        address: '',
+        namespace: '',
+        task_queue: '',
+        error: 'Temporal health check is unavailable.',
+      });
+    }
 
     if (catalogResult.status === 'fulfilled' && catalogResult.value.ok) {
       const catalogData = await catalogResult.value.json();
@@ -1022,6 +1464,62 @@ export default function WorkflowPage() {
     }
     setLoading(false);
   }, [projectParam]);
+
+  const buildAuditSearchParams = useCallback((base: Record<string, string>) => {
+    const params = new URLSearchParams({
+      ...base,
+      order: auditFilters.order,
+      limit: '100',
+    });
+    if (auditFilters.q.trim()) params.set('q', auditFilters.q.trim());
+    if (auditFilters.severity !== 'all') params.set('severity', auditFilters.severity);
+    if (auditFilters.eventType !== 'all') params.set('event_type', auditFilters.eventType);
+    return params;
+  }, [auditFilters]);
+
+  const getRunEvents = useCallback(async (runId: string) => {
+    const params = buildAuditSearchParams({ run_id: runId });
+    const res = await fetch(`${API_BASE}/workflows/events?${params.toString()}`);
+    const data = await res.json().catch(() => []);
+    if (!res.ok) throw new Error(data?.detail || data?.error || 'Failed to load workflow audit trail');
+    const events = Array.isArray(data) ? data : [];
+    setRunEventsById(prev => ({ ...prev, [runId]: events }));
+    return events as WorkflowEvent[];
+  }, [buildAuditSearchParams]);
+
+  const getRunDiagnostics = useCallback(async (runId: string) => {
+    setRunDiagnosticsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/diagnostics`);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || data?.error || 'Failed to load workflow diagnostics');
+      setRunDiagnosticsById(prev => ({ ...prev, [runId]: data }));
+      return data as WorkflowDiagnostics;
+    } finally {
+      setRunDiagnosticsLoading(false);
+    }
+  }, []);
+
+  const getRunDebug = useCallback(async (runId: string, options?: { includeTemporal?: boolean }) => {
+    const includeTemporal = options?.includeTemporal ?? true;
+    const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/debug?include_temporal=${includeTemporal ? 'true' : 'false'}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data?.detail || data?.error || 'Failed to load workflow debug details');
+    const debug = data as WorkflowRunDebug;
+    setRunDebugById(prev => ({ ...prev, [runId]: debug }));
+    if (debug.run) setSelectedRunDetails(debug.run);
+    if (Array.isArray(debug.steps)) setRunStepsById(prev => ({ ...prev, [runId]: debug.steps }));
+    if (Array.isArray(debug.events)) setRunEventsById(prev => ({ ...prev, [runId]: debug.events }));
+    if (debug.temporal) setRunDiagnosticsById(prev => ({ ...prev, [runId]: debug.temporal as WorkflowDiagnostics }));
+    return debug;
+  }, []);
+
+  const refreshRunObservability = useCallback((runId: string) => {
+    void getRunDebug(runId).catch(() => {
+      void getRunEvents(runId).catch(() => {});
+      void getRunDiagnostics(runId).catch(() => {});
+    });
+  }, [getRunDebug, getRunDiagnostics, getRunEvents]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1050,9 +1548,10 @@ export default function WorkflowPage() {
       setSelectedRunId(runId);
       setActiveTab('runs');
       void getRunDetail(runId, { quiet: true });
+      refreshRunObservability(runId);
     }
     urlStateReady.current = true;
-  }, []);
+  }, [refreshRunObservability]);
 
   useEffect(() => {
     if (!urlStateReady.current || typeof window === 'undefined') return;
@@ -1124,10 +1623,12 @@ export default function WorkflowPage() {
       return;
     }
     setSelectedRunStepId(null);
+    refreshRunObservability(selectedRunId);
     let cancelled = false;
     const refresh = async (quiet = true) => {
       try {
         const detail = await getRunDetail(selectedRunId, { quiet });
+        await getRunDebug(selectedRunId, { includeTemporal: false }).catch(() => {});
         if (!cancelled && detail.status && terminalStatuses.includes(detail.status)) {
           await load(false).catch(() => {});
         }
@@ -1143,7 +1644,7 @@ export default function WorkflowPage() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [selectedRun?.status, selectedRunId, load]);
+  }, [selectedRun?.status, selectedRunId, load, refreshRunObservability, getRunDebug]);
 
   useEffect(() => {
     if (activeTab !== 'builder' || loading || steps.length === 0) return;
@@ -1602,6 +2103,13 @@ export default function WorkflowPage() {
     return Array.from(value.matchAll(/{{\s*([^{}]+?)\s*}}/g), match => match[1]);
   }
 
+  function ensureTemporalReady() {
+    if (!temporalExecutionBlocked) return true;
+    setError(temporalBlockedMessage);
+    toast.error('Temporal unavailable');
+    return false;
+  }
+
   async function saveDefinition() {
     if (!validateWorkflow()) return;
     const serverValid = await validateWorkflowOnServer();
@@ -1632,6 +2140,7 @@ export default function WorkflowPage() {
   }
 
   async function startWorkflow(definitionId: string, startStepKey?: string) {
+    if (!ensureTemporalReady()) return;
     setError(null);
     const res = await fetch(`${API_BASE}/workflows/definitions/${encodeURIComponent(definitionId)}/runs${projectParam}`, {
       method: 'POST',
@@ -1646,6 +2155,7 @@ export default function WorkflowPage() {
     if (data.run_id) {
       setSelectedRunId(String(data.run_id));
       void getRunDetail(String(data.run_id), { quiet: true });
+      refreshRunObservability(String(data.run_id));
     }
     await load(false);
     setActiveTab('runs');
@@ -1655,33 +2165,64 @@ export default function WorkflowPage() {
   function openScheduleDialog(definition: WorkflowDefinition) {
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     setScheduleDialogDefinition(definition);
+    setEditingSchedule(null);
     setScheduleForm({
       name: `${definition.name} schedule`,
       description: '',
       cron_expression: '0 8 * * 1-5',
       timezone,
       start_step_key: '',
+      revision_mode: 'pinned',
+      revision_id: '',
       enabled: true,
       notify_on_completion: false,
       notify_on_failure: true,
       notify_on_review_needed: true,
     });
+    void fetchDefinitionRevisions(definition.id);
+  }
+
+  function openEditScheduleDialog(schedule: WorkflowSchedule) {
+    const definition = definitions.find(item => item.id === schedule.definition_id);
+    if (!definition) {
+      setError('Workflow definition for this schedule is unavailable');
+      return;
+    }
+    setScheduleDialogDefinition(definition);
+    setEditingSchedule(schedule);
+    setScheduleForm({
+      name: schedule.name,
+      description: schedule.description || '',
+      cron_expression: schedule.cron_expression,
+      timezone: schedule.timezone || 'UTC',
+      start_step_key: schedule.start_step_key || '',
+      revision_mode: schedule.revision_mode || (schedule.revision_id ? 'pinned' : 'latest'),
+      revision_id: schedule.revision_id || '',
+      enabled: schedule.enabled,
+      notify_on_completion: Boolean(schedule.notify_on_completion),
+      notify_on_failure: schedule.notify_on_failure !== false,
+      notify_on_review_needed: schedule.notify_on_review_needed !== false,
+    });
+    void fetchDefinitionRevisions(definition.id);
   }
 
   async function submitSchedule() {
     const definition = scheduleDialogDefinition;
     if (!definition) return;
-    const res = await fetch(`${API_BASE}/workflows/schedules`, {
-      method: 'POST',
+    const editing = editingSchedule;
+    const res = await fetch(editing ? `${API_BASE}/workflows/schedules/${encodeURIComponent(editing.id)}` : `${API_BASE}/workflows/schedules`, {
+      method: editing ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        definition_id: definition.id,
+        ...(editing ? {} : { definition_id: definition.id }),
         name: scheduleForm.name.trim() || `${definition.name} schedule`,
         description: scheduleForm.description.trim(),
         cron_expression: scheduleForm.cron_expression.trim(),
         timezone: scheduleForm.timezone.trim() || 'UTC',
         inputs: {},
         start_step_key: scheduleForm.start_step_key || undefined,
+        revision_mode: scheduleForm.revision_mode,
+        revision_id: scheduleForm.revision_mode === 'pinned' ? scheduleForm.revision_id || undefined : null,
         enabled: scheduleForm.enabled,
         notify_on_completion: scheduleForm.notify_on_completion,
         notify_on_failure: scheduleForm.notify_on_failure,
@@ -1695,11 +2236,13 @@ export default function WorkflowPage() {
       return;
     }
     setScheduleDialogDefinition(null);
+    setEditingSchedule(null);
     await load(false);
-    toast.success('Workflow schedule created');
+    toast.success(editing ? 'Workflow schedule updated' : 'Workflow schedule created');
   }
 
   async function runScheduleNow(schedule: WorkflowSchedule) {
+    if (!ensureTemporalReady()) return;
     const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(schedule.id)}/run-now`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -1711,7 +2254,43 @@ export default function WorkflowPage() {
     toast.success('Scheduled workflow queued');
   }
 
+  async function toggleSchedule(schedule: WorkflowSchedule) {
+    const nextEnabled = !schedule.enabled;
+    const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(schedule.id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: nextEnabled }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.detail || data.error || `Failed to ${nextEnabled ? 'resume' : 'pause'} workflow schedule`);
+      toast.error('Failed to update schedule');
+      return;
+    }
+    await load(false);
+    toast.success(nextEnabled ? 'Workflow schedule resumed' : 'Workflow schedule paused');
+  }
+
+  async function deleteSchedule(schedule: WorkflowSchedule) {
+    if (typeof window !== 'undefined' && !window.confirm(`Delete schedule "${schedule.name}"?`)) return;
+    const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(schedule.id)}`, { method: 'DELETE' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.detail || data.error || 'Failed to delete workflow schedule');
+      toast.error('Failed to delete schedule');
+      return;
+    }
+    setScheduleEventsById(prev => {
+      const next = { ...prev };
+      delete next[schedule.id];
+      return next;
+    });
+    await load(false);
+    toast.success('Workflow schedule deleted');
+  }
+
   async function controlRun(runId: string, action: 'pause' | 'resume' | 'cancel') {
+    if (action === 'resume' && !ensureTemporalReady()) return;
     const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/${action}`, { method: 'POST' });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -1723,6 +2302,7 @@ export default function WorkflowPage() {
   }
 
   async function skipStep(run: WorkflowRun, step: WorkflowRunStep) {
+    if (!ensureTemporalReady()) return;
     setError(null);
     const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(run.id)}/steps/${step.id}/skip`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
@@ -1750,15 +2330,43 @@ export default function WorkflowPage() {
     setScheduleExecutions(prev => ({ ...prev, [scheduleId]: Array.isArray(data) ? data : [] }));
   }
 
-  async function loadRevisions(definitionId: string) {
+  async function loadScheduleEvents(scheduleId: string) {
+    const params = buildAuditSearchParams({ schedule_id: scheduleId });
+    const res = await fetch(`${API_BASE}/workflows/events?${params.toString()}`);
+    const data = await res.json().catch(() => []);
+    if (!res.ok) {
+      setError(data.detail || data.error || 'Failed to load schedule audit trail');
+      return;
+    }
+    setScheduleEventsById(prev => ({ ...prev, [scheduleId]: Array.isArray(data) ? data : [] }));
+  }
+
+  async function fetchDefinitionRevisions(definitionId: string) {
     const res = await fetch(`${API_BASE}/workflows/definitions/${encodeURIComponent(definitionId)}/revisions${projectParam}`);
     const data = await res.json().catch(() => []);
     if (!res.ok) {
       setError(data.detail || data.error || 'Failed to load workflow revisions');
+      return [];
+    }
+    const revisions = Array.isArray(data) ? data : [];
+    setRevisionsByDefinition(prev => ({ ...prev, [definitionId]: revisions }));
+    return revisions as WorkflowRevision[];
+  }
+
+  async function loadRevisions(definitionId: string) {
+    await fetchDefinitionRevisions(definitionId);
+    setSelectedRevisionDefinitionId(definitionId);
+  }
+
+  async function previewRollbackRevision(definition: WorkflowDefinition, version: number) {
+    const res = await fetch(`${API_BASE}/workflows/definitions/${encodeURIComponent(definition.id)}/revisions/${version}/rollback-preview${projectParam}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setError(data.detail || data.error || 'Failed to preview rollback');
       return;
     }
-    setSelectedRevisionDefinitionId(definitionId);
-    setRevisionsByDefinition(prev => ({ ...prev, [definitionId]: Array.isArray(data) ? data : [] }));
+    setRollbackPreview(data as WorkflowRollbackPreview);
+    setRollbackPreviewDefinition(definition);
   }
 
   async function rollbackRevision(definitionId: string, version: number) {
@@ -1772,6 +2380,8 @@ export default function WorkflowPage() {
       setError(data.detail || data.error || 'Failed to rollback workflow');
       return;
     }
+    setRollbackPreview(null);
+    setRollbackPreviewDefinition(null);
     await load(false);
     await loadRevisions(definitionId);
     toast.success(`Workflow rolled back to v${version}`);
@@ -1787,6 +2397,7 @@ export default function WorkflowPage() {
     setSelectedRunId(runId);
     setActiveTab('runs');
     void getRunDetail(runId, { quiet: true });
+    refreshRunObservability(runId);
   }
 
   function resetLibraryFilters() {
@@ -1903,6 +2514,7 @@ export default function WorkflowPage() {
   }
 
   async function retryFailedStep(run: WorkflowRun) {
+    if (!ensureTemporalReady()) return;
     setError(null);
     try {
       const steps = await getRunSteps(run.id);
@@ -2449,6 +3061,72 @@ export default function WorkflowPage() {
     );
   }
 
+  function renderWorkspaceNav() {
+    const groupStats = {
+      discover: `${workflowTemplates.length} templates · ${definitions.length} saved`,
+      build: `${steps.length} draft steps · ${builderIssueSummary.errorCount} blockers`,
+      operate: `${activeRuns.length} active · ${schedules.length} schedules · ${unreadNotifications} alerts`,
+    };
+    const groups: Array<{ id: WorkflowGroup; label: string; description: string; icon: React.ReactNode }> = [
+      { id: 'discover', label: 'Discover', description: 'Find a proven workflow or inspect your library.', icon: <Search size={16} /> },
+      { id: 'build', label: 'Build', description: 'Compose steps with validation and output tokens.', icon: <ListStart size={16} /> },
+      { id: 'operate', label: 'Operate', description: 'Run, schedule, diagnose, and respond to alerts.', icon: <Play size={16} /> },
+    ];
+    return (
+      <div className="workflow-workspace-nav">
+        <div className="workflow-workspace-groups" role="tablist" aria-label="Workflow workspace areas">
+          {groups.map(group => {
+            const isActive = activeGroup === group.id;
+            return (
+              <button
+                key={group.id}
+                type="button"
+                className={isActive ? 'workflow-workspace-group is-active' : 'workflow-workspace-group'}
+                aria-pressed={isActive}
+                onClick={() => setActiveTab(workflowGroupTabs[group.id][0])}
+              >
+                <span className="workflow-workspace-group-icon">{group.icon}</span>
+                <span className="workflow-workspace-group-copy">
+                  <strong>{group.label}</strong>
+                  <span>{group.description}</span>
+                </span>
+                <span className="workflow-workspace-group-stat">{groupStats[group.id]}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="workflow-subtabs" role="tablist" aria-label={`${activeGroup} workflow views`}>
+          {workflowGroupTabs[activeGroup].map(tab => {
+            const isActive = activeTab === tab;
+            const count = tab === 'templates'
+              ? workflowTemplates.length
+              : tab === 'library'
+                ? definitions.length
+                : tab === 'runs'
+                  ? activeRuns.length
+                  : tab === 'schedules'
+                    ? schedules.length
+                    : tab === 'notifications'
+                      ? unreadNotifications
+                      : steps.length;
+            return (
+              <button
+                key={tab}
+                type="button"
+                className={isActive ? 'workflow-subtab is-active' : 'workflow-subtab'}
+                aria-pressed={isActive}
+                onClick={() => setActiveTab(tab)}
+              >
+                <span>{workflowTabLabel(tab)}</span>
+                <span className="workflow-subtab-count">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
   function renderTemplates() {
     const query = normalizeSearch(templateSearch);
     const categories = Array.from(new Set(workflowTemplates.map(template => template.category || 'General'))).sort();
@@ -2465,7 +3143,8 @@ export default function WorkflowPage() {
           ...(template.step_types || []),
         ];
         return fields.some(field => field.toLowerCase().includes(query));
-      });
+      })
+      .sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999) || a.name.localeCompare(b.name));
     if (workflowTemplates.length === 0) {
       return (
         <EmptyState
@@ -2476,71 +3155,114 @@ export default function WorkflowPage() {
       );
     }
     return (
-      <div style={{ display: 'grid', gap: '1rem' }}>
-        <div style={{ display: 'grid', gap: '0.65rem' }}>
-          <div style={{ position: 'relative' }}>
-            <Search size={15} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
+      <div className="workflow-discover">
+        <div className="workflow-discover-intro">
+          <div>
+            <div className="workflow-eyebrow">Start from intent</div>
+            <h3>Pick the closest path, then tune the steps in the builder.</h3>
+            <p>Templates are complete workflows. They expose risk, duration, async waits, and missing setup before you use them.</p>
+          </div>
+          <div className="workflow-discover-stats">
+            <MetricMini label="Templates" value={String(workflowTemplates.length)} />
+            <MetricMini label="Categories" value={String(categories.length)} />
+            <MetricMini label="Step Types" value={String(catalog.length)} />
+          </div>
+        </div>
+
+        <div className="workflow-template-toolbar">
+          <div className="workflow-template-search">
+            <Search size={15} className="workflow-template-search-icon" />
             <Input
               value={templateSearch}
               onChange={event => setTemplateSearch(event.target.value)}
-              placeholder="Search templates"
+              placeholder="Search by goal, category, step, or tag"
               aria-label="Search workflow templates"
               style={{ paddingLeft: 34 }}
             />
           </div>
-          <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
+          <div className="workflow-template-category-row" role="group" aria-label="Template category filter">
             {['All', ...categories].map(category => (
-              <Button
+              <button
                 key={category}
                 type="button"
-                size="sm"
-                variant={templateCategory === category ? 'default' : 'outline'}
+                className={templateCategory === category ? 'workflow-catalog-filter is-active' : 'workflow-catalog-filter'}
+                aria-pressed={templateCategory === category}
                 onClick={() => setTemplateCategory(category)}
               >
-                {category}
-              </Button>
+                <span>{category}</span>
+                <span className="workflow-catalog-filter-count">
+                  {category === 'All' ? workflowTemplates.length : workflowTemplates.filter(template => (template.category || 'General') === category).length}
+                </span>
+              </button>
             ))}
           </div>
         </div>
+
         {visibleTemplates.length === 0 ? (
           <EmptyState title="No matching templates" description="No workflow templates match this search or category." icon={<Search size={28} />} />
         ) : (
           <div className="workflow-card-grid workflow-template-grid">
-        {visibleTemplates.map(template => (
-          <article
-            key={template.id}
-            className="card-elevated workflow-template-card"
-          >
-            <div className="workflow-template-content">
-              <div className="workflow-card-header">
-                <div style={{ minWidth: 0 }}>
-                  <h3 className="workflow-card-title">{template.name}</h3>
-                  <div className="workflow-template-use-case">
-                    {template.useCase}
+            {visibleTemplates.map(template => {
+              const compatibility = templateCompatibility(template);
+              const hasMissingTypes = compatibility.missingStepTypes.length > 0;
+              return (
+                <article
+                  key={template.id}
+                  className={hasMissingTypes ? 'card-elevated workflow-template-card has-warning' : 'card-elevated workflow-template-card'}
+                  data-risk={normalizeSearch(template.risk_level || 'low')}
+                >
+                  <div className="workflow-template-content">
+                    <div className="workflow-card-header">
+                      <div style={{ minWidth: 0 }}>
+                        <div className="workflow-eyebrow">{template.category || 'General'}</div>
+                        <h3 className="workflow-card-title">{template.name}</h3>
+                        <div className="workflow-template-use-case">
+                          {template.useCase}
+                        </div>
+                      </div>
+                      <div className="workflow-template-icon">
+                        <FileText size={17} />
+                      </div>
+                    </div>
+                    <p className="workflow-card-description">
+                      {template.description}
+                    </p>
+                    <div className="workflow-template-path" aria-label={`${template.name} steps`}>
+                      {template.steps.slice(0, 4).map((step, index) => (
+                        <span key={`${template.id}-${step.key}`} className="workflow-template-path-step">
+                          <span>{index + 1}</span>
+                          {step.label || defaultLabelFor(step.type, catalog)}
+                        </span>
+                      ))}
+                      {template.steps.length > 4 && <span className="workflow-template-path-more">+{template.steps.length - 4}</span>}
+                    </div>
+                    <div className="workflow-meta-row">
+                      <span style={workflowMetaPillStyle}>{template.steps.length} steps</span>
+                      {template.risk_level && <span style={workflowMetaPillStyle}>{pretty(template.risk_level)} risk</span>}
+                      {template.estimated_duration_minutes && <span style={workflowMetaPillStyle}>{template.estimated_duration_minutes} min</span>}
+                      {compatibility.asyncSteps > 0 && <span style={workflowMetaPillStyle}>{compatibility.asyncSteps} async</span>}
+                    </div>
+                    {hasMissingTypes ? (
+                      <div className="workflow-template-warning">
+                        Missing step registry: {compatibility.missingStepTypes.join(', ')}
+                      </div>
+                    ) : (
+                      <div className="workflow-template-ready">
+                        Ready for this project catalog
+                      </div>
+                    )}
                   </div>
-                </div>
-                <div className="workflow-template-icon">
-                  <FileText size={17} />
-                </div>
-              </div>
-              <p className="workflow-card-description">
-                {template.description}
-              </p>
-              <div className="workflow-meta-row">
-                <span style={workflowMetaPillStyle}>{template.steps.length} steps</span>
-                {template.category && <span style={workflowMetaPillStyle}>{template.category}</span>}
-                {template.risk_level && <span style={workflowMetaPillStyle}>{pretty(template.risk_level)} risk</span>}
-                {template.estimated_duration_minutes && <span style={workflowMetaPillStyle}>{template.estimated_duration_minutes} min</span>}
-                {template.steps.slice(0, 3).map(step => (
-                  <span key={`${template.id}-${step.key}`} style={workflowMetaPillStyle}>{step.label || defaultLabelFor(step.type, catalog)}</span>
-                ))}
-              </div>
-            </div>
-            <Button onClick={() => applyTemplate(template)} style={{ justifySelf: 'start' }}>
-              <Sparkles size={15} /> Use template
-            </Button>
-          </article>
-        ))}
+                  <div className="workflow-template-actions">
+                    <Button onClick={() => setTemplatePreview(template)} variant="outline">
+                      <Eye size={15} /> Preview
+                    </Button>
+                    <Button onClick={() => applyTemplate(template)} disabled={hasMissingTypes}>
+                      <Sparkles size={15} /> Use template
+                    </Button>
+                  </div>
+                </article>
+              );
+            })}
           </div>
         )}
       </div>
@@ -2569,6 +3291,19 @@ export default function WorkflowPage() {
 
     return (
       <div className="workflow-stack">
+        <div className="workflow-library-overview">
+          <div>
+            <div className="workflow-eyebrow">Saved automations</div>
+            <h3>Run the right workflow without opening the builder first.</h3>
+            <p>Cards surface current health, latest execution, schedule coverage, and the safest next action. Advanced maintenance stays in the overflow menu.</p>
+          </div>
+          <div className="workflow-library-overview-metrics">
+            <MetricMini label="Saved" value={String(definitions.length)} />
+            <MetricMini label="Active" value={String(activeRuns.length)} />
+            <MetricMini label="Failed" value={String(runs.filter(isRunFailed).length)} />
+            <MetricMini label="Scheduled" value={String(schedules.length)} />
+          </div>
+        </div>
         {selectedRevisionDefinition && (
           <Section
             title={`Versions: ${selectedRevisionDefinition.name}`}
@@ -2600,9 +3335,9 @@ export default function WorkflowPage() {
                           size="sm"
                           variant="outline"
                           disabled={revision.version === selectedRevisionDefinition.version}
-                          onClick={() => rollbackRevision(selectedRevisionDefinition.id, revision.version)}
+                          onClick={() => previewRollbackRevision(selectedRevisionDefinition, revision.version)}
                         >
-                          <RotateCcw size={14} /> Rollback
+                          <RotateCcw size={14} /> Preview
                         </Button>
                       </TableCell>
                     </TableRow>
@@ -2705,11 +3440,11 @@ export default function WorkflowPage() {
                     className="workflow-card-footer"
                   >
                     <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', minWidth: 0 }}>
-                      <Button size="sm" onClick={() => startWorkflow(definition.id)} style={{ minWidth: 92 }}>
+                      <Button size="sm" onClick={() => startWorkflow(definition.id)} disabled={temporalExecutionBlocked} style={{ minWidth: 92 }}>
                         <Play size={14} /> Run Now
                       </Button>
                       {nextSchedule && (
-                        <Button size="sm" variant="outline" onClick={() => runScheduleNow(nextSchedule)}>
+                        <Button size="sm" variant="outline" onClick={() => runScheduleNow(nextSchedule)} disabled={temporalExecutionBlocked}>
                           <Clock size={14} /> Run schedule
                         </Button>
                       )}
@@ -2746,6 +3481,7 @@ export default function WorkflowPage() {
                             className="workflow-action-menu-item"
                             key={`${definition.id}-${step.key}`}
                             onSelect={() => startWorkflow(definition.id, step.key)}
+                            disabled={temporalExecutionBlocked}
                             style={{ cursor: 'pointer' }}
                           >
                             <span style={{ width: 20, color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums', flexShrink: 0 }}>{index + 1}</span>
@@ -2830,9 +3566,36 @@ export default function WorkflowPage() {
     );
   }
 
+  function renderBuilderGuide() {
+    const readySteps = steps.length - builderIssueSummary.errorCount;
+    return (
+      <div className="workflow-builder-guide">
+        <div className="workflow-builder-guide-copy">
+          <div className="workflow-eyebrow">Guided builder</div>
+          <h3>{selectedDefinitionId ? 'Edit this workflow without losing operational context.' : 'Create a workflow from reusable automation steps.'}</h3>
+          <p>Use the catalog to add steps, connect later steps to earlier outputs with tokens, and let validation flag missing setup before saving.</p>
+        </div>
+        <div className="workflow-builder-guide-metrics">
+          <MetricMini label="Steps" value={String(steps.length)} />
+          <MetricMini label="Ready" value={String(Math.max(0, readySteps))} />
+          <MetricMini label="Blockers" value={String(builderIssueSummary.errorCount)} />
+          <MetricMini label="Warnings" value={String(builderIssueSummary.warningCount + builderIssueSummary.asyncWithoutWait)} />
+        </div>
+        {(builderIssueSummary.errorCount > 0 || builderIssueSummary.warningCount > 0 || builderIssueSummary.asyncWithoutWait > 0) && (
+          <div className="workflow-builder-guide-alerts">
+            {builderIssueSummary.errorCount > 0 && <span className="workflow-step-status workflow-step-status-error">{builderIssueSummary.errorCount} setup issue{builderIssueSummary.errorCount === 1 ? '' : 's'}</span>}
+            {builderIssueSummary.warningCount > 0 && <span className="workflow-step-status workflow-step-status-warning">{builderIssueSummary.warningCount} validation warning{builderIssueSummary.warningCount === 1 ? '' : 's'}</span>}
+            {builderIssueSummary.asyncWithoutWait > 0 && <span className="workflow-step-status workflow-step-status-warning">{builderIssueSummary.asyncWithoutWait} async step{builderIssueSummary.asyncWithoutWait === 1 ? '' : 's'} without wait</span>}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   function renderBuilder() {
     return (
       <div className="workflow-stack">
+        {renderBuilderGuide()}
         <Section
           title={selectedDefinitionId ? 'Edit workflow' : 'Create workflow'}
           description="Configure the workflow metadata and ordered automation steps."
@@ -3051,6 +3814,65 @@ export default function WorkflowPage() {
     );
   }
 
+  function renderTemporalStepActivityDetails(step: WorkflowRunStep) {
+    const temporalActivities = temporalActivitiesByStepId.get(step.id) || [];
+    const latest = temporalActivities[temporalActivities.length - 1];
+    const diagnostics = selectedRun ? runDiagnosticsById[selectedRun.id] : null;
+    const href = temporalUiUrl(
+      diagnostics?.temporal_workflow_id || selectedRun?.temporal_workflow_id,
+      diagnostics?.temporal_run_id || selectedRun?.temporal_run_id,
+      diagnostics?.temporal_ui_url,
+      diagnostics?.temporal_namespace,
+    );
+    if (temporalActivities.length === 0) {
+      return (
+        <details style={detailDisclosureStyle}>
+          <summary style={summaryStyle}>Temporal Activity</summary>
+          <div style={emptyDiagnosticStyle}>No Temporal step activity has been linked to this step yet.</div>
+        </details>
+      );
+    }
+    return (
+      <details style={detailDisclosureStyle} open>
+        <summary style={summaryStyle}>Temporal Activity</summary>
+        <div style={{ display: 'grid', gap: '0.55rem', marginTop: '0.55rem' }}>
+          <div className="workflow-meta-row">
+            <StatusBadge status={latest.activity.status} />
+            <span style={workflowMetaPillStyle}>Attempt {latest.attempt}</span>
+            <span style={workflowMetaPillStyle}>Scheduled event {latest.activity.scheduled_event_id ?? '-'}</span>
+            <span style={workflowMetaPillStyle}>Started event {latest.activity.started_event_id ?? '-'}</span>
+            {href && (
+              <a href={href} target="_blank" rel="noreferrer" style={linkActionStyle}>
+                Open Temporal <ExternalLink size={12} />
+              </a>
+            )}
+          </div>
+          <pre style={preStyle}>{compactJson({
+            activity_id: latest.activity.activity_id,
+            activity_type: latest.activity.activity_type,
+            status: latest.activity.status,
+            attempts: temporalActivities.map(item => ({
+              attempt: item.attempt,
+              status: item.activity.status,
+              scheduled_at: item.activity.scheduled_at,
+              started_at: item.activity.started_at,
+              completed_at: item.activity.completed_at,
+              scheduled_event_id: item.activity.scheduled_event_id,
+              started_event_id: item.activity.started_event_id,
+              last_event_type: item.activity.last_event_type,
+              failure_type: item.activity.failure_type,
+              failure_message: item.activity.failure_message || item.activity.last_failure,
+            })),
+          })}</pre>
+          {(latest.activity.failure_message || latest.activity.last_failure) && (
+            <FieldError>{latest.activity.failure_message || latest.activity.last_failure}</FieldError>
+          )}
+          {latest.activity.failure_stack_trace && <pre style={preStyle}>{latest.activity.failure_stack_trace}</pre>}
+        </div>
+      </details>
+    );
+  }
+
   function renderStepDiagnostics(step: WorkflowRunStep) {
     const outputStatus = externalStatusFromStep(step);
     const outputText = compactJson(step.output);
@@ -3073,8 +3895,11 @@ export default function WorkflowPage() {
           </div>
           <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
             <StatusBadge status={outputStatus || step.status} />
+            <span style={workflowMetaPillStyle} title={recoveryPolicyTitle(step)}>
+              {recoveryPolicyLabel(step)}
+            </span>
             {selectedRun && ['failed', 'pending', 'running', 'awaiting_input'].includes(step.status) && (
-              <Button size="sm" variant="outline" onClick={() => skipStep(selectedRun, step)}>
+              <Button size="sm" variant="outline" onClick={() => skipStep(selectedRun, step)} disabled={temporalExecutionBlocked}>
                 <ListStart size={14} /> Skip
               </Button>
             )}
@@ -3096,6 +3921,7 @@ export default function WorkflowPage() {
         )}
         <div style={{ display: 'grid', gap: '0.6rem', marginTop: '0.75rem' }}>
           {renderExternalReference(step)}
+          {renderTemporalStepActivityDetails(step)}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '0.75rem' }}>
             <details style={detailDisclosureStyle} open>
               <summary style={summaryStyle}>Resolved Input</summary>
@@ -3123,6 +3949,520 @@ export default function WorkflowPage() {
             </details>
           </div>
         </div>
+      </div>
+    );
+  }
+
+  function copySelectedRunDiagnostics() {
+    if (!selectedRun) return;
+    const schedule = schedules.find(item => item.id === selectedRun.trigger_id) || null;
+    const payload = {
+      generated_at: new Date().toISOString(),
+      run: selectedRun,
+      steps: selectedRunSteps,
+      audit_trail: runEventsById[selectedRun.id] || [],
+      temporal: runDiagnosticsById[selectedRun.id] || null,
+      schedule,
+      recovery_policies: selectedRunSteps.map(step => ({
+        step_id: step.id,
+        step_key: step.step_key,
+        recovery_action: step.recovery_action,
+        max_attempts: step.max_attempts,
+        retry_backoff_seconds: step.retry_backoff_seconds,
+      })),
+    };
+    copyText(compactJson(payload)).then(() => {
+      toast.success('Support bundle copied');
+    }).catch(() => {
+      toast.error('Could not copy support bundle');
+    });
+  }
+
+  function copyAuditEvents(events: WorkflowEvent[]) {
+    copyText(compactJson({
+      generated_at: new Date().toISOString(),
+      filters: auditFilters,
+      events,
+    })).then(() => {
+      toast.success('Audit trail copied');
+    }).catch(() => {
+      toast.error('Could not copy audit trail');
+    });
+  }
+
+  function renderAuditControls(events: WorkflowEvent[], onRefresh: () => void) {
+    const eventTypes = Array.from(new Set(events.map(event => event.event_type).filter(Boolean))).sort();
+    if (auditFilters.eventType !== 'all' && !eventTypes.includes(auditFilters.eventType)) {
+      eventTypes.unshift(auditFilters.eventType);
+    }
+    return (
+      <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ position: 'relative', minWidth: '180px', flex: '1 1 180px' }}>
+          <Search size={14} style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
+          <Input
+            value={auditFilters.q}
+            onChange={event => setAuditFilters(prev => ({ ...prev, q: event.target.value }))}
+            placeholder="Search audit"
+            style={{ paddingLeft: '2rem', height: '2rem' }}
+          />
+        </div>
+        <Select value={auditFilters.severity} onValueChange={value => setAuditFilters(prev => ({ ...prev, severity: value as AuditSeverityFilter }))}>
+          <SelectTrigger style={{ width: '130px', height: '2rem' }}><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All severity</SelectItem>
+            <SelectItem value="info">Info</SelectItem>
+            <SelectItem value="warning">Warning</SelectItem>
+            <SelectItem value="error">Error</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={auditFilters.eventType} onValueChange={value => setAuditFilters(prev => ({ ...prev, eventType: value }))}>
+          <SelectTrigger style={{ width: '160px', height: '2rem' }}><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All events</SelectItem>
+            {eventTypes.map(eventType => <SelectItem key={eventType} value={eventType}>{eventLabel(eventType)}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        <Select value={auditFilters.order} onValueChange={value => setAuditFilters(prev => ({ ...prev, order: value as AuditOrder }))}>
+          <SelectTrigger style={{ width: '120px', height: '2rem' }}><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="asc">Oldest</SelectItem>
+            <SelectItem value="desc">Newest</SelectItem>
+          </SelectContent>
+        </Select>
+        <Button size="sm" variant="outline" onClick={onRefresh}>
+          <RefreshCw size={14} /> Refresh
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => copyAuditEvents(events)}>
+          <Copy size={14} /> Copy
+        </Button>
+      </div>
+    );
+  }
+
+  function renderRunAuditTrail() {
+    if (!selectedRun) return null;
+    const events = runEventsById[selectedRun.id] || [];
+    return (
+      <div style={diagnosticBoxStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontWeight: 750 }}>Audit trail</div>
+            <div style={emptyDiagnosticStyle}>Operational events recorded for this run.</div>
+          </div>
+        </div>
+        <div style={{ marginTop: '0.75rem' }}>
+          {renderAuditControls(events, () => void getRunEvents(selectedRun.id))}
+        </div>
+        {events.length === 0 ? (
+          <div style={{ ...emptyDiagnosticStyle, marginTop: '0.75rem' }}>No audit events captured for this run yet.</div>
+        ) : (
+          <div style={{ display: 'grid', gap: '0.55rem', marginTop: '0.85rem' }}>
+            {events.map(event => (
+              <details key={event.id} style={detailDisclosureStyle}>
+                <summary style={{ ...summaryStyle, display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center' }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', minWidth: 0 }}>
+                    <StatusBadge status={event.severity} />
+                    <span>{eventLabel(event.event_type)}</span>
+                  </span>
+                  <span style={{ color: 'var(--text-secondary)', fontSize: '0.72rem', whiteSpace: 'nowrap' }}>{timeAgo(event.created_at)}</span>
+                </summary>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '0.55rem', lineHeight: 1.45 }}>
+                  {event.message}
+                </div>
+                {event.payload && Object.keys(event.payload).length > 0 && (
+                  <pre style={preStyle}>{compactJson(event.payload)}</pre>
+                )}
+              </details>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderTemporalDiagnostics() {
+    if (!selectedRun) return null;
+    const diagnostics = runDiagnosticsById[selectedRun.id];
+    const workflowId = diagnostics?.temporal_workflow_id || selectedRun.temporal_workflow_id;
+    const runId = diagnostics?.temporal_run_id || selectedRun.temporal_run_id;
+    const href = temporalUiUrl(workflowId, runId, diagnostics?.temporal_ui_url, diagnostics?.temporal_namespace);
+    return (
+      <div style={diagnosticBoxStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontWeight: 750 }}>Temporal diagnostics</div>
+            <div style={emptyDiagnosticStyle}>Activity history and workflow identifiers for support/debugging.</div>
+          </div>
+          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+            <Button size="sm" variant="outline" onClick={() => void getRunDiagnostics(selectedRun.id)}>
+              {runDiagnosticsLoading ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />} Temporal
+            </Button>
+            <Button size="sm" variant="outline" onClick={copySelectedRunDiagnostics}>
+              <Copy size={14} /> Copy support bundle
+            </Button>
+          </div>
+        </div>
+        <div className="workflow-meta-row" style={{ marginTop: '0.75rem' }}>
+          <span style={workflowMetaPillStyle}>Workflow <code style={inlineCodeStyle}>{workflowId || '-'}</code></span>
+          <span style={workflowMetaPillStyle}>Run <code style={inlineCodeStyle}>{runId || '-'}</code></span>
+          {href ? (
+            <a href={href} target="_blank" rel="noreferrer" style={linkActionStyle}>
+              Open Temporal <ExternalLink size={12} />
+            </a>
+          ) : (
+            <span style={emptyDiagnosticStyle}>No Temporal link available.</span>
+          )}
+        </div>
+        {diagnostics?.temporal_error && (
+          <Alert style={{ marginTop: '0.75rem' }}>
+            <AlertTriangle size={15} />
+            <AlertTitle>Temporal diagnostics degraded</AlertTitle>
+            <AlertDescription>{diagnostics.temporal_error}</AlertDescription>
+          </Alert>
+        )}
+        {diagnostics && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '0.6rem', marginTop: '0.75rem' }}>
+            <MetricMini label="Activities" value={String(diagnostics.summary?.total_activities ?? 0)} />
+            <MetricMini label="Retries" value={String(diagnostics.summary?.retry_count ?? 0)} />
+            <MetricMini label="Failed Activities" value={String(diagnostics.summary?.failed_activities ?? 0)} />
+            <MetricMini label="Workflow Status" value={diagnostics.workflow_status ? pretty(diagnostics.workflow_status) : '-'} />
+            <MetricMini label="History Events" value={String(diagnostics.history_event_count ?? 0)} />
+            <MetricMini label="Namespace" value={diagnostics.temporal_namespace || 'default'} />
+            <MetricMini label="Started" value={diagnostics.workflow_started_at ? timeAgo(diagnostics.workflow_started_at) : '-'} />
+            <MetricMini label="Closed" value={diagnostics.workflow_closed_at ? timeAgo(diagnostics.workflow_closed_at) : '-'} />
+            <MetricMini label="Close Event" value={diagnostics.close_event_type ? eventLabel(diagnostics.close_event_type) : '-'} />
+          </div>
+        )}
+        {diagnostics?.history_first_event_at && (
+          <div style={{ ...emptyDiagnosticStyle, marginTop: '0.65rem' }}>
+            History range {timeAgo(diagnostics.history_first_event_at)} to {diagnostics.history_last_event_at ? timeAgo(diagnostics.history_last_event_at) : '-'}
+          </div>
+        )}
+        {diagnostics?.summary?.last_failure && (
+          <FieldError>{diagnostics.summary.last_failure}</FieldError>
+        )}
+        {diagnostics?.activities?.length ? (
+          <Table style={{ marginTop: '0.85rem' }}>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Activity</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Attempts</TableHead>
+                <TableHead>Event IDs</TableHead>
+                <TableHead>Started</TableHead>
+                <TableHead>Completed</TableHead>
+                <TableHead>Failure</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {diagnostics.activities.map(activity => (
+                <TableRow key={`${activity.activity_id}-${activity.scheduled_at}`}>
+                  <TableCell>
+                    <div style={{ fontWeight: 650 }}>{activity.activity_type || activity.activity_id}</div>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.72rem' }}>{activity.activity_id}</div>
+                    {activity.last_event_type && <div style={{ color: 'var(--text-secondary)', fontSize: '0.72rem' }}>{eventLabel(activity.last_event_type)}</div>}
+                  </TableCell>
+                  <TableCell><StatusBadge status={activity.status} /></TableCell>
+                  <TableCell>{activity.attempt_count ?? 0}</TableCell>
+                  <TableCell>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
+                      scheduled {activity.scheduled_event_id ?? '-'}
+                    </div>
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
+                      started {activity.started_event_id ?? '-'}
+                    </div>
+                  </TableCell>
+                  <TableCell>{activity.started_at ? timeAgo(activity.started_at) : '-'}</TableCell>
+                  <TableCell>{activity.completed_at ? timeAgo(activity.completed_at) : '-'}</TableCell>
+                  <TableCell>
+                    {activity.failure_message || activity.last_failure ? (
+                      <details style={detailDisclosureStyle}>
+                        <summary style={summaryStyle}>{activity.failure_type || activity.timeout_type || 'Failure'}</summary>
+                        <FieldError>{activity.failure_message || activity.last_failure}</FieldError>
+                        {activity.failure_stack_trace && <pre style={preStyle}>{activity.failure_stack_trace}</pre>}
+                      </details>
+                    ) : (
+                      <span style={emptyDiagnosticStyle}>-</span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ) : (
+          <div style={{ ...emptyDiagnosticStyle, marginTop: '0.75rem' }}>
+            {diagnostics ? 'No Temporal activity history returned.' : 'Temporal diagnostics have not loaded yet.'}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderRunSummary(debug?: WorkflowRunDebug | null) {
+    if (!selectedRun) return null;
+    const health = debug?.health;
+    const currentLabel = health?.current_step_label || health?.current_step_key || 'No active step';
+    const lastUpdate = health?.heartbeat_at || selectedRun.heartbeat_at || selectedRun.updated_at;
+    const findingText = findingSeverityLabel(health?.finding_counts);
+    const isAttention = selectedRun.status === 'failed' || selectedRun.status === 'awaiting_input' || Number(health?.finding_count || 0) > 0;
+    return (
+      <div style={{ ...diagnosticBoxStyle, borderColor: isAttention ? 'rgba(250,204,21,0.35)' : 'var(--border-subtle)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.75rem', alignItems: 'stretch' }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={diagnosticLabelStyle}>Current action</div>
+            <div style={{ fontSize: '1rem', fontWeight: 800, marginBottom: '0.25rem' }}>{health?.next_action || currentLabel}</div>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45 }}>
+              {health?.last_message || `Step ${selectedRun.current_step_index + 1}: ${currentLabel}`}
+            </div>
+          </div>
+          <MetricMini label="Current step" value={currentLabel} />
+          <MetricMini label="Findings" value={findingText} />
+          <MetricMini label="Last update" value={lastUpdate ? timeAgo(lastUpdate) : '-'} />
+        </div>
+        <div className="workflow-meta-row" style={{ marginTop: '0.75rem' }}>
+          <span style={workflowMetaPillStyle}>Trigger {pretty(selectedRun.trigger_type || 'manual')}</span>
+          <span style={workflowMetaPillStyle}>Steps {health?.step_count ?? selectedRunSteps.length}</span>
+          <span style={workflowMetaPillStyle}>Artifacts {health?.artifact_count ?? 0}</span>
+          {health?.current_step_status && <span style={workflowMetaPillStyle}>Active status {pretty(health.current_step_status)}</span>}
+        </div>
+      </div>
+    );
+  }
+
+  function renderRunLiveObservability(debug?: WorkflowRunDebug | null) {
+    if (!selectedRun) return null;
+    const children = (debug?.external_children || []).filter(child => child.kind === 'agent_run');
+    const currentStep = selectedRunSteps.find(step => step.step_order === selectedRun.current_step_index) || selectedRunStep || null;
+    const activeChild = children.find(child => child.step_id === currentStep?.id)
+      || children.find(child => child.status && !agentTerminalStatuses.includes(child.status))
+      || children[children.length - 1]
+      || null;
+    const shouldShow = activeStatuses.includes(selectedRun.status) || children.length > 0;
+    if (!shouldShow) return null;
+
+    const childProgress = activeChild?.progress || {};
+    const artifacts = sortedArtifactsByModifiedAt(activeChild?.artifacts || []);
+    const latestImage = activeChild?.latest_image || artifacts.find(artifact => artifact.type === 'image') || null;
+    const recentTools = Array.isArray(childProgress.recent_tools) ? childProgress.recent_tools : [];
+    const hasBrowserTools = Boolean(childProgress.has_browser_tools)
+      || Number(childProgress.browser_tool_calls || 0) > 0
+      || artifacts.some(artifact => artifact.type === 'image' || artifact.type === 'video');
+    const childStatus = activeChild?.status || currentStep?.status || selectedRun.status;
+    const childActive = Boolean(activeChild?.status && !agentTerminalStatuses.includes(activeChild.status) && activeChild.status !== 'paused');
+    const message = childProgress.activity_label
+      || childProgress.message
+      || activeChild?.summary
+      || (activeChild ? 'Agent is running.' : 'Waiting for the workflow to link a child agent run.');
+    const updatedAt = childProgress.updated_at || debug?.health?.heartbeat_at || selectedRun.heartbeat_at || selectedRun.updated_at;
+    const childHref = activeChild ? externalHref(activeChild.kind, activeChild.id) : null;
+
+    return (
+      <div style={diagnosticBoxStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <div style={{ fontWeight: 750 }}>Live run</div>
+              <StatusBadge status={childStatus} />
+            </div>
+            <div style={emptyDiagnosticStyle}>
+              {activeChild ? (
+                <>
+                  Agent <code style={inlineCodeStyle}>{activeChild.id}</code>
+                </>
+              ) : (
+                <>Current step: {currentStep?.label || currentStep?.step_key || 'pending'}</>
+              )}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+            {childHref && (
+              <a href={childHref} style={linkActionStyle}>
+                Open agent <ExternalLink size={12} />
+              </a>
+            )}
+            {latestImage && (
+              <a href={artifactHref(latestImage)} target="_blank" rel="noreferrer" style={linkActionStyle}>
+                Open image <ExternalLink size={12} />
+              </a>
+            )}
+          </div>
+        </div>
+
+        <div style={{ marginTop: '0.85rem', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '0.75rem' }}>
+          <div style={liveActivityStyle}>
+            <div style={{ fontWeight: 750, marginBottom: '0.45rem' }}>Current activity</div>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.84rem', lineHeight: 1.45, minHeight: 36 }}>
+              {message}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: '0.45rem', marginTop: '0.75rem' }}>
+              <MetricMini label="Phase" value={childProgress.phase ? pretty(String(childProgress.phase)) : '-'} />
+              <MetricMini label="Tool" value={childProgress.last_tool_label || toolLabel(childProgress.last_tool)} />
+              <MetricMini label="Tool Calls" value={String(childProgress.tool_calls ?? 0)} />
+              <MetricMini label="Browser Actions" value={String(childProgress.browser_tool_calls ?? childProgress.interactions ?? 0)} />
+            </div>
+            <div style={{ ...emptyDiagnosticStyle, marginTop: '0.65rem' }}>
+              Last update {updatedAt ? timeAgo(updatedAt) : '-'}
+            </div>
+          </div>
+
+          <div style={liveActivityStyle}>
+            <div style={{ fontWeight: 750, marginBottom: '0.45rem' }}>Latest screenshot</div>
+            {latestImage ? (
+              <a href={artifactHref(latestImage)} target="_blank" rel="noreferrer" style={{ display: 'block', color: 'inherit', textDecoration: 'none' }}>
+                <img
+                  src={artifactHref(latestImage)}
+                  alt="Latest custom workflow browser screenshot"
+                  style={{ width: '100%', maxHeight: 260, objectFit: 'contain', borderRadius: 8, border: '1px solid var(--border-subtle)', background: 'var(--background)' }}
+                />
+              </a>
+            ) : (
+              <div style={emptyDiagnosticStyle}>
+                {hasBrowserTools
+                  ? 'Waiting for the first browser screenshot artifact.'
+                  : 'This child agent has not produced a screenshot yet.'}
+              </div>
+            )}
+          </div>
+
+          <div style={liveActivityStyle}>
+            <div style={{ fontWeight: 750, marginBottom: '0.45rem' }}>Recent actions</div>
+            {recentTools.length > 0 ? (
+              <div style={{ display: 'grid', gap: '0.45rem' }}>
+                {recentTools.slice(-8).reverse().map((tool, index) => (
+                  <div key={`${tool.name || tool.label || 'tool'}-${tool.at || index}`} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '0.6rem', alignItems: 'center', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
+                    <span style={{ color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tool.label || toolLabel(tool.name)}</span>
+                    <span>{tool.at ? timeAgo(tool.at) : '-'}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div style={emptyDiagnosticStyle}>No tool activity has been reported yet.</div>
+            )}
+          </div>
+        </div>
+
+        {artifacts.length > 0 && (
+          <div style={{ marginTop: '0.75rem' }}>
+            <div style={diagnosticLabelStyle}>Child artifacts</div>
+            <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
+              {artifacts.slice(0, 8).map((artifact, index) => (
+                <a key={`${artifact.path || artifact.url}-${artifact.name}-${index}`} href={artifactHref(artifact)} target="_blank" rel="noreferrer" style={artifactLinkStyle}>
+                  <FileText size={13} /> {String(artifact.type || 'artifact')} - {String(artifact.name || artifact.path || artifact.url)}
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeChild && hasBrowserTools && (
+          <details style={{ ...detailDisclosureStyle, marginTop: '0.75rem' }}>
+            <summary style={summaryStyle}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
+                <Eye size={14} /> Live browser
+              </span>
+            </summary>
+            <div style={{ marginTop: '0.75rem' }}>
+              <LiveBrowserView runId={activeChild.id} isActive={childActive} showHeader />
+            </div>
+          </details>
+        )}
+      </div>
+    );
+  }
+
+  function renderRunFindings(debug?: WorkflowRunDebug | null) {
+    const findings = debug?.findings || [];
+    return (
+      <div style={diagnosticBoxStyle}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontWeight: 750 }}>Findings</div>
+            <div style={emptyDiagnosticStyle}>{findings.length ? findingSeverityLabel(debug?.health?.finding_counts) : 'No findings detected for this workflow run.'}</div>
+          </div>
+        </div>
+        {findings.length > 0 && (
+          <div style={{ display: 'grid', gap: '0.55rem', marginTop: '0.85rem' }}>
+            {findings
+              .slice()
+              .sort((a, b) => severityRank(b.severity) - severityRank(a.severity))
+              .slice(0, 12)
+              .map(finding => (
+                <details key={finding.id} style={{ ...detailDisclosureStyle, borderColor: severityRank(finding.severity) >= 4 ? 'rgba(248,113,113,0.45)' : 'var(--border-subtle)' }}>
+                  <summary style={{ ...summaryStyle, display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center' }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', minWidth: 0 }}>
+                      <StatusBadge status={finding.severity} />
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{finding.title}</span>
+                    </span>
+                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.72rem', whiteSpace: 'nowrap' }}>
+                      {finding.step_key || externalLabel(finding.source_kind)}
+                    </span>
+                  </summary>
+                  {finding.description && <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '0.55rem', lineHeight: 1.45 }}>{finding.description}</div>}
+                  {finding.evidence && (
+                    <>
+                      <div style={{ ...diagnosticLabelStyle, marginTop: '0.75rem' }}>Evidence</div>
+                      <pre style={preStyle}>{finding.evidence}</pre>
+                    </>
+                  )}
+                  {finding.recommendation && (
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '0.55rem', lineHeight: 1.45 }}>
+                      <strong style={{ color: 'var(--text)' }}>Recommendation: </strong>{finding.recommendation}
+                    </div>
+                  )}
+                </details>
+              ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderRunArtifacts(debug?: WorkflowRunDebug | null) {
+    const artifacts = debug?.artifacts || [];
+    return (
+      <div style={diagnosticBoxStyle}>
+        <div style={{ fontWeight: 750 }}>Artifacts</div>
+        <div style={emptyDiagnosticStyle}>{artifacts.length ? `${artifacts.length} artifact${artifacts.length === 1 ? '' : 's'} collected across workflow steps.` : 'No artifacts reported for this run.'}</div>
+        {artifacts.length > 0 && (
+          <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', marginTop: '0.75rem' }}>
+            {artifacts.slice(0, 18).map((artifact, index) => {
+              const href = artifact.path || artifact.url;
+              const label = artifact.name || artifact.path || artifact.url || `Artifact ${index + 1}`;
+              const key = `${artifact.id || label}-${index}`;
+              return href ? (
+                <a key={key} href={`${String(href).startsWith('/artifacts') ? API_BASE : ''}${href}`} target="_blank" rel="noreferrer" style={artifactLinkStyle}>
+                  <FileText size={13} /> {String(label)}
+                </a>
+              ) : (
+                <span key={key} style={workflowMetaPillStyle}>{String(label)}</span>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderRunTimeline(debug?: WorkflowRunDebug | null) {
+    const timeline = debug?.timeline || [];
+    return (
+      <div style={diagnosticBoxStyle}>
+        <div style={{ fontWeight: 750 }}>Timeline</div>
+        <div style={emptyDiagnosticStyle}>{timeline.length ? 'Chronological workflow events and step transitions.' : 'No timeline events captured yet.'}</div>
+        {timeline.length > 0 && (
+          <div style={{ display: 'grid', gap: '0.45rem', marginTop: '0.75rem' }}>
+            {timeline.slice(-10).map((item, index) => (
+              <div key={`${item.created_at}-${item.title}-${index}`} style={{ display: 'grid', gridTemplateColumns: '110px minmax(0, 1fr) auto', gap: '0.65rem', alignItems: 'start', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
+                <span>{item.created_at ? timeAgo(item.created_at) : '-'}</span>
+                <span style={{ minWidth: 0 }}>
+                  <strong style={{ color: 'var(--text)' }}>{eventLabel(item.title)}</strong>
+                  {item.message && <span> · {item.message}</span>}
+                </span>
+                <StatusBadge status={item.status} />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
@@ -3337,6 +4677,7 @@ export default function WorkflowPage() {
       );
     }
     if (!selectedRun) return null;
+    const debug = runDebugById[selectedRun.id] || null;
     const percentage = progress(selectedRun.progress);
     const diagnosticStep = selectedRunStep;
     const totalSteps = selectedRunSteps.length;
@@ -3364,11 +4705,11 @@ export default function WorkflowPage() {
           </div>
           <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
             {selectedRun.status === 'failed' && (
-              <Button size="sm" variant="outline" onClick={() => retryFailedStep(selectedRun)}>
+              <Button size="sm" variant="outline" onClick={() => retryFailedStep(selectedRun)} disabled={temporalExecutionBlocked}>
                 <RotateCcw size={14} /> Retry Failed Step
               </Button>
             )}
-            <Button size="sm" variant="outline" onClick={() => getRunDetail(selectedRun.id)}>
+            <Button size="sm" variant="outline" onClick={() => { void getRunDetail(selectedRun.id); refreshRunObservability(selectedRun.id); }}>
               <RefreshCw size={14} /> Refresh
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setSelectedRunId('')}>
@@ -3383,6 +4724,7 @@ export default function WorkflowPage() {
             <AlertDescription>{selectedRun.error_message}</AlertDescription>
           </Alert>
         )}
+        {renderRunSummary(debug)}
         <div style={{ marginTop: '0.9rem', display: 'grid', gap: '0.5rem' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
             <span>Workflow progress</span>
@@ -3393,6 +4735,7 @@ export default function WorkflowPage() {
             <span style={{ color: 'var(--text-secondary)', fontSize: '0.76rem' }}>{progressDetail}</span>
           </div>
         </div>
+        {renderRunLiveObservability(debug)}
         <div style={stepTimelineStyle}>
           {selectedRunSteps.length === 0 ? (
             <div style={{ color: 'var(--text-secondary)', fontSize: '0.84rem' }}>
@@ -3402,6 +4745,9 @@ export default function WorkflowPage() {
             const selected = diagnosticStep?.id === step.id;
             const status = externalStatusFromStep(step) || step.status;
             const attention = step.status === 'failed' || attentionStatuses.includes(status);
+            const temporalActivity = latestTemporalActivityByStepId.get(step.id);
+            const findingsCount = debug?.findings.filter(finding => finding.workflow_step_id === step.id || finding.step_key === step.step_key).length ?? stepOutputCount(step, 'findings');
+            const artifactCount = debug?.artifacts.filter(artifact => artifact.source_step_id === step.id || artifact.step_key === step.step_key).length ?? stepOutputCount(step, 'artifacts');
             return (
               <button
                 key={step.id}
@@ -3416,7 +4762,21 @@ export default function WorkflowPage() {
                 <span style={{ color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>{step.step_order + 1}</span>
                 <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{step.label || step.step_key}</span>
                 <StatusBadge status={status} />
-                <span style={{ color: 'var(--text-secondary)', fontSize: '0.72rem' }}>{stepDuration(step)}</span>
+                <span style={{ gridColumn: '2 / -1', color: 'var(--text-secondary)', fontSize: '0.72rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {temporalActivity ? `Temporal ${pretty(temporalActivity.activity.status)} · ${temporalActivity.attempt}` : 'Temporal -'}
+                </span>
+                <span style={{ gridColumn: '2 / -1', color: findingsCount ? 'var(--warning)' : 'var(--text-secondary)', fontSize: '0.72rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {findingsCount ? `${findingsCount} finding${findingsCount === 1 ? '' : 's'}` : 'No findings'}
+                </span>
+                <span style={{ gridColumn: '2 / -1', color: artifactCount ? 'var(--primary)' : 'var(--text-secondary)', fontSize: '0.72rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {artifactCount ? `${artifactCount} artifact${artifactCount === 1 ? '' : 's'}` : recoveryPolicyLabel(step)}
+                </span>
+                <span style={{ gridColumn: '2 / -1', color: 'var(--text-secondary)', fontSize: '0.72rem' }}>{stepDuration(step)}</span>
+                {(step.summary || _outputSummaryClient(step.output)) && (
+                  <span style={{ gridColumn: '2 / -1', color: 'var(--text-secondary)', fontSize: '0.72rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {step.summary || _outputSummaryClient(step.output)}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -3428,6 +4788,13 @@ export default function WorkflowPage() {
             No failed step detected. Select a running workflow to follow progress, or open the child job linked from each step when available.
           </div>
         )}
+        <div style={{ display: 'grid', gap: '0.75rem', marginTop: '0.85rem' }}>
+          {renderRunFindings(debug)}
+          {renderRunArtifacts(debug)}
+          {renderRunTimeline(debug)}
+          {renderRunAuditTrail()}
+          {renderTemporalDiagnostics()}
+        </div>
         {renderAutoPilotDiagnostics()}
       </div>
     );
@@ -3482,6 +4849,8 @@ export default function WorkflowPage() {
             {schedules.map(schedule => {
               const definition = definitions.find(item => item.id === schedule.definition_id);
               const executions = scheduleExecutions[schedule.id] || [];
+              const events = scheduleEventsById[schedule.id] || [];
+              const revisionMode = schedule.revision_mode || (schedule.revision_id ? 'pinned' : 'latest');
               return (
                 <article key={schedule.id} className="card-elevated" style={{ padding: '1rem', display: 'grid', gap: '0.75rem' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap' }}>
@@ -3493,8 +4862,15 @@ export default function WorkflowPage() {
                     </div>
                     <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
                       <StatusBadge status={schedule.enabled ? schedule.status : 'paused'} />
-                      <Button size="sm" variant="outline" onClick={() => runScheduleNow(schedule)}><Play size={14} /> Run now</Button>
+                      <Button size="sm" variant="outline" onClick={() => openEditScheduleDialog(schedule)}><Edit3 size={14} /> Edit</Button>
+                      <Button size="sm" variant="outline" onClick={() => toggleSchedule(schedule)}>
+                        {schedule.enabled ? <Pause size={14} /> : <Play size={14} />}
+                        {schedule.enabled ? 'Pause' : 'Resume'}
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => runScheduleNow(schedule)} disabled={temporalExecutionBlocked}><Play size={14} /> Run now</Button>
                       <Button size="sm" variant="outline" onClick={() => loadScheduleExecutions(schedule.id)}><Clock size={14} /> Executions</Button>
+                      <Button size="sm" variant="outline" onClick={() => loadScheduleEvents(schedule.id)}><FileText size={14} /> Audit</Button>
+                      <Button size="sm" variant="outline" onClick={() => deleteSchedule(schedule)}><Trash2 size={14} /> Delete</Button>
                     </div>
                   </div>
                   <div className="workflow-meta-row">
@@ -3502,9 +4878,24 @@ export default function WorkflowPage() {
                     <span style={workflowMetaPillStyle}>Last {schedule.last_run_at ? timeAgo(schedule.last_run_at) : '-'}</span>
                     <span style={workflowMetaPillStyle}>{schedule.success_rate ?? 0}% success</span>
                     <span style={workflowMetaPillStyle}>{schedule.total_executions ?? 0} executions</span>
-                    <span style={workflowMetaPillStyle}>pinned {schedule.revision_id ? 'revision' : 'latest'}</span>
+                    <span style={workflowMetaPillStyle}>{revisionMode === 'latest' ? 'latest revision' : 'pinned revision'}</span>
                   </div>
                   {schedule.last_error && <FieldError>{schedule.last_error}</FieldError>}
+                  {events.length > 0 && (
+                    <div style={diagnosticBoxStyle}>
+                      <div style={{ fontWeight: 750, marginBottom: '0.5rem' }}>Schedule audit trail</div>
+                      {renderAuditControls(events, () => void loadScheduleEvents(schedule.id))}
+                      <div style={{ display: 'grid', gap: '0.45rem' }}>
+                        {events.map(event => (
+                          <div key={event.id} style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: '0.6rem', alignItems: 'center', fontSize: '0.78rem' }}>
+                            <StatusBadge status={event.severity || 'info'} />
+                            <span>{eventLabel(event.event_type)}</span>
+                            <span style={{ color: 'var(--text-secondary)' }}>{timeAgo(event.created_at)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {executions.length > 0 && (
                     <Table>
                       <TableHeader>
@@ -3577,6 +4968,30 @@ export default function WorkflowPage() {
     );
   }
 
+  function renderOperationsOverview() {
+    const now = Date.now();
+    const stuckRuns = runs.filter(run => activeStatuses.includes(run.status) && now - (parseDateMs(run.started_at || run.created_at) || now) > 15 * 60 * 1000);
+    const staleHeartbeat = runs.filter(run => ['queued', 'running'].includes(run.status) && run.heartbeat_at && now - (parseDateMs(run.heartbeat_at) || now) > 5 * 60 * 1000);
+    const reviewNeeded = runs.filter(run => ['paused', 'awaiting_input'].includes(run.status));
+    const unhealthySchedules = schedules.filter(schedule => schedule.status === 'error' || Boolean(schedule.last_error));
+    const recentFailures = runs.filter(run => run.status === 'failed' && now - (parseDateMs(run.updated_at || run.created_at) || now) < 24 * 60 * 60 * 1000);
+    const items = [
+      ['Stuck runs', stuckRuns.length],
+      ['Stale heartbeat', staleHeartbeat.length],
+      ['Review needed', reviewNeeded.length],
+      ['Unhealthy schedules', unhealthySchedules.length],
+      ['Recent failures', recentFailures.length],
+      ['Unread alerts', unreadNotifications],
+    ] as const;
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.65rem', marginBottom: '1rem' }}>
+        {items.map(([label, value]) => (
+          <MetricMini key={label} label={label} value={String(value)} />
+        ))}
+      </div>
+    );
+  }
+
   function renderRuns() {
     if (loading) return <WorkflowSkeleton />;
     return (
@@ -3599,6 +5014,7 @@ export default function WorkflowPage() {
           </div>
         }
       >
+        {renderOperationsOverview()}
         {renderAnalyticsPanel()}
         {renderRunDetailPanel()}
         {runs.length === 0 ? (
@@ -3659,7 +5075,7 @@ export default function WorkflowPage() {
                           <Eye size={14} /> Details
                         </Button>
                         {run.status === 'paused' || run.status === 'awaiting_input' ? (
-                          <Button size="icon" variant="outline" title="Resume workflow" aria-label="Resume workflow" onClick={() => controlRun(run.id, 'resume')}><Play size={14} /></Button>
+                          <Button size="icon" variant="outline" title="Resume workflow" aria-label="Resume workflow" onClick={() => controlRun(run.id, 'resume')} disabled={temporalExecutionBlocked}><Play size={14} /></Button>
                         ) : ['queued', 'running'].includes(run.status) ? (
                           <Button size="icon" variant="outline" title="Pause workflow" aria-label="Pause workflow" onClick={() => controlRun(run.id, 'pause')}><Pause size={14} /></Button>
                         ) : null}
@@ -3667,7 +5083,7 @@ export default function WorkflowPage() {
                           <Button size="icon" variant="outline" title="Cancel workflow" aria-label="Cancel workflow" onClick={() => controlRun(run.id, 'cancel')}><Square size={14} /></Button>
                         )}
                         {run.status === 'failed' && (
-                          <Button size="icon" variant="outline" title="Retry failed step" aria-label="Retry failed step" onClick={() => retryFailedStep(run)}><RotateCcw size={14} /></Button>
+                          <Button size="icon" variant="outline" title="Retry failed step" aria-label="Retry failed step" onClick={() => retryFailedStep(run)} disabled={temporalExecutionBlocked}><RotateCcw size={14} /></Button>
                         )}
                       </div>
                     </TableCell>
@@ -3681,18 +5097,107 @@ export default function WorkflowPage() {
     );
   }
 
+  function renderTemplatePreviewDialog() {
+    if (!templatePreview) return null;
+    const compatibility = templateCompatibility(templatePreview);
+    const hasMissingTypes = compatibility.missingStepTypes.length > 0;
+    const dialogTitleId = 'workflow-template-preview-title';
+    const dialogDescriptionId = 'workflow-template-preview-description';
+    const riskLevel = pretty(templatePreview.risk_level || 'low');
+    const durationLabel = templatePreview.estimated_duration_minutes ? `${templatePreview.estimated_duration_minutes} min` : '-';
+    return (
+      <div
+        style={modalBackdropStyle}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={dialogTitleId}
+        aria-describedby={dialogDescriptionId}
+      >
+        <div style={{ ...modalPanelStyle, width: 'min(760px, 100%)', padding: 0 }} className="workflow-template-preview-dialog">
+          <div className="workflow-template-preview-header">
+            <div className="workflow-template-preview-heading">
+              <div className="workflow-eyebrow">{templatePreview.category || 'General'}</div>
+              <h2 id={dialogTitleId}>{templatePreview.name}</h2>
+              <p id={dialogDescriptionId}>{templatePreview.description}</p>
+            </div>
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={() => setTemplatePreview(null)}
+              aria-label="Close template preview"
+              className="workflow-template-preview-close"
+            >
+              <X size={16} />
+            </Button>
+          </div>
+          <div className="workflow-template-preview-summary">
+            <TemplatePreviewMetric label="Use case" value={templatePreview.useCase || 'Workflow'} />
+            <TemplatePreviewMetric label="Steps" value={String(templatePreview.steps.length)} />
+            <TemplatePreviewMetric label="Risk" value={riskLevel} tone={normalizeSearch(templatePreview.risk_level || 'low')} />
+            <TemplatePreviewMetric label="Duration" value={durationLabel} />
+          </div>
+          {hasMissingTypes && (
+            <Alert className="workflow-template-preview-warning">
+              <AlertTriangle size={16} />
+              <AlertTitle>Template needs unavailable step types</AlertTitle>
+              <AlertDescription>{compatibility.missingStepTypes.join(', ')}</AlertDescription>
+            </Alert>
+          )}
+          <div className="workflow-template-preview-steps">
+            <div className="workflow-template-preview-section-label">Execution path</div>
+            {templatePreview.steps.map((step, index) => {
+              const metadata = catalog.find(item => item.type === step.type);
+              const isLastStep = index === templatePreview.steps.length - 1;
+              return (
+                <div key={`${templatePreview.id}-${step.key}`} className="workflow-template-preview-step">
+                  <div className="workflow-template-preview-step-rail" aria-hidden="true">
+                    <span className="workflow-template-preview-step-number">{index + 1}</span>
+                    {!isLastStep && <span className="workflow-template-preview-step-line" />}
+                  </div>
+                  <div className="workflow-template-preview-step-body">
+                    <div className="workflow-template-preview-step-title">{step.label || metadata?.label || pretty(step.type)}</div>
+                    <p>{metadata?.description || step.key}</p>
+                    <div className="workflow-meta-row">
+                      <span style={workflowMetaPillStyle}>{pretty(step.type)}</span>
+                      {metadata?.is_async && <span style={workflowMetaPillStyle}>async</span>}
+                      {metadata?.risk_level && <span style={workflowMetaPillStyle}>{pretty(metadata.risk_level)} risk</span>}
+                      {step.continue_on_error && <span style={workflowMetaPillStyle}>continues on error</span>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div className="workflow-template-preview-actions">
+            <Button variant="ghost" onClick={() => setTemplatePreview(null)}>Close</Button>
+            <Button
+              onClick={() => {
+                applyTemplate(templatePreview);
+                setTemplatePreview(null);
+              }}
+              disabled={hasMissingTypes}
+            >
+              <Sparkles size={14} /> Use template
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   function renderScheduleDialog() {
     const definition = scheduleDialogDefinition;
     if (!definition) return null;
+    const definitionRevisions = revisionsByDefinition[definition.id] || [];
     return (
       <div style={modalBackdropStyle} role="dialog" aria-modal="true" aria-label="Schedule workflow">
         <div style={modalPanelStyle}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start' }}>
             <div>
-              <h2 style={{ margin: 0, fontSize: '1.05rem' }}>Schedule workflow</h2>
+              <h2 style={{ margin: 0, fontSize: '1.05rem' }}>{editingSchedule ? 'Edit schedule' : 'Schedule workflow'}</h2>
               <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '0.25rem' }}>{definition.name}</div>
             </div>
-            <Button size="icon" variant="ghost" onClick={() => setScheduleDialogDefinition(null)} aria-label="Close schedule dialog"><X size={16} /></Button>
+            <Button size="icon" variant="ghost" onClick={() => { setScheduleDialogDefinition(null); setEditingSchedule(null); }} aria-label="Close schedule dialog"><X size={16} /></Button>
           </div>
           <div className="workflow-step-fields-grid" style={{ marginTop: '1rem' }}>
             <div>
@@ -3720,6 +5225,32 @@ export default function WorkflowPage() {
               </Select>
             </div>
           </div>
+          <div className="workflow-step-fields-grid" style={{ marginTop: '0.75rem' }}>
+            <div>
+              <Label>Revision mode</Label>
+              <Select value={scheduleForm.revision_mode} onValueChange={value => setScheduleForm(prev => ({ ...prev, revision_mode: value as ScheduleRevisionMode }))}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="pinned">Pinned revision</SelectItem>
+                  <SelectItem value="latest">Use latest revision</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {scheduleForm.revision_mode === 'pinned' && (
+              <div>
+                <Label>Pinned revision</Label>
+                <Select value={scheduleForm.revision_id || '__current__'} onValueChange={value => setScheduleForm(prev => ({ ...prev, revision_id: value === '__current__' ? '' : value }))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__current__">Current saved version</SelectItem>
+                    {definitionRevisions.map(revision => (
+                      <SelectItem key={revision.id} value={revision.id}>v{revision.version} - {revision.change_summary || revision.created_at}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+          </div>
           <div style={{ marginTop: '0.75rem' }}>
             <Label>Description</Label>
             <textarea
@@ -3746,8 +5277,55 @@ export default function WorkflowPage() {
             ))}
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1rem' }}>
-            <Button variant="ghost" onClick={() => setScheduleDialogDefinition(null)}>Cancel</Button>
-            <Button onClick={() => void submitSchedule()}><Clock size={14} /> Create schedule</Button>
+            <Button variant="ghost" onClick={() => { setScheduleDialogDefinition(null); setEditingSchedule(null); }}>Cancel</Button>
+            <Button onClick={() => void submitSchedule()}><Clock size={14} /> {editingSchedule ? 'Save schedule' : 'Create schedule'}</Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderRollbackPreviewDialog() {
+    if (!rollbackPreview || !rollbackPreviewDefinition) return null;
+    const summary = rollbackPreview.diff.summary || {};
+    const changed = rollbackPreview.diff.changed || [];
+    const added = rollbackPreview.diff.added || [];
+    const removed = rollbackPreview.diff.removed || [];
+    const reordered = rollbackPreview.diff.reordered || [];
+    return (
+      <div style={modalBackdropStyle} role="dialog" aria-modal="true" aria-label="Rollback preview">
+        <div style={modalPanelStyle}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start' }}>
+            <div>
+              <h2 style={{ margin: 0, fontSize: '1.05rem' }}>Rollback preview</h2>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '0.25rem' }}>
+                v{rollbackPreview.current_version} to v{rollbackPreview.target_version}
+              </div>
+            </div>
+            <Button size="icon" variant="ghost" onClick={() => { setRollbackPreview(null); setRollbackPreviewDefinition(null); }} aria-label="Close rollback preview"><X size={16} /></Button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '0.55rem', marginTop: '1rem' }}>
+            {Object.entries(summary).map(([key, value]) => <MetricMini key={key} label={pretty(key)} value={String(value)} />)}
+          </div>
+          <div style={{ display: 'grid', gap: '0.65rem', marginTop: '1rem' }}>
+            {added.length > 0 && <pre style={preStyle}>Added: {added.map(step => step.key).join(', ')}</pre>}
+            {removed.length > 0 && <pre style={preStyle}>Removed: {removed.map(step => step.key).join(', ')}</pre>}
+            {reordered.length > 0 && <pre style={preStyle}>Reordered: {reordered.map(item => item.key).join(', ')}</pre>}
+            {changed.length > 0 && (
+              <details style={detailDisclosureStyle} open>
+                <summary style={summaryStyle}>Changed steps</summary>
+                <pre style={preStyle}>{compactJson(changed)}</pre>
+              </details>
+            )}
+            {added.length === 0 && removed.length === 0 && reordered.length === 0 && changed.length === 0 && (
+              <div style={emptyDiagnosticStyle}>No step changes detected.</div>
+            )}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1rem' }}>
+            <Button variant="ghost" onClick={() => { setRollbackPreview(null); setRollbackPreviewDefinition(null); }}>Cancel</Button>
+            <Button onClick={() => rollbackRevision(rollbackPreviewDefinition.id, rollbackPreview.target_version)}>
+              <RotateCcw size={14} /> Confirm rollback
+            </Button>
           </div>
         </div>
       </div>
@@ -3789,6 +5367,16 @@ export default function WorkflowPage() {
         </Alert>
       )}
 
+      {temporalHealth && temporalExecutionBlocked && (
+        <Alert style={{ marginBottom: '1rem' }}>
+          <AlertTriangle size={16} />
+          <AlertTitle>Temporal unavailable</AlertTitle>
+          <AlertDescription>
+            {temporalBlockedMessage} {temporalHealth?.address ? `Address: ${temporalHealth.address}.` : ''}
+          </AlertDescription>
+        </Alert>
+      )}
+
       {analytics && (
         <div className="workflow-meta-row" style={{ marginBottom: '1rem', gap: '0.5rem', flexWrap: 'wrap' }}>
           <span style={workflowMetaPillStyle}>{analytics.active_runs ?? 0} active runs</span>
@@ -3799,20 +5387,7 @@ export default function WorkflowPage() {
         </div>
       )}
 
-      <div className="workflow-tabs">
-        {([
-          ['templates', `Templates (${workflowTemplates.length})`],
-          ['library', `Library (${definitions.length})`],
-          ['builder', selectedDefinitionId ? 'Builder: edit' : 'Builder'],
-          ['runs', `Runs (${activeRuns.length} active)`],
-          ['schedules', `Schedules (${schedules.length})`],
-          ['notifications', `Alerts (${unreadNotifications})`],
-        ] as const).map(([tab, label]) => (
-          <button key={tab} onClick={() => setActiveTab(tab)} style={createWorkflowTabStyle(activeTab, tab)}>
-            {label}
-          </button>
-        ))}
-      </div>
+      {renderWorkspaceNav()}
 
       {activeTab === 'templates' && (
         <Section
@@ -3837,8 +5412,19 @@ export default function WorkflowPage() {
       {activeTab === 'schedules' && renderSchedules()}
       {activeTab === 'notifications' && renderNotifications()}
       {renderTokenBrowser()}
+      {renderTemplatePreviewDialog()}
       {renderScheduleDialog()}
+      {renderRollbackPreviewDialog()}
     </PageLayout>
+  );
+}
+
+function TemplatePreviewMetric({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="workflow-template-preview-metric" data-tone={tone || 'default'}>
+      <div className="workflow-template-preview-metric-label">{label}</div>
+      <div className="workflow-template-preview-metric-value">{value}</div>
+    </div>
   );
 }
 
@@ -3859,18 +5445,19 @@ const runDetailPanelStyle: React.CSSProperties = {
   marginBottom: '1rem',
   display: 'grid',
   gap: '0.85rem',
+  minWidth: 0,
 };
 
 const stepTimelineStyle: React.CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+  gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
   gap: '0.55rem',
   marginTop: '0.85rem',
 };
 
 const stepChipStyle: React.CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: '24px minmax(0, 1fr) auto auto',
+  gridTemplateColumns: '24px minmax(0, 1fr) auto',
   alignItems: 'center',
   gap: '0.5rem',
   minHeight: 40,
@@ -3887,6 +5474,7 @@ const diagnosticBoxStyle: React.CSSProperties = {
   borderRadius: 10,
   background: 'var(--background)',
   padding: '1rem',
+  minWidth: 0,
 };
 
 const detailDisclosureStyle: React.CSSProperties = {

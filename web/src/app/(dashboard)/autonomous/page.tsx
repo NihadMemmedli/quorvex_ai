@@ -6,26 +6,28 @@ import {
     AlertCircle,
     Bot,
     CalendarClock,
+    ChevronDown,
+    ChevronRight,
     CheckCircle,
     ClipboardCheck,
     Compass,
     DollarSign,
     FileText,
     Gauge,
-    Globe2,
     Loader2,
     Pause,
     Play,
     Plus,
     RefreshCw,
-    RotateCcw,
     ShieldCheck,
     Sparkles,
     Square,
     Target,
+    Terminal,
     UploadCloud,
     Users,
     Workflow,
+    X,
     XCircle,
 } from 'lucide-react';
 import { fetchWithAuth } from '@/contexts/AuthContext';
@@ -34,6 +36,7 @@ import { API_BASE } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
+import { LiveBrowserView } from '@/components/LiveBrowserView';
 
 interface MissionStatusDetails {
     status?: string | null;
@@ -131,9 +134,29 @@ interface WorkItem {
     priority?: string | number | null;
     owner_agent?: string | null;
     blocked_reason?: string | null;
+    progress?: Record<string, unknown> | null;
+    artifacts?: Array<Record<string, unknown>> | null;
+    result?: Record<string, unknown> | null;
+    agent_task_id?: string | null;
     updated_at?: string | null;
     created_at?: string | null;
 }
+
+interface AgentEvent {
+    id: string;
+    mission_id: string;
+    run_id?: string | null;
+    work_item_id?: string | null;
+    agent_task_id?: string | null;
+    sequence: number;
+    event_type: string;
+    level: string;
+    message: string;
+    payload?: Record<string, unknown>;
+    created_at: string;
+}
+
+type LiveTab = 'live' | 'browser' | 'events' | 'output' | 'runs';
 
 const DEFAULT_FORM: MissionForm = {
     name: '',
@@ -421,6 +444,29 @@ function asCompactText(value: unknown, fallback = '-'): string {
     return fallback;
 }
 
+function clampText(value: unknown, fallback = '-', maxLength = 96) {
+    const text = asCompactText(value, fallback).replace(/\s+/g, ' ').trim();
+    if (!text || text === fallback) return fallback;
+    return text.length > maxLength ? `${text.slice(0, maxLength - 3).trim()}...` : text;
+}
+
+function getMissionPrimaryTarget(mission: Mission) {
+    const firstTarget = mission.target_urls?.[0];
+    if (!firstTarget) return 'No target configured';
+    const extraCount = (mission.target_urls?.length || 0) - 1;
+    return extraCount > 0 ? `${firstTarget} +${extraCount}` : firstTarget;
+}
+
+function toggleSetItem(current: Set<string>, id: string) {
+    const next = new Set(current);
+    if (next.has(id)) {
+        next.delete(id);
+    } else {
+        next.add(id);
+    }
+    return next;
+}
+
 function getWorkItemCount(value: unknown) {
     if (Array.isArray(value)) return value.length;
     if (typeof value === 'number') return value;
@@ -431,6 +477,49 @@ function getWorkItemCount(value: unknown) {
         if (Array.isArray(record.items)) return record.items.length;
     }
     return 0;
+}
+
+function eventLabel(value: string) {
+    return value.replace(/_/g, ' ');
+}
+
+function getEventTone(event: AgentEvent) {
+    if (event.level === 'error' || event.event_type === 'error') return 'danger';
+    if (event.event_type === 'browser_action') return 'primary';
+    if (event.event_type === 'pause') return 'warning';
+    if (event.event_type === 'resume' || event.event_type === 'complete') return 'success';
+    return 'neutral';
+}
+
+function getEventStatusStyle(event: AgentEvent) {
+    const tone = getEventTone(event);
+    if (tone === 'danger') return getStatusStyle('failed');
+    if (tone === 'warning') return getStatusStyle('paused');
+    if (tone === 'success') return getStatusStyle('completed');
+    if (tone === 'primary') return getStatusStyle('running');
+    return getStatusStyle('unknown');
+}
+
+function buildEventOutput(events: AgentEvent[]) {
+    return events
+        .filter(event => event.event_type === 'assistant_output')
+        .map(event => event.message)
+        .join('\n\n');
+}
+
+function getFinalWorkItemOutput(item: WorkItem) {
+    const resultOutput = item.result?.output;
+    if (typeof resultOutput === 'string' && resultOutput.trim()) return resultOutput;
+    const artifact = item.artifacts?.find(entry => typeof entry.content === 'string' && entry.content.trim());
+    return typeof artifact?.content === 'string' ? artifact.content : '';
+}
+
+function parseSseMessages(buffer: string) {
+    const chunks = buffer.split('\n\n');
+    return {
+        messages: chunks.slice(0, -1),
+        remainder: chunks[chunks.length - 1] || '',
+    };
 }
 
 export default function AutonomousMissionsPage() {
@@ -454,9 +543,17 @@ export default function AutonomousMissionsPage() {
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [showCreate, setShowCreate] = useState(false);
+    const [createStep, setCreateStep] = useState(1);
     const [form, setForm] = useState<MissionForm>(DEFAULT_FORM);
     const [formErrors, setFormErrors] = useState<FormErrors>({});
     const [selectedTemplateLabel, setSelectedTemplateLabel] = useState(QUICK_START_TEMPLATES[0]?.label || '');
+    const [expandedMissionIds, setExpandedMissionIds] = useState<Set<string>>(new Set());
+    const [expandedProposalIds, setExpandedProposalIds] = useState<Set<string>>(new Set());
+    const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
+    const [liveTab, setLiveTab] = useState<LiveTab>('live');
+    const [missionEvents, setMissionEvents] = useState<AgentEvent[]>([]);
+    const [streamStatus, setStreamStatus] = useState<'idle' | 'connecting' | 'connected' | 'closed' | 'error'>('idle');
+    const [streamError, setStreamError] = useState<string | null>(null);
     const [creating, setCreating] = useState(false);
     const [actionLoading, setActionLoading] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -534,6 +631,99 @@ export default function AutonomousMissionsPage() {
         refreshAll().finally(() => setLoading(false));
     }, [refreshAll]);
 
+    useEffect(() => {
+        if (!selectedMissionId) {
+            setMissionEvents([]);
+            setStreamStatus('idle');
+            setStreamError(null);
+            return;
+        }
+
+        const controller = new AbortController();
+        let cancelled = false;
+        const missionId = selectedMissionId;
+
+        async function connectEventStream() {
+            setMissionEvents([]);
+            setStreamStatus('connecting');
+            setStreamError(null);
+            try {
+                const response = await fetchWithAuth(
+                    `${missionsUrl}/${encodeURIComponent(missionId)}/events/stream`,
+                    { signal: controller.signal }
+                );
+                if (!response.ok) {
+                    throw new Error(await response.text() || 'Failed to connect to mission event stream');
+                }
+                if (!response.body) {
+                    throw new Error('Mission event stream is unavailable');
+                }
+
+                setStreamStatus('connected');
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (!cancelled) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    const parsed = parseSseMessages(buffer);
+                    buffer = parsed.remainder;
+                    parsed.messages.forEach(message => {
+                        const dataLine = message
+                            .split('\n')
+                            .find(line => line.startsWith('data:'));
+                        if (!dataLine) return;
+                        try {
+                            const payload = JSON.parse(dataLine.slice(5).trim());
+                            if (payload.status === 'connected') {
+                                setStreamStatus('connected');
+                            } else if (payload.status === 'complete') {
+                                setStreamStatus('closed');
+                            } else if (payload.status === 'error') {
+                                setStreamStatus('error');
+                                setStreamError(payload.message || 'Mission event stream failed');
+                            } else if (payload.event) {
+                                const event = payload.event as AgentEvent;
+                                setMissionEvents(prev => {
+                                    if (prev.some(existing => existing.id === event.id)) return prev;
+                                    return [...prev, event].sort((a, b) => a.sequence - b.sequence).slice(-500);
+                                });
+                            }
+                        } catch (err) {
+                            console.error('Failed to parse autonomous event stream payload:', err);
+                        }
+                    });
+                }
+                if (!cancelled) setStreamStatus(current => current === 'connected' ? 'closed' : current);
+            } catch (err) {
+                if (controller.signal.aborted || cancelled) return;
+                console.error('Autonomous event stream failed:', err);
+                setStreamStatus('error');
+                setStreamError(err instanceof Error ? err.message : 'Mission event stream failed');
+            }
+        }
+
+        connectEventStream();
+        return () => {
+            cancelled = true;
+            controller.abort();
+        };
+    }, [missionsUrl, selectedMissionId]);
+
+    useEffect(() => {
+        if (!showCreate && !materializeProposal) return;
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setShowCreate(false);
+                setMaterializeProposal(null);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [materializeProposal, showCreate]);
+
     const handleRefresh = async () => {
         setRefreshing(true);
         await refreshAll().finally(() => setRefreshing(false));
@@ -566,6 +756,7 @@ export default function AutonomousMissionsPage() {
         }));
         setFormErrors({});
         setSelectedTemplateLabel(template.label);
+        setCreateStep(2);
         setShowCreate(true);
     };
 
@@ -585,19 +776,59 @@ export default function AutonomousMissionsPage() {
     }, [missions]);
 
     const hasMissions = missions.length > 0;
-    const showCreatePanel = !hasMissions || showCreate;
+    const selectedMission = missions.find(mission => mission.id === selectedMissionId) || null;
+    const selectedMissionWorkItems = workItems.filter(item => item.mission_id === selectedMissionId);
+    const selectedMissionActiveWorkItems = selectedMissionWorkItems.filter(item => ['queued', 'running'].includes((item.status || '').toLowerCase()));
+    const selectedMissionFinalOutputs = selectedMissionWorkItems
+        .map(item => ({ item, output: getFinalWorkItemOutput(item) }))
+        .filter(entry => entry.output.trim());
+    const latestEvent = missionEvents[missionEvents.length - 1];
+    const liveAgentOutput = buildEventOutput(missionEvents);
+    const latestBrowserEvent = [...missionEvents].reverse().find(event => event.event_type === 'browser_action');
     const selectedTemplate = QUICK_START_TEMPLATES.find(template => template.label === selectedTemplateLabel)
         || QUICK_START_TEMPLATES.find(template => template.mission_type === form.mission_type)
         || QUICK_START_TEMPLATES[0];
+    const degradedMissions = missions.filter(mission => {
+        const health = (mission.health_status || 'healthy').toLowerCase();
+        return health !== 'healthy' || Boolean(mission.last_error) || Boolean(mission.paused_reason);
+    });
+    const approvedProposals = proposals.filter(proposal => (proposal.approval_status || '').toLowerCase() === 'approved');
     const dashboardStats = [
         { label: 'Running', value: totals.running, icon: <Play size={16} /> },
-        { label: 'Runs', value: totals.runs, icon: <RotateCcw size={16} /> },
-        { label: 'Findings', value: totals.findings, icon: <AlertCircle size={16} /> },
-        { label: 'Active Work', value: workItems.length || totals.activeWorkItems, icon: <Workflow size={16} /> },
         { label: 'Blocked', value: totals.blockedWorkItems, icon: <AlertCircle size={16} /> },
         { label: 'Approvals', value: approvals.length, icon: <CheckCircle size={16} /> },
         { label: 'Proposals', value: proposals.length, icon: <FileText size={16} /> },
         { label: 'Budget', value: formatCurrency(totals.budget), icon: <DollarSign size={16} /> },
+    ];
+    const attentionItems = [
+        {
+            label: 'Pending approvals',
+            value: approvals.length,
+            detail: approvals.length > 0 ? 'Approve or reject requested actions' : 'No approval queue',
+            icon: <CheckCircle size={16} />,
+            tone: approvals.length > 0 ? 'warning' : 'neutral',
+        },
+        {
+            label: 'Blocked work',
+            value: totals.blockedWorkItems,
+            detail: totals.blockedWorkItems > 0 ? 'Agent lanes need review' : 'No blockers reported',
+            icon: <AlertCircle size={16} />,
+            tone: totals.blockedWorkItems > 0 ? 'danger' : 'neutral',
+        },
+        {
+            label: 'Mission health',
+            value: degradedMissions.length,
+            detail: degradedMissions.length > 0 ? 'Missions need attention' : 'All missions healthy',
+            icon: <ShieldCheck size={16} />,
+            tone: degradedMissions.length > 0 ? 'warning' : 'neutral',
+        },
+        {
+            label: 'Ready to materialize',
+            value: approvedProposals.length,
+            detail: approvedProposals.length > 0 ? 'Approved tests can become files' : 'Nothing ready',
+            icon: <UploadCloud size={16} />,
+            tone: approvedProposals.length > 0 ? 'primary' : 'neutral',
+        },
     ];
 
     const handleCreate = async (event: FormEvent) => {
@@ -666,6 +897,7 @@ export default function AutonomousMissionsPage() {
             setForm(DEFAULT_FORM);
             setFormErrors({});
             setSelectedTemplateLabel(QUICK_START_TEMPLATES[0]?.label || '');
+            setCreateStep(1);
             setShowCreate(false);
             await refreshAll();
         } catch (err) {
@@ -797,9 +1029,10 @@ export default function AutonomousMissionsPage() {
                 subtitle="Create and control recurring agent missions for the current project"
                 icon={<Bot size={20} />}
                 actions={
-                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <div className="am-header-actions" style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                         <button
                             type="button"
+                            className="am-header-button"
                             onClick={handleRefresh}
                             disabled={refreshing}
                             style={{
@@ -816,12 +1049,16 @@ export default function AutonomousMissionsPage() {
                                 opacity: refreshing ? 0.7 : 1,
                             }}
                         >
-                            <RefreshCw size={14} style={refreshing ? { animation: 'spin 1s linear infinite' } : undefined} />
+                            <RefreshCw size={14} className={refreshing ? 'am-spin' : undefined} />
                             Refresh
                         </button>
                         <button
                             type="button"
-                            onClick={() => setShowCreate(value => !value)}
+                            className="am-header-button"
+                            onClick={() => {
+                                setCreateStep(1);
+                                setShowCreate(true);
+                            }}
                             style={{
                                 padding: '0.5rem 1rem',
                                 background: 'var(--primary)',
@@ -873,24 +1110,46 @@ export default function AutonomousMissionsPage() {
                 </div>
             )}
 
+            {hasMissions && (
+                <section className="am-attention-strip" aria-label="Needs attention">
+                    {attentionItems.map(item => (
+                        <div key={item.label} className={`am-attention-card am-attention-${item.tone}`}>
+                            <div className="am-attention-icon">{item.icon}</div>
+                            <div className="am-attention-copy">
+                                <strong>{item.value}</strong>
+                                <span>{item.label}</span>
+                                <small>{item.detail}</small>
+                            </div>
+                        </div>
+                    ))}
+                </section>
+            )}
+
+            {approvalsLoadError && (
+                <div className="am-alert am-alert-danger">
+                    {approvalsLoadError}
+                </div>
+            )}
+
             {approvals.length > 0 && (
-                <section className="am-panel">
-                    <div className="am-section-heading">
-                        <CheckCircle size={17} style={{ color: 'var(--warning)' }} />
-                        <h2>Pending Approvals</h2>
+                <section className="am-panel am-queue-panel">
+                    <div className="am-section-title-row">
+                        <div className="am-section-heading">
+                            <CheckCircle size={17} style={{ color: 'var(--warning)' }} />
+                            <div>
+                                <h2>Approval Queue</h2>
+                                <p>{approvals.length} pending action{approvals.length === 1 ? '' : 's'}</p>
+                            </div>
+                        </div>
                     </div>
-                    <div style={{ display: 'grid', gap: '0.65rem' }}>
-                        {approvals.slice(0, 5).map(approval => (
+                    <div className="am-inline-list">
+                        {approvals.slice(0, 4).map(approval => (
                             <div key={approval.id} className="am-inline-item">
-                                <div style={{ minWidth: 0 }}>
-                                    <div style={{ fontWeight: 700, fontSize: '0.88rem', textTransform: 'capitalize' }}>
-                                        {approval.action_type.replace(/_/g, ' ')}
-                                    </div>
-                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginTop: '0.2rem', overflowWrap: 'anywhere' }}>
-                                        {String(approval.requested_payload?.action || approval.requested_payload?.suggested_test || approval.finding_id || approval.id)}
-                                    </div>
+                                <div className="am-inline-copy">
+                                    <strong>{approval.action_type.replace(/_/g, ' ')}</strong>
+                                    <span>{clampText(approval.requested_payload?.action || approval.requested_payload?.suggested_test || approval.finding_id || approval.id, 'Approval request', 110)}</span>
                                 </div>
-                                <div style={{ display: 'flex', gap: '0.4rem' }}>
+                                <div className="am-action-group">
                                     <MissionActionButton
                                         icon={<CheckCircle size={13} />}
                                         label="Approve"
@@ -912,10 +1171,396 @@ export default function AutonomousMissionsPage() {
                 </section>
             )}
 
-            {approvalsLoadError && (
-                <div className="am-alert am-alert-danger">
-                    {approvalsLoadError}
-                </div>
+            {!hasMissions ? (
+                <section className="am-panel am-empty-state">
+                    <div className="am-empty-icon"><Bot size={24} /></div>
+                    <h2>No Autonomous Missions Yet</h2>
+                    <p>Create a mission to start recurring exploration, coverage review, and approval-gated test proposals for this project.</p>
+                    <button
+                        type="button"
+                        className="am-button am-button-primary"
+                        onClick={() => {
+                            setCreateStep(1);
+                            setShowCreate(true);
+                        }}
+                    >
+                        <Plus size={15} />
+                        New Mission
+                    </button>
+                </section>
+            ) : (
+                <section className="am-panel am-mission-panel">
+                    <div className="am-section-title-row">
+                        <div>
+                            <div className="am-kicker">Mission control</div>
+                            <h2>Active Missions</h2>
+                            <p>Scan health, timing, blockers, and the next action without opening every mission.</p>
+                        </div>
+                    </div>
+                    <div className="am-mission-list">
+                        {missions.map(mission => {
+                            const statusStyle = getStatusStyle(mission.status);
+                            const healthStyle = getHealthStyle(mission.health_status);
+                            const statusText = getMissionStatusText(mission.status);
+                            const teamSummary = getMissionField(mission, 'team_summary');
+                            const activeWorkItems = getMissionField(mission, 'active_work_items');
+                            const blockedWorkItems = getMissionField(mission, 'blocked_work_items');
+                            const coverageSummary = getMissionField(mission, 'coverage_summary');
+                            const hasTeamStatus = Boolean(teamSummary || activeWorkItems || blockedWorkItems || coverageSummary);
+                            const expanded = expandedMissionIds.has(mission.id);
+                            return (
+                                <article key={mission.id} className="am-mission-row">
+                                    <div className="am-mission-row-main">
+                                        <div className="am-mission-identity">
+                                            <button
+                                                type="button"
+                                                className="am-expand-button"
+                                                aria-label={`${expanded ? 'Collapse' : 'Expand'} ${mission.name}`}
+                                                aria-expanded={expanded}
+                                                onClick={() => setExpandedMissionIds(current => toggleSetItem(current, mission.id))}
+                                            >
+                                                {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                                            </button>
+                                            <div className="am-mission-title-block">
+                                                <h3>{mission.name}</h3>
+                                                <div className="am-row-subtitle">{formatMissionType(mission.mission_type)}</div>
+                                            </div>
+                                        </div>
+                                        <div className="am-mission-target" title={getMissionPrimaryTarget(mission)}>
+                                            {getMissionPrimaryTarget(mission)}
+                                        </div>
+                                        <div className="am-mission-statuses">
+                                            <span className="am-pill" style={{ color: healthStyle.color, background: healthStyle.background }}>
+                                                {mission.health_status || 'healthy'}
+                                            </span>
+                                            <span className="am-pill" style={{ color: statusStyle.color, background: statusStyle.background }}>
+                                                {statusText.replace(/_/g, ' ')}
+                                            </span>
+                                        </div>
+                                        <div className="am-row-metrics">
+                                            <div>
+                                                <span>Stage</span>
+                                                <strong>{formatReason(mission.current_stage) || 'idle'}</strong>
+                                            </div>
+                                            <div>
+                                                <span>Next Run</span>
+                                                <strong>{formatDate(mission.next_run_at)}</strong>
+                                            </div>
+                                            <div>
+                                                <span>Findings</span>
+                                                <strong>{mission.total_findings || 0}</strong>
+                                            </div>
+                                        </div>
+                                        <div className="am-card-actions">
+                                            <MissionActionButton
+                                                icon={<Terminal size={13} />}
+                                                label="Live"
+                                                color="var(--primary)"
+                                                loading={false}
+                                                onClick={() => {
+                                                    setSelectedMissionId(mission.id);
+                                                    setLiveTab('live');
+                                                }}
+                                            />
+                                            {canStart(mission.status) && (
+                                                <MissionActionButton
+                                                    icon={<Play size={13} />}
+                                                    label="Start"
+                                                    color="var(--success)"
+                                                    loading={actionLoading === `${mission.id}:start`}
+                                                    onClick={() => handleMissionAction(mission, 'start')}
+                                                />
+                                            )}
+                                            {canPause(mission.status) && (
+                                                <MissionActionButton
+                                                    icon={<Pause size={13} />}
+                                                    label="Pause"
+                                                    color="var(--warning)"
+                                                    loading={actionLoading === `${mission.id}:pause`}
+                                                    onClick={() => handleMissionAction(mission, 'pause')}
+                                                />
+                                            )}
+                                            {canResume(mission.status) && (
+                                                <MissionActionButton
+                                                    icon={<Play size={13} />}
+                                                    label="Resume"
+                                                    color="var(--success)"
+                                                    loading={actionLoading === `${mission.id}:resume`}
+                                                    onClick={() => handleMissionAction(mission, 'resume')}
+                                                />
+                                            )}
+                                            {canCancel(mission.status) && (
+                                                <MissionActionButton
+                                                    icon={<Square size={13} />}
+                                                    label="Cancel"
+                                                    color="var(--danger)"
+                                                    loading={actionLoading === `${mission.id}:cancel`}
+                                                    onClick={() => handleMissionAction(mission, 'cancel')}
+                                                />
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {expanded && (
+                                        <div className="am-mission-details">
+                                            <div className="am-health-panel">
+                                                <div>
+                                                    <span>Last Run</span>
+                                                    <strong>{formatDate(mission.last_run_at)}</strong>
+                                                </div>
+                                                <div>
+                                                    <span>Heartbeat</span>
+                                                    <strong>{formatDate(mission.last_heartbeat_at)}</strong>
+                                                </div>
+                                                <div>
+                                                    <span>Budget</span>
+                                                    <strong>{formatCurrency(mission.budget_used_usd || 0)}</strong>
+                                                </div>
+                                                <div>
+                                                    <span>Runs / Limit</span>
+                                                    <strong>{mission.total_runs || 0} / {formatLimit(mission.max_iterations)}</strong>
+                                                </div>
+                                                <div>
+                                                    <span>Failures</span>
+                                                    <strong>{mission.consecutive_failures || 0}</strong>
+                                                </div>
+                                            </div>
+
+                                            {hasTeamStatus && (
+                                                <div className="am-team-panel">
+                                                    <div className="am-team-summary">
+                                                        <Users size={14} />
+                                                        <span>{clampText(teamSummary, 'Team status pending', 160)}</span>
+                                                    </div>
+                                                    <div className="am-work-lanes">
+                                                        <div>
+                                                            <span>Active</span>
+                                                            <strong>{getWorkItemCount(activeWorkItems)}</strong>
+                                                            <small>{clampText(activeWorkItems, 'No active items', 90)}</small>
+                                                        </div>
+                                                        <div>
+                                                            <span>Blocked</span>
+                                                            <strong>{getWorkItemCount(blockedWorkItems)}</strong>
+                                                            <small>{clampText(blockedWorkItems, 'No blockers', 90)}</small>
+                                                        </div>
+                                                        <div>
+                                                            <span>Coverage</span>
+                                                            <strong>{clampText(coverageSummary, 'Pending', 110)}</strong>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {(mission.paused_reason || mission.next_action) && (
+                                                <div className="am-mission-note">
+                                                    <Workflow size={14} />
+                                                    <span>
+                                                        {formatReason(mission.paused_reason) || mission.next_action}
+                                                        {mission.paused_reason && mission.next_action ? `: ${mission.next_action}` : ''}
+                                                    </span>
+                                                </div>
+                                            )}
+
+                                            {mission.last_error && (
+                                                <div className="am-mission-error">
+                                                    <AlertCircle size={14} />
+                                                    <span>{clampText(mission.last_error, 'Mission error', 220)}</span>
+                                                </div>
+                                            )}
+
+                                            <div className="am-metadata-row">
+                                                <span>{mission.autonomy_level}</span>
+                                                <span>{mission.approval_policy}</span>
+                                                {mission.schedule_cron && <span>{mission.schedule_cron}</span>}
+                                                {mission.latest_run_id && <span>Run {clampText(mission.latest_run_id, '-', 28)}</span>}
+                                            </div>
+                                        </div>
+                                    )}
+                                </article>
+                            );
+                        })}
+                    </div>
+                </section>
+            )}
+
+            {selectedMission && (
+                <section className="am-panel am-live-panel" aria-label="Live mission debug panel">
+                    <div className="am-section-title-row">
+                        <div className="am-section-heading">
+                            <Terminal size={17} style={{ color: 'var(--primary)' }} />
+                            <div>
+                                <h2>{selectedMission.name}</h2>
+                                <p>
+                                    {streamStatus === 'connected' ? 'Live stream connected' : streamStatus === 'closed' ? 'Stream closed' : streamStatus}
+                                    {latestEvent ? ` · ${eventLabel(latestEvent.event_type)} · ${formatDate(latestEvent.created_at)}` : ''}
+                                </p>
+                            </div>
+                        </div>
+                        <div className="am-action-group">
+                            {canPause(selectedMission.status) && (
+                                <MissionActionButton
+                                    icon={<Pause size={13} />}
+                                    label="Pause"
+                                    color="var(--warning)"
+                                    loading={actionLoading === `${selectedMission.id}:pause`}
+                                    onClick={() => handleMissionAction(selectedMission, 'pause')}
+                                />
+                            )}
+                            {canResume(selectedMission.status) && (
+                                <MissionActionButton
+                                    icon={<Play size={13} />}
+                                    label="Resume"
+                                    color="var(--success)"
+                                    loading={actionLoading === `${selectedMission.id}:resume`}
+                                    onClick={() => handleMissionAction(selectedMission, 'resume')}
+                                />
+                            )}
+                            {canCancel(selectedMission.status) && (
+                                <MissionActionButton
+                                    icon={<Square size={13} />}
+                                    label="Cancel"
+                                    color="var(--danger)"
+                                    loading={actionLoading === `${selectedMission.id}:cancel`}
+                                    onClick={() => handleMissionAction(selectedMission, 'cancel')}
+                                />
+                            )}
+                            <button
+                                type="button"
+                                className="am-icon-button"
+                                aria-label="Close live mission panel"
+                                onClick={() => setSelectedMissionId(null)}
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="am-live-tabs" role="tablist" aria-label="Live mission debug views">
+                        {(['live', 'browser', 'events', 'output', 'runs'] as LiveTab[]).map(tab => (
+                            <button
+                                key={tab}
+                                type="button"
+                                role="tab"
+                                aria-selected={liveTab === tab}
+                                className={liveTab === tab ? 'am-live-tab is-active' : 'am-live-tab'}
+                                onClick={() => setLiveTab(tab)}
+                            >
+                                {tab}
+                            </button>
+                        ))}
+                    </div>
+
+                    {streamError && (
+                        <div className="am-alert am-alert-danger">
+                            <AlertCircle size={16} />
+                            <span>{streamError}</span>
+                        </div>
+                    )}
+
+                    {liveTab === 'live' && (
+                        <div className="am-live-grid">
+                            <div className="am-live-summary">
+                                <div>
+                                    <span>Status</span>
+                                    <strong>{getMissionStatusText(selectedMission.status)}</strong>
+                                </div>
+                                <div>
+                                    <span>Stage</span>
+                                    <strong>{formatReason(selectedMission.current_stage) || 'idle'}</strong>
+                                </div>
+                                <div>
+                                    <span>Heartbeat</span>
+                                    <strong>{formatDate(selectedMission.last_heartbeat_at)}</strong>
+                                </div>
+                                <div>
+                                    <span>Active work</span>
+                                    <strong>{selectedMissionActiveWorkItems.length}</strong>
+                                </div>
+                                <div>
+                                    <span>Last tool</span>
+                                    <strong>{clampText(latestEvent?.payload?.short_name || latestEvent?.payload?.tool_name, 'None', 44)}</strong>
+                                </div>
+                                <div>
+                                    <span>Browser</span>
+                                    <strong>{latestBrowserEvent ? eventLabel(String(latestBrowserEvent.payload?.short_name || latestBrowserEvent.message)) : 'No action'}</strong>
+                                </div>
+                            </div>
+                            <pre className="am-live-output">
+                                {liveAgentOutput || latestEvent?.message || 'Waiting for live agent output...'}
+                            </pre>
+                        </div>
+                    )}
+
+                    {liveTab === 'browser' && (
+                        <div className="am-browser-panel">
+                            <LiveBrowserView
+                                runId={selectedMission.latest_run_id || selectedMission.id}
+                                isActive={canPause(selectedMission.status)}
+                                showHeader
+                            />
+                        </div>
+                    )}
+
+                    {liveTab === 'events' && (
+                        <div className="am-event-list">
+                            {missionEvents.length === 0 ? (
+                                <div className="am-empty-inline">Waiting for mission events...</div>
+                            ) : missionEvents.slice(-120).map(event => {
+                                const style = getEventStatusStyle(event);
+                                return (
+                                    <div key={event.id} className="am-event-row">
+                                        <span className="am-event-sequence">#{event.sequence}</span>
+                                        <span className="am-pill" style={{ color: style.color, background: style.background }}>
+                                            {eventLabel(event.event_type)}
+                                        </span>
+                                        <div className="am-event-copy">
+                                            <strong>{clampText(event.message, 'Event', 180)}</strong>
+                                            <span>{formatDate(event.created_at)}{event.work_item_id ? ` · ${event.work_item_id}` : ''}</span>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    {liveTab === 'output' && (
+                        <div className="am-output-list">
+                            {selectedMissionFinalOutputs.length === 0 ? (
+                                <pre className="am-live-output">{liveAgentOutput || 'Final agent output will appear after work items complete.'}</pre>
+                            ) : selectedMissionFinalOutputs.map(({ item, output }) => (
+                                <div key={item.id} className="am-output-card">
+                                    <div className="am-output-title">{item.owner_agent || item.title || item.id}</div>
+                                    <pre className="am-live-output">{output}</pre>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+
+                    {liveTab === 'runs' && (
+                        <div className="am-live-summary">
+                            <div>
+                                <span>Latest run</span>
+                                <strong>{selectedMission.latest_run_id || '-'}</strong>
+                            </div>
+                            <div>
+                                <span>Total runs</span>
+                                <strong>{selectedMission.total_runs || 0}</strong>
+                            </div>
+                            <div>
+                                <span>Runtime limit</span>
+                                <strong>{selectedMission.max_runtime_minutes || '-'} min</strong>
+                            </div>
+                            <div>
+                                <span>Budget</span>
+                                <strong>{formatCurrency(selectedMission.budget_used_usd || 0)}</strong>
+                            </div>
+                            <div>
+                                <span>Next action</span>
+                                <strong>{clampText(selectedMission.next_action, 'None', 120)}</strong>
+                            </div>
+                        </div>
+                    )}
+                </section>
             )}
 
             {workItems.length > 0 && (
@@ -925,7 +1570,7 @@ export default function AutonomousMissionsPage() {
                             <Workflow size={17} style={{ color: 'var(--primary)' }} />
                             <div>
                                 <h2>Recent Work Items</h2>
-                                <p>{workItems.length} latest team lane updates</p>
+                                <p>{workItems.length} latest team lane update{workItems.length === 1 ? '' : 's'}</p>
                             </div>
                         </div>
                     </div>
@@ -938,7 +1583,7 @@ export default function AutonomousMissionsPage() {
                                 <div key={item.id || `${item.mission_id || 'work'}:${index}`} className="am-work-item">
                                     <div style={{ minWidth: 0 }}>
                                         <div className="am-work-item-title">
-                                            {item.title || item.summary || 'Untitled work item'}
+                                            {clampText(item.title || item.summary, 'Untitled work item', 120)}
                                         </div>
                                         <div className="am-work-item-meta">
                                             {missionName && <span>{missionName}</span>}
@@ -948,7 +1593,7 @@ export default function AutonomousMissionsPage() {
                                         </div>
                                         {item.blocked_reason && (
                                             <div className="am-work-item-blocker">
-                                                {item.blocked_reason}
+                                                {clampText(item.blocked_reason, 'Blocked', 160)}
                                             </div>
                                         )}
                                     </div>
@@ -958,493 +1603,6 @@ export default function AutonomousMissionsPage() {
                                 </div>
                             );
                         })}
-                    </div>
-                </section>
-            )}
-
-            {showCreatePanel && (
-                <form
-                    onSubmit={handleCreate}
-                    className="am-panel am-create-panel"
-                >
-                    <div className="am-create-grid">
-                        <div className="am-create-main">
-                            <div className="am-section-title-row">
-                                <div>
-                                    <div className="am-kicker">Mission setup</div>
-                                    <h2>Create Mission</h2>
-                                    <p>Define the objective and target surface first. New missions are created paused, then started when you are ready.</p>
-                                </div>
-                                {!hasMissions && (
-                                    <div className="am-soft-badge">
-                                        <Sparkles size={14} /> First mission
-                                    </div>
-                                )}
-                            </div>
-
-                            <div className="am-setup-flow">
-                                <div className="am-step-heading">
-                                    <span>1</span>
-                                    <div>
-                                        <strong>Objective</strong>
-                                        <small>Pick the mission shape and name it for the flow or risk area it owns.</small>
-                                    </div>
-                                </div>
-
-                                <div className="am-template-picker" role="radiogroup" aria-label="Mission quick starts">
-                                    {QUICK_START_TEMPLATES.map(template => {
-                                        const isSelected = selectedTemplate?.label === template.label;
-                                        return (
-                                            <button
-                                                key={template.label}
-                                                type="button"
-                                                role="radio"
-                                                aria-checked={isSelected}
-                                                className={isSelected ? 'am-template-choice is-active' : 'am-template-choice'}
-                                                onClick={() => applyMissionTemplate(template)}
-                                            >
-                                                <span className="am-template-icon">{template.icon}</span>
-                                                <span>
-                                                    <strong>{template.label}</strong>
-                                                    <small>{template.description}</small>
-                                                </span>
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-
-                                <div className="am-form-grid">
-                                    <label className="am-field">
-                                        <span>Name</span>
-                                        <input
-                                            name="mission-name"
-                                            value={form.name}
-                                            aria-invalid={Boolean(formErrors.name)}
-                                            autoComplete="off"
-                                            onChange={event => {
-                                                setForm(prev => ({ ...prev, name: event.target.value }));
-                                                setFormErrors(prev => ({ ...prev, name: undefined }));
-                                            }}
-                                            placeholder="Checkout coverage scout"
-                                        />
-                                        {formErrors.name && <small className="am-field-error">{formErrors.name}</small>}
-                                    </label>
-                                    <label className="am-field">
-                                        <span>Type</span>
-                                        <select
-                                            name="mission-type"
-                                            value={form.mission_type}
-                                            onChange={event => {
-                                                const nextType = event.target.value;
-                                                setForm(prev => ({ ...prev, mission_type: nextType }));
-                                                const matchingTemplate = QUICK_START_TEMPLATES.find(template => template.mission_type === nextType);
-                                                if (matchingTemplate) setSelectedTemplateLabel(matchingTemplate.label);
-                                            }}
-                                        >
-                                            <option value="exploration">Exploration</option>
-                                            <option value="coverage">Coverage Gaps</option>
-                                            <option value="regression">Regression Watch</option>
-                                            <option value="flake_triage">Flake Triage</option>
-                                            <option value="mixed">Mixed Mission</option>
-                                        </select>
-                                    </label>
-                                </div>
-
-                                <label className="am-field">
-                                    <span>Description</span>
-                                    <textarea
-                                        name="mission-description"
-                                        value={form.description}
-                                        onChange={event => setForm(prev => ({ ...prev, description: event.target.value }))}
-                                        placeholder="Focus on checkout, payment error states, and account recovery paths."
-                                        rows={2}
-                                    />
-                                </label>
-
-                                <div className="am-step-heading">
-                                    <span>2</span>
-                                    <div>
-                                        <strong>Targets</strong>
-                                        <small>Use app URLs reachable by the Quorvex backend or worker environment.</small>
-                                    </div>
-                                </div>
-                                <label className="am-field">
-                                    <span>Target URLs</span>
-                                    <textarea
-                                        name="mission-target-urls"
-                                        value={form.target_urls}
-                                        aria-invalid={Boolean(formErrors.target_urls)}
-                                        inputMode="url"
-                                        autoComplete="off"
-                                        onChange={event => {
-                                            setForm(prev => ({ ...prev, target_urls: event.target.value }));
-                                            setFormErrors(prev => ({ ...prev, target_urls: undefined }));
-                                        }}
-                                        placeholder={'https://example.com\nhttps://example.com/checkout'}
-                                        rows={4}
-                                    />
-                                    {formErrors.target_urls && <small className="am-field-error">{formErrors.target_urls}</small>}
-                                </label>
-                            </div>
-                        </div>
-
-                        <aside className="am-setup-summary">
-                            <div className="am-summary-card">
-                                <div className="am-summary-header">
-                                    <span className="am-template-icon">{selectedTemplate?.icon}</span>
-                                    <div>
-                                        <div className="am-kicker">Selected quick start</div>
-                                        <h3>{selectedTemplate?.label || 'Custom mission'}</h3>
-                                    </div>
-                                </div>
-                                <p>{selectedTemplate?.capability || 'Runs with draft validation and approval gates.'}</p>
-                                <div className="am-summary-list">
-                                    <div>
-                                        <span>Lifecycle</span>
-                                        <strong>{form.max_iterations === 0 ? '24/7 until paused' : `${form.max_iterations} runs`}</strong>
-                                    </div>
-                                    <div>
-                                        <span>Autonomy</span>
-                                        <strong>Draft validate</strong>
-                                    </div>
-                                    <div>
-                                        <span>Approval</span>
-                                        <strong>Required</strong>
-                                    </div>
-                                    <div>
-                                        <span>Cadence</span>
-                                        <strong>{form.schedule_cron.trim() ? form.schedule_cron : 'Continuous wait loop'}</strong>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div className="am-fieldset">
-                                <div className="am-fieldset-heading">
-                                    <CalendarClock size={15} />
-                                    <span>Schedule</span>
-                                </div>
-                                <div className="am-preset-row" aria-label="Schedule presets">
-                                    {SCHEDULE_PRESETS.map(preset => (
-                                        <button
-                                            key={preset.label}
-                                            type="button"
-                                            className={form.schedule_cron === preset.cron ? 'am-preset is-active' : 'am-preset'}
-                                            onClick={() => setForm(prev => ({ ...prev, schedule_cron: preset.cron }))}
-                                        >
-                                            {preset.label}
-                                        </button>
-                                    ))}
-                                </div>
-                                <div className="am-form-grid am-form-grid-compact">
-                                    <label className="am-field">
-                                        <span>Cron</span>
-                                        <input
-                                            name="mission-cron"
-                                            value={form.schedule_cron}
-                                            autoComplete="off"
-                                            onChange={event => setForm(prev => ({ ...prev, schedule_cron: event.target.value }))}
-                                            placeholder="0 9 * * 1-5"
-                                        />
-                                    </label>
-                                    <label className="am-field">
-                                        <span>Timezone</span>
-                                        <input
-                                            name="mission-timezone"
-                                            value={form.timezone}
-                                            autoComplete="off"
-                                            onChange={event => setForm(prev => ({ ...prev, timezone: event.target.value || 'UTC' }))}
-                                        />
-                                    </label>
-                                </div>
-                            </div>
-
-                            <div className="am-fieldset">
-                                <div className="am-fieldset-heading">
-                                    <Gauge size={15} />
-                                    <span>Limits</span>
-                                </div>
-                                <div className="am-form-grid am-form-grid-compact">
-                                    <label className="am-field">
-                                        <span>Max Runtime <small>minutes</small></span>
-                                        <input
-                                            name="mission-max-runtime"
-                                            type="number"
-                                            min={1}
-                                            value={form.max_runtime_minutes}
-                                            onChange={event => setForm(prev => ({ ...prev, max_runtime_minutes: Number(event.target.value) }))}
-                                        />
-                                    </label>
-                                    <label className="am-field">
-                                        <span>Max Iterations <small>0 = unlimited</small></span>
-                                        <input
-                                            name="mission-max-iterations"
-                                            type="number"
-                                            min={0}
-                                            value={form.max_iterations}
-                                            onChange={event => setForm(prev => ({ ...prev, max_iterations: Number(event.target.value) }))}
-                                        />
-                                    </label>
-                                    <label className="am-field">
-                                        <span>LLM Budget <small>USD</small></span>
-                                        <input
-                                            name="mission-budget"
-                                            type="number"
-                                            min={0}
-                                            step="0.5"
-                                            value={form.max_llm_budget_usd}
-                                            onChange={event => setForm(prev => ({ ...prev, max_llm_budget_usd: Number(event.target.value) }))}
-                                        />
-                                    </label>
-                                </div>
-                            </div>
-
-                            <div className="am-guardrail">
-                                <ShieldCheck size={16} />
-                                <span>Approval is required before proposals become repository files.</span>
-                            </div>
-                        </aside>
-                    </div>
-
-                    <div className="am-form-actions">
-                        <div className="am-next-step">
-                            <Play size={14} />
-                            <span>After creation, start the paused mission from Mission Control.</span>
-                        </div>
-                        <div className="am-action-group">
-                            {hasMissions && (
-                                <button
-                                    type="button"
-                                    className="am-button am-button-secondary"
-                                    onClick={() => setShowCreate(false)}
-                                >
-                                    Cancel
-                                </button>
-                            )}
-                            <button
-                                type="submit"
-                                disabled={creating}
-                                className="am-button am-button-primary"
-                            >
-                                {creating ? <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} /> : <Plus size={15} />}
-                                Create Mission
-                            </button>
-                        </div>
-                    </div>
-                </form>
-            )}
-
-            {hasMissions && (
-                <section className="am-panel">
-                    <div className="am-section-title-row">
-                        <div>
-                            <div className="am-kicker">Mission control</div>
-                            <h2>Active Missions</h2>
-                            <p>Track schedules, latest activity, and pending actions for this project.</p>
-                        </div>
-                    </div>
-                    <div className="am-mission-grid">
-                    {missions.map(mission => {
-                        const statusStyle = getStatusStyle(mission.status);
-                        const healthStyle = getHealthStyle(mission.health_status);
-                        const statusText = getMissionStatusText(mission.status);
-                        const teamSummary = getMissionField(mission, 'team_summary');
-                        const activeWorkItems = getMissionField(mission, 'active_work_items');
-                        const blockedWorkItems = getMissionField(mission, 'blocked_work_items');
-                        const coverageSummary = getMissionField(mission, 'coverage_summary');
-                        const hasTeamStatus = Boolean(teamSummary || activeWorkItems || blockedWorkItems || coverageSummary);
-                        return (
-                            <div key={mission.id} className="am-mission-card">
-                                <div className="am-card-header">
-                                    <div style={{ minWidth: 0 }}>
-                                        <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, overflowWrap: 'anywhere' }}>
-                                            {mission.name}
-                                        </h3>
-                                        <div style={{ marginTop: '0.25rem', color: 'var(--text-secondary)', fontSize: '0.8rem', textTransform: 'capitalize' }}>
-                                            {formatMissionType(mission.mission_type)}
-                                        </div>
-                                    </div>
-                                    <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', justifyContent: 'flex-end', flexShrink: 0 }}>
-                                        <span className="am-pill" style={{ color: healthStyle.color, background: healthStyle.background }}>
-                                            {mission.health_status || 'healthy'}
-                                        </span>
-                                        <span className="am-pill" style={{ color: statusStyle.color, background: statusStyle.background }}>
-                                            {statusText.replace(/_/g, ' ')}
-                                        </span>
-                                    </div>
-                                </div>
-
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.45rem' }}>
-                                    {(mission.target_urls || []).slice(0, 3).map(url => (
-                                        <div key={url} style={{
-                                            color: 'var(--text-secondary)',
-                                            fontSize: '0.8rem',
-                                            whiteSpace: 'nowrap',
-                                            overflow: 'hidden',
-                                            textOverflow: 'ellipsis',
-                                        }}>
-                                            {url}
-                                        </div>
-                                    ))}
-                                    {(mission.target_urls?.length || 0) > 3 && (
-                                        <div style={{ color: 'var(--text-tertiary)', fontSize: '0.75rem' }}>
-                                            +{(mission.target_urls?.length || 0) - 3} more targets
-                                        </div>
-                                    )}
-                                </div>
-
-                                <div style={{
-                                    display: 'grid',
-                                    gridTemplateColumns: 'repeat(3, 1fr)',
-                                    gap: '0.6rem',
-                                }}>
-                                    {[
-                                        { label: 'Runs', value: mission.total_runs || 0 },
-                                        { label: 'Findings', value: mission.total_findings || 0 },
-                                        { label: 'Limit', value: formatLimit(mission.max_iterations) },
-                                    ].map(item => (
-                                        <div key={item.label} className="am-mini-stat">
-                                            <div style={{ fontWeight: 700, fontSize: '0.95rem' }}>{item.value}</div>
-                                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.72rem' }}>{item.label}</div>
-                                        </div>
-                                    ))}
-                                </div>
-
-                                <div style={{
-                                    display: 'grid',
-                                    gridTemplateColumns: '1fr 1fr',
-                                    gap: '0.75rem',
-                                    color: 'var(--text-secondary)',
-                                    fontSize: '0.78rem',
-                                }}>
-                                    <div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginBottom: '0.15rem', color: 'var(--text-tertiary)' }}>
-                                            <CalendarClock size={13} /> Last Run
-                                        </div>
-                                        <div>{formatDate(mission.last_run_at)}</div>
-                                    </div>
-                                    <div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', marginBottom: '0.15rem', color: 'var(--text-tertiary)' }}>
-                                            <CalendarClock size={13} /> Next Run
-                                        </div>
-                                        <div>{formatDate(mission.next_run_at)}</div>
-                                    </div>
-                                </div>
-
-                                <div className="am-health-panel">
-                                    <div>
-                                        <span>Stage</span>
-                                        <strong>{formatReason(mission.current_stage) || 'idle'}</strong>
-                                    </div>
-                                    <div>
-                                        <span>Heartbeat</span>
-                                        <strong>{formatDate(mission.last_heartbeat_at)}</strong>
-                                    </div>
-                                    <div>
-                                        <span>Budget</span>
-                                        <strong>{formatCurrency(mission.budget_used_usd || 0)}</strong>
-                                    </div>
-                                    <div>
-                                        <span>Failures</span>
-                                        <strong>{mission.consecutive_failures || 0}</strong>
-                                    </div>
-                                </div>
-
-                                {hasTeamStatus && (
-                                    <div className="am-team-panel">
-                                        <div className="am-team-summary">
-                                            <Users size={14} />
-                                            <span>{asCompactText(teamSummary, 'Team status pending')}</span>
-                                        </div>
-                                        <div className="am-work-lanes">
-                                            <div>
-                                                <span>Active</span>
-                                                <strong>{getWorkItemCount(activeWorkItems)}</strong>
-                                                <small>{asCompactText(activeWorkItems, 'No active items')}</small>
-                                            </div>
-                                            <div>
-                                                <span>Blocked</span>
-                                                <strong>{getWorkItemCount(blockedWorkItems)}</strong>
-                                                <small>{asCompactText(blockedWorkItems, 'No blockers')}</small>
-                                            </div>
-                                            <div>
-                                                <span>Coverage</span>
-                                                <strong>{asCompactText(coverageSummary, 'Pending')}</strong>
-                                            </div>
-                                        </div>
-                                    </div>
-                                )}
-
-                                <div style={{
-                                    color: 'var(--text-tertiary)',
-                                    fontSize: '0.75rem',
-                                    display: 'flex',
-                                    flexWrap: 'wrap',
-                                    gap: '0.5rem',
-                                }}>
-                                    <span>{mission.autonomy_level}</span>
-                                    <span>{mission.approval_policy}</span>
-                                    {mission.schedule_cron && <span>{mission.schedule_cron}</span>}
-                                    {mission.latest_run_id && <span>Run {mission.latest_run_id}</span>}
-                                </div>
-
-                                {(mission.paused_reason || mission.next_action) && (
-                                    <div className="am-mission-note">
-                                        <Workflow size={14} />
-                                        <span>
-                                            {formatReason(mission.paused_reason) || mission.next_action}
-                                            {mission.paused_reason && mission.next_action ? `: ${mission.next_action}` : ''}
-                                        </span>
-                                    </div>
-                                )}
-
-                                {mission.last_error && (
-                                    <div className="am-mission-error">
-                                        <AlertCircle size={14} />
-                                        <span>{mission.last_error}</span>
-                                    </div>
-                                )}
-
-                                <div className="am-card-actions">
-                                    {canStart(mission.status) && (
-                                        <MissionActionButton
-                                            icon={<Play size={13} />}
-                                            label="Start"
-                                            color="var(--success)"
-                                            loading={actionLoading === `${mission.id}:start`}
-                                            onClick={() => handleMissionAction(mission, 'start')}
-                                        />
-                                    )}
-                                    {canPause(mission.status) && (
-                                        <MissionActionButton
-                                            icon={<Pause size={13} />}
-                                            label="Pause"
-                                            color="var(--warning)"
-                                            loading={actionLoading === `${mission.id}:pause`}
-                                            onClick={() => handleMissionAction(mission, 'pause')}
-                                        />
-                                    )}
-                                    {canResume(mission.status) && (
-                                        <MissionActionButton
-                                            icon={<Play size={13} />}
-                                            label="Resume"
-                                            color="var(--success)"
-                                            loading={actionLoading === `${mission.id}:resume`}
-                                            onClick={() => handleMissionAction(mission, 'resume')}
-                                        />
-                                    )}
-                                    {canCancel(mission.status) && (
-                                        <MissionActionButton
-                                            icon={<Square size={13} />}
-                                            label="Cancel"
-                                            color="var(--danger)"
-                                            loading={actionLoading === `${mission.id}:cancel`}
-                                            onClick={() => handleMissionAction(mission, 'cancel')}
-                                        />
-                                    )}
-                                </div>
-                            </div>
-                        );
-                    })}
                     </div>
                 </section>
             )}
@@ -1460,13 +1618,12 @@ export default function AutonomousMissionsPage() {
                             </div>
                         </div>
                     </div>
-                    <div className="am-filter-row" role="tablist" aria-label="Proposal status">
+                    <div className="am-filter-row" role="group" aria-label="Proposal status filter">
                         {PROPOSAL_FILTERS.map(filter => (
                             <button
                                 key={filter}
                                 type="button"
-                                role="tab"
-                                aria-selected={proposalFilter === filter}
+                                aria-pressed={proposalFilter === filter}
                                 onClick={() => handleProposalFilterChange(filter)}
                                 className={proposalFilter === filter ? 'am-filter is-active' : 'am-filter'}
                             >
@@ -1484,7 +1641,7 @@ export default function AutonomousMissionsPage() {
                             No generated test proposals for this filter.
                         </div>
                     ) : (
-                        <div style={{ display: 'grid', gap: '0.75rem' }}>
+                        <div className="am-proposal-list">
                             {proposals.map(proposal => {
                                 const approvalStatus = proposal.approval_status || 'unknown';
                                 const riskLevel = proposal.risk_level || 'unknown';
@@ -1493,87 +1650,94 @@ export default function AutonomousMissionsPage() {
                                 const status = approvalStatus.toLowerCase();
                                 const canDecideProposal = status === 'pending';
                                 const canMaterializeProposal = status === 'approved';
+                                const expanded = expandedProposalIds.has(proposal.id);
 
                                 return (
-                                    <div key={proposal.id} className="am-proposal-card">
-                                        <div style={{ minWidth: 0 }}>
-                                            <div className="am-card-header" style={{ marginBottom: '0.55rem' }}>
-                                                <div style={{ minWidth: 0 }}>
-                                                    <h3 style={{ margin: 0, fontSize: '0.92rem', fontWeight: 700, overflowWrap: 'anywhere' }}>
-                                                        {proposal.title || 'Untitled proposal'}
-                                                    </h3>
-                                                    <div className="am-truncate">
-                                                        {getProposalTarget(proposal)}
-                                                    </div>
-                                                </div>
-                                                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', justifyContent: 'flex-end', flexShrink: 0 }}>
-                                                    <span className="am-pill" style={{ color: riskStyle.color, background: riskStyle.background }}>
-                                                        {riskLevel}
-                                                    </span>
-                                                    <span className="am-pill" style={{ color: statusStyle.color, background: statusStyle.background }}>
-                                                        {approvalStatus.replace(/_/g, ' ')}
-                                                    </span>
+                                    <article key={proposal.id} className="am-proposal-card">
+                                        <div className="am-proposal-main">
+                                            <button
+                                                type="button"
+                                                className="am-expand-button"
+                                                aria-label={`${expanded ? 'Collapse' : 'Expand'} ${proposal.title || 'proposal'}`}
+                                                aria-expanded={expanded}
+                                                onClick={() => setExpandedProposalIds(current => toggleSetItem(current, proposal.id))}
+                                            >
+                                                {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                                            </button>
+                                            <div className="am-proposal-copy">
+                                                <h3>{proposal.title || 'Untitled proposal'}</h3>
+                                                <div className="am-truncate" title={getProposalTarget(proposal)}>
+                                                    {getProposalTarget(proposal)}
                                                 </div>
                                             </div>
-
-                                            <div className="am-proposal-meta">
-                                                <div>
-                                                    <span>Type: </span>
-                                                    <strong>{proposal.test_type || '-'}</strong>
-                                                </div>
-                                                <div>
-                                                    <span>File: </span>
-                                                    <strong>{proposal.suggested_file_path || '-'}</strong>
-                                                </div>
-                                                {proposal.materialized_file_path && (
-                                                    <div>
-                                                        <span>Materialized: </span>
-                                                        <strong>{proposal.materialized_file_path}</strong>
-                                                    </div>
+                                            <div className="am-mission-statuses">
+                                                <span className="am-pill" style={{ color: riskStyle.color, background: riskStyle.background }}>
+                                                    {riskLevel}
+                                                </span>
+                                                <span className="am-pill" style={{ color: statusStyle.color, background: statusStyle.background }}>
+                                                    {approvalStatus.replace(/_/g, ' ')}
+                                                </span>
+                                            </div>
+                                            <div className="am-proposal-actions">
+                                                {canDecideProposal && (
+                                                    <>
+                                                        <MissionActionButton
+                                                            icon={<CheckCircle size={13} />}
+                                                            label="Approve"
+                                                            color="var(--success)"
+                                                            loading={actionLoading === `${proposal.id}:approve`}
+                                                            onClick={() => handleProposalAction(proposal, 'approve')}
+                                                        />
+                                                        <MissionActionButton
+                                                            icon={<XCircle size={13} />}
+                                                            label="Reject"
+                                                            color="var(--danger)"
+                                                            loading={actionLoading === `${proposal.id}:reject`}
+                                                            onClick={() => handleProposalAction(proposal, 'reject')}
+                                                        />
+                                                    </>
+                                                )}
+                                                {canMaterializeProposal && (
+                                                    <MissionActionButton
+                                                        icon={<UploadCloud size={13} />}
+                                                        label="Materialize"
+                                                        color="var(--primary)"
+                                                        loading={actionLoading === `${proposal.id}:materialize`}
+                                                        onClick={() => openMaterializeDialog(proposal)}
+                                                    />
                                                 )}
                                             </div>
-
-                                            {proposal.rationale && (
-                                                <p className="am-proposal-rationale">
-                                                    {proposal.rationale}
-                                                </p>
-                                            )}
-
-                                            <pre className="am-spec-preview">
-                                                {compactSpecPreview(proposal.generated_spec_content)}
-                                            </pre>
                                         </div>
 
-                                        <div className="am-proposal-actions">
-                                            {canDecideProposal && (
-                                                <>
-                                                    <MissionActionButton
-                                                        icon={<CheckCircle size={13} />}
-                                                        label="Approve"
-                                                        color="var(--success)"
-                                                        loading={actionLoading === `${proposal.id}:approve`}
-                                                        onClick={() => handleProposalAction(proposal, 'approve')}
-                                                    />
-                                                    <MissionActionButton
-                                                        icon={<XCircle size={13} />}
-                                                        label="Reject"
-                                                        color="var(--danger)"
-                                                        loading={actionLoading === `${proposal.id}:reject`}
-                                                        onClick={() => handleProposalAction(proposal, 'reject')}
-                                                    />
-                                                </>
-                                            )}
-                                            {canMaterializeProposal && (
-                                                <MissionActionButton
-                                                    icon={<UploadCloud size={13} />}
-                                                    label="Materialize"
-                                                    color="var(--primary)"
-                                                    loading={actionLoading === `${proposal.id}:materialize`}
-                                                    onClick={() => openMaterializeDialog(proposal)}
-                                                />
-                                            )}
-                                        </div>
-                                    </div>
+                                        {expanded && (
+                                            <div className="am-proposal-details">
+                                                <div className="am-proposal-meta">
+                                                    <div>
+                                                        <span>Type: </span>
+                                                        <strong>{proposal.test_type || '-'}</strong>
+                                                    </div>
+                                                    <div>
+                                                        <span>File: </span>
+                                                        <strong>{proposal.suggested_file_path || '-'}</strong>
+                                                    </div>
+                                                    {proposal.materialized_file_path && (
+                                                        <div>
+                                                            <span>Materialized: </span>
+                                                            <strong>{proposal.materialized_file_path}</strong>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                {proposal.rationale && (
+                                                    <p className="am-proposal-rationale">
+                                                        {proposal.rationale}
+                                                    </p>
+                                                )}
+                                                <pre className="am-spec-preview">
+                                                    {compactSpecPreview(proposal.generated_spec_content)}
+                                                </pre>
+                                            </div>
+                                        )}
+                                    </article>
                                 );
                             })}
                         </div>
@@ -1581,19 +1745,299 @@ export default function AutonomousMissionsPage() {
                 </section>
             )}
 
+            {showCreate && (
+                <div
+                    className="am-drawer-backdrop"
+                    role="presentation"
+                    onMouseDown={event => {
+                        if (event.target === event.currentTarget) setShowCreate(false);
+                    }}
+                >
+                    <aside
+                        className="am-create-drawer"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="create-mission-title"
+                    >
+                        <form onSubmit={handleCreate} className="am-create-form">
+                            <div className="am-drawer-header">
+                                <div>
+                                    <div className="am-kicker">Mission setup</div>
+                                    <h2 id="create-mission-title">Create Mission</h2>
+                                    <p>New missions are created with approval gates and can be started from Mission Control.</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    className="am-icon-button"
+                                    aria-label="Close create mission"
+                                    onClick={() => setShowCreate(false)}
+                                >
+                                    <X size={18} />
+                                </button>
+                            </div>
+
+                            <div className="am-stepper" aria-label="Create mission steps">
+                                {['Template', 'Target', 'Schedule'].map((label, index) => (
+                                    <button
+                                        key={label}
+                                        type="button"
+                                        className={createStep === index + 1 ? 'am-step is-active' : 'am-step'}
+                                        onClick={() => setCreateStep(index + 1)}
+                                    >
+                                        <span>{index + 1}</span>
+                                        {label}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {createStep === 1 && (
+                                <div className="am-drawer-section">
+                                    <div className="am-step-heading">
+                                        <span>1</span>
+                                        <div>
+                                            <strong>Choose a quick start</strong>
+                                            <small>Select the mission shape that best matches the work you want the agents to do.</small>
+                                        </div>
+                                    </div>
+                                    <div className="am-template-picker" role="radiogroup" aria-label="Mission quick starts">
+                                        {QUICK_START_TEMPLATES.map(template => {
+                                            const isSelected = selectedTemplate?.label === template.label;
+                                            return (
+                                                <button
+                                                    key={template.label}
+                                                    type="button"
+                                                    role="radio"
+                                                    aria-checked={isSelected}
+                                                    className={isSelected ? 'am-template-choice is-active' : 'am-template-choice'}
+                                                    onClick={() => applyMissionTemplate(template)}
+                                                >
+                                                    <span className="am-template-icon">{template.icon}</span>
+                                                    <span>
+                                                        <strong>{template.label}</strong>
+                                                        <small>{template.description}</small>
+                                                    </span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+
+                            {createStep === 2 && (
+                                <div className="am-drawer-section">
+                                    <div className="am-form-grid">
+                                        <label className="am-field">
+                                            <span>Name</span>
+                                            <input
+                                                name="mission-name"
+                                                value={form.name}
+                                                aria-invalid={Boolean(formErrors.name)}
+                                                autoComplete="off"
+                                                onChange={event => {
+                                                    setForm(prev => ({ ...prev, name: event.target.value }));
+                                                    setFormErrors(prev => ({ ...prev, name: undefined }));
+                                                }}
+                                                placeholder="Checkout coverage scout"
+                                            />
+                                            {formErrors.name && <small className="am-field-error">{formErrors.name}</small>}
+                                        </label>
+                                        <label className="am-field">
+                                            <span>Type</span>
+                                            <select
+                                                name="mission-type"
+                                                value={form.mission_type}
+                                                onChange={event => {
+                                                    const nextType = event.target.value;
+                                                    setForm(prev => ({ ...prev, mission_type: nextType }));
+                                                    const matchingTemplate = QUICK_START_TEMPLATES.find(template => template.mission_type === nextType);
+                                                    if (matchingTemplate) setSelectedTemplateLabel(matchingTemplate.label);
+                                                }}
+                                            >
+                                                <option value="exploration">Exploration</option>
+                                                <option value="coverage">Coverage Gaps</option>
+                                                <option value="regression">Regression Watch</option>
+                                                <option value="flake_triage">Flake Triage</option>
+                                                <option value="mixed">Mixed Mission</option>
+                                            </select>
+                                        </label>
+                                    </div>
+
+                                    <label className="am-field">
+                                        <span>Description</span>
+                                        <textarea
+                                            name="mission-description"
+                                            value={form.description}
+                                            onChange={event => setForm(prev => ({ ...prev, description: event.target.value }))}
+                                            placeholder="Focus on checkout, payment error states, and account recovery paths."
+                                            rows={3}
+                                        />
+                                    </label>
+
+                                    <label className="am-field">
+                                        <span>Target URLs</span>
+                                        <textarea
+                                            name="mission-target-urls"
+                                            value={form.target_urls}
+                                            aria-invalid={Boolean(formErrors.target_urls)}
+                                            inputMode="url"
+                                            autoComplete="off"
+                                            onChange={event => {
+                                                setForm(prev => ({ ...prev, target_urls: event.target.value }));
+                                                setFormErrors(prev => ({ ...prev, target_urls: undefined }));
+                                            }}
+                                            placeholder={'https://example.com\nhttps://example.com/checkout'}
+                                            rows={5}
+                                        />
+                                        {formErrors.target_urls && <small className="am-field-error">{formErrors.target_urls}</small>}
+                                    </label>
+                                </div>
+                            )}
+
+                            {createStep === 3 && (
+                                <div className="am-drawer-section">
+                                    <div className="am-summary-card">
+                                        <div className="am-summary-header">
+                                            <span className="am-template-icon">{selectedTemplate?.icon}</span>
+                                            <div>
+                                                <div className="am-kicker">Selected quick start</div>
+                                                <h3>{selectedTemplate?.label || 'Custom mission'}</h3>
+                                            </div>
+                                        </div>
+                                        <p>{selectedTemplate?.capability || 'Runs with draft validation and approval gates.'}</p>
+                                    </div>
+
+                                    <div className="am-fieldset">
+                                        <div className="am-fieldset-heading">
+                                            <CalendarClock size={15} />
+                                            <span>Schedule</span>
+                                        </div>
+                                        <div className="am-preset-row" aria-label="Schedule presets">
+                                            {SCHEDULE_PRESETS.map(preset => (
+                                                <button
+                                                    key={preset.label}
+                                                    type="button"
+                                                    className={form.schedule_cron === preset.cron ? 'am-preset is-active' : 'am-preset'}
+                                                    onClick={() => setForm(prev => ({ ...prev, schedule_cron: preset.cron }))}
+                                                >
+                                                    {preset.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        <div className="am-form-grid am-form-grid-compact">
+                                            <label className="am-field">
+                                                <span>Cron</span>
+                                                <input
+                                                    name="mission-cron"
+                                                    value={form.schedule_cron}
+                                                    autoComplete="off"
+                                                    onChange={event => setForm(prev => ({ ...prev, schedule_cron: event.target.value }))}
+                                                    placeholder="0 9 * * 1-5"
+                                                />
+                                            </label>
+                                            <label className="am-field">
+                                                <span>Timezone</span>
+                                                <input
+                                                    name="mission-timezone"
+                                                    value={form.timezone}
+                                                    autoComplete="off"
+                                                    onChange={event => setForm(prev => ({ ...prev, timezone: event.target.value || 'UTC' }))}
+                                                />
+                                            </label>
+                                        </div>
+                                    </div>
+
+                                    <div className="am-fieldset">
+                                        <div className="am-fieldset-heading">
+                                            <Gauge size={15} />
+                                            <span>Limits</span>
+                                        </div>
+                                        <div className="am-form-grid am-form-grid-compact">
+                                            <label className="am-field">
+                                                <span>Max Runtime <small>minutes</small></span>
+                                                <input
+                                                    name="mission-max-runtime"
+                                                    type="number"
+                                                    min={1}
+                                                    value={form.max_runtime_minutes}
+                                                    onChange={event => setForm(prev => ({ ...prev, max_runtime_minutes: Number(event.target.value) }))}
+                                                />
+                                            </label>
+                                            <label className="am-field">
+                                                <span>Max Iterations <small>0 = unlimited</small></span>
+                                                <input
+                                                    name="mission-max-iterations"
+                                                    type="number"
+                                                    min={0}
+                                                    value={form.max_iterations}
+                                                    onChange={event => setForm(prev => ({ ...prev, max_iterations: Number(event.target.value) }))}
+                                                />
+                                            </label>
+                                            <label className="am-field">
+                                                <span>LLM Budget <small>USD</small></span>
+                                                <input
+                                                    name="mission-budget"
+                                                    type="number"
+                                                    min={0}
+                                                    step="0.5"
+                                                    value={form.max_llm_budget_usd}
+                                                    onChange={event => setForm(prev => ({ ...prev, max_llm_budget_usd: Number(event.target.value) }))}
+                                                />
+                                            </label>
+                                        </div>
+                                    </div>
+
+                                    <div className="am-guardrail">
+                                        <ShieldCheck size={16} />
+                                        <span>Approval is required before proposals become repository files.</span>
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="am-drawer-footer">
+                                <button
+                                    type="button"
+                                    className="am-button am-button-secondary"
+                                    onClick={() => createStep === 1 ? setShowCreate(false) : setCreateStep(step => Math.max(1, step - 1))}
+                                >
+                                    {createStep === 1 ? 'Cancel' : 'Back'}
+                                </button>
+                                {createStep < 3 ? (
+                                    <button
+                                        type="button"
+                                        className="am-button am-button-primary"
+                                        onClick={() => setCreateStep(step => Math.min(3, step + 1))}
+                                    >
+                                        Next
+                                    </button>
+                                ) : (
+                                    <button
+                                        type="submit"
+                                        disabled={creating}
+                                        className="am-button am-button-primary"
+                                    >
+                                        {creating ? <Loader2 size={15} className="am-spin" /> : <Plus size={15} />}
+                                        Create Mission
+                                    </button>
+                                )}
+                            </div>
+                        </form>
+                    </aside>
+                </div>
+            )}
+
             {materializeProposal && (
-                <div style={{
-                    position: 'fixed',
-                    inset: 0,
-                    background: 'rgba(0,0,0,0.55)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    padding: '1rem',
-                    zIndex: 50,
-                }}>
+                <div
+                    className="am-modal-backdrop"
+                    role="presentation"
+                    onMouseDown={event => {
+                        if (event.target === event.currentTarget) setMaterializeProposal(null);
+                    }}
+                >
                     <form
                         onSubmit={handleMaterializeConfirm}
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="materialize-title"
                         style={{
                             width: 'min(560px, 100%)',
                             background: 'var(--surface)',
@@ -1605,13 +2049,14 @@ export default function AutonomousMissionsPage() {
                     >
                         <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', marginBottom: '0.85rem' }}>
                             <div>
-                                <h2 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Materialize Test Proposal</h2>
+                                <h2 id="materialize-title" style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Materialize Test Proposal</h2>
                                 <p style={{ margin: '0.25rem 0 0', color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
                                     This writes the generated spec into the repository.
                                 </p>
                             </div>
                             <button
                                 type="button"
+                                aria-label="Close materialize dialog"
                                 onClick={() => setMaterializeProposal(null)}
                                 style={{
                                     background: 'transparent',
@@ -1621,13 +2066,14 @@ export default function AutonomousMissionsPage() {
                                     height: '2rem',
                                 }}
                             >
-                                <XCircle size={18} />
+                                <X size={18} />
                             </button>
                         </div>
 
                         <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
                             Target file path
                             <input
+                                name="materialize-path"
                                 value={materializePath}
                                 onChange={event => setMaterializePath(event.target.value)}
                                 style={{
@@ -1651,6 +2097,7 @@ export default function AutonomousMissionsPage() {
                             fontSize: '0.82rem',
                         }}>
                             <input
+                                name="materialize-overwrite"
                                 type="checkbox"
                                 checked={materializeOverwrite}
                                 onChange={event => setMaterializeOverwrite(event.target.checked)}
@@ -1706,7 +2153,7 @@ export default function AutonomousMissionsPage() {
                                     opacity: actionLoading === `${materializeProposal.id}:materialize` ? 0.7 : 1,
                                 }}
                             >
-                                {actionLoading === `${materializeProposal.id}:materialize` ? <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> : <UploadCloud size={14} />}
+                                {actionLoading === `${materializeProposal.id}:materialize` ? <Loader2 size={14} className="am-spin" /> : <UploadCloud size={14} />}
                                 Materialize
                             </button>
                         </div>
@@ -2519,17 +2966,669 @@ export default function AutonomousMissionsPage() {
                     align-items: flex-end;
                 }
 
+                .am-attention-strip {
+                    display: grid;
+                    grid-template-columns: repeat(4, minmax(0, 1fr));
+                    gap: 0.75rem;
+                    margin-bottom: 1rem;
+                }
+
+                .am-attention-card {
+                    display: grid;
+                    grid-template-columns: auto minmax(0, 1fr);
+                    gap: 0.75rem;
+                    align-items: start;
+                    padding: 0.85rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius);
+                    background: rgba(255, 255, 255, 0.018);
+                    min-width: 0;
+                }
+
+                .am-attention-primary {
+                    border-color: rgba(59, 130, 246, 0.28);
+                    background: rgba(59, 130, 246, 0.08);
+                }
+
+                .am-attention-warning {
+                    border-color: rgba(251, 191, 36, 0.28);
+                    background: rgba(251, 191, 36, 0.08);
+                }
+
+                .am-attention-danger {
+                    border-color: rgba(248, 113, 113, 0.28);
+                    background: rgba(248, 113, 113, 0.08);
+                }
+
+                .am-attention-icon {
+                    width: 2rem;
+                    height: 2rem;
+                    border-radius: var(--radius-sm);
+                    color: var(--primary);
+                    background: var(--primary-glow);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+
+                .am-attention-copy {
+                    min-width: 0;
+                }
+
+                .am-attention-copy strong,
+                .am-attention-copy span,
+                .am-attention-copy small {
+                    display: block;
+                    min-width: 0;
+                }
+
+                .am-attention-copy strong {
+                    color: var(--text);
+                    font-size: 1.05rem;
+                    font-weight: 800;
+                    font-variant-numeric: tabular-nums;
+                }
+
+                .am-attention-copy span {
+                    margin-top: 0.1rem;
+                    color: var(--text);
+                    font-size: 0.8rem;
+                    font-weight: 750;
+                }
+
+                .am-attention-copy small {
+                    margin-top: 0.15rem;
+                    color: var(--text-secondary);
+                    font-size: 0.72rem;
+                    line-height: 1.35;
+                    overflow-wrap: anywhere;
+                }
+
+                .am-inline-list,
+                .am-proposal-list,
+                .am-mission-list {
+                    display: grid;
+                    gap: 0.7rem;
+                }
+
+                .am-inline-copy {
+                    min-width: 0;
+                }
+
+                .am-inline-copy strong,
+                .am-inline-copy span {
+                    display: block;
+                    min-width: 0;
+                    overflow-wrap: anywhere;
+                }
+
+                .am-inline-copy strong {
+                    color: var(--text);
+                    font-size: 0.88rem;
+                    font-weight: 750;
+                    text-transform: capitalize;
+                }
+
+                .am-inline-copy span {
+                    margin-top: 0.2rem;
+                    color: var(--text-secondary);
+                    font-size: 0.78rem;
+                    line-height: 1.35;
+                }
+
+                .am-empty-state {
+                    min-height: 320px;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
+                    text-align: center;
+                    gap: 0.75rem;
+                }
+
+                .am-empty-state h2 {
+                    margin: 0;
+                    color: var(--text);
+                    font-size: 1.15rem;
+                    font-weight: 800;
+                }
+
+                .am-empty-state p {
+                    max-width: 540px;
+                    margin: 0;
+                    color: var(--text-secondary);
+                    font-size: 0.9rem;
+                    line-height: 1.55;
+                }
+
+                .am-empty-icon {
+                    width: 3rem;
+                    height: 3rem;
+                    border-radius: var(--radius);
+                    background: var(--primary-glow);
+                    color: var(--primary);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }
+
+                .am-mission-panel {
+                    padding: 0.95rem;
+                }
+
+                .am-mission-row {
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius);
+                    background: rgba(255, 255, 255, 0.018);
+                    overflow: hidden;
+                }
+
+                .am-mission-row-main {
+                    display: grid;
+                    grid-template-columns: minmax(220px, 1.15fr) minmax(160px, 0.8fr) minmax(130px, 0.55fr) minmax(250px, 1.05fr) minmax(82px, auto);
+                    gap: 0.85rem;
+                    align-items: center;
+                    padding: 0.85rem;
+                    min-width: 0;
+                }
+
+                .am-mission-identity,
+                .am-proposal-main {
+                    display: grid;
+                    grid-template-columns: auto minmax(0, 1fr);
+                    gap: 0.65rem;
+                    align-items: center;
+                    min-width: 0;
+                }
+
+                .am-expand-button,
+                .am-icon-button {
+                    width: 2rem;
+                    height: 2rem;
+                    border-radius: var(--radius-sm);
+                    border: 1px solid var(--border);
+                    background: transparent;
+                    color: var(--text-secondary);
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    flex-shrink: 0;
+                }
+
+                .am-expand-button:hover,
+                .am-icon-button:hover {
+                    color: var(--text);
+                    background: var(--surface-hover);
+                }
+
+                .am-action-button:hover,
+                .am-button:hover,
+                .am-filter:hover,
+                .am-preset:hover {
+                    border-color: var(--border-bright);
+                    background: rgba(255, 255, 255, 0.035);
+                }
+
+                .am-button-primary:hover {
+                    background: var(--primary-hover);
+                }
+
+                .am-action-button:focus-visible,
+                .am-header-button:focus-visible,
+                .am-button:focus-visible,
+                .am-filter:focus-visible,
+                .am-preset:focus-visible,
+                .am-template-choice:focus-visible,
+                .am-expand-button:focus-visible,
+                .am-icon-button:focus-visible,
+                .am-step:focus-visible {
+                    outline: none;
+                    border-color: var(--primary);
+                    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.24);
+                }
+
+                .am-mission-title-block,
+                .am-proposal-copy {
+                    min-width: 0;
+                }
+
+                .am-mission-title-block h3,
+                .am-proposal-copy h3 {
+                    margin: 0;
+                    color: var(--text);
+                    font-size: 0.92rem;
+                    font-weight: 800;
+                    overflow-wrap: anywhere;
+                }
+
+                .am-row-subtitle {
+                    margin-top: 0.2rem;
+                    color: var(--text-secondary);
+                    font-size: 0.76rem;
+                    text-transform: capitalize;
+                }
+
+                .am-mission-target {
+                    min-width: 0;
+                    color: var(--text-secondary);
+                    font-size: 0.78rem;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+
+                .am-mission-statuses {
+                    display: flex;
+                    gap: 0.4rem;
+                    flex-wrap: wrap;
+                    justify-content: flex-start;
+                    min-width: 120px;
+                }
+
+                .am-row-metrics {
+                    display: grid;
+                    grid-template-columns: repeat(3, minmax(0, 1fr));
+                    gap: 0.55rem;
+                    min-width: 0;
+                }
+
+                .am-row-metrics div {
+                    min-width: 0;
+                }
+
+                .am-row-metrics span,
+                .am-row-metrics strong {
+                    display: block;
+                    min-width: 0;
+                }
+
+                .am-row-metrics span {
+                    color: var(--text-tertiary);
+                    font-size: 0.68rem;
+                    font-weight: 700;
+                }
+
+                .am-row-metrics strong {
+                    margin-top: 0.12rem;
+                    color: var(--text-secondary);
+                    font-size: 0.76rem;
+                    font-weight: 700;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                    text-transform: capitalize;
+                }
+
+                .am-mission-details,
+                .am-proposal-details {
+                    display: grid;
+                    gap: 0.75rem;
+                    padding: 0 0.85rem 0.85rem 3.5rem;
+                    border-top: 1px solid var(--border);
+                }
+
+                .am-mission-details {
+                    padding-top: 0.85rem;
+                }
+
+                .am-metadata-row {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 0.45rem;
+                    color: var(--text-tertiary);
+                    font-size: 0.74rem;
+                }
+
+                .am-metadata-row span {
+                    max-width: 220px;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+
+                .am-proposal-card {
+                    display: block;
+                    padding: 0;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius);
+                    background: rgba(255, 255, 255, 0.018);
+                    overflow: hidden;
+                }
+
+                .am-proposal-main {
+                    grid-template-columns: auto minmax(220px, 1fr) auto auto;
+                    padding: 0.8rem;
+                }
+
+                .am-proposal-details {
+                    padding-top: 0.85rem;
+                }
+
+                .am-drawer-backdrop,
+                .am-modal-backdrop {
+                    position: fixed;
+                    inset: 0;
+                    z-index: 50;
+                    background: rgba(0, 0, 0, 0.58);
+                    display: flex;
+                    justify-content: flex-end;
+                    padding: 0;
+                }
+
+                .am-modal-backdrop {
+                    align-items: center;
+                    justify-content: center;
+                    padding: 1rem;
+                }
+
+                .am-create-drawer {
+                    width: min(620px, 100%);
+                    height: 100%;
+                    background: var(--surface);
+                    border-left: 1px solid var(--border);
+                    box-shadow: -24px 0 70px rgba(0, 0, 0, 0.38);
+                    overflow: hidden;
+                }
+
+                .am-create-form {
+                    height: 100%;
+                    display: flex;
+                    flex-direction: column;
+                    min-width: 0;
+                }
+
+                .am-drawer-header {
+                    display: flex;
+                    justify-content: space-between;
+                    gap: 1rem;
+                    padding: 1rem;
+                    border-bottom: 1px solid var(--border);
+                }
+
+                .am-drawer-header h2 {
+                    margin: 0;
+                    color: var(--text);
+                    font-size: 1.05rem;
+                    font-weight: 800;
+                }
+
+                .am-drawer-header p {
+                    margin: 0.25rem 0 0;
+                    color: var(--text-secondary);
+                    font-size: 0.82rem;
+                    line-height: 1.45;
+                }
+
+                .am-stepper {
+                    display: grid;
+                    grid-template-columns: repeat(3, minmax(0, 1fr));
+                    gap: 0.5rem;
+                    padding: 0.8rem 1rem;
+                    border-bottom: 1px solid var(--border);
+                }
+
+                .am-step {
+                    min-width: 0;
+                    padding: 0.5rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius-sm);
+                    background: transparent;
+                    color: var(--text-secondary);
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 0.4rem;
+                    font-size: 0.78rem;
+                    font-weight: 750;
+                }
+
+                .am-step span {
+                    width: 1.25rem;
+                    height: 1.25rem;
+                    border-radius: 999px;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    background: var(--surface-hover);
+                    color: var(--text-secondary);
+                    font-size: 0.7rem;
+                }
+
+                .am-step.is-active {
+                    color: var(--primary);
+                    background: var(--primary-glow);
+                    border-color: rgba(59, 130, 246, 0.32);
+                }
+
+                .am-step.is-active span {
+                    background: var(--primary);
+                    color: white;
+                }
+
+                .am-drawer-section {
+                    display: grid;
+                    gap: 0.9rem;
+                    padding: 1rem;
+                    overflow: auto;
+                    min-height: 0;
+                }
+
+                .am-drawer-footer {
+                    margin-top: auto;
+                    padding: 1rem;
+                    border-top: 1px solid var(--border);
+                    display: flex;
+                    justify-content: space-between;
+                    gap: 0.75rem;
+                    background: var(--surface);
+                }
+
+                .am-live-panel {
+                    gap: 0.85rem;
+                }
+
+                .am-live-tabs {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 0.4rem;
+                    border-bottom: 1px solid var(--border);
+                    padding-bottom: 0.7rem;
+                }
+
+                .am-live-tab {
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius-sm);
+                    background: transparent;
+                    color: var(--text-secondary);
+                    cursor: pointer;
+                    font-size: 0.78rem;
+                    font-weight: 750;
+                    padding: 0.4rem 0.7rem;
+                    text-transform: capitalize;
+                }
+
+                .am-live-tab.is-active {
+                    border-color: rgba(59, 130, 246, 0.34);
+                    background: var(--primary-glow);
+                    color: var(--primary);
+                }
+
+                .am-live-grid {
+                    display: grid;
+                    grid-template-columns: minmax(240px, 0.42fr) minmax(0, 1fr);
+                    gap: 0.85rem;
+                    min-width: 0;
+                }
+
+                .am-live-summary {
+                    display: grid;
+                    grid-template-columns: repeat(3, minmax(0, 1fr));
+                    gap: 0.65rem;
+                }
+
+                .am-live-summary > div {
+                    min-width: 0;
+                    padding: 0.7rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius);
+                    background: rgba(255, 255, 255, 0.018);
+                }
+
+                .am-live-summary span {
+                    display: block;
+                    color: var(--text-tertiary);
+                    font-size: 0.68rem;
+                    font-weight: 750;
+                    text-transform: uppercase;
+                }
+
+                .am-live-summary strong {
+                    display: block;
+                    margin-top: 0.2rem;
+                    color: var(--text);
+                    font-size: 0.82rem;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+
+                .am-live-output {
+                    min-height: 260px;
+                    max-height: 520px;
+                    overflow: auto;
+                    margin: 0;
+                    padding: 0.8rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius);
+                    background: #070b13;
+                    color: var(--text-secondary);
+                    font-size: 0.78rem;
+                    line-height: 1.55;
+                    white-space: pre-wrap;
+                    word-break: break-word;
+                }
+
+                .am-browser-panel {
+                    overflow: hidden;
+                    border-radius: var(--radius);
+                }
+
+                .am-event-list,
+                .am-output-list {
+                    display: grid;
+                    gap: 0.55rem;
+                    min-width: 0;
+                }
+
+                .am-event-row {
+                    display: grid;
+                    grid-template-columns: auto auto minmax(0, 1fr);
+                    align-items: center;
+                    gap: 0.6rem;
+                    padding: 0.65rem 0.75rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius);
+                    background: rgba(255, 255, 255, 0.018);
+                }
+
+                .am-event-sequence {
+                    color: var(--text-tertiary);
+                    font-size: 0.72rem;
+                    font-weight: 750;
+                }
+
+                .am-event-copy {
+                    min-width: 0;
+                    display: grid;
+                    gap: 0.15rem;
+                }
+
+                .am-event-copy strong,
+                .am-event-copy span {
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+
+                .am-event-copy strong {
+                    color: var(--text);
+                    font-size: 0.82rem;
+                }
+
+                .am-event-copy span,
+                .am-empty-inline {
+                    color: var(--text-secondary);
+                    font-size: 0.76rem;
+                }
+
+                .am-output-card {
+                    display: grid;
+                    gap: 0.5rem;
+                }
+
+                .am-output-title {
+                    color: var(--text);
+                    font-size: 0.84rem;
+                    font-weight: 800;
+                }
+
+                .am-spin {
+                    animation: spin 1s linear infinite;
+                }
+
                 @keyframes spin {
                     from { transform: rotate(0deg); }
                     to { transform: rotate(360deg); }
+                }
+
+                @media (prefers-reduced-motion: reduce) {
+                    .am-spin,
+                    [style*="spin"] {
+                        animation: none !important;
+                    }
                 }
 
                 @media (max-width: 900px) {
                     .am-create-grid,
                     .am-work-item,
                     .am-proposal-card,
-                    .am-inline-item {
+                    .am-inline-item,
+                    .am-live-grid {
                         grid-template-columns: 1fr;
+                    }
+
+                    .am-attention-strip {
+                        grid-template-columns: repeat(2, minmax(0, 1fr));
+                    }
+
+                    .am-mission-row-main,
+                    .am-proposal-main {
+                        grid-template-columns: 1fr;
+                        align-items: stretch;
+                    }
+
+                    .am-mission-identity {
+                        grid-template-columns: auto minmax(0, 1fr);
+                    }
+
+                    .am-proposal-main {
+                        grid-template-columns: auto minmax(0, 1fr);
+                    }
+
+                    .am-proposal-main .am-mission-statuses,
+                    .am-proposal-main .am-proposal-actions {
+                        grid-column: 1 / -1;
+                    }
+
+                    .am-mission-statuses,
+                    .am-card-actions,
+                    .am-proposal-actions {
+                        justify-content: flex-start;
+                    }
+
+                    .am-mission-details,
+                    .am-proposal-details {
+                        padding-left: 0.85rem;
                     }
 
                     .am-proposal-actions {
@@ -2542,10 +3641,18 @@ export default function AutonomousMissionsPage() {
                 @media (max-width: 640px) {
                     .am-stat-grid,
                     .am-mission-grid,
+                    .am-attention-strip,
                     .am-health-panel,
                     .am-work-lanes,
+                    .am-row-metrics,
+                    .am-live-summary,
                     .am-template-picker {
                         grid-template-columns: 1fr;
+                    }
+
+                    .am-event-row {
+                        grid-template-columns: 1fr;
+                        align-items: start;
                     }
 
                     .am-section-title-row,
@@ -2564,6 +3671,27 @@ export default function AutonomousMissionsPage() {
 
                     .am-button {
                         width: 100%;
+                    }
+
+                    .am-header-actions {
+                        width: 100%;
+                    }
+
+                    .am-header-actions > button {
+                        flex: 1 1 150px;
+                        justify-content: center;
+                    }
+
+                    .am-create-drawer {
+                        width: 100%;
+                    }
+
+                    .am-stepper {
+                        grid-template-columns: 1fr;
+                    }
+
+                    .am-drawer-footer {
+                        flex-direction: column;
                     }
                 }
             `}</style>
@@ -2587,8 +3715,10 @@ function MissionActionButton({
     return (
         <button
             type="button"
+            className="am-action-button"
             onClick={onClick}
             disabled={loading}
+            aria-busy={loading}
             style={{
                 padding: '0.35rem 0.6rem',
                 background: 'transparent',
@@ -2603,7 +3733,7 @@ function MissionActionButton({
                 opacity: loading ? 0.7 : 1,
             }}
         >
-            {loading ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> : icon}
+            {loading ? <Loader2 size={13} className="am-spin" /> : icon}
             {label}
         </button>
     );

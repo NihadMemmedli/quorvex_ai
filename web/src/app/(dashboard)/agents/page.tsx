@@ -643,6 +643,10 @@ export default function AgentsPage() {
         fetchSessions();
         fetchToolCatalog();
         fetchAgentDefinitions();
+        if (typeof window !== 'undefined') {
+            const runId = new URLSearchParams(window.location.search).get('runId');
+            if (runId) setSelectedRunId(runId);
+        }
         return () => { if (pollInterval.current) clearInterval(pollInterval.current); }
     }, [currentProject?.id]);  // Re-fetch when project changes
 

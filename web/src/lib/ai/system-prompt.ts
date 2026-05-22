@@ -23,6 +23,7 @@ interface SystemPromptContext {
   };
   conversationHistory?: Array<{ title: string; first_message: string; last_message: string }>;
   agentMemory?: Array<{ kind: string; summary?: string | null; content?: string; confidence?: number }>;
+  agentMemoryContext?: string;
   pageContext?: {
     section?: string;
     viewingRunId?: string;
@@ -103,12 +104,14 @@ export function buildSystemPrompt(ctx: SystemPromptContext = {}): string {
   }
 
   let agentMemory = '';
-  if (ctx.agentMemory && ctx.agentMemory.length > 0) {
+  if (ctx.agentMemoryContext) {
+    agentMemory = `\n\n${ctx.agentMemoryContext}`;
+  } else if (ctx.agentMemory && ctx.agentMemory.length > 0) {
     const items = ctx.agentMemory.map(memory => {
       const confidence = typeof memory.confidence === 'number' ? ` (${Math.round(memory.confidence * 100)}%)` : '';
       return `- [${memory.kind}${confidence}] ${memory.summary || memory.content || ''}`;
     }).join('\n');
-    agentMemory = `\n\n## Agent Memory\n\nUse these scoped memories as advisory context for this project:\n${items}`;
+    agentMemory = `\n\n## Memory Context\n\nMemory is advisory and scoped. Live state and explicit user instructions outrank stored memory.\n${items}`;
   }
 
   let proactiveSection = '';

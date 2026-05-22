@@ -7,7 +7,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 
-const BACKEND_URL = process.env.INTERNAL_API_URL || 'http://backend:8001';
+const BACKEND_URL = process.env.INTERNAL_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
 
 // Hop-by-hop headers that must not be forwarded by proxies
 const HOP_BY_HOP_HEADERS = [

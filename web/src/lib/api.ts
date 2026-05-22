@@ -5,21 +5,32 @@
  * Without an override, resolves the backend host from the current browser host.
  */
 
+const ENV_API_BASE = process.env.NEXT_PUBLIC_API_URL;
+
 function getDefaultApiBase(): string {
   if (typeof window !== 'undefined') {
     const { protocol, hostname } = window.location;
-    if (hostname === 'host.docker.internal') {
-      return `${protocol}//host.docker.internal:8001`;
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+      return '/backend-proxy';
     }
-    if (hostname === '127.0.0.1' || hostname === 'localhost') {
-      return `${protocol}//${hostname}:8001`;
-    }
+    return `${protocol}//${hostname}:8001`;
   }
 
   return 'http://localhost:8001';
 }
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || getDefaultApiBase();
+function getApiBase(): string {
+  if (typeof window !== 'undefined') {
+    const { hostname } = window.location;
+    const envPointsToLocalhost = Boolean(ENV_API_BASE && /\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(ENV_API_BASE));
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1' && (!ENV_API_BASE || envPointsToLocalhost)) {
+      return '/backend-proxy';
+    }
+  }
+  return ENV_API_BASE || getDefaultApiBase();
+}
+
+export const API_BASE = getApiBase();
 
 /**
  * Constructs a full API URL from a path.

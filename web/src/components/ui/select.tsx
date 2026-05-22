@@ -15,11 +15,11 @@ const SelectValue = SelectPrimitive.Value
 const SelectTrigger = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>
->(({ className, children, ...props }, ref) => (
+>(({ className, children, style, ...props }, ref) => (
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      "flex h-10 w-full items-center justify-between px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+      "flex w-full items-center justify-between gap-2 text-sm leading-none focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:flex [&>span]:min-w-0 [&>span]:items-center [&>span]:truncate",
       className
     )}
     style={{
@@ -27,13 +27,18 @@ const SelectTrigger = React.forwardRef<
       border: '1px solid var(--border)',
       borderRadius: 'var(--radius)',
       color: 'var(--text)',
+      height: '40px',
+      minHeight: '40px',
+      padding: '0 12px',
+      lineHeight: 1,
       transition: 'all 0.2s var(--ease-smooth)',
+      ...style,
     }}
     {...props}
   >
     {children}
     <SelectPrimitive.Icon asChild>
-      <ChevronDown className="h-4 w-4 opacity-50" />
+      <ChevronDown className="h-4 w-4 flex-shrink-0 opacity-50" />
     </SelectPrimitive.Icon>
   </SelectPrimitive.Trigger>
 ))
