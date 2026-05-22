@@ -241,6 +241,128 @@ class TestDatabaseInit:
             db_module.DATABASE_URL = original_url
             db_module.engine = original_engine
 
+    def test_run_migrations_repairs_legacy_agent_memory_columns(self, tmp_path, monkeypatch):
+        """Legacy agent memory tables should get typed context columns added idempotently."""
+        db_path = tmp_path / "test_agent_memory_legacy.db"
+        db_url = f"sqlite:///{db_path}"
+
+        from sqlalchemy import inspect, text
+        from sqlmodel import create_engine
+
+        import orchestrator.api.db as db_module
+        from orchestrator.memory import agent_memory as agent_memory_module
+        from orchestrator.memory.agent_memory import AgentMemoryService
+
+        original_url = db_module.DATABASE_URL
+        original_engine = db_module.engine
+
+        try:
+            db_module.DATABASE_URL = db_url
+            db_module.engine = create_engine(
+                db_url, echo=False, connect_args={"check_same_thread": False, "timeout": 30}
+            )
+
+            with db_module.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE agent_memories (
+                            id VARCHAR PRIMARY KEY,
+                            project_id VARCHAR,
+                            user_id VARCHAR,
+                            kind VARCHAR NOT NULL,
+                            content TEXT NOT NULL,
+                            summary TEXT,
+                            tags JSON,
+                            confidence FLOAT NOT NULL DEFAULT 0.7,
+                            source_type VARCHAR,
+                            source_id VARCHAR,
+                            agent_type VARCHAR,
+                            status VARCHAR NOT NULL DEFAULT 'active',
+                            extra_data JSON,
+                            created_at DATETIME NOT NULL,
+                            updated_at DATETIME NOT NULL,
+                            last_used_at DATETIME,
+                            use_count INTEGER NOT NULL DEFAULT 0
+                        )
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO agent_memories (
+                            id, project_id, kind, content, summary, confidence,
+                            status, created_at, updated_at, use_count
+                        )
+                        VALUES (
+                            'memory-a',
+                            'project-a',
+                            'workflow_decision',
+                            'Default exploration depth is deep for authenticated apps.',
+                            'Use deep exploration for authenticated apps.',
+                            0.9,
+                            'active',
+                            CURRENT_TIMESTAMP,
+                            CURRENT_TIMESTAMP,
+                            0
+                        )
+                        """
+                    )
+                )
+
+            db_module._run_migrations()
+            db_module._run_migrations()
+
+            inspector = inspect(db_module.engine)
+            columns = {col["name"] for col in inspector.get_columns("agent_memories")}
+            indexes = {idx["name"] for idx in inspector.get_indexes("agent_memories")}
+
+            assert {
+                "memory_type",
+                "scope",
+                "importance",
+                "valid_from",
+                "valid_until",
+                "supersedes_id",
+                "review_required",
+                "last_verified_at",
+            } <= columns
+            assert {
+                "ix_agentmemory_project_type",
+                "ix_agentmemory_scope_status",
+                "ix_agent_memories_memory_type",
+                "ix_agent_memories_scope",
+                "ix_agent_memories_supersedes_id",
+            } <= indexes
+
+            with db_module.engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT memory_type, scope, importance, review_required
+                        FROM agent_memories
+                        WHERE id = 'memory-a'
+                        """
+                    )
+                ).one()
+
+            assert row.memory_type == "procedural"
+            assert row.scope == "project"
+            assert row.importance == 0.5
+            assert row.review_required in (False, 0)
+
+            monkeypatch.setenv("MEMORY_ENABLED", "true")
+            monkeypatch.setattr(agent_memory_module, "engine", db_module.engine)
+            memories = AgentMemoryService().search(project_id="project-a", limit=10, min_confidence=0.0)
+
+            assert [memory.id for memory in memories] == ["memory-a"]
+            assert memories[0].memory_type == "procedural"
+
+        finally:
+            db_module.DATABASE_URL = original_url
+            db_module.engine = original_engine
+
     def test_detects_legacy_alembic_drift(self, tmp_path):
         """A database stamped at 001 with post-baseline objects should use legacy sync."""
         db_path = tmp_path / "test_alembic_drift.db"

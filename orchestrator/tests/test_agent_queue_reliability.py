@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.services.agent_queue import AgentQueue, AgentTask, AgentTaskStatus
-from orchestrator.services.agent_worker import AgentWorker
+from orchestrator.services.agent_worker import AgentWorker, BrowserObservationRecorder
 
 
 class _MemoryPipeline:
@@ -347,6 +347,156 @@ def test_worker_effective_elapsed_excludes_paused_duration():
     elapsed = worker._effective_elapsed_seconds("agent-running", start)
 
     assert 14.0 <= elapsed <= 16.0
+
+
+def test_browser_observation_recorder_persists_snapshot_result(tmp_path):
+    class FakeState:
+        def __init__(self, state_id):
+            self.id = state_id
+
+    class FakeService:
+        def __init__(self):
+            self.states = []
+            self.transitions = []
+
+        def upsert_page_state(self, **kwargs):
+            state = FakeState(f"state-{len(self.states) + 1}")
+            self.states.append({**kwargs, "state": state})
+            return state
+
+        def record_transition(self, **kwargs):
+            self.transitions.append(kwargs)
+
+    service = FakeService()
+    recorder = BrowserObservationRecorder(
+        session_id="explore-1",
+        cwd=str(tmp_path),
+        service_factory=lambda: service,
+    )
+
+    recorder.observe_event(
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_snapshot",
+                        "name": "mcp__playwright-test__browser_snapshot",
+                        "input": {},
+                    }
+                ]
+            },
+        }
+    )
+    recorder.observe_event(
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_snapshot",
+                        "content": [{"type": "text", "text": "Page title: Login\nhttps://example.test/login\n- button \"Sign in\""}],
+                    }
+                ]
+            },
+        }
+    )
+
+    assert len(service.states) == 1
+    assert service.states[0]["session_id"] == "explore-1"
+    assert service.states[0]["url"] == "https://example.test/login"
+    assert service.states[0]["title"] == "Login"
+    assert recorder.telemetry()["browser_memory_snapshots"] == 1
+    assert (tmp_path / "browser-memory-observations.jsonl").exists()
+
+
+def test_browser_observation_recorder_pairs_interaction_with_next_snapshot(tmp_path):
+    class FakeState:
+        def __init__(self, state_id):
+            self.id = state_id
+
+    class FakeService:
+        def __init__(self):
+            self.states = []
+            self.transitions = []
+
+        def upsert_page_state(self, **kwargs):
+            state = FakeState(f"state-{len(self.states) + 1}")
+            self.states.append({**kwargs, "state": state})
+            return state
+
+        def record_transition(self, **kwargs):
+            self.transitions.append(kwargs)
+
+    service = FakeService()
+    recorder = BrowserObservationRecorder(
+        session_id="explore-1",
+        cwd=str(tmp_path),
+        service_factory=lambda: service,
+    )
+
+    def event_tool_use(tool_id, name, tool_input=None):
+        recorder.observe_event(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tool_id,
+                            "name": f"mcp__playwright-test__{name}",
+                            "input": tool_input or {},
+                        }
+                    ]
+                },
+            }
+        )
+
+    def event_tool_result(tool_id, text):
+        recorder.observe_event(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": text,
+                        }
+                    ]
+                },
+            }
+        )
+
+    event_tool_use("s1", "browser_snapshot")
+    event_tool_result("s1", "https://example.test\n- button \"Open menu\"")
+    event_tool_use("c1", "browser_click", {"element": "Open menu"})
+    event_tool_result("c1", "Clicked")
+    event_tool_use("s2", "browser_snapshot")
+    event_tool_result("s2", "https://example.test\n- menuitem \"Settings\"")
+
+    assert len(service.states) == 2
+    assert len(service.transitions) == 1
+    assert service.transitions[0]["from_state"].id == "state-1"
+    assert service.transitions[0]["to_state"].id == "state-2"
+    assert service.transitions[0]["action_type"] == "click"
+    assert service.transitions[0]["target"] == "Open menu"
+    assert recorder.telemetry()["browser_memory_transitions"] == 1
+
+
+def test_browser_observation_recorder_ignores_malformed_result_without_raising(tmp_path):
+    recorder = BrowserObservationRecorder(
+        session_id="explore-1",
+        cwd=str(tmp_path),
+        service_factory=lambda: (_ for _ in ()).throw(AssertionError("service should not be called")),
+    )
+
+    recorder.observe_event({"type": "user", "message": {"content": [{"type": "tool_result", "content": "orphan"}]}})
+
+    assert recorder.telemetry()["browser_memory_snapshots"] == 0
+    assert recorder.telemetry()["browser_memory_transitions"] == 0
 
 
 @pytest.mark.asyncio

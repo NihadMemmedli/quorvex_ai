@@ -1,15 +1,59 @@
 import copy
+import os
+import sys
+import types
 import uuid
 from datetime import datetime, timezone
 
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-workflow-tests")
+
+if "slowapi" not in sys.modules:
+    slowapi = types.ModuleType("slowapi")
+    slowapi_errors = types.ModuleType("slowapi.errors")
+    slowapi_util = types.ModuleType("slowapi.util")
+
+    class _TestLimiter:
+        def __init__(self, *args, **kwargs):
+            self._storage = types.SimpleNamespace(expirations={})
+
+    class _TestRateLimitExceeded(Exception):
+        retry_after = 60
+
+    slowapi.Limiter = _TestLimiter
+    slowapi_errors.RateLimitExceeded = _TestRateLimitExceeded
+    slowapi_util.get_remote_address = lambda request: "test-client"
+    sys.modules["slowapi"] = slowapi
+    sys.modules["slowapi.errors"] = slowapi_errors
+    sys.modules["slowapi.util"] = slowapi_util
+
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import inspect, text
 from sqlmodel import Session, SQLModel, select
 
-from orchestrator.api.db import engine
-from orchestrator.api.models_db import WorkflowDefinition, WorkflowNotification, WorkflowRun, WorkflowRunStep
+from orchestrator.api.db import _has_empty_alembic_version, _required_workflow_schema_present, engine
+from orchestrator.api.workflows import RUNS_DIR, _launch_run_durably, _workflow_debug_payload, get_workflow_temporal_health
+from orchestrator.api.models_db import (
+    AgentRun,
+    WorkflowDefinition,
+    WorkflowEvent,
+    WorkflowNotification,
+    WorkflowRun,
+    WorkflowRunStep,
+    WorkflowSchedule,
+    WorkflowScheduleExecution,
+)
+from orchestrator.services import custom_workflow_activities, custom_workflow_worker
 from orchestrator.api.time_utils import utc_iso
-from orchestrator.services.workflow_operations import emit_workflow_event
+from orchestrator.services.scheduler import execute_workflow_schedule
+from orchestrator.services.temporal_client import TemporalUnavailableError, TemporalWorkflowStart, _parse_activity_history, _parse_workflow_history
+from orchestrator.services.workflow_operations import (
+    create_workflow_revision,
+    emit_workflow_event,
+    query_workflow_events,
+    workflow_event_to_dict,
+    workflow_revision_diff,
+)
 from orchestrator.services.workflow_runner import (
     WorkflowCancelled,
     WorkflowPaused,
@@ -79,6 +123,10 @@ def _ensure_tables() -> None:
             }.items():
                 if column_name not in cols:
                     conn.execute(text(f"ALTER TABLE workflow_runs ADD COLUMN {column_name} {column_type}"))
+        if "workflow_schedules" in inspector.get_table_names():
+            cols = {column["name"] for column in inspector.get_columns("workflow_schedules")}
+            if "revision_mode" not in cols:
+                conn.execute(text("ALTER TABLE workflow_schedules ADD COLUMN revision_mode VARCHAR NOT NULL DEFAULT 'pinned'"))
         if "workflow_step_types" in inspector.get_table_names():
             cols = {column["name"] for column in inspector.get_columns("workflow_step_types")}
             if "category" not in cols:
@@ -454,6 +502,118 @@ async def test_execute_step_persists_rendered_input_and_context_snapshot():
     assert step.context_snapshot["steps"]["first"]["summary"] == "First summary"
     assert step.input_resolution[0]["reference"] == "steps.first.summary"
     assert step.output["contract_version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_workflow_debug_payload_aggregates_findings_artifacts_and_health():
+    _ensure_tables()
+    agent_id = f"agent-{uuid.uuid4()}"
+    artifact_dir = RUNS_DIR / agent_id
+    artifact_file = artifact_dir / "live-step-001.png"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_file.write_bytes(b"fake-png")
+    try:
+        with Session(engine) as session:
+            agent_run = AgentRun(
+                id=agent_id,
+                agent_type="custom",
+                status="running",
+                agent_task_id="task-1",
+            )
+            agent_run.progress = {
+                "phase": "tool_use",
+                "message": "Using browser click",
+                "last_tool": "mcp__playwright__browser_click",
+                "last_tool_label": "browser click",
+                "tool_calls": 4,
+                "browser_tool_calls": 2,
+                "interactions": 2,
+                "has_browser_tools": True,
+                "recent_tools": [
+                    {"name": "mcp__playwright__browser_navigate", "label": "browser navigate", "at": utc_iso(datetime.utcnow())},
+                    {"name": "mcp__playwright__browser_click", "label": "browser click", "at": utc_iso(datetime.utcnow())},
+                ],
+            }
+            session.add(agent_run)
+            definition = WorkflowDefinition(
+                name=f"Debug Payload {uuid.uuid4()}",
+                description="Debug payload aggregation",
+            )
+            definition.steps = validate_workflow_steps(
+                [
+                    {"key": "run_tests", "type": "review_gate", "input": {"question": "Run tests?"}},
+                ]
+            )
+            session.add(definition)
+            session.commit()
+            session.refresh(definition)
+
+            run = WorkflowRun(
+                definition_id=definition.id,
+                project_id=definition.project_id,
+                status="completed",
+                progress=1.0,
+                started_at=datetime.utcnow(),
+                completed_at=datetime.utcnow(),
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+
+            step = WorkflowRunStep(
+                run_id=run.id,
+                definition_id=definition.id,
+                step_order=0,
+                step_key="run_tests",
+                step_type="review_gate",
+                label="Run Tests",
+                status="completed",
+                started_at=run.started_at,
+                completed_at=run.completed_at,
+                external_kind="agent_run",
+                external_id=agent_id,
+            )
+            step.output = {
+                "status": "completed",
+                "summary": "Generated test evidence",
+                "findings": [
+                    {
+                        "severity": "high",
+                        "title": "Checkout test failed",
+                        "description": "Expected success but received a validation error.",
+                        "recommendation": "Inspect checkout validation rules.",
+                    }
+                ],
+                "artifacts": [{"name": "trace.zip", "path": "/artifacts/run/trace.zip"}],
+            }
+            session.add(step)
+            emit_workflow_event(
+                session,
+                event_type="workflow.completed",
+                message="Workflow completed",
+                severity="info",
+                run=run,
+            )
+            session.commit()
+            payload = await _workflow_debug_payload(run, session, include_temporal=False)
+    finally:
+        artifact_file.unlink(missing_ok=True)
+        try:
+            artifact_dir.rmdir()
+        except OSError:
+            pass
+
+    assert payload["health"]["finding_count"] == 1
+    assert payload["health"]["artifact_count"] == 2
+    assert payload["health"]["finding_counts"]["high"] == 1
+    assert payload["findings"][0]["title"] == "Checkout test failed"
+    assert payload["artifacts"][0]["name"] == "trace.zip"
+    assert payload["external_children"][0]["kind"] == "agent_run"
+    assert payload["external_children"][0]["id"] == agent_id
+    assert payload["external_children"][0]["progress"]["browser_tool_calls"] == 2
+    assert payload["external_children"][0]["latest_image"]["name"] == "live-step-001.png"
+    assert payload["external_children"][0]["artifacts"][0]["path"].endswith("/live-step-001.png")
+    assert any(item["type"] == "step" and item["step_key"] == "run_tests" for item in payload["timeline"])
 
 
 def test_create_workflow_run_steps_rejects_unknown_start_step():
@@ -854,3 +1014,415 @@ def test_handle_workflow_step_failure_skip_merges_step_output():
     assert step.status == "skipped"
     assert step.skipped_reason == "skip this"
     assert run.context["steps"][step_key] == {"skipped": True, "reason": "skip this"}
+
+
+def test_query_workflow_events_filters_run_type_severity_scope_search_and_order():
+    _ensure_tables()
+    marker = f"workflow.test_marker.{uuid.uuid4()}"
+    with Session(engine) as session:
+        definition = _create_definition(session)
+        run = WorkflowRun(definition_id=definition.id, project_id=definition.project_id, status="queued")
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        emit_workflow_event(
+            session,
+            event_type=marker,
+            message="First marker event",
+            severity="info",
+            run=run,
+            notify=False,
+        )
+        emit_workflow_event(
+            session,
+            event_type=marker,
+            message="Second marker event",
+            severity="warning",
+            run=run,
+            notify=False,
+        )
+        schedule = WorkflowSchedule(
+            definition_id=definition.id,
+            project_id=definition.project_id,
+            name=f"Scoped schedule {uuid.uuid4()}",
+            cron_expression="0 8 * * 1-5",
+            timezone="UTC",
+        )
+        session.add(schedule)
+        session.flush()
+        emit_workflow_event(
+            session,
+            event_type=f"{marker}.schedule",
+            message="Scoped schedule marker event",
+            severity="info",
+            schedule=schedule,
+            notify=False,
+        )
+        emit_workflow_event(
+            session,
+            event_type=f"{marker}.definition",
+            message="Scoped definition marker event",
+            severity="info",
+            definition_id=definition.id,
+            notify=False,
+        )
+        session.commit()
+
+        events = query_workflow_events(
+            session,
+            run_id=run.id,
+            event_type=marker,
+            severity="warning",
+            order="asc",
+            limit=10,
+        )
+        schedule_events = query_workflow_events(
+            session,
+            q=marker,
+            entity_scope="schedule",
+            order="asc",
+            limit=10,
+        )
+        definition_events = query_workflow_events(
+            session,
+            q=marker,
+            entity_scope="definition",
+            order="asc",
+            limit=10,
+        )
+
+    event_dicts = [workflow_event_to_dict(event) for event in events]
+    assert [event["message"] for event in event_dicts] == ["Second marker event"]
+    assert event_dicts[0]["event_type"] == marker
+    assert event_dicts[0]["severity"] == "warning"
+    assert [event.message for event in schedule_events] == ["Scoped schedule marker event"]
+    assert [event.message for event in definition_events] == ["Scoped definition marker event"]
+
+
+def test_workflow_revision_diff_reports_step_changes():
+    current_steps = validate_workflow_steps(
+        [
+            {"key": "first", "type": "review_gate", "label": "Review", "input": {"question": "Now?"}},
+            {"key": "removed", "type": "review_gate", "input": {"question": "Remove?"}},
+        ]
+    )
+    target_steps = validate_workflow_steps(
+        [
+            {"key": "added", "type": "review_gate", "input": {"question": "Add?"}},
+            {"key": "first", "type": "review_gate", "label": "Review", "input": {"question": "Before?"}},
+        ]
+    )
+
+    diff = workflow_revision_diff(current_steps, target_steps)
+
+    assert diff["summary"]["added"] == 1
+    assert diff["summary"]["removed"] == 1
+    assert diff["summary"]["changed"] == 1
+    assert diff["summary"]["reordered"] == 1
+    assert diff["changed"][0]["key"] == "first"
+
+
+@pytest.mark.asyncio
+async def test_latest_revision_schedule_resolves_latest_without_persisting_revision(monkeypatch):
+    _ensure_tables()
+
+    async def fake_start_custom_workflow_run(run_id: str):
+        return TemporalWorkflowStart(workflow_id=f"wf-{run_id}", run_id="temporal-run")
+
+    monkeypatch.setattr("orchestrator.services.temporal_client.start_custom_workflow_run", fake_start_custom_workflow_run)
+
+    with Session(engine) as session:
+        definition = _create_definition(session)
+        revision_1 = create_workflow_revision(session, definition, version=1)
+        definition.steps = validate_workflow_steps(
+            [{"key": "latest", "type": "review_gate", "input": {"question": "Latest?"}}]
+        )
+        revision_2 = create_workflow_revision(session, definition, version=2)
+        schedule = WorkflowSchedule(
+            definition_id=definition.id,
+            project_id=definition.project_id,
+            revision_id=revision_1.id,
+            revision_mode="latest",
+            name=f"Latest schedule {uuid.uuid4()}",
+            cron_expression="0 8 * * 1-5",
+            timezone="UTC",
+        )
+        session.add(schedule)
+        session.commit()
+        schedule_id = schedule.id
+        revision_1_id = revision_1.id
+        revision_2_id = revision_2.id
+
+    await execute_workflow_schedule(schedule_id, trigger_type="manual")
+
+    with Session(engine) as session:
+        schedule = session.get(WorkflowSchedule, schedule_id)
+        run = session.exec(select(WorkflowRun).where(WorkflowRun.trigger_id == schedule_id)).first()
+
+    assert schedule.revision_mode == "latest"
+    assert schedule.revision_id == revision_1_id
+    assert run.revision_id == revision_2_id
+    assert run.definition_version == 2
+
+
+def test_empty_alembic_version_with_workflow_schema_is_legacy_drift():
+    _ensure_tables()
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        existing = conn.execute(text("SELECT version_num FROM alembic_version")).fetchall()
+        conn.execute(text("DELETE FROM alembic_version"))
+
+    try:
+        assert _has_empty_alembic_version() is True
+        assert _required_workflow_schema_present() is True
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM alembic_version"))
+            for row in existing:
+                conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:version)"), {"version": row[0]})
+
+
+@pytest.mark.asyncio
+async def test_workflow_temporal_health_endpoint_reports_healthy(monkeypatch):
+    async def healthy():
+        return {
+            "available": True,
+            "status": "healthy",
+            "address": "temporal:7233",
+            "namespace": "default",
+            "task_queue": "custom-workflows",
+            "error": None,
+        }
+
+    monkeypatch.setattr("orchestrator.api.workflows.check_custom_workflow_temporal_health", healthy)
+
+    result = await get_workflow_temporal_health()
+
+    assert result["available"] is True
+    assert result["status"] == "healthy"
+    assert result["task_queue"] == "custom-workflows"
+
+
+@pytest.mark.asyncio
+async def test_workflow_temporal_health_endpoint_reports_unavailable(monkeypatch):
+    async def unavailable():
+        return {
+            "available": False,
+            "status": "unavailable",
+            "address": "temporal:7233",
+            "namespace": "default",
+            "task_queue": "custom-workflows",
+            "error": "Temporal is unavailable",
+        }
+
+    monkeypatch.setattr("orchestrator.api.workflows.check_custom_workflow_temporal_health", unavailable)
+
+    result = await get_workflow_temporal_health()
+
+    assert result["available"] is False
+    assert result["status"] == "unavailable"
+    assert "Temporal is unavailable" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_launch_run_durably_requires_temporal_and_marks_run_failed(monkeypatch):
+    _ensure_tables()
+
+    async def unavailable(run_id: str):
+        raise TemporalUnavailableError("Temporal is unavailable for test")
+
+    monkeypatch.setattr("orchestrator.api.workflows.start_custom_workflow_run", unavailable)
+
+    with Session(engine) as session:
+        definition = _create_definition(session)
+        revision = create_workflow_revision(session, definition, version=1)
+        run = WorkflowRun(
+            definition_id=definition.id,
+            revision_id=revision.id,
+            definition_version=revision.version,
+            project_id=definition.project_id,
+            status="queued",
+        )
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        run_id = run.id
+
+        with pytest.raises(HTTPException) as exc_info:
+            await _launch_run_durably(run, session=session)
+
+        assert exc_info.value.status_code == 503
+        failed = session.get(WorkflowRun, run_id)
+        event = session.exec(
+            select(WorkflowEvent)
+            .where(WorkflowEvent.run_id == run_id)
+            .where(WorkflowEvent.event_type == "workflow.temporal_start_failed")
+        ).first()
+
+    assert failed.status == "failed"
+    assert "Temporal is unavailable for test" in failed.error_message
+    assert event is not None
+
+
+@pytest.mark.asyncio
+async def test_schedule_execution_fails_when_temporal_start_fails(monkeypatch):
+    _ensure_tables()
+
+    async def unavailable(run_id: str):
+        raise TemporalUnavailableError("Temporal schedule unavailable")
+
+    monkeypatch.setattr("orchestrator.services.temporal_client.start_custom_workflow_run", unavailable)
+
+    with Session(engine) as session:
+        definition = _create_definition(session)
+        revision = create_workflow_revision(session, definition, version=1)
+        schedule = WorkflowSchedule(
+            definition_id=definition.id,
+            project_id=definition.project_id,
+            revision_id=revision.id,
+            revision_mode="pinned",
+            name=f"Temporal required schedule {uuid.uuid4()}",
+            cron_expression="0 8 * * 1-5",
+            timezone="UTC",
+        )
+        session.add(schedule)
+        session.flush()
+        execution = WorkflowScheduleExecution(schedule_id=schedule.id, status="pending", trigger_type="manual")
+        session.add(execution)
+        session.commit()
+        schedule_id = schedule.id
+        execution_id = execution.id
+
+    await execute_workflow_schedule(schedule_id, execution_id=execution_id, trigger_type="manual")
+
+    with Session(engine) as session:
+        schedule = session.get(WorkflowSchedule, schedule_id)
+        execution = session.get(WorkflowScheduleExecution, execution_id)
+        run = session.exec(select(WorkflowRun).where(WorkflowRun.trigger_id == schedule_id)).first()
+        temporal_event = session.exec(
+            select(WorkflowEvent)
+            .where(WorkflowEvent.run_id == run.id)
+            .where(WorkflowEvent.event_type == "workflow.temporal_start_failed")
+        ).first()
+        schedule_failed_event = session.exec(
+            select(WorkflowEvent)
+            .where(WorkflowEvent.schedule_id == schedule_id)
+            .where(WorkflowEvent.event_type == "workflow.schedule_failed")
+        ).first()
+
+    assert run.status == "failed"
+    assert execution.status == "failed"
+    assert schedule.last_run_status == "failed"
+    assert "Temporal schedule unavailable" in schedule.last_error
+    assert temporal_event is not None
+    assert schedule_failed_event is not None
+
+
+def test_custom_workflow_worker_registers_only_step_level_temporal_activities():
+    assert not hasattr(custom_workflow_activities, "execute_custom_workflow_run")
+    assert "execute_custom_workflow_run" not in custom_workflow_worker.main.__code__.co_names
+
+
+def test_temporal_activity_history_parser_summarizes_attempts_and_failure():
+    from google.protobuf.timestamp_pb2 import Timestamp
+    from temporalio.api.common.v1 import ActivityType
+    from temporalio.api.enums.v1 import EventType
+    from temporalio.api.failure.v1 import Failure
+    from temporalio.api.history.v1 import (
+        ActivityTaskFailedEventAttributes,
+        ActivityTaskScheduledEventAttributes,
+        ActivityTaskStartedEventAttributes,
+        HistoryEvent,
+    )
+
+    def ts() -> Timestamp:
+        stamp = Timestamp()
+        stamp.GetCurrentTime()
+        return stamp
+
+    events = [
+        HistoryEvent(
+            event_id=1,
+            event_time=ts(),
+            event_type=EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED,
+            activity_task_scheduled_event_attributes=ActivityTaskScheduledEventAttributes(
+                activity_id="activity-1",
+                activity_type=ActivityType(name="execute_custom_workflow_step"),
+            ),
+        ),
+        HistoryEvent(
+            event_id=2,
+            event_time=ts(),
+            event_type=EventType.EVENT_TYPE_ACTIVITY_TASK_STARTED,
+            activity_task_started_event_attributes=ActivityTaskStartedEventAttributes(
+                scheduled_event_id=1,
+                attempt=2,
+                last_failure=Failure(message="previous failure"),
+            ),
+        ),
+        HistoryEvent(
+            event_id=3,
+            event_time=ts(),
+            event_type=EventType.EVENT_TYPE_ACTIVITY_TASK_FAILED,
+            activity_task_failed_event_attributes=ActivityTaskFailedEventAttributes(
+                scheduled_event_id=1,
+                started_event_id=2,
+                failure=Failure(message="final failure"),
+            ),
+        ),
+    ]
+
+    activities = _parse_activity_history(events)
+
+    assert activities == [
+        {
+            "activity_id": "activity-1",
+            "activity_type": "execute_custom_workflow_step",
+            "status": "failed",
+            "scheduled_at": activities[0]["scheduled_at"],
+            "started_at": activities[0]["started_at"],
+            "completed_at": activities[0]["completed_at"],
+            "attempt_count": 2,
+            "last_failure": "final failure",
+            "scheduled_event_id": 1,
+            "started_event_id": 2,
+            "last_event_type": "EVENT_TYPE_ACTIVITY_TASK_FAILED",
+            "failure_type": None,
+            "failure_message": "final failure",
+            "failure_stack_trace": "",
+            "timeout_type": None,
+        }
+    ]
+
+
+def test_temporal_workflow_history_parser_reports_lifecycle_metadata():
+    from google.protobuf.timestamp_pb2 import Timestamp
+    from temporalio.api.enums.v1 import EventType
+    from temporalio.api.history.v1 import HistoryEvent
+
+    def ts() -> Timestamp:
+        stamp = Timestamp()
+        stamp.GetCurrentTime()
+        return stamp
+
+    events = [
+        HistoryEvent(
+            event_id=1,
+            event_time=ts(),
+            event_type=EventType.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED,
+        ),
+        HistoryEvent(
+            event_id=2,
+            event_time=ts(),
+            event_type=EventType.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED,
+        ),
+    ]
+
+    parsed = _parse_workflow_history(events)
+
+    assert parsed["history_event_count"] == 2
+    assert parsed["workflow_started_at"]
+    assert parsed["workflow_closed_at"]
+    assert parsed["history_first_event_at"]
+    assert parsed["history_last_event_at"]
+    assert parsed["close_event_type"] == "EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED"

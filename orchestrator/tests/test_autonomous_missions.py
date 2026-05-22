@@ -41,6 +41,7 @@ from sqlmodel import Session, SQLModel, select
 from orchestrator.api import autonomous as autonomous_api
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import (
+    AutonomousAgentEvent,
     AutonomousAgentWorkItem,
     AutonomousApproval,
     AutonomousFinding,
@@ -50,6 +51,7 @@ from orchestrator.api.models_db import (
     CoverageGap,
     Project,
 )
+from orchestrator.services.autonomous_events import create_autonomous_agent_event
 from orchestrator.services.autonomous_activities import (
     _generate_pytest_content,
     complete_mission_run,
@@ -332,6 +334,45 @@ def test_work_item_api_lists_retries_and_cancels():
         cancelled = client.post(f"/autonomous/{project_id}/work-items/{item_id}/cancel")
         assert cancelled.status_code == 200
         assert cancelled.json()["status"] == "cancelled"
+
+        events = client.get(f"/autonomous/{project_id}/work-items/{item_id}/events")
+        assert events.status_code == 200
+        event_types = [event["event_type"] for event in events.json()]
+        assert "lifecycle" in event_types
+
+
+def test_autonomous_agent_events_are_ordered_and_redacted():
+    _ensure_tables()
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session)
+        project_id = mission.project_id
+        mission_id = mission.id
+
+    first = create_autonomous_agent_event(
+        project_id=project_id,
+        mission_id=mission_id,
+        event_type="assistant_output",
+        message="Inspecting login flow",
+        payload={"authorization": "Bearer should-not-leak", "nested": {"api_key": "secret"}},
+    )
+    second = create_autonomous_agent_event(
+        project_id=project_id,
+        mission_id=mission_id,
+        event_type="browser_action",
+        message="Tool call: browser_click",
+        payload={"short_name": "browser_click"},
+    )
+
+    with Session(engine) as session:
+        events = session.exec(
+            select(AutonomousAgentEvent)
+            .where(AutonomousAgentEvent.mission_id == mission_id)
+            .order_by(AutonomousAgentEvent.sequence)
+        ).all()
+
+    assert [event.id for event in events] == [first.id, second.id]
+    assert events[0].payload["authorization"] == "[redacted]"
+    assert events[0].payload["nested"]["api_key"] == "[redacted]"
 
 
 def test_mission_status_endpoint_reports_health_and_blocking_approvals():
