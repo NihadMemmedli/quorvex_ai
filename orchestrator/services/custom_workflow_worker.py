@@ -44,7 +44,6 @@ async def main() -> None:
             task_queue=settings.temporal_workflow_task_queue,
             workflows=[CustomWorkflowRun],
             activities=[
-                _activity(custom_workflow_activities.execute_custom_workflow_run),
                 _activity(custom_workflow_activities.mark_custom_workflow_started),
                 _activity(custom_workflow_activities.prepare_custom_workflow_step),
                 _activity(custom_workflow_activities.execute_custom_workflow_step),

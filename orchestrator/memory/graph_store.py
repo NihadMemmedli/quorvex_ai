@@ -80,18 +80,23 @@ class GraphStore:
 
     # Node types
     NODE_TYPE_PAGE = "page"
+    NODE_TYPE_PAGE_STATE = "page_state"
     NODE_TYPE_ELEMENT = "element"
     NODE_TYPE_FLOW = "flow"
     NODE_TYPE_FEATURE = "feature"
     NODE_TYPE_API = "api"  # For Phase 2
+    NODE_TYPE_CLUSTER = "cluster"
 
     # Edge types
     EDGE_TYPE_CONTAINS = "contains"
+    EDGE_TYPE_CAN_ACT = "can_act"
+    EDGE_TYPE_TRANSITIONS_TO = "transitions_to"
     EDGE_TYPE_NAVIGATES_TO = "navigates_to"
     EDGE_TYPE_STARTS_AT = "starts_at"
     EDGE_TYPE_ENDS_AT = "ends_at"
     EDGE_TYPE_REQUIRES = "requires"
     EDGE_TYPE_TESTS = "tests"
+    EDGE_TYPE_SIMILAR_TO = "similar_to"
 
     def add_page(self, page_id: str, url: str, title: str = None, metadata: dict[str, Any] = None) -> None:
         """
@@ -160,6 +165,77 @@ class GraphStore:
 
         # Add edge from page to element
         self.graph.add_edge(page_id, element_id, type=self.EDGE_TYPE_CONTAINS)
+
+    def add_page_state(
+        self,
+        state_id: str,
+        url: str,
+        page_key: str,
+        state_key: str,
+        title: str = None,
+        metadata: dict[str, Any] = None,
+    ) -> None:
+        """Add a canonical browser UI state node."""
+        attrs = {
+            "type": self.NODE_TYPE_PAGE_STATE,
+            "url": url,
+            "page_key": page_key,
+            "state_key": state_key,
+            "title": title or url,
+            "first_seen": datetime.now().isoformat(),
+            "last_seen": datetime.now().isoformat(),
+            **(metadata or {}),
+        }
+        if self.graph.has_node(state_id):
+            current_attrs = self.graph.nodes[state_id]
+            attrs["first_seen"] = current_attrs.get("first_seen", attrs["first_seen"])
+        self.graph.add_node(state_id, **attrs)
+
+        page_id = f"page:{page_key}"
+        self.add_page(page_id, url=url, title=title or page_key, metadata={"page_key": page_key})
+        self.graph.add_edge(page_id, state_id, type=self.EDGE_TYPE_CONTAINS)
+
+    def add_state_element(
+        self,
+        state_id: str,
+        element_id: str,
+        element_type: str,
+        selector: dict[str, Any],
+        text: str = None,
+        metadata: dict[str, Any] = None,
+    ) -> None:
+        """Add an element contained by a canonical browser state."""
+        self.add_element(
+            element_id=element_id,
+            page_id=state_id,
+            element_type=element_type,
+            selector=selector,
+            text=text,
+            metadata=metadata,
+        )
+        action_type = "fill" if element_type == "textbox" else "select" if element_type == "combobox" else "click"
+        self.graph.add_edge(state_id, element_id, type=self.EDGE_TYPE_CAN_ACT, action_type=action_type)
+
+    def add_state_transition(
+        self,
+        from_state: str,
+        to_state: str,
+        action_type: str,
+        trigger: str = None,
+        metadata: dict[str, Any] = None,
+    ) -> None:
+        """Add an observed transition between canonical browser states."""
+        attrs = {
+            "type": self.EDGE_TYPE_TRANSITIONS_TO,
+            "action_type": action_type,
+            "trigger": trigger,
+            "first_seen": datetime.now().isoformat(),
+            **(metadata or {}),
+        }
+        if self.graph.has_edge(from_state, to_state):
+            current_attrs = self.graph.edges[from_state, to_state]
+            attrs["first_seen"] = current_attrs.get("first_seen", attrs["first_seen"])
+        self.graph.add_edge(from_state, to_state, **attrs)
 
     def add_flow(
         self, flow_id: str, name: str, start_page: str, end_page: str = None, metadata: dict[str, Any] = None

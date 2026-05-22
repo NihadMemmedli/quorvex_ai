@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlmodel import Session, col, select
 
 from orchestrator.api.models_db import (
@@ -109,6 +109,57 @@ def restore_workflow_revision(
     )
 
 
+def workflow_revision_diff(
+    current_steps: list[dict[str, Any]],
+    target_steps: list[dict[str, Any]],
+) -> dict[str, Any]:
+    current_by_key = {str(step.get("key")): step for step in current_steps if step.get("key")}
+    target_by_key = {str(step.get("key")): step for step in target_steps if step.get("key")}
+    current_keys = [str(step.get("key")) for step in current_steps if step.get("key")]
+    target_keys = [str(step.get("key")) for step in target_steps if step.get("key")]
+
+    added = [target_by_key[key] for key in target_keys if key not in current_by_key]
+    removed = [current_by_key[key] for key in current_keys if key not in target_by_key]
+    changed = [
+        {
+            "key": key,
+            "current": current_by_key[key],
+            "target": target_by_key[key],
+        }
+        for key in target_keys
+        if key in current_by_key and current_by_key[key] != target_by_key[key]
+    ]
+    reordered = [
+        {"key": key, "current_index": current_keys.index(key), "target_index": target_keys.index(key)}
+        for key in target_keys
+        if key in current_by_key and current_keys.index(key) != target_keys.index(key)
+    ]
+
+    removed_candidates = removed.copy()
+    renamed: list[dict[str, Any]] = []
+    for target in added.copy():
+        for current in removed_candidates:
+            if target.get("type") == current.get("type") and target.get("label") == current.get("label"):
+                renamed.append({"from": current.get("key"), "to": target.get("key"), "current": current, "target": target})
+                removed_candidates.remove(current)
+                break
+
+    return {
+        "added": added,
+        "removed": removed,
+        "renamed": renamed,
+        "reordered": reordered,
+        "changed": changed,
+        "summary": {
+            "added": len(added),
+            "removed": len(removed),
+            "renamed": len(renamed),
+            "reordered": len(reordered),
+            "changed": len(changed),
+        },
+    }
+
+
 def emit_workflow_event(
     session: Session,
     *,
@@ -152,6 +203,46 @@ def emit_workflow_event(
     return event
 
 
+def query_workflow_events(
+    session: Session,
+    *,
+    project_id: str | None = None,
+    run_id: str | None = None,
+    definition_id: str | None = None,
+    schedule_id: str | None = None,
+    event_type: str | None = None,
+    severity: str | None = None,
+    q: str | None = None,
+    entity_scope: str = "all",
+    order: str = "desc",
+    limit: int = 50,
+) -> list[WorkflowEvent]:
+    stmt = select(WorkflowEvent)
+    if project_id:
+        stmt = stmt.where(WorkflowEvent.project_id == project_id)
+    if run_id:
+        stmt = stmt.where(WorkflowEvent.run_id == run_id)
+    if definition_id:
+        stmt = stmt.where(WorkflowEvent.definition_id == definition_id)
+    if schedule_id:
+        stmt = stmt.where(WorkflowEvent.schedule_id == schedule_id)
+    if event_type:
+        stmt = stmt.where(WorkflowEvent.event_type == event_type)
+    if severity:
+        stmt = stmt.where(WorkflowEvent.severity == severity)
+    if q and q.strip():
+        pattern = f"%{q.strip()}%"
+        stmt = stmt.where(or_(col(WorkflowEvent.event_type).ilike(pattern), col(WorkflowEvent.message).ilike(pattern)))
+    if entity_scope == "run":
+        stmt = stmt.where(WorkflowEvent.run_id != None)
+    elif entity_scope == "schedule":
+        stmt = stmt.where(WorkflowEvent.schedule_id != None)
+    elif entity_scope == "definition":
+        stmt = stmt.where(WorkflowEvent.definition_id != None).where(WorkflowEvent.run_id == None).where(WorkflowEvent.schedule_id == None)
+    order_by = col(WorkflowEvent.created_at).asc() if order == "asc" else col(WorkflowEvent.created_at).desc()
+    return list(session.exec(stmt.order_by(order_by).limit(limit)).all())
+
+
 def _notification_title(event_type: str) -> str:
     return {
         "workflow.completed": "Workflow completed",
@@ -162,6 +253,8 @@ def _notification_title(event_type: str) -> str:
         "workflow.schedule_failed": "Workflow schedule failed",
         "workflow.schedule_completed": "Workflow schedule completed",
         "workflow.schedule_review_needed": "Workflow schedule needs review",
+        "workflow.schedule_execution_skipped": "Workflow schedule execution skipped",
+        "workflow.temporal_start_failed": "Temporal start failed",
         "workflow.review_needed": "Workflow review needed",
     }.get(event_type, "Workflow update")
 
@@ -172,6 +265,7 @@ def workflow_schedule_to_dict(schedule: WorkflowSchedule) -> dict[str, Any]:
         "project_id": schedule.project_id,
         "definition_id": schedule.definition_id,
         "revision_id": schedule.revision_id,
+        "revision_mode": schedule.revision_mode,
         "name": schedule.name,
         "description": schedule.description,
         "cron_expression": schedule.cron_expression,

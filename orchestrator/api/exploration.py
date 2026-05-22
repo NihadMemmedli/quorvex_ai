@@ -380,6 +380,31 @@ def _build_exploratory_agent_config(
         parts.append(f"Aim for up to {request_body.max_interactions} interactions.")
     config["instructions"] = " ".join(parts) if parts else ""
 
+    try:
+        from orchestrator.memory.agent_memory import get_agent_memory_service
+        from orchestrator.memory.context_builder import MemoryContextBuilder
+
+        memory_query = " ".join(
+            part
+            for part in [
+                request_body.entry_url,
+                request_body.strategy,
+                config["instructions"],
+                " ".join(request_body.focus_areas or []),
+            ]
+            if part
+        )
+        config["browser_memory_context"] = MemoryContextBuilder(get_agent_memory_service()).build_prompt_context(
+            query=memory_query,
+            project_id=request_body.project_id,
+            agent_type="ExploratoryAgent",
+            limit=8,
+            token_budget=1800,
+        )
+    except Exception as exc:
+        logger.debug("Browser memory context unavailable for exploration run %s: %s", run_id, exc)
+        config["browser_memory_context"] = ""
+
     if request_body.exclude_patterns:
         config["excluded_patterns"] = request_body.exclude_patterns
     if request_body.focus_areas:
@@ -956,6 +981,9 @@ async def start_exploration(
                 agent = ExploratoryAgent()
                 agent.on_task_enqueued = _on_task_enqueued
                 agent.agent_cwd = str(run_dir)
+                agent.owner_type = "exploration_session"
+                agent.owner_id = session_id
+                agent.owner_label = f"Exploration {session_id}"
 
                 ea_config = _build_exploratory_agent_config(request_body, run_id=session_id)
                 ea_result = await agent.run(ea_config)
@@ -975,6 +1003,21 @@ async def start_exploration(
 
                 # Bridge action_trace → DiscoveredTransition records
                 _bridge_action_trace_to_transitions(action_trace, request_body.entry_url, store, session_id)
+
+                # Seed durable browser exploration memory from the structured trace.
+                browser_memory_counts = {"states": 0, "transitions": 0}
+                try:
+                    from orchestrator.memory.browser_memory import get_exploration_memory_service
+
+                    browser_memory_counts = get_exploration_memory_service(
+                        project_id=request_body.project_id
+                    ).seed_from_action_trace(
+                        session_id=session_id,
+                        entry_url=request_body.entry_url,
+                        action_trace=action_trace,
+                    )
+                except Exception as mem_exc:
+                    logger.debug(f"Browser exploration memory seeding skipped: {mem_exc}")
 
                 # Bridge flows.json → DiscoveredFlow + FlowStep records
                 flows_count = _bridge_flows_to_db(session_id, request_body.entry_url, store, session_id)
@@ -1009,7 +1052,7 @@ async def start_exploration(
                 store.update_session_status(session_id, final_status, error_msg)
                 store.update_session_counts(
                     session_id,
-                    pages=pages_count,
+                    pages=max(pages_count, browser_memory_counts.get("states", 0)),
                     flows=flows_count,
                     elements=elements_count,
                     api_endpoints=0,  # ExploratoryAgent doesn't capture API endpoints

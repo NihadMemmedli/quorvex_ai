@@ -24,6 +24,7 @@ from orchestrator.api.models_db import (
     AutonomousTestProposal,
     CoverageGap,
 )
+from orchestrator.services.autonomous_events import emit_work_item_status_event
 from orchestrator.utils.string_utils import slugify
 
 logger = logging.getLogger(__name__)
@@ -451,6 +452,7 @@ def _enqueue_agent_work_item(
     item.progress = {"phase": "queued", "message": "Agent task has been queued.", "agent_task_id": task_id}
     session.add(item)
     session.commit()
+    emit_work_item_status_event(item, "Agent task queued for autonomous work item.", event_type="lifecycle")
     return True
 
 
@@ -471,11 +473,13 @@ def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
             queue = get_agent_queue()
             await queue.connect()
             try:
-                return [await queue.get_task(task_id) for task_id in task_ids]
+                tasks = [await queue.get_task(task_id) for task_id in task_ids]
+                progress = {task_id: await queue.get_task_progress(task_id) for task_id in task_ids}
+                return tasks, progress
             finally:
                 await queue.disconnect()
 
-        tasks = asyncio.run(_load_tasks([str(item.agent_task_id) for item in running_items if item.agent_task_id]))
+        tasks, progress_by_id = asyncio.run(_load_tasks([str(item.agent_task_id) for item in running_items if item.agent_task_id]))
         task_by_id = {task.id: task for task in tasks if task}
     except Exception as exc:
         logger.debug("Unable to sync autonomous agent work items: %s", exc)
@@ -487,7 +491,19 @@ def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
         task = task_by_id.get(str(item.agent_task_id))
         if not task:
             continue
+        live_progress = progress_by_id.get(str(item.agent_task_id)) or {}
         telemetry = task.telemetry or {}
+        if task.status == AgentTaskStatus.PAUSED:
+            item.progress = {
+                **item.progress,
+                "phase": "paused",
+                "message": "Agent is paused.",
+                **{key: value for key, value in live_progress.items() if value is not None},
+                "last_event_at": now.isoformat(),
+            }
+            item.updated_at = now
+            session.add(item)
+            continue
         if task.status.value == "running":
             item.progress = {
                 **item.progress,
@@ -495,6 +511,8 @@ def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
                 "message": "Agent is running.",
                 "tool_calls": telemetry.get("tool_calls"),
                 "last_tool": telemetry.get("last_tool"),
+                **{key: value for key, value in live_progress.items() if value is not None},
+                "last_event_at": now.isoformat(),
             }
             item.updated_at = now
             session.add(item)
@@ -512,6 +530,7 @@ def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
             item.updated_at = now
             completed_count += 1
             session.add(item)
+            emit_work_item_status_event(item, "Agent completed this assignment.", event_type="complete")
         elif task.status in {AgentTaskStatus.FAILED, AgentTaskStatus.TIMEOUT, AgentTaskStatus.CANCELLED}:
             item.status = "cancelled" if task.status == AgentTaskStatus.CANCELLED else "failed"
             item.error_message = task.error or f"Agent task {task.status.value}"
@@ -519,6 +538,7 @@ def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
             item.progress = {"phase": item.status, "message": item.error_message}
             item.updated_at = now
             session.add(item)
+            emit_work_item_status_event(item, item.error_message, event_type="error")
     if completed_count:
         mission.budget_used_usd += sum(item.budget_used_usd for item in running_items if item.status == "completed")
         mission.updated_at = now

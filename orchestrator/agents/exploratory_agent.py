@@ -95,6 +95,7 @@ class ExploratoryAgent(BaseAgent):
         test_data = config.get("test_data") or {}
         focus_areas = config.get("focus_areas") or []
         excluded_patterns = config.get("excluded_patterns") or []
+        browser_memory_context = config.get("browser_memory_context") or ""
 
         # Initialize state and coverage
         self.state = ExplorationState(start_time=time.time())
@@ -114,6 +115,7 @@ class ExploratoryAgent(BaseAgent):
             test_data=test_data,
             focus_areas=focus_areas,
             excluded_patterns=excluded_patterns,
+            browser_memory_context=browser_memory_context,
         )
 
         # Execute exploration with timeout
@@ -197,6 +199,7 @@ class ExploratoryAgent(BaseAgent):
         test_data: dict[str, Any],
         focus_areas: list[str],
         excluded_patterns: list[str],
+        browser_memory_context: str = "",
     ) -> str:
         """Build the enhanced exploration prompt."""
 
@@ -251,6 +254,21 @@ AUTHENTICATION:
         if excluded_patterns:
             exclusion_section = "\nURL PATTERNS TO AVOID:\n"
             exclusion_section += "\n".join(f"- DO NOT visit: {pattern}" for pattern in excluded_patterns)
+
+        memory_section = ""
+        if browser_memory_context:
+            memory_section = f"""
+CONTEXT-ENGINEERED BROWSER MEMORY:
+{browser_memory_context}
+
+BROWSER MEMORY RULES:
+1. Stored memory is advisory. Live browser_snapshot output and user instructions are authoritative.
+2. Start with a fresh snapshot after navigation, then compare the live page to any remembered state before acting.
+3. Prefer frontier work only when the live URL, role/name, and locator still match.
+4. Validate remembered locators before use; if a locator is stale, rediscover from the live snapshot and continue.
+5. Avoid high-risk actions such as delete/reset/logout/cancel unless explicitly required by the user.
+6. Record stale, skipped, or completed frontier work in the action_trace outcome.
+"""
 
         return f"""You are an Enhanced E2E Exploration Agent with a {time_limit_minutes}-minute budget.
 
@@ -309,6 +327,7 @@ REQUIRED JSON OUTPUT FORMAT:
 TARGET URL: {url}
 {auth_section}
 INSTRUCTIONS: {instructions if instructions else "Explore the application thoroughly."}
+{memory_section}
 
 EXPLORATION STRATEGY:
 1. DISCOVER: Start by exploring the site structure (navigation, main sections)

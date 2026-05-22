@@ -143,6 +143,9 @@ class VectorStore:
     COLLECTION_PRD_CHUNKS = "prd_chunks"
     COLLECTION_SIMILAR_TESTS = "similar_tests"
     COLLECTION_AGENT_MEMORIES = "agent_memories"
+    COLLECTION_BROWSER_PAGE_STATES = "browser_page_states"
+    COLLECTION_BROWSER_ELEMENTS = "browser_elements"
+    COLLECTION_BROWSER_TRANSITIONS = "browser_transitions"
 
     def __init__(self, persist_directory: str | None = None, project_id: str | None = None):
         """
@@ -604,6 +607,70 @@ class VectorStore:
         """Delete an agent working-memory search document."""
         collection = self.get_or_create_collection(self.COLLECTION_AGENT_MEMORIES)
         collection.delete(ids=[memory_id])
+
+    def add_browser_page_state(self, state_id: str, content: str, metadata: dict[str, Any]) -> str:
+        """Add or update a browser page-state search document."""
+        collection = self.get_or_create_collection(self.COLLECTION_BROWSER_PAGE_STATES)
+        metadata = metadata or {"_placeholder": True}
+        existing = collection.get(ids=[state_id], include=["metadatas"])
+        if existing.get("ids"):
+            collection.update(ids=[state_id], documents=[content], metadatas=[metadata])
+        else:
+            collection.add(ids=[state_id], documents=[content], metadatas=[metadata])
+        return state_id
+
+    def add_browser_element(self, element_id: str, content: str, metadata: dict[str, Any]) -> str:
+        """Add or update a browser element search document."""
+        collection = self.get_or_create_collection(self.COLLECTION_BROWSER_ELEMENTS)
+        metadata = metadata or {"_placeholder": True}
+        existing = collection.get(ids=[element_id], include=["metadatas"])
+        if existing.get("ids"):
+            collection.update(ids=[element_id], documents=[content], metadatas=[metadata])
+        else:
+            collection.add(ids=[element_id], documents=[content], metadatas=[metadata])
+        return element_id
+
+    def add_browser_transition(self, transition_id: str, content: str, metadata: dict[str, Any]) -> str:
+        """Add or update a browser transition search document."""
+        collection = self.get_or_create_collection(self.COLLECTION_BROWSER_TRANSITIONS)
+        metadata = metadata or {"_placeholder": True}
+        existing = collection.get(ids=[transition_id], include=["metadatas"])
+        if existing.get("ids"):
+            collection.update(ids=[transition_id], documents=[content], metadatas=[metadata])
+        else:
+            collection.add(ids=[transition_id], documents=[content], metadatas=[metadata])
+        return transition_id
+
+    def search_browser_page_states(
+        self, query: str, n_results: int = 5, filters: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Search browser page-state memory by semantic similarity."""
+        collection = self.get_or_create_collection(self.COLLECTION_BROWSER_PAGE_STATES)
+        results = collection.query(query_texts=[query], n_results=n_results, where=filters)
+        return self._format_query_results(results)
+
+    def search_browser_elements(
+        self, query: str, n_results: int = 10, filters: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Search browser element memory by semantic similarity."""
+        collection = self.get_or_create_collection(self.COLLECTION_BROWSER_ELEMENTS)
+        results = collection.query(query_texts=[query], n_results=n_results, where=filters)
+        return self._format_query_results(results)
+
+    @staticmethod
+    def _format_query_results(results: dict[str, Any]) -> list[dict[str, Any]]:
+        hits = []
+        if results.get("ids") and results["ids"][0]:
+            for i, item_id in enumerate(results["ids"][0]):
+                hits.append(
+                    {
+                        "id": item_id,
+                        "document": results["documents"][0][i],
+                        "metadata": results["metadatas"][0][i],
+                        "distance": results["distances"][0][i] if "distances" in results else None,
+                    }
+                )
+        return hits
 
 
 # Global vector store instances keyed by persist directory and project.

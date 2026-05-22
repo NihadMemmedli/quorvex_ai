@@ -515,6 +515,7 @@ class WorkflowSchedule(SQLModel, table=True):
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
     definition_id: str = Field(foreign_key="workflow_definitions.id", index=True)
     revision_id: str | None = Field(default=None, foreign_key="workflow_definition_revisions.id", index=True)
+    revision_mode: str = "pinned"  # pinned, latest
     name: str
     description: str = ""
     cron_expression: str
@@ -1112,6 +1113,174 @@ class FlowStep(SQLModel, table=True):
     element_role: str | None = None
     element_name: str | None = None
     value: str | None = None
+
+
+class BrowserPageState(SQLModel, table=True):
+    """Canonical browser UI state discovered during autonomous exploration."""
+
+    __tablename__ = "browser_page_states"
+    __table_args__ = (
+        Index("ix_browser_page_states_project_page", "project_id", "page_key"),
+        Index("ix_browser_page_states_project_state", "project_id", "state_key"),
+        Index("ix_browser_page_states_project_seen", "project_id", "last_seen_at"),
+        UniqueConstraint("project_id", "state_key", name="uq_browser_page_states_project_state"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    session_id: str | None = Field(default=None, foreign_key="exploration_sessions.id", index=True)
+    page_key: str = Field(index=True)
+    state_key: str = Field(index=True)
+    url: str
+    url_template: str
+    title: str | None = None
+    page_type: str | None = None
+    auth_state: str | None = None
+    viewport: str | None = None
+    locale: str | None = None
+    exact_hash: str = Field(index=True)
+    simhash: str | None = Field(default=None, index=True)
+    embedding_id: str | None = None
+    snapshot_ref: str | None = None
+    canonical_json: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    first_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    last_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    visit_count: int = 1
+    novelty_score: float = 1.0
+    importance_score: float = 0.5
+    decay_score: float = 1.0
+    status: str = Field(default="active", index=True)
+
+
+class BrowserElement(SQLModel, table=True):
+    """Stable element memory for a canonical browser state."""
+
+    __tablename__ = "browser_elements"
+    __table_args__ = (
+        Index("ix_browser_elements_project_state", "project_id", "state_id"),
+        Index("ix_browser_elements_project_key", "project_id", "element_key"),
+        Index("ix_browser_elements_project_role", "project_id", "role"),
+        UniqueConstraint("project_id", "state_id", "element_key", name="uq_browser_elements_project_state_key"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    state_id: str = Field(foreign_key="browser_page_states.id", index=True)
+    element_key: str = Field(index=True)
+    role: str | None = Field(default=None, index=True)
+    name: str | None = None
+    text: str | None = None
+    element_type: str | None = None
+    locator_candidates_json: list[dict[str, Any]] | None = Field(default=None, sa_column=Column(JSON))
+    attributes_json: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    form_context_json: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    first_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    last_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    seen_count: int = 1
+    tested_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    importance_score: float = 0.5
+    stability_score: float = 0.5
+    status: str = Field(default="active", index=True)
+
+    @property
+    def locator_candidates(self) -> list[dict[str, Any]]:
+        return self.locator_candidates_json or []
+
+    @locator_candidates.setter
+    def locator_candidates(self, value: list[dict[str, Any]]):
+        self.locator_candidates_json = value
+
+
+class BrowserTransition(SQLModel, table=True):
+    """Observed action edge between two browser page states."""
+
+    __tablename__ = "browser_transitions"
+    __table_args__ = (
+        Index("ix_browser_transitions_project_from", "project_id", "from_state_id"),
+        Index("ix_browser_transitions_project_to", "project_id", "to_state_id"),
+        Index("ix_browser_transitions_project_seen", "project_id", "last_seen_at"),
+        UniqueConstraint(
+            "project_id",
+            "from_state_id",
+            "to_state_id",
+            "action_signature",
+            name="uq_browser_transitions_project_signature",
+        ),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    session_id: str | None = Field(default=None, foreign_key="exploration_sessions.id", index=True)
+    from_state_id: str = Field(foreign_key="browser_page_states.id", index=True)
+    to_state_id: str = Field(foreign_key="browser_page_states.id", index=True)
+    action_type: str = Field(index=True)
+    action_signature: str = Field(index=True)
+    element_id: str | None = Field(default=None, foreign_key="browser_elements.id", index=True)
+    action_value_kind: str | None = None
+    transition_type: str = "interaction"
+    api_signature_json: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    success_count: int = 1
+    failure_count: int = 0
+    avg_duration_ms: float = 0.0
+    first_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    last_seen_at: datetime = Field(default_factory=datetime.utcnow)
+    novelty_at_discovery: float = 1.0
+    risk_level: str = "low"
+    status: str = Field(default="active", index=True)
+
+
+class BrowserFrontierItem(SQLModel, table=True):
+    """Persistent work queue item for 24/7 browser exploration."""
+
+    __tablename__ = "browser_frontier_items"
+    __table_args__ = (
+        Index("ix_browser_frontier_project_status_priority", "project_id", "status", "priority_score"),
+        Index("ix_browser_frontier_project_due", "project_id", "next_due_at"),
+        UniqueConstraint("project_id", "state_id", "element_id", "action_type", name="uq_browser_frontier_action"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    state_id: str = Field(foreign_key="browser_page_states.id", index=True)
+    element_id: str | None = Field(default=None, foreign_key="browser_elements.id", index=True)
+    action_type: str = Field(index=True)
+    priority_score: float = Field(default=0.5, index=True)
+    status: str = Field(default="queued", index=True)
+    attempts: int = 0
+    last_attempted_at: datetime | None = None
+    next_due_at: datetime | None = Field(default=None, index=True)
+    block_reason: str | None = None
+    lease_owner: str | None = None
+    lease_until: datetime | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class BrowserStateCluster(SQLModel, table=True):
+    """Near-duplicate browser state cluster."""
+
+    __tablename__ = "browser_state_clusters"
+    __table_args__ = (
+        Index("ix_browser_state_clusters_project_key", "project_id", "cluster_key"),
+        UniqueConstraint("project_id", "cluster_key", name="uq_browser_state_clusters_project_key"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    cluster_key: str = Field(index=True)
+    representative_state_id: str | None = Field(default=None, foreign_key="browser_page_states.id")
+    member_count: int = 0
+    summary: str | None = Field(default=None, sa_column=Column(Text))
+    embedding_id: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class DiscoveredApiEndpoint(SQLModel, table=True):
@@ -2734,6 +2903,44 @@ class AutonomousAgentWorkItem(SQLModel, table=True):
         self.result_json = json.dumps(value)
 
 
+class AutonomousAgentEvent(SQLModel, table=True):
+    """Durable observable event emitted by autonomous mission agents."""
+
+    __tablename__ = "autonomous_agent_events"
+    __table_args__ = (
+        Index("ix_autonomous_agent_events_mission_sequence", "mission_id", "sequence"),
+        Index("ix_autonomous_agent_events_work_item_sequence", "work_item_id", "sequence"),
+        Index("ix_autonomous_agent_events_project_created", "project_id", "created_at"),
+        Index("ix_autonomous_agent_events_agent_task", "agent_task_id"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    mission_id: str = Field(foreign_key="autonomous_missions.id", index=True)
+    run_id: str | None = Field(default=None, foreign_key="autonomous_mission_runs.id", index=True)
+    work_item_id: str | None = Field(default=None, foreign_key="autonomous_agent_work_items.id", index=True)
+    agent_task_id: str | None = Field(default=None, index=True)
+    sequence: int = Field(index=True)
+    event_type: str = Field(index=True)  # lifecycle, status, assistant_output, tool_call, browser_action, pause, resume, error, complete
+    level: str = Field(default="info", index=True)
+    message: str = Field(sa_column=Column(Text))
+    payload_json: str = Field(default="{}", sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.payload_json or "{}")
+            return value if isinstance(value, dict) else {"value": value}
+        except json.JSONDecodeError:
+            return {}
+
+    @payload.setter
+    def payload(self, value: dict[str, Any]):
+        self.payload_json = json.dumps(value)
+
+
 class AutonomousFinding(SQLModel, table=True):
     """Validated internal finding produced by an autonomous mission."""
 
@@ -3406,6 +3613,8 @@ class AgentMemory(SQLModel, table=True):
     __table_args__ = (
         Index("ix_agentmemory_project_status", "project_id", "status"),
         Index("ix_agentmemory_project_kind", "project_id", "kind"),
+        Index("ix_agentmemory_project_type", "project_id", "memory_type"),
+        Index("ix_agentmemory_scope_status", "scope", "status"),
         Index("ix_agentmemory_user_status", "user_id", "status"),
         Index("ix_agentmemory_source", "source_type", "source_id"),
         Index("ix_agentmemory_last_used", "last_used_at"),
@@ -3416,17 +3625,25 @@ class AgentMemory(SQLModel, table=True):
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
     user_id: str | None = Field(default=None, index=True)
     kind: str = Field(index=True)
+    memory_type: str = Field(default="semantic", index=True)
+    scope: str = Field(default="project", index=True)
     content: str = Field(sa_column=Column(Text))
     summary: str | None = Field(default=None, sa_column=Column(Text))
     tags: list[str] | None = Field(default=None, sa_column=Column(JSON))
     confidence: float = Field(default=0.7)
+    importance: float = Field(default=0.5)
     source_type: str | None = None
     source_id: str | None = None
     agent_type: str | None = Field(default=None, index=True)
     status: str = Field(default="active", index=True)
+    supersedes_id: str | None = Field(default=None, index=True)
+    review_required: bool = Field(default=False)
     extra_data: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+    last_verified_at: datetime | None = None
     last_used_at: datetime | None = None
     use_count: int = Field(default=0)
 

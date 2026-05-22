@@ -24,6 +24,9 @@ __all__ = [
     "get_exploration_store",
     "AgentMemoryService",
     "get_agent_memory_service",
+    "MemoryContextBuilder",
+    "ExplorationMemoryService",
+    "get_exploration_memory_service",
 ]
 __version__ = "0.1.0"
 
@@ -39,6 +42,17 @@ def __getattr__(name):
         return {
             "AgentMemoryService": AgentMemoryService,
             "get_agent_memory_service": get_agent_memory_service,
+        }[name]
+    if name == "MemoryContextBuilder":
+        from .context_builder import MemoryContextBuilder
+
+        return MemoryContextBuilder
+    if name in {"ExplorationMemoryService", "get_exploration_memory_service"}:
+        from .browser_memory import ExplorationMemoryService, get_exploration_memory_service
+
+        return {
+            "ExplorationMemoryService": ExplorationMemoryService,
+            "get_exploration_memory_service": get_exploration_memory_service,
         }[name]
     if name in {"vector_store", "graph_store", "manager", "config"}:
         import importlib

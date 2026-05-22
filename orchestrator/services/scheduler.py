@@ -250,9 +250,9 @@ async def execute_workflow_schedule(schedule_id: str, execution_id: int | None =
         WorkflowSchedule,
         WorkflowScheduleExecution,
     )
-    from orchestrator.services.temporal_client import TemporalUnavailableError, start_custom_workflow_run
+    from orchestrator.services.temporal_client import start_custom_workflow_run
     from orchestrator.services.workflow_operations import emit_workflow_event, ensure_workflow_revision
-    from orchestrator.services.workflow_runner import create_workflow_run_steps, launch_workflow_run
+    from orchestrator.services.workflow_runner import create_workflow_run_steps
 
     logger.info("Executing custom workflow schedule %s", schedule_id)
     with Session(engine) as session:
@@ -269,6 +269,19 @@ async def execute_workflow_schedule(schedule_id: str, execution_id: int | None =
                     execution.error_message = "Schedule is disabled"
                     execution.completed_at = datetime.now(timezone.utc)
                     session.add(execution)
+                    emit_workflow_event(
+                        session,
+                        event_type="workflow.schedule_execution_skipped",
+                        message=f"Workflow schedule {schedule.name} execution was skipped because the schedule is disabled.",
+                        severity="warning",
+                        schedule=schedule,
+                        payload={
+                            "execution_id": execution.id,
+                            "trigger_type": trigger_type,
+                            "reason": "schedule_disabled",
+                        },
+                        notify=False,
+                    )
                     session.commit()
             return
         definition = session.get(WorkflowDefinition, schedule.definition_id)
@@ -297,11 +310,14 @@ async def execute_workflow_schedule(schedule_id: str, execution_id: int | None =
                 session.add(execution)
                 session.commit()
 
-        revision = session.get(WorkflowDefinitionRevision, schedule.revision_id) if schedule.revision_id else None
+        revision = None
+        if schedule.revision_mode == "pinned":
+            revision = session.get(WorkflowDefinitionRevision, schedule.revision_id) if schedule.revision_id else None
         if not revision or revision.definition_id != definition.id:
             revision = ensure_workflow_revision(session, definition)
-            schedule.revision_id = revision.id
-            session.add(schedule)
+            if schedule.revision_mode == "pinned":
+                schedule.revision_id = revision.id
+                session.add(schedule)
         run = WorkflowRun(
             definition_id=definition.id,
             workflow_id=definition.id,
@@ -334,6 +350,13 @@ async def execute_workflow_schedule(schedule_id: str, execution_id: int | None =
             message=f"Workflow schedule {schedule.name} started run {run.id}.",
             run=run,
             schedule=schedule,
+            payload={
+                "execution_id": execution_id,
+                "run_id": run.id,
+                "trigger_type": trigger_type,
+                "revision_id": revision.id,
+                "definition_version": revision.version,
+            },
             notify=False,
         )
         session.commit()
@@ -348,8 +371,49 @@ async def execute_workflow_schedule(schedule_id: str, execution_id: int | None =
                 run.temporal_run_id = temporal.run_id
                 session.add(run)
                 session.commit()
-    except TemporalUnavailableError:
-        await launch_workflow_run(run_id)
+    except Exception as exc:
+        error_message = str(exc)
+        with Session(engine) as session:
+            run = session.get(WorkflowRun, run_id)
+            schedule = session.get(WorkflowSchedule, schedule_id)
+            execution = session.get(WorkflowScheduleExecution, execution_id) if execution_id is not None else None
+            if run:
+                run.status = "failed"
+                run.error_message = error_message
+                run.completed_at = datetime.now(timezone.utc)
+                run.updated_at = datetime.now(timezone.utc)
+                session.add(run)
+                emit_workflow_event(
+                    session,
+                    event_type="workflow.temporal_start_failed",
+                    message=f"Temporal failed to start workflow run {run.id}: {error_message}",
+                    severity="error",
+                    run=run,
+                    payload={"execution_id": execution_id, "temporal_error": error_message},
+                    notify=True,
+                )
+            if execution:
+                execution.status = "failed"
+                execution.completed_at = datetime.now(timezone.utc)
+                execution.error_message = error_message
+                session.add(execution)
+            if schedule:
+                schedule.last_run_status = "failed"
+                schedule.last_error = error_message
+                schedule.failed_executions += 1
+                session.add(schedule)
+                emit_workflow_event(
+                    session,
+                    event_type="workflow.schedule_failed",
+                    message=f"Workflow schedule {schedule.name} run failed: {error_message}",
+                    severity="error",
+                    run=run,
+                    schedule=schedule,
+                    payload={"execution_id": execution_id, "run_id": run_id, "trigger_type": trigger_type, "temporal_error": error_message},
+                    notify=schedule.notify_on_failure,
+                )
+            session.commit()
+        return
 
     asyncio.create_task(_monitor_workflow_schedule_execution(schedule_id, execution_id, run_id))
 
@@ -388,6 +452,12 @@ async def _monitor_workflow_schedule_execution(schedule_id: str, execution_id: i
                             severity="warning",
                             run=run,
                             schedule=schedule,
+                            payload={
+                                "execution_id": execution_id,
+                                "run_id": run.id,
+                                "trigger_type": execution.trigger_type if execution else None,
+                                "duration_seconds": workflow_duration_seconds(run),
+                            },
                             notify=schedule.notify_on_review_needed,
                         )
                 if execution:
@@ -418,6 +488,12 @@ async def _monitor_workflow_schedule_execution(schedule_id: str, execution_id: i
                             message=f"Workflow schedule {schedule.name} run completed.",
                             run=run,
                             schedule=schedule,
+                            payload={
+                                "execution_id": execution_id,
+                                "run_id": run.id,
+                                "trigger_type": execution.trigger_type if execution else None,
+                                "duration_seconds": duration,
+                            },
                             notify=schedule.notify_on_completion,
                         )
                     else:
@@ -429,6 +505,13 @@ async def _monitor_workflow_schedule_execution(schedule_id: str, execution_id: i
                             severity="error",
                             run=run,
                             schedule=schedule,
+                            payload={
+                                "execution_id": execution_id,
+                                "run_id": run.id,
+                                "trigger_type": execution.trigger_type if execution else None,
+                                "duration_seconds": duration,
+                                "error_message": run.error_message,
+                            },
                             notify=schedule.notify_on_failure,
                         )
                     session.add(schedule)
@@ -736,6 +819,19 @@ async def reconcile_workflow_schedule_executions():
                     schedule.failed_executions += 1
                     schedule.last_run_status = "failed"
                     schedule.last_error = execution.error_message
+                    emit_workflow_event(
+                        session,
+                        event_type="workflow.schedule_execution_skipped",
+                        message=f"Workflow schedule {schedule.name} execution did not create a workflow run.",
+                        severity="error",
+                        schedule=schedule,
+                        payload={
+                            "execution_id": execution.id,
+                            "trigger_type": execution.trigger_type,
+                            "reason": "no_workflow_run_created",
+                        },
+                        notify=False,
+                    )
                     session.add(execution)
                     session.add(schedule)
                     reconciled += 1
@@ -757,6 +853,12 @@ async def reconcile_workflow_schedule_executions():
                         severity="warning",
                         run=run,
                         schedule=schedule,
+                        payload={
+                            "execution_id": execution.id,
+                            "run_id": run.id,
+                            "trigger_type": execution.trigger_type,
+                            "duration_seconds": workflow_duration_seconds(run),
+                        },
                         notify=schedule.notify_on_review_needed,
                     )
                 continue
@@ -796,6 +898,13 @@ async def reconcile_workflow_schedule_executions():
                     severity=severity,
                     run=run,
                     schedule=schedule,
+                    payload={
+                        "execution_id": execution.id,
+                        "run_id": run.id,
+                        "trigger_type": execution.trigger_type,
+                        "duration_seconds": execution.duration_seconds,
+                        "error_message": run.error_message,
+                    },
                     notify=notify,
                 )
             session.add(execution)

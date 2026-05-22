@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlmodel import Session, col, select
 
+from orchestrator.config import settings
 from orchestrator.services.temporal_client import (
     TemporalUnavailableError,
+    check_custom_workflow_temporal_health,
+    get_custom_workflow_temporal_diagnostics,
     signal_custom_workflow_run,
     start_custom_workflow_run,
 )
@@ -20,10 +25,12 @@ from orchestrator.services.workflow_operations import (
     ensure_workflow_revision,
     json_changed,
     percentile,
+    query_workflow_events,
     restore_workflow_revision,
     workflow_duration_seconds,
     workflow_event_to_dict,
     workflow_notification_to_dict,
+    workflow_revision_diff,
     workflow_schedule_execution_to_dict,
     workflow_schedule_to_dict,
 )
@@ -33,7 +40,6 @@ from orchestrator.services.workflow_runner import (
     TERMINAL_STATUSES,
     create_workflow_run_steps,
     duplicate_workflow_definition_record,
-    launch_workflow_run,
     reset_workflow_run_for_step_retry,
     validate_workflow_definition_payload,
     validate_workflow_steps,
@@ -45,6 +51,7 @@ from .db import get_session
 from .middleware.auth import get_current_user_optional
 from .middleware.permissions import ProjectRole, check_project_access
 from .models_db import (
+    AgentRun,
     WorkflowDefinition,
     WorkflowDefinitionRevision,
     WorkflowEvent,
@@ -57,6 +64,9 @@ from .models_db import (
 from .time_utils import utc_iso
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+RUNS_DIR = BASE_DIR / "runs"
 
 
 class WorkflowStepSpec(BaseModel):
@@ -106,6 +116,8 @@ class WorkflowRollbackRequest(BaseModel):
 
 class WorkflowScheduleRequest(BaseModel):
     definition_id: str
+    revision_id: str | None = None
+    revision_mode: str = Field(default="pinned", pattern="^(latest|pinned)$")
     name: str
     description: str = ""
     cron_expression: str
@@ -119,6 +131,8 @@ class WorkflowScheduleRequest(BaseModel):
 
 
 class WorkflowScheduleUpdateRequest(BaseModel):
+    revision_id: str | None = None
+    revision_mode: str | None = Field(default=None, pattern="^(latest|pinned)$")
     name: str | None = None
     description: str | None = None
     cron_expression: str | None = None
@@ -235,6 +249,516 @@ def _run_to_dict(run: WorkflowRun, session: Session, *, include_steps: bool = Tr
     return payload
 
 
+def _short_text(value: Any, limit: int = 280) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False)
+        except TypeError:
+            text = str(value)
+    if not text:
+        return None
+    return text if len(text) <= limit else f"{text[:limit].rstrip()}..."
+
+
+def _count_by(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key) or "unknown").lower()
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _step_duration_seconds(step: WorkflowRunStep) -> int | None:
+    if not step.started_at:
+        return None
+    end = step.completed_at or datetime.utcnow()
+    return max(int((end - step.started_at).total_seconds()), 0)
+
+
+def _output_summary(output: dict[str, Any] | None) -> str | None:
+    if not isinstance(output, dict):
+        return None
+    candidates = [
+        output.get("summary"),
+        output.get("message"),
+        output.get("status_message"),
+        output.get("error_message"),
+    ]
+    result = output.get("result")
+    if isinstance(result, dict):
+        candidates.extend([result.get("summary"), result.get("message"), result.get("error_message")])
+    structured = output.get("structured_report")
+    if isinstance(structured, dict):
+        candidates.extend([structured.get("summary"), structured.get("title")])
+    for candidate in candidates:
+        text = _short_text(candidate)
+        if text:
+            return text
+    return None
+
+
+def _normalise_finding(raw: Any, *, run: WorkflowRun, step: WorkflowRunStep | None, source_kind: str) -> dict[str, Any] | None:
+    if isinstance(raw, str):
+        raw = {"title": raw}
+    if not isinstance(raw, dict):
+        return None
+    title = _short_text(raw.get("title") or raw.get("name") or raw.get("summary") or raw.get("message") or raw.get("description"), 180)
+    description = _short_text(raw.get("description") or raw.get("details") or raw.get("message") or raw.get("error"), 700)
+    evidence = _short_text(raw.get("evidence") or raw.get("actual") or raw.get("stack") or raw.get("failure"), 1000)
+    if not title and not description and not evidence:
+        return None
+    return {
+        "id": raw.get("id") or raw.get("fingerprint") or f"{source_kind}:{step.id if step else run.id}:{abs(hash(str(raw))) % 1000000}",
+        "workflow_run_id": run.id,
+        "workflow_step_id": step.id if step else None,
+        "step_key": step.step_key if step else None,
+        "source_kind": source_kind,
+        "source_run_id": (step.external_id if step else None) or raw.get("run_id") or raw.get("scan_id"),
+        "severity": str(raw.get("severity") or raw.get("level") or raw.get("priority") or "info").lower(),
+        "category": raw.get("category") or raw.get("type") or raw.get("scanner"),
+        "title": title or "Finding",
+        "description": description,
+        "evidence": evidence,
+        "recommendation": _short_text(raw.get("recommendation") or raw.get("remediation") or raw.get("fix"), 700),
+        "status": str(raw.get("status") or "open").lower(),
+    }
+
+
+def _collect_findings_from_output(run: WorkflowRun, step: WorkflowRunStep) -> list[dict[str, Any]]:
+    output = step.output if isinstance(step.output, dict) else {}
+    sources: list[Any] = [
+        output.get("findings"),
+        output.get("issues"),
+        output.get("failures"),
+    ]
+    result = output.get("result")
+    if isinstance(result, dict):
+        sources.extend([result.get("findings"), result.get("issues"), result.get("failures")])
+    structured = output.get("structured_report")
+    if isinstance(structured, dict):
+        sources.extend([structured.get("findings"), structured.get("issues")])
+
+    findings: list[dict[str, Any]] = []
+    for source in sources:
+        values = source if isinstance(source, list) else [source] if source else []
+        for raw in values:
+            finding = _normalise_finding(raw, run=run, step=step, source_kind=step.external_kind or step.step_type)
+            if finding:
+                findings.append(finding)
+    return findings
+
+
+def _collect_test_run_findings(run: WorkflowRun, step: WorkflowRunStep) -> list[dict[str, Any]]:
+    if step.external_kind != "test_run" or not step.external_id:
+        return []
+    run_dir = RUNS_DIR / step.external_id
+    results_path = run_dir / "test-results.json"
+    if not results_path.exists():
+        if step.error_message:
+            finding = _normalise_finding(
+                {"title": "Test run failed", "description": step.error_message, "severity": "error", "category": "test_run"},
+                run=run,
+                step=step,
+                source_kind="test_run",
+            )
+            return [finding] if finding else []
+        return []
+    try:
+        from orchestrator.utils.test_results_parser import parse_test_results
+
+        parsed = parse_test_results(str(results_path))
+    except Exception:
+        parsed = None
+    findings: list[dict[str, Any]] = []
+    for test in (parsed or {}).get("tests") or []:
+        if test.get("status") not in {"failed", "timedOut"}:
+            continue
+        error = test.get("error") if isinstance(test.get("error"), dict) else {}
+        finding = _normalise_finding(
+            {
+                "title": test.get("full_title") or test.get("title") or "Failed test",
+                "description": error.get("message") or "Test failed",
+                "evidence": error.get("stack"),
+                "severity": "error",
+                "category": error.get("category") or "test_failure",
+                "status": "open",
+                "file": test.get("file"),
+            },
+            run=run,
+            step=step,
+            source_kind="test_run",
+        )
+        if finding:
+            findings.append(finding)
+    return findings
+
+
+def _collect_artifacts_from_step(step: WorkflowRunStep) -> list[dict[str, Any]]:
+    output = step.output if isinstance(step.output, dict) else {}
+    candidates: list[Any] = [output.get("artifacts")]
+    result = output.get("result")
+    if isinstance(result, dict):
+        candidates.append(result.get("artifacts"))
+    artifacts: list[dict[str, Any]] = []
+    for candidate in candidates:
+        values = candidate if isinstance(candidate, list) else [candidate] if candidate else []
+        for index, raw in enumerate(values):
+            if isinstance(raw, str):
+                item = {"name": raw.rsplit("/", 1)[-1], "path": raw}
+            elif isinstance(raw, dict):
+                item = dict(raw)
+            else:
+                continue
+            item.setdefault("source_step_id", step.id)
+            item.setdefault("step_key", step.step_key)
+            item.setdefault("source_kind", step.external_kind or step.step_type)
+            item.setdefault("id", f"{step.id}:{index}:{item.get('name') or item.get('path') or item.get('url')}")
+            artifacts.append(item)
+    if step.external_kind == "test_run" and step.external_id:
+        run_dir = RUNS_DIR / step.external_id
+        if run_dir.exists():
+            for file in run_dir.glob("**/*"):
+                if file.is_file() and file.suffix.lower() in {".png", ".jpg", ".jpeg", ".webm", ".mp4", ".zip", ".html"}:
+                    try:
+                        rel = file.relative_to(RUNS_DIR)
+                    except ValueError:
+                        continue
+                    artifacts.append(
+                        {
+                            "id": f"{step.id}:{rel}",
+                            "name": file.name,
+                            "path": f"/artifacts/{rel}",
+                            "type": "image" if file.suffix.lower() in {".png", ".jpg", ".jpeg"} else file.suffix.lower().lstrip("."),
+                            "source_step_id": step.id,
+                            "step_key": step.step_key,
+                            "source_kind": "test_run",
+                        }
+                    )
+    return artifacts
+
+
+def _dedupe_artifacts(artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for artifact in artifacts:
+        key = (
+            str(artifact.get("source_step_id") or artifact.get("step_key") or ""),
+            str(artifact.get("path") or artifact.get("url") or artifact.get("name") or ""),
+            str(artifact.get("type") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(artifact)
+    return deduped
+
+
+def _collect_agent_child_artifacts(agent_run_id: str) -> list[dict[str, Any]]:
+    suffix_types = {
+        ".png": "image",
+        ".jpg": "image",
+        ".jpeg": "image",
+        ".webm": "video",
+        ".mp4": "video",
+    }
+    artifacts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for runs_root in (RUNS_DIR, Path("/app/runs")):
+        session_dir = runs_root / agent_run_id
+        if not session_dir.exists():
+            continue
+        for file in session_dir.glob("**/*"):
+            if not file.is_file():
+                continue
+            artifact_type = suffix_types.get(file.suffix.lower())
+            if not artifact_type:
+                continue
+            try:
+                resolved = str(file.resolve())
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                rel = file.relative_to(runs_root)
+                modified_at = datetime.utcfromtimestamp(file.stat().st_mtime)
+            except (OSError, ValueError):
+                continue
+            artifacts.append(
+                {
+                    "name": file.name,
+                    "path": f"/artifacts/{rel}",
+                    "type": artifact_type,
+                    "modified_at": utc_iso(modified_at),
+                }
+            )
+    return sorted(
+        artifacts,
+        key=lambda item: (
+            item.get("type") != "video",
+            str(item.get("modified_at") or ""),
+            str(item.get("name") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def _safe_agent_progress(progress: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(progress, dict):
+        return {}
+    allowed_keys = {
+        "phase",
+        "status",
+        "message",
+        "current_stage",
+        "activity_label",
+        "tool_calls",
+        "browser_tool_calls",
+        "interactions",
+        "last_tool",
+        "last_tool_label",
+        "recent_tools",
+        "has_browser_tools",
+        "updated_at",
+        "agent_task_id",
+    }
+    safe = {key: progress.get(key) for key in allowed_keys if progress.get(key) is not None}
+    recent_tools = safe.get("recent_tools")
+    if isinstance(recent_tools, list):
+        safe["recent_tools"] = [
+            {
+                "name": str(item.get("name") or ""),
+                "label": str(item.get("label") or item.get("name") or ""),
+                "at": item.get("at"),
+            }
+            for item in recent_tools
+            if isinstance(item, dict)
+        ][-12:]
+    else:
+        safe.pop("recent_tools", None)
+    return safe
+
+
+def _agent_run_summary(run: AgentRun) -> str | None:
+    result = run.result if isinstance(run.result, dict) else {}
+    structured = result.get("structured_report") if isinstance(result, dict) else None
+    if isinstance(structured, dict) and structured.get("summary"):
+        return str(structured.get("summary"))
+    if isinstance(result, dict) and result.get("summary"):
+        return str(result.get("summary"))
+    progress = run.progress if isinstance(run.progress, dict) else {}
+    if progress.get("message"):
+        return str(progress.get("message"))
+    return None
+
+
+def _external_child_for_step(step: WorkflowRunStep, session: Session) -> dict[str, Any] | None:
+    external_id = step.external_id
+    external_kind = step.external_kind
+    if not external_id or not external_kind:
+        output = step.output if isinstance(step.output, dict) else {}
+        external_id = output.get("external_id")
+        external_kind = output.get("external_kind") or external_kind
+    if not external_id or not external_kind:
+        return None
+    output = step.output if isinstance(step.output, dict) else {}
+    result = output.get("result") if isinstance(output.get("result"), dict) else {}
+    child = {
+        "kind": external_kind,
+        "id": external_id,
+        "step_id": step.id,
+        "step_key": step.step_key,
+        "status": output.get("status") or result.get("status") or step.status,
+        "summary": _output_summary(output),
+    }
+    if external_kind == "agent_run":
+        agent_run = session.get(AgentRun, external_id)
+        if agent_run:
+            artifacts = _collect_agent_child_artifacts(external_id)
+            child.update(
+                {
+                    "status": agent_run.status,
+                    "summary": _output_summary(output) or _agent_run_summary(agent_run),
+                    "agent_type": agent_run.agent_type,
+                    "progress": _safe_agent_progress(agent_run.progress),
+                    "artifacts": artifacts,
+                    "latest_image": next((artifact for artifact in artifacts if artifact.get("type") == "image"), None),
+                    "agent_task_id": agent_run.agent_task_id,
+                }
+            )
+    return child
+
+
+def _build_debug_timeline(run: WorkflowRun, steps: list[WorkflowRunStep], events: list[WorkflowEvent]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = [
+        {
+            "type": "run",
+            "status": "created",
+            "title": "Run created",
+            "message": f"Workflow run {run.id} was created.",
+            "created_at": utc_iso(run.created_at),
+        }
+    ]
+    if run.started_at:
+        items.append(
+            {
+                "type": "run",
+                "status": "started",
+                "title": "Run started",
+                "message": "Workflow execution started.",
+                "created_at": utc_iso(run.started_at),
+            }
+        )
+    for step in steps:
+        if step.started_at:
+            items.append(
+                {
+                    "type": "step",
+                    "status": step.status,
+                    "title": f"Started {step.label or step.step_key}",
+                    "message": _output_summary(step.output) or step.error_message,
+                    "step_id": step.id,
+                    "step_key": step.step_key,
+                    "created_at": utc_iso(step.started_at),
+                }
+            )
+        if step.completed_at:
+            items.append(
+                {
+                    "type": "step",
+                    "status": step.status,
+                    "title": f"{step.status.title()} {step.label or step.step_key}",
+                    "message": step.error_message or _output_summary(step.output),
+                    "step_id": step.id,
+                    "step_key": step.step_key,
+                    "created_at": utc_iso(step.completed_at),
+                }
+            )
+    for event in events:
+        items.append(
+            {
+                "type": "event",
+                "status": event.severity,
+                "title": event.event_type,
+                "message": event.message,
+                "step_id": event.step_id,
+                "created_at": utc_iso(event.created_at),
+            }
+        )
+    return sorted(items, key=lambda item: item.get("created_at") or "")
+
+
+def _build_run_health(
+    run: WorkflowRun,
+    steps: list[WorkflowRunStep],
+    events: list[WorkflowEvent],
+    findings: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    current = next((step for step in steps if step.step_order == run.current_step_index), None)
+    attention = next((step for step in steps if step.status in {"failed", "awaiting_input", "paused", "running"}), None)
+    active = attention or current
+    last_event = events[-1] if events else None
+    status_counts = _count_by([{"status": step.status} for step in steps], "status")
+    finding_counts = _count_by(findings, "severity")
+    next_action = "Review the run output."
+    if run.status == "running" and active:
+        next_action = f"Waiting for step {active.step_order + 1}: {active.label or active.step_key}."
+    elif run.status == "awaiting_input" and active:
+        next_action = f"Input is required for {active.label or active.step_key}."
+    elif run.status == "failed" and active:
+        next_action = f"Inspect or retry failed step {active.step_order + 1}: {active.label or active.step_key}."
+    elif run.status == "completed":
+        next_action = "Review findings and artifacts." if findings or artifacts else "No follow-up action detected."
+    elif run.status == "paused":
+        next_action = run.pause_reason or "Resume or cancel this paused workflow."
+    elif run.status == "cancelled":
+        next_action = "Run was cancelled."
+    return {
+        "current_step_id": active.id if active else None,
+        "current_step_key": active.step_key if active else None,
+        "current_step_label": active.label if active else None,
+        "current_step_status": active.status if active else None,
+        "next_action": next_action,
+        "last_message": run.error_message or (last_event.message if last_event else None) or (active.error_message if active else None),
+        "status_counts": status_counts,
+        "finding_counts": finding_counts,
+        "finding_count": len(findings),
+        "artifact_count": len(artifacts),
+        "event_count": len(events),
+        "step_count": len(steps),
+        "last_event_at": utc_iso(last_event.created_at) if last_event else None,
+        "heartbeat_at": utc_iso(run.heartbeat_at),
+    }
+
+
+async def _workflow_debug_payload(run: WorkflowRun, session: Session, *, include_temporal: bool = True) -> dict[str, Any]:
+    steps = session.exec(
+        select(WorkflowRunStep).where(WorkflowRunStep.run_id == run.id).order_by(WorkflowRunStep.step_order)
+    ).all()
+    events = query_workflow_events(session, run_id=run.id, order="asc", limit=200)
+    findings: list[dict[str, Any]] = []
+    artifacts: list[dict[str, Any]] = []
+    external_children: list[dict[str, Any]] = []
+    for step in steps:
+        findings.extend(_collect_findings_from_output(run, step))
+        findings.extend(_collect_test_run_findings(run, step))
+        artifacts.extend(_collect_artifacts_from_step(step))
+        child = _external_child_for_step(step, session)
+        if child:
+            external_children.append(child)
+            child_artifacts = child.get("artifacts") if isinstance(child.get("artifacts"), list) else []
+            for index, artifact in enumerate(child_artifacts):
+                if not isinstance(artifact, dict):
+                    continue
+                artifacts.append(
+                    {
+                        **artifact,
+                        "id": f"{step.id}:child:{index}:{artifact.get('path') or artifact.get('name') or artifact.get('url')}",
+                        "source_step_id": step.id,
+                        "step_key": step.step_key,
+                        "source_kind": child.get("kind") or step.external_kind or step.step_type,
+                    }
+                )
+    artifacts = _dedupe_artifacts(artifacts)
+
+    temporal: dict[str, Any] | None = None
+    if include_temporal:
+        temporal = {
+            "run_id": run.id,
+            "temporal_workflow_id": run.temporal_workflow_id,
+            "temporal_run_id": run.temporal_run_id,
+            "temporal_ui_url": settings.temporal_ui_url,
+            "temporal_available": False,
+            "temporal_error": None,
+            "activities": [],
+            "summary": {"total_activities": 0, "failed_activities": 0, "retry_count": 0, "last_failure": None},
+        }
+        if run.temporal_workflow_id:
+            try:
+                temporal = {**temporal, **await get_custom_workflow_temporal_diagnostics(run.temporal_workflow_id, run.temporal_run_id)}
+            except TemporalUnavailableError as exc:
+                temporal["temporal_error"] = str(exc)
+            except Exception as exc:
+                temporal["temporal_error"] = f"Temporal diagnostics unavailable: {exc}"
+        else:
+            temporal["temporal_error"] = "No Temporal workflow id recorded for this run."
+
+    return {
+        "run": _run_to_dict(run, session, include_steps=True),
+        "steps": [_step_to_dict(step) | {"duration_seconds": _step_duration_seconds(step), "summary": _output_summary(step.output)} for step in steps],
+        "events": [workflow_event_to_dict(event) for event in events],
+        "temporal": temporal,
+        "timeline": _build_debug_timeline(run, steps, events),
+        "findings": findings,
+        "artifacts": artifacts,
+        "external_children": external_children,
+        "health": _build_run_health(run, steps, events, findings, artifacts),
+    }
+
+
 def _revision_to_dict(revision: WorkflowDefinitionRevision) -> dict[str, Any]:
     return {
         "id": revision.id,
@@ -286,8 +810,28 @@ def _validate_recovery_policy(policy: dict[str, Any], *, label: str = "recovery_
     }
 
 
+def _mark_temporal_start_failed(session: Session, run: WorkflowRun, message: str) -> None:
+    refreshed = session.get(WorkflowRun, run.id) or run
+    refreshed.status = "failed"
+    refreshed.error_message = message
+    refreshed.completed_at = datetime.utcnow()
+    refreshed.updated_at = datetime.utcnow()
+    session.add(refreshed)
+    emit_workflow_event(
+        session,
+        event_type="workflow.temporal_start_failed",
+        message=f"Temporal failed to start workflow run {refreshed.id}: {message}",
+        severity="error",
+        run=refreshed,
+        payload={"temporal_error": message},
+        notify=True,
+    )
+    session.commit()
+
+
 async def _launch_run_durably(run: WorkflowRun, background_tasks: BackgroundTasks | None = None, session: Session | None = None) -> None:
-    """Prefer Temporal execution, with local fallback for development environments."""
+    """Start the required Temporal workflow for a custom workflow run."""
+    del background_tasks
     try:
         temporal = await start_custom_workflow_run(run.id)
         if session:
@@ -299,17 +843,13 @@ async def _launch_run_durably(run: WorkflowRun, background_tasks: BackgroundTask
                 session.add(refreshed)
                 session.commit()
         return
-    except TemporalUnavailableError:
-        logger_msg = f"Temporal unavailable for workflow run {run.id}; falling back to FastAPI background task"
+    except TemporalUnavailableError as exc:
+        message = str(exc)
     except Exception as exc:
-        logger_msg = f"Failed to start Temporal workflow for run {run.id}: {exc}; falling back to background task"
-    import logging
-
-    logging.getLogger(__name__).warning(logger_msg)
-    if background_tasks:
-        background_tasks.add_task(launch_workflow_run, run.id)
-    else:
-        await launch_workflow_run(run.id)
+        message = f"Failed to start Temporal workflow: {exc}"
+    if session:
+        _mark_temporal_start_failed(session, run, message)
+    raise HTTPException(status_code=503, detail=message)
 
 
 def _validate_cron(cron_expression: str, timezone: str) -> datetime | None:
@@ -320,6 +860,46 @@ def _validate_cron(cron_expression: str, timezone: str) -> datetime | None:
         return next_runs[0] if next_runs else None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _get_revision_or_404(
+    session: Session,
+    definition: WorkflowDefinition,
+    revision_id: str | None,
+) -> WorkflowDefinitionRevision:
+    if not revision_id:
+        return ensure_workflow_revision(session, definition)
+    revision = session.get(WorkflowDefinitionRevision, revision_id)
+    if not revision or revision.definition_id != definition.id:
+        raise HTTPException(status_code=400, detail="Workflow revision not found for this definition")
+    return revision
+
+
+def _schedule_event_payload(schedule: WorkflowSchedule, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schedule_id": schedule.id,
+        "schedule_name": schedule.name,
+        "definition_id": schedule.definition_id,
+        "revision_id": schedule.revision_id,
+        "revision_mode": schedule.revision_mode,
+        "enabled": schedule.enabled,
+        "cron_expression": schedule.cron_expression,
+        "timezone": schedule.timezone,
+        "start_step_key": schedule.start_step_key,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _changed_schedule_fields(before: dict[str, Any], schedule: WorkflowSchedule) -> dict[str, dict[str, Any]]:
+    after = _schedule_event_payload(schedule)
+    keys = ["schedule_name", "revision_id", "revision_mode", "enabled", "cron_expression", "timezone", "start_step_key"]
+    return {
+        key: {"from": before.get(key), "to": after.get(key)}
+        for key in keys
+        if before.get(key) != after.get(key)
+    }
 
 
 @router.get("/catalog")
@@ -421,6 +1001,14 @@ async def import_workflow_definition(
         created_by=getattr(user, "id", None),
         version=1,
     )
+    emit_workflow_event(
+        session,
+        event_type="workflow.definition_created",
+        message=f"Workflow definition {definition.name} was imported.",
+        definition_id=definition.id,
+        payload={"definition_name": definition.name, "step_count": len(steps), "source": "import"},
+        notify=False,
+    )
     session.commit()
     session.refresh(definition)
     return _definition_to_dict(definition)
@@ -515,15 +1103,30 @@ def get_workflow_analytics(
 def list_workflow_events(
     project_id: str | None = Query(default=None),
     run_id: str | None = Query(default=None),
+    definition_id: str | None = Query(default=None),
+    schedule_id: str | None = Query(default=None),
+    event_type: str | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+    entity_scope: str = Query(default="all", pattern="^(all|run|schedule|definition)$"),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
     limit: int = Query(default=50, ge=1, le=200),
     session: Session = Depends(get_session),
 ):
-    stmt = select(WorkflowEvent).order_by(col(WorkflowEvent.created_at).desc()).limit(limit)
-    if project_id:
-        stmt = stmt.where(WorkflowEvent.project_id == project_id)
-    if run_id:
-        stmt = stmt.where(WorkflowEvent.run_id == run_id)
-    return [workflow_event_to_dict(event) for event in session.exec(stmt).all()]
+    events = query_workflow_events(
+        session,
+        project_id=project_id,
+        run_id=run_id,
+        definition_id=definition_id,
+        schedule_id=schedule_id,
+        event_type=event_type,
+        severity=severity,
+        q=q,
+        entity_scope=entity_scope,
+        order=order,
+        limit=limit,
+    )
+    return [workflow_event_to_dict(event) for event in events]
 
 
 @router.get("/notifications")
@@ -552,6 +1155,11 @@ def mark_workflow_notification_read(notification_id: str, session: Session = Dep
     return workflow_notification_to_dict(notification)
 
 
+@router.get("/temporal/health")
+async def get_workflow_temporal_health():
+    return await check_custom_workflow_temporal_health()
+
+
 @router.get("/schedules")
 def list_workflow_schedules(
     project_id: str | None = Query(default=None),
@@ -577,11 +1185,13 @@ async def create_workflow_schedule(
     next_run = _validate_cron(request.cron_expression, request.timezone)
     if request.start_step_key and not any(step.get("key") == request.start_step_key for step in definition.steps):
         raise HTTPException(status_code=400, detail=f"Workflow step not found: {request.start_step_key}")
-    revision = ensure_workflow_revision(session, definition, created_by=getattr(user, "id", None))
+    revision_mode = request.revision_mode
+    revision = _get_revision_or_404(session, definition, request.revision_id)
     schedule = WorkflowSchedule(
         project_id=definition.project_id,
         definition_id=definition.id,
-        revision_id=revision.id,
+        revision_id=revision.id if revision_mode == "pinned" else None,
+        revision_mode=revision_mode,
         name=request.name.strip(),
         description=request.description.strip(),
         cron_expression=request.cron_expression,
@@ -596,12 +1206,22 @@ async def create_workflow_schedule(
     )
     schedule.inputs = request.inputs
     session.add(schedule)
+    session.flush()
+    emit_workflow_event(
+        session,
+        event_type="workflow.schedule_created",
+        message=f"Workflow schedule {schedule.name} created.",
+        schedule=schedule,
+        payload=_schedule_event_payload(schedule, {"definition_version": revision.version if revision_mode == "pinned" else None}),
+        notify=False,
+    )
     session.commit()
     session.refresh(schedule)
     try:
         from orchestrator.services.scheduler import add_workflow_schedule_job
 
-        add_workflow_schedule_job(schedule.id, schedule.cron_expression, schedule.timezone)
+        if schedule.enabled:
+            add_workflow_schedule_job(schedule.id, schedule.cron_expression, schedule.timezone)
     except Exception as exc:
         schedule.status = "error"
         schedule.last_error = str(exc)
@@ -622,11 +1242,20 @@ async def update_workflow_schedule(
         raise HTTPException(status_code=404, detail="Workflow schedule not found")
     await _ensure_write_access(schedule.project_id, user, session)
     definition = _get_definition_or_404(schedule.definition_id, schedule.project_id, session)
+    before = _schedule_event_payload(schedule)
     cron = request.cron_expression or schedule.cron_expression
     timezone = request.timezone or schedule.timezone
     schedule.next_run_at = _validate_cron(cron, timezone)
     if request.start_step_key and not any(step.get("key") == request.start_step_key for step in definition.steps):
         raise HTTPException(status_code=400, detail=f"Workflow step not found: {request.start_step_key}")
+    next_revision_mode = request.revision_mode or schedule.revision_mode or "pinned"
+    if next_revision_mode == "latest":
+        schedule.revision_id = None
+    elif request.revision_id is not None:
+        schedule.revision_id = _get_revision_or_404(session, definition, request.revision_id).id
+    elif not schedule.revision_id:
+        schedule.revision_id = ensure_workflow_revision(session, definition, created_by=getattr(user, "id", None)).id
+    schedule.revision_mode = next_revision_mode
     for field in ("name", "description", "cron_expression", "timezone", "start_step_key"):
         value = getattr(request, field)
         if value is not None:
@@ -641,6 +1270,26 @@ async def update_workflow_schedule(
     schedule.status = "active" if schedule.enabled else "paused"
     schedule.last_error = None
     session.add(schedule)
+    changed_fields = _changed_schedule_fields(before, schedule)
+    if changed_fields:
+        emit_workflow_event(
+            session,
+            event_type="workflow.schedule_updated",
+            message=f"Workflow schedule {schedule.name} updated.",
+            schedule=schedule,
+            payload=_schedule_event_payload(schedule, {"changed_fields": changed_fields}),
+            notify=False,
+        )
+    if "enabled" in changed_fields:
+        event_type = "workflow.schedule_resumed" if schedule.enabled else "workflow.schedule_paused"
+        emit_workflow_event(
+            session,
+            event_type=event_type,
+            message=f"Workflow schedule {schedule.name} {'resumed' if schedule.enabled else 'paused'}.",
+            schedule=schedule,
+            payload=_schedule_event_payload(schedule),
+            notify=False,
+        )
     session.commit()
     try:
         from orchestrator.services.scheduler import add_workflow_schedule_job, pause_schedule_job
@@ -673,6 +1322,15 @@ async def delete_workflow_schedule(
         remove_schedule_job(schedule.id)
     except Exception:
         pass
+    emit_workflow_event(
+        session,
+        event_type="workflow.schedule_deleted",
+        message=f"Workflow schedule {schedule.name} deleted.",
+        schedule=schedule,
+        payload=_schedule_event_payload(schedule),
+        notify=False,
+    )
+    session.flush()
     executions = session.exec(select(WorkflowScheduleExecution).where(WorkflowScheduleExecution.schedule_id == schedule.id)).all()
     for execution in executions:
         session.delete(execution)
@@ -704,6 +1362,15 @@ async def run_workflow_schedule_now(
         started_at=datetime.utcnow(),
     )
     session.add(execution)
+    session.flush()
+    emit_workflow_event(
+        session,
+        event_type="workflow.schedule_triggered",
+        message=f"Workflow schedule {schedule.name} triggered manually.",
+        schedule=schedule,
+        payload=_schedule_event_payload(schedule, {"execution_id": execution.id, "trigger_type": "manual"}),
+        notify=False,
+    )
     session.commit()
     session.refresh(execution)
     try:
@@ -783,6 +1450,14 @@ async def create_workflow_definition(
         change_summary="Initial workflow revision",
         created_by=getattr(user, "id", None),
         version=1,
+    )
+    emit_workflow_event(
+        session,
+        event_type="workflow.definition_created",
+        message=f"Workflow definition {definition.name} was created.",
+        definition_id=definition.id,
+        payload={"definition_name": definition.name, "step_count": len(steps)},
+        notify=False,
     )
     session.commit()
     session.refresh(definition)
@@ -884,6 +1559,47 @@ def get_definition_revision(
     return _revision_to_dict(revision)
 
 
+@router.get("/definitions/{definition_id}/revisions/{version}/rollback-preview")
+def preview_definition_revision_rollback(
+    definition_id: str,
+    version: int,
+    project_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+):
+    definition = _get_definition_or_404(definition_id, project_id, session)
+    revision = session.exec(
+        select(WorkflowDefinitionRevision)
+        .where(WorkflowDefinitionRevision.definition_id == definition.id)
+        .where(WorkflowDefinitionRevision.version == version)
+    ).first()
+    if not revision:
+        raise HTTPException(status_code=404, detail="Workflow revision not found")
+    diff = workflow_revision_diff(definition.steps, revision.steps)
+    emit_workflow_event(
+        session,
+        event_type="workflow.definition_rollback_previewed",
+        message=f"Workflow rollback preview generated for {definition.name} v{version}.",
+        definition_id=definition.id,
+        payload={
+            "current_version": definition.version,
+            "target_version": revision.version,
+            "target_revision_id": revision.id,
+            "summary": diff["summary"],
+        },
+        notify=False,
+    )
+    session.commit()
+    return {
+        "definition_id": definition.id,
+        "current_version": definition.version,
+        "target_version": revision.version,
+        "target_revision_id": revision.id,
+        "diff": diff,
+        "current_steps": definition.steps,
+        "target_steps": revision.steps,
+    }
+
+
 @router.post("/definitions/{definition_id}/revisions/{version}/rollback")
 async def rollback_definition_revision(
     definition_id: str,
@@ -902,10 +1618,26 @@ async def rollback_definition_revision(
     ).first()
     if not revision:
         raise HTTPException(status_code=404, detail="Workflow revision not found")
+    source_version = definition.version
+    diff = workflow_revision_diff(definition.steps, revision.steps)
     restored = restore_workflow_revision(session, definition, revision, created_by=getattr(user, "id", None))
     if request.change_summary:
         restored.change_summary = request.change_summary
         session.add(restored)
+    emit_workflow_event(
+        session,
+        event_type="workflow.definition_rolled_back",
+        message=f"Workflow {definition.name} rolled back to version {version}.",
+        definition_id=definition.id,
+        payload={
+            "source_version": source_version,
+            "target_version": revision.version,
+            "target_revision_id": revision.id,
+            "restored_revision_id": restored.id,
+            "diff_summary": diff["summary"],
+        },
+        notify=False,
+    )
     session.commit()
     session.refresh(restored)
     return {"definition": _definition_to_dict(definition), "revision": _revision_to_dict(restored)}
@@ -1017,6 +1749,38 @@ async def start_workflow_run(
         create_workflow_run_steps(session, definition, run, start_step_key=request.start_step_key, steps_override=revision.steps)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    emit_workflow_event(
+        session,
+        event_type="workflow.run_created",
+        message=f"Workflow run {run.id} was created.",
+        run=run,
+        payload={
+            "definition_id": definition.id,
+            "definition_name": definition.name,
+            "revision_id": revision.id,
+            "definition_version": revision.version,
+            "trigger_type": run.trigger_type,
+            "start_step_key": request.start_step_key,
+        },
+        notify=False,
+    )
+    if request.start_step_key:
+        emit_workflow_event(
+            session,
+            event_type="workflow.run_started_from_step",
+            message=f"Workflow run {run.id} was started from step {request.start_step_key}.",
+            run=run,
+            payload={
+                "definition_id": definition.id,
+                "definition_name": definition.name,
+                "revision_id": revision.id,
+                "definition_version": revision.version,
+                "trigger_type": run.trigger_type,
+                "start_step_key": request.start_step_key,
+            },
+            notify=False,
+        )
+    session.commit()
     await _launch_run_durably(run, background_tasks, session)
     return {"run_id": run.id, "status": run.status, "definition_id": definition.id}
 
@@ -1045,6 +1809,56 @@ def get_workflow_run(run_id: str, session: Session = Depends(get_session)):
     return _run_to_dict(run, session)
 
 
+@router.get("/runs/{run_id}/diagnostics")
+async def get_workflow_run_diagnostics(run_id: str, session: Session = Depends(get_session)):
+    run = session.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+
+    payload: dict[str, Any] = {
+        "run_id": run.id,
+        "temporal_workflow_id": run.temporal_workflow_id,
+        "temporal_run_id": run.temporal_run_id,
+        "temporal_ui_url": settings.temporal_ui_url,
+        "temporal_available": False,
+        "temporal_error": None,
+        "workflow_status": None,
+        "activities": [],
+        "summary": {
+            "total_activities": 0,
+            "failed_activities": 0,
+            "retry_count": 0,
+            "last_failure": None,
+        },
+    }
+    if not run.temporal_workflow_id:
+        payload["temporal_error"] = "No Temporal workflow id recorded for this run."
+        return payload
+
+    try:
+        temporal = await get_custom_workflow_temporal_diagnostics(run.temporal_workflow_id, run.temporal_run_id)
+    except TemporalUnavailableError as exc:
+        payload["temporal_error"] = str(exc)
+        return payload
+    except Exception as exc:
+        payload["temporal_error"] = f"Temporal diagnostics unavailable: {exc}"
+        return payload
+
+    return {**payload, **temporal}
+
+
+@router.get("/runs/{run_id}/debug")
+async def get_workflow_run_debug(
+    run_id: str,
+    include_temporal: bool = Query(default=True),
+    session: Session = Depends(get_session),
+):
+    run = session.get(WorkflowRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    return await _workflow_debug_payload(run, session, include_temporal=include_temporal)
+
+
 @router.get("/runs/{run_id}/steps")
 def list_workflow_run_steps(run_id: str, session: Session = Depends(get_session)):
     if not session.get(WorkflowRun, run_id):
@@ -1067,6 +1881,22 @@ async def retry_workflow_run_step(run_id: str, step_id: int, background_tasks: B
         reset_workflow_run_for_step_retry(session, run, step)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    emit_workflow_event(
+        session,
+        event_type="workflow.step_retry_queued",
+        message=f"Workflow step {step.step_key} was queued for retry.",
+        severity="warning",
+        run=run,
+        step_id=step.id,
+        payload={
+            "step_key": step.step_key,
+            "attempt_count": step.attempt_count,
+            "max_attempts": step.max_attempts,
+            "recovery_action": step.recovery_action,
+        },
+        notify=False,
+    )
+    session.commit()
     await _launch_run_durably(run, background_tasks, session)
     return {"run_id": run.id, "step_id": step.id, "status": "queued"}
 
@@ -1091,6 +1921,15 @@ async def pause_workflow_run(run_id: str, session: Session = Depends(get_session
         step.status = "paused"
         step.updated_at = datetime.utcnow()
         session.add(step)
+    emit_workflow_event(
+        session,
+        event_type="workflow.paused",
+        message=f"Workflow run {run.id} was paused.",
+        severity="warning",
+        run=run,
+        payload={"reason": "manual_pause"},
+        notify=False,
+    )
     session.commit()
     if run.temporal_workflow_id:
         try:
@@ -1107,6 +1946,7 @@ async def resume_workflow_run(run_id: str, background_tasks: BackgroundTasks, se
         raise HTTPException(status_code=404, detail="Workflow run not found")
     if run.status in TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail="Cannot resume a terminal workflow run")
+    previous_status = run.status
     if run.status == "awaiting_input":
         steps = session.exec(select(WorkflowRunStep).where(WorkflowRunStep.run_id == run_id)).all()
         for step in steps:
@@ -1132,6 +1972,14 @@ async def resume_workflow_run(run_id: str, background_tasks: BackgroundTasks, se
     run.pause_reason = None
     run.updated_at = datetime.utcnow()
     session.add(run)
+    emit_workflow_event(
+        session,
+        event_type="workflow.resumed",
+        message=f"Workflow run {run.id} was resumed.",
+        run=run,
+        payload={"previous_status": previous_status},
+        notify=False,
+    )
     session.commit()
     if run.temporal_workflow_id:
         try:

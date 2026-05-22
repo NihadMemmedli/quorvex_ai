@@ -9,10 +9,17 @@ Provides access to:
 """
 
 import logging
+from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
+from sqlmodel import Session, select
+
+from orchestrator.api.db import get_session
+from orchestrator.api.middleware.auth import get_current_user_optional
+from orchestrator.api.models_db import ChatConversation, ChatMessage
 
 logger = logging.getLogger(__name__)
 
@@ -95,13 +102,51 @@ class AgentMemoryCreateRequest(BaseModel):
     content: str
     project_id: str | None = None
     user_id: str | None = None
+    memory_type: str | None = None
+    scope: str | None = None
     summary: str | None = None
     tags: list[str] = Field(default_factory=list)
     confidence: float = 0.7
+    importance: float = 0.5
     source_type: str | None = "manual"
     source_id: str | None = None
     agent_type: str | None = None
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    supersedes_id: str | None = None
+    review_required: bool = False
+    last_verified_at: datetime | None = None
     extra_data: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentMemoryUpdateRequest(BaseModel):
+    kind: str | None = None
+    content: str | None = None
+    memory_type: str | None = None
+    scope: str | None = None
+    summary: str | None = None
+    tags: list[str] | None = None
+    confidence: float | None = None
+    importance: float | None = None
+    source_type: str | None = None
+    source_id: str | None = None
+    agent_type: str | None = None
+    status: str | None = None
+    valid_from: datetime | None = None
+    valid_until: datetime | None = None
+    supersedes_id: str | None = None
+    review_required: bool | None = None
+    last_verified_at: datetime | None = None
+    extra_data: dict[str, Any] | None = None
+
+
+class AgentMemoryConsolidateRequest(BaseModel):
+    text: str
+    project_id: str | None = None
+    user_id: str | None = None
+    source_type: str | None = "manual_consolidation"
+    source_id: str | None = None
+    agent_type: str | None = None
 
 
 class AgentMemoryResponse(BaseModel):
@@ -109,24 +154,91 @@ class AgentMemoryResponse(BaseModel):
     project_id: str | None = None
     user_id: str | None = None
     kind: str
+    memory_type: str
+    scope: str
     content: str
     summary: str | None = None
     tags: list[str] = Field(default_factory=list)
     confidence: float
+    importance: float
     source_type: str | None = None
     source_id: str | None = None
     agent_type: str | None = None
     status: str
+    valid_from: str | None = None
+    valid_until: str | None = None
+    supersedes_id: str | None = None
+    review_required: bool = False
+    last_verified_at: str | None = None
     created_at: str
     updated_at: str
     last_used_at: str | None = None
     use_count: int
 
 
+class SessionRecallMessage(BaseModel):
+    id: int
+    role: str
+    content: str
+    tool_name: str | None = None
+    created_at: str
+    anchor: bool = False
+
+
+class SessionRecallResult(BaseModel):
+    conversation_id: str
+    title: str
+    project_id: str | None = None
+    updated_at: str
+    match_message_id: int | None = None
+    snippet: str | None = None
+    messages: list[SessionRecallMessage] = Field(default_factory=list)
+    bookend_start: list[SessionRecallMessage] = Field(default_factory=list)
+    bookend_end: list[SessionRecallMessage] = Field(default_factory=list)
+    messages_before: int = 0
+    messages_after: int = 0
+
+
+class BrowserMemoryBundleResponse(BaseModel):
+    project_id: str
+    states: list[dict[str, Any]] = Field(default_factory=list)
+    elements: list[dict[str, Any]] = Field(default_factory=list)
+    frontier: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class BrowserFrontierClaimRequest(BaseModel):
+    project_id: str = "default"
+    worker_id: str
+    query: str = ""
+    limit: int = Field(default=5, ge=1, le=50)
+    lease_seconds: int = Field(default=900, ge=30, le=86_400)
+    risk_max: str = Field(default="medium")
+    url_scope: str | None = None
+
+
+class BrowserFrontierFailRequest(BaseModel):
+    project_id: str = "default"
+    error: str
+    retry_after_seconds: int = Field(default=300, ge=30, le=86_400)
+    max_attempts: int = Field(default=3, ge=1, le=20)
+
+
+class BrowserFrontierCompleteRequest(BaseModel):
+    project_id: str = "default"
+    transition_id: str | None = None
+    outcome: str | None = None
+
+
+class BrowserFrontierSkipRequest(BaseModel):
+    project_id: str = "default"
+    reason: str
+
+
 # ========= Endpoints =========
 
 from orchestrator.memory import get_memory_manager
 from orchestrator.memory.agent_memory import get_agent_memory_service
+from orchestrator.memory.browser_memory import get_exploration_memory_service
 from orchestrator.memory.config import get_config
 
 # ========= Endpoints =========
@@ -143,19 +255,58 @@ def _agent_memory_response(memory) -> AgentMemoryResponse:
         project_id=memory.project_id,
         user_id=memory.user_id,
         kind=memory.kind,
+        memory_type=memory.memory_type or "semantic",
+        scope=memory.scope or "project",
         content=memory.content,
         summary=memory.summary,
         tags=memory.tags or [],
         confidence=memory.confidence,
+        importance=memory.importance,
         source_type=memory.source_type,
         source_id=memory.source_id,
         agent_type=memory.agent_type,
         status=memory.status,
+        valid_from=memory.valid_from.isoformat() if memory.valid_from else None,
+        valid_until=memory.valid_until.isoformat() if memory.valid_until else None,
+        supersedes_id=memory.supersedes_id,
+        review_required=memory.review_required,
+        last_verified_at=memory.last_verified_at.isoformat() if memory.last_verified_at else None,
         created_at=memory.created_at.isoformat(),
         updated_at=memory.updated_at.isoformat(),
         last_used_at=memory.last_used_at.isoformat() if memory.last_used_at else None,
         use_count=memory.use_count,
     )
+
+
+def _snippet(content: str, query: str, radius: int = 80) -> str:
+    if not content:
+        return ""
+    idx = content.lower().find(query.lower())
+    if idx < 0:
+        return content[: radius * 2].strip()
+    start = max(0, idx - radius)
+    end = min(len(content), idx + len(query) + radius)
+    return f"{'...' if start else ''}{content[start:end].strip()}{'...' if end < len(content) else ''}"
+
+
+def _shape_recall_message(message: ChatMessage, *, anchor_id: int | None = None) -> SessionRecallMessage:
+    return SessionRecallMessage(
+        id=int(message.id or 0),
+        role=message.role,
+        content=message.content or "",
+        tool_name=message.tool_name,
+        created_at=message.created_at.isoformat(),
+        anchor=bool(anchor_id is not None and message.id == anchor_id),
+    )
+
+
+def _conversation_guard(session: Session, conversation_id: str, user) -> ChatConversation:
+    conversation = session.get(ChatConversation, conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if user and conversation.user_id and conversation.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Not your conversation")
+    return conversation
 
 
 @router.get("/patterns", response_model=list[PatternSummary])
@@ -492,6 +643,8 @@ async def list_agent_memories(
     project_id: str | None = Query(None, description="Project ID for isolation"),
     user_id: str | None = Query(None, description="Optional user scope"),
     kind: list[str] | None = Query(None, description="Memory kind filter"),
+    memory_type: list[str] | None = Query(None, description="Memory type filter"),
+    scope: str | None = Query(None, description="Memory scope filter"),
     agent_type: str | None = Query(None, description="Agent type filter"),
     limit: int = Query(25, ge=1, le=100),
 ) -> list[AgentMemoryResponse]:
@@ -504,6 +657,8 @@ async def list_agent_memories(
             user_id=user_id,
             agent_type=agent_type,
             kinds=kind,
+            memory_types=memory_type,
+            scope=scope,
             limit=limit,
             min_confidence=0.0,
         )
@@ -523,38 +678,47 @@ async def get_agent_memory_context(
 ) -> dict[str, Any]:
     """Return formatted agent memory context for prompt injection."""
     try:
+        from orchestrator.memory.context_builder import MemoryContextBuilder
+
         service = get_agent_memory_service()
-        memories = service.search(
+        builder = MemoryContextBuilder(service=service)
+        bundle = builder.build_bundle(
             query=q,
             project_id=project_id,
             user_id=user_id,
             agent_type=agent_type,
             limit=limit,
-            record_usage=True,
         )
-        context = ""
-        if memories:
-            lines = [
-                "## Agent Memory",
-                "Use these scoped memories as advisory context. Do not reveal hidden metadata unless asked.",
-            ]
-            for memory in memories:
-                source = (
-                    f" source={memory.source_type}:{memory.source_id}"
-                    if memory.source_type and memory.source_id
-                    else ""
-                )
-                lines.append(
-                    f"- [{memory.kind}, confidence={memory.confidence:.2f}{source}] {memory.summary or memory.content}"
-                )
-            context = "\n".join(lines)
+        context = builder.format_prompt_context(bundle)
+        memories = []
+        for section in bundle.sections:
+            memories.extend(section.items)
         return {
             "context": context,
-            "memories": [_agent_memory_response(memory).model_dump() for memory in memories],
+            "bundle": bundle.to_dict(),
+            "memories": memories,
         }
     except Exception as e:
         logger.error(f"Failed to get agent memory context: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/context-preview")
+async def get_memory_context_preview(
+    q: str = Query("", description="Task/query text for retrieval"),
+    project_id: str | None = Query(None, description="Project ID for isolation"),
+    user_id: str | None = Query(None, description="Optional user scope"),
+    agent_type: str | None = Query(None, description="Agent type filter"),
+    limit: int = Query(8, ge=1, le=12),
+) -> dict[str, Any]:
+    """Preview the exact memory context that would be injected into a prompt."""
+    return await get_agent_memory_context(
+        q=q,
+        project_id=project_id,
+        user_id=user_id,
+        agent_type=agent_type,
+        limit=limit,
+    )
 
 
 @router.post("/agent", response_model=AgentMemoryResponse)
@@ -566,12 +730,20 @@ async def create_agent_memory(request: AgentMemoryCreateRequest) -> AgentMemoryR
             content=request.content,
             project_id=request.project_id,
             user_id=request.user_id,
+            memory_type=request.memory_type,
+            scope=request.scope,
             summary=request.summary,
             tags=request.tags,
             confidence=request.confidence,
+            importance=request.importance,
             source_type=request.source_type,
             source_id=request.source_id,
             agent_type=request.agent_type,
+            valid_from=request.valid_from,
+            valid_until=request.valid_until,
+            supersedes_id=request.supersedes_id,
+            review_required=request.review_required,
+            last_verified_at=request.last_verified_at,
             extra_data=request.extra_data,
         )
         if memory is None:
@@ -583,6 +755,82 @@ async def create_agent_memory(request: AgentMemoryCreateRequest) -> AgentMemoryR
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to create agent memory: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.patch("/agent/{memory_id}", response_model=AgentMemoryResponse)
+async def update_agent_memory(
+    memory_id: str,
+    request: AgentMemoryUpdateRequest,
+    project_id: str | None = Query(None, description="Project ID guard"),
+) -> AgentMemoryResponse:
+    """Update curated agent memory metadata or content."""
+    try:
+        updates = request.model_dump(exclude_unset=True)
+        memory = get_agent_memory_service().update_memory(memory_id, project_id=project_id, **updates)
+        if not memory:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        return _agent_memory_response(memory)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to update agent memory: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/agent/consolidate", response_model=list[AgentMemoryResponse])
+async def consolidate_agent_memory(request: AgentMemoryConsolidateRequest) -> list[AgentMemoryResponse]:
+    """Extract and store high-signal memories from a larger text block."""
+    try:
+        memories = get_agent_memory_service().capture_candidates(
+            request.text,
+            project_id=request.project_id,
+            user_id=request.user_id,
+            source_type=request.source_type,
+            source_id=request.source_id,
+            agent_type=request.agent_type,
+        )
+        return [_agent_memory_response(memory) for memory in memories]
+    except Exception as e:
+        logger.error(f"Failed to consolidate agent memory: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.patch("/agent/{memory_id}/approve", response_model=AgentMemoryResponse)
+async def approve_agent_memory(
+    memory_id: str,
+    project_id: str | None = Query(None, description="Project ID guard"),
+) -> AgentMemoryResponse:
+    """Approve a review-required memory for future prompt injection."""
+    try:
+        memory = get_agent_memory_service().approve(memory_id, project_id=project_id)
+        if not memory:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        return _agent_memory_response(memory)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to approve agent memory: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.patch("/agent/{memory_id}/verify", response_model=AgentMemoryResponse)
+async def verify_agent_memory(
+    memory_id: str,
+    project_id: str | None = Query(None, description="Project ID guard"),
+) -> AgentMemoryResponse:
+    """Mark a memory as verified without changing its content."""
+    try:
+        memory = get_agent_memory_service().verify(memory_id, project_id=project_id)
+        if not memory:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        return _agent_memory_response(memory)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to verify agent memory: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -622,6 +870,153 @@ async def delete_agent_memory(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.get("/session-recall/recent", response_model=list[SessionRecallResult])
+async def browse_session_recall(
+    project_id: str | None = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+    session: Session = Depends(get_session),
+    user=Depends(get_current_user_optional),
+) -> list[SessionRecallResult]:
+    """Browse recent assistant conversations as on-demand recall."""
+    statement = select(ChatConversation).order_by(ChatConversation.updated_at.desc()).limit(limit)
+    if project_id:
+        statement = statement.where(ChatConversation.project_id == project_id)
+    if user:
+        statement = statement.where(or_(ChatConversation.user_id == user.id, ChatConversation.user_id.is_(None)))
+    conversations = session.exec(statement).all()
+    return [
+        SessionRecallResult(
+            conversation_id=conversation.id,
+            title=conversation.title,
+            project_id=conversation.project_id,
+            updated_at=conversation.updated_at.isoformat(),
+            snippet=conversation.summary,
+        )
+        for conversation in conversations
+    ]
+
+
+@router.get("/session-recall/search", response_model=list[SessionRecallResult])
+async def search_session_recall(
+    q: str = Query(..., min_length=2),
+    project_id: str | None = Query(None),
+    limit: int = Query(5, ge=1, le=20),
+    session: Session = Depends(get_session),
+    user=Depends(get_current_user_optional),
+) -> list[SessionRecallResult]:
+    """Search saved chat messages and return one anchored hit per conversation."""
+    conversation_filter = select(ChatConversation.id)
+    if project_id:
+        conversation_filter = conversation_filter.where(ChatConversation.project_id == project_id)
+    if user:
+        conversation_filter = conversation_filter.where(
+            or_(ChatConversation.user_id == user.id, ChatConversation.user_id.is_(None))
+        )
+    allowed_ids = session.exec(conversation_filter).all()
+    if not allowed_ids:
+        return []
+
+    matches = session.exec(
+        select(ChatMessage)
+        .where(ChatMessage.conversation_id.in_(allowed_ids))
+        .where(ChatMessage.content.ilike(f"%{q}%"))
+        .where(ChatMessage.role.in_(["user", "assistant"]))
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit * 5)
+    ).all()
+
+    seen: set[str] = set()
+    results: list[SessionRecallResult] = []
+    for message in matches:
+        if message.conversation_id in seen:
+            continue
+        conversation = session.get(ChatConversation, message.conversation_id)
+        if not conversation:
+            continue
+        seen.add(message.conversation_id)
+        results.append(
+            SessionRecallResult(
+                conversation_id=conversation.id,
+                title=conversation.title,
+                project_id=conversation.project_id,
+                updated_at=conversation.updated_at.isoformat(),
+                match_message_id=message.id,
+                snippet=_snippet(message.content or "", q),
+                messages=[_shape_recall_message(message, anchor_id=message.id)],
+            )
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+@router.get("/session-recall/window", response_model=SessionRecallResult)
+async def get_session_recall_window(
+    conversation_id: str = Query(...),
+    around_message_id: int = Query(...),
+    window: int = Query(5, ge=1, le=20),
+    session: Session = Depends(get_session),
+    user=Depends(get_current_user_optional),
+) -> SessionRecallResult:
+    """Return an anchored message window plus start/end bookends for a conversation."""
+    conversation = _conversation_guard(session, conversation_id, user)
+    anchor = session.get(ChatMessage, around_message_id)
+    if not anchor or anchor.conversation_id != conversation_id:
+        raise HTTPException(status_code=404, detail="Message not found in conversation")
+
+    before_rows = session.exec(
+        select(ChatMessage)
+        .where(ChatMessage.conversation_id == conversation_id)
+        .where(ChatMessage.id <= around_message_id)
+        .order_by(ChatMessage.id.desc())
+        .limit(window + 1)
+    ).all()
+    after_rows = session.exec(
+        select(ChatMessage)
+        .where(ChatMessage.conversation_id == conversation_id)
+        .where(ChatMessage.id > around_message_id)
+        .order_by(ChatMessage.id.asc())
+        .limit(window)
+    ).all()
+    window_rows = list(reversed(before_rows)) + list(after_rows)
+    messages_before = max(0, len(before_rows) - 1)
+    messages_after = len(after_rows)
+
+    first_window_id = window_rows[0].id if window_rows else around_message_id
+    last_window_id = window_rows[-1].id if window_rows else around_message_id
+    bookend_start = session.exec(
+        select(ChatMessage)
+        .where(ChatMessage.conversation_id == conversation_id)
+        .where(ChatMessage.id < first_window_id)
+        .where(ChatMessage.role.in_(["user", "assistant"]))
+        .where(ChatMessage.content != "")
+        .order_by(ChatMessage.id.asc())
+        .limit(3)
+    ).all()
+    bookend_end_desc = session.exec(
+        select(ChatMessage)
+        .where(ChatMessage.conversation_id == conversation_id)
+        .where(ChatMessage.id > last_window_id)
+        .where(ChatMessage.role.in_(["user", "assistant"]))
+        .where(ChatMessage.content != "")
+        .order_by(ChatMessage.id.desc())
+        .limit(3)
+    ).all()
+
+    return SessionRecallResult(
+        conversation_id=conversation.id,
+        title=conversation.title,
+        project_id=conversation.project_id,
+        updated_at=conversation.updated_at.isoformat(),
+        match_message_id=around_message_id,
+        messages=[_shape_recall_message(message, anchor_id=around_message_id) for message in window_rows],
+        bookend_start=[_shape_recall_message(message) for message in bookend_start],
+        bookend_end=[_shape_recall_message(message) for message in reversed(bookend_end_desc)],
+        messages_before=messages_before,
+        messages_after=messages_after,
+    )
+
+
 @router.get("/health")
 async def get_memory_health(project_id: str | None = Query(None)) -> dict[str, Any]:
     """Report memory system health and embedding mode."""
@@ -641,6 +1036,120 @@ async def get_memory_health(project_id: str | None = Query(None)) -> dict[str, A
         }
     except Exception as e:
         logger.error(f"Failed to get memory health: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/browser", response_model=BrowserMemoryBundleResponse)
+async def get_browser_memory(
+    project_id: str = Query(default="default"),
+    query: str = Query(default=""),
+    limit: int = Query(default=10, ge=1, le=50),
+) -> BrowserMemoryBundleResponse:
+    """Inspect durable browser exploration memory for a project."""
+    try:
+        bundle = get_exploration_memory_service(project_id=project_id).get_memory_bundle(query=query, limit=limit)
+        return BrowserMemoryBundleResponse(project_id=project_id, **bundle)
+    except Exception as e:
+        logger.error(f"Failed to get browser memory: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/browser/frontier")
+async def get_browser_frontier(
+    project_id: str = Query(default="default"),
+    query: str = Query(default=""),
+    limit: int = Query(default=10, ge=1, le=50),
+    risk_max: str = Query(default="medium"),
+    url_scope: str | None = Query(default=None),
+    include_leased: bool = Query(default=False),
+) -> dict[str, Any]:
+    """Inspect ranked browser frontier work for 24/7 exploration agents."""
+    try:
+        frontier = get_exploration_memory_service(project_id=project_id).get_frontier_work(
+            query=query,
+            limit=limit,
+            risk_max=risk_max,
+            url_scope=url_scope,
+            include_leased=include_leased,
+        )
+        return {"project_id": project_id, "frontier": frontier}
+    except Exception as e:
+        logger.error(f"Failed to get browser frontier: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/browser/frontier/claim")
+async def claim_browser_frontier(request: BrowserFrontierClaimRequest) -> dict[str, Any]:
+    """Lease ranked frontier items for an exploration worker."""
+    try:
+        claimed = get_exploration_memory_service(project_id=request.project_id).claim_frontier_items(
+            worker_id=request.worker_id,
+            limit=request.limit,
+            lease_seconds=request.lease_seconds,
+            query=request.query,
+            risk_max=request.risk_max,
+            url_scope=request.url_scope,
+        )
+        return {"project_id": request.project_id, "worker_id": request.worker_id, "frontier": claimed}
+    except Exception as e:
+        logger.error(f"Failed to claim browser frontier: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.patch("/browser/frontier/{frontier_id}/complete")
+async def complete_browser_frontier(frontier_id: str, request: BrowserFrontierCompleteRequest) -> dict[str, Any]:
+    """Mark a browser frontier item completed."""
+    try:
+        item = get_exploration_memory_service(project_id=request.project_id).complete_frontier_item(
+            frontier_id,
+            transition_id=request.transition_id,
+            outcome=request.outcome,
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail="Frontier item not found")
+        return {"project_id": request.project_id, "frontier": item}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to complete browser frontier item: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.patch("/browser/frontier/{frontier_id}/fail")
+async def fail_browser_frontier(frontier_id: str, request: BrowserFrontierFailRequest) -> dict[str, Any]:
+    """Mark a browser frontier attempt failed and optionally retry it later."""
+    try:
+        item = get_exploration_memory_service(project_id=request.project_id).fail_frontier_item(
+            frontier_id,
+            error=request.error,
+            retry_after_seconds=request.retry_after_seconds,
+            max_attempts=request.max_attempts,
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail="Frontier item not found")
+        return {"project_id": request.project_id, "frontier": item}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fail browser frontier item: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.patch("/browser/frontier/{frontier_id}/skip")
+async def skip_browser_frontier(frontier_id: str, request: BrowserFrontierSkipRequest) -> dict[str, Any]:
+    """Mark a browser frontier item skipped because it is stale, risky, or irrelevant."""
+    try:
+        item = get_exploration_memory_service(project_id=request.project_id).skip_frontier_item(
+            frontier_id,
+            reason=request.reason,
+        )
+        if not item:
+            raise HTTPException(status_code=404, detail="Frontier item not found")
+        return {"project_id": request.project_id, "frontier": item}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to skip browser frontier item: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

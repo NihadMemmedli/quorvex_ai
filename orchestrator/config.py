@@ -102,6 +102,7 @@ class AppSettings(BaseSettings):
     temporal_namespace: str = "default"
     temporal_task_queue: str = "quorvex-autonomous-missions"
     temporal_workflow_task_queue: str = "quorvex-custom-workflows"
+    temporal_ui_url: str | None = None
 
     # --- MinIO Storage ---
     minio_endpoint: str | None = None

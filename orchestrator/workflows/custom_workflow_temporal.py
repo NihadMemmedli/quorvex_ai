@@ -92,6 +92,11 @@ class CustomWorkflowRun:
             step_result = await workflow.execute_activity(
                 "execute_custom_workflow_step",
                 {"run_id": run_id, "step_id": prepared.get("step_id")},
+                activity_id=(
+                    f"custom-workflow-step-{run_id}-"
+                    f"{prepared.get('step_order')}-{prepared.get('step_key')}-"
+                    f"{prepared.get('step_id')}-attempt-{int(prepared.get('attempt_count') or 0) + 1}"
+                ),
                 start_to_close_timeout=timedelta(hours=12),
                 retry_policy=STEP_ACTIVITY_RETRY_POLICY,
             )

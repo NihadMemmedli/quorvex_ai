@@ -7,19 +7,22 @@ import logging
 import re
 import tempfile
 import uuid
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, col, select
 
 from .db import engine, get_session
 from .middleware.auth import get_current_user, get_current_user_optional
-from .middleware.permissions import EDIT_ROLES, check_project_access
+from .middleware.permissions import EDIT_ROLES, VIEW_ROLES, check_project_access
 from .models_auth import User
 from .models_db import (
+    AutonomousAgentEvent,
     AutonomousAgentWorkItem,
     AutonomousApproval,
     AutonomousFinding,
@@ -29,6 +32,12 @@ from .models_db import (
     Project,
     Requirement,
     RtmEntry,
+)
+from orchestrator.services.autonomous_events import (
+    emit_mission_event,
+    emit_work_item_status_event,
+    event_to_response,
+    list_events,
 )
 
 logger = logging.getLogger(__name__)
@@ -284,6 +293,10 @@ def _work_item_to_response(item: AutonomousAgentWorkItem) -> dict[str, Any]:
     }
 
 
+def _event_to_response(event: AutonomousAgentEvent) -> dict[str, Any]:
+    return event_to_response(event)
+
+
 def _with_session(session: Session | None):
     if session is not None:
         return session, False
@@ -428,6 +441,7 @@ async def create_mission(
     session.add(mission)
     session.commit()
     session.refresh(mission)
+    emit_mission_event(mission, "Mission created.", event_type="lifecycle", payload={"status": mission.status})
     return _mission_to_response(mission, session)
 
 
@@ -508,6 +522,7 @@ async def update_mission(
     session.add(mission)
     session.commit()
     session.refresh(mission)
+    emit_mission_event(mission, "Mission updated.", event_type="lifecycle", payload={"status": mission.status})
     return _mission_to_response(mission, session)
 
 
@@ -571,6 +586,7 @@ async def start_mission(
     session.add(mission)
     session.commit()
     session.refresh(mission)
+    emit_mission_event(mission, "Mission started.", event_type="lifecycle", payload={"workflow_id": mission.latest_workflow_id})
     return _mission_to_response(mission, session)
 
 
@@ -594,6 +610,7 @@ async def pause_mission(
     session.add(mission)
     session.commit()
     session.refresh(mission)
+    emit_mission_event(mission, "Mission paused.", event_type="pause", payload={"paused_reason": mission.paused_reason})
     return _mission_to_response(mission, session)
 
 
@@ -619,6 +636,7 @@ async def resume_mission(
         session.add(mission)
         session.commit()
         session.refresh(mission)
+        emit_mission_event(mission, "Mission resumed.", event_type="resume", payload={"workflow_id": mission.latest_workflow_id})
         return _mission_to_response(mission, session)
     return await start_mission(project_id, mission_id, session, current_user)
 
@@ -643,6 +661,7 @@ async def cancel_mission(
     session.add(mission)
     session.commit()
     session.refresh(mission)
+    emit_mission_event(mission, "Mission cancelled.", event_type="lifecycle", payload={"status": mission.status})
     return _mission_to_response(mission, session)
 
 
@@ -702,6 +721,41 @@ def list_mission_work_items(
     return [_work_item_to_response(item) for item in items]
 
 
+@router.get("/{project_id}/missions/{mission_id}/events")
+async def list_mission_events(
+    project_id: str,
+    mission_id: str,
+    after_sequence: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=500),
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    _get_project_mission(project_id, mission_id, session)
+    await _require_project_view(project_id, current_user, session)
+    events = list_events(
+        project_id=project_id,
+        mission_id=mission_id,
+        after_sequence=after_sequence,
+        limit=limit,
+        session=session,
+    )
+    return [_event_to_response(event) for event in events]
+
+
+@router.get("/{project_id}/missions/{mission_id}/events/stream")
+async def stream_mission_events(
+    project_id: str,
+    mission_id: str,
+    after_sequence: int = Query(default=0, ge=0),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    with Session(engine) as session:
+        _get_project_mission(project_id, mission_id, session)
+        await _require_project_view(project_id, current_user, session)
+
+    return _event_stream_response(project_id=project_id, mission_id=mission_id, after_sequence=after_sequence)
+
+
 @router.get("/{project_id}/work-items")
 def list_project_work_items(
     project_id: str,
@@ -722,6 +776,48 @@ def list_project_work_items(
         statement.order_by(col(AutonomousAgentWorkItem.updated_at).desc()).offset(offset).limit(limit)
     ).all()
     return [_work_item_to_response(item) for item in items]
+
+
+@router.get("/{project_id}/work-items/{work_item_id}/events")
+async def list_work_item_events(
+    project_id: str,
+    work_item_id: str,
+    after_sequence: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=500),
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    item = _get_project_work_item(project_id, work_item_id, session)
+    await _require_project_view(project_id, current_user, session)
+    events = list_events(
+        project_id=project_id,
+        mission_id=item.mission_id,
+        work_item_id=item.id,
+        after_sequence=after_sequence,
+        limit=limit,
+        session=session,
+    )
+    return [_event_to_response(event) for event in events]
+
+
+@router.get("/{project_id}/work-items/{work_item_id}/events/stream")
+async def stream_work_item_events(
+    project_id: str,
+    work_item_id: str,
+    after_sequence: int = Query(default=0, ge=0),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    with Session(engine) as session:
+        item = _get_project_work_item(project_id, work_item_id, session)
+        mission_id = item.mission_id
+        await _require_project_view(project_id, current_user, session)
+
+    return _event_stream_response(
+        project_id=project_id,
+        mission_id=mission_id,
+        work_item_id=work_item_id,
+        after_sequence=after_sequence,
+    )
 
 
 @router.post("/{project_id}/work-items/{work_item_id}/retry")
@@ -745,6 +841,7 @@ async def retry_work_item(
     session.add(item)
     session.commit()
     session.refresh(item)
+    emit_work_item_status_event(item, "Work item retry requested.", event_type="lifecycle")
     return _work_item_to_response(item)
 
 
@@ -768,6 +865,7 @@ async def cancel_work_item(
     session.add(item)
     session.commit()
     session.refresh(item)
+    emit_work_item_status_event(item, "Work item cancelled by user.", event_type="lifecycle")
     return _work_item_to_response(item)
 
 
@@ -950,6 +1048,78 @@ async def _require_project_edit(project_id: str, current_user: User | None, sess
     await check_project_access(project_id, current_user, EDIT_ROLES, session)
 
 
+async def _require_project_view(project_id: str, current_user: User | None, session: Session) -> None:
+    await check_project_access(project_id, current_user, VIEW_ROLES, session)
+
+
+def _event_stream_response(
+    *,
+    project_id: str,
+    mission_id: str,
+    work_item_id: str | None = None,
+    after_sequence: int = 0,
+) -> StreamingResponse:
+    async def generate():
+        last_sequence = after_sequence
+        heartbeat_ticks = 0
+        yield f"data: {json.dumps({'status': 'connected'})}\n\n"
+        try:
+            while True:
+                with Session(engine) as session:
+                    events = list_events(
+                        project_id=project_id,
+                        mission_id=mission_id,
+                        work_item_id=work_item_id,
+                        after_sequence=last_sequence,
+                        limit=100,
+                        session=session,
+                    )
+                    for event in events:
+                        last_sequence = max(last_sequence, event.sequence)
+                        yield f"data: {json.dumps({'event': _event_to_response(event)})}\n\n"
+
+                    terminal_status: str | None = None
+                    if work_item_id:
+                        item = session.get(AutonomousAgentWorkItem, work_item_id)
+                        if not item:
+                            yield f"data: {json.dumps({'status': 'error', 'message': 'Work item not found'})}\n\n"
+                            break
+                        if item.status in {"completed", "failed", "blocked", "cancelled"}:
+                            terminal_status = item.status
+                    else:
+                        mission = session.get(AutonomousMission, mission_id)
+                        if not mission:
+                            yield f"data: {json.dumps({'status': 'error', 'message': 'Mission not found'})}\n\n"
+                            break
+                        if mission.status in {"completed", "cancelled", "error", "paused"}:
+                            terminal_status = mission.status
+
+                    if terminal_status:
+                        yield f"data: {json.dumps({'status': 'complete', 'final_status': terminal_status, 'last_sequence': last_sequence})}\n\n"
+                        break
+
+                heartbeat_ticks += 1
+                if heartbeat_ticks >= 5:
+                    heartbeat_ticks = 0
+                    yield f"data: {json.dumps({'status': 'heartbeat', 'last_sequence': last_sequence})}\n\n"
+                await asyncio.sleep(1)
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        except Exception as exc:
+            logger.error("Autonomous event stream failed for %s: %s", mission_id, exc, exc_info=True)
+            yield f"data: {json.dumps({'status': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 def _derive_health_status(
     mission: AutonomousMission,
     *,
@@ -1073,6 +1243,8 @@ async def _cancel_mission_work_items(mission_id: str, session: Session) -> None:
         item.progress = {"phase": "cancelled", "message": "Mission cancellation stopped this assignment."}
         session.add(item)
     session.commit()
+    for item in items:
+        emit_work_item_status_event(item, "Mission cancellation stopped this assignment.", event_type="lifecycle")
 
 
 async def _pause_mission_work_items(mission_id: str, session: Session) -> None:
@@ -1090,6 +1262,8 @@ async def _pause_mission_work_items(mission_id: str, session: Session) -> None:
         item.updated_at = now
         session.add(item)
     session.commit()
+    for item in items:
+        emit_work_item_status_event(item, "Work item paused with mission.", event_type="pause")
 
 
 async def _resume_mission_work_items(mission_id: str, session: Session) -> None:
@@ -1107,6 +1281,8 @@ async def _resume_mission_work_items(mission_id: str, session: Session) -> None:
         item.updated_at = now
         session.add(item)
     session.commit()
+    for item in items:
+        emit_work_item_status_event(item, "Work item resumed with mission.", event_type="resume")
 
 
 def _decide_approval(

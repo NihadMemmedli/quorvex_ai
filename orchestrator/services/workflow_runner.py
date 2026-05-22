@@ -544,6 +544,7 @@ def prepare_next_workflow_step(run_id: str) -> dict[str, Any]:
             "step_id": next_step.id,
             "step_key": next_step.step_key,
             "step_order": next_step.step_order,
+            "attempt_count": next_step.attempt_count,
         }
 
 
@@ -591,6 +592,21 @@ def handle_workflow_step_failure(run_id: str, step_id: int | None, message: str)
             step.status = "pending"
             step.completed_at = None
             session.add(step)
+            emit_workflow_event(
+                session,
+                event_type="workflow.step_retry_queued",
+                message=f"Workflow step {step.step_key} was queued for retry.",
+                severity="warning",
+                run=run,
+                step_id=step.id,
+                payload={
+                    "step_key": step.step_key,
+                    "attempt_count": step.attempt_count,
+                    "max_attempts": step.max_attempts,
+                    "recovery_action": step.recovery_action,
+                },
+                notify=False,
+            )
             session.commit()
             return {
                 "action": "retry",
@@ -610,6 +626,20 @@ def handle_workflow_step_failure(run_id: str, step_id: int | None, message: str)
             run.context = _merge_step_output(run.context, step.step_key, step.output or {})
             session.add(step)
             session.add(run)
+            emit_workflow_event(
+                session,
+                event_type="workflow.step_skipped",
+                message=f"Workflow step {step.step_key} was skipped after failure.",
+                severity="warning",
+                run=run,
+                step_id=step.id,
+                payload={
+                    "step_key": step.step_key,
+                    "reason": message,
+                    "recovery_action": step.recovery_action,
+                },
+                notify=False,
+            )
             session.commit()
             return {"action": "continue", "status": run.status, "step_id": step.id}
         if step.recovery_action == "pause":

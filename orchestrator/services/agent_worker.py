@@ -18,11 +18,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from dataclasses import dataclass, field
 
 # Setup logging early
 logging.basicConfig(
@@ -42,6 +44,7 @@ from orchestrator.services.api_key_rotator import (
     is_rate_limit_error,
     parse_retry_after,
 )
+from orchestrator.services.autonomous_events import create_event_for_work_item
 
 # Claude CLI path
 CLAUDE_CLI_PATH = "/usr/local/lib/python3.10/dist-packages/claude_agent_sdk/_bundled/claude"
@@ -61,6 +64,231 @@ INTERACTION_TOOLS = frozenset(
         "browser_file_upload",
     }
 )
+
+
+def _short_tool_name(tool_name: str) -> str:
+    return tool_name.rsplit("__", 1)[-1] if "__" in tool_name else tool_name
+
+
+def _tool_result_text(content: object) -> str:
+    """Extract text from common Claude stream-json tool_result shapes."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        if content.get("type") == "text":
+            return str(content.get("text") or "")
+        if content.get("type") == "tool_result":
+            return _tool_result_text(content.get("content"))
+        for key in ("content", "text", "result"):
+            if key in content:
+                text = _tool_result_text(content.get(key))
+                if text:
+                    return text
+        return ""
+    if isinstance(content, list):
+        parts = [_tool_result_text(item) for item in content]
+        return "\n".join(part for part in parts if part)
+    return str(content)
+
+
+@dataclass
+class _BrowserToolCall:
+    tool_use_id: str
+    tool_name: str
+    short_name: str
+    input: dict[str, object] = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class _PendingBrowserInteraction:
+    action_type: str
+    target: str
+    from_state: object | None
+    started_at: float = field(default_factory=time.time)
+
+
+class BrowserObservationRecorder:
+    """Best-effort runtime memory capture for exploration browser tool streams."""
+
+    SNAPSHOT_URL_RE = re.compile(r"\bhttps?://[^\s\"'<>),]+")
+    SNAPSHOT_TITLE_RE = re.compile(r"(?im)^\s*(?:title|page title)\s*[:=]\s*(.+)$")
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        cwd: str | None = None,
+        service_factory=None,
+        artifact_path: Path | None = None,
+    ):
+        self.session_id = session_id
+        self.cwd = Path(cwd) if cwd else None
+        self.service_factory = service_factory or self._default_service_factory
+        self.artifact_path = artifact_path or ((self.cwd / "browser-memory-observations.jsonl") if self.cwd else None)
+        self.pending_tool_calls: dict[str, _BrowserToolCall] = {}
+        self.latest_state = None
+        self.pending_interaction: _PendingBrowserInteraction | None = None
+        self.last_url: str | None = None
+        self.project_id: str | None = None
+        self.stats = {"snapshots": 0, "transitions": 0, "errors": 0}
+
+    def observe_event(self, evt: dict[str, object]) -> None:
+        try:
+            evt_type = evt.get("type")
+            message = evt.get("message") if isinstance(evt.get("message"), dict) else {}
+            content = message.get("content", []) if isinstance(message, dict) else []
+            if evt_type == "assistant":
+                for item in content if isinstance(content, list) else []:
+                    if isinstance(item, dict) and item.get("type") == "tool_use":
+                        self.observe_tool_use(item)
+            elif evt_type == "user":
+                for item in content if isinstance(content, list) else []:
+                    if isinstance(item, dict) and item.get("type") == "tool_result":
+                        self.observe_tool_result(item)
+        except Exception as exc:
+            self._record_error("observe_event", exc)
+
+    def observe_tool_use(self, item: dict[str, object]) -> None:
+        tool_name = str(item.get("name") or "")
+        short_name = _short_tool_name(tool_name)
+        if not short_name.startswith("browser_"):
+            return
+        tool_use_id = str(item.get("id") or f"{short_name}-{time.time_ns()}")
+        raw_input = item.get("input") if isinstance(item.get("input"), dict) else {}
+        call = _BrowserToolCall(
+            tool_use_id=tool_use_id,
+            tool_name=tool_name,
+            short_name=short_name,
+            input=dict(raw_input),
+        )
+        self.pending_tool_calls[tool_use_id] = call
+        if short_name == "browser_navigate":
+            url = self._input_target(call.input)
+            if url:
+                self.last_url = url
+        if short_name in INTERACTION_TOOLS:
+            self.pending_interaction = _PendingBrowserInteraction(
+                action_type=short_name.replace("browser_", ""),
+                target=self._input_target(call.input),
+                from_state=self.latest_state,
+            )
+        self._write_artifact({"event": "tool_use", "tool": short_name, "input": call.input})
+
+    def observe_tool_result(self, item: dict[str, object]) -> None:
+        tool_use_id = str(item.get("tool_use_id") or "")
+        call = self.pending_tool_calls.pop(tool_use_id, None)
+        if not call:
+            return
+        result_text = _tool_result_text(item.get("content"))
+        if call.short_name == "browser_snapshot":
+            self._persist_snapshot(result_text)
+        elif call.short_name == "browser_navigate":
+            url = self._input_target(call.input) or self._extract_url(result_text)
+            if url:
+                self.last_url = url
+        self._write_artifact(
+            {
+                "event": "tool_result",
+                "tool": call.short_name,
+                "tool_use_id": tool_use_id,
+                "chars": len(result_text),
+            }
+        )
+
+    def telemetry(self) -> dict[str, int]:
+        return {
+            "browser_memory_snapshots": int(self.stats["snapshots"]),
+            "browser_memory_transitions": int(self.stats["transitions"]),
+            "browser_memory_errors": int(self.stats["errors"]),
+        }
+
+    def flush_pending(self) -> None:
+        self._write_artifact(
+            {
+                "event": "flush",
+                "pending_tool_calls": len(self.pending_tool_calls),
+                "has_pending_interaction": self.pending_interaction is not None,
+                **self.telemetry(),
+            }
+        )
+
+    def _persist_snapshot(self, snapshot_text: str) -> None:
+        url = self._extract_url(snapshot_text) or self.last_url or "about:blank"
+        title = self._extract_title(snapshot_text) or url
+        service = self.service_factory()
+        state = service.upsert_page_state(
+            session_id=self.session_id,
+            url=url,
+            snapshot_text=snapshot_text,
+            title=title,
+            snapshot_ref=f"agent-worker:{self.session_id}:{self.stats['snapshots'] + 1}",
+        )
+        self.stats["snapshots"] += 1
+        pending = self.pending_interaction
+        if pending and pending.from_state is not None:
+            service.record_transition(
+                session_id=self.session_id,
+                from_state=pending.from_state,
+                to_state=state,
+                action_type=pending.action_type,
+                target=pending.target,
+                success=True,
+                duration_ms=max(0.0, (time.time() - pending.started_at) * 1000),
+            )
+            self.stats["transitions"] += 1
+            self.pending_interaction = None
+        self.latest_state = state
+        self.last_url = url
+        self._write_artifact({"event": "snapshot", "url": url, "state_id": state.id, **self.telemetry()})
+
+    def _default_service_factory(self):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import ExplorationSession
+        from orchestrator.memory.browser_memory import get_exploration_memory_service
+        from sqlmodel import Session
+
+        if self.project_id is None:
+            try:
+                with Session(engine) as session:
+                    exploration = session.get(ExplorationSession, self.session_id)
+                    self.project_id = exploration.project_id if exploration else "default"
+            except Exception:
+                self.project_id = "default"
+        return get_exploration_memory_service(project_id=self.project_id or "default")
+
+    def _write_artifact(self, payload: dict[str, object]) -> None:
+        if not self.artifact_path:
+            return
+        try:
+            self.artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.artifact_path.open("a") as f:
+                f.write(json.dumps({"ts": time.time(), **payload}, default=str) + "\n")
+        except Exception:
+            pass
+
+    def _record_error(self, stage: str, exc: Exception) -> None:
+        self.stats["errors"] += 1
+        logger.debug("Browser memory recorder skipped %s: %s", stage, exc)
+        self._write_artifact({"event": "error", "stage": stage, "error": str(exc)})
+
+    @staticmethod
+    def _input_target(tool_input: dict[str, object]) -> str:
+        for key in ("url", "target", "element", "text", "selector"):
+            value = tool_input.get(key)
+            if value:
+                return str(value)
+        return ""
+
+    def _extract_url(self, text: str) -> str | None:
+        match = self.SNAPSHOT_URL_RE.search(text or "")
+        return match.group(0) if match else None
+
+    def _extract_title(self, text: str) -> str | None:
+        match = self.SNAPSHOT_TITLE_RE.search(text or "")
+        return match.group(1).strip()[:160] if match else None
 
 
 class AgentWorker:
@@ -96,6 +324,31 @@ class AgentWorker:
             "chars": 0,
             "interactions": 0,
         }
+
+    def _emit_autonomous_event(
+        self,
+        *,
+        owner_type: str | None,
+        owner_id: str | None,
+        task_id: str,
+        event_type: str,
+        message: str,
+        level: str = "info",
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        if owner_type != "autonomous_work_item" or not owner_id:
+            return
+        try:
+            create_event_for_work_item(
+                owner_id,
+                agent_task_id=task_id,
+                event_type=event_type,
+                level=level,
+                message=message,
+                payload=payload or {},
+            )
+        except Exception as exc:
+            logger.debug("Failed to emit autonomous event for task %s: %s", task_id, exc)
 
     async def start(self):
         """Start the worker loop."""
@@ -333,6 +586,14 @@ class AgentWorker:
 
         _result_submitted = False
         try:
+            self._emit_autonomous_event(
+                owner_type=task.owner_type,
+                owner_id=task.owner_id,
+                task_id=task.id,
+                event_type="lifecycle",
+                message="Agent task started.",
+                payload={"agent_type": task.agent_type, "operation_type": task.operation_type},
+            )
             for attempt in range(1, max_retries + 1):
                 # Select API key before each attempt
                 slot = rotator.get_active_key()
@@ -359,12 +620,22 @@ class AgentWorker:
                         max_budget_usd=task.max_budget_usd,
                         task_budget=task.task_budget,
                         include_hook_events=task.include_hook_events,
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
                     )
 
                     # Success — report and submit
                     if slot:
                         rotator.report_success(slot)
                     telemetry = self._build_task_telemetry(task, attempt)
+                    self._emit_autonomous_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="complete",
+                        message="Agent task completed.",
+                        payload={"telemetry": telemetry, "result_preview": result[:1200]},
+                    )
                     await self.queue.submit_result(task.id, result, success=True, telemetry=telemetry)
                     _result_submitted = True
                     return
@@ -373,6 +644,15 @@ class AgentWorker:
                     # Timeouts are not retryable
                     logger.error(f"Task {task.id} timed out: {e}")
                     telemetry = self._build_task_telemetry(task, attempt, error_type="timeout")
+                    self._emit_autonomous_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=f"Agent task timed out: {e}",
+                        payload={"telemetry": telemetry},
+                    )
                     await self.queue.submit_result(task.id, "", success=False, error=str(e), telemetry=telemetry)
                     _result_submitted = True
                     return
@@ -382,6 +662,14 @@ class AgentWorker:
                     if "cancelled" in error_str.lower():
                         logger.info(f"Task {task.id} cancelled during execution")
                         telemetry = self._build_task_telemetry(task, attempt, error_type="cancelled")
+                        self._emit_autonomous_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="lifecycle",
+                            message="Agent task cancelled.",
+                            payload={"telemetry": telemetry},
+                        )
                         await self.queue.submit_result(task.id, "", success=False, error="Task cancelled", telemetry=telemetry)
                         _result_submitted = True
                         return
@@ -414,6 +702,15 @@ class AgentWorker:
                         # Non-429 RuntimeError or final attempt — fail
                         logger.error(f"Task {task.id} failed: {e}", exc_info=True)
                         telemetry = self._build_task_telemetry(task, attempt, error_type="runtime_error")
+                        self._emit_autonomous_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="error",
+                            level="error",
+                            message=f"Agent task failed: {error_str}",
+                            payload={"telemetry": telemetry},
+                        )
                         await self.queue.submit_result(task.id, "", success=False, error=error_str, telemetry=telemetry)
                         _result_submitted = True
                         return
@@ -422,12 +719,30 @@ class AgentWorker:
                     # Any other exception — fail immediately
                     logger.error(f"Task {task.id} failed: {e}", exc_info=True)
                     telemetry = self._build_task_telemetry(task, attempt, error_type=type(e).__name__)
+                    self._emit_autonomous_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=f"Agent task failed: {e}",
+                        payload={"telemetry": telemetry},
+                    )
                     await self.queue.submit_result(task.id, "", success=False, error=str(e), telemetry=telemetry)
                     _result_submitted = True
                     return
 
             # Exhausted all retries (shouldn't normally reach here)
             telemetry = self._build_task_telemetry(task, max_retries, error_type="rate_limit_exhausted")
+            self._emit_autonomous_event(
+                owner_type=task.owner_type,
+                owner_id=task.owner_id,
+                task_id=task.id,
+                event_type="error",
+                level="error",
+                message=f"Agent task exhausted {max_retries} retries due to rate limiting.",
+                payload={"telemetry": telemetry},
+            )
             await self.queue.submit_result(
                 task.id,
                 "",
@@ -520,6 +835,8 @@ class AgentWorker:
         max_budget_usd: float | None = None,
         task_budget: dict[str, int] | None = None,
         include_hook_events: bool = False,
+        owner_type: str | None = None,
+        owner_id: str | None = None,
     ) -> str:
         """Run Claude CLI and capture output."""
         loop = asyncio.get_event_loop()
@@ -543,6 +860,8 @@ class AgentWorker:
             max_budget_usd,
             task_budget,
             include_hook_events,
+            owner_type,
+            owner_id,
         )
 
         return result
@@ -562,6 +881,8 @@ class AgentWorker:
         max_budget_usd: float | None = None,
         task_budget: dict[str, int] | None = None,
         include_hook_events: bool = False,
+        owner_type: str | None = None,
+        owner_id: str | None = None,
     ) -> str:
         """Synchronous CLI execution using subprocess with direct PIPE capture."""
         import signal
@@ -620,6 +941,11 @@ class AgentWorker:
             "parse_errors": 0,
             "exit_code": None,
         }
+        browser_recorder = (
+            BrowserObservationRecorder(session_id=owner_id, cwd=effective_cwd)
+            if owner_type == "exploration_session" and owner_id
+            else None
+        )
 
         # Build CLI command
         cli_args = [
@@ -715,11 +1041,25 @@ class AgentWorker:
                                         stream_stats["total_cost_usd"] = evt.get("total_cost_usd")
                                     elif evt_type == "hook_event":
                                         stream_stats["hook_events"] += 1
+                                    if browser_recorder is not None:
+                                        browser_recorder.observe_event(evt)
                                     with self._progress_lock:
                                         if evt.get("type") == "assistant":
                                             for item in evt.get("message", {}).get("content", []):
                                                 if item.get("type") == "text":
                                                     stream_stats["text_blocks"] += 1
+                                                    text = str(item.get("text") or "").strip()
+                                                    if text:
+                                                        with self._progress_lock:
+                                                            self._current_progress["last_message"] = text[:500]
+                                                        self._emit_autonomous_event(
+                                                            owner_type=owner_type,
+                                                            owner_id=owner_id,
+                                                            task_id=task_id,
+                                                            event_type="assistant_output",
+                                                            message=text,
+                                                            payload={"chars": len(text)},
+                                                        )
                                                 if item.get("type") == "tool_use":
                                                     tool_name = item.get("name", "")
                                                     self._current_progress["tool_calls"] += 1
@@ -728,15 +1068,26 @@ class AgentWorker:
                                                     if isinstance(tool_names, list) and len(tool_names) < 200:
                                                         tool_names.append(tool_name)
                                                     # Strip MCP prefix: mcp__playwright-test__browser_click → browser_click
-                                                    short_name = (
-                                                        tool_name.rsplit("__", 1)[-1]
-                                                        if "__" in tool_name
-                                                        else tool_name
-                                                    )
+                                                    short_name = _short_tool_name(tool_name)
                                                     if tool_name.startswith("mcp__") and short_name.startswith("browser_"):
                                                         self._current_progress["browser_tool_calls"] += 1
+                                                        event_type = "browser_action"
+                                                    else:
+                                                        event_type = "tool_call"
                                                     if short_name in INTERACTION_TOOLS:
                                                         self._current_progress["interactions"] += 1
+                                                    self._emit_autonomous_event(
+                                                        owner_type=owner_type,
+                                                        owner_id=owner_id,
+                                                        task_id=task_id,
+                                                        event_type=event_type,
+                                                        message=f"Tool call: {short_name or tool_name}",
+                                                        payload={
+                                                            "tool_name": tool_name,
+                                                            "short_name": short_name,
+                                                            "input": item.get("input") or {},
+                                                        },
+                                                    )
                                         self._current_progress["chars"] = sum(len(c) for c in output_chunks)
                                 except (json.JSONDecodeError, TypeError):
                                     stream_stats["parse_errors"] += 1
@@ -807,6 +1158,8 @@ class AgentWorker:
                 self._running_processes.pop(task_id, None)
 
         raw_output = "".join(output_chunks)
+        if browser_recorder is not None:
+            browser_recorder.flush_pending()
         elapsed = self._effective_elapsed_seconds(task_id, start_time)
         with self._pause_lock:
             paused_duration = self._paused_duration_seconds.get(task_id, 0.0)
@@ -818,6 +1171,7 @@ class AgentWorker:
         with self._progress_lock:
             self._last_execution_telemetry = {
                 **stream_stats,
+                **(browser_recorder.telemetry() if browser_recorder is not None else {}),
                 "raw_output_chars": len(raw_output),
                 "cli_elapsed_seconds": elapsed,
             }

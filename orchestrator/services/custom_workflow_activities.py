@@ -13,7 +13,6 @@ from orchestrator.services.workflow_runner import (
     execute_workflow_step_once,
     handle_workflow_step_failure,
     prepare_next_workflow_step,
-    run_workflow,
 )
 
 
@@ -50,29 +49,6 @@ def handle_custom_workflow_step_failure(payload: dict[str, Any]) -> dict[str, An
         payload.get("step_id"),
         str(payload.get("error_message") or "Workflow step failed"),
     )
-
-
-async def execute_custom_workflow_run(payload: dict[str, Any]) -> dict[str, Any]:
-    """Execute an existing workflow run using the DB-backed runner."""
-    run_id = str(payload["run_id"])
-    with Session(engine) as session:
-        run = session.get(WorkflowRun, run_id)
-        if run:
-            run.temporal_workflow_id = payload.get("workflow_id") or run.temporal_workflow_id
-            run.temporal_run_id = payload.get("temporal_run_id") or run.temporal_run_id
-            run.heartbeat_at = datetime.utcnow()
-            session.add(run)
-            session.commit()
-
-    await run_workflow(run_id)
-
-    with Session(engine) as session:
-        run = session.get(WorkflowRun, run_id)
-        return {
-            "run_id": run_id,
-            "status": run.status if run else "missing",
-            "error_message": run.error_message if run else "Workflow run disappeared",
-        }
 
 
 def set_custom_workflow_status(payload: dict[str, Any]) -> None:

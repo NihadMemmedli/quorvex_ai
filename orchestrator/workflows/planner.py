@@ -210,14 +210,14 @@ class Planner:
         if not self.use_memory or not self.memory_manager:
             return {}
 
-        context = {"similar_tests": [], "successful_selectors": [], "coverage_gaps": []}
+        context = {"similar_tests": [], "successful_selectors": [], "coverage_gaps": [], "graph": {}}
 
         try:
             # Extract potential URL from spec
             import re
 
-            url_match = re.search(r"https?://[^\s\)]+", spec_content)
-            url = url_match.group(0) if url_match else None
+            urls = [match.rstrip(".,;:!?)") for match in re.findall(r"https?://[^\s\)]+", spec_content)]
+            url = urls[0] if urls else None
 
             # Find similar tests
             similar = self.memory_manager.find_similar_tests(
@@ -242,6 +242,19 @@ class Planner:
                     {"type": g["type"], "element_type": g.get("element_type"), "description": g["description"]}
                     for g in gaps
                 ]
+
+            graph = self.memory_manager.graph_store
+            graph_context = {
+                "stats": graph.get_graph_stats(),
+                "flows": [
+                    {"name": flow.get("name") or flow.get("title"), "start_page": flow.get("start_page")}
+                    for flow in graph.get_all_flows()[:5]
+                ],
+                "navigation_path": None,
+            }
+            if len(urls) >= 2:
+                graph_context["navigation_path"] = self.memory_manager.find_navigation_path(urls[0], urls[-1])
+            context["graph"] = graph_context
 
         except Exception as e:
             logger.warning(f"Error gathering memory context: {e}")
@@ -302,6 +315,28 @@ ASSERTION TYPES: visible, text
                     if test.get("test_name"):
                         prompt += f"- {test['test_name']}: {test.get('action', '')} on {test.get('target', '')} "
                         prompt += f"(success rate: {test.get('success_rate', 0):.1%})\n"
+
+            if memory_context.get("graph"):
+                graph = memory_context["graph"]
+                stats = graph.get("stats") or {}
+                if stats:
+                    prompt += "\n### Structural Graph Context:\n"
+                    prompt += (
+                        f"- Known app graph: {stats.get('page_count', 0)} pages, "
+                        f"{stats.get('element_count', 0)} elements, "
+                        f"{stats.get('flow_count', 0)} flows, "
+                        f"{stats.get('element_coverage', 0):.1f}% element coverage.\n"
+                    )
+                if graph.get("navigation_path"):
+                    prompt += f"- Known navigation path: {' -> '.join(graph['navigation_path'])}\n"
+                for flow in graph.get("flows", [])[:3]:
+                    if flow.get("name"):
+                        prompt += f"- Known flow: {flow['name']}\n"
+
+            if memory_context.get("coverage_gaps"):
+                prompt += "\n### Coverage Gaps:\n"
+                for gap in memory_context["coverage_gaps"][:5]:
+                    prompt += f"- {gap.get('description', '')}\n"
 
         # Add Reused Automation Context
         if reused_context and reused_context.get("automated_templates"):

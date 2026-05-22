@@ -343,6 +343,84 @@ def _run_migrations():
                 conn.execute(text("ALTER TABLE agentrun ADD COLUMN agent_task_id VARCHAR"))
                 logger.info("Added column: agentrun.agent_task_id")
 
+        # Repair agent memory tables created before typed/scoped memory fields.
+        if "agent_memories" in inspector.get_table_names():
+            agent_memory_columns = {col["name"] for col in inspector.get_columns("agent_memories")}
+            agent_memory_timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            agent_memory_bool_false = "FALSE" if db_type == "postgresql" else "0"
+            typed_memory_columns = {
+                "memory_type": "VARCHAR NOT NULL DEFAULT 'semantic'",
+                "scope": "VARCHAR NOT NULL DEFAULT 'project'",
+                "importance": "FLOAT NOT NULL DEFAULT 0.5",
+                "valid_from": agent_memory_timestamp_type,
+                "valid_until": agent_memory_timestamp_type,
+                "supersedes_id": "VARCHAR",
+                "review_required": f"BOOLEAN NOT NULL DEFAULT {agent_memory_bool_false}",
+                "last_verified_at": agent_memory_timestamp_type,
+            }
+            for column_name, column_type in typed_memory_columns.items():
+                if column_name not in agent_memory_columns:
+                    conn.execute(text(f"ALTER TABLE agent_memories ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: agent_memories.%s", column_name)
+
+            conn.execute(
+                text(
+                    """
+                    UPDATE agent_memories
+                    SET memory_type = CASE
+                        WHEN kind IN ('failure_pattern') THEN 'episodic'
+                        WHEN kind IN ('agent_lesson', 'workflow_decision') THEN 'procedural'
+                        ELSE 'semantic'
+                    END
+                    WHERE memory_type IS NULL OR memory_type = 'semantic'
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    UPDATE agent_memories
+                    SET scope = CASE
+                        WHEN user_id IS NOT NULL AND user_id != '' THEN 'user'
+                        WHEN project_id IS NOT NULL AND project_id != '' THEN 'project'
+                        ELSE 'global'
+                    END
+                    WHERE scope IS NULL OR scope = 'project'
+                    """
+                )
+            )
+            conn.execute(text("UPDATE agent_memories SET importance = 0.5 WHERE importance IS NULL"))
+            conn.execute(text(f"UPDATE agent_memories SET review_required = {agent_memory_bool_false} WHERE review_required IS NULL"))
+
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_agentmemory_project_type "
+                        "ON agent_memories (project_id, memory_type)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_agentmemory_scope_status "
+                        "ON agent_memories (scope, status)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_agent_memories_memory_type "
+                        "ON agent_memories (memory_type)"
+                    )
+                )
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_memories_scope ON agent_memories (scope)"))
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_agent_memories_supersedes_id "
+                        "ON agent_memories (supersedes_id)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Index may already exist on agent_memories: {e}")
+
         # Create UI-created agent tables for databases initialized before this feature.
         if "agent_definitions" not in inspector.get_table_names():
             if db_type == "postgresql":
@@ -872,6 +950,41 @@ def _run_migrations():
                 )
                 logger.info("Added column: autonomous_mission_runs.checkpoint_json")
 
+        if "autonomous_agent_events" not in inspector.get_table_names() and "autonomous_missions" in inspector.get_table_names():
+            conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE autonomous_agent_events (
+                        id VARCHAR PRIMARY KEY,
+                        project_id VARCHAR,
+                        mission_id VARCHAR NOT NULL,
+                        run_id VARCHAR,
+                        work_item_id VARCHAR,
+                        agent_task_id VARCHAR,
+                        sequence INTEGER NOT NULL,
+                        event_type VARCHAR NOT NULL,
+                        level VARCHAR NOT NULL DEFAULT 'info',
+                        message TEXT NOT NULL,
+                        payload_json TEXT NOT NULL DEFAULT '{{}}',
+                        created_at {timestamp_type} NOT NULL
+                    )
+                    """
+                )
+            )
+            logger.info("Created table: autonomous_agent_events")
+
+        if "autonomous_agent_events" in inspector.get_table_names():
+            for index_sql in (
+                "CREATE INDEX IF NOT EXISTS ix_autonomous_agent_events_mission_sequence ON autonomous_agent_events (mission_id, sequence)",
+                "CREATE INDEX IF NOT EXISTS ix_autonomous_agent_events_work_item_sequence ON autonomous_agent_events (work_item_id, sequence)",
+                "CREATE INDEX IF NOT EXISTS ix_autonomous_agent_events_project_created ON autonomous_agent_events (project_id, created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_autonomous_agent_events_agent_task ON autonomous_agent_events (agent_task_id)",
+            ):
+                try:
+                    conn.execute(text(index_sql))
+                except Exception as e:
+                    logger.debug(f"Index may already exist on autonomous_agent_events: {e}")
+
         # ===== Production Data Management - Performance Indexes =====
 
         # Add performance indexes for testrun table (Phase 4: Database Optimization)
@@ -1268,11 +1381,54 @@ def _get_alembic_version() -> str | None:
         return None
 
 
+def _has_alembic_version_table() -> bool:
+    from sqlalchemy import inspect
+
+    return "alembic_version" in inspect(engine).get_table_names()
+
+
+def _has_empty_alembic_version() -> bool:
+    return _has_alembic_version_table() and _get_alembic_version() is None
+
+
+def _required_workflow_schema_present() -> bool:
+    """Return True when legacy sync has already created workflow schema expected by head."""
+    from sqlalchemy import inspect
+
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    required_tables = {
+        "workflow_definitions",
+        "workflow_definition_revisions",
+        "workflow_runs",
+        "workflow_run_steps",
+        "workflow_schedules",
+        "workflow_events",
+    }
+    if not required_tables.issubset(tables):
+        return False
+
+    required_columns = {
+        "workflow_schedules": {"revision_mode"},
+        "workflow_runs": {"temporal_workflow_id", "temporal_run_id", "heartbeat_at", "pause_reason"},
+        "workflow_run_steps": {"attempt_count", "recovery_action", "rendered_input_json", "context_snapshot_json"},
+        "workflow_events": {"schedule_id", "payload_json"},
+    }
+    for table, columns in required_columns.items():
+        existing = {column["name"] for column in inspector.get_columns(table)}
+        if not columns.issubset(existing):
+            return False
+    return True
+
+
 def _has_legacy_alembic_drift() -> bool:
     """Detect databases stamped at 001 after schema was already partially migrated."""
     from sqlalchemy import inspect
 
-    if _get_alembic_version() != "001":
+    version = _get_alembic_version()
+    if version is None and _has_alembic_version_table() and _required_workflow_schema_present():
+        return True
+    if version != "001":
         return False
 
     inspector = inspect(engine)
@@ -1317,6 +1473,13 @@ def _run_alembic_migrations() -> bool:
         command.stamp(alembic_cfg, "001")
         logger.info("Alembic baseline stamped. Future migrations will run normally.")
         return _has_legacy_alembic_drift()
+
+    if _has_empty_alembic_version() and _required_workflow_schema_present():
+        logger.warning(
+            "Alembic version table exists but has no version row, and workflow schema is already present. "
+            "Skipping normal upgrade so legacy schema sync can stamp head without replaying baseline migrations."
+        )
+        return True
 
     if _has_legacy_alembic_drift():
         logger.warning(
@@ -1380,6 +1543,8 @@ def init_db():
 
         logger.info("Running database migrations...")
         _run_migrations()
+        if _has_empty_alembic_version() and _required_workflow_schema_present():
+            _stamp_alembic_head()
 
     # Enable WAL mode for SQLite (improves concurrent read performance)
     if get_database_type() == "sqlite":
