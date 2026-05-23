@@ -1,5 +1,10 @@
 # Browser Pool and Concurrency
 
+![AutoPilot dashboard with live browser automation context](../assets/ui/autopilot.png)
+
+<p class="caption">AutoPilot dashboard with live browser automation context.</p>
+
+
 Browser automation is the most resource-intensive operation in Quorvex AI. Each Playwright browser instance consumes 200-500MB of RAM, significant CPU for rendering, and shared memory for Chromium's multi-process architecture. The browser pool exists to prevent resource exhaustion while maximizing throughput.
 
 ## Why a Unified Pool

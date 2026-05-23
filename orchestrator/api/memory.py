@@ -147,6 +147,13 @@ class AgentMemoryConsolidateRequest(BaseModel):
     source_type: str | None = "manual_consolidation"
     source_id: str | None = None
     agent_type: str | None = None
+    use_llm: bool = False
+    review_required: bool | None = None
+
+
+class MemoryInjectionFeedbackRequest(BaseModel):
+    rating: str
+    comment: str | None = None
 
 
 class AgentMemoryResponse(BaseModel):
@@ -174,6 +181,12 @@ class AgentMemoryResponse(BaseModel):
     updated_at: str
     last_used_at: str | None = None
     use_count: int
+
+
+class StaleMemoryVerifyRequest(BaseModel):
+    project_id: str | None = None
+    older_than_days: int = Field(default=30, ge=1, le=3650)
+    limit: int = Field(default=50, ge=1, le=200)
 
 
 class SessionRecallMessage(BaseModel):
@@ -600,6 +613,130 @@ async def get_flows(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+@router.get("/graph/knowledge")
+async def get_knowledge_graph(
+    project_id: str | None = Query(None, description="Project ID for isolation"),
+    limit: int = Query(200, ge=1, le=500),
+) -> dict[str, Any]:
+    """Get the SQL-backed agent memory knowledge graph."""
+    try:
+        from orchestrator.memory.knowledge_graph import get_memory_knowledge_graph_service
+
+        return get_memory_knowledge_graph_service().graph_summary(project_id=project_id, limit=limit)
+    except Exception as e:
+        logger.error(f"Failed to get memory knowledge graph: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/graph/memory/{memory_id}")
+async def get_memory_knowledge_graph(
+    memory_id: str,
+    project_id: str | None = Query(None, description="Project ID guard"),
+) -> dict[str, Any]:
+    """Get graph nodes and edges connected to one agent memory."""
+    try:
+        from orchestrator.memory.knowledge_graph import get_memory_knowledge_graph_service
+
+        graph = get_memory_knowledge_graph_service().graph_for_memory(memory_id, project_id=project_id)
+        if not graph["nodes"]:
+            raise HTTPException(status_code=404, detail="Memory graph node not found")
+        return graph
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get memory graph for memory {memory_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/graph/review")
+async def list_graph_review_edges(
+    project_id: str | None = Query(None, description="Project ID guard"),
+    relationship_type: str | None = Query(None, description="Optional relationship type filter"),
+    limit: int = Query(100, ge=1, le=200),
+) -> dict[str, Any]:
+    """List LLM-inferred graph edges waiting for human review."""
+    try:
+        from orchestrator.memory.knowledge_graph import get_memory_knowledge_graph_service
+
+        return get_memory_knowledge_graph_service().review_edges(
+            project_id=project_id,
+            relationship_type=relationship_type,
+            status="pending_review",
+            limit=limit,
+        )
+    except Exception as e:
+        logger.error(f"Failed to list graph review edges: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.patch("/graph/review/{edge_id}/approve")
+async def approve_graph_review_edge(
+    edge_id: str,
+    project_id: str | None = Query(None, description="Project ID guard"),
+) -> dict[str, Any]:
+    """Approve a pending LLM-inferred graph edge so it can affect retrieval."""
+    try:
+        from orchestrator.memory.knowledge_graph import get_memory_knowledge_graph_service
+
+        edge = get_memory_knowledge_graph_service().set_review_edge_status(
+            edge_id,
+            status="active",
+            project_id=project_id,
+        )
+        if not edge:
+            raise HTTPException(status_code=404, detail="Graph edge not found")
+        return edge
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to approve graph review edge {edge_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.patch("/graph/review/{edge_id}/reject")
+async def reject_graph_review_edge(
+    edge_id: str,
+    project_id: str | None = Query(None, description="Project ID guard"),
+) -> dict[str, Any]:
+    """Reject a pending LLM-inferred graph edge and keep it out of active retrieval."""
+    try:
+        from orchestrator.memory.knowledge_graph import get_memory_knowledge_graph_service
+
+        edge = get_memory_knowledge_graph_service().set_review_edge_status(
+            edge_id,
+            status="rejected",
+            project_id=project_id,
+        )
+        if not edge:
+            raise HTTPException(status_code=404, detail="Graph edge not found")
+        return edge
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to reject graph review edge {edge_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/graph/rebuild")
+async def rebuild_knowledge_graph(
+    project_id: str | None = Query(None, description="Project ID for isolation"),
+    include_review_required: bool = Query(False, description="Include review-required memories"),
+    use_llm: bool = Query(False, description="Use optional gated LLM relationship extraction"),
+) -> dict[str, int]:
+    """Rebuild derived graph nodes and relationships from approved agent memories."""
+    try:
+        from orchestrator.memory.knowledge_graph import get_memory_knowledge_graph_service
+
+        return get_memory_knowledge_graph_service().rebuild(
+            project_id=project_id,
+            include_review_required=include_review_required,
+            use_llm=use_llm,
+        )
+    except Exception as e:
+        logger.error(f"Failed to rebuild memory knowledge graph: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.get("/stats")
 async def get_memory_stats(
     project_id: str | None = Query("demo", description="Project ID for isolation"),
@@ -721,6 +858,137 @@ async def get_memory_context_preview(
     )
 
 
+@router.get("/context")
+async def get_unified_memory_context(
+    q: str = Query("", description="Task/query text for retrieval"),
+    project_id: str | None = Query(None, description="Project ID for isolation"),
+    user_id: str | None = Query(None, description="Optional user scope"),
+    agent_type: str | None = Query(None, description="Agent type filter"),
+    limit: int = Query(8, ge=1, le=25),
+) -> dict[str, Any]:
+    """Return the unified structured memory bundle used by agents and planners."""
+    try:
+        from orchestrator.memory.unified import get_unified_memory_service
+
+        bundle = get_unified_memory_service().build_bundle(
+            query=q,
+            project_id=project_id,
+            user_id=user_id,
+            agent_type=agent_type,
+            limit=limit,
+        )
+        return bundle
+    except Exception as e:
+        logger.error(f"Failed to get unified memory context: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/injections")
+async def list_memory_injections(
+    project_id: str | None = Query(None, description="Project ID for isolation"),
+    stage: str | None = Query(None, description="Optional stage filter"),
+    actor_type: str | None = Query(None, description="Optional actor type filter"),
+    outcome: str | None = Query(None, description="Optional outcome filter"),
+    source_type: str | None = Query(None, description="Optional source type filter"),
+    limit: int = Query(50, ge=1, le=200),
+    session: Session = Depends(get_session),
+) -> list[dict[str, Any]]:
+    """List recent memory injection telemetry records."""
+    try:
+        from orchestrator.api.models_db import MemoryInjectionEvent
+        from orchestrator.memory.feedback import get_memory_feedback_service
+
+        statement = select(MemoryInjectionEvent)
+        if project_id:
+            statement = statement.where(MemoryInjectionEvent.project_id == project_id)
+        if stage:
+            statement = statement.where(MemoryInjectionEvent.stage == stage)
+        if actor_type:
+            statement = statement.where(MemoryInjectionEvent.actor_type == actor_type)
+        if outcome:
+            statement = statement.where(MemoryInjectionEvent.outcome == outcome)
+        if source_type:
+            statement = statement.where(MemoryInjectionEvent.source_type == source_type)
+        rows = session.exec(statement.order_by(MemoryInjectionEvent.created_at.desc()).limit(limit)).all()
+        feedback_summary = get_memory_feedback_service(session).feedback_summary_for_injections([row.id for row in rows])
+        return [
+            {
+                "id": row.id,
+                "project_id": row.project_id,
+                "actor_type": row.actor_type,
+                "stage": row.stage,
+                "source_type": row.source_type,
+                "source_id": row.source_id,
+                "query": row.query,
+                "memory_ids": row.memory_ids,
+                "context_preview": row.context_preview,
+                "outcome": row.outcome,
+                "extra_data": row.extra_data or {},
+                "feedback": feedback_summary.get(row.id, {"total": 0, "positive": 0, "negative": 0}),
+                "created_at": row.created_at.isoformat(),
+            }
+            for row in rows
+        ]
+    except Exception as e:
+        logger.error(f"Failed to list memory injections: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/injections/{injection_event_id}/feedback")
+async def submit_memory_injection_feedback(
+    injection_event_id: str,
+    request: MemoryInjectionFeedbackRequest,
+    session: Session = Depends(get_session),
+    user=Depends(get_current_user_optional),
+) -> dict[str, Any]:
+    """Apply feedback from one injection event to all injected memories."""
+    try:
+        from orchestrator.memory.feedback import get_memory_feedback_service
+
+        return get_memory_feedback_service(session).apply_feedback_to_injection(
+            injection_event_id,
+            rating=request.rating,
+            user_id=user.id if user else None,
+            comment=request.comment,
+            source="manual_dashboard",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400 if "Rating" in str(e) else 404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to submit memory injection feedback: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/feedback")
+async def get_memory_feedback(
+    project_id: str | None = Query(None, description="Project ID for isolation"),
+    memory_id: list[str] | None = Query(None, description="Memory IDs to inspect"),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Return aggregate feedback stats for selected memories."""
+    try:
+        from orchestrator.memory.feedback import get_memory_feedback_service
+
+        stats = get_memory_feedback_service(session).get_memory_feedback_stats(
+            project_id=project_id,
+            memory_ids=memory_id or [],
+        )
+        return {
+            "items": {
+                key: {
+                    "positive_feedback_count": value.positive_feedback_count,
+                    "negative_feedback_count": value.negative_feedback_count,
+                    "feedback_score": value.feedback_score,
+                    "last_feedback_at": value.last_feedback_at.isoformat() if value.last_feedback_at else None,
+                }
+                for key, value in stats.items()
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to get memory feedback: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
 @router.post("/agent", response_model=AgentMemoryResponse)
 async def create_agent_memory(request: AgentMemoryCreateRequest) -> AgentMemoryResponse:
     """Create a curated agent working memory."""
@@ -784,17 +1052,40 @@ async def update_agent_memory(
 async def consolidate_agent_memory(request: AgentMemoryConsolidateRequest) -> list[AgentMemoryResponse]:
     """Extract and store high-signal memories from a larger text block."""
     try:
-        memories = get_agent_memory_service().capture_candidates(
+        from orchestrator.memory.consolidation import MemoryConsolidationService
+
+        result = await MemoryConsolidationService(get_agent_memory_service()).consolidate_text(
             request.text,
             project_id=request.project_id,
             user_id=request.user_id,
             source_type=request.source_type,
             source_id=request.source_id,
             agent_type=request.agent_type,
+            use_llm=request.use_llm,
+            review_required=request.review_required,
         )
-        return [_agent_memory_response(memory) for memory in memories]
+        return [_agent_memory_response(memory) for memory in result.stored]
     except Exception as e:
         logger.error(f"Failed to consolidate agent memory: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/agent/verify-stale")
+async def verify_stale_agent_memories(request: StaleMemoryVerifyRequest) -> dict[str, Any]:
+    """Run a stale-memory verification pass for one project or all projects."""
+    try:
+        result = get_agent_memory_service().verify_stale(
+            project_id=request.project_id,
+            older_than_days=request.older_than_days,
+            limit=request.limit,
+        )
+        memories = result.pop("memories", [])
+        return {
+            **result,
+            "memories": [_agent_memory_response(memory).model_dump() for memory in memories],
+        }
+    except Exception as e:
+        logger.error(f"Failed to verify stale memories: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

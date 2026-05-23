@@ -1,5 +1,10 @@
 # Pipeline Modes
 
+![Workflow monitor showing available pipeline modes](../assets/ui/workflow.png)
+
+<p class="caption">Workflow monitor showing available pipeline modes.</p>
+
+
 Comparison reference for all Quorvex AI execution pipelines.
 
 ## Pipeline Comparison

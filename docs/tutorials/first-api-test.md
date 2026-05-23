@@ -1,5 +1,10 @@
 # Your First API Test
 
+![API testing dashboard with OpenAPI import and generated tests](../assets/ui/api-testing.png)
+
+<p class="caption">API testing dashboard with OpenAPI import and generated tests.</p>
+
+
 In this tutorial, you will create an API test spec, import it into Quorvex AI, generate Playwright-based HTTP tests, and run them -- all without a browser.
 
 ## Prerequisites

@@ -1,5 +1,10 @@
 # How to Test Database Quality
 
+![Database testing dashboard with connections, schema analysis, and checks](../assets/ui/database-testing.png)
+
+<p class="caption">Database testing dashboard with connections, schema analysis, and checks.</p>
+
+
 PostgreSQL schema analysis and data quality testing with AI-powered check generation, fix suggestions, and an approve/apply workflow.
 
 ## Overview
@@ -256,6 +261,7 @@ Confirm database testing works:
 
 ## Related Guides
 
+- [Specialized Testing Architecture](../explanation/specialized-testing-architecture.md) -- database testing boundaries and models
 - [Credential Management](./credential-management.md) -- secure database connection credentials
 - [Scheduling](./scheduling.md) -- automate quality checks on a schedule
 - [Troubleshooting](./troubleshooting.md) -- database connection issues

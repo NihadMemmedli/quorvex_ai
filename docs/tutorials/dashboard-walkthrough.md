@@ -1,5 +1,10 @@
 # Dashboard Walkthrough
 
+![Quorvex dashboard walkthrough across core product areas](../assets/ui/product-flow.gif)
+
+<p class="caption">Quorvex dashboard walkthrough across core product areas.</p>
+
+
 In this tutorial, you will start the Quorvex AI web dashboard, navigate its main sections, and learn how each page fits into the test management workflow.
 
 ## Prerequisites
@@ -48,32 +53,33 @@ The left sidebar organizes the dashboard into sections:
 
 | Section | Page | Purpose |
 |---------|------|---------|
-| **Testing** | Specs | Create and manage test specifications |
-| | Runs | View test execution history and details |
-| | Regression | Batch execution of multiple tests |
-| | Templates | Reusable spec fragments |
-| **Agents** | AutoPilot | Interactive agent sessions for app discovery, task generation, and test creation |
+| **Top links** | Overview | Command center for the selected project |
+| | AutoPilot | Interactive agent sessions for app discovery, task generation, and test creation |
 | | Autonomous | Recurring or long-running autonomous testing missions with approval gates |
-| | Agents | Custom agent definitions, runs, tool access, and reports |
-| | Workflow | Custom multi-step workflow automation |
-| **Discovery** | Exploration | AI-powered app discovery sessions |
-| | Requirements | Structured requirements from exploration |
+| | Test Specs | Create and manage test specifications |
+| | Test Runs | View test execution history and details |
+| | Reporting | Analytics overview and trend charts |
+| | Projects | Create, switch, edit, and delete projects |
+| **Supporting Workflows** | PRD | PDF requirements document processing |
+| | Recorder | Browser session recording and code import |
+| | Templates | Reusable spec fragments |
+| | Requirements | Structured requirements from discovery |
 | | RTM | Requirements Traceability Matrix |
 | | Coverage | Test coverage analysis and gap detection |
-| **Specialized** | API Testing | HTTP/REST API test management |
+| | Regression | Batch execution of multiple tests |
+| | Batch Reports | Historical regression batch reports |
+| **Advanced Tools** | Workflow Monitor | Custom multi-step workflow automation |
+| | API Testing | HTTP/REST API test management |
 | | Load Testing | K6-based performance testing |
 | | Security Testing | Vulnerability scanning and triage |
 | | Database Testing | PostgreSQL schema and data quality checks |
 | | LLM Testing | AI model evaluation platform |
-| **Operations** | Dashboard | Analytics and reporting overview |
 | | Schedules | Cron-based automated test runs |
 | | CI/CD | GitHub Actions and GitLab CI integration |
 | | PR Advisor | Changed-file impact analysis, recommended test subsets, and quality gates |
-| | Analytics | Cross-feature trends and insights |
-| **System** | Memory | Stored selector patterns from past runs |
-| | PRD | PDF requirements document processing |
-| | Settings | Project configuration and credentials |
-| | Assistant | AI chat interface with tool access |
+| | Memory | Stored selector patterns, browser memory, and agent memories |
+| | Agents | Custom agent definitions, runs, tool access, and reports |
+| **Settings** | Settings | Project configuration and credentials |
 
 The **project selector** at the top of the sidebar lets you switch between projects. All pages filter data to the currently selected project.
 
@@ -148,7 +154,7 @@ Click **Regression** in the sidebar. This page enables batch test execution.
 
 ## Step 6: Exploration Page
 
-Click **Exploration** in the sidebar. This manages AI-powered app discovery.
+Open the command palette and choose **Discovery** (`/exploration`). This manages AI-powered app discovery.
 
 **What you see:**
 
@@ -160,8 +166,8 @@ Click **Exploration** in the sidebar. This manages AI-powered app discovery.
 
 1. Click **New Exploration**.
 2. Enter a URL (e.g., `https://the-internet.herokuapp.com`).
-3. Choose a strategy (breadth-first is a good default).
-4. Set max interactions to `20` for a quick exploration.
+3. Choose an exploration mode: **General** or **API Focused**.
+4. Choose a thoroughness level. Use **Quick** for a short smoke pass.
 5. Click **Start** and watch the live action log.
 
 See the [App Exploration and Requirements](./first-exploration.md) tutorial for the full exploration-to-RTM workflow.
@@ -208,7 +214,7 @@ Configure TestRail, GitHub, GitLab, and Jira connections for the current project
 
 ## Step 9: AI Assistant
 
-Click **Assistant** in the sidebar (or the floating chat bubble on any page).
+Open **AI Assistant** from the command palette or use the floating chat bubble on any page.
 
 The AI assistant can:
 

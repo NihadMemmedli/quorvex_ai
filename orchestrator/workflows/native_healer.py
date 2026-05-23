@@ -101,6 +101,12 @@ class NativeHealer:
         new_content = path_obj.read_text()
         if new_content != test_content:
             logger.info(f"Test healed and saved: {test_file}")
+            self._capture_successful_healing_memory(
+                test_file=test_file,
+                error_log=error_log,
+                diagnosis_context=diagnosis_context,
+                healer_output=result,
+            )
             return new_content
 
         # Fallback: If agent returned fixed code but didn't write it
@@ -109,6 +115,12 @@ class NativeHealer:
             if fixed_code:
                 path_obj.write_text(fixed_code)
                 logger.info(f"Applied fix to: {test_file}")
+                self._capture_successful_healing_memory(
+                    test_file=test_file,
+                    error_log=error_log,
+                    diagnosis_context=diagnosis_context,
+                    healer_output=result,
+                )
                 return fixed_code
 
         logger.warning("Healing completed but no changes detected")
@@ -141,6 +153,12 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 {diagnosis_context}
 """
 
+        memory_section = self._build_memory_context_section(
+            query=f"{test_file}\n{error_log or ''}\n{diagnosis_context or ''}\n{test_content[:3000]}",
+            project_id=os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID"),
+            source_id=test_file,
+        )
+
         prompt = f"""You are the Playwright Test Healer.
 
 # Task: Debug and Fix Failing Test
@@ -153,6 +171,7 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 
 {error_section}
 {diagnosis_section}
+{memory_section}
 
 ## Your Workflow
 
@@ -192,6 +211,99 @@ call `browser_close` to close the browser before finishing.
 Start by running the test to see the current state.
 """
         return prompt
+
+    def _build_memory_context_section(self, *, query: str, project_id: str | None, source_id: str) -> str:
+        if os.environ.get("MEMORY_ENABLED", "true").lower() != "true" or not project_id:
+            return ""
+        try:
+            from orchestrator.memory.agent_memory import get_agent_memory_service
+            from orchestrator.memory.context_builder import MemoryContextBuilder
+            from orchestrator.memory.telemetry import record_memory_injection
+
+            builder = MemoryContextBuilder(service=get_agent_memory_service())
+            bundle = builder.build_bundle(
+                query=query[:2000],
+                project_id=project_id,
+                agent_type="NativeHealer",
+                limit=8,
+            )
+            context = builder.format_prompt_context(bundle, token_budget=1200)
+            if not context:
+                return ""
+            record_memory_injection(
+                project_id=project_id,
+                actor_type="agent",
+                stage="native_healer",
+                query=query[:1000],
+                bundle=bundle.to_dict(),
+                context_text=context,
+                source_type="test_file",
+                source_id=source_id,
+            )
+            return f"""
+## Memory Context
+Use this memory as advisory debugging context. If remembered selectors, routes, or fixes conflict with test_run/browser evidence, prefer the live evidence and update the test accordingly.
+
+{context}
+"""
+        except Exception as exc:
+            logger.debug("Healer memory context skipped: %s", exc)
+            return ""
+
+    def _capture_successful_healing_memory(
+        self,
+        *,
+        test_file: str,
+        error_log: str | None,
+        diagnosis_context: str | None,
+        healer_output: str | None,
+    ) -> None:
+        project_id = os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID")
+        if os.environ.get("MEMORY_ENABLED", "true").lower() != "true" or not project_id:
+            return
+        try:
+            from orchestrator.memory.agent_memory import get_agent_memory_service
+
+            text = "\n".join(
+                part
+                for part in [
+                    f"Root cause / failure pattern from healed test {test_file}.",
+                    f"Previous error: {(error_log or '')[:1800]}",
+                    f"Failure triage: {(diagnosis_context or '')[:1200]}",
+                    f"Known fix is reflected in healer output: {(healer_output or '')[:1800]}",
+                    "Lesson learned: next time, validate remembered selectors against live browser evidence before editing.",
+                ]
+                if part.strip()
+            )
+            service = get_agent_memory_service()
+            service.create_memory(
+                kind="failure_pattern",
+                content=text[:1200],
+                project_id=project_id,
+                confidence=0.78,
+                importance=0.7,
+                tags=["healer", "failure"],
+                source_type="native_healer",
+                source_id=test_file,
+                agent_type="NativeHealer",
+                review_required=True,
+            )
+            # Also let the consolidator extract any explicit lessons from the agent output.
+            # Run the deterministic path synchronously by using existing heuristics directly.
+            for memory in service.extract_candidates(healer_output or "", agent_type="NativeHealer"):
+                service.create_memory(
+                    kind=memory.kind,
+                    content=memory.content,
+                    project_id=project_id,
+                    tags=memory.tags,
+                    confidence=memory.confidence,
+                    source_type="native_healer",
+                    source_id=test_file,
+                    agent_type="NativeHealer",
+                    review_required=True,
+                )
+        except Exception as exc:
+            logger.debug("Healer memory capture skipped: %s", exc)
 
     async def _query_healer_agent(self, prompt: str, timeout_seconds: int | None = None) -> str:
         """

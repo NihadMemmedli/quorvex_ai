@@ -1,5 +1,10 @@
 # Spec Format
 
+![New test specification editor showing Markdown spec authoring](../assets/ui/spec-editor.png)
+
+<p class="caption">New test specification editor showing Markdown spec authoring.</p>
+
+
 Markdown test specification syntax reference for Quorvex AI.
 
 ## File Structure

@@ -1,5 +1,10 @@
 # CLI Reference
 
+![Quorvex dashboard showing the UI result of local CLI setup](../assets/ui/dashboard-overview.png)
+
+<p class="caption">Quorvex dashboard showing the UI result of local CLI setup.</p>
+
+
 Complete reference for the `orchestrator/cli.py` command-line interface.
 
 ## Usage
@@ -48,6 +53,7 @@ make run SPEC=specs/your-test.md
 | `--interactive` / `-i` | flag | `false` | Enable interactive mode (plan review and step confirmation) |
 | `--max-iterations` | int | `20` | Maximum healing iterations (used with `--hybrid`) |
 | `--memory-stats` | flag | `false` | Show memory system statistics and exit |
+| `--sync-workflow-step-types` | flag | `false` | Sync built-in workflow step registry metadata to the database and exit |
 | `--validate-only` | flag | `false` | Validate spec format, template includes, and target URL reachability without running the pipeline |
 | `--dry-run` | flag | `false` | Alias for `--validate-only` |
 | `--validate-timeout` | int | `10` | URL reachability timeout in seconds for validation mode |
@@ -98,7 +104,7 @@ make run SPEC=specs/your-test.md
 | `--skill-mode` | flag | `false` | Use skill-based execution from spec |
 | `--run-skill` | path | -- | Execute a Playwright skill script directly |
 | `--skill-timeout` | int | `30000` | Skill script timeout in milliseconds |
-| `--skill-headless` | flag | `false` | Run skill scripts in headless mode |
+| `--skill-headless` | flag | `true` for direct skill execution | Run skill scripts in headless mode |
 
 ## Legacy Flags (Hidden)
 
@@ -241,6 +247,13 @@ python orchestrator/cli.py --memory-stats
 
 # Memory stats for specific project
 python orchestrator/cli.py --memory-stats --project-id my-project
+```
+
+### Maintenance
+
+```bash
+# Sync built-in custom workflow step metadata into the database
+python orchestrator/cli.py --sync-workflow-step-types
 ```
 
 ## Exit Codes

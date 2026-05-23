@@ -66,7 +66,8 @@ cp secrets.yaml secrets.local.yaml
 # Edit with your values
 vim secrets.local.yaml
 
-# Apply secrets (do this BEFORE kustomize)
+# Apply secrets before the rest of the manifests.
+# make k8s-deploy does this automatically when k8s/secrets.local.yaml exists.
 kubectl apply -f secrets.local.yaml
 ```
 
@@ -74,13 +75,17 @@ kubectl apply -f secrets.local.yaml
 
 ```bash
 # From project root
+docker build -t your-registry/quorvex-backend:latest -f Dockerfile .
 docker build -t your-registry/quorvex-worker:latest -f docker/browser-worker/Dockerfile .
 docker build -t your-registry/quorvex-backend-slim:latest -f docker/backend-slim/Dockerfile .
 docker build -t your-registry/quorvex-frontend:latest -f web/Dockerfile web/
+docker build -t your-registry/quorvex-k6-worker:latest -f docker/k6-worker/Dockerfile .
 
+docker push your-registry/quorvex-backend:latest
 docker push your-registry/quorvex-worker:latest
 docker push your-registry/quorvex-backend-slim:latest
 docker push your-registry/quorvex-frontend:latest
+docker push your-registry/quorvex-k6-worker:latest
 ```
 
 ### 4. Update kustomization.yaml with your registry
@@ -90,12 +95,14 @@ images:
   - name: quorvex-worker
     newName: your-registry/quorvex-worker
     newTag: latest
+  # Also update quorvex-backend, quorvex-backend-slim,
+  # quorvex-frontend, and quorvex-k6-worker.
 ```
 
 ### 5. Deploy
 
 ```bash
-kubectl apply -k k8s/
+make k8s-deploy
 ```
 
 ### 6. Verify
@@ -147,6 +154,10 @@ Persistent Volume Claims:
 - `specs-pvc`: 5Gi - Test specifications
 - `tests-pvc`: 10Gi - Generated tests
 - `test-results-pvc`: 20Gi - Playwright reports
+- `minio-pvc`: 50Gi - MinIO object storage
+- `prds-pvc`: 10Gi - Uploaded PRD files
+- `data-pvc`: 20Gi - Runtime data such as memory stores
+- `backup-pvc`: 20Gi - Local backup staging
 
 ## Resource Limits
 

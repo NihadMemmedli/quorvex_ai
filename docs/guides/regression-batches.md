@@ -1,5 +1,10 @@
 # How to Run Regression Batches
 
+![Regression batch reports list in the Quorvex dashboard](../assets/ui/regression-batches.png)
+
+<p class="caption">Regression batch reports list in the Quorvex dashboard.</p>
+
+
 Group multiple test specs into batches for regression testing, track results, and export reports.
 
 ## Prerequisites

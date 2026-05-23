@@ -50,8 +50,14 @@ Thumbs.db
 marketing/
 .playwright-mcp/
 
-# Demo video outputs
+# Marketing / launch production (local only)
+specs/demo-marketing/
+scripts/docs-assets/
+docs/assets/ui/
+
+# Demo video pipeline outputs and campaign artifacts
 scripts/demo-video/output/
+scripts/demo-video/campaign-config.json
 
 # Playwright MCP temp files
 healer_result.json
@@ -73,6 +79,8 @@ pdf/
 # Generated Data and DB
 prds/
 test.db
+test.db-shm
+test.db-wal
 web/.next/
 web/out/
 

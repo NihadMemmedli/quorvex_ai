@@ -6104,6 +6104,155 @@ def _serialize_agent_run(run: AgentRun) -> dict[str, Any]:
     }
 
 
+def _report_confidence(value: str | None) -> float:
+    normalized = str(value or "").lower()
+    if normalized == "high":
+        return 0.86
+    if normalized == "low":
+        return 0.58
+    return 0.72
+
+
+def _report_importance(value: str | None) -> float:
+    normalized = str(value or "").lower()
+    if normalized == "critical":
+        return 0.95
+    if normalized == "high":
+        return 0.84
+    if normalized == "low":
+        return 0.54
+    if normalized == "info":
+        return 0.42
+    return 0.7
+
+
+def _capture_custom_agent_report_memory(
+    *,
+    run_id: str,
+    project_id: str | None,
+    structured_report: dict[str, Any],
+    config: dict[str, Any],
+) -> list[str]:
+    """Store review-gated memories from a custom agent's normalized report."""
+    if not project_id or not isinstance(structured_report, dict):
+        return []
+
+    try:
+        from orchestrator.memory.agent_memory import get_agent_memory_service
+    except Exception as exc:
+        logger.debug("Custom agent memory capture unavailable for %s: %s", run_id, exc)
+        return []
+
+    service = get_agent_memory_service()
+    stored_ids: list[str] = []
+    agent_name = _clean_text(config.get("agent_name") or "Custom agent", 120)
+    source_type = "custom_agent_run"
+
+    def store(
+        *,
+        kind: str,
+        content: str,
+        summary: str,
+        tags: list[str],
+        confidence: float,
+        importance: float,
+        extra_data: dict[str, Any],
+    ) -> None:
+        try:
+            memory = service.create_memory(
+                kind=kind,
+                content=content,
+                project_id=project_id,
+                summary=summary,
+                tags=["custom-agent", *tags],
+                confidence=confidence,
+                importance=importance,
+                source_type=source_type,
+                source_id=run_id,
+                agent_type="CustomAgent",
+                review_required=True,
+                extra_data={"agent_run_id": run_id, "agent_name": agent_name, **extra_data},
+            )
+            if memory and memory.id not in stored_ids:
+                stored_ids.append(memory.id)
+        except Exception as exc:
+            logger.debug("Skipped custom agent memory candidate for %s: %s", run_id, exc)
+
+    summary = _clean_text(structured_report.get("summary"), 500)
+    scope = _clean_text(structured_report.get("scope") or config.get("prompt") or config.get("url"), 500)
+    if summary:
+        store(
+            kind="project_fact",
+            content=f"{agent_name} summary: {summary}" + (f" Scope: {scope}" if scope else ""),
+            summary=f"{agent_name}: {summary}",
+            tags=["summary"],
+            confidence=0.68,
+            importance=0.5,
+            extra_data={"report_section": "summary"},
+        )
+
+    findings = _as_report_list(structured_report.get("findings"))[:5]
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        title = _clean_text(finding.get("title"), 180)
+        if not title:
+            continue
+        severity = _clean_text(finding.get("severity") or "medium", 30).lower()
+        page = _clean_text(finding.get("page"), 300)
+        description = _clean_text(finding.get("description"), 600)
+        evidence = _clean_text(finding.get("evidence"), 500)
+        suggested_action = _clean_text(finding.get("suggested_action"), 400)
+        content = (
+            f"Custom agent finding: {title}. "
+            f"Severity: {severity}. "
+            f"{f'Page: {page}. ' if page else ''}"
+            f"{f'Description: {description}. ' if description else ''}"
+            f"{f'Evidence: {evidence}. ' if evidence else ''}"
+            f"{f'Suggested action: {suggested_action}.' if suggested_action else ''}"
+        )
+        store(
+            kind="project_fact" if severity == "info" else "failure_pattern",
+            content=content,
+            summary=f"{title} ({severity})",
+            tags=["finding", severity],
+            confidence=_report_confidence(str(finding.get("confidence") or "")),
+            importance=_report_importance(severity),
+            extra_data={"report_section": "findings", "finding_id": finding.get("id")},
+        )
+
+    test_ideas = _as_report_list(structured_report.get("test_ideas"))[:5]
+    for idea in test_ideas:
+        if not isinstance(idea, dict):
+            continue
+        title = _clean_text(idea.get("title"), 180)
+        if not title:
+            continue
+        priority = _clean_text(idea.get("priority") or "medium", 30).lower()
+        page = _clean_text(idea.get("page"), 300)
+        steps = [_clean_text(step, 220) for step in _as_report_list(idea.get("steps")) if _clean_text(step, 220)]
+        expected = _clean_text(idea.get("expected"), 400)
+        steps_text = "; ".join(steps[:5])
+        content = (
+            f"Custom agent test idea: {title}. "
+            f"Priority: {priority}. "
+            f"{f'Page: {page}. ' if page else ''}"
+            f"{f'Steps: {steps_text}. ' if steps_text else ''}"
+            f"{f'Expected: {expected}.' if expected else ''}"
+        )
+        store(
+            kind="workflow_decision",
+            content=content,
+            summary=f"Test idea: {title}",
+            tags=["test-idea", priority],
+            confidence=0.72,
+            importance=_report_importance(priority),
+            extra_data={"report_section": "test_ideas", "test_idea_id": idea.get("id")},
+        )
+
+    return stored_ids
+
+
 def _sync_agent_tool_catalog(session: Session) -> list[AgentToolDefinition]:
     """Upsert the built-in selectable tool catalog."""
     now = datetime.utcnow()
@@ -6546,6 +6695,9 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 if custom_config:
                     prompt_parts.append(f"Additional config JSON:\n{json.dumps(custom_config, indent=2)}")
                 prompt_parts.extend(["", "Task:", task_prompt])
+                with Session(engine) as session:
+                    custom_run = session.get(AgentRun, run_id)
+                    custom_project_id = custom_run.project_id if custom_run else None
 
                 def _on_custom_task_enqueued(task_id: str) -> None:
                     _update_agent_run_progress(
@@ -6593,6 +6745,13 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     owner_type="agent_run",
                     owner_id=run_id,
                     owner_label=f"Agent run {run_id}",
+                    memory_project_id=custom_project_id,
+                    memory_agent_type="CustomAgent",
+                    memory_source_type="custom_agent_run",
+                    memory_source_id=run_id,
+                    memory_stage="custom_agent",
+                    inject_memory=True,
+                    capture_memory=False,
                 )
                 if not await _wait_if_agent_run_paused(run_id):
                     return
@@ -6603,11 +6762,18 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     config,
                     artifacts,
                 )
+                captured_memory_ids = _capture_custom_agent_report_memory(
+                    run_id=run_id,
+                    project_id=custom_project_id,
+                    structured_report=structured_report,
+                    config=config,
+                )
                 result = {
                     "summary": structured_report.get("summary")
                     or (agent_result.output[:500] if agent_result.output else agent_result.error),
                     "output": agent_result.output,
                     "structured_report": structured_report,
+                    "captured_memory_ids": captured_memory_ids,
                     "error": agent_result.error,
                     "duration_seconds": agent_result.duration_seconds,
                     "tool_calls": [
@@ -6875,11 +7041,13 @@ async def run_agent_definition(
     queue_position = None if initial_status == "running" else agent_status.queued + 1
 
     run_id = str(uuid.uuid4())
+    run_project_id = definition.project_id or request.project_id
     run_config = {
         "agent_definition_id": definition.id,
         "agent_name": definition.name,
         "prompt": request.prompt.strip(),
         "url": request.url,
+        "project_id": run_project_id,
         "custom_config": request.config or {},
         "system_prompt": definition.system_prompt,
         "timeout_seconds": definition.timeout_seconds,
@@ -6893,7 +7061,7 @@ async def run_agent_definition(
         agent_type="custom",
         config_json=json.dumps(run_config),
         status=initial_status,
-        project_id=definition.project_id,
+        project_id=run_project_id,
     )
     session.add(run)
     session.commit()

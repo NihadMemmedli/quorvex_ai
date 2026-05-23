@@ -1,5 +1,10 @@
 # How to Deploy Quorvex AI
 
+![Settings dashboard used to verify deployment configuration](../assets/ui/settings.png)
+
+<p class="caption">Settings dashboard used to verify deployment configuration.</p>
+
+
 Choose a deployment mode and configure it for your environment, from local development to Kubernetes auto-scaling.
 
 ## Prerequisites
@@ -13,6 +18,7 @@ Choose a deployment mode and configure it for your environment, from local devel
 | Mode | Use Case | Command | Scaling |
 |------|----------|---------|---------|
 | Local dev | Solo developer | `make dev` | Single instance |
+| Minimal Docker | Quick demo, low-resource machine | `docker compose -f docker-compose.minimal.yml up -d` | Single instance |
 | Docker dev | Team/reproducible | `make docker-up` | Single instance |
 | Production (Standard) | Small team, VNC | `make prod-up` | 1 backend + browsers |
 | Production (Workers) | Medium team | `make workers-up` | N browser containers |
@@ -21,10 +27,11 @@ Choose a deployment mode and configure it for your environment, from local devel
 
 ## Local Development
 
-The simplest mode. Runs the backend and frontend as local processes using SQLite.
+The simplest development mode. It runs the backend and frontend as local processes. If Docker is available, `make dev` starts a PostgreSQL container; otherwise it falls back to SQLite.
 
 ```bash
 make setup    # One-time: venv, deps, browsers
+make check-env
 make dev      # Start backend (port 8001) + frontend (port 3000)
 ```
 
@@ -72,7 +79,7 @@ Production uses `docker-compose.prod.yml` with an `.env.prod` configuration file
 ### Create Production Environment File
 
 ```bash
-cp .env.example .env.prod
+cp .env.prod.example .env.prod
 ```
 
 Edit `.env.prod` with production values:
@@ -93,6 +100,12 @@ INITIAL_ADMIN_EMAIL=admin@yourcompany.com
 INITIAL_ADMIN_PASSWORD=your-secure-password
 ```
 
+Validate the file before startup:
+
+```bash
+make check-env
+```
+
 ### Standard Mode (with VNC)
 
 Runs a single backend container with Playwright browsers and VNC streaming. Best for small teams that need live browser observation.
@@ -109,6 +122,8 @@ Services started:
 | API | http://localhost:8001 | FastAPI backend |
 | VNC View | http://localhost:6080 | Live browser (noVNC) |
 | MinIO Console | http://localhost:9001 | Object storage admin |
+| Temporal | localhost:7233 | Durable workflow engine for autonomous missions |
+| Temporal UI | http://localhost:8233 | Temporal workflow inspection UI |
 
 The backend container uses **supervisord** to manage:
 - Xvfb (virtual display at `:99`, 1920x1080x24)
@@ -116,6 +131,7 @@ The backend container uses **supervisord** to manage:
 - x11vnc (VNC server)
 - websockify (WebSocket bridge on port 6080)
 - uvicorn (API server on port 8001)
+- agent worker, autonomous mission worker, and custom workflow worker processes
 
 Resource allocation: 24 GB memory limit, 8 CPUs, 2 GB shared memory.
 
@@ -293,17 +309,22 @@ Enterprise auto-scaling deployment with HPA (Horizontal Pod Autoscaler).
 # 1. Configure secrets
 cp k8s/secrets.yaml k8s/secrets.local.yaml
 # Edit secrets.local.yaml with your values
-kubectl apply -f k8s/secrets.local.yaml
+# make k8s-deploy applies secrets.local.yaml before the rest of the manifests.
+# If secrets.local.yaml is missing, the target asks before applying the template.
 
 # 2. Build and push images
-docker build -t your-registry/playwright-worker:latest -f docker/browser-worker/Dockerfile .
-docker build -t your-registry/playwright-backend-slim:latest -f docker/backend-slim/Dockerfile .
-docker build -t your-registry/playwright-frontend:latest -f web/Dockerfile web/
-docker push your-registry/playwright-worker:latest
-docker push your-registry/playwright-backend-slim:latest
-docker push your-registry/playwright-frontend:latest
+docker build -t your-registry/quorvex-backend:latest -f Dockerfile .
+docker build -t your-registry/quorvex-worker:latest -f docker/browser-worker/Dockerfile .
+docker build -t your-registry/quorvex-backend-slim:latest -f docker/backend-slim/Dockerfile .
+docker build -t your-registry/quorvex-frontend:latest -f web/Dockerfile web/
+docker build -t your-registry/quorvex-k6-worker:latest -f docker/k6-worker/Dockerfile .
+docker push your-registry/quorvex-backend:latest
+docker push your-registry/quorvex-worker:latest
+docker push your-registry/quorvex-backend-slim:latest
+docker push your-registry/quorvex-frontend:latest
+docker push your-registry/quorvex-k6-worker:latest
 
-# 3. Update kustomization.yaml with your registry
+# 3. Update kustomization.yaml image overrides with your registry
 # 4. Deploy
 make k8s-deploy
 ```
@@ -350,6 +371,10 @@ make k8s-delete          # Remove all resources
 | specs-pvc | 5 Gi | Test specifications |
 | tests-pvc | 10 Gi | Generated tests |
 | test-results-pvc | 20 Gi | Playwright reports |
+| minio-pvc | 50 Gi | MinIO object storage |
+| prds-pvc | 10 Gi | Uploaded PRD files |
+| data-pvc | 20 Gi | Runtime data such as memory stores |
+| backup-pvc | 20 Gi | Local backup staging |
 
 ### Kubernetes Files
 
@@ -358,14 +383,23 @@ All manifests are in `k8s/`:
 | File | Purpose |
 |------|---------|
 | `kustomization.yaml` | Kustomize configuration and image overrides |
-| `namespace.yaml` | `playwright-agent` namespace |
+| `namespace.yaml` | `quorvex` namespace |
 | `secrets.yaml` | Secret template (copy to `secrets.local.yaml`) |
 | `configmap.yaml` | Non-secret configuration |
 | `backend-deployment.yaml` | Backend slim deployment (2 replicas) |
 | `frontend-deployment.yaml` | Frontend deployment |
 | `browser-worker-deployment.yaml` | Worker deployment + HPA |
 | `postgres-deployment.yaml` | PostgreSQL StatefulSet |
+| `temporal-deployment.yaml` | Temporal server and UI |
 | `redis.yaml` | Redis deployment |
+| `minio-deployment.yaml` | MinIO object storage |
+| `agent-worker-deployment.yaml` | Agent queue workers |
+| `autonomous-mission-worker-deployment.yaml` | Temporal autonomous mission worker |
+| `k6-worker-deployment.yaml` | K6 load-test worker |
+| `zap-deployment.yaml` | OWASP ZAP daemon |
+| `backup-cronjob.yaml` | Scheduled backup job |
+| `archival-cronjob.yaml` | Artifact archival job |
+| `scripts-configmap.yaml` | Operational scripts mounted into jobs |
 | `pvc.yaml` | PersistentVolumeClaims |
 | `ingress.yaml` | Ingress rules for external access |
 
@@ -383,18 +417,16 @@ make db-stamp R=001                          # Stamp existing DB at revision
 
 Migrations are stored in `orchestrator/migrations/versions/` and managed by Alembic.
 
-## TLS/SSL with Nginx
+## Reverse Proxy with Nginx
 
-An optional nginx reverse proxy is available for TLS termination:
+The production stack starts the nginx profile by default through `make prod-up`. The checked-in nginx config is an HTTP reverse proxy on port 80. Terminate TLS at an external load balancer, ingress controller, or update `nginx/nginx.conf` with `listen 443 ssl` and certificate directives before relying on container-local TLS.
 
-1. Place certificates in `nginx/certs/`
-2. Configure `nginx/nginx.conf`
-3. Start with the nginx profile:
+To start the same profiles manually:
    ```bash
-   docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard --profile nginx up -d
+   docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard --profile nginx --profile backup-scheduler up -d
    ```
 
-Nginx exposes ports 80 and 443 and proxies to the backend and frontend.
+Nginx proxies to the backend and frontend. Port 443 is exposed by Compose for custom TLS configs, but the default config does not enable TLS.
 
 ## Health Checks
 
@@ -436,5 +468,7 @@ After deployment, confirm everything works:
 
 - [Company Deployment](./company-deployment.md) -- on-premises deployment walkthrough
 - [Disaster Recovery](./disaster-recovery.md) -- backup and recovery procedures
+- [Artifact Storage Lifecycle](../explanation/artifact-storage-lifecycle.md) -- hot/warm/cold artifact retention
+- [Database Migration Architecture](../explanation/database-migration-architecture.md) -- Alembic and startup migration behavior
 - [Authentication](./authentication.md) -- enable auth and manage users
 - [Troubleshooting](./troubleshooting.md) -- diagnose deployment issues

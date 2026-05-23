@@ -8,7 +8,6 @@ namespace: quorvex
 resources:
   - namespace.yaml
   - configmap.yaml
-  - secrets.yaml
   - pvc.yaml
   - redis.yaml
   - postgres-deployment.yaml
@@ -35,6 +34,9 @@ labels:
 
 # Image customization (override in overlays)
 images:
+  - name: quorvex-backend
+    newName: your-registry/quorvex-backend
+    newTag: latest
   - name: quorvex-worker
     newName: your-registry/quorvex-worker
     newTag: latest
@@ -43,4 +45,7 @@ images:
     newTag: latest
   - name: quorvex-frontend
     newName: your-registry/quorvex-frontend
+    newTag: latest
+  - name: quorvex-k6-worker
+    newName: your-registry/quorvex-k6-worker
     newTag: latest

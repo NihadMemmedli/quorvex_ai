@@ -1,5 +1,10 @@
 # How to Explore an App and Generate Requirements
 
+![Discovery dashboard showing explored flows and generated requirements](../assets/ui/exploration.png)
+
+<p class="caption">Discovery dashboard showing explored flows and generated requirements.</p>
+
+
 Use AI-powered exploration to discover application flows, generate structured requirements, and create a Requirements Traceability Matrix (RTM) for test coverage analysis.
 
 ## Prerequisites
@@ -26,20 +31,20 @@ python orchestrator/cli.py --explore https://app.example.com \
 
 ### Via Dashboard
 
-1. Navigate to **Exploration** in the dashboard (`/exploration`)
+1. Open the command palette and choose **Discovery** (`/exploration`)
 2. Click **New Exploration**
 3. Enter the target URL
-4. Select a strategy (`goal_directed`, `breadth_first`, or `depth_first`)
-5. Configure max interactions (default: 50)
+4. Select **General** or **API Focused** mode
+5. Choose a thoroughness level: **Quick**, **Normal**, or **Comprehensive**
 6. Click **Start**
 
 ### Via API
 
 ```bash
-curl -X POST http://localhost:8001/exploration/sessions \
+curl -X POST http://localhost:8001/exploration/start \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://app.example.com",
+    "entry_url": "https://app.example.com",
     "strategy": "goal_directed",
     "max_interactions": 50,
     "project_id": "your-project-id"
@@ -77,7 +82,7 @@ python orchestrator/cli.py --exploration-results SESSION_ID
 
 ### Via Dashboard
 
-1. Navigate to **Exploration** in the dashboard
+1. Open **Discovery** from the command palette
 2. Click on the completed session
 3. Review the discovered items:
    - **Pages** -- URLs and page titles discovered
@@ -90,10 +95,10 @@ python orchestrator/cli.py --exploration-results SESSION_ID
 
 ```bash
 # Get session details with discovered flows
-curl http://localhost:8001/exploration/sessions/SESSION_ID
+curl http://localhost:8001/exploration/SESSION_ID
 
 # List all sessions for a project
-curl http://localhost:8001/exploration/sessions?project_id=your-project-id
+curl http://localhost:8001/exploration?project_id=your-project-id
 ```
 
 ## Step 4: Generate Requirements from Exploration
@@ -195,8 +200,9 @@ curl -X POST http://localhost:8001/rtm/generate \
 curl http://localhost:8001/rtm?project_id=your-project-id
 
 # Export RTM
-curl "http://localhost:8001/rtm/export?project_id=your-project-id&format=csv" -o rtm.csv
-curl "http://localhost:8001/rtm/export?project_id=your-project-id&format=json" -o rtm.json
+curl "http://localhost:8001/rtm/export/csv?project_id=your-project-id" -o rtm.csv
+curl "http://localhost:8001/rtm/export/markdown?project_id=your-project-id" -o rtm.md
+curl "http://localhost:8001/rtm/export/html?project_id=your-project-id" -o rtm.html
 ```
 
 The RTM maps each requirement to test specs with:
@@ -233,7 +239,11 @@ Confirm the end-to-end pipeline worked:
 1. Exploration session shows status `completed` with discovered flows
 2. Requirements list is populated with auto-generated codes (REQ-001, etc.)
 3. RTM shows coverage percentages and identifies gaps
-4. Exported RTM file (CSV/JSON) contains the expected mappings
+4. Exported RTM file (CSV, Markdown, or HTML) contains the expected mappings
+
+## Generate API Specs and Tests from Discovery
+
+When a completed Discovery session captures API endpoints, the dashboard exposes actions to generate API specs and API tests from that session. Use **API Focused** mode when API coverage is the main goal, then review captured endpoints before generating tests.
 
 ## Related Guides
 

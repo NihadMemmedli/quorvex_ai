@@ -1,5 +1,10 @@
 # How to Diagnose and Fix Common Issues
 
+![Test runs dashboard used to debug execution failures](../assets/ui/runs.png)
+
+<p class="caption">Test runs dashboard used to debug execution failures.</p>
+
+
 Expanded troubleshooting guide for resolving setup, pipeline, authentication, browser, database, Docker, and Kubernetes problems.
 
 ## Prerequisites
@@ -129,7 +134,7 @@ except Exception as e:
 
 **Symptom**: Login returns HTTP 423.
 
-**Fix**: Wait 15 minutes for automatic unlock, or manually clear:
+**Fix**: Wait 30 minutes for automatic unlock, or manually clear:
 ```sql
 -- PostgreSQL
 UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE email = 'user@example.com';
@@ -185,8 +190,9 @@ make prod-up
 
 **Fix** (SQLite fallback):
 ```bash
-# In .env
-DATABASE_URL=sqlite:///./test.db
+# In .env; omit DATABASE_URL to use the default local SQLite path,
+# or set an explicit file path:
+DATABASE_URL=sqlite:///./orchestrator/data/playwright_agent.db
 ```
 
 ### Migration Errors
@@ -236,9 +242,9 @@ make prod-restart
 1. Verify `VNC_ENABLED=true` in `.env.prod`
 2. Check supervisord status:
    ```bash
-   docker exec playwright-agent-backend-1 supervisorctl status
+   docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard exec backend supervisorctl status
    ```
-   All processes (xvfb, fluxbox, x11vnc, websockify, uvicorn) should be `RUNNING`.
+   X/VNC processes, uvicorn, and worker processes should be `RUNNING`.
 
 ### Backup Services Can't Connect
 
@@ -251,11 +257,82 @@ make prod-restart
 **Fix**:
 ```bash
 docker ps | grep redis
-docker compose restart redis
-docker exec -it playwright-agent-redis-1 redis-cli ping
+docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard restart redis
+docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard exec redis redis-cli ping
 ```
 
 The application degrades gracefully: rate limiting uses in-memory storage and the agent queue falls back to direct execution.
+
+### Temporal Unavailable for Autonomous Missions
+
+**Symptom**: Autonomous mission APIs report durable orchestration is unavailable, or missions stay in a pending state.
+
+**Cause**: `TEMPORAL_ADDRESS` is not configured, the Temporal service is not reachable from the backend container, or the autonomous mission worker is not running.
+
+**Fix**:
+```bash
+make prod-status
+make autopilot-logs
+```
+
+Verify `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, and `TEMPORAL_TASK_QUEUE` in `.env.prod`, then restart the backend and mission worker stack. If you do not need durable long-running missions, use the regular AutoPilot flow instead.
+
+### Long-Running Missions Retry Repeatedly
+
+**Symptom**: A mission creates repeated attempts but never reaches approval or completion.
+
+**Cause**: The target application is unreachable, credentials are invalid, browser slots are exhausted, or the mission definition is too broad for the configured timeout.
+
+**Fix**:
+1. Check mission logs with `make autopilot-logs`
+2. Check browser capacity with `curl http://localhost:8001/api/browser-pool/status`
+3. Increase `AGENT_TIMEOUT_SECONDS` or narrow the mission scope
+4. Confirm project credentials are present and not expired
+
+### K6 Workers Are Running but Jobs Stay Queued
+
+**Symptom**: K6 worker containers are healthy, but load-test jobs remain queued.
+
+**Cause**: Redis is unavailable, workers were started without the K6 profile, or the backend and workers are not using the same queue configuration.
+
+**Fix**:
+```bash
+make k6-workers-status
+make k6-workers-logs
+docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard exec redis redis-cli ping
+```
+
+Restart the worker profile after Redis is healthy:
+```bash
+make k6-workers-down
+make k6-workers-up
+```
+
+### Backups Succeed Locally but Fail to Upload to MinIO
+
+**Symptom**: `make backup-full` creates local backup files, but MinIO upload fails.
+
+**Cause**: MinIO credentials, bucket names, network aliases, or retention settings differ between `.env.prod` and the running containers.
+
+**Fix**:
+1. Open the MinIO console with `make minio-console`
+2. Confirm `MINIO_ENDPOINT`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`, `MINIO_BUCKET`, and `MINIO_BUCKET_ARTIFACTS`
+3. Run `make storage-health`
+4. Restart backup-related services after env changes
+
+### ZAP Reachable from Host but Not from Backend
+
+**Symptom**: `curl http://localhost:8090` works on the host, but security scans fail from the backend.
+
+**Cause**: The backend container cannot resolve the host's `localhost`; inside Docker, `localhost` refers to the backend container itself.
+
+**Fix**:
+```bash
+make zap-status
+make zap-logs
+```
+
+Use the Docker service name and internal port in container configuration, for example `ZAP_HOST=zap` and `ZAP_PORT=8090`, then restart the backend.
 
 ## Kubernetes Issues
 
@@ -263,8 +340,8 @@ The application degrades gracefully: rate limiting uses in-memory storage and th
 
 **Diagnostics**:
 ```bash
-kubectl describe pod <pod-name> -n playwright-agent
-kubectl get pvc -n playwright-agent
+kubectl describe pod <pod-name> -n quorvex
+kubectl get pvc -n quorvex
 ```
 
 ### HPA Not Scaling
@@ -287,8 +364,8 @@ kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/late
 | Local dev | Backend | `api.log` (project root) |
 | Local dev | Frontend | `web.log` (project root) |
 | Docker prod | All | `make prod-logs` |
-| Kubernetes | Backend | `kubectl logs -l app=backend -n playwright-agent` |
-| Kubernetes | Workers | `kubectl logs -l app=browser-worker -n playwright-agent` |
+| Kubernetes | Backend | `kubectl logs -l app=backend -n quorvex` |
+| Kubernetes | Workers | `kubectl logs -l app=browser-worker -n quorvex` |
 
 ## Health Endpoints
 

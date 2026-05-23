@@ -201,6 +201,13 @@ class AgentRunner:
         owner_type: str | None = None,
         owner_id: str | None = None,
         owner_label: str | None = None,
+        memory_project_id: str | None = None,
+        memory_agent_type: str | None = None,
+        memory_source_type: str | None = None,
+        memory_source_id: str | None = None,
+        memory_stage: str | None = None,
+        inject_memory: bool = True,
+        capture_memory: bool = True,
     ):
         """
         Initialize the agent runner.
@@ -227,6 +234,13 @@ class AgentRunner:
             owner_type: Optional logical owner type for queue lifecycle cleanup
             owner_id: Optional logical owner ID for queue lifecycle cleanup
             owner_label: Optional human-readable owner label for queue diagnostics
+            memory_project_id: Optional project scope for prompt memory
+            memory_agent_type: Optional memory actor label
+            memory_source_type: Optional memory source type for capture/telemetry
+            memory_source_id: Optional memory source ID for capture/telemetry
+            memory_stage: Optional telemetry stage for memory injection
+            inject_memory: Whether to inject memory context into prompts
+            capture_memory: Whether to extract memory candidates from run output
         """
         self.timeout_seconds = timeout_seconds
         self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
@@ -247,6 +261,13 @@ class AgentRunner:
         self.owner_type = owner_type
         self.owner_id = owner_id
         self.owner_label = owner_label
+        self.memory_project_id = memory_project_id
+        self.memory_agent_type = memory_agent_type or "AgentRunner"
+        self.memory_source_type = memory_source_type or "agent_run"
+        self.memory_source_id = memory_source_id
+        self.memory_stage = memory_stage or "agent_runner"
+        self.inject_memory = inject_memory
+        self.capture_memory = capture_memory
 
     def _effective_tools(self) -> list[str] | dict[str, str] | None:
         """Build the SDK/CLI tool availability set.
@@ -796,32 +817,47 @@ class AgentRunner:
         return agent_result
 
     def _agent_memory_project_id(self) -> str | None:
-        return os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID")
+        return self.memory_project_id or os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID")
 
     def _augment_prompt_with_agent_memory(self, prompt: str) -> str:
-        if os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
+        if not self.inject_memory or os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
             return prompt
         project_id = self._agent_memory_project_id()
         if not project_id:
             return prompt
         try:
             from orchestrator.memory.agent_memory import get_agent_memory_service
+            from orchestrator.memory.context_builder import MemoryContextBuilder
+            from orchestrator.memory.telemetry import record_memory_injection
 
-            context = get_agent_memory_service().build_context(
+            builder = MemoryContextBuilder(service=get_agent_memory_service())
+            bundle = builder.build_bundle(
                 query=prompt[:2000],
                 project_id=project_id,
-                agent_type="AgentRunner",
+                agent_type=self.memory_agent_type,
                 limit=8,
             )
+            context = builder.format_prompt_context(bundle, token_budget=1200)
             if not context:
                 return prompt
+            record_memory_injection(
+                project_id=project_id,
+                actor_type="agent",
+                stage=self.memory_stage,
+                query=prompt[:1000],
+                bundle=bundle.to_dict(),
+                context_text=context,
+                source_type=self.memory_source_type,
+                source_id=self.memory_source_id or self.owner_id,
+                extra_data={"agent_type": self.memory_agent_type},
+            )
             return f"{context}\n\n---\n\n{prompt}"
         except Exception as exc:
             logger.debug("Agent memory retrieval skipped: %s", exc)
             return prompt
 
     def _capture_agent_memory(self, prompt: str, result: AgentResult | None) -> None:
-        if os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
+        if not self.capture_memory or os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
             return
         project_id = self._agent_memory_project_id()
         if not project_id or result is None:
@@ -837,9 +873,9 @@ class AgentRunner:
             get_agent_memory_service().capture_candidates(
                 text,
                 project_id=project_id,
-                source_type="agent_run",
-                source_id=result.session_id,
-                agent_type="AgentRunner",
+                source_type=self.memory_source_type,
+                source_id=self.memory_source_id or result.session_id,
+                agent_type=self.memory_agent_type,
             )
         except Exception as exc:
             logger.debug("Agent memory capture skipped: %s", exc)

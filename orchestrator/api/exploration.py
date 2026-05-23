@@ -18,6 +18,7 @@ import os
 
 # Import workflows - deferred to avoid circular imports
 import sys
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -40,6 +41,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from services.browser_pool import OperationType as BrowserOpType
 from services.browser_pool import get_browser_pool
+from services.exploration_policy import (
+    ExplorationPolicyError,
+    ExplorationSafetyPolicy,
+    policy_to_agent_instructions,
+    validate_exploration_policy,
+)
 
 # Import MCP health checker
 from utils.mcp_health import verify_mcp_environment
@@ -72,6 +79,7 @@ class ExplorationStartRequest(BaseModel):
     exclude_patterns: list[str] = Field(default_factory=list)
     focus_areas: list[str] = Field(default_factory=list)
     additional_instructions: str | None = None  # Custom instructions for AI
+    safety_policy: ExplorationSafetyPolicy = Field(default_factory=ExplorationSafetyPolicy)
 
 
 class ExplorationSessionResponse(BaseModel):
@@ -88,6 +96,7 @@ class ExplorationSessionResponse(BaseModel):
     api_endpoints_discovered: int
     issues_discovered: int = 0
     progress_data: str | None = None
+    safety_policy: dict[str, Any] | None = None
     started_at: datetime | None
     completed_at: datetime | None
     duration_seconds: int | None
@@ -108,6 +117,11 @@ class FlowResponse(BaseModel):
     is_success_path: bool
     preconditions: list[str]
     postconditions: list[str]
+    review_status: str = "pending"
+    reviewer: str | None = None
+    review_comment: str | None = None
+    reviewed_at: datetime | None = None
+    generated_at: datetime | None = None
 
 
 class ApiEndpointResponse(BaseModel):
@@ -170,6 +184,11 @@ class FlowDetailResponse(BaseModel):
     preconditions: list[str] = Field(default_factory=list)
     postconditions: list[str] = Field(default_factory=list)
     steps: list[FlowStepResponse] = Field(default_factory=list)
+    review_status: str = "pending"
+    reviewer: str | None = None
+    review_comment: str | None = None
+    reviewed_at: datetime | None = None
+    generated_at: datetime | None = None
 
 
 class ApiEndpointDetailResponse(BaseModel):
@@ -232,6 +251,30 @@ class FlowUpdateRequest(BaseModel):
     is_success_path: bool | None = None
     preconditions: list[str] | None = None
     postconditions: list[str] | None = None
+
+
+class FlowReviewDecisionRequest(BaseModel):
+    """Approve/reject metadata for a discovered flow."""
+
+    reviewer: str | None = None
+    comment: str | None = None
+
+
+class FlowReviewBulkDecision(BaseModel):
+    """Single bulk review decision for a discovered flow."""
+
+    flow_id: int
+    decision: str = Field(..., description="approve, reject, approved, rejected, pending, or generated")
+    reviewer: str | None = None
+    comment: str | None = None
+
+
+class FlowReviewBulkDecisionRequest(BaseModel):
+    """Bulk review decisions for discovered flows."""
+
+    decisions: list[FlowReviewBulkDecision] = Field(default_factory=list)
+    reviewer: str | None = None
+    comment: str | None = None
 
 
 class ApiEndpointUpdateRequest(BaseModel):
@@ -347,11 +390,13 @@ def _build_exploratory_agent_config(
     run_id: str,
 ) -> dict:
     """Map ExplorationStartRequest fields to ExploratoryAgent config dict."""
+    safety_policy = validate_exploration_policy(request_body.entry_url, request_body.safety_policy)
     config: dict[str, Any] = {
         "url": request_body.entry_url,
         "time_limit_minutes": request_body.timeout_minutes,
         "run_id": run_id,
         "project_id": request_body.project_id,
+        "safety_policy": safety_policy.model_dump(),
     }
 
     # Build auth config
@@ -372,6 +417,7 @@ def _build_exploratory_agent_config(
     parts: list[str] = []
     if request_body.additional_instructions:
         parts.append(request_body.additional_instructions)
+    parts.append(policy_to_agent_instructions(safety_policy))
     if request_body.strategy and request_body.strategy != "goal_directed":
         parts.append(f"Use a '{request_body.strategy}' exploration strategy.")
     if request_body.max_depth and request_body.max_depth != 10:
@@ -535,6 +581,68 @@ def _collect_exploration_artifacts(session_id: str) -> list[ExplorationArtifactR
             item.name,
         ),
     )
+
+
+def _session_safety_policy(session: ExplorationSession) -> dict[str, Any] | None:
+    try:
+        config = session.config
+    except Exception:
+        config = {}
+    policy = config.get("safety_policy") if isinstance(config, dict) else None
+    return policy if isinstance(policy, dict) else None
+
+
+def _flow_review_fields(review: Any | None) -> dict[str, Any]:
+    return {
+        "review_status": getattr(review, "review_status", None) or "pending",
+        "reviewer": getattr(review, "reviewer", None),
+        "review_comment": getattr(review, "comment", None),
+        "reviewed_at": getattr(review, "decided_at", None),
+        "generated_at": getattr(review, "generated_at", None),
+    }
+
+
+def _flow_response(flow: Any, review: Any | None = None) -> FlowResponse:
+    return FlowResponse(
+        id=flow.id,
+        flow_name=flow.flow_name,
+        flow_category=flow.flow_category,
+        description=flow.description,
+        start_url=flow.start_url,
+        end_url=flow.end_url,
+        step_count=flow.step_count,
+        is_success_path=flow.is_success_path,
+        preconditions=flow.preconditions,
+        postconditions=flow.postconditions,
+        **_flow_review_fields(review),
+    )
+
+
+def _reviewer_identity(current_user: Any, requested_reviewer: str | None) -> str | None:
+    if requested_reviewer:
+        return requested_reviewer
+    if not current_user:
+        return None
+    return (
+        getattr(current_user, "email", None)
+        or getattr(current_user, "username", None)
+        or getattr(current_user, "id", None)
+    )
+
+
+def _ensure_flow_generation_allowed(store: Any, session_id: str) -> dict[str, int]:
+    counts = store.get_flow_review_status_counts(session_id)
+    blocked = counts.get("pending", 0) + counts.get("rejected", 0)
+    if blocked:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "Flow review required before generation",
+                "message": "Generation is blocked until all discovered flows are approved or already generated.",
+                "review_status_counts": counts,
+            },
+        )
+    return counts
 
 
 def _bridge_action_trace_to_transitions(
@@ -729,6 +837,191 @@ async def _check_target_connectivity(url: str) -> str | None:
     return None
 
 
+async def run_exploration_session(session_id: str, request_body: ExplorationStartRequest, user_key: str = "system") -> None:
+    """Run the persisted exploration pipeline for an already-created session."""
+    from agents.exploratory_agent import ExploratoryAgent
+    from memory.exploration_store import get_exploration_store
+
+    store = get_exploration_store(project_id=request_body.project_id)
+    pool = await get_browser_pool()
+
+    try:
+        from orchestrator.services.load_test_lock import check_system_available
+
+        await check_system_available("exploration")
+
+        async with pool.browser_slot(
+            request_id=session_id,
+            operation_type=BrowserOpType.EXPLORATION,
+            description=f"Explore: {request_body.entry_url}",
+        ) as acquired:
+            if not acquired:
+                store.update_session_status(session_id, "failed", "Timeout waiting for browser slot")
+                return
+
+            store.update_session_status(session_id, "running")
+            store.update_session_progress(
+                session_id,
+                {
+                    "phase": "starting",
+                    "message": "Browser slot acquired, starting agent...",
+                    "step": 0,
+                    "max_steps": request_body.max_interactions,
+                    "last_action": "",
+                    "updated_at": datetime.utcnow().isoformat(),
+                },
+            )
+
+            agent_task_id: list[str | None] = [None]
+
+            def _on_task_enqueued(task_id: str):
+                agent_task_id[0] = task_id
+                store.update_session_progress(
+                    session_id,
+                    {
+                        "phase": "enqueued",
+                        "message": "Agent task queued, waiting for worker...",
+                        "step": 0,
+                        "max_steps": request_body.max_interactions,
+                        "last_action": "",
+                        "updated_at": datetime.utcnow().isoformat(),
+                    },
+                )
+
+            async def _poll_progress():
+                try:
+                    from orchestrator.services.agent_queue import get_agent_queue
+
+                    queue = get_agent_queue()
+                    await queue.connect()
+                    for _ in range(60):
+                        if agent_task_id[0]:
+                            break
+                        await asyncio.sleep(0.5)
+                    if not agent_task_id[0]:
+                        return
+                    while True:
+                        await asyncio.sleep(5)
+                        progress = await queue.get_task_progress(agent_task_id[0])
+                        if not progress:
+                            continue
+                        retry_attempt = progress.get("retry_attempt")
+                        store.update_session_progress(
+                            session_id,
+                            {
+                                "phase": "retrying" if retry_attempt else "running",
+                                "message": f"Rate limited, retrying (attempt {retry_attempt})..." if retry_attempt else None,
+                                "step": progress.get("interactions", progress.get("tool_calls", 0)),
+                                "max_steps": request_body.max_interactions,
+                                "last_action": progress.get("last_tool", ""),
+                                "updated_at": datetime.utcnow().isoformat(),
+                            },
+                        )
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.debug("Progress polling error for %s: %s", session_id, exc)
+
+            progress_task = asyncio.create_task(_poll_progress())
+
+            run_dir = _prepare_exploration_mcp_config(session_id)
+            agent = ExploratoryAgent()
+            agent.on_task_enqueued = _on_task_enqueued
+            agent.agent_cwd = str(run_dir)
+            agent.owner_type = "exploration_session"
+            agent.owner_id = session_id
+            agent.owner_label = f"Exploration {session_id}"
+
+            ea_result = await agent.run(_build_exploratory_agent_config(request_body, run_id=session_id))
+
+            progress_task.cancel()
+            try:
+                await progress_task
+            except asyncio.CancelledError:
+                pass
+            store.clear_session_progress(session_id)
+
+            action_trace = ea_result.get("action_trace", [])
+            parsing_failed = ea_result.get("parsing_failed", False)
+            total_flows = ea_result.get("total_flows_discovered", 0)
+
+            _bridge_action_trace_to_transitions(action_trace, request_body.entry_url, store, session_id)
+
+            browser_memory_counts = {"states": 0, "transitions": 0}
+            try:
+                from orchestrator.memory.browser_memory import get_exploration_memory_service
+
+                browser_memory_counts = get_exploration_memory_service(
+                    project_id=request_body.project_id
+                ).seed_from_action_trace(
+                    session_id=session_id,
+                    entry_url=request_body.entry_url,
+                    action_trace=action_trace,
+                )
+            except Exception as exc:
+                logger.debug("Browser exploration memory seeding skipped for %s: %s", session_id, exc)
+
+            flows_count = _bridge_flows_to_db(session_id, request_body.entry_url, store, session_id) or total_flows
+            pages_count, elements_count = _count_pages_and_elements(action_trace, request_body.entry_url)
+
+            has_no_structured_data = flows_count == 0 and elements_count == 0 and len(action_trace) == 0
+            if has_no_structured_data and not parsing_failed and ea_result.get("termination_reason") != "timeout":
+                final_status = "failed"
+                error_msg = (
+                    "Exploration completed but discovered zero flows, elements, and actions. "
+                    "The agent may have encountered issues with the target site."
+                )
+            elif parsing_failed and flows_count == 0 and len(action_trace) == 0:
+                final_status = "failed"
+                error_msg = "Exploration completed but result parsing failed and no structured data recovered."
+            else:
+                final_status = "completed"
+                error_msg = None
+
+            store.update_session_status(session_id, final_status, error_msg)
+            store.update_session_counts(
+                session_id,
+                pages=max(pages_count, browser_memory_counts.get("states", 0)),
+                flows=flows_count,
+                elements=elements_count,
+                api_endpoints=0,
+            )
+    except asyncio.CancelledError:
+        logger.info("Exploration %s cancelled", session_id)
+        store.update_session_status(session_id, "cancelled")
+        raise
+    except Exception as exc:
+        logger.error("Exploration failed for session %s: %s", session_id, exc, exc_info=True)
+        store.update_session_status(session_id, "failed", str(exc))
+    finally:
+        _running_explorations.pop(session_id, None)
+
+
+def launch_exploration_background(
+    session_id: str,
+    request_body: ExplorationStartRequest,
+    *,
+    user_key: str = "system",
+    track: bool = False,
+) -> asyncio.Task | threading.Thread:
+    """Launch persisted exploration from API handlers or non-async mission workers."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        thread = threading.Thread(
+            target=lambda: asyncio.run(run_exploration_session(session_id, request_body, user_key=user_key)),
+            name=f"exploration-{session_id}",
+            daemon=True,
+        )
+        thread.start()
+        return thread
+
+    task = loop.create_task(run_exploration_session(session_id, request_body, user_key=user_key))
+    if track:
+        _running_explorations[session_id] = (task, user_key)
+    return task
+
+
 # ========== API Endpoints ==========
 
 
@@ -798,6 +1091,11 @@ async def start_exploration(
             ),
         )
 
+    try:
+        safety_policy = validate_exploration_policy(request_body.entry_url, request_body.safety_policy)
+    except ExplorationPolicyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # Circuit breaker check
     cb_error = _check_circuit_breaker(request_body.entry_url)
     if cb_error:
@@ -856,6 +1154,7 @@ async def start_exploration(
             "exclude_patterns": request_body.exclude_patterns,
             "focus_areas": request_body.focus_areas,
             "additional_instructions": request_body.additional_instructions,
+            "safety_policy": safety_policy.model_dump(),
         },
     )
 
@@ -1181,6 +1480,7 @@ async def get_exploration_session(session_id: str, project_id: str = Query(defau
         api_endpoints_discovered=session.api_endpoints_discovered,
         issues_discovered=getattr(session, "issues_discovered", 0) or 0,
         progress_data=getattr(session, "progress_data", None),
+        safety_policy=_session_safety_policy(session),
         started_at=session.started_at,
         completed_at=session.completed_at,
         duration_seconds=session.duration_seconds,
@@ -1201,6 +1501,7 @@ async def get_exploration_results(session_id: str, project_id: str = Query(defau
         raise HTTPException(status_code=404, detail="Session not found")
 
     flows = store.get_session_flows(session_id)
+    flow_reviews = store.get_session_flow_reviews(session_id)
     api_endpoints = store.get_session_api_endpoints(session_id)
 
     return ExplorationResultsResponse(
@@ -1216,27 +1517,14 @@ async def get_exploration_results(session_id: str, project_id: str = Query(defau
             api_endpoints_discovered=session.api_endpoints_discovered,
             issues_discovered=getattr(session, "issues_discovered", 0) or 0,
             progress_data=getattr(session, "progress_data", None),
+            safety_policy=_session_safety_policy(session),
             started_at=session.started_at,
             completed_at=session.completed_at,
             duration_seconds=session.duration_seconds,
             error_message=session.error_message,
             created_at=session.created_at,
         ),
-        flows=[
-            FlowResponse(
-                id=f.id,
-                flow_name=f.flow_name,
-                flow_category=f.flow_category,
-                description=f.description,
-                start_url=f.start_url,
-                end_url=f.end_url,
-                step_count=f.step_count,
-                is_success_path=f.is_success_path,
-                preconditions=f.preconditions,
-                postconditions=f.postconditions,
-            )
-            for f in flows
-        ],
+        flows=[_flow_response(f, flow_reviews.get(f.id)) for f in flows],
         api_endpoints=[
             ApiEndpointResponse(
                 id=e.id,
@@ -1304,6 +1592,7 @@ async def list_explorations(
             api_endpoints_discovered=s.api_endpoints_discovered,
             issues_discovered=getattr(s, "issues_discovered", 0) or 0,
             progress_data=getattr(s, "progress_data", None),
+            safety_policy=_session_safety_policy(s),
             started_at=s.started_at,
             completed_at=s.completed_at,
             duration_seconds=s.duration_seconds,
@@ -1316,33 +1605,128 @@ async def list_explorations(
 
 @router.get("/{session_id}/flows", response_model=list[FlowResponse])
 async def get_exploration_flows(
-    session_id: str, project_id: str = Query(default="default"), category: str | None = Query(default=None)
+    session_id: str,
+    project_id: str = Query(default="default"),
+    category: str | None = Query(default=None),
+    review_status: str | None = Query(default=None),
 ):
     """Get flows discovered in an exploration session."""
     from memory.exploration_store import get_exploration_store
 
     store = get_exploration_store(project_id=project_id)
 
-    flows = store.get_session_flows(session_id)
+    try:
+        flows_with_reviews = store.get_session_flows_with_reviews(session_id, status=review_status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if category:
-        flows = [f for f in flows if f.flow_category == category]
+        flows_with_reviews = [(f, r) for f, r in flows_with_reviews if f.flow_category == category]
 
-    return [
-        FlowResponse(
-            id=f.id,
-            flow_name=f.flow_name,
-            flow_category=f.flow_category,
-            description=f.description,
-            start_url=f.start_url,
-            end_url=f.end_url,
-            step_count=f.step_count,
-            is_success_path=f.is_success_path,
-            preconditions=f.preconditions,
-            postconditions=f.postconditions,
-        )
-        for f in flows
-    ]
+    return [_flow_response(f, r) for f, r in flows_with_reviews]
+
+
+@router.get("/{session_id}/flows/review", response_model=list[FlowResponse])
+async def list_reviewable_exploration_flows(
+    session_id: str,
+    project_id: str = Query(default="default"),
+    status: str | None = Query(default=None),
+):
+    """List discovered flows with review state for human review."""
+    from memory.exploration_store import get_exploration_store
+
+    store = get_exploration_store(project_id=project_id)
+
+    try:
+        flows_with_reviews = store.get_session_flows_with_reviews(session_id, status=status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return [_flow_response(flow, review) for flow, review in flows_with_reviews]
+
+
+@router.post("/{session_id}/flows/{flow_id}/approve", response_model=FlowResponse)
+async def approve_exploration_flow(
+    session_id: str,
+    flow_id: int,
+    body: FlowReviewDecisionRequest | None = None,
+    project_id: str = Query(default="default"),
+    current_user=Depends(get_current_user_optional),
+):
+    """Approve a discovered flow for downstream generation."""
+    from memory.exploration_store import get_exploration_store
+
+    store = get_exploration_store(project_id=project_id)
+    body = body or FlowReviewDecisionRequest()
+    result = store.set_flow_review_status(
+        flow_id=flow_id,
+        session_id=session_id,
+        status="approved",
+        reviewer=_reviewer_identity(current_user, body.reviewer),
+        comment=body.comment,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Flow not found or session mismatch")
+
+    flow, review = result
+    return _flow_response(flow, review)
+
+
+@router.post("/{session_id}/flows/{flow_id}/reject", response_model=FlowResponse)
+async def reject_exploration_flow(
+    session_id: str,
+    flow_id: int,
+    body: FlowReviewDecisionRequest | None = None,
+    project_id: str = Query(default="default"),
+    current_user=Depends(get_current_user_optional),
+):
+    """Reject a discovered flow and block it from downstream generation."""
+    from memory.exploration_store import get_exploration_store
+
+    store = get_exploration_store(project_id=project_id)
+    body = body or FlowReviewDecisionRequest()
+    result = store.set_flow_review_status(
+        flow_id=flow_id,
+        session_id=session_id,
+        status="rejected",
+        reviewer=_reviewer_identity(current_user, body.reviewer),
+        comment=body.comment,
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Flow not found or session mismatch")
+
+    flow, review = result
+    return _flow_response(flow, review)
+
+
+@router.post("/{session_id}/flows/review/decisions", response_model=dict)
+async def bulk_decide_exploration_flows(
+    session_id: str,
+    body: FlowReviewBulkDecisionRequest,
+    project_id: str = Query(default="default"),
+    current_user=Depends(get_current_user_optional),
+):
+    """Apply multiple discovered-flow review decisions."""
+    from memory.exploration_store import get_exploration_store
+
+    if not body.decisions:
+        raise HTTPException(status_code=400, detail="No flow review decisions provided")
+
+    store = get_exploration_store(project_id=project_id)
+    default_reviewer = _reviewer_identity(current_user, body.reviewer)
+    updated, errors = store.bulk_set_flow_review_statuses(
+        session_id=session_id,
+        decisions=[decision.model_dump() for decision in body.decisions],
+        reviewer=default_reviewer,
+        comment=body.comment,
+    )
+
+    return {
+        "status": "completed" if not errors else "completed_with_errors",
+        "updated": [_flow_response(flow, review).model_dump(mode="json") for flow, review in updated],
+        "errors": errors,
+        "review_status_counts": store.get_flow_review_status_counts(session_id),
+    }
 
 
 @router.get("/{session_id}/apis", response_model=list[ApiEndpointResponse])
@@ -1738,6 +2122,7 @@ async def get_exploration_details(session_id: str, project_id: str = Query(defau
 
     # Get flows with steps
     flows = store.get_session_flows(session_id)
+    flow_reviews = store.get_session_flow_reviews(session_id)
     flow_details = []
     for f in flows:
         steps = store.get_flow_steps(f.id)
@@ -1753,6 +2138,7 @@ async def get_exploration_details(session_id: str, project_id: str = Query(defau
                 is_success_path=f.is_success_path,
                 preconditions=f.preconditions,
                 postconditions=f.postconditions,
+                **_flow_review_fields(flow_reviews.get(f.id)),
                 steps=[
                     FlowStepResponse(
                         id=s.id,
@@ -1811,6 +2197,7 @@ async def get_exploration_details(session_id: str, project_id: str = Query(defau
             api_endpoints_discovered=session.api_endpoints_discovered,
             issues_discovered=getattr(session, "issues_discovered", 0) or 0,
             progress_data=getattr(session, "progress_data", None),
+            safety_policy=_session_safety_policy(session),
             started_at=session.started_at,
             completed_at=session.completed_at,
             duration_seconds=session.duration_seconds,
@@ -1855,20 +2242,11 @@ async def update_exploration_flow(
     if not updated:
         raise HTTPException(status_code=404, detail="Flow not found or session mismatch")
 
+    flow_review = store.get_session_flow_reviews(session_id).get(updated.id)
+
     return {
         "status": "updated",
-        "flow": {
-            "id": updated.id,
-            "flow_name": updated.flow_name,
-            "flow_category": updated.flow_category,
-            "description": updated.description,
-            "start_url": updated.start_url,
-            "end_url": updated.end_url,
-            "step_count": updated.step_count,
-            "is_success_path": updated.is_success_path,
-            "preconditions": updated.preconditions,
-            "postconditions": updated.postconditions,
-        },
+        "flow": _flow_response(updated, flow_review).model_dump(mode="json"),
     }
 
 
@@ -1983,13 +2361,18 @@ async def generate_api_specs_from_exploration(
     if not exploration:
         raise HTTPException(status_code=404, detail=f"Exploration session not found: {session_id}")
 
+    project_id = exploration.project_id or "default"
+    from memory.exploration_store import get_exploration_store
+
+    review_store = get_exploration_store(project_id=project_id)
+    review_counts = _ensure_flow_generation_allowed(review_store, session_id)
+
     # Check that endpoints exist
     stmt = select(DiscoveredApiEndpoint).where(DiscoveredApiEndpoint.session_id == session_id)
     endpoints = session.exec(stmt).all()
     if not endpoints:
         raise HTTPException(status_code=400, detail="No API endpoints found for this exploration session")
 
-    project_id = exploration.project_id or "default"
     job_id = f"spec-gen-{session_id}-{uuid.uuid4().hex[:8]}"
 
     _spec_gen_jobs[job_id] = {
@@ -2010,13 +2393,18 @@ async def generate_api_specs_from_exploration(
 
             generator = ApiSpecFromExploration(project_id=project_id)
             results = await generator.generate(session_id=session_id)
+            generated_flow_count = review_store.mark_session_flows_generated(session_id)
             spec_files = [str(p) for p in results]
             logger.info(f"Generated {len(results)} API spec files from exploration {session_id}")
             _spec_gen_jobs[job_id].update(
                 {
                     "status": "completed",
                     "message": f"Generated {len(results)} API spec file(s)",
-                    "result": {"spec_files": spec_files, "count": len(results)},
+                    "result": {
+                        "spec_files": spec_files,
+                        "count": len(results),
+                        "generated_flow_count": generated_flow_count,
+                    },
                     "completed_at": time.time(),
                 }
             )
@@ -2037,6 +2425,7 @@ async def generate_api_specs_from_exploration(
         "status": "running",
         "session_id": session_id,
         "endpoint_count": len(endpoints),
+        "flow_review_status_counts": review_counts,
         "message": f"Generating API specs from {len(endpoints)} discovered endpoints",
     }
 
@@ -2065,13 +2454,18 @@ async def generate_api_tests_from_exploration(
     if not exploration:
         raise HTTPException(status_code=404, detail=f"Exploration session not found: {session_id}")
 
+    project_id = exploration.project_id or "default"
+    from memory.exploration_store import get_exploration_store
+
+    review_store = get_exploration_store(project_id=project_id)
+    review_counts = _ensure_flow_generation_allowed(review_store, session_id)
+
     # Check that endpoints exist
     stmt = select(DiscoveredApiEndpoint).where(DiscoveredApiEndpoint.session_id == session_id)
     endpoints = session.exec(stmt).all()
     if not endpoints:
         raise HTTPException(status_code=400, detail="No API endpoints found for this exploration session")
 
-    project_id = exploration.project_id or "default"
     job_id = f"test-gen-{session_id}-{uuid.uuid4().hex[:8]}"
 
     _spec_gen_jobs[job_id] = {
@@ -2092,13 +2486,18 @@ async def generate_api_tests_from_exploration(
 
             generator = ApiTestFromExploration(project_id=project_id)
             results = await generator.generate(session_id=session_id)
+            generated_flow_count = review_store.mark_session_flows_generated(session_id)
             test_files = [str(p) for p in results]
             logger.info(f"Generated {len(results)} API test files from exploration {session_id}")
             _spec_gen_jobs[job_id].update(
                 {
                     "status": "completed",
                     "message": f"Generated {len(results)} API test file(s)",
-                    "result": {"spec_files": test_files, "count": len(results)},
+                    "result": {
+                        "spec_files": test_files,
+                        "count": len(results),
+                        "generated_flow_count": generated_flow_count,
+                    },
                     "completed_at": time.time(),
                 }
             )
@@ -2119,5 +2518,6 @@ async def generate_api_tests_from_exploration(
         "status": "running",
         "session_id": session_id,
         "endpoint_count": len(endpoints),
+        "flow_review_status_counts": review_counts,
         "message": f"Generating API tests from {len(endpoints)} discovered endpoints",
     }

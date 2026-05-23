@@ -1,5 +1,10 @@
 # Pipeline Architecture
 
+![Test runs dashboard showing pipeline execution state](../assets/ui/runs.png)
+
+<p class="caption">Test runs dashboard showing pipeline execution state.</p>
+
+
 Quorvex AI supports six pipeline types, each designed for a specific workflow. This document explains why they exist, how they differ, and when to choose each one.
 
 ## Why Multiple Pipelines

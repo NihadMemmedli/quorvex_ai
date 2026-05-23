@@ -1,5 +1,10 @@
 # How to Use AutoPilot and Autonomous Agents
 
+![AutoPilot dashboard showing autonomous test generation workflow](../assets/ui/autopilot.png)
+
+<p class="caption">AutoPilot dashboard showing autonomous test generation workflow.</p>
+
+
 AutoPilot and autonomous agents are for teams that want Quorvex AI to inspect an application, propose useful tests, and keep working across multiple steps instead of generating one test from one static spec.
 
 Use **AutoPilot** when you want an interactive session with live progress and artifacts. Use **autonomous missions** when you want recurring or longer-running exploration with approval gates before tests are materialized. With the scheduler, Temporal worker, queues, and monitored infrastructure in place, missions are designed for continuous 24/7-style operation.

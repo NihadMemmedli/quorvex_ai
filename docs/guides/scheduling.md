@@ -1,5 +1,10 @@
 # How to Schedule Automated Test Runs
 
+![Schedules dashboard with recurring test runs and cron configuration](../assets/ui/schedules.png)
+
+<p class="caption">Schedules dashboard with recurring test runs and cron configuration.</p>
+
+
 Set up cron-based schedules for recurring test execution, with execution history tracking and monitoring.
 
 ## Prerequisites

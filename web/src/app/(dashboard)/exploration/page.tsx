@@ -42,6 +42,20 @@ interface Flow {
     is_success_path: boolean;
     preconditions: string[];
     postconditions: string[];
+    review_status?: FlowReviewStatus | string | null;
+    review_comment?: string | null;
+    reviewed_at?: string | null;
+    reviewed_by?: string | null;
+    status?: string | null;
+}
+
+type FlowReviewStatus = 'pending' | 'approved' | 'rejected';
+type FlowReviewDecision = 'approve' | 'reject';
+
+interface FlowReviewOverride {
+    review_status: FlowReviewStatus;
+    review_comment?: string | null;
+    reviewed_at: string;
 }
 
 // ============ EXPLORATION DETAILS TYPES ============
@@ -227,6 +241,19 @@ const statusColors: Record<string, { bg: string; color: string }> = {
     stopped: { bg: 'rgba(156, 163, 175, 0.1)', color: 'var(--text-tertiary)' },
 };
 
+const flowReviewStatusMeta: Record<FlowReviewStatus, { label: string; bg: string; color: string }> = {
+    pending: { label: 'Pending review', bg: 'var(--warning-muted)', color: 'var(--warning)' },
+    approved: { label: 'Approved', bg: 'var(--success-muted)', color: 'var(--success)' },
+    rejected: { label: 'Rejected', bg: 'var(--danger-muted)', color: 'var(--danger)' },
+};
+
+function normalizeFlowReviewStatus(flow: Flow): FlowReviewStatus {
+    const rawStatus = (flow.review_status || flow.status || '').toLowerCase();
+    if (rawStatus === 'approved') return 'approved';
+    if (rawStatus === 'rejected') return 'rejected';
+    return 'pending';
+}
+
 async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 15000): Promise<T> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -293,6 +320,11 @@ export default function DiscoveryPage() {
     const [isEditingExplorationFlow, setIsEditingExplorationFlow] = useState(false);
     const [isSavingExplorationFlow, setIsSavingExplorationFlow] = useState(false);
     const [deleteExplorationFlowId, setDeleteExplorationFlowId] = useState<number | null>(null);
+    const [selectedFlowIds, setSelectedFlowIds] = useState<Set<number>>(new Set());
+    const [flowReviewComment, setFlowReviewComment] = useState('');
+    const [flowReviewSubmitting, setFlowReviewSubmitting] = useState<FlowReviewDecision | null>(null);
+    const [flowReviewMessage, setFlowReviewMessage] = useState<{ type: 'success' | 'warning' | 'error'; text: string } | null>(null);
+    const [flowReviewOverrides, setFlowReviewOverrides] = useState<Record<number, FlowReviewOverride>>({});
     // API editing in details
     const [editingApiEndpoint, setEditingApiEndpoint] = useState<ApiEndpointDetail | null>(null);
     const [isEditingApiEndpoint, setIsEditingApiEndpoint] = useState(false);
@@ -511,6 +543,10 @@ export default function DiscoveryPage() {
         setExpandedApiId(null);
         setIsEditingExplorationFlow(false);
         setEditingExplorationFlow(null);
+        setSelectedFlowIds(new Set());
+        setFlowReviewComment('');
+        setFlowReviewMessage(null);
+        setFlowReviewOverrides({});
         setIsEditingApiEndpoint(false);
         setEditingApiEndpoint(null);
         setDetailModalOpen(true);
@@ -774,6 +810,117 @@ export default function DiscoveryPage() {
     };
 
     // ============ EXPLORATION DETAILS CRUD ============
+    const getFlowReviewState = (flow: Flow): FlowReviewOverride | Flow => {
+        return flowReviewOverrides[flow.id] || flow;
+    };
+
+    const toggleFlowSelection = (flowId: number) => {
+        setSelectedFlowIds(prev => {
+            const next = new Set(prev);
+            if (next.has(flowId)) {
+                next.delete(flowId);
+            } else {
+                next.add(flowId);
+            }
+            return next;
+        });
+    };
+
+    const setAllFlowSelection = (flows: FlowDetail[], checked: boolean) => {
+        setSelectedFlowIds(checked ? new Set(flows.map(flow => flow.id)) : new Set());
+    };
+
+    const applyFlowReviewDecision = async (decision: FlowReviewDecision, flowIds: number[]) => {
+        if (!selectedSession || !explorationDetails || flowIds.length === 0) return;
+
+        const comment = flowReviewComment.trim();
+        if (decision === 'reject' && !comment) {
+            setFlowReviewMessage({ type: 'error', text: 'Add a review comment before rejecting selected flows.' });
+            return;
+        }
+
+        setFlowReviewSubmitting(decision);
+        setFlowReviewMessage(null);
+
+        const projectParam = currentProject?.id
+            ? `?project_id=${encodeURIComponent(currentProject.id)}`
+            : '';
+        const reviewStatus: FlowReviewStatus = decision === 'approve' ? 'approved' : 'rejected';
+        const now = new Date().toISOString();
+
+        try {
+            const results = await Promise.all(flowIds.map(async (flowId) => {
+                const res = await fetch(`${API_BASE}/exploration/${selectedSession.id}/flows/${flowId}/${decision}${projectParam}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        comment: comment || undefined,
+                        review_comment: comment || undefined,
+                    })
+                });
+
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+                    throw new Error(err.detail || `HTTP ${res.status}`);
+                }
+
+                return await res.json().catch(() => null);
+            }));
+
+            setExplorationDetails(prev => prev ? {
+                ...prev,
+                flows: prev.flows.map(flow => {
+                    if (!flowIds.includes(flow.id)) return flow;
+                    const payload = results.find(result => {
+                        const payloadFlow = result?.flow || result;
+                        return payloadFlow?.id === flow.id;
+                    });
+                    const updatedFlow = payload?.flow || payload || {};
+                    return {
+                        ...flow,
+                        ...updatedFlow,
+                        review_status: updatedFlow.review_status || reviewStatus,
+                        review_comment: updatedFlow.review_comment ?? comment,
+                        reviewed_at: updatedFlow.reviewed_at || now,
+                    };
+                })
+            } : prev);
+            setFlowReviewOverrides(prev => {
+                const next = { ...prev };
+                flowIds.forEach(flowId => {
+                    delete next[flowId];
+                });
+                return next;
+            });
+            setSelectedFlowIds(new Set());
+            setFlowReviewComment('');
+            setFlowReviewMessage({
+                type: 'success',
+                text: `${flowIds.length} flow${flowIds.length === 1 ? '' : 's'} ${reviewStatus}.`,
+            });
+        } catch (e) {
+            setFlowReviewOverrides(prev => {
+                const next = { ...prev };
+                flowIds.forEach(flowId => {
+                    next[flowId] = {
+                        review_status: reviewStatus,
+                        review_comment: comment || null,
+                        reviewed_at: now,
+                    };
+                });
+                return next;
+            });
+            setSelectedFlowIds(new Set());
+            setFlowReviewComment('');
+            setFlowReviewMessage({
+                type: 'warning',
+                text: `${flowIds.length} flow${flowIds.length === 1 ? '' : 's'} marked ${reviewStatus} locally. Review API did not accept the request: ${e instanceof Error ? e.message : 'Network error'}`,
+            });
+        } finally {
+            setFlowReviewSubmitting(null);
+        }
+    };
+
     const saveExplorationFlow = async (flow: FlowDetail) => {
         if (!selectedSession || !explorationDetails) return;
         setIsSavingExplorationFlow(true);
@@ -828,6 +975,16 @@ export default function DiscoveryPage() {
                 setExplorationDetails({
                     ...explorationDetails,
                     flows: explorationDetails.flows.filter(f => f.id !== flowId)
+                });
+                setSelectedFlowIds(prev => {
+                    const next = new Set(prev);
+                    next.delete(flowId);
+                    return next;
+                });
+                setFlowReviewOverrides(prev => {
+                    const next = { ...prev };
+                    delete next[flowId];
+                    return next;
                 });
                 setDeleteExplorationFlowId(null);
                 if (expandedFlowId === flowId) setExpandedFlowId(null);
@@ -2750,8 +2907,63 @@ export default function DiscoveryPage() {
                                             </div>
                                         ) : (
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                                                {explorationDetails.flows.map(flow => (
-                                                    <div key={flow.id} style={{ background: 'var(--surface-hover)', borderRadius: '8px', border: '1px solid var(--border)', overflow: 'hidden' }}>
+                                                <div style={{ padding: '0.85rem', background: 'var(--surface-hover)', border: '1px solid var(--border)', borderRadius: '8px', display: 'grid', gridTemplateColumns: 'minmax(150px, 190px) 1fr auto auto', gap: '0.75rem', alignItems: 'center' }}>
+                                                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={selectedFlowIds.size === explorationDetails.flows.length}
+                                                            ref={input => {
+                                                                if (input) {
+                                                                    input.indeterminate = selectedFlowIds.size > 0 && selectedFlowIds.size < explorationDetails.flows.length;
+                                                                }
+                                                            }}
+                                                            onChange={e => setAllFlowSelection(explorationDetails.flows, e.target.checked)}
+                                                        />
+                                                        {selectedFlowIds.size > 0 ? `${selectedFlowIds.size} selected` : 'Select flows'}
+                                                    </label>
+                                                    <textarea
+                                                        value={flowReviewComment}
+                                                        onChange={e => setFlowReviewComment(e.target.value)}
+                                                        rows={1}
+                                                        placeholder="Review comment for approval or rejection"
+                                                        style={{ width: '100%', minHeight: '34px', maxHeight: '72px', padding: '0.45rem 0.6rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '0.82rem', color: 'var(--text)', resize: 'vertical', fontFamily: 'inherit', boxSizing: 'border-box' }}
+                                                    />
+                                                    <button
+                                                        onClick={() => applyFlowReviewDecision('approve', Array.from(selectedFlowIds))}
+                                                        disabled={selectedFlowIds.size === 0 || flowReviewSubmitting !== null}
+                                                        style={{ padding: '0.45rem 0.75rem', background: 'var(--success-muted)', border: '1px solid rgba(52, 211, 153, 0.35)', borderRadius: '6px', color: 'var(--success)', cursor: selectedFlowIds.size === 0 || flowReviewSubmitting ? 'not-allowed' : 'pointer', fontSize: '0.82rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '0.35rem', opacity: selectedFlowIds.size === 0 || flowReviewSubmitting ? 0.65 : 1 }}
+                                                    >
+                                                        {flowReviewSubmitting === 'approve' ? <Loader2 size={14} className="spinning" /> : <CheckCircle2 size={14} />}
+                                                        Approve
+                                                    </button>
+                                                    <button
+                                                        onClick={() => applyFlowReviewDecision('reject', Array.from(selectedFlowIds))}
+                                                        disabled={selectedFlowIds.size === 0 || flowReviewSubmitting !== null}
+                                                        style={{ padding: '0.45rem 0.75rem', background: 'var(--danger-muted)', border: '1px solid rgba(248, 113, 113, 0.35)', borderRadius: '6px', color: 'var(--danger)', cursor: selectedFlowIds.size === 0 || flowReviewSubmitting ? 'not-allowed' : 'pointer', fontSize: '0.82rem', fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '0.35rem', opacity: selectedFlowIds.size === 0 || flowReviewSubmitting ? 0.65 : 1 }}
+                                                    >
+                                                        {flowReviewSubmitting === 'reject' ? <Loader2 size={14} className="spinning" /> : <X size={14} />}
+                                                        Reject
+                                                    </button>
+                                                </div>
+                                                {flowReviewMessage && (
+                                                    <div style={{
+                                                        padding: '0.55rem 0.75rem',
+                                                        borderRadius: '6px',
+                                                        fontSize: '0.82rem',
+                                                        background: flowReviewMessage.type === 'success' ? 'var(--success-muted)' : flowReviewMessage.type === 'error' ? 'var(--danger-muted)' : 'var(--warning-muted)',
+                                                        color: flowReviewMessage.type === 'success' ? 'var(--success)' : flowReviewMessage.type === 'error' ? 'var(--danger)' : 'var(--warning)',
+                                                        border: '1px solid var(--border)',
+                                                    }}>
+                                                        {flowReviewMessage.text}
+                                                    </div>
+                                                )}
+                                                {explorationDetails.flows.map(flow => {
+                                                    const reviewState = getFlowReviewState(flow) as Flow;
+                                                    const reviewStatus = normalizeFlowReviewStatus(reviewState);
+                                                    const reviewMeta = flowReviewStatusMeta[reviewStatus];
+                                                    const reviewComment = reviewState.review_comment;
+                                                    return (
+                                                    <div key={flow.id} style={{ background: 'var(--surface-hover)', borderRadius: '8px', border: selectedFlowIds.has(flow.id) ? '1px solid var(--primary)' : '1px solid var(--border)', overflow: 'hidden' }}>
                                                         {/* Flow header - always visible */}
                                                         <div
                                                             style={{ padding: '1rem', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
@@ -2759,6 +2971,13 @@ export default function DiscoveryPage() {
                                                         >
                                                             <div style={{ flex: 1 }}>
                                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={selectedFlowIds.has(flow.id)}
+                                                                        onClick={e => e.stopPropagation()}
+                                                                        onChange={() => toggleFlowSelection(flow.id)}
+                                                                        aria-label={`Select ${flow.flow_name}`}
+                                                                    />
                                                                     <ChevronRight size={16} style={{ transform: expandedFlowId === flow.id ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }} />
                                                                     <span style={{ fontWeight: 600 }}>{flow.flow_name}</span>
                                                                     <span style={{ padding: '0.15rem 0.5rem', borderRadius: '4px', fontSize: '0.7rem', background: 'rgba(192, 132, 252, 0.12)', color: 'var(--accent)' }}>
@@ -2766,6 +2985,9 @@ export default function DiscoveryPage() {
                                                                     </span>
                                                                     <span style={{ padding: '0.15rem 0.5rem', borderRadius: '4px', fontSize: '0.7rem', background: flow.is_success_path ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)', color: flow.is_success_path ? '#10b981' : '#f59e0b' }}>
                                                                         {flow.is_success_path ? 'Success' : 'Alternative'}
+                                                                    </span>
+                                                                    <span style={{ padding: '0.15rem 0.5rem', borderRadius: '4px', fontSize: '0.7rem', background: reviewMeta.bg, color: reviewMeta.color }}>
+                                                                        {reviewMeta.label}
                                                                     </span>
                                                                 </div>
                                                                 {flow.description && (
@@ -2794,6 +3016,17 @@ export default function DiscoveryPage() {
                                                         {/* Expanded flow details */}
                                                         {expandedFlowId === flow.id && !isEditingExplorationFlow && (
                                                             <div style={{ padding: '0 1rem 1rem', borderTop: '1px solid var(--border)' }}>
+                                                                <div style={{ marginTop: '0.75rem', padding: '0.55rem 0.7rem', borderRadius: '6px', background: 'var(--surface)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', fontSize: '0.8rem' }}>
+                                                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-secondary)' }}>
+                                                                        Review
+                                                                        <strong style={{ color: reviewMeta.color }}>{reviewMeta.label}</strong>
+                                                                    </span>
+                                                                    {reviewComment && (
+                                                                        <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={reviewComment}>
+                                                                            {reviewComment}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
                                                                 {flow.preconditions.length > 0 && (
                                                                     <div style={{ marginTop: '0.75rem' }}>
                                                                         <h4 style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: '0.25rem', color: 'var(--text-secondary)' }}>Preconditions</h4>
@@ -2857,7 +3090,8 @@ export default function DiscoveryPage() {
                                                             </div>
                                                         )}
                                                     </div>
-                                                ))}
+                                                    );
+                                                })}
                                             </div>
                                         )}
 

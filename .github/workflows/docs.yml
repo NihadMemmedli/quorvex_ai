@@ -1,21 +1,77 @@
 name: Deploy Documentation
 
 on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "README*.md"
+      - "CONTRIBUTING.md"
+      - "SECURITY.md"
+      - "CHANGELOG.md"
+      - ".env.example"
+      - ".env.prod.example"
+      - "Makefile"
+      - "mkdocs.yml"
+      - "orchestrator/api/**"
+      - "orchestrator/cli.py"
+      - "requirements-docs.txt"
+      - "scripts/check_docs_drift.py"
+      - "web/src/app/**"
+      - ".github/workflows/docs.yml"
   push:
     branches:
       - main
     paths:
       - "docs/**"
+      - "README*.md"
+      - "CONTRIBUTING.md"
+      - "SECURITY.md"
+      - "CHANGELOG.md"
+      - ".env.example"
+      - ".env.prod.example"
+      - "Makefile"
       - "mkdocs.yml"
+      - "orchestrator/api/**"
+      - "orchestrator/cli.py"
       - "requirements-docs.txt"
+      - "scripts/check_docs_drift.py"
+      - "web/src/app/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
+  check:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: docs-pip-${{ hashFiles('requirements-docs.txt') }}
+          restore-keys: docs-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements-docs.txt
+
+      - name: Check docs drift
+        run: python scripts/check_docs_drift.py
+
+      - name: Build documentation
+        run: mkdocs build --strict
+
   deploy:
+    if: github.event_name == 'push'
+    needs: check
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -1,5 +1,10 @@
 # How to Choose and Use Pipeline Modes
 
+![Workflow monitor showing pipeline execution and diagnostics](../assets/ui/workflow.png)
+
+<p class="caption">Workflow monitor showing pipeline execution and diagnostics.</p>
+
+
 Select the right pipeline mode for your test generation scenario and configure it for optimal results.
 
 ## Prerequisites

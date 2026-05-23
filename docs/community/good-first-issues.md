@@ -1,5 +1,10 @@
 # Good First Issues
 
+![Test specifications dashboard with contributor-friendly feature areas](../assets/ui/specs.png)
+
+<p class="caption">Test specifications dashboard with contributor-friendly feature areas.</p>
+
+
 A curated list of improvements that new contributors can pick up without deep knowledge of the entire system. Each issue is scoped to be completable in 1-4 hours.
 
 Before starting, read the [contributing guide](https://github.com/NihadMemmedli/quorvex_ai/blob/main/CONTRIBUTING.md) for setup instructions, code style, and PR guidelines.
@@ -8,9 +13,9 @@ Before starting, read the [contributing guide](https://github.com/NihadMemmedli/
 
 ## Documentation Improvements
 
-### 1. Sync `.env.example` with the Environment Variables Reference
+### 1. Expand Documentation Drift Checks for New Public Surfaces
 
-**Description:** The `.env.example` file (247 lines) and the docs reference at `docs/reference/environment-variables.md` have drifted apart over time. Some newer variables (security testing, load testing, LLM testing, database testing) may be present in one but not the other. Audit both files, identify mismatches, and update the reference doc to cover every variable in `.env.example` with a description, default value, and whether it is required.
+**Description:** The docs drift checker already validates environment variables, CLI flags, selected API routes, dashboard routes, MkDocs nav coverage, local image assets, and common stale setup strings. Extend it to cover one additional public surface, such as Pydantic request/response model names in high-traffic API docs, public Makefile targets, or external comparison source freshness metadata.
 
 **Difficulty:** Easy
 
@@ -18,11 +23,11 @@ Before starting, read the [contributing guide](https://github.com/NihadMemmedli/
 
 **Files involved:**
 
-- `.env.example`
-- `docs/reference/environment-variables.md`
-- `CLAUDE.md` (environment variables section, for cross-reference)
+- `scripts/check_docs_drift.py`
+- `docs/guides/documentation-maintenance.md`
+- The reference page for the surface being checked
 
-**Skills needed:** Markdown, reading Python code to understand what variables do
+**Skills needed:** Python, Markdown, reading source files to understand public interfaces
 
 ---
 
@@ -68,14 +73,14 @@ Each entry should follow the existing format: symptom, cause, solution.
 
 ---
 
-### 4. Document the Template Include System with Examples
+### 4. Add Template Include Edge Cases to the Spec Docs
 
-**Description:** Test specs support an `@include` directive (e.g., `@include "templates/login.md"`) that lets you reuse common step sequences across specs. This feature is mentioned briefly in CLAUDE.md but has no dedicated documentation. Create a new section in `docs/guides/writing-specs.md` (or a standalone guide) that covers:
+**Description:** Test specs support an `@include` directive (e.g., `@include "templates/login.md"`) that lets you reuse common step sequences across specs. The writing guide covers the common path. Expand it with focused edge-case examples:
 
-- The `@include` syntax and how it resolves paths relative to `specs/templates/`
-- A worked example: creating a `specs/templates/login.md` template and including it in a test spec
-- How selector hints from previously automated templates are passed to generators
-- Limitations and edge cases (nested includes, missing templates)
+- nested includes and how to avoid circular reuse
+- missing template errors and how to debug path resolution
+- project-specific templates versus shared templates
+- validation with `python orchestrator/cli.py specs/my-test.md --validate-only`
 
 **Difficulty:** Medium
 
@@ -93,9 +98,9 @@ Each entry should follow the existing format: symptom, cause, solution.
 
 ## Frontend UI Improvements
 
-### 5. Add `prefers-reduced-motion` Media Queries
+### 5. Expand `prefers-reduced-motion` Coverage
 
-**Description:** The application has CSS animations and transitions (notably the `card-elevated:hover` transform in `globals.css` that applies `translateY(-2px)`, plus any other transition effects) but contains zero `prefers-reduced-motion` media queries. Users who have enabled "Reduce motion" in their OS accessibility settings still see all animations. Add a `@media (prefers-reduced-motion: reduce)` block to `globals.css` that disables or minimizes transitions and transforms for users who prefer reduced motion.
+**Description:** The app has at least one `prefers-reduced-motion` rule, but coverage is route-specific. Audit shared CSS and common dashboard components for transitions, transforms, animated spinners, and chart animations that still ignore the user's OS motion preference. Add or consolidate reduced-motion rules where needed.
 
 **Difficulty:** Easy
 

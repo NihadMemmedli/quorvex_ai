@@ -29,6 +29,7 @@ class MemoryContextBundle:
     project_id: str | None = None
     sections: list[MemoryContextSection] = field(default_factory=list)
     graph: dict[str, Any] | None = None
+    unified: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +40,7 @@ class MemoryContextBundle:
                 for section in self.sections
             ],
             "graph": self.graph or {},
+            "unified": self.unified or {},
         }
 
 
@@ -81,50 +83,96 @@ class MemoryContextBuilder:
         include_graph: bool = True,
     ) -> MemoryContextBundle:
         query = query or ""
-        per_section = max(2, min(5, limit))
-        bundle = MemoryContextBundle(query=query, project_id=project_id)
+        try:
+            from .unified import UnifiedMemoryService
+
+            unified = UnifiedMemoryService(agent_service=self.service).build_bundle(
+                query=query,
+                project_id=project_id,
+                user_id=user_id,
+                agent_type=agent_type,
+                limit=limit,
+                include_review_required=False,
+            )
+        except Exception:
+            unified = {
+                "agent_memories": {"semantic": [], "episodic": [], "procedural": []},
+                "browser_memory": {"states": [], "elements": [], "frontier": []},
+                "graph_context": {},
+                "memory_graph": {"related_memories": [], "relationships": [], "explanations": []},
+                "selector_patterns": [],
+                "coverage_gaps": [],
+            }
+
+        bundle = MemoryContextBundle(query=query, project_id=project_id, unified=unified)
 
         section_specs = [
             (
                 "Semantic Memory",
-                ["semantic"],
+                "semantic",
                 "Stable facts and preferences. Use as advisory context unless live state or the user contradicts it.",
             ),
             (
                 "Episodic Memory",
-                ["episodic"],
+                "episodic",
                 "Past runs, failures, and fixes. Prefer recent high-confidence examples, but revalidate before acting.",
             ),
             (
                 "Procedural Memory",
-                ["procedural"],
+                "procedural",
                 "Reusable workflow decisions and agent lessons. Treat as operating guidance for this project.",
             ),
         ]
 
         seen: set[str] = set()
-        for name, memory_types, guidance in section_specs:
-            memories = self.service.search(
-                query=query,
-                project_id=project_id,
-                user_id=user_id,
-                agent_type=agent_type,
-                memory_types=memory_types,
-                limit=per_section,
-                record_usage=True,
-                include_review_required=False,
-            )
-            items = [_memory_item(memory) for memory in memories if memory.id not in seen]
-            seen.update(item["id"] for item in items)
+        agent_memories = unified.get("agent_memories") or {}
+        for name, memory_type, guidance in section_specs:
+            items = [item for item in agent_memories.get(memory_type, []) if item.get("id") not in seen]
+            seen.update(str(item.get("id")) for item in items)
             if items:
                 bundle.sections.append(MemoryContextSection(name=name, guidance=guidance, items=items))
 
+        related_memories = (unified.get("memory_graph") or {}).get("related_memories") or []
+        related_items = [item for item in related_memories if item.get("id") not in seen]
+        if related_items:
+            seen.update(str(item.get("id")) for item in related_items)
+            bundle.sections.append(
+                MemoryContextSection(
+                    name="Related Memory Graph",
+                    guidance=(
+                        "Graph-expanded memories connected by shared entities, pages, workflows, failures, "
+                        "or selector relationships. Use these as supporting context, not primary evidence."
+                    ),
+                    items=related_items[: min(5, limit)],
+                )
+            )
+
         if include_graph:
-            graph = self._build_graph_context(query=query, project_id=project_id)
+            graph = unified.get("graph_context") or {}
             if graph:
                 bundle.graph = graph
 
-        browser_memory = self._build_browser_memory_context(query=query, project_id=project_id)
+        selector_patterns = unified.get("selector_patterns") or []
+        if selector_patterns:
+            bundle.sections.append(
+                MemoryContextSection(
+                    name="Selector Pattern Memory",
+                    guidance=(
+                        "Previously successful selector/action patterns. Use as hints only, then validate "
+                        "against the live page before generating or executing code."
+                    ),
+                    items=selector_patterns[: min(5, limit)],
+                )
+            )
+
+        browser_bundle = unified.get("browser_memory") or {}
+        browser_memory: list[dict[str, Any]] = []
+        for state in browser_bundle.get("states", [])[:4]:
+            browser_memory.append({"type": "state", **state})
+        for element in browser_bundle.get("elements", [])[:8]:
+            browser_memory.append({"type": "element", **element})
+        for frontier in browser_bundle.get("frontier", [])[:4]:
+            browser_memory.append({"type": "frontier", **frontier})
         if browser_memory:
             bundle.sections.append(
                 MemoryContextSection(
@@ -227,15 +275,29 @@ class MemoryContextBuilder:
                             f"risk={item.get('risk_level', 'unknown')}; "
                             f"attempts={item.get('attempts', 0)}; "
                             f"status={item.get('status', 'queued')}; "
+                            f"source={item.get('state_source_fidelity', 'unknown')}; "
                             f"provenance=state:{item.get('state_id')} element:{item.get('element_id')}"
                         )
+                    continue
+                if section.name == "Selector Pattern Memory":
+                    selector = item.get("playwright_selector") or item.get("selector_value") or ""
+                    lines.append(
+                        "- "
+                        f"{item.get('action') or 'action'} {_clip_line(str(item.get('target') or ''))}: "
+                        f"{_clip_line(str(selector), 180)} "
+                        f"(success={float(item.get('success_rate') or 0):.0%}, "
+                        f"test={_clip_line(str(item.get('test_name') or ''), 80)})"
+                    )
                     continue
                 source = ""
                 if item.get("source_type") and item.get("source_id"):
                     source = f", source={item['source_type']}:{item['source_id']}"
+                graph_reason = ""
+                if item.get("graph_reason"):
+                    graph_reason = f", graph={_clip_line(str(item['graph_reason']), 90)}"
                 lines.append(
                     "- "
-                    f"[{item['kind']}, confidence={item['confidence']:.2f}, importance={item['importance']:.2f}{source}] "
+                    f"[{item['kind']}, confidence={item['confidence']:.2f}, importance={item['importance']:.2f}{source}{graph_reason}] "
                     f"{_clip_line(item.get('summary') or '')}"
                 )
 

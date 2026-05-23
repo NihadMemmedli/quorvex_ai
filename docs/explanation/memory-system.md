@@ -1,170 +1,207 @@
 # Memory System
 
-The memory system gives Quorvex AI the ability to learn from past test executions and application exploration. It stores proven selectors, application structure, and exploration discoveries, then feeds this knowledge back into test generation to produce more reliable tests.
+![Memory dashboard showing reusable context and coverage signals](../assets/ui/memory.png)
 
-## Why a Memory System Exists
+<p class="caption">Memory dashboard showing reusable context and coverage signals.</p>
 
-Without memory, every test generation starts from scratch. The AI agent must discover selectors, navigate application structure, and figure out timing requirements independently for each spec. This leads to two problems:
 
-1. **Repeated failures**: If `getByRole('button', {name: 'Submit'})` works on a login page, every future test touching that page should use it -- not rediscover it through trial and error.
-2. **Disconnected knowledge**: Exploration sessions discover pages, flows, and API endpoints, but without persistent storage, that knowledge dies with the session.
+The memory system lets Quorvex AI reuse what it has already learned about an application, a project, and prior agent work. It stores reliable selectors, discovered browser states, coverage gaps, curated agent memories, and prompt-injection telemetry, then returns a bounded context bundle to planners, generators, healers, chat, and exploration agents.
 
-The memory system solves both by acting as a shared knowledge base across pipeline runs.
+Memory is advisory. Live browser observations, the current spec, and explicit user instructions always outrank stored memory.
+
+## Why Memory Exists
+
+Without memory, each test generation starts cold. The planner must rediscover application structure, the generator must guess selectors again, and the healer has no durable record of failures that already happened.
+
+Memory solves four recurring problems:
+
+1. **Selector reuse**: proven Playwright selectors can be suggested before the generator falls back to trial and error.
+2. **Exploration continuity**: discovered pages, elements, flows, and frontier work survive beyond one exploration session.
+3. **Agent context**: durable project facts, user preferences, workflow decisions, failure patterns, and agent lessons can be injected into future prompts.
+4. **Auditability**: prompt context injection is recorded so maintainers can inspect which memories influenced a run.
 
 ## Architecture
 
 ```mermaid
 graph TB
-    subgraph "Memory Manager"
-        MM["Unified API<br/>memory/manager.py"]
+    subgraph "Retrieval Layer"
+        UMS["UnifiedMemoryService<br/>memory/unified.py"]
+        MCB["MemoryContextBuilder<br/>memory/context_builder.py"]
     end
 
-    subgraph "Vector Store (ChromaDB)"
-        TP["Test Patterns<br/>action + selector + success rate"]
-        AE["Application Elements<br/>discovered UI elements"]
-        TI["Test Ideas<br/>coverage gap suggestions"]
-        PRD["PRD Chunks<br/>document embeddings"]
+    subgraph "Memory Stores"
+        AM["AgentMemory<br/>SQLModel table"]
+        TP["Selector Pattern Memory<br/>ChromaDB"]
+        BG["Application Graph<br/>NetworkX JSON"]
+        BM["Browser Exploration Memory<br/>SQLModel tables"]
+        CR["Conversation Recall<br/>chat tables"]
     end
 
-    subgraph "Graph Store (NetworkX)"
-        PAGES["Pages"] -->|"contains"| ELEMENTS["Elements"]
-        PAGES -->|"navigates_to"| PAGES
-        FLOWS["Flows"] -->|"starts_at"| PAGES
+    subgraph "Consumers"
+        PL["Planner"]
+        GE["Generator"]
+        HE["Healer"]
+        CH["Assistant Chat"]
+        EX["Exploration Agents"]
+        UI["Memory Dashboard"]
     end
 
-    subgraph "Exploration Store (SQLModel)"
-        SESS["Sessions"]
-        TRANS["Transitions"]
-        DFLOWS["Discovered Flows"]
-        APIS["API Endpoints"]
-    end
-
-    MM --> TP
-    MM --> AE
-    MM --> PAGES
-    MM --> SESS
-
-    PLANNER["Planner"] -.->|"query selectors"| MM
-    GENERATOR["Generator"] -.->|"query selectors"| MM
-    GENERATOR -->|"store patterns"| MM
-    EXPLORER["Explorer"] -->|"store discoveries"| MM
-    REQ_GEN["Requirements<br/>Generator"] -.->|"read discoveries"| MM
+    AM --> UMS
+    TP --> UMS
+    BG --> UMS
+    BM --> UMS
+    CR --> UI
+    UMS --> MCB
+    MCB --> PL
+    MCB --> GE
+    MCB --> HE
+    MCB --> CH
+    UMS --> EX
+    UMS --> UI
 ```
 
-The `MemoryManager` class provides a unified API that coordinates three underlying stores, each optimized for a different access pattern.
+`UnifiedMemoryService` builds one typed bundle from the available stores. `MemoryContextBuilder` formats the most relevant parts of that bundle for prompt injection.
 
-## Vector Store: Semantic Search
+## Store Types
 
-**Technology**: ChromaDB (embedded mode) with OpenAI embeddings
+| Store | Backing technology | Main data | Primary readers |
+|-------|--------------------|-----------|-----------------|
+| Agent memory | SQLModel database plus optional vector index | Curated facts, preferences, decisions, failure patterns, lessons | Chat, planner, generator, healer, dashboard |
+| Memory knowledge graph | SQLModel database | Typed relationships between memories, topics, pages, workflows, failures, and selectors | Unified context, telemetry, dashboard |
+| Selector pattern memory | ChromaDB collections | Successful action, target, selector, duration, success rate | Planner, generator, coverage APIs |
+| Application graph | NetworkX graph persisted as JSON | Pages, elements, flows, navigation edges, tested counts | Coverage APIs, planner, exploration views |
+| Browser exploration memory | SQLModel database | Canonical browser states, stable elements, ranked frontier work | Exploration agents, dashboard, unified context |
+| Conversation recall | SQLModel chat tables | Recent or searched assistant messages with context windows | Dashboard and assistant recall flows |
+| Injection telemetry | SQLModel database | Memory IDs, prompt stage, query, context preview, outcome | Dashboard, debugging, audit reviews |
 
-The vector store answers questions like "what selectors have worked for elements similar to this one?" It stores test patterns as text documents with metadata, embeds them using OpenAI's `text-embedding-3-small` model, and retrieves results by cosine similarity.
+## Agent Memory
 
-**Collections:**
+Agent memory is the curated working memory used by assistants and autonomous agents. It is stored in the `agent_memories` table and indexed into the vector store when possible.
 
-| Collection | Purpose | Typical Query |
-|------------|---------|--------------|
-| `test_patterns` | Successful action + selector pairs | "click submit button on login form" |
-| `application_elements` | Discovered UI elements | "password input field" |
-| `test_ideas` | Coverage gap suggestions | "negative tests for checkout" |
-| `prd_chunks` | PRD document segments | "user authentication requirements" |
+Valid memory kinds:
 
-**How patterns are stored**: When a test step succeeds, the memory manager records the action type (click, fill, etc.), the selector that worked, the success rate, and context metadata like page URL and Playwright selector code. Each pattern gets a unique ID derived from `md5(action:selector_type:selector_value)`.
+| Kind | Default type | Use |
+|------|--------------|-----|
+| `project_fact` | `semantic` | Stable facts about the product, app, environment, or test target |
+| `user_preference` | `semantic` | Preferences that should guide future agent behavior |
+| `workflow_decision` | `procedural` | Process choices, conventions, or accepted ways of working |
+| `failure_pattern` | `episodic` | Recurring failures and their observed causes |
+| `agent_lesson` | `procedural` | Lessons that should change future agent behavior |
 
-**How patterns are retrieved**: When the planner or generator needs selectors for an element, it queries the vector store with a natural language description. ChromaDB returns the most semantically similar patterns, filtered by minimum success rate (default: 70%). The generator receives proven selectors as hints rather than having to discover them from scratch.
+Valid memory types are `semantic`, `episodic`, `procedural`, and `structural`. Valid scopes are `global`, `project`, `user`, and `agent`.
 
-!!! tip "Why cosine similarity?"
-    Test descriptions vary in wording. "Click the login button" and "Press the Sign In button" describe similar actions. Cosine similarity on embeddings captures this semantic overlap, finding relevant patterns even when the exact words differ.
+Agent memories include confidence, importance, tags, source metadata, optional validity windows, review status, verification timestamps, and use counts. Review-required memories are excluded from prompt injection until approved.
 
-### Pattern Stats
+## Memory Knowledge Graph
 
-Patterns track success and failure counts, allowing the system to prioritize reliable selectors:
+The memory knowledge graph is a derived SQL-backed graph over approved agent memories. Each saved memory becomes a `memory` node, and the graph links it to typed entities such as topics, pages, workflows, failures, and selector evidence.
+
+The graph is used after normal vector/SQL retrieval. Primary retrieval finds the most relevant memories, then graph expansion adds closely connected memories with explanations such as shared topic, observed page, failure cause, fix, or supersession. Graph-expanded memories remain advisory and are excluded when they are review-required, archived, deleted, or otherwise inactive.
+
+Graph APIs expose project-scoped graph summaries, per-memory neighborhoods, and a rebuild operation for regenerating relationships from existing approved memories.
+
+## Safety Model
+
+Agent memory is screened before it can be stored or injected:
+
+- Secret-looking values are redacted.
+- Prompt-injection phrases and role-hijack patterns are rejected.
+- Invisible Unicode control characters are rejected.
+- Empty or fully redacted memories are dropped.
+- Review-required memories stay out of prompt context until approved.
+- Validity windows and status filters prevent expired, archived, deleted, or superseded memories from being selected.
+
+This is a guardrail, not a substitute for human review. Memories that came from noisy agent output should normally be marked `review_required`.
+
+## Consolidation
+
+`MemoryConsolidationService` turns a larger text block, such as a chat transcript or agent report, into a small set of durable memory candidates.
+
+By default, consolidation is deterministic and uses local heuristics. Optional LLM extraction only runs when the caller sets `use_llm=true`, `OPENAI_API_KEY` is available, and `MEMORY_CONSOLIDATION_LLM=true`.
+
+The consolidation prompt asks for zero to five high-signal memories and rejects one-off chatter, credentials, and private data.
+
+## Selector Pattern Memory
+
+Selector pattern memory stores successful test actions as vector-searchable records. A typical record contains:
 
 ```python
-# Stored per pattern
 {
+    "action": "click",
+    "target": "Submit button",
+    "selector_type": "role",
+    "selector_value": "button[name='Submit']",
+    "playwright_selector": "page.getByRole('button', { name: 'Submit' })",
     "success_count": 42,
     "failure_count": 3,
     "success_rate": 0.93,
-    "avg_duration": 250,  # ms
-    "playwright_selector": "page.getByRole('button', { name: 'Submit' })",
-    "page_url": "https://example.com/login"
+    "avg_duration": 250,
+    "page_url": "https://example.com/login",
 }
 ```
 
-When a selector fails, its success rate drops, and the system naturally deprioritizes it in future queries. This self-correcting behavior adapts to application changes over time.
+When a future spec mentions a similar target, the planner or generator can request selector hints with a minimum success rate. The generated code still verifies selectors against the live browser.
 
-## Graph Store: Application Structure
+## Browser Exploration Memory
 
-**Technology**: NetworkX (in-memory directed graph, JSON-persisted)
+Browser exploration memory stores canonical states and ranked frontier work for continuous discovery.
 
-The graph store models the application as a directed graph of pages, elements, and flows. It answers structural questions: "What elements does this page contain?", "How do I navigate from page A to page B?", "Which elements have never been tested?"
+It tracks:
 
-**Node types**: `page`, `element`, `flow`, `feature`, `api`
+- states, such as normalized URLs, state keys, source fidelity, visit counts, and timestamps;
+- elements, such as role, name, durable locators, test counts, success and failure counts, stability, and importance;
+- frontier items, such as action type, risk level, lease status, attempts, rank score, and priority score.
 
-**Edge types**: `contains` (page -> element), `navigates_to` (page -> page), `starts_at` / `ends_at` (flow -> page), `tests` (test -> element)
+Frontier APIs let exploration workers claim, complete, fail, or skip work with leases. This keeps long-running or recurring exploration from repeatedly testing the same low-value path.
 
-**Why NetworkX over a graph database?** NetworkX runs in-process with zero infrastructure. The application graph for most projects contains hundreds to low thousands of nodes -- well within NetworkX's in-memory performance range. The graph is persisted as a JSON file and reloaded on startup. A full graph database (Neo4j) would add operational complexity for minimal benefit at this scale.
+## Unified Context Bundle
 
-**Coverage tracking**: The graph store records which elements have been tested and how many times. `get_untested_elements()` returns elements with `test_count == 0`, feeding into coverage gap analysis. `get_orphan_pages()` finds pages not connected to any flow, identifying unreachable areas of the application.
+`UnifiedMemoryService.build_bundle()` returns a structured object with:
 
-**Project isolation**: Each project gets its own graph file (`application_{project_id}.json`). The graph store detects when the active project changes and reloads the appropriate file.
+- `agent_memories`: semantic, episodic, and procedural memory sections;
+- `browser_memory`: states, elements, and frontier items;
+- `graph_context`: graph stats, flows, coverage gaps, and navigation paths when URLs are present in the query;
+- `selector_patterns`: similar successful selector records;
+- `coverage_gaps`: high-priority untested elements or flows.
 
-## Exploration Store: Persistent Discoveries
+`MemoryContextBuilder.format_prompt_context()` converts this bundle into a compact prompt section with provenance labels and guidance that stored memory is advisory.
 
-**Technology**: SQLModel with database backend (PostgreSQL or SQLite)
+## Injection Telemetry
 
-The exploration store persists data from AI exploration sessions: sessions, transitions, discovered flows, API endpoints, requirements, and RTM entries. Unlike the vector and graph stores (which are optimized for search and structure), the exploration store provides durable, queryable records with full CRUD operations.
+When generator and healer stages inject memory context, `record_memory_injection()` writes a `memory_injection_events` row with:
 
-**Key models:**
-- `ExplorationSession` -- Entry URL, strategy, status, statistics
-- `DiscoveredTransition` -- From-URL to to-URL with trigger action and screenshot
-- `DiscoveredFlow` -- Multi-step user flow with ordered `FlowStep` entries
-- `DiscoveredApiEndpoint` -- HTTP method, path, parameters, status codes
-- `Requirement` -- Structured requirement with code, category, priority, acceptance criteria
-- `RtmEntry` -- Requirement-to-spec mapping with confidence score and coverage status
+- project ID;
+- actor type and stage;
+- source type and source ID;
+- retrieval query;
+- selected memory IDs;
+- context preview;
+- outcome and extra metadata.
 
-The exploration store feeds into downstream workflows:
-1. **Requirements generation**: AI analyzes transitions, flows, and endpoints to infer functional requirements
-2. **RTM generation**: Requirements are matched to existing test specs using semantic similarity, producing a traceability matrix with coverage percentages
-
-## How Memory Flows into Test Generation
-
-```mermaid
-sequenceDiagram
-    participant Spec as Markdown Spec
-    participant Planner
-    participant Memory as Memory Manager
-    participant Generator
-    participant Test as Generated Test
-
-    Spec->>Planner: "Click the Submit button"
-    Planner->>Memory: find_similar_tests("submit button")
-    Memory-->>Planner: [{selector: "getByRole('button', {name: 'Submit'})", success_rate: 0.95}]
-    Planner->>Planner: Include proven selectors in plan
-
-    Planner->>Generator: Plan with selector hints
-    Generator->>Generator: Use hints, verify in live browser
-    Generator->>Test: .spec.ts with proven selectors
-
-    Test-->>Memory: store_test_pattern(success=true)
-```
-
-Memory is advisory, not authoritative. The generator uses memory hints as starting points but always verifies selectors against the live browser. If a stored selector no longer works (the application changed), the generator discovers a new one and the pattern stats update accordingly.
+Use this telemetry to debug why a prompt included certain facts, confirm whether memory was active for a run, and identify stale memories that need review.
 
 ## Configuration
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CHROMADB_PERSIST_DIRECTORY` | `./data/chromadb` | Vector store data location |
-| `OPENAI_API_KEY` | (optional) | Enables embedding generation for semantic search |
-| `MEMORY_ENABLED` | `true` | Toggle memory system |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
+| `MEMORY_ENABLED` | `true` | Enables memory retrieval and storage |
+| `MEMORY_PROJECT_ID` | unset | Project ID injected into pipeline subprocesses |
+| `CHROMADB_PERSIST_DIRECTORY` | `./data/chromadb` | ChromaDB vector store location |
+| `MEMORY_COLLECTION_PREFIX` | `test_automation` | Prefix for ChromaDB collection names |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for semantic retrieval |
+| `EMBEDDING_DIMENSION` | `1536` | Expected embedding vector size |
+| `MEMORY_RETENTION_DAYS` | `365` | Retention horizon for memory records |
+| `MEMORY_CONSOLIDATION_LLM` | unset | Enables optional LLM consolidation when set to `true` |
+| `MEMORY_CONSOLIDATION_MODEL` | `OPENAI_MODEL_ID` or `gpt-4o-mini` | Model used for optional LLM consolidation |
+| `COVERAGE_ENABLED` | `true` | Enables coverage analysis from memory |
+| `COVERAGE_THRESHOLD` | `0.8` | Target coverage threshold |
 
 !!! note "Memory without OpenAI"
-    If `OPENAI_API_KEY` is not set, the memory system falls back to ChromaDB's default embedding function. Semantic search quality degrades, but the system remains functional. The graph store and exploration store do not require OpenAI.
+    If `OPENAI_API_KEY` is not set, selector and agent memory can still function with the available local/default embedding path, but semantic retrieval quality may be lower. Graph, browser exploration, and SQL-backed agent memory records do not require OpenAI.
 
 ## Related
 
-- [System Overview](./system-overview.md) -- How memory fits into the component architecture
-- [Pipeline Architecture](./pipeline-architecture.md) -- Where memory is queried during pipeline stages
-- [Browser Pool](./browser-pool.md) -- Resource management that memory helps optimize
+- [Web Dashboard](../reference/web-dashboard.md) -- Memory page capabilities
+- [API Endpoints](../reference/api-endpoints.md#memory) -- Memory REST API reference
+- [Environment Variables](../reference/environment-variables.md#memory-system) -- Runtime configuration
+- [Pipeline Architecture](pipeline-architecture.md) -- Where planner, generator, and healer use memory

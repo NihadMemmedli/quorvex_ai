@@ -62,6 +62,13 @@ Feature ideas are welcome. Open an issue with the **feature request** label and 
 
 ## Development Setup
 
+### Prerequisites
+
+- Git
+- Python 3.10+
+- Node.js 20+ and npm 9+
+- Docker, optional for local PostgreSQL and required for Docker-based development or production testing
+
 ### 1. Fork and Clone
 
 ```bash
@@ -241,6 +248,13 @@ Before submitting a PR, verify:
    python orchestrator/cli.py specs/your-test.md --validate-only
    # or: --dry-run (alias). Use --validate-timeout N for a longer URL check timeout.
    ```
+
+6. **If you changed public behavior**: Update the matching docs in the same PR and run:
+   ```bash
+   make docs-check
+   ```
+
+See [Documentation Maintenance](docs/guides/documentation-maintenance.md) for the API, dashboard, CLI, environment variable, and architecture surfaces that commonly drift.
 
 ---
 

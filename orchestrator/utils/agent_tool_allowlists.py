@@ -130,6 +130,15 @@ AGENT_TOOL_PROFILES: dict[str, AgentToolProfile] = {
     "test-operator": AgentToolProfile((), TEST_OPERATOR_MCP_TOOLS),
     "playwright-skill-executor": AgentToolProfile(("Read", "Write", "Bash", "Glob", "Grep"), ()),
     "text-analysis": AgentToolProfile((), ()),
+    # Autonomous mission roles are intentionally proposal-only. They can inspect
+    # project/app state but repository writes happen only through approval APIs.
+    "surface-mapper": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_MCP_TOOLS),
+    "explorer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_MCP_TOOLS),
+    "requirements-analyst": AgentToolProfile(("Glob", "Grep", "Read", "LS"), ()),
+    "rtm-mapper": AgentToolProfile(("Glob", "Grep", "Read", "LS"), ()),
+    "spec-writer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), ()),
+    "regression-scout": AgentToolProfile(("Glob", "Grep", "Read", "LS"), TEST_VALIDATOR_MCP_TOOLS),
+    "flake-triager": AgentToolProfile(("Glob", "Grep", "Read", "LS"), TEST_VALIDATOR_MCP_TOOLS),
 }
 
 AGENT_CLASS_PROFILE_ALIASES: dict[str, str] = {

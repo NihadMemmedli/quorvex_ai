@@ -180,6 +180,12 @@ Use this design guidance to reduce flaky output. Treat it as advisory context fr
 {design_context}
 """
 
+        memory_section = self._build_memory_context_section(
+            query=f"{target_url or ''}\n{spec_content}",
+            project_id=os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID"),
+            source_id=spec_path,
+        )
+
         prompt = f"""You are the Playwright Test Generator.
 
 Context: User wants to generate automated tests from the following test plan.
@@ -190,6 +196,7 @@ Context: User wants to generate automated tests from the following test plan.
 {url_section}
 {credentials_section}
 {design_section}
+{memory_section}
 <spec-content file="{spec_path}">
 {spec_content}
 </spec-content>
@@ -241,6 +248,45 @@ Save the generated test file to: {output_path}
             rendered_prompt=prompt,
         )
         return attach_prompt_metadata(prompt, metadata)
+
+    def _build_memory_context_section(self, *, query: str, project_id: str | None, source_id: str) -> str:
+        if os.environ.get("MEMORY_ENABLED", "true").lower() != "true" or not project_id:
+            return ""
+        try:
+            from orchestrator.memory.context_builder import MemoryContextBuilder
+            from orchestrator.memory.telemetry import record_memory_injection
+            from orchestrator.memory.agent_memory import get_agent_memory_service
+
+            builder = MemoryContextBuilder(service=get_agent_memory_service())
+            bundle = builder.build_bundle(
+                query=query[:2000],
+                project_id=project_id,
+                agent_type="NativeGenerator",
+                limit=8,
+            )
+            context = builder.format_prompt_context(bundle, token_budget=1200)
+            if not context:
+                return ""
+            record_memory_injection(
+                project_id=project_id,
+                actor_type="agent",
+                stage="native_generator",
+                query=query[:1000],
+                bundle=bundle.to_dict(),
+                context_text=context,
+                source_type="spec",
+                source_id=source_id,
+            )
+            return f"""
+
+## Memory Context
+Use this memory only as advisory context. Validate remembered selectors, routes, and browser-state hints against the live browser before writing code.
+
+{context}
+"""
+        except Exception as exc:
+            logger.debug("Generator memory context skipped: %s", exc)
+            return ""
 
     async def _query_generator_agent(self, prompt: str) -> str:
         """

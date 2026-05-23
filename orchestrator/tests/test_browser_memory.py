@@ -68,8 +68,117 @@ def test_exploration_memory_seeds_states_transitions_and_frontier(monkeypatch):
     assert counts["states"] >= 2
     assert counts["transitions"] == 3
     assert any(state["url"] == "https://example.test/login" for state in bundle["states"])
+    assert all(state["source_fidelity"] == "action_trace" for state in bundle["states"])
     assert any(element["name"] in {"Email", "Sign in"} for element in bundle["elements"])
     assert any(item["action_type"] in {"fill", "click"} for item in bundle["frontier"])
+
+
+def test_live_snapshot_memory_is_preferred_over_trace_fallback(monkeypatch):
+    service = _memory_service(monkeypatch)
+    service.seed_from_action_trace(
+        session_id="explore-1",
+        entry_url="https://example.test/login",
+        action_trace=[{"action": "click", "target": "Sign in", "outcome": "ok"}],
+    )
+    live = service.upsert_page_state(
+        session_id="explore-1",
+        url="https://example.test/login",
+        title="Login",
+        snapshot_text='- button "Sign in" [ref=e1]\n- textbox "Email" [ref=e2]',
+        source_fidelity="live_snapshot",
+    )
+
+    bundle = service.get_memory_bundle(query="sign in", limit=10)
+
+    assert bundle["states"][0]["id"] == live.id
+    assert bundle["states"][0]["source_fidelity"] == "live_snapshot"
+    assert any(item["state_source_fidelity"] == "live_snapshot" for item in bundle["frontier"])
+
+
+def test_browser_memory_delta_detects_page_state_changes_and_removed_pages(monkeypatch):
+    from sqlmodel import Session
+
+    from orchestrator.api.models_db import BrowserPageState
+    from orchestrator.memory import browser_memory as browser_memory_module
+
+    service = _memory_service(monkeypatch)
+    service.upsert_page_state(
+        session_id="baseline-run",
+        url="https://example.test/login",
+        title="Login",
+        snapshot_text='- button "Sign in" [ref=e1]',
+    )
+    removed_state = service.upsert_page_state(
+        session_id="baseline-run",
+        url="https://example.test/settings",
+        title="Settings",
+        snapshot_text='- button "Save" [ref=e2]',
+    )
+    baseline = service.capture_memory_baseline()
+
+    service.upsert_page_state(
+        session_id="current-run",
+        url="https://example.test/login",
+        title="Login",
+        snapshot_text='- textbox "Email" [ref=e1]\n- button "Continue" [ref=e2]',
+    )
+    service.upsert_page_state(
+        session_id="current-run",
+        url="https://example.test/dashboard",
+        title="Dashboard",
+        snapshot_text='- link "Settings" [ref=e3]',
+    )
+    with Session(browser_memory_module.engine) as db:
+        row = db.get(BrowserPageState, removed_state.id)
+        row.status = "inactive"
+        db.add(row)
+        db.commit()
+
+    delta = service.compute_memory_delta(baseline)
+
+    assert delta["summary"]["changed_page_states"] == 1
+    assert delta["summary"]["new_page_states"] == 1
+    assert delta["summary"]["removed_page_states"] == 1
+    assert delta["page_states"]["changed"][0]["changed_fields"]["state_key"]
+    assert delta["page_states"]["new"][0]["current"]["url"] == "https://example.test/dashboard"
+    assert delta["page_states"]["removed"][0]["baseline"]["url"] == "https://example.test/settings"
+
+
+def test_browser_memory_delta_detects_locator_drift(monkeypatch):
+    from sqlmodel import Session, select
+
+    from orchestrator.api.models_db import BrowserElement
+    from orchestrator.memory import browser_memory as browser_memory_module
+
+    service = _memory_service(monkeypatch)
+    state = service.upsert_page_state(
+        session_id="baseline-run",
+        url="https://example.test/login",
+        title="Login",
+        snapshot_text='- button "Sign in" [ref=e1]',
+    )
+    baseline = service.capture_memory_baseline()
+
+    with Session(browser_memory_module.engine) as db:
+        element = db.exec(select(BrowserElement).where(BrowserElement.state_id == state.id)).first()
+        element.locator_candidates_json = [
+            {
+                "strategy": "css",
+                "locator": "button:nth-child(3)",
+                "score": 0.35,
+                "durable": False,
+            }
+        ]
+        db.add(element)
+        db.commit()
+
+    delta = service.compute_memory_delta(baseline)
+
+    assert delta["summary"]["locator_drift"] == 1
+    drift = delta["elements"]["locator_drift"][0]["drift"]
+    assert drift["best_locator.strategy"] == {"from": "role", "to": "css"}
+    assert drift["best_locator.durable"] == {"from": True, "to": False}
+    assert drift["best_locator.score_delta"] < 0
 
 
 def test_frontier_work_is_actionable_ranked_and_leased(monkeypatch):

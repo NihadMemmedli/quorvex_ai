@@ -60,6 +60,10 @@ class RequirementCreate(BaseModel):
     category: str = Field(default="other")
     priority: str = Field(default="medium")
     acceptance_criteria: list[str] = Field(default_factory=list)
+    truth_state: str = Field(default="candidate_requirement")
+    source_type: str = Field(default="manual")
+    confidence: float = Field(default=0.9, ge=0, le=1)
+    uncertainty_reason: str | None = None
 
 
 class RequirementUpdate(BaseModel):
@@ -70,7 +74,35 @@ class RequirementUpdate(BaseModel):
     category: str | None = None
     priority: str | None = None
     status: str | None = None
+    truth_state: str | None = None
+    source_type: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    uncertainty_reason: str | None = None
     acceptance_criteria: list[str] | None = None
+
+
+class RequirementTruthDecisionRequest(BaseModel):
+    """Human decision for requirement truth state."""
+
+    user: str | None = None
+    comment: str | None = None
+
+
+class RequirementReviewDecision(BaseModel):
+    """Bulk human decision for one requirement."""
+
+    req_id: int
+    decision: str = Field(pattern="^(confirm|confirmed|approve|approved|reject|rejected|stale|mark_stale)$")
+    user: str | None = None
+    comment: str | None = None
+
+
+class RequirementReviewDecisionsRequest(BaseModel):
+    """Bulk review decisions for requirement truth state."""
+
+    user: str | None = None
+    comment: str | None = None
+    decisions: list[RequirementReviewDecision] = Field(..., min_length=1, max_length=200)
 
 
 class RequirementResponse(BaseModel):
@@ -83,10 +115,26 @@ class RequirementResponse(BaseModel):
     category: str
     priority: str
     status: str
+    truth_state: str
+    source_type: str
+    confidence: float
+    uncertainty_reason: str | None = None
+    confirmed_by: str | None = None
+    confirmed_at: datetime | None = None
+    rejected_by: str | None = None
+    rejected_at: datetime | None = None
     acceptance_criteria: list[str]
     source_session_id: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class RequirementReviewDecisionsResponse(BaseModel):
+    """Bulk requirement review result."""
+
+    updated: int
+    requirements: list[RequirementResponse]
+    errors: list[dict]
 
 
 class PaginatedRequirementsResponse(BaseModel):
@@ -112,6 +160,99 @@ class GenerateRequirementsResponse(BaseModel):
     by_category: dict
     by_priority: dict
     requirements: list[RequirementResponse]
+
+
+def _requirement_truth_state(requirement) -> str:
+    stored = getattr(requirement, "truth_state", None)
+    if stored:
+        return str(stored)
+    status = str(getattr(requirement, "status", "") or "").lower()
+    if status in {"approved", "implemented", "tested", "confirmed"}:
+        return "confirmed_requirement"
+    if status in {"observed", "observed_behavior"}:
+        return "observed_behavior"
+    if getattr(requirement, "source_session_id", None):
+        return "candidate_requirement"
+    return "manual_requirement"
+
+
+def _requirement_confidence(requirement) -> float:
+    stored = getattr(requirement, "confidence", None)
+    if stored is not None:
+        try:
+            return max(0.0, min(float(stored), 1.0))
+        except (TypeError, ValueError):
+            pass
+    truth_state = _requirement_truth_state(requirement)
+    if truth_state == "confirmed_requirement":
+        return 1.0
+    if truth_state == "manual_requirement":
+        return 0.9
+    if truth_state == "candidate_requirement":
+        return 0.7
+    return 0.5
+
+
+def _requirement_source_type(requirement) -> str:
+    stored = getattr(requirement, "source_type", None)
+    if stored:
+        return str(stored)
+    if getattr(requirement, "source_session_id", None):
+        return "app_observation"
+    if _requirement_truth_state(requirement) == "confirmed_requirement":
+        return "human_approval"
+    return "manual_entry"
+
+
+def _requirement_uncertainty_reason(requirement) -> str | None:
+    stored = getattr(requirement, "uncertainty_reason", None)
+    if stored:
+        return str(stored)
+    truth_state = _requirement_truth_state(requirement)
+    if truth_state == "candidate_requirement":
+        return "Generated from observed app behavior and awaiting human confirmation."
+    if truth_state == "observed_behavior":
+        return "Records current behavior only; it has not been promoted to an intended requirement."
+    return None
+
+
+def _requirement_generation_warning(requirement) -> str | None:
+    truth_state = _requirement_truth_state(requirement)
+    if truth_state == "confirmed_requirement":
+        return None
+    if truth_state == "rejected_requirement":
+        return "This requirement was rejected; generated specs should be reviewed before use."
+    if truth_state == "stale_requirement":
+        return "This requirement was marked stale; generated specs may not match the current application."
+    if truth_state == "observed_behavior":
+        return "This is observed behavior, not a confirmed requirement. Avoid encoding a bug as expected behavior."
+    if truth_state == "candidate_requirement":
+        return "This candidate requirement has not been confirmed by a human reviewer."
+    return "This requirement is not confirmed; generated specs should be reviewed before use."
+
+
+def _requirement_to_response(requirement) -> RequirementResponse:
+    return RequirementResponse(
+        id=requirement.id,
+        req_code=requirement.req_code,
+        title=requirement.title,
+        description=requirement.description,
+        category=requirement.category,
+        priority=requirement.priority,
+        status=requirement.status,
+        truth_state=_requirement_truth_state(requirement),
+        source_type=_requirement_source_type(requirement),
+        confidence=_requirement_confidence(requirement),
+        uncertainty_reason=_requirement_uncertainty_reason(requirement),
+        confirmed_by=getattr(requirement, "confirmed_by", None),
+        confirmed_at=getattr(requirement, "confirmed_at", None),
+        rejected_by=getattr(requirement, "rejected_by", None),
+        rejected_at=getattr(requirement, "rejected_at", None),
+        acceptance_criteria=requirement.acceptance_criteria,
+        source_session_id=requirement.source_session_id,
+        created_at=requirement.created_at,
+        updated_at=requirement.updated_at,
+    )
 
 
 # ========== Deduplication Models ==========
@@ -202,6 +343,9 @@ class GenerateSpecFromRequirementResponse(BaseModel):
     rtm_entry_id: int
     generated_at: str
     cached: bool = False
+    truth_state: str | None = None
+    generation_warning: str | None = None
+    generation_allowed: bool = True
 
 
 class SpecStatusResponse(BaseModel):
@@ -212,6 +356,9 @@ class SpecStatusResponse(BaseModel):
     spec_name: str | None = None
     rtm_entry_id: int | None = None
     generated_at: str | None = None
+    truth_state: str | None = None
+    generation_warning: str | None = None
+    generation_allowed: bool = True
 
 
 # ========== API Endpoints ==========
@@ -225,6 +372,7 @@ async def list_requirements(
     project_id: str = Query(default="default"),
     category: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    truth_state: str | None = Query(default=None),
     priority: str | None = Query(default=None),
     search: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -250,25 +398,16 @@ async def list_requirements(
     store = get_exploration_store(project_id=project_id)
 
     requirements, total = store.get_requirements_paginated(
-        category=category, status=status, priority=priority, search=search, limit=limit, offset=offset
+        category=category,
+        status=status,
+        truth_state=truth_state,
+        priority=priority,
+        search=search,
+        limit=limit,
+        offset=offset,
     )
 
-    items = [
-        RequirementResponse(
-            id=r.id,
-            req_code=r.req_code,
-            title=r.title,
-            description=r.description,
-            category=r.category,
-            priority=r.priority,
-            status=r.status,
-            acceptance_criteria=r.acceptance_criteria,
-            source_session_id=r.source_session_id,
-            created_at=r.created_at,
-            updated_at=r.updated_at,
-        )
-        for r in requirements
-    ]
+    items = [_requirement_to_response(r) for r in requirements]
 
     return PaginatedRequirementsResponse(
         items=items, total=total, limit=limit, offset=offset, has_more=(offset + len(items)) < total
@@ -480,19 +619,7 @@ async def get_requirement(req_id: int, project_id: str = Query(default="default"
     if not requirement:
         raise HTTPException(status_code=404, detail="Requirement not found")
 
-    return RequirementResponse(
-        id=requirement.id,
-        req_code=requirement.req_code,
-        title=requirement.title,
-        description=requirement.description,
-        category=requirement.category,
-        priority=requirement.priority,
-        status=requirement.status,
-        acceptance_criteria=requirement.acceptance_criteria,
-        source_session_id=requirement.source_session_id,
-        created_at=requirement.created_at,
-        updated_at=requirement.updated_at,
-    )
+    return _requirement_to_response(requirement)
 
 
 @router.post("", response_model=RequirementResponse)
@@ -511,21 +638,13 @@ async def create_requirement(request: RequirementCreate, project_id: str = Query
         category=request.category,
         priority=request.priority,
         acceptance_criteria=request.acceptance_criteria,
+        truth_state=request.truth_state,
+        source_type=request.source_type,
+        confidence=request.confidence,
+        uncertainty_reason=request.uncertainty_reason,
     )
 
-    return RequirementResponse(
-        id=requirement.id,
-        req_code=requirement.req_code,
-        title=requirement.title,
-        description=requirement.description,
-        category=requirement.category,
-        priority=requirement.priority,
-        status=requirement.status,
-        acceptance_criteria=requirement.acceptance_criteria,
-        source_session_id=requirement.source_session_id,
-        created_at=requirement.created_at,
-        updated_at=requirement.updated_at,
-    )
+    return _requirement_to_response(requirement)
 
 
 class BulkRequirementCreate(BaseModel):
@@ -558,22 +677,12 @@ async def bulk_create_requirements(request: BulkRequirementCreate, project_id: s
             category=item.category,
             priority=item.priority,
             acceptance_criteria=item.acceptance_criteria,
+            truth_state=item.truth_state,
+            source_type=item.source_type,
+            confidence=item.confidence,
+            uncertainty_reason=item.uncertainty_reason,
         )
-        created_reqs.append(
-            RequirementResponse(
-                id=requirement.id,
-                req_code=requirement.req_code,
-                title=requirement.title,
-                description=requirement.description,
-                category=requirement.category,
-                priority=requirement.priority,
-                status=requirement.status,
-                acceptance_criteria=requirement.acceptance_criteria,
-                source_session_id=requirement.source_session_id,
-                created_at=requirement.created_at,
-                updated_at=requirement.updated_at,
-            )
-        )
+        created_reqs.append(_requirement_to_response(requirement))
 
     return BulkCreateResponse(created=len(created_reqs), requirements=created_reqs)
 
@@ -595,19 +704,254 @@ async def update_requirement(req_id: int, request: RequirementUpdate, project_id
     if not requirement:
         raise HTTPException(status_code=404, detail="Requirement not found")
 
-    return RequirementResponse(
-        id=requirement.id,
-        req_code=requirement.req_code,
-        title=requirement.title,
-        description=requirement.description,
-        category=requirement.category,
-        priority=requirement.priority,
-        status=requirement.status,
-        acceptance_criteria=requirement.acceptance_criteria,
-        source_session_id=requirement.source_session_id,
-        created_at=requirement.created_at,
-        updated_at=requirement.updated_at,
+    return _requirement_to_response(requirement)
+
+
+def _update_requirement_truth_decision(
+    req_id: int,
+    *,
+    project_id: str,
+    truth_state: str,
+    status: str,
+    actor: str | None,
+    comment: str | None,
+):
+    from sqlmodel import select
+
+    from orchestrator.api.db import get_session
+    from orchestrator.api.models_db import (
+        AutonomousFinding,
+        AutonomousMission,
+        AutonomousTestProposal,
+        Requirement,
     )
+    from orchestrator.services.autonomous_events import create_autonomous_agent_event
+
+    with next(get_session()) as db:
+        requirement = db.get(Requirement, req_id)
+        if not requirement or requirement.project_id != project_id:
+            raise HTTPException(status_code=404, detail="Requirement not found")
+
+        now = datetime.utcnow()
+        requirement.truth_state = truth_state
+        requirement.status = status
+        requirement.confidence = 1.0 if truth_state == "confirmed_requirement" else max(float(requirement.confidence or 0.7), 0.6)
+        requirement.uncertainty_reason = comment if truth_state != "confirmed_requirement" else None
+        requirement.updated_at = now
+        if truth_state == "confirmed_requirement":
+            requirement.confirmed_by = actor
+            requirement.confirmed_at = now
+            requirement.rejected_by = None
+            requirement.rejected_at = None
+            requirement.source_type = "human_approval"
+        elif truth_state == "rejected_requirement":
+            requirement.rejected_by = actor
+            requirement.rejected_at = now
+        db.add(requirement)
+
+        affected_finding_ids: list[str] = []
+        affected_proposal_ids: list[str] = []
+        affected_mission_ids: set[str] = set()
+        propagation = {
+            "requirement_id": requirement.id,
+            "requirement_code": requirement.req_code,
+            "truth_state": truth_state,
+            "status": status,
+            "actor": actor,
+            "comment": comment,
+            "propagated_at": now.isoformat(),
+        }
+
+        findings = db.exec(select(AutonomousFinding).where(AutonomousFinding.project_id == project_id)).all()
+        for finding in findings:
+            evidence = dict(finding.evidence or {})
+            try:
+                linked_requirement_id = int(evidence.get("requirement_id"))
+            except (TypeError, ValueError):
+                continue
+            if linked_requirement_id != req_id:
+                continue
+            evidence["requirement_review"] = propagation
+            if truth_state == "confirmed_requirement":
+                evidence["requirement_truth_state"] = truth_state
+                evidence.pop("generation_warning", None)
+            elif truth_state == "rejected_requirement":
+                evidence["requirement_truth_state"] = truth_state
+                evidence["generation_warning"] = "Linked requirement was rejected by human review."
+                if finding.status in {"open", "awaiting_approval"}:
+                    finding.status = "rejected"
+            else:
+                evidence["requirement_truth_state"] = truth_state
+                evidence["generation_warning"] = "Linked requirement was marked stale by human review."
+            finding.evidence = evidence
+            finding.updated_at = now
+            db.add(finding)
+            affected_finding_ids.append(finding.id)
+            if finding.mission_id:
+                affected_mission_ids.add(finding.mission_id)
+
+        proposals = db.exec(select(AutonomousTestProposal).where(AutonomousTestProposal.project_id == project_id)).all()
+        for proposal in proposals:
+            metadata = dict(proposal.source_metadata or {})
+            try:
+                linked_requirement_id = int(metadata.get("requirement_id"))
+            except (TypeError, ValueError):
+                linked_requirement_id = None
+            if linked_requirement_id != req_id and proposal.finding_id not in affected_finding_ids:
+                continue
+            metadata["requirement_review"] = propagation
+            metadata["requirement_id"] = requirement.id
+            metadata["requirement_code"] = requirement.req_code
+            metadata["requirement_truth_state"] = truth_state
+            metadata["generation_allowed"] = True
+            if truth_state == "confirmed_requirement":
+                metadata["generation_warning"] = None
+            elif truth_state == "rejected_requirement":
+                metadata["generation_warning"] = "Linked requirement was rejected by human review."
+                if proposal.approval_status == "pending":
+                    proposal.approval_status = "rejected"
+                    proposal.rejected_at = now
+                    proposal.rejected_by = actor
+            else:
+                metadata["generation_warning"] = "Linked requirement was marked stale by human review."
+            proposal.source_metadata = metadata
+            proposal.updated_at = now
+            db.add(proposal)
+            affected_proposal_ids.append(proposal.id)
+            if proposal.mission_id:
+                affected_mission_ids.add(proposal.mission_id)
+
+        db.commit()
+        for mission_id in affected_mission_ids:
+            mission = db.get(AutonomousMission, mission_id)
+            if not mission:
+                continue
+            create_autonomous_agent_event(
+                project_id=project_id,
+                mission_id=mission.id,
+                run_id=mission.latest_run_id,
+                event_type="requirement_propagation",
+                message=f"Requirement {requirement.req_code} marked {truth_state.replace('_', ' ')} and propagated to autonomous artifacts.",
+                payload={
+                    "requirement_id": requirement.id,
+                    "requirement_code": requirement.req_code,
+                    "truth_state": truth_state,
+                    "finding_ids": affected_finding_ids,
+                    "proposal_ids": affected_proposal_ids,
+                    "finding_count": len(affected_finding_ids),
+                    "proposal_count": len(affected_proposal_ids),
+                    "actor": actor,
+                    "comment": comment,
+                },
+                session=db,
+            )
+        db.refresh(requirement)
+        return requirement
+
+
+@router.post("/review/decisions", response_model=RequirementReviewDecisionsResponse)
+async def review_requirement_decisions(
+    request: RequirementReviewDecisionsRequest,
+    project_id: str = Query(default="default"),
+):
+    """Apply multiple human truth-state decisions to requirements."""
+
+    updated: list[RequirementResponse] = []
+    errors: list[dict] = []
+    for decision in request.decisions:
+        actor = decision.user or request.user
+        comment = decision.comment if decision.comment is not None else request.comment
+        normalized = decision.decision.lower()
+        try:
+            if normalized in {"confirm", "confirmed", "approve", "approved"}:
+                requirement = _update_requirement_truth_decision(
+                    decision.req_id,
+                    project_id=project_id,
+                    truth_state="confirmed_requirement",
+                    status="confirmed",
+                    actor=actor,
+                    comment=comment,
+                )
+            elif normalized in {"reject", "rejected"}:
+                requirement = _update_requirement_truth_decision(
+                    decision.req_id,
+                    project_id=project_id,
+                    truth_state="rejected_requirement",
+                    status="rejected",
+                    actor=actor,
+                    comment=comment or "Rejected by human review.",
+                )
+            else:
+                requirement = _update_requirement_truth_decision(
+                    decision.req_id,
+                    project_id=project_id,
+                    truth_state="stale_requirement",
+                    status="stale",
+                    actor=actor,
+                    comment=comment or "Marked stale by human review.",
+                )
+            updated.append(_requirement_to_response(requirement))
+        except HTTPException as exc:
+            errors.append({"req_id": decision.req_id, "error": exc.detail, "status_code": exc.status_code})
+        except Exception as exc:
+            logger.exception("Requirement review decision failed for %s", decision.req_id)
+            errors.append({"req_id": decision.req_id, "error": str(exc), "status_code": 500})
+
+    return RequirementReviewDecisionsResponse(updated=len(updated), requirements=updated, errors=errors)
+
+
+@router.post("/{req_id}/confirm", response_model=RequirementResponse)
+async def confirm_requirement(
+    req_id: int,
+    request: RequirementTruthDecisionRequest | None = None,
+    project_id: str = Query(default="default"),
+):
+    payload = request or RequirementTruthDecisionRequest()
+    requirement = _update_requirement_truth_decision(
+        req_id,
+        project_id=project_id,
+        truth_state="confirmed_requirement",
+        status="confirmed",
+        actor=payload.user,
+        comment=payload.comment,
+    )
+    return _requirement_to_response(requirement)
+
+
+@router.post("/{req_id}/reject", response_model=RequirementResponse)
+async def reject_requirement(
+    req_id: int,
+    request: RequirementTruthDecisionRequest | None = None,
+    project_id: str = Query(default="default"),
+):
+    payload = request or RequirementTruthDecisionRequest()
+    requirement = _update_requirement_truth_decision(
+        req_id,
+        project_id=project_id,
+        truth_state="rejected_requirement",
+        status="rejected",
+        actor=payload.user,
+        comment=payload.comment or "Rejected by human review.",
+    )
+    return _requirement_to_response(requirement)
+
+
+@router.post("/{req_id}/mark-stale", response_model=RequirementResponse)
+async def mark_requirement_stale(
+    req_id: int,
+    request: RequirementTruthDecisionRequest | None = None,
+    project_id: str = Query(default="default"),
+):
+    payload = request or RequirementTruthDecisionRequest()
+    requirement = _update_requirement_truth_decision(
+        req_id,
+        project_id=project_id,
+        truth_state="stale_requirement",
+        status="stale",
+        actor=payload.user,
+        comment=payload.comment or "Marked stale by human review.",
+    )
+    return _requirement_to_response(requirement)
 
 
 @router.delete("/{req_id}")
@@ -679,6 +1023,10 @@ async def _run_requirements_generation(job_id: str, project_id: str, session_id:
                     "category": r.category,
                     "priority": r.priority,
                     "status": r.status,
+                    "truth_state": _requirement_truth_state(r),
+                    "source_type": _requirement_source_type(r),
+                    "confidence": _requirement_confidence(r),
+                    "uncertainty_reason": _requirement_uncertainty_reason(r),
                     "acceptance_criteria": r.acceptance_criteria,
                     "source_session_id": r.source_session_id,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -953,19 +1301,7 @@ async def check_duplicate(request: CheckDuplicateRequest, project_id: str = Quer
         # Get full requirement for response
         req = store.get_requirement(exact_match.get("id"))
         if req:
-            exact_match_response = RequirementResponse(
-                id=req.id,
-                req_code=req.req_code,
-                title=req.title,
-                description=req.description,
-                category=req.category,
-                priority=req.priority,
-                status=req.status,
-                acceptance_criteria=req.acceptance_criteria,
-                source_session_id=req.source_session_id,
-                created_at=req.created_at,
-                updated_at=req.updated_at,
-            )
+            exact_match_response = _requirement_to_response(req)
 
     near_matches_response = [
         DuplicateMatchResponse(
@@ -1066,19 +1402,7 @@ async def merge_requirements(request: MergeRequest, project_id: str = Query(defa
         db.refresh(canonical)
 
         return MergeResponse(
-            canonical=RequirementResponse(
-                id=canonical.id,
-                req_code=canonical.req_code,
-                title=canonical.title,
-                description=canonical.description,
-                category=canonical.category,
-                priority=canonical.priority,
-                status=canonical.status,
-                acceptance_criteria=canonical.acceptance_criteria,
-                source_session_id=canonical.source_session_id,
-                created_at=canonical.created_at,
-                updated_at=canonical.updated_at,
-            ),
+            canonical=_requirement_to_response(canonical),
             merged_count=len(deleted_ids),
             deleted_ids=deleted_ids,
         )
@@ -1096,9 +1420,9 @@ async def get_spec_status(req_id: int, project_id: str = Query(default="default"
     """
     from sqlmodel import select
 
-    from api.db import get_session
-    from api.models_db import RtmEntry
     from memory.exploration_store import get_exploration_store
+    from orchestrator.api.db import get_session
+    from orchestrator.api.models_db import RtmEntry
 
     store = get_exploration_store(project_id=project_id)
 
@@ -1106,6 +1430,8 @@ async def get_spec_status(req_id: int, project_id: str = Query(default="default"
     requirement = store.get_requirement(req_id)
     if not requirement:
         raise HTTPException(status_code=404, detail="Requirement not found")
+    truth_state = _requirement_truth_state(requirement)
+    generation_warning = _requirement_generation_warning(requirement)
 
     # Check for RTM entries linked to this requirement
     with next(get_session()) as db:
@@ -1121,9 +1447,17 @@ async def get_spec_status(req_id: int, project_id: str = Query(default="default"
                 spec_name=entry.test_spec_name,
                 rtm_entry_id=entry.id,
                 generated_at=entry.created_at.isoformat() if entry.created_at else None,
+                truth_state=truth_state,
+                generation_warning=generation_warning,
+                generation_allowed=True,
             )
 
-    return SpecStatusResponse(has_spec=False)
+    return SpecStatusResponse(
+        has_spec=False,
+        truth_state=truth_state,
+        generation_warning=generation_warning,
+        generation_allowed=True,
+    )
 
 
 @router.post("/{req_id}/generate-spec", response_model=GenerateSpecFromRequirementResponse)
@@ -1138,6 +1472,7 @@ async def generate_spec_from_requirement(
     Automatically creates an RTM entry linking the spec to the requirement.
     """
     from memory.exploration_store import get_exploration_store
+    from orchestrator.api.db import get_session
     from utils.string_utils import slugify
     from workflows.native_planner import NativePlanner
 
@@ -1147,6 +1482,8 @@ async def generate_spec_from_requirement(
     requirement = store.get_requirement(req_id)
     if not requirement:
         raise HTTPException(status_code=404, detail="Requirement not found")
+    truth_state = _requirement_truth_state(requirement)
+    generation_warning = _requirement_generation_warning(requirement)
 
     # Check if spec already exists (unless force_regenerate)
     if not request.force_regenerate:
@@ -1156,8 +1493,7 @@ async def generate_spec_from_requirement(
             spec_path = Path(status.spec_path) if status.spec_path else None
             if spec_path and spec_path.exists():
                 # Ensure spec is registered in DBSpecMetadata for this project
-                from api.db import get_session
-                from api.models_db import SpecMetadata as DBSpecMetadata
+                from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
 
                 specs_base_dir = Path(__file__).resolve().parent.parent.parent / "specs"
                 try:
@@ -1193,6 +1529,9 @@ async def generate_spec_from_requirement(
                     rtm_entry_id=status.rtm_entry_id,
                     generated_at=status.generated_at,
                     cached=True,
+                    truth_state=truth_state,
+                    generation_warning=generation_warning,
+                    generation_allowed=True,
                 )
 
     # Resolve base URL from exploration session if available
@@ -1219,7 +1558,6 @@ async def generate_spec_from_requirement(
     credential_keys = []
     try:
         from api.credentials import list_project_credentials
-        from api.db import get_session
 
         with next(get_session()) as db_session:
             creds = list_project_credentials(project_id, db_session, include_env=True)
@@ -1233,12 +1571,11 @@ async def generate_spec_from_requirement(
     )
 
     # Determine output directory - use project name slug instead of UUID
-    from api.db import get_session as _get_session
-    from api.models_db import Project as _Project
+    from orchestrator.api.models_db import Project as _Project
 
     _folder_name = project_id
     try:
-        with next(_get_session()) as _db:
+        with next(get_session()) as _db:
             _project = _db.get(_Project, project_id)
             if _project and _project.name:
                 _folder_name = slugify(_project.name)
@@ -1268,8 +1605,7 @@ async def generate_spec_from_requirement(
         spec_content = spec_path.read_text() if spec_path.exists() else ""
 
         # Register spec in DBSpecMetadata for project filtering
-        from api.db import get_session
-        from api.models_db import SpecMetadata as DBSpecMetadata
+        from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
 
         # Calculate relative spec name (relative to specs/ directory)
         specs_base_dir = Path(__file__).resolve().parent.parent.parent / "specs"
@@ -1312,6 +1648,9 @@ async def generate_spec_from_requirement(
             rtm_entry_id=rtm_entry.id,
             generated_at=datetime.utcnow().isoformat(),
             cached=False,
+            truth_state=truth_state,
+            generation_warning=generation_warning,
+            generation_allowed=True,
         )
 
     except Exception as e:

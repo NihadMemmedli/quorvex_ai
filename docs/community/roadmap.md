@@ -1,5 +1,10 @@
 # Roadmap
 
+![Quorvex dashboard overview for roadmap feature context](../assets/ui/dashboard-overview.png)
+
+<p class="caption">Quorvex dashboard overview for roadmap feature context.</p>
+
+
 This page outlines the current capabilities of Quorvex AI and the features under consideration for future releases.
 
 ## Current Release

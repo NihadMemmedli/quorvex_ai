@@ -1,6 +1,6 @@
 #!/bin/bash
-# Health Monitor for Playwright Agent
-# Schedule: */5 * * * * /opt/playwright-agent/scripts/health-monitor.sh
+# Health Monitor for Quorvex AI
+# Schedule: */5 * * * * /opt/quorvex_ai/scripts/health-monitor.sh
 #
 # Checks:
 #   1. Backend API health endpoint
@@ -16,7 +16,9 @@ LOG_FILE="${HEALTH_LOG:-/var/log/playwright-health.log}"
 API_URL="${API_URL:-http://localhost:8001}"
 DISK_THRESHOLD="${DISK_THRESHOLD:-80}"
 BACKUP_MAX_AGE_HOURS="${BACKUP_MAX_AGE_HOURS:-48}"
-APP_DIR="${APP_DIR:-/opt/playwright-agent}"
+APP_DIR="${APP_DIR:-/opt/quorvex_ai}"
+COMPOSE_FILE="${COMPOSE_FILE:-$APP_DIR/docker-compose.prod.yml}"
+COMPOSE_ENV_FILE="${COMPOSE_ENV_FILE:-$APP_DIR/.env.prod}"
 
 timestamp() {
     date '+%Y-%m-%d %H:%M:%S'
@@ -93,13 +95,17 @@ fi
 
 # --- Check 4: Docker containers running ---
 if command -v docker &>/dev/null; then
-    running=$(docker ps --filter "name=playwright" --format "{{.Names}}" 2>/dev/null | wc -l | tr -d ' ')
+    if [ -f "$COMPOSE_FILE" ] && [ -f "$COMPOSE_ENV_FILE" ]; then
+        running=$(docker compose --env-file "$COMPOSE_ENV_FILE" -f "$COMPOSE_FILE" --profile standard --profile nginx --profile backup-scheduler ps --services --filter "status=running" 2>/dev/null | wc -l | tr -d ' ')
+    else
+        running=$(docker ps --filter "name=quorvex" --format "{{.Names}}" 2>/dev/null | wc -l | tr -d ' ')
+    fi
 
     if [ "$running" -ge 4 ]; then
-        log "[OK] Docker: $running playwright containers running"
+        log "[OK] Docker: $running Quorvex containers/services running"
     elif [ "$running" -gt 0 ]; then
-        alert "Only $running playwright containers running (expected >= 4)"
+        alert "Only $running Quorvex containers/services running (expected >= 4)"
     else
-        alert "No playwright containers running"
+        alert "No Quorvex containers/services running"
     fi
 fi

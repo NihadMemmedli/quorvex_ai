@@ -1,5 +1,10 @@
 # How to Generate Tests from a PRD
 
+![PRD workspace for extracting features and generating tests](../assets/ui/prd.png)
+
+<p class="caption">PRD workspace for extracting features and generating tests.</p>
+
+
 Convert a PDF Product Requirements Document into test specifications and production-ready Playwright tests automatically.
 
 ## Prerequisites

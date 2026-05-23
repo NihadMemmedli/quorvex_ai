@@ -3057,7 +3057,7 @@ function AssistantMessage() {
         await fetchWithAuth(`${API_BASE}/chat/conversations/${conversationId}/feedback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messageIndex: 0, rating: newRating }),
+          body: JSON.stringify({ message_index: 0, rating: newRating }),
         });
         setFeedbackSaved(true);
         setTimeout(() => setFeedbackSaved(false), 1500);

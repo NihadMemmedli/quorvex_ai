@@ -25,6 +25,7 @@ from orchestrator.api.db import get_session
 from orchestrator.api.models_db import (
     DiscoveredApiEndpoint,
     DiscoveredFlow,
+    DiscoveredFlowReview,
     DiscoveredIssue,
     DiscoveredTransition,
     ExplorationSession,
@@ -34,6 +35,25 @@ from orchestrator.api.models_db import (
     RtmEntry,
     RtmSnapshot,
 )
+
+FLOW_REVIEW_STATUSES = {"pending", "approved", "rejected", "generated"}
+FLOW_REVIEW_DECISION_ALIASES = {
+    "approve": "approved",
+    "approved": "approved",
+    "reject": "rejected",
+    "rejected": "rejected",
+    "generate": "generated",
+    "generated": "generated",
+    "pending": "pending",
+}
+
+
+def normalize_flow_review_status(status: str) -> str:
+    """Normalize user-facing review decisions to stored flow review states."""
+    normalized = FLOW_REVIEW_DECISION_ALIASES.get((status or "").strip().lower())
+    if not normalized:
+        raise ValueError(f"Invalid flow review status: {status}")
+    return normalized
 
 
 class ExplorationStore:
@@ -298,6 +318,17 @@ class ExplorationStore:
             # Flush to get the flow ID without committing the transaction
             db.flush()
 
+            db.add(
+                DiscoveredFlowReview(
+                    flow_id=flow.id,
+                    session_id=session_id,
+                    project_id=self.project_id,
+                    review_status="pending",
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
+            )
+
             # Store flow steps if provided (same transaction)
             if steps:
                 for i, step in enumerate(steps):
@@ -323,6 +354,28 @@ class ExplorationStore:
 
             return flow
 
+    def _get_flow_review(self, db, flow_id: int) -> DiscoveredFlowReview | None:
+        return db.exec(
+            select(DiscoveredFlowReview).where(DiscoveredFlowReview.flow_id == flow_id)
+        ).first()
+
+    def _ensure_flow_review(self, db, flow: DiscoveredFlow) -> DiscoveredFlowReview:
+        review = self._get_flow_review(db, flow.id)
+        if review:
+            return review
+
+        review = DiscoveredFlowReview(
+            flow_id=flow.id,
+            session_id=flow.session_id,
+            project_id=flow.project_id,
+            review_status="pending",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        db.add(review)
+        db.flush()
+        return review
+
     def get_session_flows(self, session_id: str) -> list[DiscoveredFlow]:
         """Get all flows for a session."""
         with self._get_session() as db:
@@ -332,6 +385,150 @@ class ExplorationStore:
                 .order_by(DiscoveredFlow.created_at)
             )
             return list(db.exec(query).all())
+
+    def get_session_flow_reviews(self, session_id: str) -> dict[int, DiscoveredFlowReview]:
+        """Get review rows for flows in a session, keyed by flow ID."""
+        with self._get_session() as db:
+            query = select(DiscoveredFlowReview).where(
+                DiscoveredFlowReview.session_id == session_id
+            )
+            reviews = db.exec(query).all()
+            return {review.flow_id: review for review in reviews}
+
+    def get_session_flows_with_reviews(
+        self, session_id: str, status: str | None = None
+    ) -> list[tuple[DiscoveredFlow, DiscoveredFlowReview | None]]:
+        """Get all session flows with optional review status filtering.
+
+        Legacy flows without a review row are treated as pending until they are
+        explicitly decided.
+        """
+        normalized_status = normalize_flow_review_status(status) if status else None
+        with self._get_session() as db:
+            flows = list(
+                db.exec(
+                    select(DiscoveredFlow)
+                    .where(DiscoveredFlow.session_id == session_id)
+                    .order_by(DiscoveredFlow.created_at)
+                ).all()
+            )
+            reviews = {
+                review.flow_id: review
+                for review in db.exec(
+                    select(DiscoveredFlowReview).where(
+                        DiscoveredFlowReview.session_id == session_id
+                    )
+                ).all()
+            }
+
+            result: list[tuple[DiscoveredFlow, DiscoveredFlowReview | None]] = []
+            for flow in flows:
+                review = reviews.get(flow.id)
+                review_status = review.review_status if review else "pending"
+                if normalized_status and review_status != normalized_status:
+                    continue
+                result.append((flow, review))
+            return result
+
+    def get_flow_review_status_counts(self, session_id: str) -> dict[str, int]:
+        """Count flow review states for a session, treating missing rows as pending."""
+        counts = {status: 0 for status in FLOW_REVIEW_STATUSES}
+        for _flow, review in self.get_session_flows_with_reviews(session_id):
+            review_status = review.review_status if review else "pending"
+            counts[review_status if review_status in counts else "pending"] += 1
+        return counts
+
+    def set_flow_review_status(
+        self,
+        flow_id: int,
+        session_id: str,
+        status: str,
+        reviewer: str | None = None,
+        comment: str | None = None,
+    ) -> tuple[DiscoveredFlow, DiscoveredFlowReview] | None:
+        """Create or update review metadata for a discovered flow."""
+        review_status = normalize_flow_review_status(status)
+        now = datetime.utcnow()
+
+        with self._get_session() as db:
+            flow = db.get(DiscoveredFlow, flow_id)
+            if not flow or flow.session_id != session_id:
+                return None
+
+            review = self._ensure_flow_review(db, flow)
+            review.review_status = review_status
+            review.reviewer = reviewer
+            review.comment = comment
+            review.updated_at = now
+            if review_status in ("approved", "rejected"):
+                review.decided_at = now
+            if review_status == "generated":
+                review.generated_at = now
+                if review.decided_at is None:
+                    review.decided_at = now
+
+            db.add(review)
+            db.commit()
+            db.refresh(flow)
+            db.refresh(review)
+            return flow, review
+
+    def bulk_set_flow_review_statuses(
+        self,
+        session_id: str,
+        decisions: list[dict[str, Any]],
+        reviewer: str | None = None,
+        comment: str | None = None,
+    ) -> tuple[list[tuple[DiscoveredFlow, DiscoveredFlowReview]], list[dict[str, Any]]]:
+        """Apply flow review decisions and collect per-row errors."""
+        updated: list[tuple[DiscoveredFlow, DiscoveredFlowReview]] = []
+        errors: list[dict[str, Any]] = []
+
+        for item in decisions:
+            flow_id = item.get("flow_id")
+            status = item.get("decision") or item.get("status")
+            try:
+                if flow_id is None:
+                    raise ValueError("flow_id is required")
+                result = self.set_flow_review_status(
+                    flow_id=int(flow_id),
+                    session_id=session_id,
+                    status=str(status or ""),
+                    reviewer=item.get("reviewer") or reviewer,
+                    comment=item.get("comment") if item.get("comment") is not None else comment,
+                )
+                if not result:
+                    errors.append({"flow_id": flow_id, "error": "Flow not found or session mismatch"})
+                    continue
+                updated.append(result)
+            except (TypeError, ValueError) as exc:
+                errors.append({"flow_id": flow_id, "error": str(exc)})
+
+        return updated, errors
+
+    def mark_session_flows_generated(self, session_id: str) -> int:
+        """Mark approved flows as generated after downstream artifact generation."""
+        now = datetime.utcnow()
+        updated = 0
+
+        with self._get_session() as db:
+            flows = list(
+                db.exec(
+                    select(DiscoveredFlow).where(DiscoveredFlow.session_id == session_id)
+                ).all()
+            )
+            for flow in flows:
+                review = self._ensure_flow_review(db, flow)
+                if review.review_status == "approved":
+                    review.review_status = "generated"
+                    review.generated_at = now
+                    review.updated_at = now
+                    db.add(review)
+                    updated += 1
+
+            db.commit()
+
+        return updated
 
     def get_project_flows(self, category: str | None = None) -> list[DiscoveredFlow]:
         """Get all flows for the project."""
@@ -609,6 +806,10 @@ class ExplorationStore:
         status: str = "draft",
         acceptance_criteria: list[str] | None = None,
         source_session_id: str | None = None,
+        truth_state: str | None = None,
+        source_type: str | None = None,
+        confidence: float | None = None,
+        uncertainty_reason: str | None = None,
     ) -> Requirement:
         """
         Store a requirement.
@@ -635,6 +836,15 @@ class ExplorationStore:
                 category=category,
                 priority=priority,
                 status=status,
+                truth_state=truth_state or ("candidate_requirement" if source_session_id else "candidate_requirement"),
+                source_type=source_type or ("exploration" if source_session_id else "manual"),
+                confidence=confidence if confidence is not None else (0.7 if source_session_id else 0.9),
+                uncertainty_reason=uncertainty_reason
+                or (
+                    "Generated from observed app behavior and awaiting human confirmation."
+                    if source_session_id
+                    else None
+                ),
                 acceptance_criteria_json=json.dumps(acceptance_criteria or []),
                 source_session_id=source_session_id,
                 created_at=datetime.utcnow(),
@@ -662,6 +872,7 @@ class ExplorationStore:
         self,
         category: str | None = None,
         status: str | None = None,
+        truth_state: str | None = None,
         priority: str | None = None,
         search: str | None = None,
         limit: int = 50,
@@ -689,6 +900,8 @@ class ExplorationStore:
                 query = query.where(Requirement.category == category)
             if status:
                 query = query.where(Requirement.status == status)
+            if truth_state:
+                query = query.where(Requirement.truth_state == truth_state)
             if priority:
                 query = query.where(Requirement.priority == priority)
             if search:

@@ -1,5 +1,10 @@
 # API Overview
 
+![API testing dashboard for API workflow context](../assets/ui/api-testing.png)
+
+<p class="caption">API testing dashboard for API workflow context.</p>
+
+
 REST API conventions for Quorvex AI. For the full endpoint catalog, see [API Endpoints](api-endpoints.md).
 
 ## Base URL
@@ -57,7 +62,6 @@ Minimum 8 characters, at least one uppercase letter, one lowercase letter, one d
 
 | Role | Capabilities |
 |------|-------------|
-| `owner` | Full project control including deletion |
 | `admin` | Manage members, run tests, edit specs |
 | `editor` | Run tests, edit specs |
 | `viewer` | Read-only access |
@@ -79,6 +83,52 @@ Content type: `application/json` (file uploads use `multipart/form-data`).
 ### Path Parameters
 
 Spec names and folder paths use FastAPI `{name:path}` syntax, allowing slashes: `GET /specs/folder/subfolder/my-test.md`
+
+## Common API Workflows
+
+Use these examples as starting points. Exact request and response fields are listed in Swagger UI at `/docs`.
+
+### Create and Run a Spec
+
+```bash
+curl -X POST http://localhost:8001/specs \
+  -H "Content-Type: application/json" \
+  -d '{"name":"smoke/example.md","content":"# Test: Example\n\n1. Navigate to https://example.com\n2. Verify the page title contains \"Example\""}'
+
+curl -X POST http://localhost:8001/runs \
+  -H "Content-Type: application/json" \
+  -d '{"spec_name":"smoke/example.md","browser":"chromium","hybrid":false}'
+```
+
+### Store a Project Credential
+
+```bash
+curl -X POST http://localhost:8001/projects/default/credentials \
+  -H "Content-Type: application/json" \
+  -d '{"key":"LOGIN_PASSWORD","value":"replace-me"}'
+```
+
+Credential values are returned masked. Use `{{LOGIN_PASSWORD}}` in specs instead of hardcoding secrets.
+
+### Start Exploration and Generate Requirements
+
+```bash
+curl -X POST http://localhost:8001/exploration/start \
+  -H "Content-Type: application/json" \
+  -d '{"entry_url":"https://example.com","strategy":"goal_directed","max_interactions":25}'
+
+curl -X POST http://localhost:8001/requirements/generate \
+  -H "Content-Type: application/json" \
+  -d '{"exploration_session_id":"<session-id>"}'
+```
+
+### Check Operations Health
+
+```bash
+curl http://localhost:8001/health
+curl http://localhost:8001/api/browser-pool/status
+curl http://localhost:8001/api/agents/queue-status
+```
 
 ## Response Format
 
@@ -159,7 +209,7 @@ Authenticated user ID when available, otherwise client IP address.
 | Endpoint | Description |
 |----------|-------------|
 | `GET /runs/{id}/log/stream` | Streams execution log lines |
-| `GET /api/prd/{project_id}/generation/{id}/log/stream` | Streams PRD generation logs |
+| `GET /api/prd/generation/{generation_id}/log/stream` | Streams PRD generation logs |
 
 Stream terminates on: terminal status, 10 minutes inactivity, or server error.
 
@@ -185,6 +235,8 @@ Every request receives an `X-Request-ID` header (UUID) for traceability.
 | Auth | `/auth` | `auth.py` |
 | Users | `/users` | `users.py` |
 | Projects | `/projects` | `projects.py` |
+| Settings | `/settings` | `settings.py` |
+| Recordings | `/recordings` | `recordings.py` |
 | Exploration | `/exploration` | `exploration.py` |
 | Requirements | `/requirements` | `requirements.py` |
 | RTM | `/rtm` | `rtm.py` |
@@ -205,8 +257,10 @@ Every request receives an `X-Request-ID` header (UUID) for traceability.
 | Jira | `/jira` | `jira.py` |
 | Analytics | `/analytics` | `analytics.py` |
 | Chat | `/chat` | `chat.py` |
+| AutoPilot | `/autopilot` | `autopilot.py` |
+| Autonomous Missions | `/autonomous` | `autonomous.py` |
+| Custom Workflows | `/workflows` | `workflows.py` |
 | Dashboard | *(none)* | `dashboard.py` |
-| Settings | *(none)* | `settings.py` |
 | Core (specs, runs, etc.) | *(none)* | `main.py` |
 
 ## Related

@@ -1,5 +1,10 @@
 # How to Set Up TestRail, Jira, and CI/CD Integrations
 
+![CI/CD dashboard with integration mappings and quality gates](../assets/ui/ci-cd.png)
+
+<p class="caption">CI/CD dashboard with integration mappings and quality gates.</p>
+
+
 Connect Quorvex AI with external tools for test case management, issue tracking, and continuous integration pipelines.
 
 ## Prerequisites
@@ -147,18 +152,18 @@ The created issue includes:
    - Trigger events (push, pull_request, schedule)
    - Specs to run
    - Browser selection
-4. Click **Generate Workflow**
-5. Copy the generated YAML
+4. Generate a workflow change request
+5. Review the draft and open a pull request when ready
 
 #### Via API
 
 ```bash
-curl -X POST http://localhost:8001/github/your-project-id/generate-workflow \
+curl -X POST http://localhost:8001/projects/your-project-id/ci/workflow-change-requests \
   -H "Content-Type: application/json" \
   -d '{
-    "trigger": "pull_request",
-    "specs": ["spec-1", "spec-2"],
-    "browser": "chromium"
+    "provider": "github",
+    "intent": "Run selected Playwright specs on pull_request",
+    "specs": ["spec-1", "spec-2"]
   }'
 ```
 
@@ -174,16 +179,15 @@ The workflow:
 
 ### Step 3: Configure GitHub Webhook (Optional)
 
-Set up a webhook to report test results back to Quorvex AI:
+GitHub webhooks are received by the backend webhook endpoint:
 
 ```bash
-curl -X POST http://localhost:8001/github/your-project-id/webhook-config \
+curl -X POST http://localhost:8001/github/webhook/github \
   -H "Content-Type: application/json" \
-  -d '{
-    "repo_url": "https://github.com/org/repo",
-    "webhook_secret": "your-webhook-secret"
-  }'
+  -d '{"action": "ping"}'
 ```
+
+Configure the actual webhook secret and repository mapping in the **CI/CD** dashboard before enabling event delivery.
 
 ---
 
@@ -196,17 +200,15 @@ curl -X POST http://localhost:8001/github/your-project-id/webhook-config \
 1. Navigate to **CI/CD** (`/ci-cd`)
 2. Select **GitLab CI**
 3. Configure pipeline settings
-4. Click **Generate Configuration**
-5. Copy the generated `.gitlab-ci.yml`
+4. Dispatch a pipeline or manage provider configuration from the dashboard
 
 #### Via API
 
 ```bash
-curl -X POST http://localhost:8001/gitlab/your-project-id/generate-config \
+curl -X POST http://localhost:8001/gitlab/your-project-id/trigger-pipeline \
   -H "Content-Type: application/json" \
   -d '{
-    "specs": ["spec-1", "spec-2"],
-    "browser": "chromium"
+    "ref": "main"
   }'
 ```
 
@@ -238,5 +240,7 @@ Confirm each integration works:
 
 - [Regression Batches](./regression-batches.md) -- create batches to sync with TestRail
 - [Scheduling](./scheduling.md) -- automate test runs for CI reporting
+- [CI/CD and PR Advisor Architecture](../explanation/ci-pr-advisor-architecture.md) -- CI sync, dispatch, and quality gates
+- [Integration Contracts](../reference/integration-contracts.md) -- integration ownership and credential surfaces
 - [Authentication](./authentication.md) -- secure your Quorvex AI instance
 - [Credential Management](./credential-management.md) -- rotate integration API keys

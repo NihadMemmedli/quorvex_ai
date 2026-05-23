@@ -1,5 +1,10 @@
 # App Exploration and Requirements
 
+![Quorvex UI flow for exploration and requirement discovery](../assets/ui/product-flow.gif)
+
+<p class="caption">Quorvex UI flow for exploration and requirement discovery.</p>
+
+
 In this tutorial, you will use Quorvex AI's exploration agent to autonomously discover pages, flows, and endpoints in a web application. Then you will generate structured requirements from those discoveries and build a Requirements Traceability Matrix (RTM).
 
 ## Prerequisites
@@ -21,22 +26,18 @@ The exploration agent opens a real browser and interacts with a target web appli
 
 ## Step 1: Start an Exploration via the Dashboard
 
-Open the dashboard at `http://localhost:3000` and click **Exploration** in the sidebar.
+Open the dashboard at `http://localhost:3000`, open the command palette, and choose **Discovery** (`/exploration`).
 
 Click **New Exploration** and fill in:
 
 | Field | Value | Notes |
 |-------|-------|-------|
-| **URL** | `https://the-internet.herokuapp.com` | The target app |
-| **Strategy** | `breadth-first` | Explores many pages at one level before going deeper |
-| **Max Interactions** | `30` | Limits the number of actions the AI takes |
+| **Entry URL** | `https://the-internet.herokuapp.com` | The target app |
+| **Exploration Mode** | `General` | Discovers pages, flows, elements, and APIs |
+| **Thoroughness Level** | `Quick` or `Normal` | Use Quick for a short trial, Normal for balanced discovery |
 
 !!! tip
-    Three exploration strategies are available:
-
-    - **breadth-first** -- visits as many pages as possible at each depth level (best for discovering the full sitemap)
-    - **depth-first** -- follows each path deeply before backtracking (best for finding complex multi-step flows)
-    - **goal-directed** -- focuses on a specific goal you describe (best when you know what you are looking for)
+    Use **API Focused** mode when you want richer captured request and response details for API generation.
 
 Click **Start Exploration**.
 
@@ -71,6 +72,8 @@ When the exploration completes, the page displays a summary:
 - **Elements** -- interactive elements found on each page
 
 Browse through the discovered pages and flows. Each flow shows the sequence of actions the AI performed and what it observed.
+
+You can approve or reject discovered flows during review. Completed sessions can also generate requirements, API specs, or API tests when enough discovery data is available.
 
 ## Step 4: Explore via the CLI (Alternative)
 
@@ -214,7 +217,7 @@ Export the RTM for reporting or review:
 1. On the **RTM** page, click **Export**.
 2. Choose a format:
    - **CSV** -- spreadsheet-compatible
-   - **JSON** -- machine-readable
+   - **Markdown** -- review-friendly document
    - **HTML** -- formatted report
 
 The export includes requirement codes, titles, linked specs, and coverage status.

@@ -24,7 +24,7 @@ from utils.json_utils import extract_json_from_markdown, validate_json_schema
 
 # Memory system integration
 try:
-    from memory import get_memory_manager
+    from memory import get_memory_manager, get_unified_memory_service
 
     MEMORY_AVAILABLE = True
 except ImportError:
@@ -210,7 +210,15 @@ class Planner:
         if not self.use_memory or not self.memory_manager:
             return {}
 
-        context = {"similar_tests": [], "successful_selectors": [], "coverage_gaps": [], "graph": {}}
+        context = {
+            "similar_tests": [],
+            "successful_selectors": [],
+            "coverage_gaps": [],
+            "graph": {},
+            "browser_memory": {},
+            "selector_patterns": [],
+            "unified": {},
+        }
 
         try:
             # Extract potential URL from spec
@@ -218,6 +226,44 @@ class Planner:
 
             urls = [match.rstrip(".,;:!?)") for match in re.findall(r"https?://[^\s\)]+", spec_content)]
             url = urls[0] if urls else None
+            project_id = self.project_id or getattr(self.memory_manager, "project_id", None)
+
+            if project_id:
+                unified = get_unified_memory_service().build_bundle(
+                    query=spec_content[:2000],
+                    project_id=project_id,
+                    agent_type="Planner",
+                    limit=8,
+                )
+                context["unified"] = unified
+                context["browser_memory"] = unified.get("browser_memory") or {}
+                context["selector_patterns"] = unified.get("selector_patterns") or []
+                context["coverage_gaps"] = [
+                    {"type": g["type"], "element_type": g.get("element_type"), "description": g["description"]}
+                    for g in (unified.get("coverage_gaps") or [])
+                    if g.get("description")
+                ][:5]
+                graph = unified.get("graph_context") or {}
+                if graph:
+                    navigation_paths = graph.get("navigation_paths") or []
+                    context["graph"] = {
+                        "stats": graph.get("stats") or {},
+                        "flows": [
+                            {"name": flow.get("name") or flow.get("title"), "start_page": flow.get("start_page")}
+                            for flow in (graph.get("flows") or [])[:5]
+                        ],
+                        "navigation_path": navigation_paths[0].get("path") if navigation_paths else None,
+                    }
+                context["similar_tests"] = [
+                    {
+                        "test_name": item.get("test_name"),
+                        "action": item.get("action"),
+                        "target": item.get("target"),
+                        "success_rate": item.get("success_rate"),
+                    }
+                    for item in context["selector_patterns"]
+                ]
+                return context
 
             # Find similar tests
             similar = self.memory_manager.find_similar_tests(
@@ -337,6 +383,26 @@ ASSERTION TYPES: visible, text
                 prompt += "\n### Coverage Gaps:\n"
                 for gap in memory_context["coverage_gaps"][:5]:
                     prompt += f"- {gap.get('description', '')}\n"
+
+            if memory_context.get("selector_patterns"):
+                prompt += "\n### Selector Pattern Hints:\n"
+                for pattern in memory_context["selector_patterns"][:5]:
+                    selector = pattern.get("playwright_selector") or pattern.get("selector_value") or ""
+                    prompt += (
+                        f"- {pattern.get('action', 'action')} on {pattern.get('target', '')}: "
+                        f"{selector} (success rate: {pattern.get('success_rate', 0):.1%})\n"
+                    )
+
+            browser_memory = memory_context.get("browser_memory") or {}
+            frontier = browser_memory.get("frontier") or []
+            if frontier:
+                prompt += "\n### Browser Frontier Hints:\n"
+                for item in frontier[:4]:
+                    locator = (item.get("best_locator") or {}).get("locator") or "rediscover"
+                    prompt += (
+                        f"- {item.get('action_type', 'inspect')} {item.get('name') or item.get('text') or ''} "
+                        f"at {item.get('state_url') or item.get('state_url_template')}: {locator}\n"
+                    )
 
         # Add Reused Automation Context
         if reused_context and reused_context.get("automated_templates"):

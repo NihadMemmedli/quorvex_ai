@@ -18,6 +18,7 @@ from .models_db import (
     ChatMessage,
     ChatMessageFeedback,
     ExplorationSession,
+    MemoryInjectionEvent,
     RegressionBatch,
     Requirement,
     RtmEntry,
@@ -637,6 +638,41 @@ async def submit_feedback(
     session.add(feedback)
     session.commit()
     session.refresh(feedback)
+
+    try:
+        from orchestrator.memory.feedback import get_memory_feedback_service
+
+        statement = select(MemoryInjectionEvent)
+        if conv.project_id:
+            statement = statement.where(MemoryInjectionEvent.project_id == conv.project_id)
+        candidates = session.exec(statement.order_by(MemoryInjectionEvent.created_at.desc()).limit(50)).all()
+        exact_matches = [
+            event
+            for event in candidates
+            if (event.extra_data or {}).get("conversation_id") == conversation_id
+            and int((event.extra_data or {}).get("message_index", -1)) == req.message_index
+        ]
+        fallback_matches = [
+            event
+            for event in candidates
+            if event.source_type in {"chat", "assistant_chat"}
+            and event.source_id == conversation_id
+            and not (event.extra_data or {}).get("conversation_id")
+        ]
+        matched_event = next(
+            iter(exact_matches or fallback_matches),
+            None,
+        )
+        if matched_event:
+            get_memory_feedback_service(session).apply_feedback_to_injection(
+                matched_event.id,
+                rating=req.rating,
+                user_id=user.id if user else None,
+                comment=req.comment,
+                source="chat_feedback",
+            )
+    except Exception as exc:
+        logger.debug("Memory feedback attribution skipped: %s", exc)
 
     return {
         "id": feedback.id,

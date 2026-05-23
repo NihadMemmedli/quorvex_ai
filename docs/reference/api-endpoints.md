@@ -1,6 +1,11 @@
 # API Endpoints
 
-Complete endpoint catalog for the Quorvex AI REST API. For conventions (authentication, errors, pagination, rate limiting), see [API Overview](api-overview.md).
+![API testing dashboard for API endpoint workflow context](../assets/ui/api-testing.png)
+
+<p class="caption">API testing dashboard for API endpoint workflow context.</p>
+
+
+Endpoint catalog for the Quorvex AI REST API. For conventions (authentication, errors, pagination, rate limiting), see [API Overview](api-overview.md).
 
 ## Authentication
 
@@ -11,7 +16,7 @@ Prefix: `/auth` | Source: `orchestrator/api/auth.py`
 | POST | `/auth/register` | Register a new user | No | 3/min |
 | POST | `/auth/login` | Login with email and password | No | 10/min |
 | POST | `/auth/refresh` | Refresh access token using refresh token | No | 30/min |
-| POST | `/auth/logout` | Revoke a specific refresh token | Yes | -- |
+| POST | `/auth/logout` | Revoke a specific refresh token | No | -- |
 | POST | `/auth/logout-all` | Revoke all refresh tokens for the user | Yes | -- |
 | GET | `/auth/me` | Get current authenticated user info | Yes | -- |
 
@@ -70,6 +75,8 @@ Source: `orchestrator/api/main.py` (registered directly on app)
 | DELETE | `/specs/{name}` | Delete spec and optionally generated test | Optional |
 | DELETE | `/specs/folder/{path}` | Delete a folder and all specs inside | Optional |
 | POST | `/specs/move` | Move a spec or folder to a new location | Optional |
+| POST | `/specs/rename` | Rename a spec or folder | Optional |
+| POST | `/specs/create-folder` | Create a spec folder | Optional |
 | POST | `/specs/register-folder` | Register all specs in a folder to a project | Optional |
 | GET | `/specs/{name}/generated-code` | Get the generated TypeScript test code | Optional |
 | PUT | `/specs/{name}/generated-code` | Update generated test code | Optional |
@@ -94,9 +101,11 @@ Source: `orchestrator/api/main.py`
 |--------|------|-------------|---------------|
 | GET | `/runs` | Paginated list of test runs | Optional |
 | GET | `/runs/{id}` | Full run details with plan, validation, artifacts | Optional |
+| DELETE | `/runs/{id}` | Delete a run and associated artifacts | Optional |
 | POST | `/runs` | Create and start a single test run | Optional |
 | POST | `/runs/{id}/stop` | Stop a running or queued test | Optional |
 | POST | `/runs/{id}/progress` | Update run stage progress (called by CLI) | Optional |
+| POST | `/runs/{id}/agentic-summary` | Generate or refresh an agentic run summary | Optional |
 | GET | `/runs/{id}/log/stream` | Stream execution log via SSE | Optional |
 | POST | `/runs/bulk` | Create a regression batch of runs | Optional |
 
@@ -110,7 +119,15 @@ Prefix: `/regression` | Source: `orchestrator/api/regression.py`
 | GET | `/regression/batches/{id}` | Get batch detail with all runs | Optional |
 | PATCH | `/regression/batches/{id}/refresh` | Recalculate batch statistics | Optional |
 | GET | `/regression/batches/{id}/export` | Export batch as JSON or HTML report | Optional |
+| PATCH | `/regression/batches/{id}` | Update batch metadata | Optional |
+| POST | `/regression/batches/{id}/cancel` | Cancel a running regression batch | Optional |
+| POST | `/regression/batches/{id}/rerun-failed` | Rerun failed tests in a batch | Optional |
 | DELETE | `/regression/batches/{id}` | Delete batch and all associated runs | Optional |
+| GET | `/regression/batches/trend` | Batch execution trend data | Optional |
+| GET | `/regression/batches/{id}/error-summary` | Error summary for one batch | Optional |
+| POST | `/regression/batches/compare` | Compare two regression batches | Optional |
+| GET | `/regression/spec-history` | Historical status for specs | Optional |
+| GET | `/regression/flaky-tests` | List detected flaky tests | Optional |
 | GET | `/regression/debug/test-counts` | Debug: show test counts across all batches | Optional |
 | GET | `/regression/debug/batch/{id}/test-counts` | Debug: show test counts for one batch | Optional |
 
@@ -122,12 +139,23 @@ Prefix: `/exploration` | Source: `orchestrator/api/exploration.py`
 |--------|------|-------------|---------------|------------|
 | GET | `/exploration/health` | Check exploration service health | Optional | -- |
 | POST | `/exploration/start` | Start an AI exploration session | Optional | 5/min |
+| GET | `/exploration/spec-gen-jobs` | List exploration spec-generation jobs | Optional | -- |
+| GET | `/exploration/spec-gen-jobs/{id}` | Get exploration spec-generation job status | Optional | -- |
 | GET | `/exploration` | List exploration sessions | Optional | -- |
 | GET | `/exploration/{id}` | Get exploration session details | Optional | -- |
+| GET | `/exploration/{id}/artifacts` | List artifacts for an exploration session | Optional | -- |
+| GET | `/exploration/{id}/details` | Get full exploration details | Optional | -- |
 | GET | `/exploration/{id}/results` | Get exploration results (pages, flows, APIs) | Optional | -- |
 | POST | `/exploration/{id}/stop` | Stop a running exploration | Optional | 10/min |
 | GET | `/exploration/{id}/flows` | Get discovered user flows | Optional | -- |
+| PUT | `/exploration/{id}/flows/{flow_id}` | Update a discovered flow | Optional | -- |
+| DELETE | `/exploration/{id}/flows/{flow_id}` | Delete a discovered flow | Optional | -- |
 | GET | `/exploration/{id}/apis` | Get discovered API endpoints | Optional | -- |
+| PUT | `/exploration/{id}/apis/{endpoint_id}` | Update a discovered API endpoint | Optional | -- |
+| DELETE | `/exploration/{id}/apis/{endpoint_id}` | Delete a discovered API endpoint | Optional | -- |
+| GET | `/exploration/{id}/issues` | Get issues discovered during exploration | Optional | -- |
+| POST | `/exploration/{id}/generate-api-specs` | Generate API specs from exploration results | Optional | -- |
+| POST | `/exploration/{id}/generate-api-tests` | Generate API tests from exploration results | Optional | -- |
 | GET | `/exploration/queue/status` | Get exploration queue status | Optional | -- |
 
 ## Requirements
@@ -142,9 +170,14 @@ Prefix: `/requirements` | Source: `orchestrator/api/requirements.py`
 | PUT | `/requirements/{id}` | Update a requirement | Optional |
 | DELETE | `/requirements/{id}` | Delete a requirement | Optional |
 | POST | `/requirements/generate` | Generate requirements from exploration session | Optional |
+| GET | `/requirements/generate-jobs/{id}` | Get requirement generation job status | Optional |
+| POST | `/requirements/bulk` | Create requirements in bulk | Optional |
+| POST | `/requirements/bulk-generate-specs` | Start bulk spec generation for requirements | Optional |
+| GET | `/requirements/bulk-generate-jobs/{id}` | Get bulk spec generation job status | Optional |
 | GET | `/requirements/duplicates` | Find duplicate requirements | Optional |
 | POST | `/requirements/check-duplicate` | Check if a requirement is a duplicate | Optional |
 | POST | `/requirements/merge` | Merge duplicate requirements | Optional |
+| POST | `/requirements/review/decisions` | Apply bulk requirement review decisions | Optional |
 | GET | `/requirements/categories/list` | List distinct categories | Optional |
 | GET | `/requirements/stats` | Requirement statistics | Optional |
 | GET | `/requirements/health` | Requirements service health | Optional |
@@ -159,11 +192,14 @@ Prefix: `/rtm` | Source: `orchestrator/api/rtm.py`
 |--------|------|-------------|---------------|
 | GET | `/rtm` | Get full RTM (requirements mapped to tests) | Optional |
 | POST | `/rtm/generate` | Generate/rebuild the RTM | Optional |
+| GET | `/rtm/generate-jobs/{id}` | Get RTM generation job status | Optional |
 | GET | `/rtm/coverage` | Get test coverage summary | Optional |
 | GET | `/rtm/gaps` | Find requirements with no test coverage | Optional |
 | GET | `/rtm/export/{format}` | Export RTM as markdown, csv, or html | Optional |
 | POST | `/rtm/snapshot` | Save a point-in-time RTM snapshot | Optional |
 | GET | `/rtm/snapshots` | List saved RTM snapshots | Optional |
+| GET | `/rtm/snapshot/{id}` | Get one RTM snapshot with entries | Optional |
+| GET | `/rtm/trend` | RTM coverage trend data | Optional |
 | GET | `/rtm/requirement/{id}/tests` | Get tests linked to a requirement | Optional |
 | GET | `/rtm/test/{name}/requirements` | Get requirements linked to a test | Optional |
 | POST | `/rtm/entry` | Manually link a requirement to a test | Optional |
@@ -184,7 +220,38 @@ Prefix: `/api/memory` | Source: `orchestrator/api/memory.py`
 | GET | `/api/memory/graph/stats` | Graph store statistics | Optional |
 | GET | `/api/memory/graph/pages` | Pages in the knowledge graph | Optional |
 | GET | `/api/memory/graph/flows` | User flows in the knowledge graph | Optional |
+| GET | `/api/memory/graph/knowledge` | Knowledge graph facts and relationships | Optional |
+| GET | `/api/memory/graph/memory/{id}` | Get graph details for one memory | Optional |
+| GET | `/api/memory/graph/review` | List memory graph relationships pending review | Optional |
+| PATCH | `/api/memory/graph/review/{edge_id}/approve` | Approve a memory graph relationship | Optional |
+| PATCH | `/api/memory/graph/review/{edge_id}/reject` | Reject a memory graph relationship | Optional |
+| POST | `/api/memory/graph/rebuild` | Rebuild memory graph indexes | Optional |
 | GET | `/api/memory/stats` | Overall memory system statistics | Optional |
+| GET | `/api/memory/agent` | List or search curated agent memories | Optional |
+| POST | `/api/memory/agent` | Create a curated agent memory | Optional |
+| PATCH | `/api/memory/agent/{memory_id}` | Update an agent memory | Optional |
+| POST | `/api/memory/agent/consolidate` | Extract durable memories from a text block | Optional |
+| POST | `/api/memory/agent/verify-stale` | Mark stale active memories for review | Optional |
+| PATCH | `/api/memory/agent/{memory_id}/approve` | Approve a review-required memory | Optional |
+| PATCH | `/api/memory/agent/{memory_id}/verify` | Mark a memory as verified | Optional |
+| PATCH | `/api/memory/agent/{memory_id}/archive` | Archive an agent memory | Optional |
+| DELETE | `/api/memory/agent/{memory_id}` | Delete an agent memory and vector index document | Optional |
+| GET | `/api/memory/agent/context` | Return formatted memory context for prompt injection | Optional |
+| GET | `/api/memory/context-preview` | Preview prompt-ready memory context | Optional |
+| GET | `/api/memory/context` | Return unified structured memory bundle | Optional |
+| GET | `/api/memory/injections` | List recent memory injection telemetry | Optional |
+| POST | `/api/memory/injections/{injection_event_id}/feedback` | Submit feedback for memories used in an injection event | Optional |
+| GET | `/api/memory/feedback` | Return aggregate feedback stats for selected memories | Optional |
+| GET | `/api/memory/session-recall/recent` | Browse recent assistant conversations | Optional |
+| GET | `/api/memory/session-recall/search` | Search assistant conversation memory | Optional |
+| GET | `/api/memory/session-recall/window` | Return an anchored conversation window | Optional |
+| GET | `/api/memory/health` | Report memory system health and embedding mode | Optional |
+| GET | `/api/memory/browser` | Inspect browser exploration memory | Optional |
+| GET | `/api/memory/browser/frontier` | Inspect ranked browser frontier work | Optional |
+| POST | `/api/memory/browser/frontier/claim` | Lease frontier items for a worker | Optional |
+| PATCH | `/api/memory/browser/frontier/{frontier_id}/complete` | Mark frontier work completed | Optional |
+| PATCH | `/api/memory/browser/frontier/{frontier_id}/fail` | Mark frontier work failed and retryable | Optional |
+| PATCH | `/api/memory/browser/frontier/{frontier_id}/skip` | Skip stale, risky, or irrelevant frontier work | Optional |
 | GET | `/api/memory/projects` | Memory data grouped by project | Optional |
 
 ## PRD Processing
@@ -202,6 +269,9 @@ Prefix: `/api/prd` | Source: `orchestrator/api/prd.py`
 | POST | `/api/prd/generation/{id}/stop` | Stop a running generation | Optional |
 | GET | `/api/prd/generation/{id}/log/stream` | Stream generation log (SSE) | Optional |
 | GET | `/api/prd/{project_id}/generations` | List generation history | Optional |
+| POST | `/api/prd/{project_id}/features/{feature_slug}/requirements` | Add a requirement to a PRD feature | Optional |
+| PUT | `/api/prd/{project_id}/features/{feature_slug}/requirements/{index}` | Update a PRD feature requirement | Optional |
+| DELETE | `/api/prd/{project_id}/features/{feature_slug}/requirements/{index}` | Delete a PRD feature requirement | Optional |
 | POST | `/api/prd/generate-test` | Generate a test from a plan | Optional |
 | POST | `/api/prd/heal-test` | Heal a failing test | Optional |
 | POST | `/api/prd/run-test` | Run a generated test | Optional |
@@ -216,13 +286,30 @@ Source: `orchestrator/api/main.py`
 | POST | `/api/agents/runs` | Run an autonomous agent (exploratory, writer, synthesis) | Optional |
 | GET | `/api/agents/runs` | List agent runs | Optional |
 | GET | `/api/agents/runs/{id}` | Get agent run details | Optional |
+| POST | `/api/agents/runs/{id}/pause` | Pause an agent run | Optional |
+| POST | `/api/agents/runs/{id}/resume` | Resume an agent run | Optional |
+| POST | `/api/agents/runs/{id}/cancel` | Cancel an agent run | Optional |
+| GET | `/api/agents/runs/{id}/report` | Get an agent run report | Optional |
+| GET | `/api/agents/reports/search` | Search generated agent reports | Optional |
+| GET | `/api/agents/tools/catalog` | List available agent tools | Optional |
+| GET | `/api/agents/definitions` | List custom agent definitions | Optional |
+| POST | `/api/agents/definitions` | Create a custom agent definition | Optional |
+| GET | `/api/agents/definitions/{id}` | Get a custom agent definition | Optional |
+| PUT | `/api/agents/definitions/{id}` | Update a custom agent definition | Optional |
+| DELETE | `/api/agents/definitions/{id}` | Delete a custom agent definition | Optional |
+| POST | `/api/agents/definitions/{id}/runs` | Run a custom agent definition | Optional |
 | POST | `/api/agents/exploratory` | Run enhanced exploratory testing | Optional |
 | POST | `/api/agents/exploratory/{run_id}/synthesize` | Generate specs from exploration | Optional |
 | GET | `/api/agents/exploratory/{run_id}/specs` | Get generated specs | Optional |
 | GET | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | Get flow details | Optional |
+| PUT | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | Update exploratory flow details | Optional |
+| DELETE | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | Delete exploratory flow details | Optional |
 | POST | `/api/agents/exploratory/{run_id}/analyze-prerequisites` | Analyze flow prerequisites | Optional |
 | POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/spec` | Generate spec for one flow | Optional |
 | POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/generate` | Generate validated test via native pipeline | Optional |
+| GET | `/api/agents/exploratory/flow-spec-jobs/{id}` | Get exploratory flow-spec job status | Optional |
+| POST | `/api/agents/queue-flush` | Clear queued agent work | Optional |
+| POST | `/api/agents/queue-clean-orphans` | Clean orphaned agent queue entries | Optional |
 
 Agent types: `exploratory`, `writer`, `spec-synthesis`.
 
@@ -254,6 +341,7 @@ Source: `orchestrator/api/settings.py`
 |--------|------|-------------|---------------|
 | GET | `/settings` | Get current settings (API key masked) | Optional |
 | POST | `/settings` | Update settings (writes to .env file) | Optional |
+| POST | `/settings/test-connection` | Test AI provider settings without saving | Optional |
 
 ## Execution Settings
 
@@ -335,7 +423,8 @@ Prefix: `/api-testing` | Source: `orchestrator/api/api_testing.py`
 | PUT | `/api-testing/specs/{folder}` | Update API test spec | Optional |
 | DELETE | `/api-testing/specs/{folder}` | Delete API test spec | Optional |
 | POST | `/api-testing/import-openapi` | Import OpenAPI/Swagger spec | Optional |
-| POST | `/api-testing/specs/{folder}/run` | Run API test (background job) | Optional |
+| POST | `/api-testing/run` | Run API test (background job) | Optional |
+| POST | `/api-testing/run-direct` | Run API test directly | Optional |
 | GET | `/api-testing/runs` | List API test run history | Optional |
 | GET | `/api-testing/runs/{run_id}` | Get run details with logs | Optional |
 
@@ -350,10 +439,12 @@ Prefix: `/load-testing` | Source: `orchestrator/api/load_testing.py`
 | GET | `/load-testing/specs/{folder}` | Get load test spec details | Optional |
 | PUT | `/load-testing/specs/{folder}` | Update load test spec | Optional |
 | DELETE | `/load-testing/specs/{folder}` | Delete load test spec | Optional |
-| POST | `/load-testing/specs/{folder}/generate` | Generate K6 script from spec | Optional |
-| POST | `/load-testing/specs/{folder}/run` | Execute load test (background job) | Optional |
+| POST | `/load-testing/generate` | Generate K6 script | Optional |
+| POST | `/load-testing/run` | Execute load test (background job) | Optional |
+| POST | `/load-testing/run-from-spec` | Execute load test from a saved spec | Optional |
 | GET | `/load-testing/runs` | List load test runs | Optional |
-| GET | `/load-testing/runs/{run_id}/status` | Real-time status with metrics | Optional |
+| GET | `/load-testing/runs/{run_id}` | Run details with metrics | Optional |
+| GET | `/load-testing/runs/{run_id}/timeseries` | Time-series metrics for one run | Optional |
 | POST | `/load-testing/runs/{run_id}/stop` | Cancel running test | Optional |
 | GET | `/load-testing/runs/compare` | Compare multiple runs with overlay charts | Optional |
 | GET | `/load-testing/system-limits` | Current resource caps and worker status | Optional |
@@ -439,10 +530,12 @@ Prefix: `/llm-testing` | Source: `orchestrator/api/llm_testing.py`
 |--------|------|-------------|---------------|
 | GET | `/llm-testing/analytics/overview` | Overview stats | Optional |
 | GET | `/llm-testing/analytics/trends` | Performance trends | Optional |
-| GET | `/llm-testing/analytics/latency` | Latency distribution | Optional |
-| GET | `/llm-testing/analytics/cost` | Cost tracking | Optional |
+| GET | `/llm-testing/analytics/latency-distribution` | Latency distribution | Optional |
+| GET | `/llm-testing/analytics/cost-tracking` | Cost tracking | Optional |
 | GET | `/llm-testing/analytics/regressions` | Regression detection | Optional |
-| GET | `/llm-testing/analytics/golden` | Golden dashboard | Optional |
+| GET | `/llm-testing/analytics/dataset-performance` | Dataset performance analytics | Optional |
+| GET | `/llm-testing/analytics/dataset-trends` | Dataset performance trends | Optional |
+| GET | `/llm-testing/analytics/golden-dashboard` | Golden dashboard | Optional |
 
 ## Database Testing
 
@@ -577,6 +670,647 @@ Source: `orchestrator/api/main.py`
 | GET | `/debug-imports` | Check sys.path and test import resolution | No |
 
 Not intended for production use.
+
+## Complete Route Coverage Index
+
+This generated index is used by `scripts/check_docs_drift.py` to keep the endpoint reference aligned with FastAPI decorators. The curated sections above explain the main product surfaces; this table provides full method/path coverage.
+
+| Method | Path | Source |
+|--------|------|--------|
+| GET | `/analytics/coverage-overview` | `orchestrator/api/analytics.py` |
+| GET | `/analytics/failure-classification` | `orchestrator/api/analytics.py` |
+| GET | `/analytics/flake-detection` | `orchestrator/api/analytics.py` |
+| GET | `/analytics/pass-rate-trends` | `orchestrator/api/analytics.py` |
+| DELETE | `/analytics/quarantine/{spec_name}` | `orchestrator/api/analytics.py` |
+| POST | `/analytics/quarantine/{spec_name}` | `orchestrator/api/analytics.py` |
+| GET | `/analytics/spec-performance` | `orchestrator/api/analytics.py` |
+| POST | `/api-testing/create-and-generate` | `orchestrator/api/api_testing.py` |
+| POST | `/api-testing/edge-cases` | `orchestrator/api/api_testing.py` |
+| POST | `/api-testing/generate` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/generated-tests` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/generated-tests/summary` | `orchestrator/api/api_testing.py` |
+| DELETE | `/api-testing/generated-tests/{name}` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/generated-tests/{name}` | `orchestrator/api/api_testing.py` |
+| PUT | `/api-testing/generated-tests/{name}` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/import-history` | `orchestrator/api/api_testing.py` |
+| POST | `/api-testing/import-openapi` | `orchestrator/api/api_testing.py` |
+| POST | `/api-testing/import-openapi-file` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/jobs` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/jobs/{job_id}` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/jobs/{job_id}/logs` | `orchestrator/api/api_testing.py` |
+| POST | `/api-testing/run` | `orchestrator/api/api_testing.py` |
+| POST | `/api-testing/run-direct` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/runs` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/runs/latest-by-spec` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/runs/{run_id}` | `orchestrator/api/api_testing.py` |
+| POST | `/api-testing/runs/{run_id}/retry` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/specs` | `orchestrator/api/api_testing.py` |
+| POST | `/api-testing/specs` | `orchestrator/api/api_testing.py` |
+| POST | `/api-testing/specs/bulk-generate` | `orchestrator/api/api_testing.py` |
+| POST | `/api-testing/specs/bulk-run` | `orchestrator/api/api_testing.py` |
+| POST | `/api-testing/specs/folder` | `orchestrator/api/api_testing.py` |
+| DELETE | `/api-testing/specs/{name}` | `orchestrator/api/api_testing.py` |
+| GET | `/api-testing/specs/{name}` | `orchestrator/api/api_testing.py` |
+| PUT | `/api-testing/specs/{name}` | `orchestrator/api/api_testing.py` |
+| PUT | `/api-testing/specs/{name}/tags` | `orchestrator/api/api_testing.py` |
+| GET | `/api/agents/definitions` | `orchestrator/api/main.py` |
+| POST | `/api/agents/definitions` | `orchestrator/api/main.py` |
+| DELETE | `/api/agents/definitions/{definition_id}` | `orchestrator/api/main.py` |
+| GET | `/api/agents/definitions/{definition_id}` | `orchestrator/api/main.py` |
+| PUT | `/api/agents/definitions/{definition_id}` | `orchestrator/api/main.py` |
+| POST | `/api/agents/definitions/{definition_id}/runs` | `orchestrator/api/main.py` |
+| POST | `/api/agents/exploratory` | `orchestrator/api/main.py` |
+| GET | `/api/agents/exploratory/flow-spec-jobs/{job_id}` | `orchestrator/api/main.py` |
+| POST | `/api/agents/exploratory/{run_id}/analyze-prerequisites` | `orchestrator/api/main.py` |
+| DELETE | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/main.py` |
+| GET | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/main.py` |
+| PUT | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/main.py` |
+| POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/generate` | `orchestrator/api/main.py` |
+| POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/spec` | `orchestrator/api/main.py` |
+| GET | `/api/agents/exploratory/{run_id}/specs` | `orchestrator/api/main.py` |
+| POST | `/api/agents/exploratory/{run_id}/synthesize` | `orchestrator/api/main.py` |
+| POST | `/api/agents/queue-clean-orphans` | `orchestrator/api/main.py` |
+| POST | `/api/agents/queue-flush` | `orchestrator/api/main.py` |
+| GET | `/api/agents/queue-status` | `orchestrator/api/main.py` |
+| GET | `/api/agents/reports/search` | `orchestrator/api/main.py` |
+| GET | `/api/agents/runs` | `orchestrator/api/main.py` |
+| POST | `/api/agents/runs` | `orchestrator/api/main.py` |
+| GET | `/api/agents/runs/{id}` | `orchestrator/api/main.py` |
+| POST | `/api/agents/runs/{id}/cancel` | `orchestrator/api/main.py` |
+| POST | `/api/agents/runs/{id}/pause` | `orchestrator/api/main.py` |
+| GET | `/api/agents/runs/{id}/report` | `orchestrator/api/main.py` |
+| POST | `/api/agents/runs/{id}/resume` | `orchestrator/api/main.py` |
+| GET | `/api/agents/sessions` | `orchestrator/api/main.py` |
+| DELETE | `/api/agents/sessions/{session_id}` | `orchestrator/api/main.py` |
+| POST | `/api/agents/sessions/{session_id}` | `orchestrator/api/main.py` |
+| GET | `/api/agents/tools/catalog` | `orchestrator/api/main.py` |
+| POST | `/api/backup` | `orchestrator/api/main.py` |
+| GET | `/api/backup/status` | `orchestrator/api/main.py` |
+| POST | `/api/browser-pool/cleanup` | `orchestrator/api/main.py` |
+| GET | `/api/browser-pool/recent` | `orchestrator/api/main.py` |
+| GET | `/api/browser-pool/status` | `orchestrator/api/main.py` |
+| GET | `/api/key-rotation/status` | `orchestrator/api/main.py` |
+| GET | `/api/memory/agent` | `orchestrator/api/memory.py` |
+| POST | `/api/memory/agent` | `orchestrator/api/memory.py` |
+| POST | `/api/memory/agent/consolidate` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/agent/context` | `orchestrator/api/memory.py` |
+| POST | `/api/memory/agent/verify-stale` | `orchestrator/api/memory.py` |
+| DELETE | `/api/memory/agent/{memory_id}` | `orchestrator/api/memory.py` |
+| PATCH | `/api/memory/agent/{memory_id}` | `orchestrator/api/memory.py` |
+| PATCH | `/api/memory/agent/{memory_id}/approve` | `orchestrator/api/memory.py` |
+| PATCH | `/api/memory/agent/{memory_id}/archive` | `orchestrator/api/memory.py` |
+| PATCH | `/api/memory/agent/{memory_id}/verify` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/browser` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/browser/frontier` | `orchestrator/api/memory.py` |
+| POST | `/api/memory/browser/frontier/claim` | `orchestrator/api/memory.py` |
+| PATCH | `/api/memory/browser/frontier/{frontier_id}/complete` | `orchestrator/api/memory.py` |
+| PATCH | `/api/memory/browser/frontier/{frontier_id}/fail` | `orchestrator/api/memory.py` |
+| PATCH | `/api/memory/browser/frontier/{frontier_id}/skip` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/context` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/context-preview` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/coverage/gaps` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/coverage/suggestions` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/coverage/summary` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/feedback` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/graph/flows` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/graph/knowledge` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/graph/memory/{memory_id}` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/graph/pages` | `orchestrator/api/memory.py` |
+| POST | `/api/memory/graph/rebuild` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/graph/review` | `orchestrator/api/memory.py` |
+| PATCH | `/api/memory/graph/review/{edge_id}/approve` | `orchestrator/api/memory.py` |
+| PATCH | `/api/memory/graph/review/{edge_id}/reject` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/graph/stats` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/health` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/injections` | `orchestrator/api/memory.py` |
+| POST | `/api/memory/injections/{injection_event_id}/feedback` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/patterns` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/projects` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/selectors` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/session-recall/recent` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/session-recall/search` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/session-recall/window` | `orchestrator/api/memory.py` |
+| POST | `/api/memory/similar` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/stats` | `orchestrator/api/memory.py` |
+| GET | `/api/mobile-testing/health` | `orchestrator/api/main.py` |
+| POST | `/api/prd/generate-test` | `orchestrator/api/prd.py` |
+| GET | `/api/prd/generation/{generation_id}` | `orchestrator/api/prd.py` |
+| GET | `/api/prd/generation/{generation_id}/log/stream` | `orchestrator/api/prd.py` |
+| POST | `/api/prd/generation/{generation_id}/stop` | `orchestrator/api/prd.py` |
+| POST | `/api/prd/heal-test` | `orchestrator/api/prd.py` |
+| GET | `/api/prd/projects` | `orchestrator/api/prd.py` |
+| GET | `/api/prd/queue/status` | `orchestrator/api/prd.py` |
+| POST | `/api/prd/run-test` | `orchestrator/api/prd.py` |
+| POST | `/api/prd/upload` | `orchestrator/api/prd.py` |
+| DELETE | `/api/prd/{project_id}` | `orchestrator/api/prd.py` |
+| GET | `/api/prd/{project_id}/features` | `orchestrator/api/prd.py` |
+| POST | `/api/prd/{project_id}/features/{feature_slug}/requirements` | `orchestrator/api/prd.py` |
+| DELETE | `/api/prd/{project_id}/features/{feature_slug}/requirements/{req_index}` | `orchestrator/api/prd.py` |
+| PUT | `/api/prd/{project_id}/features/{feature_slug}/requirements/{req_index}` | `orchestrator/api/prd.py` |
+| POST | `/api/prd/{project_id}/generate-plan` | `orchestrator/api/prd.py` |
+| GET | `/api/prd/{project_id}/generations` | `orchestrator/api/prd.py` |
+| POST | `/api/resources/cleanup` | `orchestrator/api/main.py` |
+| GET | `/api/resources/status` | `orchestrator/api/main.py` |
+| POST | `/auth/login` | `orchestrator/api/auth.py` |
+| POST | `/auth/logout` | `orchestrator/api/auth.py` |
+| POST | `/auth/logout-all` | `orchestrator/api/auth.py` |
+| GET | `/auth/me` | `orchestrator/api/auth.py` |
+| POST | `/auth/refresh` | `orchestrator/api/auth.py` |
+| POST | `/auth/register` | `orchestrator/api/auth.py` |
+| GET | `/autonomous/{project_id}/approvals` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/approvals/{approval_id}/approve` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/approvals/{approval_id}/reject` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/findings/{finding_id}/approve` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/findings/{finding_id}/reject` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/findings/{finding_id}/resolve` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/missions` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/missions` | `orchestrator/api/autonomous.py` |
+| DELETE | `/autonomous/{project_id}/missions/{mission_id}` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/missions/{mission_id}` | `orchestrator/api/autonomous.py` |
+| PATCH | `/autonomous/{project_id}/missions/{mission_id}` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/missions/{mission_id}/app-changes` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/missions/{mission_id}/cancel` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/missions/{mission_id}/events` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/missions/{mission_id}/events/stream` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/missions/{mission_id}/findings` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/missions/{mission_id}/pause` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/missions/{mission_id}/resume` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/missions/{mission_id}/runs` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/missions/{mission_id}/start` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/missions/{mission_id}/status` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/missions/{mission_id}/team-timeline` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/missions/{mission_id}/work-items` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/proposal-review` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/proposals` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/proposals/refresh-reviews` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/proposals/{proposal_id}` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/proposals/{proposal_id}/approve` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/proposals/{proposal_id}/audit` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/proposals/{proposal_id}/materialize` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/proposals/{proposal_id}/refresh-review` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/proposals/{proposal_id}/reject` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/work-items` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/work-items/{work_item_id}/accept` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/work-items/{work_item_id}/cancel` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/work-items/{work_item_id}/events` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/work-items/{work_item_id}/events/stream` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/work-items/{work_item_id}/needs-revision` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/work-items/{work_item_id}/reject` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/work-items/{work_item_id}/retry` | `orchestrator/api/autonomous.py` |
+| GET | `/autopilot/sessions` | `orchestrator/api/autopilot.py` |
+| POST | `/autopilot/start` | `orchestrator/api/autopilot.py` |
+| DELETE | `/autopilot/{session_id}` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/{session_id}` | `orchestrator/api/autopilot.py` |
+| POST | `/autopilot/{session_id}/answer` | `orchestrator/api/autopilot.py` |
+| POST | `/autopilot/{session_id}/cancel` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/{session_id}/live` | `orchestrator/api/autopilot.py` |
+| POST | `/autopilot/{session_id}/pause` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/{session_id}/phases` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/{session_id}/questions` | `orchestrator/api/autopilot.py` |
+| POST | `/autopilot/{session_id}/resume` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/{session_id}/spec-tasks` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/{session_id}/test-tasks` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/{session_id}/test-tasks/{task_id}` | `orchestrator/api/autopilot.py` |
+| POST | `/autopilot/{session_id}/test-tasks/{task_id}/stop` | `orchestrator/api/autopilot.py` |
+| POST | `/chat/claude-code` | `orchestrator/api/chat.py` |
+| GET | `/chat/conversations` | `orchestrator/api/chat.py` |
+| POST | `/chat/conversations` | `orchestrator/api/chat.py` |
+| GET | `/chat/conversations/recent-summaries` | `orchestrator/api/chat.py` |
+| GET | `/chat/conversations/search` | `orchestrator/api/chat.py` |
+| DELETE | `/chat/conversations/{conversation_id}` | `orchestrator/api/chat.py` |
+| PUT | `/chat/conversations/{conversation_id}` | `orchestrator/api/chat.py` |
+| POST | `/chat/conversations/{conversation_id}/auto-title` | `orchestrator/api/chat.py` |
+| POST | `/chat/conversations/{conversation_id}/feedback` | `orchestrator/api/chat.py` |
+| POST | `/chat/conversations/{conversation_id}/generate-summary` | `orchestrator/api/chat.py` |
+| GET | `/chat/conversations/{conversation_id}/messages` | `orchestrator/api/chat.py` |
+| POST | `/chat/conversations/{conversation_id}/messages` | `orchestrator/api/chat.py` |
+| POST | `/chat/conversations/{conversation_id}/messages/bulk` | `orchestrator/api/chat.py` |
+| PATCH | `/chat/conversations/{conversation_id}/messages/{message_id}/content-json` | `orchestrator/api/chat.py` |
+| PATCH | `/chat/conversations/{conversation_id}/star` | `orchestrator/api/chat.py` |
+| GET | `/chat/project-context` | `orchestrator/api/chat.py` |
+| GET | `/chat/resolve-entity` | `orchestrator/api/chat.py` |
+| GET | `/chat/search-entities` | `orchestrator/api/chat.py` |
+| GET | `/dashboard` | `orchestrator/api/dashboard.py` |
+| POST | `/database-testing/analyze/{conn_id}` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/connections` | `orchestrator/api/database_testing.py` |
+| POST | `/database-testing/connections` | `orchestrator/api/database_testing.py` |
+| DELETE | `/database-testing/connections/{conn_id}` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/connections/{conn_id}` | `orchestrator/api/database_testing.py` |
+| PUT | `/database-testing/connections/{conn_id}` | `orchestrator/api/database_testing.py` |
+| POST | `/database-testing/connections/{conn_id}/query` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/connections/{conn_id}/schema` | `orchestrator/api/database_testing.py` |
+| POST | `/database-testing/connections/{conn_id}/test` | `orchestrator/api/database_testing.py` |
+| POST | `/database-testing/generate-spec` | `orchestrator/api/database_testing.py` |
+| POST | `/database-testing/generated-specs/save` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/jobs/{job_id}` | `orchestrator/api/database_testing.py` |
+| POST | `/database-testing/run-full/{conn_id}` | `orchestrator/api/database_testing.py` |
+| POST | `/database-testing/run/{conn_id}` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/runs` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/runs/{run_id}` | `orchestrator/api/database_testing.py` |
+| POST | `/database-testing/runs/{run_id}/approve-suggestions` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/runs/{run_id}/checks` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/runs/{run_id}/schema` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/runs/{run_id}/suggestions` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/specs` | `orchestrator/api/database_testing.py` |
+| POST | `/database-testing/specs` | `orchestrator/api/database_testing.py` |
+| DELETE | `/database-testing/specs/{name}` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/specs/{name}` | `orchestrator/api/database_testing.py` |
+| PUT | `/database-testing/specs/{name}` | `orchestrator/api/database_testing.py` |
+| POST | `/database-testing/suggest/{run_id}` | `orchestrator/api/database_testing.py` |
+| GET | `/database-testing/summary` | `orchestrator/api/database_testing.py` |
+| GET | `/debug-imports` | `orchestrator/api/main.py` |
+| GET | `/execution-settings` | `orchestrator/api/main.py` |
+| PUT | `/execution-settings` | `orchestrator/api/main.py` |
+| GET | `/exploration` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/health` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/queue/status` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/spec-gen-jobs` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/spec-gen-jobs/{job_id}` | `orchestrator/api/exploration.py` |
+| POST | `/exploration/start` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/{session_id}` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/{session_id}/apis` | `orchestrator/api/exploration.py` |
+| DELETE | `/exploration/{session_id}/apis/{endpoint_id}` | `orchestrator/api/exploration.py` |
+| PUT | `/exploration/{session_id}/apis/{endpoint_id}` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/{session_id}/artifacts` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/{session_id}/details` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/{session_id}/flows` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/{session_id}/flows/review` | `orchestrator/api/exploration.py` |
+| POST | `/exploration/{session_id}/flows/review/decisions` | `orchestrator/api/exploration.py` |
+| DELETE | `/exploration/{session_id}/flows/{flow_id}` | `orchestrator/api/exploration.py` |
+| PUT | `/exploration/{session_id}/flows/{flow_id}` | `orchestrator/api/exploration.py` |
+| POST | `/exploration/{session_id}/flows/{flow_id}/approve` | `orchestrator/api/exploration.py` |
+| POST | `/exploration/{session_id}/flows/{flow_id}/reject` | `orchestrator/api/exploration.py` |
+| POST | `/exploration/{session_id}/generate-api-specs` | `orchestrator/api/exploration.py` |
+| POST | `/exploration/{session_id}/generate-api-tests` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/{session_id}/issues` | `orchestrator/api/exploration.py` |
+| GET | `/exploration/{session_id}/results` | `orchestrator/api/exploration.py` |
+| POST | `/exploration/{session_id}/stop` | `orchestrator/api/exploration.py` |
+| POST | `/export/testrail` | `orchestrator/api/main.py` |
+| POST | `/github/webhook/github` | `orchestrator/api/github_ci.py` |
+| DELETE | `/github/{project_id}/config` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/config` | `orchestrator/api/github_ci.py` |
+| POST | `/github/{project_id}/config` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/pipelines` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/pipelines/{pipeline_mapping_id}` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/pr-advisor/analyses` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/pr-advisor/analyses/{analysis_id}` | `orchestrator/api/github_ci.py` |
+| POST | `/github/{project_id}/pr-advisor/analyses/{analysis_id}/run` | `orchestrator/api/github_ci.py` |
+| POST | `/github/{project_id}/pr-advisor/analyze` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/pull-requests` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/quality-gates/config` | `orchestrator/api/github_ci.py` |
+| PUT | `/github/{project_id}/quality-gates/config` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/quality-gates/pr` | `orchestrator/api/github_ci.py` |
+| POST | `/github/{project_id}/quality-gates/pr/start` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/quality-gates/pr/status` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/quality-gates/pr/{analysis_id}` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/remote-repos` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/remote-workflows` | `orchestrator/api/github_ci.py` |
+| POST | `/github/{project_id}/repository-index` | `orchestrator/api/github_ci.py` |
+| GET | `/github/{project_id}/repository-index/latest` | `orchestrator/api/github_ci.py` |
+| POST | `/github/{project_id}/sync-runs` | `orchestrator/api/github_ci.py` |
+| POST | `/github/{project_id}/test-connection` | `orchestrator/api/github_ci.py` |
+| POST | `/github/{project_id}/trigger-workflow` | `orchestrator/api/github_ci.py` |
+| POST | `/gitlab/webhook/gitlab` | `orchestrator/api/gitlab_ci.py` |
+| DELETE | `/gitlab/{project_id}/config` | `orchestrator/api/gitlab_ci.py` |
+| GET | `/gitlab/{project_id}/config` | `orchestrator/api/gitlab_ci.py` |
+| POST | `/gitlab/{project_id}/config` | `orchestrator/api/gitlab_ci.py` |
+| GET | `/gitlab/{project_id}/pipelines` | `orchestrator/api/gitlab_ci.py` |
+| GET | `/gitlab/{project_id}/pipelines/{mapping_id}` | `orchestrator/api/gitlab_ci.py` |
+| GET | `/gitlab/{project_id}/remote-projects` | `orchestrator/api/gitlab_ci.py` |
+| POST | `/gitlab/{project_id}/test-connection` | `orchestrator/api/gitlab_ci.py` |
+| POST | `/gitlab/{project_id}/trigger-pipeline` | `orchestrator/api/gitlab_ci.py` |
+| GET | `/health` | `orchestrator/api/main.py` |
+| GET | `/health/alerts` | `orchestrator/api/health.py` |
+| GET | `/health/archival/stats` | `orchestrator/api/health.py` |
+| GET | `/health/backup` | `orchestrator/api/health.py` |
+| GET | `/health/storage` | `orchestrator/api/health.py` |
+| POST | `/health/storage/record` | `orchestrator/api/health.py` |
+| POST | `/import/testrail` | `orchestrator/api/main.py` |
+| GET | `/jira/{project_id}/bug-report-jobs/{job_id}` | `orchestrator/api/jira.py` |
+| DELETE | `/jira/{project_id}/config` | `orchestrator/api/jira.py` |
+| GET | `/jira/{project_id}/config` | `orchestrator/api/jira.py` |
+| POST | `/jira/{project_id}/config` | `orchestrator/api/jira.py` |
+| POST | `/jira/{project_id}/create-issue` | `orchestrator/api/jira.py` |
+| POST | `/jira/{project_id}/generate-bug-report/{run_id}` | `orchestrator/api/jira.py` |
+| GET | `/jira/{project_id}/issues` | `orchestrator/api/jira.py` |
+| GET | `/jira/{project_id}/issues/{run_id}` | `orchestrator/api/jira.py` |
+| GET | `/jira/{project_id}/remote-issue-types/{jira_project_key}` | `orchestrator/api/jira.py` |
+| GET | `/jira/{project_id}/remote-projects` | `orchestrator/api/jira.py` |
+| POST | `/jira/{project_id}/test-connection` | `orchestrator/api/jira.py` |
+| GET | `/llm-testing/analytics/cost-tracking` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/analytics/dataset-performance` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/analytics/dataset-trends` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/analytics/golden-dashboard` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/analytics/latency-distribution` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/analytics/overview` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/analytics/regressions` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/analytics/trends` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/bulk-compare` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/bulk-run` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/compare` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/comparisons` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/comparisons/{comparison_id}` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/comparisons/{comparison_id}/matrix` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/datasets` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/datasets` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/datasets/from-spec/{spec_name}` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/datasets/import-csv` | `orchestrator/api/llm_testing.py` |
+| DELETE | `/llm-testing/datasets/{dataset_id}` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/datasets/{dataset_id}` | `orchestrator/api/llm_testing.py` |
+| PUT | `/llm-testing/datasets/{dataset_id}` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/datasets/{dataset_id}/augment` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/datasets/{dataset_id}/augment/{job_id}/accept` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/datasets/{dataset_id}/cases` | `orchestrator/api/llm_testing.py` |
+| DELETE | `/llm-testing/datasets/{dataset_id}/cases/{case_id}` | `orchestrator/api/llm_testing.py` |
+| PUT | `/llm-testing/datasets/{dataset_id}/cases/{case_id}` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/datasets/{dataset_id}/compare` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/datasets/{dataset_id}/diff` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/datasets/{dataset_id}/duplicate` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/datasets/{dataset_id}/export` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/datasets/{dataset_id}/golden` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/datasets/{dataset_id}/run` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/datasets/{dataset_id}/to-spec` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/datasets/{dataset_id}/versions` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/demo-content` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/generate-suite` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/jobs/{job_id}` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/openrouter/demo` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/openrouter/models` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/prompt-iterations` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/prompt-iterations` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/prompt-iterations/{iteration_id}` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/providers` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/providers` | `orchestrator/api/llm_testing.py` |
+| DELETE | `/llm-testing/providers/{provider_id}` | `orchestrator/api/llm_testing.py` |
+| PUT | `/llm-testing/providers/{provider_id}` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/providers/{provider_id}/health-check` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/run` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/runs` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/runs/{run_id}` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/runs/{run_id}/results` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/schedules` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/schedules` | `orchestrator/api/llm_testing.py` |
+| DELETE | `/llm-testing/schedules/{schedule_id}` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/schedules/{schedule_id}` | `orchestrator/api/llm_testing.py` |
+| PUT | `/llm-testing/schedules/{schedule_id}` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/schedules/{schedule_id}/run-now` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/specs` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/specs` | `orchestrator/api/llm_testing.py` |
+| DELETE | `/llm-testing/specs/{name}` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/specs/{name}` | `orchestrator/api/llm_testing.py` |
+| PUT | `/llm-testing/specs/{name}` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/specs/{name}/suggest-improvements` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/specs/{name}/versions` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/specs/{name}/versions` | `orchestrator/api/llm_testing.py` |
+| GET | `/llm-testing/specs/{name}/versions/{version}` | `orchestrator/api/llm_testing.py` |
+| POST | `/llm-testing/specs/{name}/versions/{version}/restore` | `orchestrator/api/llm_testing.py` |
+| GET | `/load-testing/dashboard` | `orchestrator/api/load_testing.py` |
+| POST | `/load-testing/force-unlock` | `orchestrator/api/load_testing.py` |
+| POST | `/load-testing/generate` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/jobs` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/jobs/{job_id}` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/jobs/{job_id}/logs` | `orchestrator/api/load_testing.py` |
+| POST | `/load-testing/run` | `orchestrator/api/load_testing.py` |
+| POST | `/load-testing/run-from-spec` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/runs` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/runs/compare` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/runs/latest-by-spec` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/runs/trends` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/runs/{run_id}` | `orchestrator/api/load_testing.py` |
+| POST | `/load-testing/runs/{run_id}/analyze` | `orchestrator/api/load_testing.py` |
+| POST | `/load-testing/runs/{run_id}/stop` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/runs/{run_id}/timeseries` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/scripts` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/scripts/{name}` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/scripts/{name}/download` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/specs` | `orchestrator/api/load_testing.py` |
+| POST | `/load-testing/specs` | `orchestrator/api/load_testing.py` |
+| DELETE | `/load-testing/specs/{name}` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/specs/{name}` | `orchestrator/api/load_testing.py` |
+| PUT | `/load-testing/specs/{name}` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/status` | `orchestrator/api/load_testing.py` |
+| GET | `/load-testing/system-limits` | `orchestrator/api/load_testing.py` |
+| GET | `/projects` | `orchestrator/api/projects.py` |
+| POST | `/projects` | `orchestrator/api/projects.py` |
+| DELETE | `/projects/{project_id}` | `orchestrator/api/projects.py` |
+| GET | `/projects/{project_id}` | `orchestrator/api/projects.py` |
+| PUT | `/projects/{project_id}` | `orchestrator/api/projects.py` |
+| POST | `/projects/{project_id}/assign-spec` | `orchestrator/api/projects.py` |
+| POST | `/projects/{project_id}/bulk-assign-specs` | `orchestrator/api/projects.py` |
+| GET | `/projects/{project_id}/ci/audit-events` | `orchestrator/api/ci_control.py` |
+| GET | `/projects/{project_id}/ci/generated-tests` | `orchestrator/api/ci_control.py` |
+| GET | `/projects/{project_id}/ci/providers` | `orchestrator/api/ci_control.py` |
+| PATCH | `/projects/{project_id}/ci/providers/defaults` | `orchestrator/api/ci_control.py` |
+| GET | `/projects/{project_id}/ci/runs` | `orchestrator/api/ci_control.py` |
+| POST | `/projects/{project_id}/ci/runs/sync` | `orchestrator/api/ci_control.py` |
+| GET | `/projects/{project_id}/ci/runs/{provider}/{mapping_id}` | `orchestrator/api/ci_control.py` |
+| POST | `/projects/{project_id}/ci/runs/{provider}/{mapping_id}/cancel` | `orchestrator/api/ci_control.py` |
+| GET | `/projects/{project_id}/ci/runs/{provider}/{mapping_id}/logs` | `orchestrator/api/ci_control.py` |
+| POST | `/projects/{project_id}/ci/runs/{provider}/{mapping_id}/rerun` | `orchestrator/api/ci_control.py` |
+| GET | `/projects/{project_id}/ci/test-subsets` | `orchestrator/api/ci_control.py` |
+| POST | `/projects/{project_id}/ci/test-subsets` | `orchestrator/api/ci_control.py` |
+| DELETE | `/projects/{project_id}/ci/test-subsets/{subset_id}` | `orchestrator/api/ci_control.py` |
+| GET | `/projects/{project_id}/ci/test-subsets/{subset_id}` | `orchestrator/api/ci_control.py` |
+| PATCH | `/projects/{project_id}/ci/test-subsets/{subset_id}` | `orchestrator/api/ci_control.py` |
+| POST | `/projects/{project_id}/ci/test-subsets/{subset_id}/dispatch` | `orchestrator/api/ci_control.py` |
+| POST | `/projects/{project_id}/ci/test-subsets/{subset_id}/preview` | `orchestrator/api/ci_control.py` |
+| POST | `/projects/{project_id}/ci/test-subsets/{subset_id}/pull-request` | `orchestrator/api/ci_control.py` |
+| POST | `/projects/{project_id}/ci/workflow-change-requests` | `orchestrator/api/ci_control.py` |
+| POST | `/projects/{project_id}/ci/workflow-change-requests/{change_id}/pull-request` | `orchestrator/api/ci_control.py` |
+| GET | `/projects/{project_id}/ci/workflows` | `orchestrator/api/ci_control.py` |
+| POST | `/projects/{project_id}/ci/workflows/dispatch` | `orchestrator/api/ci_control.py` |
+| GET | `/projects/{project_id}/credentials` | `orchestrator/api/projects.py` |
+| POST | `/projects/{project_id}/credentials` | `orchestrator/api/projects.py` |
+| DELETE | `/projects/{project_id}/credentials/{credential_key}` | `orchestrator/api/projects.py` |
+| GET | `/projects/{project_id}/members` | `orchestrator/api/projects.py` |
+| POST | `/projects/{project_id}/members` | `orchestrator/api/projects.py` |
+| DELETE | `/projects/{project_id}/members/{user_id}` | `orchestrator/api/projects.py` |
+| PUT | `/projects/{project_id}/members/{user_id}` | `orchestrator/api/projects.py` |
+| GET | `/projects/{project_id}/my-role` | `orchestrator/api/projects.py` |
+| GET | `/queue-status` | `orchestrator/api/main.py` |
+| POST | `/queue/clear` | `orchestrator/api/main.py` |
+| GET | `/recordings` | `orchestrator/api/recordings.py` |
+| POST | `/recordings/start` | `orchestrator/api/recordings.py` |
+| GET | `/recordings/{recording_id}` | `orchestrator/api/recordings.py` |
+| GET | `/recordings/{recording_id}/code` | `orchestrator/api/recordings.py` |
+| POST | `/recordings/{recording_id}/import` | `orchestrator/api/recordings.py` |
+| POST | `/recordings/{recording_id}/stop` | `orchestrator/api/recordings.py` |
+| GET | `/regression/batches` | `orchestrator/api/regression.py` |
+| POST | `/regression/batches/compare` | `orchestrator/api/regression.py` |
+| GET | `/regression/batches/trend` | `orchestrator/api/regression.py` |
+| DELETE | `/regression/batches/{batch_id}` | `orchestrator/api/regression.py` |
+| GET | `/regression/batches/{batch_id}` | `orchestrator/api/regression.py` |
+| PATCH | `/regression/batches/{batch_id}` | `orchestrator/api/regression.py` |
+| POST | `/regression/batches/{batch_id}/cancel` | `orchestrator/api/regression.py` |
+| GET | `/regression/batches/{batch_id}/error-summary` | `orchestrator/api/regression.py` |
+| GET | `/regression/batches/{batch_id}/export` | `orchestrator/api/regression.py` |
+| PATCH | `/regression/batches/{batch_id}/refresh` | `orchestrator/api/regression.py` |
+| POST | `/regression/batches/{batch_id}/rerun-failed` | `orchestrator/api/regression.py` |
+| GET | `/regression/debug/batch/{batch_id}/test-counts` | `orchestrator/api/regression.py` |
+| GET | `/regression/debug/test-counts` | `orchestrator/api/regression.py` |
+| GET | `/regression/flaky-tests` | `orchestrator/api/regression.py` |
+| GET | `/regression/spec-history` | `orchestrator/api/regression.py` |
+| GET | `/requirements` | `orchestrator/api/requirements.py` |
+| POST | `/requirements` | `orchestrator/api/requirements.py` |
+| POST | `/requirements/bulk` | `orchestrator/api/requirements.py` |
+| GET | `/requirements/bulk-generate-jobs/{job_id}` | `orchestrator/api/requirements.py` |
+| POST | `/requirements/bulk-generate-specs` | `orchestrator/api/requirements.py` |
+| GET | `/requirements/categories/list` | `orchestrator/api/requirements.py` |
+| POST | `/requirements/check-duplicate` | `orchestrator/api/requirements.py` |
+| GET | `/requirements/duplicates` | `orchestrator/api/requirements.py` |
+| POST | `/requirements/generate` | `orchestrator/api/requirements.py` |
+| GET | `/requirements/generate-jobs/{job_id}` | `orchestrator/api/requirements.py` |
+| GET | `/requirements/health` | `orchestrator/api/requirements.py` |
+| POST | `/requirements/merge` | `orchestrator/api/requirements.py` |
+| POST | `/requirements/review/decisions` | `orchestrator/api/requirements.py` |
+| GET | `/requirements/stats` | `orchestrator/api/requirements.py` |
+| DELETE | `/requirements/{req_id}` | `orchestrator/api/requirements.py` |
+| GET | `/requirements/{req_id}` | `orchestrator/api/requirements.py` |
+| PUT | `/requirements/{req_id}` | `orchestrator/api/requirements.py` |
+| POST | `/requirements/{req_id}/confirm` | `orchestrator/api/requirements.py` |
+| POST | `/requirements/{req_id}/generate-spec` | `orchestrator/api/requirements.py` |
+| POST | `/requirements/{req_id}/mark-stale` | `orchestrator/api/requirements.py` |
+| POST | `/requirements/{req_id}/reject` | `orchestrator/api/requirements.py` |
+| GET | `/requirements/{req_id}/spec-status` | `orchestrator/api/requirements.py` |
+| GET | `/rtm` | `orchestrator/api/rtm.py` |
+| GET | `/rtm/coverage` | `orchestrator/api/rtm.py` |
+| POST | `/rtm/entry` | `orchestrator/api/rtm.py` |
+| DELETE | `/rtm/entry/{entry_id}` | `orchestrator/api/rtm.py` |
+| GET | `/rtm/export/{format}` | `orchestrator/api/rtm.py` |
+| GET | `/rtm/gaps` | `orchestrator/api/rtm.py` |
+| POST | `/rtm/generate` | `orchestrator/api/rtm.py` |
+| GET | `/rtm/generate-jobs/{job_id}` | `orchestrator/api/rtm.py` |
+| GET | `/rtm/requirement/{req_id}/tests` | `orchestrator/api/rtm.py` |
+| POST | `/rtm/snapshot` | `orchestrator/api/rtm.py` |
+| GET | `/rtm/snapshot/{snapshot_id}` | `orchestrator/api/rtm.py` |
+| GET | `/rtm/snapshots` | `orchestrator/api/rtm.py` |
+| GET | `/rtm/test/{test_name}/requirements` | `orchestrator/api/rtm.py` |
+| GET | `/rtm/trend` | `orchestrator/api/rtm.py` |
+| GET | `/runs` | `orchestrator/api/main.py` |
+| POST | `/runs` | `orchestrator/api/main.py` |
+| POST | `/runs/bulk` | `orchestrator/api/main.py` |
+| DELETE | `/runs/{id}` | `orchestrator/api/main.py` |
+| GET | `/runs/{id}` | `orchestrator/api/main.py` |
+| POST | `/runs/{id}/agentic-summary` | `orchestrator/api/main.py` |
+| GET | `/runs/{id}/log/stream` | `orchestrator/api/main.py` |
+| POST | `/runs/{id}/progress` | `orchestrator/api/main.py` |
+| POST | `/runs/{id}/stop` | `orchestrator/api/main.py` |
+| POST | `/scheduling/validate-cron` | `orchestrator/api/scheduling.py` |
+| GET | `/scheduling/{project_id}/executions` | `orchestrator/api/scheduling.py` |
+| GET | `/scheduling/{project_id}/schedules` | `orchestrator/api/scheduling.py` |
+| POST | `/scheduling/{project_id}/schedules` | `orchestrator/api/scheduling.py` |
+| DELETE | `/scheduling/{project_id}/schedules/{schedule_id}` | `orchestrator/api/scheduling.py` |
+| GET | `/scheduling/{project_id}/schedules/{schedule_id}` | `orchestrator/api/scheduling.py` |
+| PUT | `/scheduling/{project_id}/schedules/{schedule_id}` | `orchestrator/api/scheduling.py` |
+| GET | `/scheduling/{project_id}/schedules/{schedule_id}/executions` | `orchestrator/api/scheduling.py` |
+| GET | `/scheduling/{project_id}/schedules/{schedule_id}/next-runs` | `orchestrator/api/scheduling.py` |
+| POST | `/scheduling/{project_id}/schedules/{schedule_id}/run-now` | `orchestrator/api/scheduling.py` |
+| POST | `/scheduling/{project_id}/schedules/{schedule_id}/toggle` | `orchestrator/api/scheduling.py` |
+| POST | `/security-testing/analyze/{run_id}` | `orchestrator/api/security_testing.py` |
+| GET | `/security-testing/capabilities` | `orchestrator/api/security_testing.py` |
+| GET | `/security-testing/findings` | `orchestrator/api/security_testing.py` |
+| GET | `/security-testing/findings/summary` | `orchestrator/api/security_testing.py` |
+| PATCH | `/security-testing/findings/{finding_id}/status` | `orchestrator/api/security_testing.py` |
+| POST | `/security-testing/generate-spec` | `orchestrator/api/security_testing.py` |
+| GET | `/security-testing/jobs/{job_id}` | `orchestrator/api/security_testing.py` |
+| GET | `/security-testing/runs` | `orchestrator/api/security_testing.py` |
+| GET | `/security-testing/runs/compare` | `orchestrator/api/security_testing.py` |
+| GET | `/security-testing/runs/{run_id}` | `orchestrator/api/security_testing.py` |
+| GET | `/security-testing/runs/{run_id}/findings` | `orchestrator/api/security_testing.py` |
+| POST | `/security-testing/runs/{run_id}/stop` | `orchestrator/api/security_testing.py` |
+| POST | `/security-testing/scan/full` | `orchestrator/api/security_testing.py` |
+| POST | `/security-testing/scan/nuclei` | `orchestrator/api/security_testing.py` |
+| POST | `/security-testing/scan/quick` | `orchestrator/api/security_testing.py` |
+| POST | `/security-testing/scan/zap` | `orchestrator/api/security_testing.py` |
+| GET | `/security-testing/specs` | `orchestrator/api/security_testing.py` |
+| POST | `/security-testing/specs` | `orchestrator/api/security_testing.py` |
+| DELETE | `/security-testing/specs/{name}` | `orchestrator/api/security_testing.py` |
+| GET | `/security-testing/specs/{name}` | `orchestrator/api/security_testing.py` |
+| PUT | `/security-testing/specs/{name}` | `orchestrator/api/security_testing.py` |
+| GET | `/security-testing/targets` | `orchestrator/api/security_testing.py` |
+| GET | `/settings` | `orchestrator/api/settings.py` |
+| POST | `/settings` | `orchestrator/api/settings.py` |
+| POST | `/settings/test-connection` | `orchestrator/api/settings.py` |
+| GET | `/spec-metadata` | `orchestrator/api/main.py` |
+| GET | `/spec-metadata/{spec_name}` | `orchestrator/api/main.py` |
+| PUT | `/spec-metadata/{spec_name}` | `orchestrator/api/main.py` |
+| GET | `/specs` | `orchestrator/api/main.py` |
+| POST | `/specs` | `orchestrator/api/main.py` |
+| GET | `/specs/automated` | `orchestrator/api/main.py` |
+| POST | `/specs/create-folder` | `orchestrator/api/main.py` |
+| DELETE | `/specs/folder/{folder_path}` | `orchestrator/api/main.py` |
+| GET | `/specs/folders` | `orchestrator/api/main.py` |
+| GET | `/specs/list` | `orchestrator/api/main.py` |
+| POST | `/specs/move` | `orchestrator/api/main.py` |
+| POST | `/specs/register-folder` | `orchestrator/api/main.py` |
+| POST | `/specs/rename` | `orchestrator/api/main.py` |
+| POST | `/specs/split` | `orchestrator/api/main.py` |
+| DELETE | `/specs/{name}` | `orchestrator/api/main.py` |
+| GET | `/specs/{name}` | `orchestrator/api/main.py` |
+| PUT | `/specs/{name}` | `orchestrator/api/main.py` |
+| GET | `/specs/{name}/generated-code` | `orchestrator/api/main.py` |
+| PUT | `/specs/{name}/generated-code` | `orchestrator/api/main.py` |
+| GET | `/specs/{name}/info` | `orchestrator/api/main.py` |
+| POST | `/stop-all` | `orchestrator/api/main.py` |
+| DELETE | `/testrail/{project_id}/config` | `orchestrator/api/testrail.py` |
+| GET | `/testrail/{project_id}/config` | `orchestrator/api/testrail.py` |
+| POST | `/testrail/{project_id}/config` | `orchestrator/api/testrail.py` |
+| GET | `/testrail/{project_id}/mappings` | `orchestrator/api/testrail.py` |
+| DELETE | `/testrail/{project_id}/mappings/{mapping_id}` | `orchestrator/api/testrail.py` |
+| POST | `/testrail/{project_id}/push-cases` | `orchestrator/api/testrail.py` |
+| GET | `/testrail/{project_id}/remote-projects` | `orchestrator/api/testrail.py` |
+| GET | `/testrail/{project_id}/remote-suites/{tr_project_id}` | `orchestrator/api/testrail.py` |
+| GET | `/testrail/{project_id}/sync-preview/{batch_id}` | `orchestrator/api/testrail.py` |
+| POST | `/testrail/{project_id}/sync-results` | `orchestrator/api/testrail.py` |
+| POST | `/testrail/{project_id}/test-connection` | `orchestrator/api/testrail.py` |
+| GET | `/users` | `orchestrator/api/users.py` |
+| POST | `/users` | `orchestrator/api/users.py` |
+| DELETE | `/users/{user_id}` | `orchestrator/api/users.py` |
+| GET | `/users/{user_id}` | `orchestrator/api/users.py` |
+| PUT | `/users/{user_id}` | `orchestrator/api/users.py` |
+| GET | `/users/{user_id}/projects` | `orchestrator/api/users.py` |
+| DELETE | `/users/{user_id}/projects/{project_id}` | `orchestrator/api/users.py` |
+| POST | `/users/{user_id}/projects/{project_id}` | `orchestrator/api/users.py` |
+| GET | `/workflows` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/admin/step-types` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/analytics` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/catalog` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/definitions` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/definitions` | `orchestrator/api/workflows.py` |
+| DELETE | `/workflows/definitions/{definition_id}` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/definitions/{definition_id}` | `orchestrator/api/workflows.py` |
+| PUT | `/workflows/definitions/{definition_id}` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/definitions/{definition_id}/duplicate` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/definitions/{definition_id}/export` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/definitions/{definition_id}/revisions` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/definitions/{definition_id}/revisions/{version}` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/definitions/{definition_id}/revisions/{version}/rollback` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/definitions/{definition_id}/revisions/{version}/rollback-preview` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/definitions/{definition_id}/runs` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/definitions/{definition_id}/runs` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/events` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/import` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/import/validate` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/notifications` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/notifications/{notification_id}/read` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/runs` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/runs/{run_id}` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/runs/{run_id}/cancel` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/runs/{run_id}/debug` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/runs/{run_id}/diagnostics` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/runs/{run_id}/pause` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/runs/{run_id}/resume` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/runs/{run_id}/steps` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/runs/{run_id}/steps/{step_id}/retry` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/runs/{run_id}/steps/{step_id}/skip` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/schedules` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/schedules` | `orchestrator/api/workflows.py` |
+| DELETE | `/workflows/schedules/{schedule_id}` | `orchestrator/api/workflows.py` |
+| PUT | `/workflows/schedules/{schedule_id}` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/schedules/{schedule_id}/executions` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/schedules/{schedule_id}/run-now` | `orchestrator/api/workflows.py` |
+| GET | `/workflows/temporal/health` | `orchestrator/api/workflows.py` |
+| POST | `/workflows/validate` | `orchestrator/api/workflows.py` |
 
 ## Related
 

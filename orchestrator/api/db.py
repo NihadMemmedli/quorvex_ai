@@ -19,6 +19,7 @@ from .models_auth import ProjectMember, RefreshToken, User  # noqa: F401
 from .models_db import (  # noqa: F401
     AgentDefinition,
     AgentMemory,
+    MemoryInjectionEvent,
     AgentRun,
     AgentToolDefinition,
     ApplicationMap,
@@ -421,6 +422,260 @@ def _run_migrations():
             except Exception as e:
                 logger.debug(f"Index may already exist on agent_memories: {e}")
 
+        if "memory_injection_events" not in inspector.get_table_names():
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            json_type = "JSONB" if db_type == "postgresql" else "JSON"
+            conn.execute(
+                text(f"""
+                CREATE TABLE memory_injection_events (
+                    id VARCHAR PRIMARY KEY,
+                    project_id VARCHAR,
+                    actor_type VARCHAR NOT NULL,
+                    stage VARCHAR NOT NULL,
+                    source_type VARCHAR,
+                    source_id VARCHAR,
+                    query TEXT NOT NULL DEFAULT '',
+                    memory_ids_json TEXT NOT NULL DEFAULT '[]',
+                    context_preview TEXT NOT NULL DEFAULT '',
+                    outcome VARCHAR NOT NULL DEFAULT 'injected',
+                    extra_data {json_type},
+                    created_at {timestamp_type} NOT NULL
+                )
+                """)
+            )
+            logger.info("Created table: memory_injection_events")
+        if "memory_injection_events" in inspector.get_table_names():
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_injection_project_created "
+                        "ON memory_injection_events (project_id, created_at)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_injection_stage_created "
+                        "ON memory_injection_events (stage, created_at)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_injection_source "
+                        "ON memory_injection_events (source_type, source_id)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Index may already exist on memory_injection_events: {e}")
+
+        if "memory_graph_nodes" not in inspector.get_table_names():
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            json_type = "JSONB" if db_type == "postgresql" else "JSON"
+            conn.execute(
+                text(f"""
+                CREATE TABLE memory_graph_nodes (
+                    id VARCHAR PRIMARY KEY,
+                    project_id VARCHAR,
+                    node_type VARCHAR NOT NULL,
+                    label TEXT NOT NULL,
+                    memory_id VARCHAR,
+                    entity_key VARCHAR NOT NULL,
+                    confidence FLOAT NOT NULL DEFAULT 0.7,
+                    status VARCHAR NOT NULL DEFAULT 'active',
+                    extra_data {json_type},
+                    created_at {timestamp_type} NOT NULL,
+                    updated_at {timestamp_type} NOT NULL
+                )
+                """)
+            )
+            logger.info("Created table: memory_graph_nodes")
+        if "memory_graph_edges" not in inspector.get_table_names():
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            json_type = "JSONB" if db_type == "postgresql" else "JSON"
+            conn.execute(
+                text(f"""
+                CREATE TABLE memory_graph_edges (
+                    id VARCHAR PRIMARY KEY,
+                    project_id VARCHAR,
+                    source_node_id VARCHAR NOT NULL,
+                    target_node_id VARCHAR NOT NULL,
+                    relationship_type VARCHAR NOT NULL,
+                    weight FLOAT NOT NULL DEFAULT 0.7,
+                    evidence_memory_id VARCHAR,
+                    status VARCHAR NOT NULL DEFAULT 'active',
+                    extra_data {json_type},
+                    created_at {timestamp_type} NOT NULL,
+                    updated_at {timestamp_type} NOT NULL
+                )
+                """)
+            )
+            logger.info("Created table: memory_graph_edges")
+        try:
+            graph_tables = set(inspector.get_table_names())
+            if "memory_graph_nodes" in graph_tables:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_graph_node_identity "
+                        "ON memory_graph_nodes (project_id, node_type, entity_key)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_graph_nodes_project_type "
+                        "ON memory_graph_nodes (project_id, node_type)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_graph_nodes_project_status "
+                        "ON memory_graph_nodes (project_id, status)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_graph_nodes_memory "
+                        "ON memory_graph_nodes (memory_id)"
+                    )
+                )
+            if "memory_graph_edges" in graph_tables:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_graph_edge_identity "
+                        "ON memory_graph_edges (project_id, source_node_id, target_node_id, relationship_type)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_graph_edges_project_type "
+                        "ON memory_graph_edges (project_id, relationship_type)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_graph_edges_source "
+                        "ON memory_graph_edges (source_node_id)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_graph_edges_target "
+                        "ON memory_graph_edges (target_node_id)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_graph_edges_evidence "
+                        "ON memory_graph_edges (evidence_memory_id)"
+                    )
+                )
+        except Exception as e:
+            logger.debug(f"Index may already exist on memory knowledge graph: {e}")
+
+        if "memory_feedback_events" not in inspector.get_table_names():
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            conn.execute(
+                text(f"""
+                CREATE TABLE memory_feedback_events (
+                    id VARCHAR PRIMARY KEY,
+                    project_id VARCHAR,
+                    memory_id VARCHAR NOT NULL,
+                    injection_event_id VARCHAR,
+                    conversation_id VARCHAR,
+                    message_index INTEGER,
+                    rating VARCHAR NOT NULL,
+                    signal FLOAT NOT NULL DEFAULT 0.0,
+                    source VARCHAR NOT NULL DEFAULT 'manual_dashboard',
+                    comment TEXT,
+                    user_id VARCHAR,
+                    created_at {timestamp_type} NOT NULL
+                )
+                """)
+            )
+            logger.info("Created table: memory_feedback_events")
+        if "memory_feedback_aggregates" not in inspector.get_table_names():
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            conn.execute(
+                text(f"""
+                CREATE TABLE memory_feedback_aggregates (
+                    id VARCHAR PRIMARY KEY,
+                    project_id VARCHAR,
+                    project_key VARCHAR NOT NULL DEFAULT '__global__',
+                    memory_id VARCHAR NOT NULL,
+                    positive_feedback_count INTEGER NOT NULL DEFAULT 0,
+                    negative_feedback_count INTEGER NOT NULL DEFAULT 0,
+                    feedback_score FLOAT NOT NULL DEFAULT 0.0,
+                    last_feedback_at {timestamp_type},
+                    updated_at {timestamp_type} NOT NULL
+                )
+                """)
+            )
+            logger.info("Created table: memory_feedback_aggregates")
+        try:
+            feedback_inspector = inspect(conn)
+            feedback_tables = set(feedback_inspector.get_table_names())
+            if "memory_feedback_events" in feedback_tables:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_feedback_project_created "
+                        "ON memory_feedback_events (project_id, created_at)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_feedback_memory "
+                        "ON memory_feedback_events (memory_id)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_feedback_injection "
+                        "ON memory_feedback_events (injection_event_id)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_feedback_source "
+                        "ON memory_feedback_events (source)"
+                    )
+                )
+            if "memory_feedback_aggregates" in feedback_tables:
+                feedback_aggregate_columns = {
+                    col["name"] for col in feedback_inspector.get_columns("memory_feedback_aggregates")
+                }
+                if "project_key" not in feedback_aggregate_columns:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE memory_feedback_aggregates "
+                            "ADD COLUMN project_key VARCHAR NOT NULL DEFAULT '__global__'"
+                        )
+                    )
+                    conn.execute(
+                        text(
+                            "UPDATE memory_feedback_aggregates "
+                            "SET project_key = COALESCE(project_id, '__global__') "
+                            "WHERE project_key = '__global__'"
+                        )
+                    )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_feedback_aggregate_project_memory "
+                        "ON memory_feedback_aggregates (project_key, memory_id)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_feedback_aggregate_project_score "
+                        "ON memory_feedback_aggregates (project_id, feedback_score)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_memory_feedback_aggregate_memory "
+                        "ON memory_feedback_aggregates (memory_id)"
+                    )
+                )
+        except Exception as e:
+            logger.debug(f"Index may already exist on memory feedback tables: {e}")
+
         # Create UI-created agent tables for databases initialized before this feature.
         if "agent_definitions" not in inspector.get_table_names():
             if db_type == "postgresql":
@@ -818,8 +1073,9 @@ def _run_migrations():
             )
             logger.info("Created table: workflow_step_types")
 
-        if "workflow_step_types" in inspect(conn).get_table_names():
-            step_type_columns = {col["name"] for col in inspector.get_columns("workflow_step_types")}
+        conn_inspector = inspect(conn)
+        if "workflow_step_types" in conn_inspector.get_table_names():
+            step_type_columns = {col["name"] for col in conn_inspector.get_columns("workflow_step_types")}
             if "category" not in step_type_columns:
                 conn.execute(text("ALTER TABLE workflow_step_types ADD COLUMN category VARCHAR NOT NULL DEFAULT 'Utility'"))
                 logger.info("Added column: workflow_step_types.category")
@@ -854,6 +1110,51 @@ def _run_migrations():
             if "title_embedding_json" not in req_columns:
                 conn.execute(text("ALTER TABLE requirements ADD COLUMN title_embedding_json TEXT"))
                 logger.info("Added column: requirements.title_embedding_json")
+            requirement_timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            requirement_truth_columns = {
+                "truth_state": "VARCHAR NOT NULL DEFAULT 'candidate_requirement'",
+                "source_type": "VARCHAR NOT NULL DEFAULT 'manual'",
+                "confidence": "FLOAT NOT NULL DEFAULT 0.9",
+                "uncertainty_reason": "TEXT",
+                "confirmed_by": "VARCHAR",
+                "confirmed_at": requirement_timestamp_type,
+                "rejected_by": "VARCHAR",
+                "rejected_at": requirement_timestamp_type,
+            }
+            for column_name, column_type in requirement_truth_columns.items():
+                if column_name not in req_columns:
+                    conn.execute(text(f"ALTER TABLE requirements ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: requirements.%s", column_name)
+            try:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE requirements
+                        SET truth_state = CASE
+                            WHEN status IN ('approved', 'implemented', 'tested', 'confirmed') THEN 'confirmed_requirement'
+                            WHEN status IN ('rejected') THEN 'rejected_requirement'
+                            WHEN source_session_id IS NOT NULL THEN 'candidate_requirement'
+                            ELSE truth_state
+                        END
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        UPDATE requirements
+                        SET source_type = CASE
+                            WHEN source_session_id IS NOT NULL THEN 'exploration'
+                            WHEN truth_state = 'confirmed_requirement' THEN 'human_approval'
+                            ELSE source_type
+                        END
+                        """
+                    )
+                )
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_requirements_truth_state ON requirements (truth_state)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_requirements_source_type ON requirements (source_type)"))
+            except Exception as e:
+                logger.debug(f"Requirement truth-state migration note: {e}")
 
         # Add log_path to prd_generation_results table for real-time log streaming
         if "prd_generation_results" in inspector.get_table_names():

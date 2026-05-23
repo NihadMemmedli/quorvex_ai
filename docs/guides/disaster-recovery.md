@@ -1,5 +1,10 @@
 # How to Recover from System Failures
 
+![Workflow monitor used to verify recovery and runtime health](../assets/ui/workflow.png)
+
+<p class="caption">Workflow monitor used to verify recovery and runtime health.</p>
+
+
 Step-by-step recovery procedures for database loss, credential recovery, MinIO failures, and full system rebuilds.
 
 ## Prerequisites
@@ -17,8 +22,8 @@ Use when recovering to a new server or after complete data loss.
 
 ```bash
 # Clone repository
-git clone https://gitlab.example.com/qa/playwright-agent.git /opt/playwright-agent
-cd /opt/playwright-agent
+git clone https://gitlab.example.com/qa/quorvex_ai.git /opt/quorvex_ai
+cd /opt/quorvex_ai
 
 # Restore .env.prod from secure backup
 cp /secure-backup/.env.prod .env.prod
@@ -67,16 +72,16 @@ make health-check
 
 Use when the database is corrupted but files are intact.
 
-### Step 1: Stop the Backend
+### Step 1: Stop the Production Stack
 
 ```bash
-docker compose --env-file .env.prod -f docker-compose.prod.yml stop backend frontend
+make prod-down
 ```
 
 ### Step 2: Restore Database
 
 ```bash
-docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm --profile restore restore bash -c "
+docker compose --env-file .env.prod -f docker-compose.prod.yml --profile restore run --rm restore bash -c "
   apk add --no-cache postgresql15-client
   export PGPASSWORD=\$POSTGRES_PASSWORD
   gunzip -c /backups/20260115_143022_db.sql.gz | psql -h db -U playwright -d playwright_agent
@@ -86,7 +91,7 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml run --rm --profil
 ### Step 3: Restart Services
 
 ```bash
-docker compose --env-file .env.prod -f docker-compose.prod.yml up -d backend frontend
+make prod-up
 make health-check
 ```
 
@@ -96,13 +101,14 @@ Use when MinIO data is lost but local backups exist.
 
 ```bash
 # Stop MinIO
-docker compose --env-file .env.prod -f docker-compose.prod.yml stop minio
+docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard stop minio
 
-# Remove corrupted volume
-docker volume rm playwright-agent_minio_data
+# Find and remove the corrupted MinIO volume for this Compose project
+docker volume ls | grep minio_data
+docker volume rm <project>_minio_data
 
 # Restart MinIO (fresh volume)
-docker compose --env-file .env.prod -f docker-compose.prod.yml up -d minio
+docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard up -d minio
 
 # Re-populate MinIO with a fresh backup
 make backup-full
@@ -243,5 +249,7 @@ Confirm recovery is complete:
 
 - [Company Deployment](./company-deployment.md) -- initial deployment setup
 - [Deployment](./deployment.md) -- all deployment modes
+- [Artifact Storage Lifecycle](../explanation/artifact-storage-lifecycle.md) -- understand retained and deleted artifacts
+- [Database Migration Architecture](../explanation/database-migration-architecture.md) -- schema restore and migration behavior
 - [Troubleshooting](./troubleshooting.md) -- diagnose issues before recovery
 - [Credential Management](./credential-management.md) -- re-enter credentials after key loss

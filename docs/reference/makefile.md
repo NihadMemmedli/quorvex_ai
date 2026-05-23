@@ -1,5 +1,10 @@
 # Makefile Reference
 
+![Quorvex dashboard shown after running local development commands](../assets/ui/dashboard-overview.png)
+
+<p class="caption">Quorvex dashboard shown after running local development commands.</p>
+
+
 Complete reference for all `make` targets in Quorvex AI.
 
 ## Setup & Development
@@ -9,6 +14,7 @@ Complete reference for all `make` targets in Quorvex AI.
 | `make setup` | Install Python venv, Node deps, Playwright browsers, database | -- | `make setup` |
 | `make setup-skills` | Install Playwright skill dependencies (npm + Chromium) | `.claude/skills/playwright` directory | `make setup-skills` |
 | `make start` | Start the dashboard stack via `make prod-dev` | Docker, `.env.prod` | `make start` |
+| `make restart` | Stop and restart the dashboard stack | Docker, `.env.prod` | `make restart` |
 | `make dev` | Start backend API (port 8001) + frontend (port 3000) | `make setup` | `make dev` |
 | `make run SPEC=...` | Run a specific test spec via CLI (native pipeline) | `make setup`, venv | `make run SPEC=specs/login.md` |
 | `make run-skill S=...` | Run a Playwright skill script | `make setup-skills`, venv | `make run-skill S=path/to/script.js` |
@@ -30,6 +36,7 @@ Complete reference for all `make` targets in Quorvex AI.
 | Command | Description | Prerequisites | Example |
 |---------|-------------|---------------|---------|
 | `make prod-up` | Start production services (standard + VNC + nginx) | Docker, `.env.prod` | `make prod-up` |
+| `make prod` | Alias for `make prod-up` | Docker, `.env.prod` | `make prod` |
 | `make prod-dev` | Start production with local code mounting (auto-reload) | Docker, `.env.prod` | `make prod-dev` |
 | `make prod-down` | Stop production services (30s graceful timeout) | Docker | `make prod-down` |
 | `make prod-down-safe` | Stop with backup first | Docker | `make prod-down-safe` |
@@ -53,6 +60,8 @@ Complete reference for all `make` targets in Quorvex AI.
 | VNC View | 6080 | Live browser view (websockify) |
 | MinIO API | 9000 | S3-compatible artifact and backup storage |
 | MinIO Console | 9001 | Object storage admin |
+| Temporal | 7233 | Durable workflow engine for autonomous missions |
+| Temporal UI | 8233 | Workflow inspection UI |
 
 !!! warning
     `.env.prod.example` contains development-friendly defaults. Change `JWT_SECRET_KEY`, database passwords, MinIO passwords, and initial admin credentials before using `make prod-up` for a real deployment.
@@ -165,6 +174,9 @@ Default namespace: `K8S_NAMESPACE=quorvex` (overridable).
 
 | Command | Description | Prerequisites | Example |
 |---------|-------------|---------------|---------|
+| `make docs-check` | Run docs drift checks and a strict MkDocs build | `requirements-docs.txt` | `make docs-check` |
+| `make docs-visual-check` | Verify every published page has a local UI screenshot or GIF | `docs/assets/ui/` | `make docs-visual-check` |
+| `make docs-visual-capture` | Capture dashboard UI screenshots into committed docs assets | running dashboard | `BASE_URL=http://localhost:3000 make docs-visual-capture` |
 | `make docs-serve` | Start MkDocs development server | `requirements-docs.txt` | `make docs-serve` |
 | `make docs-build` | Build MkDocs documentation (strict mode) | `requirements-docs.txt` | `make docs-build` |
 | `make docs-deploy` | Deploy docs to GitHub Pages | `requirements-docs.txt` | `make docs-deploy` |

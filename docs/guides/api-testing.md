@@ -1,5 +1,10 @@
 # How to Test REST APIs
 
+![API testing dashboard with OpenAPI import and generated tests](../assets/ui/api-testing.png)
+
+<p class="caption">API testing dashboard with OpenAPI import and generated tests.</p>
+
+
 Test HTTP/REST APIs without browser automation. Import OpenAPI specs or write test specs manually, then let AI generate and heal Playwright-based API tests.
 
 ## Overview
@@ -148,7 +153,8 @@ Reference in spec: `Use environment variable {{API_TOKEN}}`
 | PUT | `/api-testing/specs/{folder}` | Update spec |
 | DELETE | `/api-testing/specs/{folder}` | Delete spec |
 | POST | `/api-testing/import-openapi` | Import OpenAPI/Swagger spec |
-| POST | `/api-testing/specs/{folder}/run` | Run API test (background job) |
+| POST | `/api-testing/run` | Run API test (background job) |
+| POST | `/api-testing/run-direct` | Run API test directly |
 | GET | `/api-testing/runs` | List run history |
 | GET | `/api-testing/runs/{run_id}` | Get run details with logs |
 
@@ -196,6 +202,7 @@ Confirm API testing works end-to-end:
 ## Related Guides
 
 - [Writing Specs](./writing-specs.md) -- general spec format
+- [Specialized Testing Architecture](../explanation/specialized-testing-architecture.md) -- how API testing fits the platform
 - [Load Testing](./load-testing.md) -- performance test your APIs
 - [Security Testing](./security-testing.md) -- scan API endpoints for vulnerabilities
 - [Credential Management](./credential-management.md) -- manage API tokens securely

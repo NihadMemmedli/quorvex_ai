@@ -31,30 +31,48 @@
 
 ---
 
-Quorvex AI is a self-hosted AI testing platform for QA and engineering teams. Its core workflow is simple: describe a user flow, let an agent explore the real app, and get a validated Playwright test you can keep as normal code.
+Quorvex AI is for teams that already know Playwright is the right test runtime, but do not want to hand-write every brittle end-to-end flow. Describe a user flow, import a PRD or OpenAPI file, or let an agent explore a real app; Quorvex plans the flow, generates Playwright TypeScript, validates it in a browser, and repairs selector or timing failures when it can.
 
-The same foundation expands into PRD-to-tests, API checks, K6 load tests, security scans, database quality checks, mobile smoke flows, LLM evaluation suites, CI quality gates, and autonomous coverage discovery. Generated tests run as normal code, and the self-healing pipeline can repair selector and timing failures when the UI changes.
+The output is normal code your team owns: inspect it, commit it, and run it in CI with no runtime AI dependency. Around that core workflow, Quorvex also supports PRD-to-tests, API checks, K6 load tests, security scans, database quality checks, mobile smoke flows, LLM evaluation suites, CI quality gates, and autonomous coverage discovery.
 
-![Quorvex AI Demo](docs/assets/demo.gif)
+![Quorvex AI product flow](docs/assets/ui/product-flow.gif)
 *Plain-English specs become validated test code through planning, browser execution, and healing.*
+
+## Why Star This Repo?
+
+- **AI speed, normal Playwright ownership** -- Generate tests with agents, then keep readable code that runs without AI in every CI job.
+- **Self-hosted by design** -- Keep app URLs, credentials, traces, and test data on your infrastructure instead of a vendor runtime.
+- **More than UI happy paths** -- Grow from E2E generation into PRD coverage, API, load, security, database, mobile, and LLM testing.
 
 ## Start Here
 
 | Path | Best for | Link |
 |---|---|---|
-| Watch the demo | Understand the workflow in under a minute | [Demo GIF](docs/assets/demo.gif) |
-| Try the focused path | Generate your first Playwright test without reading the full platform docs | [Minimal README](README.minimal.md) |
+| Star and follow | Track the open-source self-hosted Playwright agent platform | [Star Quorvex AI](https://github.com/NihadMemmedli/quorvex_ai/stargazers) |
+| Watch the demo | Understand the workflow in under a minute | [Demo GIF](docs/assets/ui/product-flow.gif) |
+| Try the fastest path | Run the lightweight SQLite stack and generate your first Playwright test | [Minimal README](README.minimal.md) |
+| Choose a setup | Pick minimal Docker, full Docker, local dev, production, workers, or Kubernetes | [Setup Options](docs/guides/setup-options.md) |
 | Run the full stack | Use the dashboard, queues, storage, and integrations locally | [Getting Started](https://nihadmemmedli.github.io/quorvex_ai/tutorials/getting-started/) |
 
 ### Why Quorvex AI?
 
-- **Move from specs to coverage faster** -- Describe a flow, upload a PRD, import OpenAPI, or let AutoPilot explore the app. Quorvex turns the result into executable tests and traceability.
-- **Run long-lived testing agents** -- Use autonomous missions for recurring or 24/7-style exploration when backed by the scheduler, Temporal worker, queues, and monitored infrastructure.
-- **Generate code you can keep** -- Output is Playwright, WebdriverIO/Appium, or K6 code where appropriate, so teams can inspect, run, commit, and extend it without runtime AI dependency.
-- **Cover more than UI happy paths** -- API, load, security, database, mobile, LLM, regression, analytics, CI/CD, TestRail, Jira, and PR advisor workflows live in one self-hosted platform.
+- **Built for Playwright teams** -- Quorvex does the slow work of planning, browser exploration, generation, validation, and repair, while your team keeps standard Playwright code.
+- **Generate once, run forever** -- AI helps create and heal tests, but passing generated tests run natively in CI without burning model tokens on every run.
+- **Turn product context into coverage** -- Start from markdown specs, PRDs, OpenAPI files, or autonomous app exploration and preserve traceability back to requirements.
+- **Own the platform surface** -- Run the dashboard, workers, queues, browser pool, storage, schedules, credentials, and integrations in your own environment.
 
-![Dashboard Screenshot](docs/assets/dashboard-screenshot.png)
+![Quorvex AI dashboard overview](docs/assets/ui/dashboard-overview.png)
 *Web dashboard for managing specs, monitoring execution trends, and analyzing test results.*
+
+## Product Screenshots
+
+| Dashboard | API testing | Workflow monitor |
+|---|---|---|
+| ![Dashboard overview](docs/assets/ui/dashboard-overview.png) | ![API testing dashboard](docs/assets/ui/api-testing.png) | ![Workflow monitor](docs/assets/ui/workflow.png) |
+
+| AutoPilot | Test runs | Settings |
+|---|---|---|
+| ![AutoPilot dashboard](docs/assets/ui/autopilot.png) | ![Test runs dashboard](docs/assets/ui/runs.png) | ![Settings dashboard](docs/assets/ui/settings.png) |
 
 ---
 
@@ -92,6 +110,8 @@ test('logs in with valid credentials and logs out', async ({ page }) => {
 });
 ```
 
+This is not just prompt-to-code. Quorvex plans against the target app, uses live browser context during generation, runs the generated test, and only hands you code after validation or healing attempts.
+
 See the full example spec and generated output in [`demo/`](demo/).
 
 ---
@@ -107,25 +127,29 @@ No local setup required -- open a fully configured development environment in yo
 
 ## How Quorvex AI Compares
 
-| Feature | Quorvex AI | Shortest | Octomind | testRigor | MS Playwright Agents |
+| Capability | Quorvex AI | Shortest | Octomind | testRigor | Playwright Test Agents |
 |---|---|---|---|---|---|
-| Natural language input | ✅ | ✅ | ❌ | ✅ | ✅ |
-| Stable code output | ✅ | ❌ (runtime AI) | ✅ | ❌ (proprietary) | ✅ |
-| Self-healing | ✅ (3 modes) | ❌ | ✅ | ✅ | ✅ |
-| Web dashboard | ✅ | ❌ | ✅ | ✅ | ❌ |
-| CLI mode | ✅ | ✅ | ❌ | ❌ | ✅ (VS Code) |
-| API testing | ✅ (OpenAPI) | ❌ | ❌ | Partial | ❌ |
-| Load testing | ✅ (K6) | ❌ | ❌ | ❌ | ❌ |
-| Security testing | ✅ (ZAP+Nuclei) | ❌ | ❌ | ❌ | ❌ |
-| Database testing | ✅ | ❌ | ❌ | ❌ | ❌ |
-| LLM evaluation | ✅ | ❌ | ❌ | ❌ | ❌ |
-| PRD to tests | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Self-hosted | ✅ | ✅ | ❌ | ❌ | ✅ |
-| Open source | ✅ (MIT) | ✅ | Freemium | ❌ ($450+/mo) | ✅ |
+| Natural-language authoring | ✅ Specs, PRDs, chat, exploration | ✅ | ✅ Prompt/discovery | ✅ Plain English | ✅ Agent prompts |
+| Standard Playwright code | ✅ Owned repo code | Runtime-oriented Playwright | ✅ Portable Playwright | ❌ Proprietary no-code runtime | ✅ Generated tests |
+| Generate once, run natively | ✅ | ❌ AI used during execution | ✅ Cloud/local execution | Managed platform runtime | ✅ |
+| Self-healing / repair | ✅ Native, hybrid, standard | Not advertised | ✅ Source-level healing | ✅ AI maintenance | ✅ Healer agent |
+| Web QA dashboard | ✅ Full platform | Not advertised | ✅ Hosted QA dashboard | ✅ Hosted QA dashboard | ❌ Editor/agent workflow |
+| Requirements, RTM, coverage | ✅ Built in | Not advertised | Not advertised | Not advertised | Plan/spec files only |
+| PRD to tests | ✅ Upload + feature workspace | Not advertised | Not advertised | Not advertised | PRD context for agents |
+| Autonomous missions | ✅ Scheduled/approval-gated | Not advertised | Not advertised | Not advertised | Agent loop, not platform missions |
+| API testing | ✅ OpenAPI import + API specs | ✅ Natural-language API tests | Not advertised as API testing | ✅ API commands | Via code/MCP |
+| Load testing | ✅ K6 workers/results | Not advertised | Not advertised | Not advertised | Via custom code |
+| Security testing | ✅ ZAP + Nuclei | Not advertised | Not advertised | Not advertised | Via custom code |
+| Database testing | ✅ Connections, schema checks | Via callback code | Not advertised | ✅ Database query support | Via custom code |
+| LLM evaluation | ✅ Providers, datasets, comparisons | Not advertised | Not advertised | Not advertised | Via custom code |
+| CI/CD and PR advisor | ✅ GitHub/GitLab + quality gates | ✅ CI headless runs | ✅ CI/CD | ✅ CI integrations | ✅ In repo workflows |
+| Test management integrations | ✅ TestRail + Jira | Not advertised | TestRail on higher tiers | Integrations advertised | Via custom code |
+| Self-hosted / private deployment | ✅ Full stack | ✅ Package/repo | Hosted SaaS + private workers | Hosted SaaS | ✅ Local repo agents |
+| Open source / license | ✅ MIT | ✅ MIT | ❌ Commercial | ❌ Commercial | ✅ Playwright |
 
-> **Generate once, run forever** -- Unlike tools that burn AI tokens on every test run, Quorvex AI outputs stable Playwright code. Subsequent runs execute natively with zero AI cost.
+> **Generate once, run forever** -- Unlike runtime-first AI runners, Quorvex AI outputs stable Playwright code. Subsequent runs execute natively with zero AI cost.
 >
-> Comparison notes are based on publicly available product documentation and repository information as of May 2026. See the detailed comparison pages for rationale and source context.
+> Comparison notes are based on public product documentation and repositories checked on May 23, 2026. "Not advertised" means the capability was not clearly documented as a first-class product feature, not that it is impossible to build with custom code.
 
 [Detailed comparisons](docs/comparisons/index.md) | [Why we built this](docs/comparisons/why-we-built-this.md)
 
@@ -171,6 +195,15 @@ The **Smart Check** system skips regeneration when valid code already exists, re
 
 ## Quick Start
 
+### Which Setup Should You Use?
+
+| Setup | Best for | Database | Command |
+|---|---|---|---|
+| Minimal Docker | Fast first trial on smaller machines | SQLite | `docker compose -f docker-compose.minimal.yml up -d` |
+| Full Docker dev | Complete self-hosted evaluation with dashboard, queues, storage, VNC, and security scanning | PostgreSQL | `make prod-dev` |
+| Local native | Contributors and backend/frontend development | PostgreSQL if Docker is running, otherwise SQLite | `make setup && make dev` |
+| Production | Hardened single-host deployment | PostgreSQL | `make prod-up` |
+
 ### Prerequisites
 
 | Requirement | Version  | Notes                                |
@@ -189,6 +222,9 @@ cd quorvex_ai
 # 2. Configure your AI provider credentials
 cp .env.prod.example .env.prod
 # Edit .env.prod and set ANTHROPIC_AUTH_TOKEN (see Configuration below)
+
+# Optional: confirm local and production env files are readable
+make check-env
 
 # 3. Start all services (backend, frontend, PostgreSQL, Redis, MinIO, VNC)
 make prod-dev
@@ -320,7 +356,7 @@ Sign up at [console.anthropic.com](https://console.anthropic.com) to get an API 
 OPENAI_API_KEY=your-openai-key
 
 # Database (SQLite by default, PostgreSQL for production)
-DATABASE_URL=sqlite:///./test.db
+DATABASE_URL=sqlite:///./orchestrator/data/playwright_agent.db
 # DATABASE_URL=postgresql://user:pass@localhost:5432/quorvex
 
 # Authentication (disabled by default for local development)
@@ -344,17 +380,23 @@ For the complete list of environment variables, see the [Environment Variables R
 ### Docker Mode (Recommended)
 
 ```bash
+cp .env.prod.example .env.prod
+# Edit .env.prod, then validate it
+make check-env
 make prod-dev
 ```
 
 - All services in Docker containers (backend, frontend, PostgreSQL, Redis, MinIO, VNC)
 - Local `./orchestrator` and `./web/src` mounted for hot-reload
-- Backend API on http://localhost:8001, frontend on http://localhost:3000
+- Backend API on http://localhost:8001, frontend on http://localhost:3000, API docs on http://localhost:8001/docs
+- VNC browser view on http://localhost:6080 and MinIO console on http://localhost:9001
 
 ### Local Mode
 
 ```bash
 make setup   # One-time: Python venv, Node deps, Playwright browsers
+# Edit .env, then validate it
+make check-env
 make dev     # Start backend + frontend natively
 ```
 
@@ -564,7 +606,7 @@ mkdocs serve
 | Symptom | Solution |
 |---------|----------|
 | "ANTHROPIC_AUTH_TOKEN not set" | Check `.env` file, run `make check-env` |
-| "Database connection refused" | Run `docker-compose up -d db` or use SQLite (default) |
+| "Database connection refused" | Run `docker compose up -d db` or use SQLite (default) |
 | Generated test selector fails | Self-healer auto-fixes; use `--hybrid` for complex cases |
 | "No target URL found in spec" | Spec must contain a URL (e.g., "Navigate to https://...") |
 | Test timeout on complex pages | Use `--hybrid` or increase exploration depth |

@@ -1,5 +1,10 @@
 # Your First Test in 10 Minutes
 
+![Quorvex UI flow for getting started with the dashboard](../assets/ui/product-flow.gif)
+
+<p class="caption">Quorvex UI flow for getting started with the dashboard.</p>
+
+
 In this tutorial, you will install Quorvex AI, write a test spec in plain English, run it through the AI pipeline, and see a fully generated, passing Playwright test.
 
 ## Prerequisites
@@ -70,7 +75,7 @@ quorvex_ai/
     Your local `./orchestrator` and `./web/src` directories are mounted, so code changes apply automatically.
 
     !!! tip
-        Run `make prod-status` to verify all services are healthy.
+        Run `make check-env` after editing `.env.prod`, then `make prod-status` after startup to verify the stack.
 
 === "Local"
 
@@ -102,6 +107,7 @@ quorvex_ai/
     Start the dashboard (optional):
 
     ```bash
+    make check-env
     make dev
     ```
 
@@ -165,6 +171,8 @@ Checking environment configuration...
   + Python virtual environment exists
   + Frontend dependencies installed
 ```
+
+`make check-env` reads `.env` and, when present, `.env.prod`. Docker users should confirm the `.env.prod` section shows configured production secrets before starting or restarting the stack.
 
 ## Step 4: Write a Test Spec
 

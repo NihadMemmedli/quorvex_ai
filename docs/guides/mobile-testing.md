@@ -1,5 +1,10 @@
 # Mobile Testing with Appium MCP
 
+![Settings dashboard showing platform configuration and mobile testing health context](../assets/ui/settings.png)
+
+<p class="caption">Settings dashboard showing platform configuration and mobile testing health context.</p>
+
+
 Quorvex can run mobile smoke tests through Appium and exposes Appium MCP for AI-assisted mobile automation.
 
 ## Local iPhone Requirements

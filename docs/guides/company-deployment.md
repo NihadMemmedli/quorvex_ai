@@ -1,5 +1,10 @@
 # How to Deploy Quorvex AI On-Premises
 
+![Projects dashboard for company workspace and membership setup](../assets/ui/projects.png)
+
+<p class="caption">Projects dashboard for company workspace and membership setup.</p>
+
+
 Deploy Quorvex AI to an on-premises or private network environment, including VM setup, TLS configuration, and ongoing maintenance.
 
 ## Prerequisites
@@ -15,7 +20,7 @@ Deploy Quorvex AI to an on-premises or private network environment, including VM
 Push the repository to a clean internal Git server:
 
 ```bash
-cd /path/to/playwright-agent
+cd /path/to/quorvex_ai
 
 # Create orphan branch with single commit (no dev history)
 git checkout --orphan clean-main
@@ -24,7 +29,7 @@ git commit -m "Initial commit: AI-Powered Test Automation Platform"
 git branch -M main
 
 # Add internal remote and push
-git remote add origin https://gitlab.example.com/qa/playwright-agent.git
+git remote add origin https://gitlab.example.com/qa/quorvex_ai.git
 git push -u origin main
 ```
 
@@ -71,8 +76,8 @@ sudo systemctl restart docker
 ## Step 3: Clone and Configure
 
 ```bash
-git clone https://gitlab.example.com/qa/playwright-agent.git /opt/playwright-agent
-cd /opt/playwright-agent
+git clone https://gitlab.example.com/qa/quorvex_ai.git /opt/quorvex_ai
+cd /opt/quorvex_ai
 
 # Create production environment file
 cp .env.prod.example .env.prod
@@ -98,6 +103,7 @@ REQUIRE_AUTH=true
 ALLOW_REGISTRATION=false
 
 # URLs -- adjust to your domain/IP
+QUORVEX_PUBLIC_API_URL=https://playwright.example.com/api
 NEXT_PUBLIC_API_URL=https://playwright.example.com/api
 ALLOWED_ORIGINS=https://playwright.example.com
 
@@ -107,6 +113,8 @@ HTTPS_PROXY=http://proxy.example.com:8080
 ```
 
 ## Step 4: Set Up TLS (Optional but Recommended)
+
+The checked-in nginx config is an HTTP reverse proxy on port 80. For TLS, prefer terminating HTTPS at your load balancer, ingress controller, or corporate reverse proxy. If you want nginx in this Compose stack to terminate TLS directly, update `nginx/nginx.conf` to add `listen 443 ssl` and certificate directives before relying on the `443` port mapping.
 
 ```bash
 mkdir -p nginx/certs
@@ -131,8 +139,8 @@ make prod-build-no-cache
 # Start all services
 make prod-up
 
-# With TLS/nginx:
-docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard --profile nginx up -d
+# Manual equivalent of make prod-up:
+docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard --profile nginx --profile backup-scheduler up -d
 ```
 
 Services started:
@@ -144,8 +152,10 @@ Services started:
 | PostgreSQL | 5432 | Database |
 | Redis | 6379 | Rate limiting + job queue |
 | MinIO | 9000/9001 | Object storage for backups |
+| Temporal | 7233 | Durable workflow engine for autonomous missions |
+| Temporal UI | 8233 | Workflow inspection UI |
 | Backup Scheduler | -- | Automated daily backups |
-| Nginx (with TLS) | 80/443 | TLS termination + reverse proxy |
+| Nginx reverse proxy | 80 by default, 443 with custom TLS config | HTTP reverse proxy; terminate TLS externally or add nginx SSL config |
 
 ## Step 6: Back Up `.env.prod` Immediately
 
@@ -188,7 +198,7 @@ chmod +x scripts/health-monitor.sh
 ./scripts/health-monitor.sh
 
 # Add to cron (every 5 minutes)
-(crontab -l 2>/dev/null; echo "*/5 * * * * /opt/playwright-agent/scripts/health-monitor.sh") | crontab -
+(crontab -l 2>/dev/null; echo "*/5 * * * * /opt/quorvex_ai/scripts/health-monitor.sh") | crontab -
 ```
 
 ## Daily Operations
@@ -203,7 +213,7 @@ chmod +x scripts/health-monitor.sh
 ## Upgrading
 
 ```bash
-cd /opt/playwright-agent
+cd /opt/quorvex_ai
 git pull origin main
 make upgrade    # Backup -> rebuild -> migrate -> restart -> verify
 ```

@@ -1,5 +1,10 @@
 # How to Set Up Authentication and User Management
 
+![Quorvex login screen for authenticated dashboard deployments](../assets/ui/login.png)
+
+<p class="caption">Quorvex login screen for authenticated dashboard deployments.</p>
+
+
 Enable authentication, create users, assign project roles, and configure role-based access control for your Quorvex AI instance.
 
 ## Prerequisites
@@ -132,11 +137,11 @@ Superusers can manage all users via the admin panel:
 
 ```bash
 # List all users
-curl http://localhost:8001/admin/users \
+curl http://localhost:8001/users \
   -H "Authorization: Bearer ADMIN_TOKEN"
 
 # Update user
-curl -X PUT http://localhost:8001/admin/users/USER_ID \
+curl -X PUT http://localhost:8001/users/USER_ID \
   -H "Authorization: Bearer ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -151,9 +156,8 @@ Users are assigned to projects with specific roles:
 
 | Role | Permissions |
 |------|------------|
-| `owner` | Full access, can delete project, manage members |
 | `admin` | Full access, can manage members |
-| `member` | Run tests, create specs, view results |
+| `editor` | Run tests, create specs, and update project test assets |
 | `viewer` | Read-only access to all project data |
 
 ### Via Dashboard
@@ -173,7 +177,7 @@ curl -X POST http://localhost:8001/projects/PROJECT_ID/members \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "USER_ID",
-    "role": "member"
+    "role": "editor"
   }'
 ```
 
@@ -194,9 +198,9 @@ curl -X POST http://localhost:8001/auth/refresh \
 
 ## Step 7: Handle Account Lockouts
 
-After 5 consecutive failed login attempts, an account is locked for 15 minutes.
+After 5 consecutive failed login attempts, an account is locked for 30 minutes.
 
-**Wait for automatic unlock** (15 minutes), or manually unlock:
+**Wait for automatic unlock** (30 minutes), or manually unlock:
 
 ```bash
 # PostgreSQL

@@ -5,6 +5,11 @@ hide:
 
 # Quorvex AI
 
+![Quorvex dashboard overview with project quality and execution metrics](assets/ui/dashboard-overview.png)
+
+<p class="caption">Quorvex dashboard overview with project quality and execution metrics.</p>
+
+
 **Self-hosted AI testing for QA and engineering teams.**
 
 Quorvex AI turns plain-English specs, PRDs, recordings, and app exploration into validated tests and quality signals. Generate Playwright UI tests, API checks, K6 load tests, security scans, database quality checks, mobile smoke flows, and LLM evaluation suites from one dashboard or CLI. For continuous discovery, autonomous missions can run on schedules or durable long-lived workflows with human approval before tests are created.
@@ -75,6 +80,13 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
 
 ## Quick Start
 
+| Setup | Best for | Command |
+|-------|----------|---------|
+| Full Docker dev | Self-hosted evaluation with dashboard, queues, storage, VNC, and security scanning | `make prod-dev` |
+| Minimal Docker | Fast demo on smaller machines with SQLite | `docker compose -f docker-compose.minimal.yml up -d` |
+| Local dev | Contributor workflow with native backend/frontend processes | `make setup && make dev` |
+| Production | Hardened single-host deployment | `make prod-up` |
+
 === "Docker (Recommended)"
 
     ```bash
@@ -82,6 +94,7 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
     cd quorvex_ai
     cp .env.prod.example .env.prod
     # Edit .env.prod with your AI provider token
+    make check-env
     make prod-dev
     ```
 
@@ -94,6 +107,7 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
     cd quorvex_ai
     make setup
     # Edit .env with your AI provider token
+    make check-env
     make dev
     ```
 
@@ -142,6 +156,12 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
     ---
 
     Task-oriented guides for API testing, load testing, security scans, scheduling, integrations, and more.
+
+-   :material-source-branch: **[Choose a Setup Path](guides/setup-options.md)**
+
+    ---
+
+    Pick minimal Docker, full Docker, local dev, production, workers, or Kubernetes based on your goal.
 
 -   :material-file-document-outline: **[Reference](reference/cli.md)**
 

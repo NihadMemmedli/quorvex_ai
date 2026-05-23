@@ -1,5 +1,10 @@
 # Infrastructure & Deployment Design
 
+![Quorvex dashboard overview running on the deployed platform](../assets/ui/dashboard-overview.png)
+
+<p class="caption">Quorvex dashboard overview running on the deployed platform.</p>
+
+
 Quorvex AI supports three deployment modes of increasing scale: local development, Docker Compose, and Kubernetes. This document explains the trade-offs behind each topology and why the infrastructure is structured the way it is.
 
 ## Deployment Spectrum
@@ -67,7 +72,7 @@ Kubernetes adds automatic scaling, self-healing, and multi-node distribution. Th
 - Rolling deployments for the backend (zero downtime)
 - Ingress with TLS termination
 - PersistentVolumeClaims for data durability across pod restarts
-- Namespace isolation (`playwright-agent`)
+- Namespace isolation (`quorvex`)
 
 **What Kubernetes costs:**
 - Cluster management overhead (EKS, GKE, or self-managed)

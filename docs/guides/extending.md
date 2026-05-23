@@ -1,5 +1,10 @@
 # How to Extend Quorvex AI
 
+![Workflow monitor for extending platform runtime capabilities](../assets/ui/workflow.png)
+
+<p class="caption">Workflow monitor for extending platform runtime capabilities.</p>
+
+
 Add new API endpoints, database models, pipeline stages, agents, and frontend pages to Quorvex AI.
 
 ## Prerequisites
@@ -205,43 +210,7 @@ result = extract_json_from_markdown(agent_output)
 
 ## Adding a Frontend Page
 
-### Step 1: Create the Page
-
-```bash
-mkdir -p web/src/app/\(dashboard\)/my-feature
-```
-
-```typescript title="web/src/app/(dashboard)/my-feature/page.tsx"
-"use client";
-
-import { useEffect, useState } from "react";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
-
-export default function MyFeaturePage() {
-  const [items, setItems] = useState([]);
-  const projectId = typeof window !== "undefined"
-    ? localStorage.getItem("currentProjectId") || "default"
-    : "default";
-
-  useEffect(() => {
-    fetch(`${API_URL}/my-feature?project_id=${projectId}`)
-      .then((res) => res.json())
-      .then(setItems);
-  }, [projectId]);
-
-  return (
-    <div className="p-6">
-      <h1 className="text-2xl font-bold mb-4">My Feature</h1>
-      {/* Render items */}
-    </div>
-  );
-}
-```
-
-### Step 2: Add Navigation
-
-Add a link to the sidebar in `web/src/app/(dashboard)/layout.tsx`.
+Use the focused [Adding a Dashboard Feature](adding-dashboard-feature.md) guide for dashboard pages. It covers route placement, `fetchWithAuth`, project context, shared loading and empty states, sidebar navigation, command palette entries, and documentation updates.
 
 ## Development Checklist
 
@@ -252,9 +221,10 @@ When adding a new feature:
 - [ ] Database model in `orchestrator/api/models_db.py` (if needed)
 - [ ] Migration with `make db-migrate M="description"`
 - [ ] Frontend page in `web/src/app/(dashboard)/`
-- [ ] Navigation link in layout
+- [ ] Sidebar and command palette navigation updated
 - [ ] CLI argument in `orchestrator/cli.py` (if applicable)
 - [ ] Agent definition in `.claude/agents/` (if applicable)
+- [ ] API, dashboard, environment, or architecture docs updated when public behavior changes
 - [ ] Tested with `make dev` at http://localhost:3000
 
 ## Verification
@@ -271,4 +241,8 @@ Confirm the extension works:
 
 - [Contributing](./contributing.md) -- contribution workflow and PR process
 - [Pipeline Modes](./pipeline-modes.md) -- understand pipeline architecture
+- [Adding a Backend Runtime Capability](adding-backend-runtime-capability.md) -- backend feature workflow
+- [Adding a Dashboard Feature](adding-dashboard-feature.md) -- frontend feature workflow
+- [API Router and Service Map](../reference/api-router-service-map.md) -- backend ownership map
+- [Custom Workflow Contract](../reference/custom-workflow-contract.md) -- workflow step contract
 - [Getting Started](../tutorials/getting-started.md) -- development setup

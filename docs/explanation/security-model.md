@@ -1,5 +1,10 @@
 # Security Model
 
+![Security testing dashboard with findings and scanner configuration](../assets/ui/security-testing.png)
+
+<p class="caption">Security testing dashboard with findings and scanner configuration.</p>
+
+
 Quorvex AI's security model is built around defense in depth: multiple layers that each independently reduce risk. This document explains the design rationale behind authentication, authorization, credential management, and production hardening.
 
 ## Authentication Design
@@ -171,7 +176,7 @@ For a production deployment, the critical security settings are:
 - `REQUIRE_AUTH=true`: Enforce token validation on all endpoints
 - `ALLOW_REGISTRATION=false`: Prevent unauthorized account creation
 - `REDIS_URL`: Enable distributed rate limiting
-- TLS termination via nginx reverse proxy
+- TLS termination at the external load balancer, ingress controller, corporate reverse proxy, or a custom nginx SSL configuration
 - `ALLOWED_ORIGINS`: Restrict CORS to your actual frontend domain
 
 For the complete checklist, see the [deployment guide](../guides/deployment.md).

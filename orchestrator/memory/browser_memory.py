@@ -30,7 +30,6 @@ from orchestrator.api.models_db import (
 
 from .config import get_config
 
-
 TRACKING_QUERY_KEYS = {
     "utm_source",
     "utm_medium",
@@ -81,8 +80,8 @@ SENSITIVE_PATTERNS = [
 ]
 SNAPSHOT_LINE_RE = re.compile(
     r"^\s*[-*]?\s*(?P<role>[A-Za-z][\w-]*)"
-    r"(?:\s+\"(?P<name_q>[^\"]*)\"|\s+'(?P<name_s>[^']*)'|\s+(?P<name_plain>[^\\[]+?))?"
-    r"(?:\s+\[(?P<meta>[^\]]+)\])?\s*$"
+    r"(?:\s+\"(?P<name_q>[^\"]*)\"|\s+'(?P<name_s>[^']*)'|\s+(?P<name_plain>[^\[]+?))?"
+    r"(?P<meta>(?:\s+\[[^\]]+\])*)\s*:?\s*$"
 )
 
 
@@ -296,6 +295,7 @@ def canonicalize_state(
     auth_state: str = "unknown",
     viewport: str = "default",
     locale: str | None = None,
+    source_fidelity: str = "live_snapshot",
 ) -> CanonicalState:
     elements = parse_accessibility_snapshot(snapshot_text)
     url_template = normalize_url_template(url)
@@ -306,6 +306,7 @@ def canonicalize_state(
         "auth_state": auth_state,
         "viewport": viewport,
         "locale": locale or "",
+        "source_fidelity": source_fidelity,
         "elements": [
             {
                 "role": item.get("role"),
@@ -356,6 +357,7 @@ class ExplorationMemoryService:
         auth_state: str = "unknown",
         viewport: str = "default",
         locale: str | None = None,
+        source_fidelity: str = "live_snapshot",
     ) -> BrowserPageState:
         owns_session = self.session is None
         db = self._session()
@@ -367,6 +369,7 @@ class ExplorationMemoryService:
                 auth_state=auth_state,
                 viewport=viewport,
                 locale=locale,
+                source_fidelity=source_fidelity,
             )
             now = _utcnow()
             existing = db.exec(
@@ -382,12 +385,17 @@ class ExplorationMemoryService:
                 existing.canonical_json = state.canonical
                 existing.simhash = state.simhash
                 existing.embedding_id = existing.embedding_id or f"browser_state:{existing.id}"
+                existing.page_type = source_fidelity
+                existing.importance_score = max(
+                    float(existing.importance_score or 0),
+                    self._state_importance(state.elements) * self._source_fidelity_score(source_fidelity),
+                )
                 db.add(existing)
                 db.commit()
                 db.refresh(existing)
                 page_state = existing
             else:
-                state_id = f"bpstate-{state.state_key[:16]}"
+                state_id = f"bpstate-{_hash(f'{self.project_id}|{state.state_key}', 16)}"
                 page_state = BrowserPageState(
                     id=state_id,
                     project_id=self.project_id,
@@ -397,6 +405,7 @@ class ExplorationMemoryService:
                     url=url,
                     url_template=state.url_template,
                     title=title,
+                    page_type=source_fidelity,
                     auth_state=auth_state,
                     viewport=viewport,
                     locale=locale,
@@ -408,13 +417,14 @@ class ExplorationMemoryService:
                     first_seen_at=now,
                     last_seen_at=now,
                     novelty_score=1.0,
-                    importance_score=self._state_importance(state.elements),
+                    importance_score=self._state_importance(state.elements)
+                    * self._source_fidelity_score(source_fidelity),
                 )
                 db.add(page_state)
                 db.commit()
                 db.refresh(page_state)
 
-            elements = self._upsert_elements(db, page_state, state.elements)
+            elements = self._upsert_elements(db, page_state, state.elements, source_fidelity=source_fidelity)
             self._upsert_cluster(db, page_state, state)
             self._index_page_state(page_state, state.embedding_text)
             for element in elements:
@@ -510,7 +520,12 @@ class ExplorationMemoryService:
         action_trace: list[dict[str, Any]],
     ) -> dict[str, int]:
         """Populate durable memory from existing ExploratoryAgent trace output."""
-        current = self.upsert_page_state(session_id=session_id, url=entry_url, title=entry_url)
+        current = self.upsert_page_state(
+            session_id=session_id,
+            url=entry_url,
+            title=entry_url,
+            source_fidelity="action_trace",
+        )
         states = 1
         transitions = 0
         for action in action_trace or []:
@@ -519,7 +534,12 @@ class ExplorationMemoryService:
             if not target:
                 continue
             if action_type == "navigate" and target.startswith("http"):
-                next_state = self.upsert_page_state(session_id=session_id, url=target, title=target)
+                next_state = self.upsert_page_state(
+                    session_id=session_id,
+                    url=target,
+                    title=target,
+                    source_fidelity="action_trace",
+                )
                 states += 1
             else:
                 snapshot_text = f'- {self._role_for_action(action_type)} "{_clip(target, 120)}"'
@@ -528,6 +548,7 @@ class ExplorationMemoryService:
                     url=current.url,
                     title=current.title or current.url,
                     snapshot_text=snapshot_text,
+                    source_fidelity="action_trace",
                 )
             self.record_transition(
                 session_id=session_id,
@@ -550,8 +571,16 @@ class ExplorationMemoryService:
                 .where(BrowserPageState.project_id == self.project_id)
                 .where(BrowserPageState.status == "active")
                 .order_by(col(BrowserPageState.last_seen_at).desc())
-                .limit(limit)
+                .limit(limit * 3)
             ).all()
+            states = sorted(
+                states,
+                key=lambda state: (
+                    self._source_fidelity_score(self._state_source_fidelity(state)),
+                    state.last_seen_at or datetime.min,
+                ),
+                reverse=True,
+            )[:limit]
             elements = []
             if states:
                 state_ids = [state.id for state in states]
@@ -569,6 +598,7 @@ class ExplorationMemoryService:
                         "url": state.url,
                         "page_key": state.page_key,
                         "state_key": state.state_key,
+                        "source_fidelity": self._state_source_fidelity(state),
                         "visit_count": state.visit_count,
                         "last_seen_at": state.last_seen_at.isoformat() if state.last_seen_at else None,
                     }
@@ -586,12 +616,106 @@ class ExplorationMemoryService:
                         "stability_score": round(float(element.stability_score or 0), 3),
                         "importance_score": round(float(element.importance_score or 0), 3),
                         "best_locator": (element.locator_candidates_json or [{}])[0],
+                        "source_fidelity": (element.attributes_json or {}).get("source_fidelity", "unknown"),
                         "last_seen_at": element.last_seen_at.isoformat() if element.last_seen_at else None,
                     }
                     for element in elements
                 ],
                 "frontier": self.get_frontier_work(query=query, limit=limit, db=db),
             }
+        finally:
+            if owns_session:
+                db.close()
+
+    def capture_memory_baseline(
+        self,
+        *,
+        session_id: str | None = None,
+        url_scope: str | None = None,
+        limit: int = 500,
+        include_inactive: bool = False,
+        db: Session | None = None,
+    ) -> dict[str, Any]:
+        """Return a portable browser-memory snapshot suitable for later diffing."""
+        owns_session = db is None
+        db = db or self._session()
+        try:
+            state_query = select(BrowserPageState).where(BrowserPageState.project_id == self.project_id)
+            if session_id:
+                state_query = state_query.where(BrowserPageState.session_id == session_id)
+            if not include_inactive:
+                state_query = state_query.where(BrowserPageState.status == "active")
+            if url_scope:
+                state_query = state_query.where(
+                    (col(BrowserPageState.url).contains(url_scope))
+                    | (col(BrowserPageState.url_template).contains(url_scope))
+                )
+            states = db.exec(
+                state_query.order_by(col(BrowserPageState.last_seen_at).desc()).limit(max(1, limit))
+            ).all()
+            state_by_id = {state.id: state for state in states}
+            elements: list[BrowserElement] = []
+            if state_by_id:
+                elements = db.exec(
+                    select(BrowserElement)
+                    .where(BrowserElement.project_id == self.project_id)
+                    .where(col(BrowserElement.state_id).in_(list(state_by_id)))
+                    .order_by(col(BrowserElement.last_seen_at).desc())
+                    .limit(max(1, limit * 5))
+                ).all()
+            return {
+                "project_id": self.project_id,
+                "captured_at": _utcnow().isoformat(),
+                "session_id": session_id,
+                "url_scope": url_scope,
+                "states": [self._shape_state_snapshot(state) for state in states],
+                "elements": [
+                    self._shape_element_snapshot(element, state_by_id.get(element.state_id))
+                    for element in elements
+                ],
+            }
+        finally:
+            if owns_session:
+                db.close()
+
+    def compute_memory_delta(
+        self,
+        baseline: dict[str, Any] | None = None,
+        *,
+        baseline_session_id: str | None = None,
+        current_session_id: str | None = None,
+        url_scope: str | None = None,
+        limit: int = 500,
+        include_unchanged: bool = False,
+        locator_score_drop_threshold: float = 0.15,
+    ) -> dict[str, Any]:
+        """Compare a mission/run baseline with current browser memory.
+
+        Callers can persist the output of ``capture_memory_baseline`` at mission
+        start and pass it back here after a run. If no baseline dict is supplied,
+        ``baseline_session_id`` is used to build one from existing rows.
+        """
+        owns_session = self.session is None
+        db = self._session()
+        try:
+            baseline_snapshot = baseline or self.capture_memory_baseline(
+                session_id=baseline_session_id,
+                url_scope=url_scope,
+                limit=limit,
+                db=db,
+            )
+            current_snapshot = self.capture_memory_baseline(
+                session_id=current_session_id,
+                url_scope=url_scope,
+                limit=limit,
+                db=db,
+            )
+            return self._diff_memory_snapshots(
+                baseline_snapshot,
+                current_snapshot,
+                include_unchanged=include_unchanged,
+                locator_score_drop_threshold=locator_score_drop_threshold,
+            )
         finally:
             if owns_session:
                 db.close()
@@ -748,7 +872,12 @@ class ExplorationMemoryService:
         return self._update_frontier_status(frontier_id, status="skipped", block_reason=reason, clear_lease=True)
 
     def _upsert_elements(
-        self, db: Session, page_state: BrowserPageState, elements: list[dict[str, Any]]
+        self,
+        db: Session,
+        page_state: BrowserPageState,
+        elements: list[dict[str, Any]],
+        *,
+        source_fidelity: str = "live_snapshot",
     ) -> list[BrowserElement]:
         rows: list[BrowserElement] = []
         now = _utcnow()
@@ -774,12 +903,21 @@ class ExplorationMemoryService:
                 existing.last_seen_at = now
                 existing.seen_count = (existing.seen_count or 0) + 1
                 existing.locator_candidates_json = element.get("locator_candidates") or existing.locator_candidates_json
-                existing.importance_score = max(existing.importance_score or 0, element.get("importance_score") or 0)
+                existing.importance_score = max(
+                    existing.importance_score or 0,
+                    (element.get("importance_score") or 0) * self._source_fidelity_score(source_fidelity),
+                )
+                attrs = dict(existing.attributes_json or {})
+                attrs["source_fidelity"] = source_fidelity
+                existing.attributes_json = attrs
                 db.add(existing)
                 rows.append(existing)
                 continue
+            attributes = {"source_fidelity": source_fidelity}
+            if element.get("ref"):
+                attributes["snapshot_ref"] = element.get("ref")
             row = BrowserElement(
-                id=f"bpelem-{element_key[:16]}",
+                id=f"bpelem-{_hash(f'{self.project_id}|{page_state.id}|{element_key}', 16)}",
                 project_id=self.project_id,
                 state_id=page_state.id,
                 element_key=element_key,
@@ -788,9 +926,10 @@ class ExplorationMemoryService:
                 text=element.get("text"),
                 element_type=element.get("role"),
                 locator_candidates_json=element.get("locator_candidates") or [],
-                attributes_json={"snapshot_ref": element.get("ref")} if element.get("ref") else {},
-                importance_score=element.get("importance_score") or 0.5,
-                stability_score=0.5,
+                attributes_json=attributes,
+                importance_score=(element.get("importance_score") or 0.5)
+                * self._source_fidelity_score(source_fidelity),
+                stability_score=0.7 if source_fidelity == "live_snapshot" else 0.35,
                 first_seen_at=now,
                 last_seen_at=now,
             )
@@ -943,7 +1082,6 @@ class ExplorationMemoryService:
     ) -> dict[str, Any]:
         best_locator = (element.locator_candidates_json or [{}])[0] if element else {}
         success_count = int(element.success_count or 0) if element else 0
-        failure_count = int(element.failure_count or 0) if element else 0
         tested_count = int(element.tested_count or 0) if element else 0
         success_rate = success_count / tested_count if tested_count else None
         risk = risk_level or self._risk_level(item.action_type, element.name if element else "")
@@ -955,6 +1093,7 @@ class ExplorationMemoryService:
             "state_title": state.title if state else None,
             "state_last_seen_at": state.last_seen_at.isoformat() if state and state.last_seen_at else None,
             "state_visit_count": state.visit_count if state else 0,
+            "state_source_fidelity": self._state_source_fidelity(state) if state else "unknown",
             "element_id": item.element_id,
             "role": element.role if element else None,
             "name": element.name if element else None,
@@ -978,6 +1117,325 @@ class ExplorationMemoryService:
             "created_at": item.created_at.isoformat() if item.created_at else None,
             "updated_at": item.updated_at.isoformat() if item.updated_at else None,
         }
+
+    def _shape_state_snapshot(self, state: BrowserPageState) -> dict[str, Any]:
+        return {
+            "id": state.id,
+            "project_id": state.project_id,
+            "session_id": state.session_id,
+            "page_key": state.page_key,
+            "state_key": state.state_key,
+            "url": state.url,
+            "url_template": state.url_template,
+            "title": state.title,
+            "source_fidelity": self._state_source_fidelity(state),
+            "auth_state": state.auth_state,
+            "viewport": state.viewport,
+            "locale": state.locale,
+            "exact_hash": state.exact_hash,
+            "simhash": state.simhash,
+            "snapshot_ref": state.snapshot_ref,
+            "visit_count": state.visit_count,
+            "importance_score": round(float(state.importance_score or 0), 3),
+            "novelty_score": round(float(state.novelty_score or 0), 3),
+            "decay_score": round(float(state.decay_score or 0), 3),
+            "status": state.status,
+            "first_seen_at": state.first_seen_at.isoformat() if state.first_seen_at else None,
+            "last_seen_at": state.last_seen_at.isoformat() if state.last_seen_at else None,
+        }
+
+    def _shape_element_snapshot(
+        self,
+        element: BrowserElement,
+        state: BrowserPageState | None,
+    ) -> dict[str, Any]:
+        locator_candidates = element.locator_candidates_json or []
+        best_locator = locator_candidates[0] if locator_candidates else {}
+        logical_key = self._element_logical_key(
+            page_key=state.page_key if state else "",
+            role=element.role,
+            name=element.name,
+            text=element.text,
+            element_type=element.element_type,
+        )
+        return {
+            "id": element.id,
+            "project_id": element.project_id,
+            "state_id": element.state_id,
+            "page_key": state.page_key if state else None,
+            "state_key": state.state_key if state else None,
+            "element_key": element.element_key,
+            "logical_key": logical_key,
+            "role": element.role,
+            "name": element.name,
+            "text": element.text,
+            "element_type": element.element_type,
+            "locator_candidates": locator_candidates,
+            "best_locator": best_locator,
+            "locator_signature": self._locator_signature(locator_candidates),
+            "attributes": element.attributes_json or {},
+            "form_context": element.form_context_json or {},
+            "seen_count": element.seen_count,
+            "tested_count": element.tested_count,
+            "success_count": element.success_count,
+            "failure_count": element.failure_count,
+            "importance_score": round(float(element.importance_score or 0), 3),
+            "stability_score": round(float(element.stability_score or 0), 3),
+            "status": element.status,
+            "first_seen_at": element.first_seen_at.isoformat() if element.first_seen_at else None,
+            "last_seen_at": element.last_seen_at.isoformat() if element.last_seen_at else None,
+        }
+
+    def _diff_memory_snapshots(
+        self,
+        baseline: dict[str, Any],
+        current: dict[str, Any],
+        *,
+        include_unchanged: bool,
+        locator_score_drop_threshold: float,
+    ) -> dict[str, Any]:
+        baseline_states = self._latest_states_by_page_key(baseline.get("states") or [])
+        current_states = self._latest_states_by_page_key(current.get("states") or [])
+        page_changes: dict[str, list[dict[str, Any]]] = {
+            "new": [],
+            "changed": [],
+            "removed": [],
+        }
+        if include_unchanged:
+            page_changes["unchanged"] = []
+
+        for page_key in sorted(set(baseline_states) | set(current_states)):
+            baseline_state = baseline_states.get(page_key)
+            current_state = current_states.get(page_key)
+            if baseline_state is None and current_state is not None:
+                page_changes["new"].append({"page_key": page_key, "current": current_state})
+                continue
+            if current_state is None and baseline_state is not None:
+                page_changes["removed"].append({"page_key": page_key, "baseline": baseline_state})
+                continue
+            changed_fields = self._changed_fields(
+                baseline_state or {},
+                current_state or {},
+                ["state_key", "exact_hash", "simhash", "url_template", "title", "source_fidelity", "status"],
+            )
+            if changed_fields:
+                page_changes["changed"].append(
+                    {
+                        "page_key": page_key,
+                        "baseline": baseline_state,
+                        "current": current_state,
+                        "changed_fields": changed_fields,
+                    }
+                )
+            elif include_unchanged:
+                page_changes["unchanged"].append(
+                    {"page_key": page_key, "baseline": baseline_state, "current": current_state}
+                )
+
+        element_changes = self._diff_memory_elements(
+            baseline=baseline,
+            current=current,
+            baseline_states_by_page=baseline_states,
+            current_states_by_page=current_states,
+            include_unchanged=include_unchanged,
+            locator_score_drop_threshold=locator_score_drop_threshold,
+        )
+        summary = {
+            "new_page_states": len(page_changes["new"]),
+            "changed_page_states": len(page_changes["changed"]),
+            "removed_page_states": len(page_changes["removed"]),
+            "new_elements": len(element_changes["new"]),
+            "changed_elements": len(element_changes["changed"]),
+            "removed_elements": len(element_changes["removed"]),
+            "locator_drift": len(element_changes["locator_drift"]),
+        }
+        if include_unchanged:
+            summary["unchanged_page_states"] = len(page_changes["unchanged"])
+            summary["unchanged_elements"] = len(element_changes["unchanged"])
+        return {
+            "project_id": current.get("project_id") or baseline.get("project_id") or self.project_id,
+            "baseline_captured_at": baseline.get("captured_at"),
+            "current_captured_at": current.get("captured_at"),
+            "baseline_session_id": baseline.get("session_id"),
+            "current_session_id": current.get("session_id"),
+            "summary": summary,
+            "page_states": page_changes,
+            "elements": element_changes,
+        }
+
+    def _diff_memory_elements(
+        self,
+        *,
+        baseline: dict[str, Any],
+        current: dict[str, Any],
+        baseline_states_by_page: dict[str, dict[str, Any]],
+        current_states_by_page: dict[str, dict[str, Any]],
+        include_unchanged: bool,
+        locator_score_drop_threshold: float,
+    ) -> dict[str, list[dict[str, Any]]]:
+        baseline_elements = self._elements_for_latest_states(baseline.get("elements") or [], baseline_states_by_page)
+        current_elements = self._elements_for_latest_states(current.get("elements") or [], current_states_by_page)
+        changes: dict[str, list[dict[str, Any]]] = {
+            "new": [],
+            "changed": [],
+            "removed": [],
+            "locator_drift": [],
+        }
+        if include_unchanged:
+            changes["unchanged"] = []
+
+        baseline_by_id = {item.get("id"): item for item in baseline_elements if item.get("id")}
+        current_by_id = {item.get("id"): item for item in current_elements if item.get("id")}
+        baseline_by_logical = {item.get("logical_key"): item for item in baseline_elements if item.get("logical_key")}
+        current_by_logical = {item.get("logical_key"): item for item in current_elements if item.get("logical_key")}
+        paired: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+        used_baseline_ids: set[str] = set()
+        used_current_ids: set[str] = set()
+
+        for element_id, baseline_element in baseline_by_id.items():
+            current_element = current_by_id.get(element_id)
+            if current_element:
+                paired.append((baseline_element, current_element, "id"))
+                used_baseline_ids.add(element_id)
+                used_current_ids.add(element_id)
+
+        for logical_key, baseline_element in baseline_by_logical.items():
+            baseline_id = str(baseline_element.get("id") or "")
+            if baseline_id in used_baseline_ids:
+                continue
+            current_element = current_by_logical.get(logical_key)
+            current_id = str((current_element or {}).get("id") or "")
+            if not current_element or current_id in used_current_ids:
+                continue
+            paired.append((baseline_element, current_element, "logical_key"))
+            used_baseline_ids.add(baseline_id)
+            used_current_ids.add(current_id)
+
+        for baseline_element, current_element, match_type in paired:
+            changed_fields = self._changed_fields(
+                baseline_element,
+                current_element,
+                ["role", "name", "text", "element_type", "status", "importance_score", "stability_score"],
+            )
+            locator_drift = self._locator_drift(baseline_element, current_element, locator_score_drop_threshold)
+            if changed_fields:
+                changes["changed"].append(
+                    {
+                        "match_type": match_type,
+                        "baseline": baseline_element,
+                        "current": current_element,
+                        "changed_fields": changed_fields,
+                    }
+                )
+            if locator_drift:
+                changes["locator_drift"].append(
+                    {
+                        "match_type": match_type,
+                        "baseline": baseline_element,
+                        "current": current_element,
+                        "drift": locator_drift,
+                    }
+                )
+            if include_unchanged and not changed_fields and not locator_drift:
+                changes["unchanged"].append(
+                    {"match_type": match_type, "baseline": baseline_element, "current": current_element}
+                )
+
+        for element in current_elements:
+            if str(element.get("id") or "") not in used_current_ids:
+                changes["new"].append({"current": element})
+        for element in baseline_elements:
+            if str(element.get("id") or "") not in used_baseline_ids:
+                changes["removed"].append({"baseline": element})
+        return changes
+
+    @classmethod
+    def _elements_for_latest_states(
+        cls,
+        elements: list[dict[str, Any]],
+        states_by_page: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        latest_state_ids = {state.get("id") for state in states_by_page.values()}
+        return [element for element in elements if element.get("state_id") in latest_state_ids]
+
+    @classmethod
+    def _latest_states_by_page_key(cls, states: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        latest: dict[str, dict[str, Any]] = {}
+        for state in states:
+            page_key = str(state.get("page_key") or "")
+            if not page_key:
+                continue
+            existing = latest.get(page_key)
+            if existing is None or str(state.get("last_seen_at") or "") > str(existing.get("last_seen_at") or ""):
+                latest[page_key] = state
+        return latest
+
+    @staticmethod
+    def _changed_fields(
+        baseline: dict[str, Any],
+        current: dict[str, Any],
+        fields: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        changed: dict[str, dict[str, Any]] = {}
+        for field in fields:
+            if baseline.get(field) != current.get(field):
+                changed[field] = {"from": baseline.get(field), "to": current.get(field)}
+        return changed
+
+    @staticmethod
+    def _locator_drift(
+        baseline: dict[str, Any],
+        current: dict[str, Any],
+        locator_score_drop_threshold: float,
+    ) -> dict[str, Any]:
+        baseline_best = baseline.get("best_locator") or {}
+        current_best = current.get("best_locator") or {}
+        baseline_score = float(baseline_best.get("score") or 0) if isinstance(baseline_best, dict) else 0.0
+        current_score = float(current_best.get("score") or 0) if isinstance(current_best, dict) else 0.0
+        drift: dict[str, Any] = {}
+        if baseline.get("locator_signature") != current.get("locator_signature"):
+            drift["locator_candidates"] = {
+                "from": baseline.get("locator_candidates") or [],
+                "to": current.get("locator_candidates") or [],
+            }
+        for field in ["strategy", "locator", "durable"]:
+            if isinstance(baseline_best, dict) and isinstance(current_best, dict) and baseline_best.get(field) != current_best.get(field):
+                drift[f"best_locator.{field}"] = {"from": baseline_best.get(field), "to": current_best.get(field)}
+        score_delta = round(current_score - baseline_score, 3)
+        if score_delta <= -abs(locator_score_drop_threshold):
+            drift["best_locator.score_delta"] = score_delta
+        return drift
+
+    @staticmethod
+    def _locator_signature(locator_candidates: list[dict[str, Any]]) -> str:
+        normalized = [
+            {
+                "strategy": candidate.get("strategy"),
+                "locator": candidate.get("locator"),
+                "durable": candidate.get("durable"),
+                "score": round(float(candidate.get("score") or 0), 3),
+            }
+            for candidate in locator_candidates or []
+        ]
+        return _hash(json.dumps(normalized, sort_keys=True, separators=(",", ":")), 32)
+
+    @staticmethod
+    def _element_logical_key(
+        *,
+        page_key: str,
+        role: str | None,
+        name: str | None,
+        text: str | None,
+        element_type: str | None,
+    ) -> str:
+        bits = [
+            page_key or "",
+            (role or "").strip().lower(),
+            re.sub(r"\s+", " ", (name or "").strip().lower()),
+            re.sub(r"\s+", " ", (text or "").strip().lower()),
+            (element_type or "").strip().lower(),
+        ]
+        return "|".join(bits)
 
     def _rank_frontier_item(
         self,
@@ -1011,6 +1469,7 @@ class ExplorationMemoryService:
         query_match = sum(1 for term in query_terms if term in query_text) / max(1, len(query_terms))
         risk_penalty = {0: 0.0, 1: 0.08, 2: 0.22}.get(self._risk_rank(risk_level), 0.3)
         lease_penalty = 0.15 if item.status == "in_progress" else 0.0
+        fidelity_score = self._source_fidelity_score(self._state_source_fidelity(state))
         return (
             float(item.priority_score or 0) * 0.32
             + (float(element.importance_score or 0.0) if element else 0.0) * 0.18
@@ -1019,6 +1478,7 @@ class ExplorationMemoryService:
             + coverage_gap * 0.12
             + recency * 0.08
             + query_match * 0.12
+            + fidelity_score * 0.08
             - risk_penalty
             - lease_penalty
             - min(0.18, (item.attempts or 0) * 0.04)
@@ -1107,6 +1567,22 @@ class ExplorationMemoryService:
             graph.save()
         except Exception:
             pass
+
+    @staticmethod
+    def _state_source_fidelity(state: BrowserPageState | None) -> str:
+        if not state:
+            return "unknown"
+        canonical = state.canonical_json or {}
+        return str(canonical.get("source_fidelity") or state.page_type or "unknown")
+
+    @staticmethod
+    def _source_fidelity_score(source_fidelity: str | None) -> float:
+        return {
+            "live_snapshot": 1.0,
+            "snapshot": 0.9,
+            "action_trace": 0.45,
+            "url_only": 0.25,
+        }.get((source_fidelity or "unknown").lower(), 0.5)
 
     @staticmethod
     def _state_importance(elements: list[dict[str, Any]]) -> float:

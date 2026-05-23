@@ -98,30 +98,50 @@ nav:
           - Credential Management: guides/credential-management.md
       - Operations:
           - Authentication & RBAC: guides/authentication.md
+          - Choosing a Setup Path: guides/setup-options.md
           - Deployment: guides/deployment.md
           - On-Premises Deployment: guides/company-deployment.md
           - Disaster Recovery: guides/disaster-recovery.md
+          - Runtime Observability & Recovery: guides/runtime-observability-recovery.md
           - Troubleshooting: guides/troubleshooting.md
       - Development:
           - Extending the System: guides/extending.md
+          - Adding a Backend Runtime Capability: guides/adding-backend-runtime-capability.md
+          - Adding a Dashboard Feature: guides/adding-dashboard-feature.md
           - Contributing: guides/contributing.md
+          - Documentation Maintenance: guides/documentation-maintenance.md
   - Reference:
       - CLI Reference: reference/cli.md
       - Spec Format: reference/spec-format.md
       - Pipeline Modes: reference/pipeline-modes.md
       - Web Dashboard: reference/web-dashboard.md
+      - Dashboard UI Patterns: reference/dashboard-ui-patterns.md
       - API Overview: reference/api-overview.md
       - API Endpoints: reference/api-endpoints.md
+      - API Router & Service Map: reference/api-router-service-map.md
+      - Frontend API Routing: reference/frontend-api-routing.md
+      - Custom Workflow Contract: reference/custom-workflow-contract.md
+      - Integration Contracts: reference/integration-contracts.md
       - Environment Variables: reference/environment-variables.md
       - Database Schema: reference/database-schema.md
       - Makefile Commands: reference/makefile.md
       - FAQ: reference/faq.md
   - Explanation:
       - System Architecture: explanation/system-overview.md
+      - Backend Runtime Lifecycle: explanation/backend-runtime-lifecycle.md
       - Pipeline Architecture: explanation/pipeline-architecture.md
+      - Queue and Worker Architecture: explanation/queue-worker-architecture.md
+      - Temporal Orchestration: explanation/temporal-orchestration.md
       - Infrastructure & Scaling: explanation/infrastructure.md
+      - Artifact Storage Lifecycle: explanation/artifact-storage-lifecycle.md
+      - Database Migration Architecture: explanation/database-migration-architecture.md
+      - Specialized Testing Architecture: explanation/specialized-testing-architecture.md
+      - CI/CD and PR Advisor Architecture: explanation/ci-pr-advisor-architecture.md
       - Memory & Coverage: explanation/memory-system.md
       - Browser Pool & Concurrency: explanation/browser-pool.md
+      - Frontend Architecture: explanation/frontend-architecture.md
+      - Dashboard Auth and Project Flow: explanation/dashboard-auth-project-flow.md
+      - Assistant Architecture: explanation/assistant-architecture.md
       - Security Model: explanation/security-model.md
   - Community:
       - Roadmap: community/roadmap.md

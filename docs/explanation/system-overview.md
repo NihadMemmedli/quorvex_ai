@@ -1,5 +1,10 @@
 # System Architecture Overview
 
+![Quorvex dashboard overview showing the platform system in use](../assets/ui/dashboard-overview.png)
+
+<p class="caption">Quorvex dashboard overview showing the platform system in use.</p>
+
+
 Quorvex AI converts natural language test specifications into production-ready Playwright tests through a layered architecture of user interfaces, pipeline engines, AI agents, and infrastructure services.
 
 ## Why This Architecture
@@ -16,7 +21,7 @@ graph TB
     subgraph BACKEND["Backend API · FastAPI :8001"]
         API["FastAPI Application"]
         AUTH["Auth & RBAC"]
-        ROUTERS["API Routers\nspecs · runs · regression\nexploration · requirements\nrtm · analytics · health"]
+        ROUTERS["API Routers\nspecs · runs · regression · discovery\nrequirements · RTM · specialized testing\nCI · chat · AutoPilot · autonomous · workflows"]
     end
 
     subgraph PIPELINE["Pipeline Engine"]
@@ -24,6 +29,7 @@ graph TB
         HEALER["Self-Healing Loop"]
         EXPLORER["App Explorer"]
         PRD["PRD Processor"]
+        WORKFLOWS["Workflow & Mission Runtimes"]
     end
 
     subgraph AILAYER["AI Layer"]
@@ -41,6 +47,7 @@ graph TB
     subgraph INFRA["Infrastructure"]
         BP["Browser Pool"]
         AQ["Agent Queue · Redis"]
+        TEMP["Temporal"]
         DB[("Database")]
         STORE["Storage · Local + MinIO"]
     end
@@ -51,9 +58,11 @@ graph TB
     API --> ROUTERS
     ROUTERS --> NATIVE
     ROUTERS --> EXPLORER
+    ROUTERS --> WORKFLOWS
 
     NATIVE --> HEALER
     NATIVE --> RUNNER
+    WORKFLOWS --> TEMP
     RUNNER --> SDK
     SDK --> AGENTS
 
@@ -69,7 +78,7 @@ graph TB
 
 ## Dual-Interface Design
 
-The platform exposes two interfaces -- CLI and Web Dashboard -- that share the same backend logic but serve different use cases.
+The platform exposes two interfaces -- CLI and Web Dashboard -- that share the same backend logic but serve different use cases. Around the core spec-to-test pipeline, the backend also exposes routers for API, load, security, database, and LLM testing; CI and PR advisor workflows; assistant chat; AutoPilot sessions; persistent autonomous missions; custom workflows; recordings; and operational health.
 
 **CLI** (`orchestrator/cli.py`) is optimized for automation and CI/CD. It spawns pipeline stages as subprocesses, communicates through file artifacts (JSON, exit codes, stdout), and requires no database. This makes it suitable for scripting, one-off runs, and environments where a web server is unwanted.
 
@@ -116,7 +125,9 @@ flowchart TB
     subgraph "Inputs"
         MD["Markdown Spec"]
         PDF["PDF PRD"]
-        URL["Live URL"]
+    URL["Live URL"]
+    OPENAPI["OpenAPI / API traffic"]
+    CI["CI / PR context"]
     end
 
     subgraph "Processing"
@@ -124,12 +135,16 @@ flowchart TB
         GEN["Generator"]
         HEAL["Healer"]
         EXPLORE["Explorer"]
+        SPECIAL["Specialized Test Generators"]
+        MISSION["Autonomous / Workflow Runtime"]
     end
 
     subgraph "Outputs"
         CODE["Playwright Test<br/>tests/generated/*.spec.ts"]
         REQ["Requirements"]
         RTM["RTM"]
+        API["API, load, security,\ndatabase, and LLM tests"]
+        PR["PR advice and CI actions"]
     end
 
     subgraph "Feedback"
@@ -139,6 +154,9 @@ flowchart TB
     MD --> PLAN --> GEN --> CODE
     PDF -->|"extract features"| PLAN
     URL --> EXPLORE --> REQ --> RTM
+    OPENAPI --> SPECIAL --> API
+    CI --> MISSION --> PR
+    URL --> EXPLORE --> API
 
     CODE -->|"fail"| HEAL -->|"fix"| CODE
     CODE -->|"pass: store patterns"| MEM

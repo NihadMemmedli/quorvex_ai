@@ -1,5 +1,10 @@
 # How to Manage Test Credentials Securely
 
+![Settings dashboard for credentials and integration configuration](../assets/ui/settings.png)
+
+<p class="caption">Settings dashboard for credentials and integration configuration.</p>
+
+
 Store, use, and rotate test credentials without exposing secrets in spec files or generated test code.
 
 ## Prerequisites
@@ -61,16 +66,15 @@ For web dashboard usage, store credentials per-project without touching `.env` f
 
 ```bash
 # Store a credential
-curl -X POST http://localhost:8001/credentials \
+curl -X POST http://localhost:8001/projects/your-project-id/credentials \
   -H "Content-Type: application/json" \
   -d '{
     "key": "LOGIN_PASSWORD",
-    "value": "S3cretP@ss",
-    "project_id": "your-project-id"
+    "value": "S3cretP@ss"
   }'
 
 # List credentials (values are masked)
-curl http://localhost:8001/credentials?project_id=your-project-id
+curl http://localhost:8001/projects/your-project-id/credentials
 ```
 
 Credentials stored via the dashboard are encrypted at rest using Fernet symmetric encryption derived from `JWT_SECRET_KEY`.

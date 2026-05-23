@@ -12,7 +12,7 @@
         k6-workers-up k6-workers-down k6-workers-scale k6-workers-logs k6-workers-status \
         zap-up zap-down zap-status zap-logs \
         lint format test \
-        docs-serve docs-build docs-deploy
+        docs-check docs-serve docs-build docs-deploy
 
 # Default target
 help:
@@ -120,6 +120,12 @@ help:
 	@echo ""
 	@echo "  Load Testing:"
 	@echo "    make load-test SPEC=... - Generate and run K6 load test from spec"
+	@echo ""
+	@echo "  Documentation:"
+	@echo "    make docs-check     - Run docs drift checks and strict MkDocs build"
+	@echo "    make docs-serve     - Start MkDocs development server"
+	@echo "    make docs-build     - Build MkDocs documentation in strict mode"
+	@echo "    make docs-deploy    - Deploy docs to GitHub Pages"
 	@echo ""
 	@echo "  Utilities:"
 	@echo "    make stop           - Stop all running services"
@@ -799,11 +805,15 @@ k8s-deploy:
 	@kubectl version --client > /dev/null 2>&1 || (echo "Error: kubectl not found" && exit 1)
 	@echo "  + kubectl found"
 	@echo ""
-	@if [ ! -f "k8s/secrets.local.yaml" ]; then \
+	@if [ -f "k8s/secrets.local.yaml" ]; then \
+		echo "Applying local Kubernetes secrets..."; \
+		kubectl apply -f k8s/secrets.local.yaml; \
+	elif [ -f "k8s/secrets.yaml" ]; then \
 		echo "WARNING: k8s/secrets.local.yaml not found!"; \
 		echo "Copy k8s/secrets.yaml to k8s/secrets.local.yaml and fill in values."; \
 		echo ""; \
 		read -p "Continue with template secrets? (yes/no): " confirm && [ "$$confirm" = "yes" ] || exit 1; \
+		kubectl apply -f k8s/secrets.yaml; \
 	fi
 	@echo "Applying Kubernetes manifests..."
 	@kubectl apply -k k8s/
@@ -946,6 +956,20 @@ test:
 # ==========================================
 # DOCUMENTATION
 # ==========================================
+
+docs-check:
+	@python scripts/check_docs_drift.py
+	@if [ -x "./venv/bin/mkdocs" ]; then \
+		./venv/bin/mkdocs build --strict; \
+	else \
+		mkdocs build --strict; \
+	fi
+
+docs-visual-check:
+	@python scripts/check_docs_drift.py --visual-only
+
+docs-visual-capture:
+	node scripts/docs-assets/capture-docs-assets.mjs --base-url $${BASE_URL:-http://127.0.0.1:3000} --update-docs-assets
 
 docs-serve:
 	pip install -r requirements-docs.txt && mkdocs serve

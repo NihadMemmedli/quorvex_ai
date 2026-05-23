@@ -1,5 +1,10 @@
 # How to Run Security Scans
 
+![Security testing dashboard with scanner configuration and findings](../assets/ui/security-testing.png)
+
+<p class="caption">Security testing dashboard with scanner configuration and findings.</p>
+
+
 Multi-tier security scanning with Python-native checks, Nuclei templates, OWASP ZAP DAST, and AI-powered finding analysis with remediation planning.
 
 ## Overview
@@ -246,6 +251,7 @@ Confirm security testing works:
 ## Related Guides
 
 - [API Testing](./api-testing.md) -- functional API testing
+- [Specialized Testing Architecture](../explanation/specialized-testing-architecture.md) -- scanner and domain pipeline boundaries
 - [Load Testing](./load-testing.md) -- performance testing
 - [Exploration and Requirements](./exploration-requirements.md) -- discover endpoints to scan
 - [Credential Management](./credential-management.md) -- manage scan authentication

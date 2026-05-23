@@ -24,6 +24,14 @@ interface Requirement {
     status: string;
     acceptance_criteria: string[];
     source_session_id: string | null;
+    truth_state?: string | null;
+    source_type?: string | null;
+    confidence?: number | null;
+    uncertainty_reason?: string | null;
+    confirmed_by?: string | null;
+    confirmed_at?: string | null;
+    rejected_by?: string | null;
+    rejected_at?: string | null;
     created_at: string;
     updated_at: string;
 }
@@ -45,6 +53,9 @@ interface RtmRequirement {
     priority: string;
     status: string;
     acceptance_criteria: string[];
+    truth_state?: string | null;
+    generation_warning?: string | null;
+    generation_allowed?: boolean;
     tests: Array<{
         entry_id: number;
         spec_name: string;
@@ -107,6 +118,15 @@ interface SpecListItem {
     path?: string;
 }
 
+interface SpecStatusResponse {
+    has_spec: boolean;
+    spec_path?: string;
+    spec_name?: string;
+    truth_state?: string | null;
+    generation_warning?: string | null;
+    generation_allowed?: boolean;
+}
+
 // Types for Deduplication
 interface DuplicateMatch {
     requirement_id: number;
@@ -139,6 +159,7 @@ interface CheckDuplicateResponse {
 }
 
 type TabType = 'requirements' | 'traceability';
+type RequirementTruthAction = 'confirm' | 'reject' | 'mark-stale';
 
 const priorityColors: Record<string, { bg: string; color: string }> = {
     critical: { bg: 'var(--danger-muted)', color: 'var(--danger)' },
@@ -152,6 +173,24 @@ const statusColors: Record<string, { bg: string; color: string }> = {
     approved: { bg: 'var(--success-muted)', color: 'var(--success)' },
     implemented: { bg: 'var(--primary-glow)', color: 'var(--primary)' },
     deprecated: { bg: 'var(--danger-muted)', color: 'var(--danger)' },
+};
+
+const truthStateColors: Record<string, { bg: string; color: string }> = {
+    candidate_requirement: { bg: 'rgba(156, 163, 175, 0.1)', color: 'var(--text-tertiary)' },
+    observed_behavior: { bg: 'var(--primary-glow)', color: 'var(--primary)' },
+    manual_requirement: { bg: 'rgba(192, 132, 252, 0.12)', color: 'var(--accent)' },
+    confirmed_requirement: { bg: 'var(--success-muted)', color: 'var(--success)' },
+    rejected_requirement: { bg: 'var(--danger-muted)', color: 'var(--danger)' },
+    stale_requirement: { bg: 'var(--warning-muted)', color: 'var(--warning)' },
+};
+
+const truthStateLabels: Record<string, string> = {
+    candidate_requirement: 'Candidate',
+    observed_behavior: 'Observed',
+    manual_requirement: 'Manual',
+    confirmed_requirement: 'Confirmed',
+    rejected_requirement: 'Rejected',
+    stale_requirement: 'Stale',
 };
 
 const coverageColors: Record<string, string> = {
@@ -190,6 +229,7 @@ export default function RequirementsPage() {
     const [categoryFilter, setCategoryFilter] = useState<string>('');
     const [priorityFilter, setPriorityFilter] = useState<string>('');
     const [statusFilter, setStatusFilter] = useState<string>('');
+    const [truthStateFilter, setTruthStateFilter] = useState<string>('');
 
     const [expandedReqs, setExpandedReqs] = useState<Set<number>>(new Set());
     const [editModalOpen, setEditModalOpen] = useState(false);
@@ -198,6 +238,10 @@ export default function RequirementsPage() {
     const [deletingReq, setDeletingReq] = useState<Requirement | null>(null);
     const [isDeleting, setIsDeleting] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
+    const [reviewingTruthReq, setReviewingTruthReq] = useState<Requirement | null>(null);
+    const [truthAction, setTruthAction] = useState<RequirementTruthAction | null>(null);
+    const [truthComment, setTruthComment] = useState('');
+    const [truthActionLoading, setTruthActionLoading] = useState<string | null>(null);
 
     const [createModalOpen, setCreateModalOpen] = useState(false);
     const [newReq, setNewReq] = useState({
@@ -271,6 +315,13 @@ export default function RequirementsPage() {
     const [generateSpecModalOpen, setGenerateSpecModalOpen] = useState(false);
     const [selectedReqForSpec, setSelectedReqForSpec] = useState<Requirement | RtmRequirement | null>(null);
     const [createSpecDropdownOpen, setCreateSpecDropdownOpen] = useState<number | null>(null);
+    const [specPreflightLoadingId, setSpecPreflightLoadingId] = useState<number | null>(null);
+    const [specPreflightWarning, setSpecPreflightWarning] = useState<{
+        requirement: Requirement;
+        truthState: string;
+        warning: string;
+        generationAllowed: boolean;
+    } | null>(null);
 
     useEffect(() => {
         const tab = searchParams.get('tab');
@@ -289,6 +340,7 @@ export default function RequirementsPage() {
         if (categoryFilter) params.append('category', categoryFilter);
         if (priorityFilter) params.append('priority', priorityFilter);
         if (statusFilter) params.append('status', statusFilter);
+        if (truthStateFilter) params.append('truth_state', truthStateFilter);
         if (searchTerm) params.append('search', searchTerm);
 
         const queryString = params.toString();
@@ -328,7 +380,7 @@ export default function RequirementsPage() {
             setLoading(false);
             setIsLoadingMore(false);
         }
-    }, [currentProject?.id, projectLoading, categoryFilter, priorityFilter, statusFilter, searchTerm]);
+    }, [currentProject?.id, projectLoading, categoryFilter, priorityFilter, statusFilter, truthStateFilter, searchTerm]);
 
     // Load more handler
     const loadMore = () => {
@@ -548,6 +600,60 @@ export default function RequirementsPage() {
         }
     };
 
+    const openTruthReview = (req: Requirement, action: RequirementTruthAction) => {
+        if (action === 'confirm') {
+            applyTruthDecision(req, action);
+            return;
+        }
+        setReviewingTruthReq(req);
+        setTruthAction(action);
+        setTruthComment('');
+    };
+
+    const closeTruthReview = (force = false) => {
+        if (truthActionLoading && !force) return;
+        setReviewingTruthReq(null);
+        setTruthAction(null);
+        setTruthComment('');
+    };
+
+    const applyTruthDecision = async (req: Requirement, action: RequirementTruthAction, comment?: string) => {
+        const trimmedComment = comment?.trim() || '';
+        if ((action === 'reject' || action === 'mark-stale') && !trimmedComment) return;
+
+        const projectParam = currentProject?.id
+            ? `?project_id=${encodeURIComponent(currentProject.id)}`
+            : '';
+        const actionKey = `${req.id}:${action}`;
+
+        setTruthActionLoading(actionKey);
+        try {
+            const res = await fetch(`${API_BASE}/requirements/${req.id}/${action}${projectParam}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: action === 'confirm' ? undefined : JSON.stringify({ comment: trimmedComment })
+            });
+
+            if (res.ok) {
+                closeTruthReview(true);
+                await fetchData(0, false);
+            } else {
+                const err = await res.json().catch(() => ({}));
+                alert(`Failed to update truth state: ${err.detail || res.statusText}`);
+            }
+        } catch (e) {
+            console.error('Failed to update requirement truth state:', e);
+            alert('Failed to update truth state');
+        } finally {
+            setTruthActionLoading(null);
+        }
+    };
+
+    const submitTruthReview = async () => {
+        if (!reviewingTruthReq || !truthAction) return;
+        await applyTruthDecision(reviewingTruthReq, truthAction, truthComment);
+    };
+
     // Original createRequirement is replaced by createRequirementWithCheck
     const createRequirement = () => createRequirementWithCheck(false);
 
@@ -707,10 +813,10 @@ export default function RequirementsPage() {
         }
     };
 
-    // Generate Spec functions
-    const openGenerateSpecModal = (req: Requirement | RtmRequirement) => {
-        // Convert RtmRequirement to Requirement format if needed
-        const requirement: Requirement = 'req_code' in req ? req : {
+    const toSpecRequirement = (req: Requirement | RtmRequirement): Requirement => {
+        if ('req_code' in req) return req;
+
+        return {
             id: req.id,
             req_code: req.code,
             title: req.title,
@@ -720,12 +826,85 @@ export default function RequirementsPage() {
             status: req.status,
             acceptance_criteria: req.acceptance_criteria,
             source_session_id: null,
+            truth_state: req.truth_state,
             created_at: '',
             updated_at: ''
         };
+    };
+
+    const getGenerationWarning = (requirement: Requirement, status?: SpecStatusResponse | null) => {
+        const truthState = status?.truth_state || requirement.truth_state || 'candidate_requirement';
+        const truthLabel = truthStateLabels[truthState] || truthState.replace(/_/g, ' ');
+        const warning = status?.generation_warning || requirement.uncertainty_reason;
+
+        if (warning) return { truthState, warning };
+        if (truthState !== 'confirmed_requirement') {
+            return {
+                truthState,
+                warning: `This requirement is ${truthLabel.toLowerCase()}, not confirmed. Generated specs may encode assumptions that have not been approved.`
+            };
+        }
+
+        return null;
+    };
+
+    // Generate Spec functions
+    const openGenerateSpecModal = (req: Requirement | RtmRequirement) => {
+        const requirement = toSpecRequirement(req);
         setSelectedReqForSpec(requirement);
         setGenerateSpecModalOpen(true);
         setCreateSpecDropdownOpen(null);
+    };
+
+    const openGenerateSpecWithPreflight = async (req: Requirement | RtmRequirement) => {
+        const requirement = toSpecRequirement(req);
+        const projectParam = currentProject?.id
+            ? `?project_id=${encodeURIComponent(currentProject.id)}`
+            : '';
+
+        setSpecPreflightLoadingId(requirement.id);
+        try {
+            const res = await fetch(`${API_BASE}/requirements/${requirement.id}/spec-status${projectParam}`);
+            const data: SpecStatusResponse | null = res.ok ? await res.json() : null;
+            const warning = getGenerationWarning(requirement, data);
+
+            if (warning) {
+                setSpecPreflightWarning({
+                    requirement,
+                    truthState: warning.truthState,
+                    warning: warning.warning,
+                    generationAllowed: data?.generation_allowed !== false
+                });
+                setCreateSpecDropdownOpen(null);
+                return;
+            }
+
+            openGenerateSpecModal(requirement);
+        } catch (err) {
+            console.error('Failed to check requirement spec status:', err);
+            const warning = getGenerationWarning(requirement, null);
+
+            if (warning) {
+                setSpecPreflightWarning({
+                    requirement,
+                    truthState: warning.truthState,
+                    warning: warning.warning,
+                    generationAllowed: true
+                });
+                setCreateSpecDropdownOpen(null);
+                return;
+            }
+
+            openGenerateSpecModal(requirement);
+        } finally {
+            setSpecPreflightLoadingId(null);
+        }
+    };
+
+    const continueGenerateSpecAfterWarning = () => {
+        if (!specPreflightWarning) return;
+        openGenerateSpecModal(specPreflightWarning.requirement);
+        setSpecPreflightWarning(null);
     };
 
     const handleSpecGenerated = (specPath: string, specName: string) => {
@@ -882,8 +1061,9 @@ export default function RequirementsPage() {
                                 className="dropdown-item"
                                 onClick={(e) => {
                                     e.stopPropagation();
-                                    openGenerateSpecModal(req);
+                                    void openGenerateSpecWithPreflight(req);
                                 }}
+                                disabled={specPreflightLoadingId === reqId}
                                 style={{
                                     display: 'flex',
                                     alignItems: 'center',
@@ -892,15 +1072,20 @@ export default function RequirementsPage() {
                                     padding: '0.75rem 1rem',
                                     border: 'none',
                                     textAlign: 'left',
-                                    cursor: 'pointer',
+                                    cursor: specPreflightLoadingId === reqId ? 'wait' : 'pointer',
                                     color: 'var(--text)',
                                     fontSize: '0.9rem',
-                                    borderBottom: '1px solid var(--border)'
+                                    borderBottom: '1px solid var(--border)',
+                                    opacity: specPreflightLoadingId === reqId ? 0.7 : 1
                                 }}
                             >
-                                <Sparkles size={16} color="var(--primary)" />
+                                {specPreflightLoadingId === reqId ? (
+                                    <Loader2 size={16} color="var(--primary)" className="spinning" />
+                                ) : (
+                                    <Sparkles size={16} color="var(--primary)" />
+                                )}
                                 <div>
-                                    <div style={{ fontWeight: 500 }}>AI Generate</div>
+                                    <div style={{ fontWeight: 500 }}>{specPreflightLoadingId === reqId ? 'Checking...' : 'AI Generate'}</div>
                                     <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
                                         Auto-create with browser AI
                                     </div>
@@ -1363,6 +1548,21 @@ export default function RequirementsPage() {
                             <option value="implemented">Implemented</option>
                             <option value="deprecated">Deprecated</option>
                         </select>
+
+                        <select
+                            value={truthStateFilter}
+                            onChange={e => setTruthStateFilter(e.target.value)}
+                            className="input"
+                            style={{ minWidth: '150px' }}
+                        >
+                            <option value="">All Truth States</option>
+                            <option value="candidate_requirement">Candidate</option>
+                            <option value="observed_behavior">Observed</option>
+                            <option value="manual_requirement">Manual</option>
+                            <option value="confirmed_requirement">Confirmed</option>
+                            <option value="rejected_requirement">Rejected</option>
+                            <option value="stale_requirement">Stale</option>
+                        </select>
                     </div>
 
                     {/* Requirements List */}
@@ -1380,6 +1580,10 @@ export default function RequirementsPage() {
                             <>
                             {filteredRequirements.map(req => {
                                 const isExpanded = expandedReqs.has(req.id);
+                                const truthState = req.truth_state || 'candidate_requirement';
+                                const truthStyle = truthStateColors[truthState] || truthStateColors.candidate_requirement;
+                                const truthLabel = truthStateLabels[truthState] || truthState.replace(/_/g, ' ');
+                                const confidence = typeof req.confidence === 'number' ? `${Math.round(req.confidence * 100)}%` : null;
                                 return (
                                     <div key={req.id} style={{ borderBottom: '1px solid var(--border)' }}>
                                         <div
@@ -1439,7 +1643,48 @@ export default function RequirementsPage() {
                                                 {req.status}
                                             </span>
 
-                                            <div style={{ display: 'flex', gap: '0.375rem' }} onClick={e => e.stopPropagation()}>
+                                            <span
+                                                title={req.uncertainty_reason || undefined}
+                                                style={{
+                                                    padding: '0.25rem 0.625rem',
+                                                    borderRadius: '4px',
+                                                    fontSize: '0.75rem',
+                                                    fontWeight: 600,
+                                                    textTransform: 'capitalize',
+                                                    ...truthStyle
+                                                }}
+                                            >
+                                                {truthLabel}
+                                            </span>
+
+                                            <div style={{ display: 'flex', gap: '0.375rem', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+                                                <button
+                                                    className="btn btn-sm"
+                                                    onClick={() => openTruthReview(req, 'confirm')}
+                                                    disabled={truthActionLoading === `${req.id}:confirm` || truthState === 'confirmed_requirement'}
+                                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', padding: '0.375rem 0.625rem' }}
+                                                >
+                                                    {truthActionLoading === `${req.id}:confirm` ? <Loader2 size={13} className="spinning" /> : <CheckCircle size={13} />}
+                                                    Confirm
+                                                </button>
+                                                <button
+                                                    className="btn btn-sm"
+                                                    onClick={() => openTruthReview(req, 'reject')}
+                                                    disabled={truthActionLoading === `${req.id}:reject` || truthState === 'rejected_requirement'}
+                                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', padding: '0.375rem 0.625rem' }}
+                                                >
+                                                    <X size={13} />
+                                                    Reject
+                                                </button>
+                                                <button
+                                                    className="btn btn-sm"
+                                                    onClick={() => openTruthReview(req, 'mark-stale')}
+                                                    disabled={truthActionLoading === `${req.id}:mark-stale` || truthState === 'stale_requirement'}
+                                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', padding: '0.375rem 0.625rem' }}
+                                                >
+                                                    <AlertTriangle size={13} />
+                                                    Stale
+                                                </button>
                                                 <button
                                                     className="btn-icon"
                                                     onClick={() => openEditModal(req)}
@@ -1479,6 +1724,26 @@ export default function RequirementsPage() {
                                                             <li key={idx} style={{ fontSize: '0.9rem', marginBottom: '0.375rem' }}>{ac}</li>
                                                         ))}
                                                     </ul>
+                                                )}
+
+                                                {(req.source_type || confidence || req.uncertainty_reason || req.confirmed_at || req.rejected_at) && (
+                                                    <div style={{ marginTop: '1rem', display: 'flex', flexWrap: 'wrap', gap: '0.75rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                        {req.source_type && (
+                                                            <span>Source: <strong style={{ color: 'var(--text)' }}>{req.source_type}</strong></span>
+                                                        )}
+                                                        {confidence && (
+                                                            <span>Confidence: <strong style={{ color: 'var(--text)' }}>{confidence}</strong></span>
+                                                        )}
+                                                        {req.uncertainty_reason && (
+                                                            <span>Uncertainty: <strong style={{ color: 'var(--text)' }}>{req.uncertainty_reason}</strong></span>
+                                                        )}
+                                                        {req.confirmed_at && (
+                                                            <span>Confirmed: <strong style={{ color: 'var(--text)' }}>{new Date(req.confirmed_at).toLocaleString()}</strong>{req.confirmed_by ? ` by ${req.confirmed_by}` : ''}</span>
+                                                        )}
+                                                        {req.rejected_at && (
+                                                            <span>Rejected: <strong style={{ color: 'var(--text)' }}>{new Date(req.rejected_at).toLocaleString()}</strong>{req.rejected_by ? ` by ${req.rejected_by}` : ''}</span>
+                                                        )}
+                                                    </div>
                                                 )}
                                             </div>
                                         )}
@@ -2804,6 +3069,60 @@ export default function RequirementsPage() {
                 </div>
             )}
 
+            {/* Truth Review Modal */}
+            {reviewingTruthReq && truthAction && (
+                <div className="modal-overlay" onClick={() => closeTruthReview()}>
+                    <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '480px', maxHeight: '80vh', overflow: 'auto' }}>
+                        <h2 style={{ marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                            {truthAction === 'reject' ? (
+                                <X size={24} color="var(--danger)" />
+                            ) : (
+                                <AlertTriangle size={24} color="var(--warning)" />
+                            )}
+                            {truthAction === 'reject' ? 'Reject Requirement' : 'Mark Requirement Stale'}
+                        </h2>
+
+                        <div style={{ padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '6px', marginBottom: '1rem' }}>
+                            <strong>{reviewingTruthReq.req_code}</strong>: {reviewingTruthReq.title}
+                        </div>
+
+                        <label style={{ display: 'block', marginBottom: '0.375rem', fontWeight: 500 }}>
+                            Review comment <span style={{ color: 'var(--danger)' }}>*</span>
+                        </label>
+                        <textarea
+                            className="input"
+                            value={truthComment}
+                            onChange={e => setTruthComment(e.target.value)}
+                            placeholder={truthAction === 'reject' ? 'Why is this requirement not true?' : 'What changed or needs re-validation?'}
+                            rows={3}
+                            disabled={Boolean(truthActionLoading)}
+                            style={{ width: '100%', resize: 'vertical', marginBottom: '1.5rem' }}
+                        />
+
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem' }}>
+                            <button className="btn btn-secondary" onClick={() => closeTruthReview()} disabled={Boolean(truthActionLoading)}>
+                                Cancel
+                            </button>
+                            <button
+                                className="btn"
+                                onClick={submitTruthReview}
+                                disabled={Boolean(truthActionLoading) || !truthComment.trim()}
+                                style={{
+                                    background: truthAction === 'reject' ? 'var(--danger)' : 'var(--warning)',
+                                    color: 'white',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.5rem'
+                                }}
+                            >
+                                {truthActionLoading ? <Loader2 size={16} className="spinning" /> : null}
+                                {truthAction === 'reject' ? 'Reject' : 'Mark Stale'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Snapshot Modal */}
             {snapshotModalOpen && (
                 <div className="modal-overlay" onClick={() => !creatingSnapshot && setSnapshotModalOpen(false)}>
@@ -3002,6 +3321,109 @@ export default function RequirementsPage() {
                             </button>
                             <button className="btn btn-primary" onClick={createSnapshot} disabled={creatingSnapshot}>
                                 {creatingSnapshot ? 'Creating...' : 'Create Snapshot'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Spec Generation Truth Warning */}
+            {specPreflightWarning && (
+                <div
+                    className="modal-overlay"
+                    onClick={(e) => {
+                        if (e.target === e.currentTarget) {
+                            setSpecPreflightWarning(null);
+                        }
+                    }}
+                >
+                    <div
+                        className="modal-content"
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ width: '520px', maxWidth: '95vw' }}
+                    >
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.875rem', marginBottom: '1rem' }}>
+                            <AlertTriangle size={24} color="var(--warning)" style={{ flexShrink: 0, marginTop: '0.125rem' }} />
+                            <div style={{ flex: 1 }}>
+                                <h2 style={{ marginBottom: '0.375rem' }}>Generate from unconfirmed requirement?</h2>
+                                <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                                    Review the requirement truth state before creating a test spec.
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setSpecPreflightWarning(null)}
+                                style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    padding: '0.25rem',
+                                    color: 'var(--text-secondary)'
+                                }}
+                            >
+                                <X size={20} />
+                            </button>
+                        </div>
+
+                        <div style={{
+                            padding: '1rem',
+                            background: 'rgba(245, 158, 11, 0.1)',
+                            border: '1px solid rgba(245, 158, 11, 0.3)',
+                            borderRadius: '8px',
+                            display: 'flex',
+                            alignItems: 'flex-start',
+                            gap: '0.75rem',
+                            marginBottom: '1rem'
+                        }}>
+                            <AlertCircle size={20} color="#f59e0b" style={{ flexShrink: 0, marginTop: '2px' }} />
+                            <div>
+                                <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>
+                                    Non-confirmed requirement
+                                </div>
+                                <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                                    {specPreflightWarning.warning}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div style={{ marginBottom: '1.25rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                                <span style={{ fontWeight: 600, color: 'var(--primary)', fontSize: '0.85rem' }}>
+                                    {specPreflightWarning.requirement.req_code}
+                                </span>
+                                <span style={{ fontWeight: 500 }}>{specPreflightWarning.requirement.title}</span>
+                            </div>
+                            <span style={{
+                                display: 'inline-flex',
+                                padding: '0.25rem 0.625rem',
+                                borderRadius: '4px',
+                                fontSize: '0.75rem',
+                                fontWeight: 600,
+                                textTransform: 'capitalize',
+                                ...(truthStateColors[specPreflightWarning.truthState] || truthStateColors.candidate_requirement)
+                            }}>
+                                {truthStateLabels[specPreflightWarning.truthState] || specPreflightWarning.truthState.replace(/_/g, ' ')}
+                            </span>
+                            {!specPreflightWarning.generationAllowed && (
+                                <p style={{ marginTop: '0.75rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                    The status response marked generation as not allowed, but the action remains available for this workflow.
+                                </p>
+                            )}
+                        </div>
+
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
+                            <button
+                                className="btn btn-secondary"
+                                onClick={() => setSpecPreflightWarning(null)}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                className="btn btn-primary"
+                                onClick={continueGenerateSpecAfterWarning}
+                                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+                            >
+                                <Sparkles size={16} />
+                                Continue to Generate
                             </button>
                         </div>
                     </div>

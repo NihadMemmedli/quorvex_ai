@@ -225,6 +225,7 @@ class BrowserObservationRecorder:
             snapshot_text=snapshot_text,
             title=title,
             snapshot_ref=f"agent-worker:{self.session_id}:{self.stats['snapshots'] + 1}",
+            source_fidelity="live_snapshot",
         )
         self.stats["snapshots"] += 1
         pending = self.pending_interaction

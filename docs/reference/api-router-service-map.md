@@ -1,0 +1,86 @@
+# API Router and Service Map
+
+![API testing dashboard showing API workflow entry points](../assets/ui/api-testing.png)
+
+<p class="caption">API testing dashboard showing API workflow entry points.</p>
+
+
+Backend ownership map for FastAPI routers and their primary service boundaries.
+
+## Router Ownership
+
+| Domain | Router source | Main path prefix | Primary service or workflow boundary |
+|--------|---------------|------------------|--------------------------------------|
+| Authentication | `orchestrator/api/auth.py` | `/auth` | `models_auth.py`, auth middleware |
+| Users | `orchestrator/api/users.py` | `/users` | user and project membership models |
+| Projects | `orchestrator/api/projects.py` | `/projects` | project, credential, membership models |
+| Settings | `orchestrator/api/settings.py` | `/settings` | LLM and runtime settings validation |
+| Core specs and runs | `orchestrator/api/main.py` | `/specs`, `/runs`, queue routes | native planner, generator, healer, process manager |
+| Dashboard analytics | `orchestrator/api/dashboard.py`, `analytics.py` | dashboard-specific prefixes | run, spec, coverage, analytics queries |
+| Memory | `orchestrator/api/memory.py` | `/api/memory` | `orchestrator/memory/*` |
+| PRD processing | `orchestrator/api/prd.py` | `/api/prd` | `orchestrator/workflows/prd_processor.py` |
+| Regression | `orchestrator/api/regression.py` | `/regression` | regression batch models and run records |
+| Recordings | `orchestrator/api/recordings.py` | recording routes | `orchestrator/services/recording_parser.py` |
+| Exploration | `orchestrator/api/exploration.py` | `/exploration` | exploration workflows and discovery models |
+| Requirements | `orchestrator/api/requirements.py` | `/requirements` | requirements generator and dedup services |
+| RTM | `orchestrator/api/rtm.py` | `/rtm` | RTM generator and requirement/spec links |
+| Scheduling | `orchestrator/api/scheduling.py` | `/scheduling` | `orchestrator/services/scheduler.py` |
+| TestRail | `orchestrator/api/testrail.py` | TestRail routes | `orchestrator/services/testrail_client.py` |
+| Jira | `orchestrator/api/jira.py` | Jira routes | `orchestrator/services/jira_client.py` |
+| CI control | `orchestrator/api/ci_control.py` | `/projects/{project_id}/ci` | provider-neutral CI orchestration |
+| GitHub CI | `orchestrator/api/github_ci.py` | GitHub routes | GitHub client, PR advisor, quality gates |
+| GitLab CI | `orchestrator/api/gitlab_ci.py` | GitLab routes | GitLab client |
+| API testing | `orchestrator/api/api_testing.py` | API testing routes | OpenAPI processor, native API generator/healer |
+| Load testing | `orchestrator/api/load_testing.py` | load testing routes | K6 generator, K6 queue, K6 worker |
+| Security testing | `orchestrator/api/security_testing.py` | security testing routes | quick scanner, Nuclei, ZAP client |
+| Database testing | `orchestrator/api/database_testing.py` | database testing routes | database connector, schema analyzer, DB test generator |
+| LLM testing | `orchestrator/api/llm_testing.py` | LLM testing routes | LLM evaluator and test generator |
+| Storage health | `orchestrator/api/health.py` | `/health` | storage, MinIO, database checks |
+| Assistant chat | `orchestrator/api/chat.py` | `/chat` | conversation models, memory context |
+| AutoPilot | `orchestrator/api/autopilot.py` | AutoPilot routes | AutoPilot pipeline |
+| Autonomous missions | `orchestrator/api/autonomous.py` | `/autonomous` | Temporal client, autonomous activities, agent queue |
+| Custom workflows | `orchestrator/api/workflows.py` | workflow routes | workflow runner, step registry, Temporal client |
+
+## Boundary Rules
+
+| Rule | Apply it this way |
+|------|-------------------|
+| Router modules parse HTTP | Request validation, auth dependencies, pagination, and response shaping live in `orchestrator/api/` |
+| Services own reusable business behavior | Cross-route logic belongs in `orchestrator/services/`, `orchestrator/workflows/`, or a domain package |
+| Models stay centralized | SQLModel database models live in `orchestrator/api/models_db.py`; auth-specific schemas live in `models_auth.py` |
+| Long-running work should expose status | Start routes should return IDs; status routes should read persisted state |
+| Source docs follow code | New routers must be added to `orchestrator/api/main.py`, API docs, and drift checks when public |
+
+## Direct Routes in `main.py`
+
+`orchestrator/api/main.py` still owns some direct app routes for legacy core behavior:
+
+| Area | Examples | Notes |
+|------|----------|-------|
+| Spec CRUD | `/specs`, `/specs/list`, `/specs/{name}` | Closely tied to filesystem and metadata sync |
+| Run execution | `/runs`, `/runs/{id}`, progress and log stream routes | Integrates process manager, run directories, and generated artifacts |
+| Queue control | `/queue-status`, `/queue/clear` | Handles in-process queue compatibility |
+| Browser pool control | `/api/browser-pool/*` | Operational status and manual cleanup |
+| Agent queue control | `/api/agents/queue-*` | Operational cleanup and queue status |
+| Static artifacts | `/artifacts/{run_id}/...` | Mounted from the runs directory |
+
+Prefer a dedicated router for new domains. Extend `main.py` only when the new behavior is part of an existing direct route family.
+
+## Documentation Updates for New Public APIs
+
+| Change | Required docs |
+|--------|---------------|
+| New route | `docs/reference/api-endpoints.md` |
+| New auth or error convention | `docs/reference/api-overview.md` |
+| New environment variable | `docs/reference/environment-variables.md` |
+| New dashboard page | `docs/reference/web-dashboard.md` |
+| New model or migration | `docs/reference/database-schema.md` |
+| New operational behavior | relevant guide or explanation page |
+
+## Related
+
+- [API Overview](api-overview.md)
+- [API Endpoints](api-endpoints.md)
+- [Backend Runtime Lifecycle](../explanation/backend-runtime-lifecycle.md)
+- [Database Schema](database-schema.md)
+- [Documentation Maintenance](../guides/documentation-maintenance.md)

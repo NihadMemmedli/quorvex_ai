@@ -1,5 +1,10 @@
 # Database Schema
 
+![Database testing dashboard with schema analysis and checks](../assets/ui/database-testing.png)
+
+<p class="caption">Database testing dashboard with schema analysis and checks.</p>
+
+
 All database models in the Quorvex AI platform. Uses SQLModel (SQLAlchemy) with SQLite (development) or PostgreSQL (production).
 
 Source files: `orchestrator/api/models_db.py`, `orchestrator/api/models_auth.py`, `orchestrator/api/db.py`
@@ -17,6 +22,7 @@ Source files: `orchestrator/api/models_db.py`, `orchestrator/api/models_auth.py`
 | `AgentRun` | `agentrun` | Test Execution | Generic AI agent execution record |
 | `ExecutionSettings` | `execution_settings` | Test Execution | Singleton row for execution configuration |
 | `RegressionBatch` | `regression_batches` | Regression | Batch grouping of test runs with aggregated counts |
+| `RecordingSession` | `recording_sessions` | Recording | Browser recording session metadata and generated output |
 | `ExplorationSession` | `exploration_sessions` | Exploration | AI exploration run with discovery counts |
 | `DiscoveredTransition` | `discovered_transitions` | Exploration | Individual state change during exploration |
 | `DiscoveredFlow` | `discovered_flows` | Exploration | Multi-step user flow |
@@ -37,6 +43,22 @@ Source files: `orchestrator/api/models_db.py`, `orchestrator/api/models_auth.py`
 | `StorageStats` | `storage_stats` | Storage | Daily storage statistics |
 | `TestrailCaseMapping` | `testrail_case_mappings` | TestRail | Local spec to TestRail case mapping |
 | `TestrailRunMapping` | `testrail_run_mappings` | TestRail | Batch to TestRail run mapping |
+| `JiraIssueMapping` | `jira_issue_mappings` | Jira | Test run to Jira issue mapping |
+
+Additional current model groups in `models_db.py`:
+
+| Group | Tables |
+|-------|--------|
+| Agent definitions | `agent_tool_definitions`, `agent_definitions` |
+| Custom workflows | `workflow_definitions`, `workflow_definition_revisions`, `workflow_runs`, `workflow_run_steps`, `workflow_schedules`, `workflow_schedule_executions`, `workflow_events`, `workflow_notifications`, `workflow_step_types` |
+| Browser exploration memory | `browser_page_states`, `browser_elements`, `browser_transitions`, `browser_frontier_items`, `browser_state_clusters`, `discovered_flow_reviews`, `discovered_issues` |
+| Specialized testing | `load_test_runs`, `security_scan_runs`, `security_findings`, `db_connections`, `db_test_runs`, `db_test_checks`, `openapi_import_history` |
+| LLM testing | `llm_providers`, `llm_test_runs`, `llm_test_results`, `llm_comparison_runs`, `llm_datasets`, `llm_dataset_cases`, `llm_dataset_versions`, `llm_schedules`, `llm_schedule_executions`, `llm_spec_versions`, `llm_prompt_iterations` |
+| Scheduling | `cron_schedules`, `schedule_executions` |
+| Autonomous missions | `autonomous_missions`, `autonomous_mission_runs`, `autonomous_agent_work_items`, `autonomous_agent_events`, `autonomous_findings`, `autonomous_test_proposals`, `autonomous_approvals` |
+| CI and PR intelligence | `ci_pipeline_mappings`, `ci_workflow_change_requests`, `ci_audit_events`, `ci_test_subsets`, `ci_test_subset_items`, `pr_impact_analyses`, `pr_quality_gate_runs`, `pr_changed_files`, `pr_selected_tests`, `test_impact_maps`, `test_execution_history`, `repo_index_snapshots`, `repo_indexed_files` |
+| Assistant and memory | `chat_conversations`, `chat_messages`, `chat_message_feedback`, `agent_memories`, `memory_injection_events`, `memory_feedback_events`, `memory_feedback_aggregates`, `memory_graph_nodes`, `memory_graph_edges` |
+| AutoPilot | `autopilot_sessions`, `autopilot_phases`, `autopilot_questions`, `autopilot_spec_tasks`, `autopilot_test_tasks` |
 
 ## Multi-Tenancy Models
 
@@ -59,7 +81,7 @@ Source files: `orchestrator/api/models_db.py`, `orchestrator/api/models_auth.py`
 | `id` | int | PK | Auto-increment |
 | `project_id` | string | FK (projects) | Project reference |
 | `user_id` | string | FK (users) | User reference |
-| `role` | string | -- | `owner`, `admin`, `editor`, `viewer` |
+| `role` | string | -- | `admin`, `editor`, `viewer` |
 | `granted_by` | string | FK (users) | Who granted membership |
 | `granted_at` | datetime | -- | When membership was granted |
 
@@ -244,6 +266,13 @@ Unique constraint: `(project_id, user_id)`
 | `category` | string | -- | Functional category |
 | `priority` | string | -- | `low`, `medium`, `high`, `critical` |
 | `status` | string | -- | `draft`, `approved`, `implemented`, `tested` |
+| `truth_state` | string | -- | Requirement truth/review state such as candidate, confirmed, or rejected |
+| `source_type` | string | -- | Origin such as manual, exploration, or PRD |
+| `confidence` | float | -- | Generation or extraction confidence |
+| `uncertainty_reason` | string | -- | Explanation when the requirement needs review |
+| `confirmed_by` / `confirmed_at` | string / datetime | -- | Confirmation audit fields |
+| `rejected_by` / `rejected_at` | string / datetime | -- | Rejection audit fields |
+| `title_embedding_json` | JSON string | -- | Cached embedding used for deduplication |
 | `acceptance_criteria` | JSON | -- | List of acceptance criteria |
 | `source_session_id` | string | FK (exploration_sessions) | Source exploration |
 

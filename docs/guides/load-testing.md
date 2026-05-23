@@ -1,5 +1,10 @@
 # How to Run Load Tests
 
+![Load testing dashboard with scenarios, scripts, and run results](../assets/ui/load-testing.png)
+
+<p class="caption">Load testing dashboard with scenarios, scripts, and run results.</p>
+
+
 Run K6-based load tests with AI-generated scripts, distributed execution across worker containers, real-time metrics monitoring, and run comparison.
 
 ## Overview
@@ -171,10 +176,12 @@ This prevents resource contention between load tests and browser-based operation
 | GET | `/load-testing/specs/{folder}` | Get spec details |
 | PUT | `/load-testing/specs/{folder}` | Update spec |
 | DELETE | `/load-testing/specs/{folder}` | Delete spec |
-| POST | `/load-testing/specs/{folder}/generate` | Generate K6 script |
-| POST | `/load-testing/specs/{folder}/run` | Execute load test |
+| POST | `/load-testing/generate` | Generate K6 script |
+| POST | `/load-testing/run` | Execute load test |
+| POST | `/load-testing/run-from-spec` | Execute load test from a saved spec |
 | GET | `/load-testing/runs` | List runs |
-| GET | `/load-testing/runs/{run_id}/status` | Real-time status with metrics |
+| GET | `/load-testing/runs/{run_id}` | Run details with metrics |
+| GET | `/load-testing/runs/{run_id}/timeseries` | Time-series metrics for one run |
 | POST | `/load-testing/runs/{run_id}/stop` | Cancel running test |
 | GET | `/load-testing/runs/compare` | Compare multiple runs |
 | GET | `/load-testing/system-limits` | Resource caps and worker status |
@@ -215,6 +222,8 @@ Confirm load testing works:
 ## Related Guides
 
 - [API Testing](./api-testing.md) -- functional API test generation
+- [Specialized Testing Architecture](../explanation/specialized-testing-architecture.md) -- how load testing differs from UI tests
+- [Queue and Worker Architecture](../explanation/queue-worker-architecture.md) -- distributed K6 worker model
 - [Security Testing](./security-testing.md) -- security scan your endpoints
 - [Scheduling](./scheduling.md) -- automate load tests on a schedule
 - [Deployment](./deployment.md) -- scale K6 workers in production

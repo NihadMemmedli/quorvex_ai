@@ -1,5 +1,10 @@
 # Frequently Asked Questions
 
+![Quorvex dashboard overview for common documentation questions](../assets/ui/dashboard-overview.png)
+
+<p class="caption">Quorvex dashboard overview for common documentation questions.</p>
+
+
 ## General
 
 ### What is Quorvex AI?
@@ -30,10 +35,11 @@ MIT License. Free to use, modify, and distribute for personal and commercial pur
 | Requirement | Minimum |
 |-------------|---------|
 | Python | 3.10+ |
-| Node.js | 18+ |
+| Node.js | 20+ |
 | Playwright browsers | Installed via `make setup` |
 | Database | SQLite (default) or PostgreSQL (production) |
 | Docker | Optional (required for production, K6 workers, ZAP) |
+| Docker Compose | v2 |
 | Redis | Optional (distributed queues, rate limiting) |
 
 ## Setup & Configuration

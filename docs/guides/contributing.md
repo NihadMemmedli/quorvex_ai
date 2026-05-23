@@ -1,10 +1,15 @@
 # How to Contribute to Quorvex AI
 
+![Projects dashboard showing workspace context for contributors](../assets/ui/projects.png)
+
+<p class="caption">Projects dashboard showing workspace context for contributors.</p>
+
+
 Set up a development environment, follow code style conventions, run tests, and submit pull requests.
 
 ## Prerequisites
 
-- Git, Python 3.10+, Node.js 18+, npm 9+
+- Git, Python 3.10+, Node.js 20+, npm 9+
 - A GitHub account with a fork of the repository
 - Docker (optional, for PostgreSQL and production testing)
 
@@ -112,6 +117,8 @@ If you changed a pipeline stage, run end-to-end:
 python orchestrator/cli.py specs/your-test.md
 ```
 
+If you changed public behavior, update the matching docs in the same PR. Start with [Documentation Maintenance](./documentation-maintenance.md) for the API, dashboard, CLI, environment variable, and architecture surfaces that commonly drift.
+
 ## Step 7: Write Clear Commit Messages
 
 Follow [Conventional Commits](https://www.conventionalcommits.org/):
@@ -175,11 +182,13 @@ Before submitting your PR:
 2. `make test` passes all tests
 3. `make dev` starts and the dashboard loads
 4. If you changed a pipeline stage, run a test spec end-to-end
-5. Your commit messages follow conventional commits format
+5. If you changed public behavior, the docs are updated and `make docs-check` passes
+6. Your commit messages follow conventional commits format
 
 ## Related Guides
 
 - [Extending](./extending.md) -- add new features to the codebase
+- [Documentation Maintenance](./documentation-maintenance.md) -- keep docs aligned with code changes
 - [Getting Started](../tutorials/getting-started.md) -- development setup
 - [Pipeline Modes](./pipeline-modes.md) -- understand the architecture
 - [Troubleshooting](./troubleshooting.md) -- fix common dev issues

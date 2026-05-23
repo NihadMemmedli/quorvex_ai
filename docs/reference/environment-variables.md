@@ -1,5 +1,10 @@
 # Environment Variables
 
+![Settings dashboard for environment-backed configuration](../assets/ui/settings.png)
+
+<p class="caption">Settings dashboard for environment-backed configuration.</p>
+
+
 Complete reference for all environment variables used by Quorvex AI. Configure in `.env` (local development) or `.env.prod` (production).
 
 ## AI / LLM Configuration
@@ -16,6 +21,7 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | `glm-5-turbo` | Yes | Claude Code / Agent SDK Sonnet alias target |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `glm-4.5-air` | No | Claude Code / Agent SDK Haiku alias target |
 | `ANTHROPIC_CHAT_MODEL` | `glm-5-turbo` | No | Optional chat model override for assistant/chat features |
+| `ANTHROPIC_ENABLE_CHAT_THINKING` | `false` | No | Enable provider-specific chat reasoning controls when supported |
 | `API_TIMEOUT_MS` | `3000000` | No | Claude Code API timeout used by the Z.ai GLM Coding Plan |
 | `OPENAI_API_KEY` | -- | No | OpenAI API key for memory system embeddings |
 | `OPENAI_BASE_URL` | -- | No | Optional OpenAI-compatible endpoint for embedding/chat clients |
@@ -25,7 +31,7 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `DATABASE_URL` | `sqlite:///./test.db` | No | Database connection string. PostgreSQL: `postgresql://user:pass@host:port/db` |
+| `DATABASE_URL` | `sqlite:///.../orchestrator/data/playwright_agent.db` | No | Database connection string. PostgreSQL: `postgresql://user:pass@host:port/db` |
 | `POSTGRES_USER` | `playwright` | Prod only | PostgreSQL username (Docker Compose) |
 | `POSTGRES_PASSWORD` | -- | Prod only | PostgreSQL password (Docker Compose) |
 | `POSTGRES_DB` | `playwright_agent` | Prod only | PostgreSQL database name |
@@ -34,7 +40,7 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `JWT_SECRET_KEY` | `dev-secret-key-change-in-production` | Prod only | Secret key for JWT token signing. Generate: `openssl rand -hex 32` |
+| `JWT_SECRET_KEY` | -- | Yes | Secret key for JWT token signing. Generate: `openssl rand -hex 32`. Some local commands set a temporary development value, but the API process requires this variable. |
 | `REQUIRE_AUTH` | `false` | No | Enable authentication enforcement |
 | `ALLOW_REGISTRATION` | `true` | No | Allow new user registration |
 | `REDIS_URL` | -- | No | Redis URL for distributed rate limiting. Format: `redis://host:6379/0` |
@@ -82,6 +88,7 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 |----------|---------|----------|-------------|
 | `AGENT_TIMEOUT_SECONDS` | `1800` | No | Default timeout for all agents (30 minutes) |
 | `EXPLORATION_TIMEOUT_SECONDS` | `1800` | No | Timeout for the exploration agent |
+| `PRD_TIMEOUT_SECONDS` | `600` | No | Timeout for PRD processing jobs |
 | `PLANNER_TIMEOUT_SECONDS` | `1800` | No | Timeout for the planner agent |
 | `GENERATOR_TIMEOUT_SECONDS` | `1800` | No | Timeout for the generator agent |
 
@@ -100,11 +107,16 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `MEMORY_ENABLED` | `true` | No | Enable/disable the memory system |
+| `MEMORY_PROJECT_ID` | -- | No | Project ID passed to pipeline subprocesses for memory isolation |
+| `CHROMADB_HOST` | `localhost` | No | ChromaDB host when using a networked Chroma deployment |
+| `CHROMADB_PORT` | `8000` | No | ChromaDB port when using a networked Chroma deployment |
 | `CHROMADB_PERSIST_DIRECTORY` | `./data/chromadb` | No | Directory for ChromaDB vector store data |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | No | OpenAI embedding model for semantic search |
 | `EMBEDDING_DIMENSION` | `1536` | No | Embedding vector dimension |
 | `MEMORY_RETENTION_DAYS` | `365` | No | Days to retain memory records |
 | `MEMORY_COLLECTION_PREFIX` | `test_automation` | No | Prefix for ChromaDB collection names |
+| `MEMORY_CONSOLIDATION_LLM` | `false` | No | Enable optional LLM extraction for agent memory consolidation |
+| `MEMORY_CONSOLIDATION_MODEL` | `OPENAI_MODEL_ID` or `gpt-4o-mini` | No | Model used when LLM memory consolidation is enabled |
 | `COVERAGE_ENABLED` | `true` | No | Enable coverage analysis |
 | `COVERAGE_THRESHOLD` | `0.8` | No | Target coverage threshold (0.0-1.0) |
 
@@ -173,6 +185,8 @@ When `VNC_ENABLED=true`, parallel browser execution is limited to 1 instance.
 | `TEMPORAL_ADDRESS` | configured in app settings | Autonomous missions with Temporal | Temporal frontend address |
 | `TEMPORAL_NAMESPACE` | configured in app settings | No | Temporal namespace for autonomous mission workflows |
 | `TEMPORAL_TASK_QUEUE` | configured in app settings | No | Task queue consumed by the autonomous mission worker |
+| `TEMPORAL_WORKFLOW_TASK_QUEUE` | `quorvex-custom-workflows` | No | Task queue consumed by custom workflow workers |
+| `TEMPORAL_UI_URL` | -- | No | Internal or external Temporal UI URL used by backend status surfaces |
 
 Temporal-backed missions support durable long-running and recurring autonomous agent workflows. If Temporal is not reachable, mission APIs report that durable orchestration is unavailable.
 
@@ -181,6 +195,9 @@ Temporal-backed missions support durable long-running and recurring autonomous a
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8001` | No | Backend API URL for the frontend |
+| `QUORVEX_PUBLIC_API_URL` | -- | Docker prod | Public backend URL passed through production Compose to `NEXT_PUBLIC_API_URL` for the frontend container |
+| `INTERNAL_API_URL` | -- | No | Server-side backend URL used by Next.js routes and the backend proxy |
+| `NEXT_PUBLIC_TEMPORAL_UI_URL` | -- | No | Public Temporal UI URL displayed by frontend features |
 | `ALLOWED_ORIGINS` | `http://localhost:3000` | No | CORS allowed origins (comma-separated) |
 
 ## Test Credentials
@@ -209,6 +226,70 @@ Custom application credentials can be added as any `KEY=VALUE` pair in `.env` an
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `LOG_LEVEL` | `INFO` | No | Python logging level |
+
+## Runtime and Advanced Internals
+
+These variables are read by source code paths but are usually set by Docker Compose, CI, queue workers, or advanced integrations rather than by first-time local users.
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `AGENTIC_STABILITY_RERUNS` | feature default | No | Number of stability reruns used by selected agentic validation paths |
+| `AGENT_TIMEOUT_MINUTES` | feature default | No | Minute-based timeout accepted by legacy agent paths |
+| `AGENT_WORKER_ID` | generated | No | Identifier for an agent worker process |
+| `API_TOKEN` | -- | No | Generic API token accepted by selected automation scripts |
+| `APPIUM_HOST` | Appium default | No | Appium host override for mobile tooling |
+| `APPIUM_LOG_LEVEL` | Appium default | No | Appium server log-level override |
+| `APPIUM_MCP_ON_CLIENT_DISCONNECT` | Appium default | No | Appium MCP disconnect behavior |
+| `APPIUM_PATH` | Appium default | No | Appium executable path override |
+| `APPIUM_PORT` | Appium default | No | Appium port override |
+| `APPIUM_PROTOCOL` | Appium default | No | Appium protocol override |
+| `APP_BASE_URL` | -- | No | Frontend/application base URL fallback for generated links |
+| `APP_LOGIN_EMAIL` | -- | No | App login email used by selected generated or scripted flows |
+| `APP_LOGIN_PASSWORD` | -- | No | App login password used by selected generated or scripted flows |
+| `ASSISTANT_ACTION_SECRET` | -- | No | Secret used to authenticate assistant action requests |
+| `AUTH_SECRET` | -- | No | Auth secret fallback for assistant/server-side routes |
+| `AUTH_SESSIONS_DIR` | `/app/data/auth_sessions` | No | Directory for persisted browser auth sessions |
+| `AUTONOMOUS_API_BASE_URL` | backend base URL | No | API URL used by autonomous mission activities when calling back into the backend |
+| `BACKUP_DIR` | backup script default | No | Local backup directory override |
+| `BROWSER_POOL_TYPE` | `in_memory` | No | Browser pool implementation selector |
+| `CLAUDE_CONFIG_DIR` | Claude SDK default | No | Claude configuration directory override for native generator paths |
+| `DOCKER_CONTAINER` | -- | No | Marks execution inside a Docker container for environment defaults |
+| `ENVIRONMENT` | `development` | No | Runtime environment name |
+| `EXPLORATION_TIMEOUT_MINUTES` | feature default | No | Minute-based timeout accepted by legacy exploration paths |
+| `FRONTEND_URL` | -- | No | Frontend URL fallback for generated links |
+| `GITHUB_EVENT_NAME` | GitHub Actions | No | GitHub event name used by CI-aware tooling |
+| `HEALER_ATTEMPT_TIMEOUT_SECONDS` | feature default | No | Timeout for a single healing attempt |
+| `HEALER_TIMEOUT_SECONDS` | feature default | No | Overall healing timeout |
+| `K6_GENERATOR_TIMEOUT_SECONDS` | feature default | No | K6 generation timeout |
+| `MAX_RUN_AGE_MINUTES` | `120` | No | Age after which stale running jobs can be recovered |
+| `MEMORY_GRAPH_LLM` | `false` | No | Enable optional LLM extraction for memory graph relationships |
+| `MEMORY_GRAPH_LLM_MIN_IMPORTANCE` | feature default | No | Minimum importance threshold for LLM graph extraction |
+| `MEMORY_GRAPH_LLM_MODEL` | provider default | No | Model used for optional memory graph extraction |
+| `MOBILE_PLATFORM` | feature default | No | Mobile target platform for mobile generation paths |
+| `MOBILE_TARGET_URL` | `https://example.com` | No | Default mobile target URL |
+| `NEXTAUTH_SECRET` | -- | No | NextAuth-compatible secret fallback for assistant routes |
+| `OPENAI_MODEL` | provider default | No | OpenAI model fallback used by selected frontend AI routes |
+| `PLAYWRIGHT_AGENT_API_URL` | `http://localhost:8001` | No | Backend URL used by progress reporters and subprocesses |
+| `PLAYWRIGHT_MCP_ARGS` | `--browser chromium` | No | Arguments for the Playwright MCP server |
+| `PLAYWRIGHT_MCP_COMMAND` | -- | No | Command override for the Playwright MCP server |
+| `PLAYWRIGHT_MCP_MIN_VERSION` | `0.0.75` | No | Minimum Playwright MCP package version |
+| `PLAYWRIGHT_MCP_PACKAGE` | derived | No | Package spec for Playwright MCP |
+| `PRD_TIMEOUT_MINUTES` | feature default | No | Minute-based timeout accepted by legacy PRD paths |
+| `PROJECT_ID` | `default` | No | Project scope passed into subprocesses |
+| `PR_NUMBER` | CI context | No | Pull request number used by PR advisor tooling |
+| `QUORVEX_API_TOKEN` | -- | No | API token used by external Quorvex automation |
+| `QUORVEX_API_URL` | -- | No | API URL used by external Quorvex automation |
+| `QUORVEX_PROJECT_ID` | -- | No | Project ID used by external Quorvex automation |
+| `RECORDER_BROWSER_URL` | -- | No | Browser endpoint used by recording features |
+| `RUNS_DIR` | `/app/runs` | No | Run artifact directory override |
+| `SUBSET_MANIFEST` | -- | No | CI test subset manifest path |
+| `SUBSET_MODE` | -- | No | CI test subset selection mode |
+| `USE_AGENT_QUEUE` | `true` | No | Enable Redis-backed agent queue dispatch |
+| `USE_DIRECT_CLI` | `false` | No | Force direct CLI execution instead of SDK path in selected agents |
+| `USE_K6_QUEUE` | `true` | No | Enable Redis-backed K6 queue dispatch |
+| `VNC_PUBLIC_URL` | -- | No | Public VNC URL shown in dashboard contexts |
+| `WEB_BASE_URL` | -- | No | Web base URL fallback for generated links |
+| `WORKER_ID` | generated | No | Generic queue worker identifier |
 
 ## Headless Mode Resolution
 

@@ -1097,6 +1097,30 @@ class DiscoveredFlow(SQLModel, table=True):
         self.postconditions_json = json.dumps(value)
 
 
+class DiscoveredFlowReview(SQLModel, table=True):
+    """Review decision metadata for a discovered flow."""
+
+    __tablename__ = "discovered_flow_reviews"
+    __table_args__ = (
+        Index("ix_discovered_flow_reviews_project_status", "project_id", "review_status"),
+        Index("ix_discovered_flow_reviews_session_status", "session_id", "review_status"),
+        UniqueConstraint("flow_id", name="uq_discovered_flow_reviews_flow_id"),
+        {"extend_existing": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    flow_id: int = Field(foreign_key="discovered_flows.id", index=True)
+    session_id: str = Field(foreign_key="exploration_sessions.id", index=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    review_status: str = Field(default="pending", index=True)  # pending, approved, rejected, generated
+    reviewer: str | None = None
+    comment: str | None = None
+    decided_at: datetime | None = None
+    generated_at: datetime | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class FlowStep(SQLModel, table=True):
     """Steps within a discovered flow"""
 
@@ -1345,6 +1369,14 @@ class Requirement(SQLModel, table=True):
     category: str  # authentication, navigation, crud, validation, etc.
     priority: str = "medium"  # low, medium, high, critical
     status: str = "draft"  # draft, approved, implemented, tested
+    truth_state: str = Field(default="candidate_requirement", index=True)
+    source_type: str = Field(default="manual", index=True)
+    confidence: float = Field(default=0.9)
+    uncertainty_reason: str | None = Field(default=None, sa_column=Column(Text))
+    confirmed_by: str | None = None
+    confirmed_at: datetime | None = None
+    rejected_by: str | None = None
+    rejected_at: datetime | None = None
     acceptance_criteria_json: str = "[]"
     title_embedding_json: str | None = None  # Cached embedding for deduplication
     source_session_id: str | None = Field(default=None, foreign_key="exploration_sessions.id", index=True)
@@ -3646,6 +3678,148 @@ class AgentMemory(SQLModel, table=True):
     last_verified_at: datetime | None = None
     last_used_at: datetime | None = None
     use_count: int = Field(default=0)
+
+
+class MemoryInjectionEvent(SQLModel, table=True):
+    """Audit record of memory context injected into a prompt or agent task."""
+
+    __tablename__ = "memory_injection_events"
+    __table_args__ = (
+        Index("ix_memory_injection_project_created", "project_id", "created_at"),
+        Index("ix_memory_injection_stage_created", "stage", "created_at"),
+        Index("ix_memory_injection_source", "source_type", "source_id"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    actor_type: str = Field(index=True)
+    stage: str = Field(index=True)
+    source_type: str | None = Field(default=None, index=True)
+    source_id: str | None = Field(default=None, index=True)
+    query: str = Field(default="", sa_column=Column(Text))
+    memory_ids_json: str = Field(default="[]", sa_column=Column(Text))
+    context_preview: str = Field(default="", sa_column=Column(Text))
+    outcome: str = Field(default="injected", index=True)
+    extra_data: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+    @property
+    def memory_ids(self) -> list[str]:
+        try:
+            value = json.loads(self.memory_ids_json or "[]")
+            return [str(item) for item in value] if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @memory_ids.setter
+    def memory_ids(self, value: list[str]):
+        self.memory_ids_json = json.dumps(value)
+
+
+class MemoryFeedbackEvent(SQLModel, table=True):
+    """Durable user/system feedback attributed to an injected memory."""
+
+    __tablename__ = "memory_feedback_events"
+    __table_args__ = (
+        Index("ix_memory_feedback_project_created", "project_id", "created_at"),
+        Index("ix_memory_feedback_memory", "memory_id"),
+        Index("ix_memory_feedback_injection", "injection_event_id"),
+        Index("ix_memory_feedback_source", "source"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    memory_id: str = Field(foreign_key="agent_memories.id", index=True)
+    injection_event_id: str | None = Field(default=None, foreign_key="memory_injection_events.id", index=True)
+    conversation_id: str | None = Field(default=None, foreign_key="chat_conversations.id", index=True)
+    message_index: int | None = None
+    rating: str = Field(index=True)
+    signal: float = Field(default=0.0)
+    source: str = Field(default="manual_dashboard", index=True)
+    comment: str | None = Field(default=None, sa_column=Column(Text))
+    user_id: str | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+
+class MemoryFeedbackAggregate(SQLModel, table=True):
+    """Project-scoped aggregate feedback signal for graph scoring."""
+
+    __tablename__ = "memory_feedback_aggregates"
+    __table_args__ = (
+        Index("ix_memory_feedback_aggregate_project_score", "project_id", "feedback_score"),
+        Index("ix_memory_feedback_aggregate_memory", "memory_id"),
+        UniqueConstraint("project_key", "memory_id", name="uq_memory_feedback_aggregate_project_memory"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    project_key: str = Field(default="__global__", index=True)
+    memory_id: str = Field(foreign_key="agent_memories.id", index=True)
+    positive_feedback_count: int = Field(default=0)
+    negative_feedback_count: int = Field(default=0)
+    feedback_score: float = Field(default=0.0)
+    last_feedback_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class MemoryGraphNode(SQLModel, table=True):
+    """Typed node in the agent memory knowledge graph."""
+
+    __tablename__ = "memory_graph_nodes"
+    __table_args__ = (
+        Index("ix_memory_graph_nodes_project_type", "project_id", "node_type"),
+        Index("ix_memory_graph_nodes_project_status", "project_id", "status"),
+        Index("ix_memory_graph_nodes_memory", "memory_id"),
+        UniqueConstraint("project_id", "node_type", "entity_key", name="uq_memory_graph_node_identity"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    node_type: str = Field(index=True)
+    label: str = Field(sa_column=Column(Text))
+    memory_id: str | None = Field(default=None, foreign_key="agent_memories.id", index=True)
+    entity_key: str = Field(index=True)
+    confidence: float = Field(default=0.7)
+    status: str = Field(default="active", index=True)
+    extra_data: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class MemoryGraphEdge(SQLModel, table=True):
+    """Typed relationship between knowledge graph nodes."""
+
+    __tablename__ = "memory_graph_edges"
+    __table_args__ = (
+        Index("ix_memory_graph_edges_project_type", "project_id", "relationship_type"),
+        Index("ix_memory_graph_edges_source", "source_node_id"),
+        Index("ix_memory_graph_edges_target", "target_node_id"),
+        Index("ix_memory_graph_edges_evidence", "evidence_memory_id"),
+        UniqueConstraint(
+            "project_id",
+            "source_node_id",
+            "target_node_id",
+            "relationship_type",
+            name="uq_memory_graph_edge_identity",
+        ),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    source_node_id: str = Field(foreign_key="memory_graph_nodes.id", index=True)
+    target_node_id: str = Field(foreign_key="memory_graph_nodes.id", index=True)
+    relationship_type: str = Field(index=True)
+    weight: float = Field(default=0.7)
+    evidence_memory_id: str | None = Field(default=None, foreign_key="agent_memories.id", index=True)
+    status: str = Field(default="active", index=True)
+    extra_data: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 # ========== Auto Pilot Pipeline Models ==========

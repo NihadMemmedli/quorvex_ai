@@ -6,7 +6,7 @@ import logging
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import or_
@@ -243,6 +243,7 @@ class AgentMemoryService:
                 session.commit()
                 session.refresh(existing)
                 self._index_memory(existing)
+                self._sync_knowledge_graph(existing)
                 return existing
 
             memory = AgentMemory(
@@ -272,6 +273,7 @@ class AgentMemoryService:
             session.commit()
             session.refresh(memory)
             self._index_memory(memory)
+            self._sync_knowledge_graph(memory)
             if owns_session:
                 session.expunge(memory)
             return memory
@@ -565,6 +567,7 @@ class AgentMemoryService:
             session.commit()
             session.refresh(memory)
             self._index_memory(memory)
+            self._sync_knowledge_graph(memory)
             session.expunge(memory)
             return memory
 
@@ -579,6 +582,69 @@ class AgentMemoryService:
 
     def verify(self, memory_id: str, *, project_id: str | None = None) -> AgentMemory | None:
         return self.update_memory(memory_id, project_id=project_id, last_verified_at=datetime.utcnow())
+
+    def verify_stale(
+        self,
+        *,
+        project_id: str | None = None,
+        older_than_days: int = 30,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Best-effort verification pass for stale memories.
+
+        This does not pretend to prove all facts. It verifies URL-backed memories
+        against the application graph when possible and otherwise marks stale
+        high-impact memories for human review instead of injecting them blindly.
+        """
+
+        cutoff = datetime.utcnow() - timedelta(days=max(1, older_than_days))
+        limit = max(1, min(limit, 200))
+        stats = {"checked": 0, "verified": 0, "review_required": 0, "confidence_reduced": 0}
+        updated: list[AgentMemory] = []
+
+        with self._session() as session:
+            statement = select(AgentMemory).where(AgentMemory.status == "active")
+            statement = statement.where(
+                or_(AgentMemory.last_verified_at.is_(None), AgentMemory.last_verified_at < cutoff)
+            )
+            if project_id:
+                statement = statement.where(AgentMemory.project_id == project_id)
+            memories = session.exec(
+                statement.order_by(AgentMemory.importance.desc(), AgentMemory.updated_at.asc()).limit(limit)
+            ).all()
+
+            known_urls = self._known_project_urls(project_id)
+            now = datetime.utcnow()
+            for memory in memories:
+                stats["checked"] += 1
+                content = f"{memory.content}\n{memory.summary or ''}"
+                urls = re.findall(r"https?://[^\s\"'<>),]+", content)
+                if urls and known_urls:
+                    if any(url.rstrip(".,;:!?") in known_urls for url in urls):
+                        memory.last_verified_at = now
+                        stats["verified"] += 1
+                    else:
+                        memory.review_required = True
+                        memory.confidence = max(0.25, float(memory.confidence or 0.7) - 0.15)
+                        stats["review_required"] += 1
+                        stats["confidence_reduced"] += 1
+                elif memory.importance >= 0.75 or memory.confidence < 0.65:
+                    memory.review_required = True
+                    stats["review_required"] += 1
+                else:
+                    memory.last_verified_at = now
+                    stats["verified"] += 1
+                memory.updated_at = now
+                session.add(memory)
+
+            session.commit()
+            for memory in memories:
+                session.refresh(memory)
+                session.expunge(memory)
+                updated.append(memory)
+
+        stats["memories"] = updated
+        return stats
 
     def archive(self, memory_id: str, *, project_id: str | None = None) -> AgentMemory | None:
         return self._set_status(memory_id, "archived", project_id=project_id)
@@ -596,6 +662,12 @@ class AgentMemoryService:
             get_vector_store(project_id=project_id or "default").delete_agent_memory(memory_id)
         except Exception:
             logger.debug("Failed to delete agent memory from vector index", exc_info=True)
+        try:
+            from .knowledge_graph import get_memory_knowledge_graph_service
+
+            get_memory_knowledge_graph_service().mark_memory_deleted(memory_id, project_id=project_id)
+        except Exception:
+            logger.debug("Failed to mark memory deleted in knowledge graph", exc_info=True)
         return True
 
     def _set_status(self, memory_id: str, status: str, *, project_id: str | None = None) -> AgentMemory | None:
@@ -608,6 +680,7 @@ class AgentMemoryService:
             session.add(memory)
             session.commit()
             session.refresh(memory)
+            self._sync_knowledge_graph(memory)
             session.expunge(memory)
             return memory
 
@@ -630,6 +703,30 @@ class AgentMemoryService:
             get_vector_store(project_id=memory.project_id or "default").add_agent_memory(memory.id, text, metadata)
         except Exception:
             logger.debug("Failed to index agent memory", exc_info=True)
+
+    def _sync_knowledge_graph(self, memory: AgentMemory) -> None:
+        try:
+            from .knowledge_graph import get_memory_knowledge_graph_service
+
+            get_memory_knowledge_graph_service().upsert_memory_graph(memory)
+        except Exception:
+            logger.debug("Failed to sync agent memory knowledge graph", exc_info=True)
+
+    def _known_project_urls(self, project_id: str | None) -> set[str]:
+        if not project_id:
+            return set()
+        try:
+            from .manager import get_memory_manager
+
+            graph = get_memory_manager(project_id=project_id).graph_store.graph
+            urls = set()
+            for node in graph.nodes():
+                attrs = graph.nodes[node]
+                if attrs.get("type") == "page" and attrs.get("url"):
+                    urls.add(str(attrs["url"]).rstrip(".,;:!?"))
+            return urls
+        except Exception:
+            return set()
 
 
 def get_agent_memory_service(session: Session | None = None) -> AgentMemoryService:

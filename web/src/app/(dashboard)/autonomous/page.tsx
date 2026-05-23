@@ -77,6 +77,14 @@ interface Mission {
     active_work_items?: unknown;
     blocked_work_items?: unknown;
     coverage_summary?: unknown;
+    safety_summary?: {
+        environment?: string;
+        allowed_domains?: string[];
+        tool_profile?: string;
+        credential_scope?: string;
+        write_policy?: string;
+        approval_policy?: string;
+    };
     created_at: string;
 }
 
@@ -90,6 +98,10 @@ interface MissionForm {
     max_runtime_minutes: number;
     max_iterations: number;
     max_llm_budget_usd: number;
+    environment: string;
+    allowed_domains: string;
+    tool_profile: string;
+    credential_scope: string;
 }
 
 interface FormErrors {
@@ -120,6 +132,61 @@ interface TestProposal {
     approval_status: string;
     generated_spec_content?: string | null;
     materialized_file_path?: string | null;
+    source_type?: string | null;
+    source_id?: string | null;
+    source_metadata?: Record<string, unknown> | null;
+    review_context?: {
+        provenance?: {
+            source_type?: string | null;
+            source_id?: string | null;
+            finding_id?: string | null;
+            coverage_gap_id?: number | null;
+            confidence?: number | string | null;
+            evidence?: Record<string, unknown>;
+        };
+        duplicate?: {
+            has_warning?: boolean;
+            existing_file_conflict?: boolean;
+            blocking?: boolean;
+            severity?: 'none' | 'warning' | 'blocking' | string;
+            matches?: Array<{
+                kind?: string;
+                id?: string;
+                path?: string | null;
+                title?: string;
+                status?: string;
+                suggested_file_path?: string | null;
+                score?: number;
+                blocking?: boolean;
+                reasons?: string[];
+            }>;
+            candidates?: Array<{
+                id: string;
+                kind?: string;
+                path?: string | null;
+                title: string;
+                status?: string;
+                suggested_file_path?: string | null;
+                score?: number;
+                blocking?: boolean;
+                reasons?: string[];
+            }>;
+        };
+        staleness?: {
+            is_stale?: boolean;
+            reason?: string | null;
+            status?: 'fresh' | 'needs_review' | 'stale' | string;
+            reasons?: Array<{
+                source?: string;
+                message?: string;
+                confidence?: number;
+                entity_id?: string | number;
+                stale?: boolean;
+            }>;
+            last_checked_at?: string | null;
+        };
+        merge_gate?: string;
+    };
     created_at?: string | null;
 }
 
@@ -156,6 +223,119 @@ interface AgentEvent {
     created_at: string;
 }
 
+interface AuditWorkItem {
+    id?: string | null;
+    role?: string | null;
+    title?: string | null;
+    objective?: string | null;
+    status?: string | null;
+    output_preview?: string | null;
+    review_decision?: string | null;
+    review_reason?: string | null;
+    reviewed_by?: string | null;
+    reviewed_at?: string | null;
+    result?: Record<string, unknown> | null;
+    progress?: Record<string, unknown> | null;
+    created_at?: string | null;
+    updated_at?: string | null;
+}
+
+interface AuditRequirement {
+    id?: string | number | null;
+    req_code?: string | null;
+    title?: string | null;
+    truth_state?: string | null;
+    confidence?: number | string | null;
+    uncertainty_reason?: string | null;
+    confirmed_by?: string | null;
+    confirmed_at?: string | null;
+    rejected_by?: string | null;
+    rejected_at?: string | null;
+}
+
+interface ProposalAudit {
+    proposal: TestProposal;
+    finding?: AppChangeFinding | null;
+    source_work_item?: AuditWorkItem | null;
+    revision_chain?: AuditWorkItem[];
+    linked_requirement?: AuditRequirement | null;
+    review_events?: AgentEvent[];
+    timeline: Array<{
+        type: string;
+        at?: string | null;
+        message: string;
+        payload?: Record<string, unknown> | null;
+    }>;
+}
+
+interface AppChangeFinding {
+    id?: string | number | null;
+    title?: string | null;
+    summary?: string | null;
+    description?: string | null;
+    source_type?: string | null;
+    change_type?: string | null;
+    risk_level?: string | null;
+    test_value?: string | number | boolean | Record<string, unknown> | null;
+    uncertainty_reason?: string | null;
+    category?: string | null;
+    status?: string | null;
+    severity?: string | null;
+    confidence?: number | string | null;
+    requirement_id?: string | number | null;
+    requirement?: string | Record<string, unknown> | null;
+    requirement_title?: string | null;
+    truth_state?: string | null;
+    test_proposal_id?: string | null;
+    linked_proposal_id?: string | null;
+    proposal_id?: string | null;
+    test_proposal_status?: string | null;
+    proposal_status?: string | null;
+    test_proposal?: Partial<TestProposal> | null;
+    proposal?: Partial<TestProposal> | null;
+    memory_delta?: Record<string, unknown> | null;
+    app_change?: Record<string, unknown> | null;
+    evidence?: Record<string, unknown> | null;
+    created_at?: string | null;
+}
+
+interface AppChangeGroup {
+    key: string;
+    label: string;
+    findings: AppChangeFinding[];
+}
+
+interface TeamTimelineItem {
+    id?: string | null;
+    work_item_id?: string | null;
+    mission_id?: string | null;
+    role?: string | null;
+    owner_agent?: string | null;
+    title?: string | null;
+    summary?: string | null;
+    status?: string | null;
+    latest_event?: string | Record<string, unknown> | null;
+    output_preview?: string | null;
+    blocker?: string | null;
+    blocked_reason?: string | null;
+    artifacts_count?: number | null;
+    artifacts?: Array<Record<string, unknown>> | null;
+    progress?: Record<string, unknown> | null;
+    result?: Record<string, unknown> | null;
+    review_decision?: string | null;
+    review_reason?: string | null;
+    reviewed_at?: string | null;
+    reviewed_by?: string | null;
+    is_revision?: boolean | null;
+    revision_of_work_item_id?: string | null;
+    revision_work_item_id?: string | null;
+    revision_attempt?: string | number | null;
+    review?: Record<string, unknown> | null;
+    review_metadata?: Record<string, unknown> | null;
+    updated_at?: string | null;
+    created_at?: string | null;
+}
+
 type LiveTab = 'live' | 'browser' | 'events' | 'output' | 'runs';
 
 const DEFAULT_FORM: MissionForm = {
@@ -168,12 +348,22 @@ const DEFAULT_FORM: MissionForm = {
     max_runtime_minutes: 30,
     max_iterations: 0,
     max_llm_budget_usd: 5,
+    environment: 'staging',
+    allowed_domains: '',
+    tool_profile: 'role_based',
+    credential_scope: 'project',
 };
 
-const PROPOSAL_FILTERS = ['pending', 'approved', 'materialized', 'rejected', 'all'] as const;
+const PROPOSAL_FILTERS = ['pending', 'approved', 'materialized', 'rejected', 'all', 'duplicate_risk', 'blocking', 'stale', 'needs_review'] as const;
 type ProposalFilter = typeof PROPOSAL_FILTERS[number];
 
+const APP_CHANGE_STATUS_FILTERS = ['active', 'awaiting_approval', 'approved', 'rejected', 'resolved', 'all'] as const;
+type AppChangeStatusFilter = typeof APP_CHANGE_STATUS_FILTERS[number];
+
 const proposalFilterSet = new Set<string>(PROPOSAL_FILTERS);
+const proposalStatusFilters = new Set<string>(['pending', 'approved', 'materialized', 'rejected']);
+const proposalReviewFilters = new Set<string>(['duplicate_risk', 'blocking', 'stale', 'needs_review']);
+const hiddenAppChangeStatuses = new Set<string>(['resolved']);
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
     month: 'short',
@@ -300,6 +490,92 @@ function normalizeProposals(data: unknown): TestProposal[] {
     return [];
 }
 
+function normalizeAppChanges(data: unknown): AppChangeGroup[] {
+    if (!data) return [];
+    if (Array.isArray(data)) return groupAppChangeFindings(data as AppChangeFinding[]);
+    if (typeof data !== 'object') return [];
+
+    const payload = data as {
+        groups?: unknown;
+        grouped?: unknown;
+        items?: unknown;
+        findings?: unknown;
+        app_changes?: unknown;
+        changes?: unknown;
+        memory_deltas?: unknown;
+    };
+
+    if (Array.isArray(payload.groups)) {
+        return payload.groups.flatMap((group, index) => {
+            if (!group || typeof group !== 'object') return [];
+            const record = group as { key?: unknown; label?: unknown; findings?: unknown; items?: unknown; changes?: unknown };
+            const findings = record.findings || record.items || record.changes;
+            if (!Array.isArray(findings)) return [];
+            const key = String(record.key || record.label || `group-${index}`);
+            return [{
+                key,
+                label: String(record.label || record.key || key).replace(/_/g, ' '),
+                findings: findings as AppChangeFinding[],
+            }];
+        });
+    }
+
+    if (payload.grouped && typeof payload.grouped === 'object' && !Array.isArray(payload.grouped)) {
+        return Object.entries(payload.grouped as Record<string, unknown>).flatMap(([key, value]) => {
+            if (!Array.isArray(value)) return [];
+            return [{
+                key,
+                label: key.replace(/_/g, ' '),
+                findings: value as AppChangeFinding[],
+            }];
+        });
+    }
+
+    const findings = [payload.items, payload.findings, payload.app_changes, payload.changes, payload.memory_deltas]
+        .find(Array.isArray) as AppChangeFinding[] | undefined;
+    return groupAppChangeFindings(findings || []);
+}
+
+function groupAppChangeFindings(findings: AppChangeFinding[]): AppChangeGroup[] {
+    const groups = new Map<string, AppChangeFinding[]>();
+    findings.forEach(finding => {
+        const key = String(finding.source_type || finding.change_type || finding.category || 'app_change');
+        groups.set(key, [...(groups.get(key) || []), finding]);
+    });
+    return Array.from(groups.entries()).map(([key, items]) => ({
+        key,
+        label: key.replace(/_/g, ' '),
+        findings: items,
+    }));
+}
+
+function isBlockingDuplicate(proposal: TestProposal) {
+    const duplicate = proposal.review_context?.duplicate;
+    return Boolean(duplicate?.blocking || duplicate?.severity === 'blocking');
+}
+
+function hasDuplicateRisk(proposal: TestProposal) {
+    return Boolean(proposal.review_context?.duplicate?.has_warning);
+}
+
+function getStalenessStatus(proposal: TestProposal) {
+    const staleness = proposal.review_context?.staleness;
+    if (staleness?.status) return staleness.status;
+    return staleness?.is_stale ? 'stale' : 'fresh';
+}
+
+function proposalMatchesReviewFilter(proposal: TestProposal, filter: ProposalFilter) {
+    if (filter === 'duplicate_risk') return hasDuplicateRisk(proposal);
+    if (filter === 'blocking') return isBlockingDuplicate(proposal);
+    if (filter === 'stale') return getStalenessStatus(proposal) === 'stale';
+    if (filter === 'needs_review') return getStalenessStatus(proposal) === 'needs_review';
+    return true;
+}
+
+function proposalFilterLabel(filter: ProposalFilter) {
+    return filter.replace(/_/g, ' ');
+}
+
 function normalizeWorkItems(data: unknown): WorkItem[] {
     if (Array.isArray(data)) return data as WorkItem[];
     if (data && typeof data === 'object') {
@@ -310,11 +586,65 @@ function normalizeWorkItems(data: unknown): WorkItem[] {
     return [];
 }
 
+function normalizeTeamTimeline(data: unknown): TeamTimelineItem[] {
+    if (Array.isArray(data)) return data as TeamTimelineItem[];
+    if (data && typeof data === 'object') {
+        const payload = data as { team_timeline?: unknown; timeline?: unknown; items?: unknown; work_items?: unknown };
+        const items = [payload.team_timeline, payload.timeline, payload.items, payload.work_items].find(Array.isArray);
+        if (Array.isArray(items)) return items as TeamTimelineItem[];
+    }
+    return [];
+}
+
+function workItemToTeamTimelineItem(item: WorkItem): TeamTimelineItem {
+    return {
+        id: item.id,
+        work_item_id: item.id,
+        mission_id: item.mission_id,
+        role: item.owner_agent || item.lane || null,
+        owner_agent: item.owner_agent,
+        title: item.title,
+        summary: item.summary,
+        status: item.status || item.lane || 'open',
+        latest_event: item.progress?.message || item.progress?.phase
+            ? asCompactText(item.progress?.message || item.progress?.phase, '')
+            : null,
+        output_preview: getFinalWorkItemOutput(item),
+        blocker: item.blocked_reason || null,
+        blocked_reason: item.blocked_reason,
+        artifacts_count: item.artifacts?.length || 0,
+        artifacts: item.artifacts,
+        updated_at: item.updated_at,
+        created_at: item.created_at,
+    };
+}
+
 function splitTargetUrls(value: string): string[] {
     return value
         .split(/[\n,]/)
         .map(url => url.trim())
         .filter(Boolean);
+}
+
+function inferAllowedDomains(targetUrls: string[]) {
+    const domains = new Set<string>();
+    targetUrls.forEach(rawUrl => {
+        try {
+            const url = new URL(rawUrl);
+            if (url.hostname) domains.add(url.hostname);
+        } catch {
+            // Backend validation reports malformed URLs with the final payload.
+        }
+    });
+    return Array.from(domains);
+}
+
+function splitDomains(value: string, targetUrls: string[]) {
+    const configured = value
+        .split(/[\n,]/)
+        .map(domain => domain.trim().toLowerCase())
+        .filter(Boolean);
+    return configured.length > 0 ? configured : inferAllowedDomains(targetUrls);
 }
 
 function formatDate(value?: string | null) {
@@ -417,6 +747,41 @@ function getProposalTarget(proposal: TestProposal) {
     return proposal.target_url || proposal.target_route || proposal.route || '-';
 }
 
+function getLinkedProposalId(finding: AppChangeFinding) {
+    return finding.test_proposal_id
+        || finding.linked_proposal_id
+        || finding.proposal_id
+        || finding.test_proposal?.id
+        || finding.proposal?.id
+        || null;
+}
+
+function getLinkedProposalStatus(finding: AppChangeFinding, proposal?: TestProposal | null) {
+    return proposal?.approval_status
+        || finding.test_proposal_status
+        || finding.proposal_status
+        || finding.test_proposal?.approval_status
+        || finding.proposal?.approval_status
+        || null;
+}
+
+function getFindingTruthState(finding: AppChangeFinding) {
+    return finding.truth_state
+        || asCompactText(finding.memory_delta?.truth_state, '')
+        || asCompactText(finding.app_change?.truth_state, '')
+        || null;
+}
+
+function getRequirementLabel(finding: AppChangeFinding) {
+    if (finding.requirement_title) return finding.requirement_title;
+    if (typeof finding.requirement === 'string') return finding.requirement;
+    if (finding.requirement && typeof finding.requirement === 'object') {
+        const record = finding.requirement as Record<string, unknown>;
+        return asCompactText(record.title || record.name || record.statement || record.description, '');
+    }
+    return '';
+}
+
 function compactSpecPreview(content?: string | null) {
     if (!content) return 'No generated spec preview available.';
     const compact = content.replace(/\s+/g, ' ').trim();
@@ -479,6 +844,23 @@ function getWorkItemCount(value: unknown) {
     return 0;
 }
 
+function getTeamSummaryMetric(value: unknown, key: string) {
+    if (!value || typeof value !== 'object') return 0;
+    const record = value as Record<string, unknown>;
+    const metric = record[key];
+    if (typeof metric === 'number') return metric;
+    if (typeof metric === 'string') {
+        const parsed = Number(metric);
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+    return 0;
+}
+
+function getTeamSummaryFlag(value: unknown, key: string) {
+    if (!value || typeof value !== 'object') return false;
+    return Boolean((value as Record<string, unknown>)[key]);
+}
+
 function eventLabel(value: string) {
     return value.replace(/_/g, ' ');
 }
@@ -514,6 +896,74 @@ function getFinalWorkItemOutput(item: WorkItem) {
     return typeof artifact?.content === 'string' ? artifact.content : '';
 }
 
+function getTimelineItemId(item: TeamTimelineItem) {
+    return item.work_item_id || item.id || null;
+}
+
+function getTimelineRole(item: TeamTimelineItem) {
+    return item.role || item.owner_agent || 'agent';
+}
+
+function getTimelineArtifactCount(item: TeamTimelineItem) {
+    if (typeof item.artifacts_count === 'number') return item.artifacts_count;
+    return item.artifacts?.length || 0;
+}
+
+function getTimelineOutputPreview(item: TeamTimelineItem) {
+    return item.output_preview || '';
+}
+
+function getTimelineReviewField(item: TeamTimelineItem, field: 'decision' | 'reason' | 'reviewed_at' | 'reviewed_by') {
+    const key = field === 'decision' ? 'review_decision' : field === 'reason' ? 'review_reason' : field;
+    return asCompactText(
+        item[key as keyof TeamTimelineItem]
+            || item.review?.[key]
+            || item.review?.[field]
+            || item.review_metadata?.[key]
+            || item.review_metadata?.[field],
+        ''
+    );
+}
+
+function getTimelineRevisionField(item: TeamTimelineItem, field: 'revision_of_work_item_id' | 'revision_work_item_id') {
+    return asCompactText(
+        item[field]
+            || item.result?.[field]
+            || item.progress?.[field]
+            || item.review?.[field]
+            || item.review_metadata?.[field],
+        ''
+    );
+}
+
+function canRetryWorkItemStatus(status?: string | null) {
+    return ['failed', 'blocked', 'cancelled', 'error', 'timeout'].includes((status || '').toLowerCase());
+}
+
+function canCancelWorkItemStatus(status?: string | null) {
+    return ['queued', 'running', 'active', 'open'].includes((status || '').toLowerCase());
+}
+
+function canReviewWorkItemStatus(status?: string | null) {
+    return ['completed', 'done', 'success'].includes((status || '').toLowerCase());
+}
+
+function getFindingId(finding: AppChangeFinding) {
+    return finding.id === null || finding.id === undefined ? null : String(finding.id);
+}
+
+function appChangeStatusFilterLabel(filter: AppChangeStatusFilter) {
+    if (filter === 'active') return 'active';
+    return filter.replace(/_/g, ' ');
+}
+
+function appChangeMatchesStatusFilter(finding: AppChangeFinding, filter: AppChangeStatusFilter) {
+    const status = (finding.status || 'awaiting_approval').toLowerCase();
+    if (filter === 'all') return true;
+    if (filter === 'active') return !hiddenAppChangeStatuses.has(status);
+    return status === filter;
+}
+
 function parseSseMessages(buffer: string) {
     const chunks = buffer.split('\n\n');
     return {
@@ -534,12 +984,28 @@ export default function AutonomousMissionsPage() {
     const [approvals, setApprovals] = useState<Approval[]>([]);
     const [proposals, setProposals] = useState<TestProposal[]>([]);
     const [workItems, setWorkItems] = useState<WorkItem[]>([]);
+    const [teamTimelineItems, setTeamTimelineItems] = useState<TeamTimelineItem[]>([]);
+    const [teamTimelineLoading, setTeamTimelineLoading] = useState(false);
+    const [teamTimelineError, setTeamTimelineError] = useState<string | null>(null);
+    const [teamTimelineFallback, setTeamTimelineFallback] = useState(false);
+    const [appChangeGroups, setAppChangeGroups] = useState<AppChangeGroup[]>([]);
+    const [appChangesLoading, setAppChangesLoading] = useState(false);
+    const [appChangesError, setAppChangesError] = useState<string | null>(null);
+    const [appChangeStatusFilter, setAppChangeStatusFilter] = useState<AppChangeStatusFilter>('active');
+    const [appChangeComments, setAppChangeComments] = useState<Record<string, string>>({});
+    const [workItemReviewReasons, setWorkItemReviewReasons] = useState<Record<string, string>>({});
     const [proposalFilter, setProposalFilter] = useState<ProposalFilter>(getInitialProposalFilter);
     const [proposalLoadError, setProposalLoadError] = useState<string | null>(null);
     const [approvalsLoadError, setApprovalsLoadError] = useState<string | null>(null);
     const [materializeProposal, setMaterializeProposal] = useState<TestProposal | null>(null);
     const [materializePath, setMaterializePath] = useState('');
     const [materializeOverwrite, setMaterializeOverwrite] = useState(false);
+    const [materializeOverrideDuplicate, setMaterializeOverrideDuplicate] = useState(false);
+    const [materializeOverrideReason, setMaterializeOverrideReason] = useState('');
+    const [auditProposal, setAuditProposal] = useState<TestProposal | null>(null);
+    const [auditDetail, setAuditDetail] = useState<ProposalAudit | null>(null);
+    const [auditLoading, setAuditLoading] = useState(false);
+    const [reviewRefreshing, setReviewRefreshing] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [showCreate, setShowCreate] = useState(false);
@@ -591,13 +1057,16 @@ export default function AutonomousMissionsPage() {
     const fetchProposals = useCallback(async () => {
         setProposalLoadError(null);
         try {
-            const url = proposalFilter === 'all' ? proposalsUrl : `${proposalsUrl}?status=${proposalFilter}`;
+            const url = proposalStatusFilters.has(proposalFilter) ? `${proposalsUrl}?status=${proposalFilter}` : proposalsUrl;
             const response = await fetchWithAuth(url);
             if (!response.ok) {
                 throw new Error(await response.text() || 'Failed to load generated test proposals');
             }
             const data = await response.json();
-            setProposals(normalizeProposals(data));
+            const normalized = normalizeProposals(data);
+            setProposals(proposalReviewFilters.has(proposalFilter)
+                ? normalized.filter(proposal => proposalMatchesReviewFilter(proposal, proposalFilter))
+                : normalized);
         } catch (err) {
             console.error('Failed to load autonomous test proposals:', err);
             setProposalLoadError(err instanceof Error ? err.message : 'Failed to load generated test proposals');
@@ -622,6 +1091,55 @@ export default function AutonomousMissionsPage() {
         }
     }, [workItemsUrl]);
 
+    const fetchAppChanges = useCallback(async (missionId: string) => {
+        setAppChangesLoading(true);
+        setAppChangesError(null);
+        try {
+            const response = await fetchWithAuth(`${missionsUrl}/${encodeURIComponent(missionId)}/app-changes`);
+            if (response.status === 404 || response.status === 405) {
+                setAppChangeGroups([]);
+                return;
+            }
+            if (!response.ok) {
+                throw new Error(await response.text() || 'Failed to load app changes');
+            }
+            const data = await response.json();
+            setAppChangeGroups(normalizeAppChanges(data));
+        } catch (err) {
+            console.error('Failed to load autonomous app changes:', err);
+            setAppChangesError(err instanceof Error ? err.message : 'Failed to load app changes');
+            setAppChangeGroups([]);
+        } finally {
+            setAppChangesLoading(false);
+        }
+    }, [missionsUrl]);
+
+    const fetchTeamTimeline = useCallback(async (missionId: string, fallbackWorkItems: WorkItem[]) => {
+        setTeamTimelineLoading(true);
+        setTeamTimelineError(null);
+        setTeamTimelineFallback(false);
+        try {
+            const response = await fetchWithAuth(`${missionsUrl}/${encodeURIComponent(missionId)}/team-timeline`);
+            if (response.status === 404 || response.status === 405) {
+                setTeamTimelineItems(fallbackWorkItems.map(workItemToTeamTimelineItem));
+                setTeamTimelineFallback(true);
+                return;
+            }
+            if (!response.ok) {
+                throw new Error(await response.text() || 'Failed to load team timeline');
+            }
+            const data = await response.json();
+            setTeamTimelineItems(normalizeTeamTimeline(data));
+        } catch (err) {
+            console.error('Failed to load autonomous team timeline:', err);
+            setTeamTimelineError(err instanceof Error ? err.message : 'Failed to load team timeline');
+            setTeamTimelineItems(fallbackWorkItems.map(workItemToTeamTimelineItem));
+            setTeamTimelineFallback(true);
+        } finally {
+            setTeamTimelineLoading(false);
+        }
+    }, [missionsUrl]);
+
     const refreshAll = useCallback(async () => {
         await Promise.all([fetchMissions(), fetchApprovals(), fetchProposals(), fetchWorkItems()]);
     }, [fetchApprovals, fetchMissions, fetchProposals, fetchWorkItems]);
@@ -636,6 +1154,11 @@ export default function AutonomousMissionsPage() {
             setMissionEvents([]);
             setStreamStatus('idle');
             setStreamError(null);
+            setAppChangeGroups([]);
+            setAppChangesError(null);
+            setTeamTimelineItems([]);
+            setTeamTimelineError(null);
+            setTeamTimelineFallback(false);
             return;
         }
 
@@ -713,20 +1236,75 @@ export default function AutonomousMissionsPage() {
     }, [missionsUrl, selectedMissionId]);
 
     useEffect(() => {
-        if (!showCreate && !materializeProposal) return;
+        if (!selectedMissionId) return;
+        void fetchAppChanges(selectedMissionId);
+    }, [fetchAppChanges, selectedMissionId]);
+
+    useEffect(() => {
+        if (!selectedMissionId) return;
+        const fallbackWorkItems = workItems.filter(item => item.mission_id === selectedMissionId);
+        void fetchTeamTimeline(selectedMissionId, fallbackWorkItems);
+    }, [fetchTeamTimeline, selectedMissionId, workItems]);
+
+    useEffect(() => {
+        if (!showCreate && !materializeProposal && !auditProposal) return;
         const handleKeyDown = (event: KeyboardEvent) => {
             if (event.key === 'Escape') {
                 setShowCreate(false);
                 setMaterializeProposal(null);
+                setMaterializeOverrideDuplicate(false);
+                setMaterializeOverrideReason('');
+                setAuditProposal(null);
+                setAuditDetail(null);
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [materializeProposal, showCreate]);
+    }, [auditProposal, materializeProposal, showCreate]);
 
     const handleRefresh = async () => {
         setRefreshing(true);
         await refreshAll().finally(() => setRefreshing(false));
+    };
+
+    const handleRefreshReviews = async () => {
+        setReviewRefreshing('all');
+        setError(null);
+        try {
+            const response = await fetchWithAuth(`${API_BASE}/autonomous/${encodedProjectId}/proposals/refresh-reviews`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ limit: 200 }),
+            });
+            if (!response.ok) {
+                throw new Error(await response.text() || 'Failed to refresh proposal reviews');
+            }
+            await refreshAll();
+        } catch (err) {
+            console.error('Failed to refresh autonomous proposal reviews:', err);
+            setError(err instanceof Error ? err.message : 'Failed to refresh proposal reviews');
+        } finally {
+            setReviewRefreshing(null);
+        }
+    };
+
+    const handleRefreshProposalReview = async (proposal: TestProposal) => {
+        setReviewRefreshing(proposal.id);
+        setError(null);
+        try {
+            const response = await fetchWithAuth(`${API_BASE}/autonomous/${encodedProjectId}/proposals/${encodeURIComponent(proposal.id)}/refresh-review`, {
+                method: 'POST',
+            });
+            if (!response.ok) {
+                throw new Error(await response.text() || 'Failed to refresh proposal review');
+            }
+            await refreshAll();
+        } catch (err) {
+            console.error('Failed to refresh autonomous proposal review:', err);
+            setError(err instanceof Error ? err.message : 'Failed to refresh proposal review');
+        } finally {
+            setReviewRefreshing(null);
+        }
     };
 
     const handleProposalFilterChange = (filter: ProposalFilter) => {
@@ -779,6 +1357,14 @@ export default function AutonomousMissionsPage() {
     const selectedMission = missions.find(mission => mission.id === selectedMissionId) || null;
     const selectedMissionWorkItems = workItems.filter(item => item.mission_id === selectedMissionId);
     const selectedMissionActiveWorkItems = selectedMissionWorkItems.filter(item => ['queued', 'running'].includes((item.status || '').toLowerCase()));
+    const filteredAppChangeGroups = appChangeGroups
+        .map(group => ({
+            ...group,
+            findings: group.findings.filter(finding => appChangeMatchesStatusFilter(finding, appChangeStatusFilter)),
+        }))
+        .filter(group => group.findings.length > 0);
+    const visibleAppChangeCount = filteredAppChangeGroups.reduce((count, group) => count + group.findings.length, 0);
+    const totalAppChangeCount = appChangeGroups.reduce((count, group) => count + group.findings.length, 0);
     const selectedMissionFinalOutputs = selectedMissionWorkItems
         .map(item => ({ item, output: getFinalWorkItemOutput(item) }))
         .filter(entry => entry.output.trim());
@@ -851,6 +1437,13 @@ export default function AutonomousMissionsPage() {
         setError(null);
         try {
             const isWholeAppTeam = selectedTemplate?.label === 'Whole App Team';
+            const safetyConfig = {
+                environment: form.environment || 'staging',
+                allowed_domains: splitDomains(form.allowed_domains, targetUrls),
+                tool_profile: form.tool_profile || 'role_based',
+                credential_scope: form.credential_scope || 'project',
+                write_policy: 'proposals_only',
+            };
             const payload = {
                 name: form.name.trim(),
                 description: form.description.trim() || undefined,
@@ -863,27 +1456,30 @@ export default function AutonomousMissionsPage() {
                 max_llm_budget_usd: form.max_llm_budget_usd,
                 autonomy_level: 'draft_validate',
                 approval_policy: 'approval_required',
-                config: isWholeAppTeam ? {
-                    whole_app_team: true,
-                    team_mode: 'whole_app',
-                    mission_template: 'whole_app_team',
-                    max_parallel_agents: 2,
-                    loop_delay_seconds: 300,
-                    max_pending_approvals: 25,
-                    roles: [
-                        'surface_mapper',
-                        'explorer',
-                        'requirements_analyst',
-                        'rtm_mapper',
-                        'spec_writer',
-                        'regression_scout',
-                        'flake_triager',
-                    ],
-                    completion_target: {
-                        rtm_coverage_percentage: 95,
-                        critical_gaps: 0,
-                    },
-                } : {},
+                config: {
+                    ...safetyConfig,
+                    ...(isWholeAppTeam ? {
+                        whole_app_team: true,
+                        team_mode: 'whole_app',
+                        mission_template: 'whole_app_team',
+                        max_parallel_agents: 2,
+                        loop_delay_seconds: 300,
+                        max_pending_approvals: 25,
+                        roles: [
+                            'surface_mapper',
+                            'explorer',
+                            'requirements_analyst',
+                            'rtm_mapper',
+                            'spec_writer',
+                            'regression_scout',
+                            'flake_triager',
+                        ],
+                        completion_target: {
+                            rtm_coverage_percentage: 95,
+                            critical_gaps: 0,
+                        },
+                    } : {}),
+                },
             };
 
             const response = await fetchWithAuth(missionsUrl, {
@@ -972,10 +1568,145 @@ export default function AutonomousMissionsPage() {
         }
     };
 
+    const handleRequirementTruthAction = async (finding: AppChangeFinding, action: 'confirm' | 'reject' | 'mark-stale') => {
+        if (!finding.requirement_id) return;
+        const comment = action === 'confirm'
+            ? ''
+            : window.prompt(action === 'reject' ? 'Why should this requirement be rejected?' : 'Why is this requirement stale?', '')?.trim();
+        if (action !== 'confirm' && !comment) return;
+
+        const requirementId = String(finding.requirement_id);
+        const label = `requirement:${requirementId}:${action}`;
+        setActionLoading(label);
+        setError(null);
+        try {
+            const response = await fetchWithAuth(`${API_BASE}/requirements/${encodeURIComponent(requirementId)}/${action}?project_id=${encodedProjectId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(comment ? { comment } : {}),
+            });
+            if (!response.ok) {
+                throw new Error(await response.text() || `Failed to ${action} requirement`);
+            }
+            if (selectedMissionId) await fetchAppChanges(selectedMissionId);
+        } catch (err) {
+            console.error(`Failed to ${action} requirement from app changes:`, err);
+            setError(err instanceof Error ? err.message : `Failed to ${action} requirement`);
+        } finally {
+            setActionLoading(null);
+        }
+    };
+
+    const handleAppChangeFindingAction = async (finding: AppChangeFinding, action: 'approve' | 'reject' | 'resolve') => {
+        const findingId = getFindingId(finding);
+        if (!findingId || !selectedMissionId) return;
+        const comment = (appChangeComments[findingId] || '').trim();
+        if ((action === 'reject' || action === 'resolve') && !comment) {
+            setError(`${action === 'reject' ? 'Rejecting' : 'Resolving'} an app-change finding requires a comment.`);
+            return;
+        }
+
+        const label = `app-change:${findingId}:${action}`;
+        setActionLoading(label);
+        setError(null);
+        try {
+            const response = await fetchWithAuth(`${API_BASE}/autonomous/${encodedProjectId}/missions/${encodeURIComponent(selectedMissionId)}/findings/${encodeURIComponent(findingId)}/${action}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(comment ? { comment } : {}),
+            });
+            if (!response.ok) {
+                throw new Error(await response.text() || `Failed to ${action} finding`);
+            }
+            setAppChangeComments(prev => {
+                const next = { ...prev };
+                delete next[findingId];
+                return next;
+            });
+            await fetchAppChanges(selectedMissionId);
+            await refreshAll();
+        } catch (err) {
+            console.error(`Failed to ${action} autonomous app-change finding:`, err);
+            setError(err instanceof Error ? err.message : `Failed to ${action} finding`);
+        } finally {
+            setActionLoading(null);
+        }
+    };
+
+    const handleWorkItemAction = async (item: TeamTimelineItem, action: 'retry' | 'cancel') => {
+        const workItemId = getTimelineItemId(item);
+        if (!workItemId) return;
+        const label = `work-item:${workItemId}:${action}`;
+        setActionLoading(label);
+        setError(null);
+        try {
+            const response = await fetchWithAuth(`${API_BASE}/autonomous/${encodedProjectId}/work-items/${encodeURIComponent(workItemId)}/${action}`, {
+                method: 'POST',
+            });
+            if (!response.ok) {
+                throw new Error(await response.text() || `Failed to ${action} work item`);
+            }
+            await refreshAll();
+            if (selectedMissionId) {
+                const fallbackWorkItems = workItems.filter(workItem => workItem.mission_id === selectedMissionId);
+                await fetchTeamTimeline(selectedMissionId, fallbackWorkItems);
+            }
+        } catch (err) {
+            console.error(`Failed to ${action} autonomous work item:`, err);
+            setError(err instanceof Error ? err.message : `Failed to ${action} work item`);
+        } finally {
+            setActionLoading(null);
+        }
+    };
+
+    const handleWorkItemReview = async (item: TeamTimelineItem, decision: 'accept' | 'reject' | 'needs_revision') => {
+        const workItemId = getTimelineItemId(item);
+        if (!workItemId) return;
+        const reason = (workItemReviewReasons[workItemId] || '').trim();
+        if ((decision === 'reject' || decision === 'needs_revision') && !reason) {
+            setError(`${decision === 'reject' ? 'Rejecting' : 'Requesting revision for'} completed work requires a reason.`);
+            return;
+        }
+
+        const action = decision === 'accept' ? 'accept' : decision === 'reject' ? 'reject' : 'needs-revision';
+        const label = `work-item:${workItemId}:review:${decision}`;
+        setActionLoading(label);
+        setError(null);
+        try {
+            const response = await fetchWithAuth(`${API_BASE}/autonomous/${encodedProjectId}/work-items/${encodeURIComponent(workItemId)}/${action}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    comment: reason || undefined,
+                }),
+            });
+            if (!response.ok) {
+                throw new Error(await response.text() || `Failed to record ${decision.replace(/_/g, ' ')} review`);
+            }
+            setWorkItemReviewReasons(prev => {
+                const next = { ...prev };
+                delete next[workItemId];
+                return next;
+            });
+            await refreshAll();
+            if (selectedMissionId) {
+                const fallbackWorkItems = workItems.filter(workItem => workItem.mission_id === selectedMissionId);
+                await fetchTeamTimeline(selectedMissionId, fallbackWorkItems);
+            }
+        } catch (err) {
+            console.error(`Failed to record autonomous work item review ${decision}:`, err);
+            setError(err instanceof Error ? err.message : `Failed to record ${decision.replace(/_/g, ' ')} review`);
+        } finally {
+            setActionLoading(null);
+        }
+    };
+
     const openMaterializeDialog = (proposal: TestProposal) => {
         setMaterializeProposal(proposal);
         setMaterializePath(proposal.suggested_file_path || '');
         setMaterializeOverwrite(false);
+        setMaterializeOverrideDuplicate(false);
+        setMaterializeOverrideReason('');
         setError(null);
     };
 
@@ -992,6 +1723,8 @@ export default function AutonomousMissionsPage() {
                 body: JSON.stringify({
                     file_path: materializePath.trim() || undefined,
                     overwrite: materializeOverwrite,
+                    override_blocking_duplicate: materializeOverrideDuplicate,
+                    override_reason: materializeOverrideReason.trim() || undefined,
                     comment: 'Materialized from Autonomous Missions dashboard',
                 }),
             });
@@ -1001,6 +1734,8 @@ export default function AutonomousMissionsPage() {
             setMaterializeProposal(null);
             setMaterializePath('');
             setMaterializeOverwrite(false);
+            setMaterializeOverrideDuplicate(false);
+            setMaterializeOverrideReason('');
             await refreshAll();
         } catch (err) {
             console.error('Failed to materialize autonomous test proposal:', err);
@@ -1009,10 +1744,36 @@ export default function AutonomousMissionsPage() {
             if (message.includes('already exists')) {
                 setMaterializeOverwrite(true);
             }
+            if (message.includes('Blocking duplicate')) {
+                setMaterializeOverrideDuplicate(true);
+            }
         } finally {
             setActionLoading(null);
         }
     };
+
+    const openAuditDialog = async (proposal: TestProposal) => {
+        setAuditProposal(proposal);
+        setAuditDetail(null);
+        setAuditLoading(true);
+        setError(null);
+        try {
+            const response = await fetchWithAuth(`${API_BASE}/autonomous/${encodedProjectId}/proposals/${encodeURIComponent(proposal.id)}/audit`);
+            if (!response.ok) {
+                throw new Error(await response.text() || 'Failed to load proposal audit');
+            }
+            setAuditDetail(await response.json());
+        } catch (err) {
+            console.error('Failed to load proposal audit:', err);
+            setError(err instanceof Error ? err.message : 'Failed to load proposal audit');
+        } finally {
+            setAuditLoading(false);
+        }
+    };
+
+    const materializeHasBlockingDuplicate = materializeProposal ? isBlockingDuplicate(materializeProposal) : false;
+    const materializeOverrideReady = !materializeHasBlockingDuplicate
+        || (materializeOverrideDuplicate && materializeOverrideReason.trim().length >= 8);
 
     if (loading || projectLoading) {
         return (
@@ -1206,6 +1967,10 @@ export default function AutonomousMissionsPage() {
                             const activeWorkItems = getMissionField(mission, 'active_work_items');
                             const blockedWorkItems = getMissionField(mission, 'blocked_work_items');
                             const coverageSummary = getMissionField(mission, 'coverage_summary');
+                            const pendingRevisions = getTeamSummaryMetric(teamSummary, 'pending_revision_count');
+                            const acceptedRevisions = getTeamSummaryMetric(teamSummary, 'accepted_revision_count');
+                            const totalRevisions = getTeamSummaryMetric(teamSummary, 'revision_count');
+                            const revisionAttention = getTeamSummaryFlag(teamSummary, 'revision_attention') || pendingRevisions > 0;
                             const hasTeamStatus = Boolean(teamSummary || activeWorkItems || blockedWorkItems || coverageSummary);
                             const expanded = expandedMissionIds.has(mission.id);
                             return (
@@ -1236,6 +2001,11 @@ export default function AutonomousMissionsPage() {
                                             <span className="am-pill" style={{ color: statusStyle.color, background: statusStyle.background }}>
                                                 {statusText.replace(/_/g, ' ')}
                                             </span>
+                                            {revisionAttention && (
+                                                <span className="am-pill" style={{ color: 'var(--warning)', background: 'var(--warning-muted)' }}>
+                                                    {pendingRevisions} revision{pendingRevisions === 1 ? '' : 's'}
+                                                </span>
+                                            )}
                                         </div>
                                         <div className="am-row-metrics">
                                             <div>
@@ -1347,6 +2117,11 @@ export default function AutonomousMissionsPage() {
                                                             <span>Coverage</span>
                                                             <strong>{clampText(coverageSummary, 'Pending', 110)}</strong>
                                                         </div>
+                                                        <div>
+                                                            <span>Revisions</span>
+                                                            <strong>{pendingRevisions} pending</strong>
+                                                            <small>{acceptedRevisions} accepted / {totalRevisions} total</small>
+                                                        </div>
                                                     </div>
                                                 </div>
                                             )}
@@ -1371,6 +2146,8 @@ export default function AutonomousMissionsPage() {
                                             <div className="am-metadata-row">
                                                 <span>{mission.autonomy_level}</span>
                                                 <span>{mission.approval_policy}</span>
+                                                {mission.safety_summary?.environment && <span>{mission.safety_summary.environment}</span>}
+                                                {mission.safety_summary?.tool_profile && <span>{mission.safety_summary.tool_profile.replace(/_/g, ' ')}</span>}
                                                 {mission.schedule_cron && <span>{mission.schedule_cron}</span>}
                                                 {mission.latest_run_id && <span>Run {clampText(mission.latest_run_id, '-', 28)}</span>}
                                             </div>
@@ -1563,6 +2340,444 @@ export default function AutonomousMissionsPage() {
                 </section>
             )}
 
+            {selectedMission && (
+                <section className="am-panel" aria-label="App changes review">
+                    <div className="am-section-title-row">
+                        <div className="am-section-heading">
+                            <Sparkles size={17} style={{ color: 'var(--primary)' }} />
+                            <div>
+                                <h2>App Changes</h2>
+                                <p>{visibleAppChangeCount} of {totalAppChangeCount} finding{totalAppChangeCount === 1 ? '' : 's'} for {selectedMission.name}</p>
+                            </div>
+                        </div>
+                        <div className="am-action-group">
+                            <div className="am-filter-row am-filter-row-inline" role="group" aria-label="App change status filter">
+                                {APP_CHANGE_STATUS_FILTERS.map(filter => (
+                                    <button
+                                        key={filter}
+                                        type="button"
+                                        aria-pressed={appChangeStatusFilter === filter}
+                                        onClick={() => setAppChangeStatusFilter(filter)}
+                                        className={appChangeStatusFilter === filter ? 'am-filter is-active' : 'am-filter'}
+                                    >
+                                        {appChangeStatusFilterLabel(filter)}
+                                    </button>
+                                ))}
+                            </div>
+                            <MissionActionButton
+                                icon={<RefreshCw size={13} className={appChangesLoading ? 'am-spin' : undefined} />}
+                                label="Refresh"
+                                color="var(--primary)"
+                                loading={appChangesLoading}
+                                onClick={() => void fetchAppChanges(selectedMission.id)}
+                            />
+                        </div>
+                    </div>
+
+                    {appChangesError ? (
+                        <div className="am-alert am-alert-danger">
+                            <AlertCircle size={16} />
+                            <span>{appChangesError}</span>
+                        </div>
+                    ) : appChangesLoading && appChangeGroups.length === 0 ? (
+                        <div className="am-empty-inline">Loading app changes...</div>
+                    ) : appChangeGroups.length === 0 ? (
+                        <div className="am-empty-inline">No memory deltas or app-change findings are waiting for review.</div>
+                    ) : filteredAppChangeGroups.length === 0 ? (
+                        <div className="am-empty-inline">No app-change findings match this status filter.</div>
+                    ) : (
+                        <div className="am-change-group-list">
+                            {filteredAppChangeGroups.map(group => (
+                                <div key={group.key} className="am-change-group">
+                                    <div className="am-change-group-heading">
+                                        <strong>{group.label}</strong>
+                                        <span>{group.findings.length}</span>
+                                    </div>
+                                    <div className="am-inline-list">
+                                        {group.findings.map((finding, index) => {
+                                            const findingId = getFindingId(finding);
+                                            const linkedProposalId = getLinkedProposalId(finding);
+                                            const linkedProposal = linkedProposalId
+                                                ? proposals.find(proposal => proposal.id === linkedProposalId)
+                                                    || (finding.proposal as TestProposal | undefined)
+                                                    || (finding.test_proposal as TestProposal | undefined)
+                                                    || null
+                                                : null;
+                                            const proposalStatus = getLinkedProposalStatus(finding, linkedProposal);
+                                            const status = proposalStatus || finding.status || (linkedProposalId ? 'proposal_linked' : 'unlinked');
+                                            const statusStyle = getStatusStyle(status);
+                                            const changeType = finding.change_type || finding.category || finding.source_type || 'app_change';
+                                            const risk = finding.risk_level || finding.severity || 'unknown';
+                                            const riskStyle = getRiskStyle(risk);
+                                            const truthState = getFindingTruthState(finding);
+                                            const requirementLabel = getRequirementLabel(finding);
+                                            const statusLower = (linkedProposal?.approval_status || '').toLowerCase();
+                                            const canDecideProposal = Boolean(linkedProposal && statusLower === 'pending');
+                                            const canMaterializeProposal = Boolean(linkedProposal && statusLower === 'approved');
+                                            const requirementActionKey = finding.requirement_id ? String(finding.requirement_id) : '';
+                                            const findingStatusLower = (finding.status || '').toLowerCase();
+                                            const canDecideFinding = Boolean(findingId && !['approved', 'rejected', 'resolved'].includes(findingStatusLower));
+                                            const findingComment = findingId ? appChangeComments[findingId] || '' : '';
+                                            const findingCommentRequired = findingComment.trim().length === 0;
+
+                                            return (
+                                                <div key={`${finding.id || group.key}:${index}`} className="am-change-item">
+                                                    <div className="am-inline-copy">
+                                                        <strong>{finding.title || requirementLabel || finding.change_type || 'App change finding'}</strong>
+                                                        <span>{clampText(finding.summary || finding.description || finding.evidence || finding.memory_delta || finding.app_change, 'No summary provided', 180)}</span>
+                                                        <div className="am-change-field-grid">
+                                                            <div>
+                                                                <span>Change</span>
+                                                                <strong>{formatReason(changeType) || '-'}</strong>
+                                                            </div>
+                                                            <div>
+                                                                <span>Risk</span>
+                                                                <strong>{formatReason(risk) || '-'}</strong>
+                                                            </div>
+                                                            <div>
+                                                                <span>Test value</span>
+                                                                <strong>{clampText(finding.test_value, 'Not scored', 80)}</strong>
+                                                            </div>
+                                                            <div>
+                                                                <span>Uncertainty</span>
+                                                                <strong>{clampText(finding.uncertainty_reason, 'None noted', 90)}</strong>
+                                                            </div>
+                                                        </div>
+                                                        {requirementLabel && (
+                                                            <div className="am-change-requirement">
+                                                                <span>Requirement</span>
+                                                                <strong>{clampText(requirementLabel, 'Requirement', 160)}</strong>
+                                                            </div>
+                                                        )}
+                                                        <div className="am-metadata-row">
+                                                            {finding.requirement_id && <span>Req {finding.requirement_id}</span>}
+                                                            {truthState && <span>{truthState.replace(/_/g, ' ')}</span>}
+                                                            {typeof finding.confidence !== 'undefined' && finding.confidence !== null && <span>{String(finding.confidence)} confidence</span>}
+                                                            {linkedProposalId && <span>Proposal {clampText(linkedProposalId, '-', 28)}</span>}
+                                                            {finding.created_at && <span>{formatDate(finding.created_at)}</span>}
+                                                        </div>
+                                                    </div>
+                                                    <div className="am-change-side">
+                                                        <div className="am-mission-statuses">
+                                                            <span className="am-pill" style={{ color: riskStyle.color, background: riskStyle.background }}>
+                                                                {risk.replace(/_/g, ' ')}
+                                                            </span>
+                                                            <span className="am-pill" style={{ color: 'var(--primary)', background: 'var(--primary-glow)' }}>
+                                                                {changeType.replace(/_/g, ' ')}
+                                                            </span>
+                                                            <span className="am-pill" style={{ color: statusStyle.color, background: statusStyle.background }}>
+                                                                {status.replace(/_/g, ' ')}
+                                                            </span>
+                                                        </div>
+                                                        {findingId && (
+                                                            <div className="am-change-review">
+                                                                <label className="am-field am-comment-field">
+                                                                    <span>Review comment</span>
+                                                                    <input
+                                                                        value={findingComment}
+                                                                        onChange={event => {
+                                                                            const value = event.target.value;
+                                                                            setAppChangeComments(prev => ({ ...prev, [findingId]: value }));
+                                                                        }}
+                                                                        placeholder="Required for reject or resolve"
+                                                                    />
+                                                                </label>
+                                                                <div className="am-proposal-actions am-change-actions">
+                                                                    {canDecideFinding && (
+                                                                        <MissionActionButton
+                                                                            icon={<CheckCircle size={13} />}
+                                                                            label="Approve"
+                                                                            color="var(--success)"
+                                                                            loading={actionLoading === `app-change:${findingId}:approve`}
+                                                                            onClick={() => void handleAppChangeFindingAction(finding, 'approve')}
+                                                                        />
+                                                                    )}
+                                                                    {findingStatusLower !== 'rejected' && (
+                                                                        <MissionActionButton
+                                                                            icon={<XCircle size={13} />}
+                                                                            label="Reject"
+                                                                            color="var(--danger)"
+                                                                            loading={actionLoading === `app-change:${findingId}:reject`}
+                                                                            disabled={findingCommentRequired}
+                                                                            onClick={() => void handleAppChangeFindingAction(finding, 'reject')}
+                                                                        />
+                                                                    )}
+                                                                    {findingStatusLower !== 'resolved' && (
+                                                                        <MissionActionButton
+                                                                            icon={<ClipboardCheck size={13} />}
+                                                                            label="Resolve"
+                                                                            color="var(--primary)"
+                                                                            loading={actionLoading === `app-change:${findingId}:resolve`}
+                                                                            disabled={findingCommentRequired}
+                                                                            onClick={() => void handleAppChangeFindingAction(finding, 'resolve')}
+                                                                        />
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        )}
+                                                        {finding.requirement_id && (
+                                                            <div className="am-proposal-actions am-change-actions">
+                                                                <MissionActionButton
+                                                                    icon={<CheckCircle size={13} />}
+                                                                    label="Truth"
+                                                                    color="var(--success)"
+                                                                    loading={actionLoading === `requirement:${requirementActionKey}:confirm`}
+                                                                    onClick={() => void handleRequirementTruthAction(finding, 'confirm')}
+                                                                />
+                                                                <MissionActionButton
+                                                                    icon={<XCircle size={13} />}
+                                                                    label="Reject"
+                                                                    color="var(--danger)"
+                                                                    loading={actionLoading === `requirement:${requirementActionKey}:reject`}
+                                                                    onClick={() => void handleRequirementTruthAction(finding, 'reject')}
+                                                                />
+                                                                <MissionActionButton
+                                                                    icon={<AlertCircle size={13} />}
+                                                                    label="Stale"
+                                                                    color="var(--warning)"
+                                                                    loading={actionLoading === `requirement:${requirementActionKey}:mark-stale`}
+                                                                    onClick={() => void handleRequirementTruthAction(finding, 'mark-stale')}
+                                                                />
+                                                            </div>
+                                                        )}
+                                                        {linkedProposal ? (
+                                                            <div className="am-proposal-actions am-change-actions">
+                                                                <MissionActionButton
+                                                                    icon={<FileText size={13} />}
+                                                                    label="Audit"
+                                                                    color="var(--text-secondary)"
+                                                                    loading={auditLoading && auditProposal?.id === linkedProposal.id}
+                                                                    onClick={() => void openAuditDialog(linkedProposal)}
+                                                                />
+                                                                <MissionActionButton
+                                                                    icon={<RefreshCw size={13} className={reviewRefreshing === linkedProposal.id ? 'am-spin' : undefined} />}
+                                                                    label="Review"
+                                                                    color="var(--primary)"
+                                                                    loading={reviewRefreshing === linkedProposal.id}
+                                                                    onClick={() => void handleRefreshProposalReview(linkedProposal)}
+                                                                />
+                                                                {canDecideProposal && (
+                                                                    <>
+                                                                        <MissionActionButton
+                                                                            icon={<CheckCircle size={13} />}
+                                                                            label="Approve"
+                                                                            color="var(--success)"
+                                                                            loading={actionLoading === `${linkedProposal.id}:approve`}
+                                                                            onClick={() => handleProposalAction(linkedProposal, 'approve')}
+                                                                        />
+                                                                        <MissionActionButton
+                                                                            icon={<XCircle size={13} />}
+                                                                            label="Reject"
+                                                                            color="var(--danger)"
+                                                                            loading={actionLoading === `${linkedProposal.id}:reject`}
+                                                                            onClick={() => handleProposalAction(linkedProposal, 'reject')}
+                                                                        />
+                                                                    </>
+                                                                )}
+                                                                {canMaterializeProposal && (
+                                                                    <MissionActionButton
+                                                                        icon={<UploadCloud size={13} />}
+                                                                        label="Materialize"
+                                                                        color="var(--primary)"
+                                                                        loading={actionLoading === `${linkedProposal.id}:materialize`}
+                                                                        onClick={() => openMaterializeDialog(linkedProposal)}
+                                                                    />
+                                                                )}
+                                                            </div>
+                                                        ) : linkedProposalId ? (
+                                                            <div className="am-empty-inline am-change-note">Linked proposal is outside the current proposal filter.</div>
+                                                        ) : null}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </section>
+            )}
+
+            {selectedMission && (
+                <section className="am-panel" aria-label="Mission team timeline">
+                    <div className="am-section-title-row">
+                        <div className="am-section-heading">
+                            <Users size={17} style={{ color: 'var(--primary)' }} />
+                            <div>
+                                <h2>Team Timeline</h2>
+                                <p>
+                                    {teamTimelineItems.length} lane update{teamTimelineItems.length === 1 ? '' : 's'} for {selectedMission.name}
+                                    {teamTimelineFallback ? ' · work item fallback' : ''}
+                                </p>
+                            </div>
+                        </div>
+                        <MissionActionButton
+                            icon={<RefreshCw size={13} className={teamTimelineLoading ? 'am-spin' : undefined} />}
+                            label="Refresh"
+                            color="var(--primary)"
+                            loading={teamTimelineLoading}
+                            onClick={() => void fetchTeamTimeline(selectedMission.id, selectedMissionWorkItems)}
+                        />
+                    </div>
+
+                    {teamTimelineError && (
+                        <div className="am-alert am-alert-warning">
+                            <AlertCircle size={16} />
+                            <span>{teamTimelineError}. Showing available work items.</span>
+                        </div>
+                    )}
+
+                    {teamTimelineLoading && teamTimelineItems.length === 0 ? (
+                        <div className="am-empty-inline">Loading team timeline...</div>
+                    ) : teamTimelineItems.length === 0 ? (
+                        <div className="am-empty-inline">No team activity is available for this mission yet.</div>
+                    ) : (
+                        <div className="am-team-timeline-list">
+                            {teamTimelineItems.map((item, index) => {
+                                const itemId = getTimelineItemId(item);
+                                const status = item.status || 'open';
+                                const statusStyle = getStatusStyle(status);
+                                const latestEventText = clampText(item.latest_event, 'No event yet', 140);
+                                const outputPreview = getTimelineOutputPreview(item);
+                                const blocker = item.blocker || item.blocked_reason;
+                                const artifactCount = getTimelineArtifactCount(item);
+                                const canRetry = Boolean(itemId && canRetryWorkItemStatus(status));
+                                const canCancel = Boolean(itemId && canCancelWorkItemStatus(status));
+                                const canReview = Boolean(itemId && canReviewWorkItemStatus(status));
+                                const reviewDecision = getTimelineReviewField(item, 'decision');
+                                const reviewReason = getTimelineReviewField(item, 'reason');
+                                const reviewedAt = getTimelineReviewField(item, 'reviewed_at');
+                                const reviewedBy = getTimelineReviewField(item, 'reviewed_by');
+                                const revisionOfId = getTimelineRevisionField(item, 'revision_of_work_item_id');
+                                const revisionWorkItemId = getTimelineRevisionField(item, 'revision_work_item_id');
+                                const reviewReasonInput = itemId ? workItemReviewReasons[itemId] || '' : '';
+                                const reviewReasonRequired = reviewReasonInput.trim().length === 0;
+
+                                return (
+                                    <div key={itemId || `${item.mission_id || selectedMission.id}:timeline:${index}`} className="am-team-timeline-item">
+                                        <div className="am-timeline-rail" aria-hidden="true">
+                                            <span />
+                                        </div>
+                                        <div className="am-team-timeline-main">
+                                            <div className="am-team-timeline-top">
+                                                <div className="am-inline-copy">
+                                                    <strong>{clampText(item.title || item.summary || getTimelineRole(item), 'Team lane', 110)}</strong>
+                                                    <span>{latestEventText}</span>
+                                                </div>
+                                                <div className="am-mission-statuses">
+                                                    <span className="am-pill" style={{ color: 'var(--primary)', background: 'var(--primary-glow)' }}>
+                                                        {getTimelineRole(item).replace(/_/g, ' ')}
+                                                    </span>
+                                                    <span className="am-pill" style={{ color: statusStyle.color, background: statusStyle.background }}>
+                                                        {status.replace(/_/g, ' ')}
+                                                    </span>
+                                                    {reviewDecision && (
+                                                        <span className="am-pill" style={getStatusStyle(reviewDecision)}>
+                                                            {reviewDecision.replace(/_/g, ' ')}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                            <div className="am-team-timeline-grid">
+                                                <div>
+                                                    <span>Output</span>
+                                                    <strong>{clampText(outputPreview, 'No output yet', 120)}</strong>
+                                                </div>
+                                                <div>
+                                                    <span>Blocker</span>
+                                                    <strong>{clampText(blocker, 'None', 100)}</strong>
+                                                </div>
+                                                <div>
+                                                    <span>Artifacts</span>
+                                                    <strong>{artifactCount}</strong>
+                                                </div>
+                                                <div>
+                                                    <span>Updated</span>
+                                                    <strong>{formatDate(item.updated_at || item.created_at)}</strong>
+                                                </div>
+                                            </div>
+                                            {(reviewDecision || reviewReason || reviewedAt || reviewedBy || revisionOfId || revisionWorkItemId) && (
+                                                <div className="am-review-metadata">
+                                                    {reviewDecision && <span>Decision: <strong>{reviewDecision.replace(/_/g, ' ')}</strong></span>}
+                                                    {reviewReason && <span>Reason: <strong>{clampText(reviewReason, 'None', 140)}</strong></span>}
+                                                    {reviewedBy && <span>By: <strong>{reviewedBy}</strong></span>}
+                                                    {reviewedAt && <span>At: <strong>{formatDate(reviewedAt)}</strong></span>}
+                                                    {revisionOfId && <span>Revision of: <strong>{clampText(revisionOfId, '-', 32)}</strong></span>}
+                                                    {revisionWorkItemId && <span>Follow-up: <strong>{clampText(revisionWorkItemId, '-', 32)}</strong></span>}
+                                                </div>
+                                            )}
+                                            {canReview && itemId && (
+                                                <div className="am-timeline-review-gate">
+                                                    <label className="am-field am-comment-field">
+                                                        <span>Review reason</span>
+                                                        <input
+                                                            value={reviewReasonInput}
+                                                            onChange={event => {
+                                                                const value = event.target.value;
+                                                                setWorkItemReviewReasons(prev => ({ ...prev, [itemId]: value }));
+                                                            }}
+                                                            placeholder="Required for reject or needs revision"
+                                                        />
+                                                    </label>
+                                                    <div className="am-team-timeline-actions">
+                                                        <MissionActionButton
+                                                            icon={<CheckCircle size={13} />}
+                                                            label="Accept"
+                                                            color="var(--success)"
+                                                            loading={actionLoading === `work-item:${itemId}:review:accept`}
+                                                            onClick={() => void handleWorkItemReview(item, 'accept')}
+                                                        />
+                                                        <MissionActionButton
+                                                            icon={<XCircle size={13} />}
+                                                            label="Reject"
+                                                            color="var(--danger)"
+                                                            loading={actionLoading === `work-item:${itemId}:review:reject`}
+                                                            disabled={reviewReasonRequired}
+                                                            onClick={() => void handleWorkItemReview(item, 'reject')}
+                                                        />
+                                                        <MissionActionButton
+                                                            icon={<AlertCircle size={13} />}
+                                                            label="Needs Revision"
+                                                            color="var(--warning)"
+                                                            loading={actionLoading === `work-item:${itemId}:review:needs_revision`}
+                                                            disabled={reviewReasonRequired}
+                                                            onClick={() => void handleWorkItemReview(item, 'needs_revision')}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {(canRetry || canCancel) && (
+                                                <div className="am-team-timeline-actions">
+                                                    {canRetry && (
+                                                        <MissionActionButton
+                                                            icon={<RefreshCw size={13} />}
+                                                            label="Retry"
+                                                            color="var(--primary)"
+                                                            loading={actionLoading === `work-item:${itemId}:retry`}
+                                                            onClick={() => void handleWorkItemAction(item, 'retry')}
+                                                        />
+                                                    )}
+                                                    {canCancel && (
+                                                        <MissionActionButton
+                                                            icon={<Square size={13} />}
+                                                            label="Cancel"
+                                                            color="var(--danger)"
+                                                            loading={actionLoading === `work-item:${itemId}:cancel`}
+                                                            onClick={() => void handleWorkItemAction(item, 'cancel')}
+                                                        />
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </section>
+            )}
+
             {workItems.length > 0 && (
                 <section className="am-panel">
                     <div className="am-section-title-row">
@@ -1617,6 +2832,13 @@ export default function AutonomousMissionsPage() {
                                 <p>{proposals.length} total</p>
                             </div>
                         </div>
+                        <MissionActionButton
+                            icon={<RefreshCw size={13} className={reviewRefreshing === 'all' ? 'am-spin' : undefined} />}
+                            label="Refresh Reviews"
+                            color="var(--primary)"
+                            loading={reviewRefreshing === 'all'}
+                            onClick={() => void handleRefreshReviews()}
+                        />
                     </div>
                     <div className="am-filter-row" role="group" aria-label="Proposal status filter">
                         {PROPOSAL_FILTERS.map(filter => (
@@ -1627,7 +2849,7 @@ export default function AutonomousMissionsPage() {
                                 onClick={() => handleProposalFilterChange(filter)}
                                 className={proposalFilter === filter ? 'am-filter is-active' : 'am-filter'}
                             >
-                                {filter}
+                                {proposalFilterLabel(filter)}
                             </button>
                         ))}
                     </div>
@@ -1651,6 +2873,13 @@ export default function AutonomousMissionsPage() {
                                 const canDecideProposal = status === 'pending';
                                 const canMaterializeProposal = status === 'approved';
                                 const expanded = expandedProposalIds.has(proposal.id);
+                                const duplicateWarning = hasDuplicateRisk(proposal);
+                                const blockingDuplicate = isBlockingDuplicate(proposal);
+                                const stalenessStatus = getStalenessStatus(proposal);
+                                const staleWarning = stalenessStatus === 'stale';
+                                const needsReview = stalenessStatus === 'needs_review';
+                                const mergeGate = proposal.review_context?.merge_gate;
+                                const provenance = proposal.review_context?.provenance;
 
                                 return (
                                     <article key={proposal.id} className="am-proposal-card">
@@ -1671,6 +2900,21 @@ export default function AutonomousMissionsPage() {
                                                 </div>
                                             </div>
                                             <div className="am-mission-statuses">
+                                                {duplicateWarning && (
+                                                    <span className="am-pill" style={{ color: blockingDuplicate ? 'var(--danger)' : 'var(--warning)', background: blockingDuplicate ? 'var(--danger-muted)' : 'var(--warning-muted)' }}>
+                                                        {blockingDuplicate ? 'blocking duplicate' : 'duplicate risk'}
+                                                    </span>
+                                                )}
+                                                {staleWarning && (
+                                                    <span className="am-pill" style={{ color: 'var(--danger)', background: 'var(--danger-muted)' }}>
+                                                        stale
+                                                    </span>
+                                                )}
+                                                {needsReview && (
+                                                    <span className="am-pill" style={{ color: 'var(--warning)', background: 'var(--warning-muted)' }}>
+                                                        needs review
+                                                    </span>
+                                                )}
                                                 <span className="am-pill" style={{ color: riskStyle.color, background: riskStyle.background }}>
                                                     {riskLevel}
                                                 </span>
@@ -1679,6 +2923,20 @@ export default function AutonomousMissionsPage() {
                                                 </span>
                                             </div>
                                             <div className="am-proposal-actions">
+                                                <MissionActionButton
+                                                    icon={<FileText size={13} />}
+                                                    label="Audit"
+                                                    color="var(--text-secondary)"
+                                                    loading={auditLoading && auditProposal?.id === proposal.id}
+                                                    onClick={() => void openAuditDialog(proposal)}
+                                                />
+                                                <MissionActionButton
+                                                    icon={<RefreshCw size={13} className={reviewRefreshing === proposal.id ? 'am-spin' : undefined} />}
+                                                    label="Review"
+                                                    color="var(--primary)"
+                                                    loading={reviewRefreshing === proposal.id}
+                                                    onClick={() => void handleRefreshProposalReview(proposal)}
+                                                />
                                                 {canDecideProposal && (
                                                     <>
                                                         <MissionActionButton
@@ -1717,6 +2975,20 @@ export default function AutonomousMissionsPage() {
                                                         <strong>{proposal.test_type || '-'}</strong>
                                                     </div>
                                                     <div>
+                                                        <span>Source: </span>
+                                                        <strong>{provenance?.source_type || proposal.source_type || '-'}</strong>
+                                                    </div>
+                                                    <div>
+                                                        <span>Gate: </span>
+                                                        <strong>{mergeGate ? mergeGate.replace(/_/g, ' ') : '-'}</strong>
+                                                    </div>
+                                                    {provenance?.confidence !== undefined && provenance?.confidence !== null && (
+                                                        <div>
+                                                            <span>Confidence: </span>
+                                                            <strong>{String(provenance.confidence)}</strong>
+                                                        </div>
+                                                    )}
+                                                    <div>
                                                         <span>File: </span>
                                                         <strong>{proposal.suggested_file_path || '-'}</strong>
                                                     </div>
@@ -1731,6 +3003,53 @@ export default function AutonomousMissionsPage() {
                                                     <p className="am-proposal-rationale">
                                                         {proposal.rationale}
                                                     </p>
+                                                )}
+                                                {duplicateWarning && (
+                                                    <div className="am-mission-error">
+                                                        <AlertCircle size={14} />
+                                                        <span>
+                                                            {blockingDuplicate
+                                                                ? 'Blocking duplicate must be overridden before materialization.'
+                                                                : proposal.review_context?.duplicate?.existing_file_conflict
+                                                                    ? 'Suggested file already exists.'
+                                                                    : 'Similar proposal or spec found.'}
+                                                        </span>
+                                                    </div>
+                                                )}
+                                                {(proposal.review_context?.duplicate?.matches || proposal.review_context?.duplicate?.candidates || []).length > 0 && (
+                                                    <div className="am-inline-list">
+                                                        {(proposal.review_context?.duplicate?.matches || proposal.review_context?.duplicate?.candidates || []).slice(0, 4).map((candidate, index) => (
+                                                            <div key={`${candidate.id || candidate.path || 'match'}:${index}`} className="am-inline-item">
+                                                                <div className="am-inline-copy">
+                                                                    <strong>{candidate.title || candidate.id || candidate.path}</strong>
+                                                                    <span>
+                                                                        {[
+                                                                            candidate.kind,
+                                                                            candidate.status,
+                                                                            candidate.suggested_file_path || candidate.path || candidate.id,
+                                                                            (candidate.reasons || []).join(', '),
+                                                                        ].filter(Boolean).join(' · ')}
+                                                                    </span>
+                                                                </div>
+                                                                <span className="am-pill">{Math.round((candidate.score || 0) * 100)}%</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {(proposal.review_context?.staleness?.reasons || []).length > 0 && (
+                                                    <div className="am-inline-list">
+                                                        {(proposal.review_context?.staleness?.reasons || []).slice(0, 4).map((reason, index) => (
+                                                            <div key={`${reason.source || 'stale'}:${index}`} className="am-inline-item">
+                                                                <div className="am-inline-copy">
+                                                                    <strong>{reason.source ? reason.source.replace(/_/g, ' ') : 'staleness signal'}</strong>
+                                                                    <span>{reason.message || proposal.review_context?.staleness?.reason || 'Review this proposal against current app behavior.'}</span>
+                                                                </div>
+                                                                {typeof reason.confidence === 'number' && (
+                                                                    <span className="am-pill">{Math.round(reason.confidence * 100)}%</span>
+                                                                )}
+                                                            </div>
+                                                        ))}
+                                                    </div>
                                                 )}
                                                 <pre className="am-spec-preview">
                                                     {compactSpecPreview(proposal.generated_spec_content)}
@@ -1986,6 +3305,59 @@ export default function AutonomousMissionsPage() {
                                         </div>
                                     </div>
 
+                                    <div className="am-fieldset">
+                                        <div className="am-fieldset-heading">
+                                            <ShieldCheck size={15} />
+                                            <span>Safety</span>
+                                        </div>
+                                        <div className="am-form-grid am-form-grid-compact">
+                                            <label className="am-field">
+                                                <span>Environment</span>
+                                                <select
+                                                    name="mission-environment"
+                                                    value={form.environment}
+                                                    onChange={event => setForm(prev => ({ ...prev, environment: event.target.value }))}
+                                                >
+                                                    <option value="staging">Staging</option>
+                                                    <option value="development">Development</option>
+                                                    <option value="production">Production</option>
+                                                </select>
+                                            </label>
+                                            <label className="am-field">
+                                                <span>Tool Profile</span>
+                                                <select
+                                                    name="mission-tool-profile"
+                                                    value={form.tool_profile}
+                                                    onChange={event => setForm(prev => ({ ...prev, tool_profile: event.target.value }))}
+                                                >
+                                                    <option value="role_based">Role based</option>
+                                                    <option value="read_only">Read only</option>
+                                                </select>
+                                            </label>
+                                            <label className="am-field">
+                                                <span>Credential Scope</span>
+                                                <select
+                                                    name="mission-credential-scope"
+                                                    value={form.credential_scope}
+                                                    onChange={event => setForm(prev => ({ ...prev, credential_scope: event.target.value }))}
+                                                >
+                                                    <option value="project">Project</option>
+                                                    <option value="environment">Environment</option>
+                                                </select>
+                                            </label>
+                                        </div>
+                                        <label className="am-field" style={{ marginTop: '0.75rem' }}>
+                                            <span>Allowed Domains</span>
+                                            <textarea
+                                                name="mission-allowed-domains"
+                                                value={form.allowed_domains}
+                                                onChange={event => setForm(prev => ({ ...prev, allowed_domains: event.target.value }))}
+                                                placeholder="Leave empty to use hostnames from target URLs"
+                                                rows={3}
+                                            />
+                                        </label>
+                                    </div>
+
                                     <div className="am-guardrail">
                                         <ShieldCheck size={16} />
                                         <span>Approval is required before proposals become repository files.</span>
@@ -2105,6 +3477,51 @@ export default function AutonomousMissionsPage() {
                             Overwrite existing file
                         </label>
 
+                        {materializeHasBlockingDuplicate && (
+                            <div className="am-alert am-alert-danger" style={{ marginTop: '0.85rem' }}>
+                                Blocking duplicate review is active. Add an override reason before writing this proposal.
+                            </div>
+                        )}
+
+                        {materializeHasBlockingDuplicate && (
+                            <>
+                                <label style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '0.5rem',
+                                    marginTop: '0.85rem',
+                                    color: 'var(--text-secondary)',
+                                    fontSize: '0.82rem',
+                                }}>
+                                    <input
+                                        name="materialize-override-duplicate"
+                                        type="checkbox"
+                                        checked={materializeOverrideDuplicate}
+                                        onChange={event => setMaterializeOverrideDuplicate(event.target.checked)}
+                                    />
+                                    Override blocking duplicate
+                                </label>
+
+                                <label style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginTop: '0.85rem', color: 'var(--text-secondary)', fontSize: '0.8rem' }}>
+                                    Override reason
+                                    <input
+                                        name="materialize-override-reason"
+                                        value={materializeOverrideReason}
+                                        onChange={event => setMaterializeOverrideReason(event.target.value)}
+                                        placeholder="Explain why this duplicate is intentional"
+                                        style={{
+                                            padding: '0.6rem 0.75rem',
+                                            background: 'var(--background)',
+                                            border: '1px solid var(--border)',
+                                            borderRadius: 'var(--radius-sm)',
+                                            color: 'var(--text)',
+                                            fontSize: '0.82rem',
+                                        }}
+                                    />
+                                </label>
+                            </>
+                        )}
+
                         <pre style={{
                             margin: '0.85rem 0 0',
                             padding: '0.65rem',
@@ -2138,19 +3555,19 @@ export default function AutonomousMissionsPage() {
                             </button>
                             <button
                                 type="submit"
-                                disabled={actionLoading === `${materializeProposal.id}:materialize`}
+                                disabled={actionLoading === `${materializeProposal.id}:materialize` || !materializeOverrideReady}
                                 style={{
                                     padding: '0.5rem 0.9rem',
                                     background: 'var(--primary)',
                                     color: 'white',
                                     border: 'none',
                                     borderRadius: 'var(--radius)',
-                                    cursor: actionLoading === `${materializeProposal.id}:materialize` ? 'not-allowed' : 'pointer',
+                                    cursor: actionLoading === `${materializeProposal.id}:materialize` || !materializeOverrideReady ? 'not-allowed' : 'pointer',
                                     display: 'flex',
                                     alignItems: 'center',
                                     gap: '0.45rem',
                                     fontWeight: 700,
-                                    opacity: actionLoading === `${materializeProposal.id}:materialize` ? 0.7 : 1,
+                                    opacity: actionLoading === `${materializeProposal.id}:materialize` || !materializeOverrideReady ? 0.7 : 1,
                                 }}
                             >
                                 {actionLoading === `${materializeProposal.id}:materialize` ? <Loader2 size={14} className="am-spin" /> : <UploadCloud size={14} />}
@@ -2158,6 +3575,134 @@ export default function AutonomousMissionsPage() {
                             </button>
                         </div>
                     </form>
+                </div>
+            )}
+
+            {auditProposal && (
+                <div
+                    className="am-modal-backdrop"
+                    role="presentation"
+                    onMouseDown={event => {
+                        if (event.target === event.currentTarget) {
+                            setAuditProposal(null);
+                            setAuditDetail(null);
+                        }
+                    }}
+                >
+                    <section
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="audit-title"
+                        style={{
+                            width: 'min(720px, 100%)',
+                            maxHeight: 'min(80vh, 760px)',
+                            overflow: 'auto',
+                            background: 'var(--surface)',
+                            border: '1px solid var(--border)',
+                            borderRadius: 'var(--radius)',
+                            padding: '1rem',
+                            boxShadow: '0 20px 60px rgba(0,0,0,0.35)',
+                        }}
+                    >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', marginBottom: '0.85rem' }}>
+                            <div>
+                                <h2 id="audit-title" style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Proposal Audit</h2>
+                                <p style={{ margin: '0.25rem 0 0', color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+                                    {auditProposal.title}
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                aria-label="Close audit dialog"
+                                onClick={() => {
+                                    setAuditProposal(null);
+                                    setAuditDetail(null);
+                                }}
+                                style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', height: '2rem' }}
+                            >
+                                <X size={18} />
+                            </button>
+                        </div>
+                        {auditLoading ? (
+                            <div className="am-empty-inline">Loading audit trail...</div>
+                        ) : !auditDetail ? (
+                            <div className="am-empty-inline">No audit trail loaded.</div>
+                        ) : (
+                            <div className="am-audit-body">
+                                <div className="am-audit-summary-grid">
+                                    <div>
+                                        <span>Finding</span>
+                                        <strong>{clampText(auditDetail.finding?.title || auditDetail.finding?.id, 'No linked finding', 120)}</strong>
+                                        <small>{clampText(auditDetail.finding?.status, 'No status', 48)}</small>
+                                    </div>
+                                    <div>
+                                        <span>Source Agent</span>
+                                        <strong>{clampText(auditDetail.source_work_item?.role, 'No source work item', 80)}</strong>
+                                        <small>{clampText(auditDetail.source_work_item?.review_decision, 'No review decision', 80)}</small>
+                                    </div>
+                                    <div>
+                                        <span>Requirement</span>
+                                        <strong>{clampText(auditDetail.linked_requirement?.req_code || auditDetail.linked_requirement?.title, 'No linked requirement', 120)}</strong>
+                                        <small>{clampText(auditDetail.linked_requirement?.truth_state, 'No truth state', 80)}</small>
+                                    </div>
+                                </div>
+
+                                {auditDetail.linked_requirement?.uncertainty_reason && (
+                                    <div className="am-alert am-alert-warning">
+                                        <AlertCircle size={15} />
+                                        <span>{auditDetail.linked_requirement.uncertainty_reason}</span>
+                                    </div>
+                                )}
+
+                                {(auditDetail.revision_chain || []).length > 0 && (
+                                    <div className="am-audit-section">
+                                        <h3>Revision Chain</h3>
+                                        <div className="am-review-metadata">
+                                            {(auditDetail.revision_chain || []).map(item => (
+                                                <span key={item.id || item.created_at || item.role || 'revision'}>
+                                                    {clampText(item.role, 'agent', 32)}: <strong>{clampText(item.id, '-', 30)}</strong>
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {(auditDetail.review_events || []).length > 0 && (
+                                    <div className="am-audit-section">
+                                        <h3>Review Events</h3>
+                                        <div className="am-event-list">
+                                            {(auditDetail.review_events || []).slice(-8).map((event, index) => (
+                                                <div key={`${event.id || event.sequence || index}`} className="am-event-row">
+                                                    <span className="am-event-sequence">#{event.sequence || index + 1}</span>
+                                                    <span className="am-pill">{event.event_type.replace(/_/g, ' ')}</span>
+                                                    <div className="am-event-copy">
+                                                        <strong>{clampText(event.message, 'Review event', 180)}</strong>
+                                                        <span>{formatDate(event.created_at)}</span>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                <div className="am-audit-section">
+                                    <h3>Timeline</h3>
+                                    <div className="am-event-list">
+                                        {auditDetail.timeline.map((entry, index) => (
+                                            <div key={`${entry.type}:${entry.at || index}`} className="am-event-row">
+                                                <span className="am-event-sequence">#{index + 1}</span>
+                                                <span className="am-pill">{entry.type.replace(/_/g, ' ')}</span>
+                                                <div className="am-event-copy">
+                                                    <strong>{clampText(entry.message, 'Audit event', 220)}</strong>
+                                                    <span>{formatDate(entry.at)}</span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </section>
                 </div>
             )}
 
@@ -2176,6 +3721,12 @@ export default function AutonomousMissionsPage() {
                     background: var(--danger-muted);
                     border: 1px solid rgba(239, 68, 68, 0.25);
                     color: var(--danger);
+                }
+
+                .am-alert-warning {
+                    background: var(--warning-muted);
+                    border: 1px solid rgba(251, 191, 36, 0.25);
+                    color: var(--warning);
                 }
 
                 .am-stat-grid {
@@ -2741,6 +4292,248 @@ export default function AutonomousMissionsPage() {
                     overflow-wrap: anywhere;
                 }
 
+                .am-team-timeline-list {
+                    display: grid;
+                    gap: 0.6rem;
+                    min-width: 0;
+                }
+
+                .am-team-timeline-item {
+                    display: grid;
+                    grid-template-columns: 1.35rem minmax(0, 1fr);
+                    gap: 0.65rem;
+                    padding: 0.72rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius-sm);
+                    background: rgba(255, 255, 255, 0.018);
+                    min-width: 0;
+                }
+
+                .am-timeline-rail {
+                    position: relative;
+                    display: flex;
+                    justify-content: center;
+                    min-height: 100%;
+                }
+
+                .am-timeline-rail::before {
+                    content: "";
+                    position: absolute;
+                    top: 1.1rem;
+                    bottom: -0.72rem;
+                    width: 1px;
+                    background: var(--border);
+                }
+
+                .am-team-timeline-item:last-child .am-timeline-rail::before {
+                    display: none;
+                }
+
+                .am-timeline-rail span {
+                    position: relative;
+                    z-index: 1;
+                    width: 0.62rem;
+                    height: 0.62rem;
+                    margin-top: 0.25rem;
+                    border-radius: 999px;
+                    background: var(--primary);
+                    box-shadow: 0 0 0 4px var(--primary-glow);
+                }
+
+                .am-team-timeline-main {
+                    display: grid;
+                    gap: 0.55rem;
+                    min-width: 0;
+                }
+
+                .am-team-timeline-top {
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) auto;
+                    gap: 0.75rem;
+                    align-items: start;
+                    min-width: 0;
+                }
+
+                .am-team-timeline-grid,
+                .am-change-field-grid {
+                    display: grid;
+                    grid-template-columns: repeat(4, minmax(0, 1fr));
+                    gap: 0.45rem;
+                    min-width: 0;
+                }
+
+                .am-team-timeline-grid > div,
+                .am-change-field-grid > div {
+                    min-width: 0;
+                    padding: 0.48rem 0.55rem;
+                    border: 1px solid rgba(255, 255, 255, 0.06);
+                    border-radius: var(--radius-sm);
+                    background: rgba(0, 0, 0, 0.08);
+                }
+
+                .am-team-timeline-grid span,
+                .am-team-timeline-grid strong,
+                .am-change-field-grid span,
+                .am-change-field-grid strong,
+                .am-change-requirement span,
+                .am-change-requirement strong {
+                    display: block;
+                    min-width: 0;
+                }
+
+                .am-team-timeline-grid span,
+                .am-change-field-grid span,
+                .am-change-requirement span {
+                    color: var(--text-tertiary);
+                    font-size: 0.66rem;
+                    font-weight: 750;
+                    text-transform: uppercase;
+                }
+
+                .am-team-timeline-grid strong,
+                .am-change-field-grid strong,
+                .am-change-requirement strong {
+                    margin-top: 0.12rem;
+                    color: var(--text-secondary);
+                    font-size: 0.74rem;
+                    font-weight: 700;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+
+                .am-team-timeline-actions {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 0.4rem;
+                    justify-content: flex-end;
+                }
+
+                .am-review-metadata {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 0.45rem;
+                    color: var(--text-tertiary);
+                    font-size: 0.72rem;
+                }
+
+                .am-review-metadata span {
+                    padding: 0.3rem 0.45rem;
+                    border: 1px solid rgba(255, 255, 255, 0.06);
+                    border-radius: var(--radius-sm);
+                    background: rgba(0, 0, 0, 0.08);
+                    overflow-wrap: anywhere;
+                }
+
+                .am-review-metadata strong {
+                    color: var(--text-secondary);
+                    font-weight: 700;
+                }
+
+                .am-timeline-review-gate {
+                    display: grid;
+                    gap: 0.45rem;
+                    justify-items: stretch;
+                    min-width: 0;
+                    padding: 0.55rem;
+                    border: 1px solid rgba(59, 130, 246, 0.18);
+                    border-radius: var(--radius-sm);
+                    background: rgba(59, 130, 246, 0.045);
+                }
+
+                .am-change-group-list,
+                .am-change-group {
+                    display: grid;
+                    gap: 0.75rem;
+                    min-width: 0;
+                }
+
+                .am-change-group {
+                    padding: 0.75rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius);
+                    background: rgba(255, 255, 255, 0.014);
+                }
+
+                .am-change-group-heading {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 0.75rem;
+                    color: var(--text);
+                    font-size: 0.82rem;
+                    font-weight: 800;
+                    text-transform: capitalize;
+                }
+
+                .am-change-group-heading span {
+                    min-width: 1.45rem;
+                    height: 1.45rem;
+                    padding: 0 0.35rem;
+                    border-radius: 999px;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    background: var(--primary-glow);
+                    color: var(--primary);
+                    font-size: 0.72rem;
+                    font-weight: 800;
+                }
+
+                .am-change-item {
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) minmax(220px, auto);
+                    gap: 0.75rem;
+                    align-items: start;
+                    padding: 0.7rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius-sm);
+                    background: rgba(0, 0, 0, 0.08);
+                    min-width: 0;
+                }
+
+                .am-change-side {
+                    display: grid;
+                    gap: 0.5rem;
+                    justify-items: end;
+                    min-width: 0;
+                }
+
+                .am-change-review {
+                    display: grid;
+                    gap: 0.45rem;
+                    justify-items: end;
+                    min-width: 0;
+                }
+
+                .am-comment-field {
+                    width: min(260px, 100%);
+                }
+
+                .am-comment-field input {
+                    padding: 0.42rem 0.55rem;
+                    font-size: 0.75rem;
+                }
+
+                .am-change-requirement {
+                    margin-top: 0.5rem;
+                    padding: 0.5rem 0.55rem;
+                    border: 1px solid rgba(59, 130, 246, 0.2);
+                    border-radius: var(--radius-sm);
+                    background: var(--primary-glow);
+                    min-width: 0;
+                }
+
+                .am-change-actions {
+                    align-items: flex-end;
+                }
+
+                .am-change-note {
+                    padding: 0.45rem 0.55rem;
+                    font-size: 0.72rem;
+                    max-width: 220px;
+                }
+
                 .am-mission-grid {
                     display: grid;
                     grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
@@ -2826,7 +4619,7 @@ export default function AutonomousMissionsPage() {
 
                 .am-work-lanes {
                     display: grid;
-                    grid-template-columns: repeat(3, minmax(0, 1fr));
+                    grid-template-columns: repeat(4, minmax(0, 1fr));
                     gap: 0.5rem;
                 }
 
@@ -2871,6 +4664,12 @@ export default function AutonomousMissionsPage() {
 
                 .am-filter-row {
                     margin-bottom: 0.85rem;
+                }
+
+                .am-filter-row-inline {
+                    margin-bottom: 0;
+                    align-items: center;
+                    justify-content: flex-end;
                 }
 
                 .am-filter {
@@ -3513,6 +5312,53 @@ export default function AutonomousMissionsPage() {
                     border-radius: var(--radius);
                 }
 
+                .am-audit-body,
+                .am-audit-section {
+                    display: grid;
+                    gap: 0.75rem;
+                    min-width: 0;
+                }
+
+                .am-audit-section h3 {
+                    margin: 0;
+                    color: var(--text);
+                    font-size: 0.86rem;
+                    font-weight: 800;
+                }
+
+                .am-audit-summary-grid {
+                    display: grid;
+                    grid-template-columns: repeat(3, minmax(0, 1fr));
+                    gap: 0.65rem;
+                }
+
+                .am-audit-summary-grid > div {
+                    min-width: 0;
+                    display: grid;
+                    gap: 0.25rem;
+                    padding: 0.7rem;
+                    border: 1px solid var(--border);
+                    border-radius: var(--radius);
+                    background: rgba(255, 255, 255, 0.018);
+                }
+
+                .am-audit-summary-grid span,
+                .am-audit-summary-grid small {
+                    color: var(--text-secondary);
+                    font-size: 0.72rem;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+
+                .am-audit-summary-grid strong {
+                    color: var(--text);
+                    font-size: 0.82rem;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+
                 .am-event-list,
                 .am-output-list {
                     display: grid;
@@ -3591,6 +5437,7 @@ export default function AutonomousMissionsPage() {
                 @media (max-width: 900px) {
                     .am-create-grid,
                     .am-work-item,
+                    .am-change-item,
                     .am-proposal-card,
                     .am-inline-item,
                     .am-live-grid {
@@ -3622,8 +5469,18 @@ export default function AutonomousMissionsPage() {
 
                     .am-mission-statuses,
                     .am-card-actions,
-                    .am-proposal-actions {
+                    .am-proposal-actions,
+                    .am-change-side,
+                    .am-team-timeline-actions {
                         justify-content: flex-start;
+                        justify-items: start;
+                    }
+
+                    .am-team-timeline-top,
+                    .am-team-timeline-grid,
+                    .am-change-field-grid,
+                    .am-audit-summary-grid {
+                        grid-template-columns: 1fr;
                     }
 
                     .am-mission-details,
@@ -3646,7 +5503,9 @@ export default function AutonomousMissionsPage() {
                     .am-work-lanes,
                     .am-row-metrics,
                     .am-live-summary,
-                    .am-template-picker {
+                    .am-template-picker,
+                    .am-team-timeline-grid,
+                    .am-change-field-grid {
                         grid-template-columns: 1fr;
                     }
 
@@ -3704,33 +5563,36 @@ function MissionActionButton({
     label,
     color,
     loading,
+    disabled = false,
     onClick,
 }: {
     icon: ReactNode;
     label: string;
     color: string;
     loading: boolean;
+    disabled?: boolean;
     onClick: () => void;
 }) {
+    const isDisabled = loading || disabled;
     return (
         <button
             type="button"
             className="am-action-button"
             onClick={onClick}
-            disabled={loading}
+            disabled={isDisabled}
             aria-busy={loading}
             style={{
                 padding: '0.35rem 0.6rem',
                 background: 'transparent',
                 border: '1px solid var(--border)',
                 borderRadius: 'var(--radius)',
-                cursor: loading ? 'not-allowed' : 'pointer',
+                cursor: isDisabled ? 'not-allowed' : 'pointer',
                 color,
                 fontSize: '0.8rem',
                 display: 'flex',
                 alignItems: 'center',
                 gap: '0.35rem',
-                opacity: loading ? 0.7 : 1,
+                opacity: isDisabled ? 0.55 : 1,
             }}
         >
             {loading ? <Loader2 size={13} className="am-spin" /> : icon}

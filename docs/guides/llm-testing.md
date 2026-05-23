@@ -1,5 +1,10 @@
 # How to Evaluate LLM Providers
 
+![LLM evaluation dashboard with providers, datasets, and comparison results](../assets/ui/llm-testing.png)
+
+<p class="caption">LLM evaluation dashboard with providers, datasets, and comparison results.</p>
+
+
 Full LLM evaluation platform for testing AI providers against structured test suites, comparing models, iterating on prompts, and tracking performance over time.
 
 ## Overview
@@ -233,13 +238,13 @@ curl http://localhost:8001/llm-testing/analytics/overview?project_id=your-projec
 curl http://localhost:8001/llm-testing/analytics/trends?project_id=your-project-id
 
 # Cost tracking
-curl http://localhost:8001/llm-testing/analytics/cost?project_id=your-project-id
+curl http://localhost:8001/llm-testing/analytics/cost-tracking?project_id=your-project-id
 
 # Regression detection
 curl http://localhost:8001/llm-testing/analytics/regressions?project_id=your-project-id
 
 # Golden dashboard
-curl http://localhost:8001/llm-testing/analytics/golden?project_id=your-project-id
+curl http://localhost:8001/llm-testing/analytics/golden-dashboard?project_id=your-project-id
 ```
 
 ## Configuration
@@ -300,6 +305,7 @@ Confirm LLM testing works:
 
 ## Related Guides
 
+- [Specialized Testing Architecture](../explanation/specialized-testing-architecture.md) -- LLM evaluation in the testing platform
 - [Scheduling](./scheduling.md) -- automate LLM test runs
 - [API Testing](./api-testing.md) -- test the LLM provider's HTTP API directly
 - [Credential Management](./credential-management.md) -- manage provider API keys

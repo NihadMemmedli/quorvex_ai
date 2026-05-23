@@ -1,5 +1,10 @@
 # CI/CD Setup
 
+![CI/CD dashboard with pipeline mappings and quality gates](../assets/ui/ci-cd.png)
+
+<p class="caption">CI/CD dashboard with pipeline mappings and quality gates.</p>
+
+
 In this tutorial, you will configure Quorvex AI to run generated Playwright tests automatically in a CI/CD pipeline. You will set up GitHub Actions (with GitLab CI as an alternative), connect it to the dashboard, and see test results flow back.
 
 ## Prerequisites
@@ -73,6 +78,8 @@ This workflow:
 - Runs all Playwright tests in `tests/generated/`
 - Uploads the HTML report as an artifact (available for 30 days)
 
+The checked-in `.github/workflows/playwright.yml` is intentionally secret-gated: it only runs when `ANTHROPIC_AUTH_TOKEN` is configured for the repository, and it passes that token to Playwright. That keeps forked pull requests from trying to run AI-backed tests without credentials. If you want a pure generated-test workflow with no AI dependency, use the example above and point Playwright at tests that do not call the generation pipeline.
+
 ### Step 2: Commit and Push
 
 Add the workflow file and your generated tests to Git:
@@ -116,6 +123,8 @@ Update the workflow to pass secrets as environment variables:
           LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
           BASE_URL: ${{ vars.BASE_URL }}
 ```
+
+For the repository's Docker CI smoke test, provider defaults come from workflow secrets when present. The project environment examples default to the Z.ai Anthropic-compatible endpoint, so set `ANTHROPIC_BASE_URL` and `ANTHROPIC_DEFAULT_SONNET_MODEL` explicitly if your CI should use the same provider as local development.
 
 !!! warning
     Never commit credentials to your repository. Always use GitHub Secrets for sensitive values.
@@ -258,4 +267,5 @@ In this tutorial, you:
 - [Dashboard Walkthrough](./dashboard-walkthrough.md) -- explore other dashboard features
 - [Regression Testing Guide](../guides/regression-batches.md) -- batch execution and reporting
 - [Schedule Automated Runs](../guides/scheduling.md) -- cron-based test execution
+- [CI/CD and PR Advisor Architecture](../explanation/ci-pr-advisor-architecture.md) -- understand provider sync and quality gates
 - [Environment Variables](../reference/environment-variables.md) -- full configuration reference

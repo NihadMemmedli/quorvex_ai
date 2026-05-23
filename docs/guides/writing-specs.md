@@ -1,5 +1,10 @@
 # How to Write Test Specifications
 
+![New test specification editor in the Quorvex dashboard](../assets/ui/spec-editor.png)
+
+<p class="caption">New test specification editor in the Quorvex dashboard.</p>
+
+
 Write plain-English markdown specs that Quorvex AI converts into production-ready Playwright tests.
 
 ## Prerequisites

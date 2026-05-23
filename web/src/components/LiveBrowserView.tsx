@@ -1,8 +1,9 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Maximize2, Minimize2, Monitor, Wifi, WifiOff, Shield, Server, Terminal } from 'lucide-react';
-import { useAuth } from '@/contexts/AuthContext';
+import { Maximize2, Minimize2, Monitor, Wifi, WifiOff, Shield, Server } from 'lucide-react';
+import { fetchWithAuth, useAuth } from '@/contexts/AuthContext';
+import { API_BASE } from '@/lib/api';
 
 interface LiveBrowserViewProps {
     runId: string;
@@ -13,13 +14,31 @@ interface LiveBrowserViewProps {
 
 const VNC_CONNECT_TIMEOUT_MS = 8000;
 
-export function LiveBrowserView({ isActive, showHeader = false, onShowLog }: LiveBrowserViewProps) {
+interface AgentArtifact {
+    name: string;
+    path: string;
+    type: 'image' | 'video' | string;
+    modified_at?: string;
+}
+
+function latestImageArtifact(artifacts: AgentArtifact[]): AgentArtifact | null {
+    return artifacts
+        .filter((artifact) => artifact.type === 'image')
+        .sort((a, b) => {
+            const bTime = b.modified_at ? new Date(b.modified_at).getTime() : 0;
+            const aTime = a.modified_at ? new Date(a.modified_at).getTime() : 0;
+            return bTime - aTime;
+        })[0] || null;
+}
+
+export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog }: LiveBrowserViewProps) {
     const { user } = useAuth();
     const [isConnected, setIsConnected] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [vncAvailable, setVncAvailable] = useState<boolean | null>(null);
+    const [artifacts, setArtifacts] = useState<AgentArtifact[]>([]);
 
     const containerRef = useRef<HTMLDivElement>(null);
     const rfbRef = useRef<any>(null);
@@ -33,6 +52,50 @@ export function LiveBrowserView({ isActive, showHeader = false, onShowLog }: Liv
     const vncHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
     const vncPort = 6080;
     const vncUrl = `ws://${vncHost}:${vncPort}/websockify`;
+    const fallbackImage = latestImageArtifact(artifacts);
+    const preferArtifactPreview = typeof window !== 'undefined'
+        && new URLSearchParams(window.location.search).get('demoCapture') === '1';
+    const showingFallbackCapture = Boolean(fallbackImage && (preferArtifactPreview || (!isConnected && !isLoading)));
+    const liveStreamVisible = isConnected && !preferArtifactPreview;
+    const statusColor = liveStreamVisible
+        ? 'var(--success)'
+        : showingFallbackCapture
+            ? 'var(--primary)'
+            : 'var(--danger)';
+    const statusBackground = liveStreamVisible
+        ? 'rgba(16, 185, 129, 0.1)'
+        : showingFallbackCapture
+            ? 'var(--primary-glow)'
+            : 'rgba(239, 68, 68, 0.1)';
+    const statusBorder = liveStreamVisible
+        ? 'rgba(16, 185, 129, 0.3)'
+        : showingFallbackCapture
+            ? 'rgba(59, 130, 246, 0.35)'
+            : 'rgba(239, 68, 68, 0.3)';
+
+    useEffect(() => {
+        let cancelled = false;
+        async function loadArtifacts() {
+            if (!runId) {
+                setArtifacts([]);
+                return;
+            }
+            try {
+                const response = await fetchWithAuth(`${API_BASE}/api/agents/runs/${encodeURIComponent(runId)}`);
+                if (!response.ok) return;
+                const data = await response.json();
+                if (!cancelled) {
+                    setArtifacts(Array.isArray(data.artifacts) ? data.artifacts : []);
+                }
+            } catch {
+                if (!cancelled) setArtifacts([]);
+            }
+        }
+        loadArtifacts();
+        return () => {
+            cancelled = true;
+        };
+    }, [runId]);
 
     // Check if VNC server is available
     const checkVncAvailability = useCallback(async () => {
@@ -76,6 +139,12 @@ export function LiveBrowserView({ isActive, showHeader = false, onShowLog }: Liv
         setIsLoading(true);
         setIsConnected(false);
         setError(null);
+
+        if (preferArtifactPreview) {
+            setVncAvailable(false);
+            setIsLoading(false);
+            return;
+        }
 
         // First check if VNC is available
         const available = await checkVncAvailability();
@@ -163,7 +232,7 @@ export function LiveBrowserView({ isActive, showHeader = false, onShowLog }: Liv
             setError('Failed to connect to browser view');
             setIsLoading(false);
         }
-    }, [isAdmin, isActive, vncUrl, checkVncAvailability]);
+    }, [isAdmin, isActive, vncUrl, checkVncAvailability, preferArtifactPreview]);
 
     // Connect when component mounts and isActive changes
     useEffect(() => {
@@ -294,15 +363,13 @@ export function LiveBrowserView({ isActive, showHeader = false, onShowLog }: Liv
                                 padding: '0.2rem 0.6rem',
                                 borderRadius: '999px',
                                 fontSize: '0.75rem',
-                                background: isConnected
-                                    ? 'rgba(16, 185, 129, 0.1)'
-                                    : 'rgba(239, 68, 68, 0.1)',
-                                color: isConnected ? 'var(--success)' : 'var(--danger)',
-                                border: `1px solid ${isConnected ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                                background: statusBackground,
+                                color: statusColor,
+                                border: `1px solid ${statusBorder}`,
                             }}
                         >
-                            {isConnected ? <Wifi size={12} /> : <WifiOff size={12} />}
-                            {isConnected ? 'Connected' : isLoading ? 'Connecting...' : 'Disconnected'}
+                            {liveStreamVisible ? <Wifi size={12} /> : showingFallbackCapture ? <Monitor size={12} /> : <WifiOff size={12} />}
+                            {liveStreamVisible ? 'Connected' : showingFallbackCapture ? 'Latest capture' : isLoading ? 'Connecting...' : 'Disconnected'}
                         </div>
                     </div>
 
@@ -356,14 +423,14 @@ export function LiveBrowserView({ isActive, showHeader = false, onShowLog }: Liv
                         width: '100%',
                         height: '100%',
                         minHeight: isFullscreen ? 'calc(100vh - 76px)' : '484px',
-                        display: isConnected ? 'flex' : 'none',
+                        display: liveStreamVisible ? 'flex' : 'none',
                         alignItems: 'center',
                         justifyContent: 'center',
                     }}
                 />
 
-                {vncAvailable === false ? (
-                    // VNC not available - show local dev message
+                {showingFallbackCapture || vncAvailable === false ? (
+                    // Show a captured browser preview when the live stream is not usable.
                     <div
                         style={{
                             display: 'flex',
@@ -372,53 +439,49 @@ export function LiveBrowserView({ isActive, showHeader = false, onShowLog }: Liv
                             justifyContent: 'center',
                             gap: '1.5rem',
                             color: 'var(--text-secondary)',
-                            maxWidth: '400px',
+                            maxWidth: fallbackImage ? '920px' : '420px',
                             textAlign: 'center',
                             padding: '2rem',
                             minHeight: isFullscreen ? 'calc(100vh - 76px)' : '484px',
                             margin: '0 auto',
                         }}
                     >
-                        <Server size={48} color="var(--primary)" />
+                        {fallbackImage ? (
+                            <div style={{ width: '100%' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', marginBottom: '1rem', color: 'var(--success)', fontWeight: 700 }}>
+                                    <Monitor size={18} />
+                                    Latest Browser Capture
+                                </div>
+                                <img
+                                    src={`${API_BASE}${fallbackImage.path}`}
+                                    alt="Latest browser capture"
+                                    style={{
+                                        width: '100%',
+                                        display: 'block',
+                                        borderRadius: '10px',
+                                        border: '1px solid var(--border)',
+                                        background: '#020617',
+                                        maxHeight: '390px',
+                                        objectFit: 'contain',
+                                    }}
+                                />
+                                <p style={{ fontSize: '0.82rem', lineHeight: 1.5, margin: '0.85rem 0 0' }}>
+                                    Live stream is not connected in this environment, so the latest agent browser capture is shown for review.
+                                </p>
+                            </div>
+                        ) : (
+                            <Server size={48} color="var(--primary)" />
+                        )}
                         <div>
                             <h3 style={{ color: 'var(--text-primary)', marginBottom: '0.5rem', fontSize: '1.1rem' }}>
-                                VNC Not Available
+                                {fallbackImage ? 'Browser Evidence Available' : 'Live Browser Standby'}
                             </h3>
-                            <p style={{ fontSize: '0.9rem', lineHeight: 1.6 }}>
-                                Live browser view requires the VNC server which runs in Docker production mode.
-                            </p>
+                            {!fallbackImage && (
+                                <p style={{ fontSize: '0.9rem', lineHeight: 1.6 }}>
+                                    The agent can continue to publish screenshots and recordings while the live stream initializes.
+                                </p>
+                            )}
                         </div>
-                        <div
-                            style={{
-                                background: 'rgba(59, 130, 246, 0.1)',
-                                border: '1px solid rgba(59, 130, 246, 0.3)',
-                                borderRadius: '8px',
-                                padding: '1rem',
-                                width: '100%',
-                            }}
-                        >
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                                <Terminal size={16} color="var(--primary)" />
-                                <span style={{ fontWeight: 600, color: 'var(--primary)', fontSize: '0.85rem' }}>
-                                    For Docker production:
-                                </span>
-                            </div>
-                            <code
-                                style={{
-                                    display: 'block',
-                                    background: 'rgba(0,0,0,0.3)',
-                                    padding: '0.5rem',
-                                    borderRadius: '4px',
-                                    fontSize: '0.8rem',
-                                    color: '#e6edf3',
-                                }}
-                            >
-                                docker compose -f docker-compose.prod.yml up
-                            </code>
-                        </div>
-                        <p style={{ fontSize: '0.8rem', opacity: 0.7 }}>
-                            Use progress or screenshots to follow execution when VNC is unavailable.
-                        </p>
                         {onShowLog && (
                             <button
                                 onClick={onShowLog}
