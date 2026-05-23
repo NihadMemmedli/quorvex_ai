@@ -1,0 +1,240 @@
+{
+  "version": 1,
+  "defaultViewport": {
+    "width": 1440,
+    "height": 960
+  },
+  "assets": [
+    {
+      "id": "dashboard-overview",
+      "kind": "screenshot",
+      "route": "/dashboard",
+      "path": "docs/assets/ui/dashboard-overview.png",
+      "alt": "Quorvex dashboard overview with project quality and execution metrics"
+    },
+    {
+      "id": "product-flow",
+      "kind": "gif",
+      "route": "/autopilot",
+      "path": "docs/assets/ui/product-flow.gif",
+      "alt": "Quorvex UI flow from dashboard to automated test generation"
+    },
+    {
+      "id": "command-center",
+      "kind": "screenshot",
+      "route": "/",
+      "path": "docs/assets/ui/command-center.png",
+      "alt": "Quorvex command center showing project status and active work"
+    },
+    {
+      "id": "autopilot",
+      "kind": "screenshot",
+      "route": "/autopilot",
+      "path": "docs/assets/ui/autopilot.png",
+      "alt": "AutoPilot dashboard showing autonomous test generation workflow"
+    },
+    {
+      "id": "autonomous",
+      "kind": "screenshot",
+      "route": "/autonomous",
+      "path": "docs/assets/ui/autonomous.png",
+      "alt": "Autonomous missions dashboard with mission status and approval workflow"
+    },
+    {
+      "id": "agents",
+      "kind": "screenshot",
+      "route": "/agents",
+      "path": "docs/assets/ui/agents.png",
+      "alt": "Agents dashboard for reusable agent definitions and runs"
+    },
+    {
+      "id": "specs",
+      "kind": "screenshot",
+      "route": "/specs",
+      "path": "docs/assets/ui/specs.png",
+      "alt": "Test specifications dashboard with folders, tags, and run actions"
+    },
+    {
+      "id": "spec-editor",
+      "kind": "screenshot",
+      "route": "/specs/new",
+      "path": "docs/assets/ui/spec-editor.png",
+      "alt": "New test specification editor in the Quorvex dashboard"
+    },
+    {
+      "id": "runs",
+      "kind": "screenshot",
+      "route": "/runs",
+      "path": "docs/assets/ui/runs.png",
+      "alt": "Test runs dashboard with execution status and recent results"
+    },
+    {
+      "id": "regression",
+      "kind": "screenshot",
+      "route": "/regression",
+      "path": "docs/assets/ui/regression.png",
+      "alt": "Regression dashboard for batch execution and result review"
+    },
+    {
+      "id": "regression-batches",
+      "kind": "screenshot",
+      "route": "/regression/batches",
+      "path": "docs/assets/ui/regression-batches.png",
+      "alt": "Regression batch reports list in the Quorvex dashboard"
+    },
+    {
+      "id": "exploration",
+      "kind": "screenshot",
+      "route": "/exploration",
+      "path": "docs/assets/ui/exploration.png",
+      "alt": "Discovery dashboard showing explored flows and generated requirements"
+    },
+    {
+      "id": "requirements",
+      "kind": "screenshot",
+      "route": "/requirements",
+      "path": "docs/assets/ui/requirements.png",
+      "alt": "Requirements dashboard with priorities, review status, and traceability"
+    },
+    {
+      "id": "rtm",
+      "kind": "screenshot",
+      "route": "/rtm",
+      "path": "docs/assets/ui/rtm.png",
+      "alt": "Requirements traceability matrix in the Quorvex dashboard"
+    },
+    {
+      "id": "coverage",
+      "kind": "screenshot",
+      "route": "/coverage",
+      "path": "docs/assets/ui/coverage.png",
+      "alt": "Coverage dashboard showing tested areas and gap analysis"
+    },
+    {
+      "id": "prd",
+      "kind": "screenshot",
+      "route": "/prd",
+      "path": "docs/assets/ui/prd.png",
+      "alt": "PRD workspace for extracting features and generating tests"
+    },
+    {
+      "id": "recordings",
+      "kind": "screenshot",
+      "route": "/recordings",
+      "path": "docs/assets/ui/recordings.png",
+      "alt": "Recording import dashboard for turning browser flows into specs"
+    },
+    {
+      "id": "api-testing",
+      "kind": "screenshot",
+      "route": "/api-testing",
+      "path": "docs/assets/ui/api-testing.png",
+      "alt": "API testing dashboard with OpenAPI import and generated tests"
+    },
+    {
+      "id": "load-testing",
+      "kind": "screenshot",
+      "route": "/load-testing",
+      "path": "docs/assets/ui/load-testing.png",
+      "alt": "Load testing dashboard with scenarios, scripts, and run results"
+    },
+    {
+      "id": "security-testing",
+      "kind": "screenshot",
+      "route": "/security-testing",
+      "path": "docs/assets/ui/security-testing.png",
+      "alt": "Security testing dashboard with scanner configuration and findings"
+    },
+    {
+      "id": "database-testing",
+      "kind": "screenshot",
+      "route": "/database-testing",
+      "path": "docs/assets/ui/database-testing.png",
+      "alt": "Database testing dashboard with connections, schema analysis, and checks"
+    },
+    {
+      "id": "llm-testing",
+      "kind": "screenshot",
+      "route": "/llm-testing",
+      "path": "docs/assets/ui/llm-testing.png",
+      "alt": "LLM evaluation dashboard with providers, datasets, and comparison results"
+    },
+    {
+      "id": "schedules",
+      "kind": "screenshot",
+      "route": "/schedules",
+      "path": "docs/assets/ui/schedules.png",
+      "alt": "Schedules dashboard with recurring test runs and cron configuration"
+    },
+    {
+      "id": "ci-cd",
+      "kind": "screenshot",
+      "route": "/ci-cd",
+      "path": "docs/assets/ui/ci-cd.png",
+      "alt": "CI/CD dashboard with pipeline mappings and quality gates"
+    },
+    {
+      "id": "pr-advisor",
+      "kind": "screenshot",
+      "route": "/pr-advisor",
+      "path": "docs/assets/ui/pr-advisor.png",
+      "alt": "PR advisor dashboard with risk analysis and recommended tests"
+    },
+    {
+      "id": "workflow",
+      "kind": "screenshot",
+      "route": "/workflow",
+      "path": "docs/assets/ui/workflow.png",
+      "alt": "Workflow monitor showing custom workflow definitions and run diagnostics"
+    },
+    {
+      "id": "memory",
+      "kind": "screenshot",
+      "route": "/memory",
+      "path": "docs/assets/ui/memory.png",
+      "alt": "Memory dashboard showing reusable context, coverage signals, and recall"
+    },
+    {
+      "id": "assistant",
+      "kind": "screenshot",
+      "route": "/assistant",
+      "path": "docs/assets/ui/assistant.png",
+      "alt": "Assistant dashboard with project-aware chat and tool approval context"
+    },
+    {
+      "id": "analytics",
+      "kind": "screenshot",
+      "route": "/analytics",
+      "path": "docs/assets/ui/analytics.png",
+      "alt": "Analytics dashboard showing trends, failure analysis, and flaky tests"
+    },
+    {
+      "id": "projects",
+      "kind": "screenshot",
+      "route": "/projects",
+      "path": "docs/assets/ui/projects.png",
+      "alt": "Projects dashboard for workspace selection and project membership"
+    },
+    {
+      "id": "settings",
+      "kind": "screenshot",
+      "route": "/settings",
+      "path": "docs/assets/ui/settings.png",
+      "alt": "Settings dashboard for credentials, integrations, and platform health"
+    },
+    {
+      "id": "admin-users",
+      "kind": "screenshot",
+      "route": "/admin/users",
+      "path": "docs/assets/ui/admin-users.png",
+      "alt": "Admin user management dashboard with roles and project memberships"
+    },
+    {
+      "id": "login",
+      "kind": "screenshot",
+      "route": "/login",
+      "path": "docs/assets/ui/login.png",
+      "alt": "Quorvex login screen for authenticated dashboard deployments"
+    }
+  ]
+}

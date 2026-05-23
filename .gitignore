@@ -25,7 +25,7 @@ build/
 /tests/generated/
 
 *.png
-!docs/assets/*.png
+!docs/assets/**/*.png
 
 # Environment
 .env
@@ -50,14 +50,11 @@ Thumbs.db
 marketing/
 .playwright-mcp/
 
-# Marketing / launch production (local only)
+# Marketing demo specs and video production (local only)
 specs/demo-marketing/
-scripts/docs-assets/
-docs/assets/ui/
-
-# Demo video pipeline outputs and campaign artifacts
 scripts/demo-video/output/
 scripts/demo-video/campaign-config.json
+scripts/docs-assets/output/
 
 # Playwright MCP temp files
 healer_result.json
