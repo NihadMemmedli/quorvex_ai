@@ -7,90 +7,78 @@ Usage:
     python scripts/demo-video/generate-voice.py
     python scripts/demo-video/generate-voice.py --lang en   # English only
     python scripts/demo-video/generate-voice.py --lang az   # Azeri only
-    python scripts/demo-video/generate-voice.py --voice "Rachel"  # Specific voice
+    python scripts/demo-video/generate-voice.py --lang en --input scripts/demo-video/output/narration-en.md
+    python scripts/demo-video/generate-voice.py --voice "George"  # Specific voice
 
 Prerequisites:
     pip install elevenlabs
-    ELEVENLABS_API_KEY in .env or environment
+    ELEVENLABS_API_KEY in .env, .env.prod, or environment
 """
 
 import os
 import sys
 import argparse
+import re
 from pathlib import Path
 
-# Load .env from project root
+# Load environment files from project root. .env.prod is supported because the
+# production OpenAI key is commonly kept there for release/demo workflows.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-ENV_FILE = PROJECT_ROOT / ".env"
-if ENV_FILE.exists():
-    for line in ENV_FILE.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
+for ENV_FILE in (PROJECT_ROOT / ".env", PROJECT_ROOT / ".env.local", PROJECT_ROOT / ".env.prod"):
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and not os.environ.get(key):
+                    os.environ[key] = value
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Narration texts — must match the .md scripts exactly
-NARRATION_EN = (
-    "Writing a hundred test cases by hand takes weeks. "
-    "Watch this AI do it in thirty seconds. "
-    "Manual test writing is slow, error-prone, and doesn't scale. "
-    "This dashboard changes everything. "
-    "Point this AI at any web app. "
-    "It explores every page, discovers user flows, and maps API endpoints — "
-    "completely on its own. No scripts, no setup — just a URL. "
-    "From exploration to production-ready Playwright tests — fully automated. "
-    "Requirements extraction, test generation, and self-healing validation — "
-    "all in one pipeline. When a test breaks, the AI fixes it automatically. "
-    "Not just UI tests. API testing from OpenAPI specs. "
-    "Load testing with real-time metrics. Multi-tier security scanning. "
-    "Database quality checks. Even LLM evaluation for your AI models. "
-    "CI/CD integration with GitHub and GitLab. "
-    "Full requirements traceability. Regression reports. "
-    "Cron scheduling. Multi-project isolation. "
-    "AI-powered test automation. From zero to full coverage. Try it today."
-)
-
-NARRATION_AZ = (
-    "Yüz test yazısını əllə yazmaq həftələr çəkir. "
-    "Bu süni intellektin bunu otuz saniyəyə necə etdiyinə baxın. "
-    "Əl ilə test yazmaq yavaş, səhvlərə meyilli və miqyaslanmır. "
-    "Bu panel hər şeyi dəyişir. "
-    "Bu süni intellekti istənilən veb tətbiqə yönəldin. "
-    "O, hər səhifəni araşdırır, istifadəçi axınlarını kəşf edir və "
-    "API nöqtələrini xəritələyir — tamamilə müstəqil şəkildə. "
-    "Skript yoxdur, quraşdırma yoxdur — sadəcə bir URL. "
-    "Kəşfiyyatdan istehsala hazır Playwright testlərinə — tam avtomatik. "
-    "Tələblərin çıxarılması, test generasiyası və özünü bərpa edən validasiya — "
-    "hamısı bir boru kəmərində. Test sınanda süni intellekt onu avtomatik düzəldir. "
-    "Yalnız UI testləri deyil. OpenAPI spesifikasiyalarından API testləri. "
-    "Real vaxt metrikalı yük testləri. Çoxsəviyyəli təhlükəsizlik skanı. "
-    "Verilənlər bazası keyfiyyət yoxlamaları. "
-    "Hətta süni intellekt modelləri üçün LLM qiymətləndirməsi. "
-    "GitHub və GitLab ilə CI/CD inteqrasiyası. "
-    "Tam tələb izlənməsi. Reqressiya hesabatları. "
-    "Cron planlaşdırma. Çoxlayihəli izolyasiya. "
-    "Süni intellektlə test avtomatlaşdırması. Sıfırdan tam əhatəyə. Bu gün sınayın."
+PREFERRED_WARM_VOICES = (
+    "Eldrin - Crisp British Baritone",
+    "George - Warm, Captivating Storyteller",
+    "George",
+    "Adam",
 )
 
 
 def get_api_key() -> str:
     key = os.environ.get("ELEVENLABS_API_KEY", "")
-    if not key:
-        print("❌ ELEVENLABS_API_KEY not found in environment or .env file")
-        print("   Get a free key at: https://elevenlabs.io")
-        sys.exit(1)
     return key
+
+
+def narration_path_for(language: str) -> Path:
+    generated = OUTPUT_DIR / f"narration-{language}.md"
+    if generated.exists():
+        return generated
+    return Path(__file__).resolve().parent / f"narration-{language}.md"
+
+
+def narration_text_from_markdown(path: Path) -> str:
+    if not path.exists():
+        raise FileNotFoundError(f"Narration file not found: {path}")
+
+    lines: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("**") or line == "---":
+            continue
+        if line.startswith(">"):
+            line = line.lstrip("> ").strip()
+        lines.append(line)
+
+    text = re.sub(r"\s+", " ", " ".join(lines)).strip()
+    if not text:
+        raise ValueError(f"Narration file has no speakable text: {path}")
+    return text
 
 
 def list_voices(client):
     """List available voices for selection."""
-    from elevenlabs import VoiceSettings
     response = client.voices.get_all()
     print("\n📢 Available voices:")
     for voice in response.voices:
@@ -102,21 +90,29 @@ def list_voices(client):
     print()
 
 
+def voice_display_name(voice) -> str:
+    labels = voice.labels or {}
+    accent = labels.get("accent", "")
+    description = labels.get("description", "")
+    details = ", ".join(part for part in (accent, description) if part)
+    return f"{voice.name} ({details})" if details else voice.name
+
+
 def generate_voiceover(
     client,
     text: str,
     output_path: Path,
     voice_name: str = "Adam",
     model_id: str = "eleven_multilingual_v2",
-    stability: float = 0.5,
-    similarity_boost: float = 0.75,
-    style: float = 0.3,
+    stability: float = 0.38,
+    similarity_boost: float = 0.76,
+    style: float = 0.58,
 ):
     """Generate voiceover audio using ElevenLabs API."""
     from elevenlabs import VoiceSettings
 
     print(f"🎙️  Generating voiceover: {output_path.name}")
-    print(f"   Voice: {voice_name} | Model: {model_id}")
+    print(f"   Voice ID: {voice_name} | Model: {model_id}")
     print(f"   Text length: {len(text)} chars")
 
     audio = client.text_to_speech.convert(
@@ -141,50 +137,106 @@ def generate_voiceover(
     print(f"   ✅ Saved: {output_path} ({size_kb:.0f} KB)")
 
 
-def resolve_voice_id(client, voice_name: str) -> str:
-    """Resolve a voice name to its ID. Returns the name if it looks like an ID already."""
+def looks_like_voice_id(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{16,}", value))
+
+
+def resolve_voice_id(client, voice_name: str) -> tuple[str, str]:
+    """Resolve a voice name or ID to an ElevenLabs voice ID and display name."""
+    configured_id = os.environ.get("ELEVENLABS_DEMO_VOICE_ID", "").strip()
+    if configured_id:
+        return configured_id, "ELEVENLABS_DEMO_VOICE_ID"
+
     response = client.voices.get_all()
+    voices = response.voices
+
+    configured_voice = os.environ.get("ELEVENLABS_DEMO_VOICE", "").strip()
+    if configured_voice:
+        voice_name = configured_voice
+
+    if voice_name.lower() in {"auto", "warm-founder", "warm_founder"}:
+        for preferred in PREFERRED_WARM_VOICES:
+            for voice in voices:
+                if voice.name.lower() == preferred.lower():
+                    return voice.voice_id, voice.name
+
+        available = ", ".join(voice_display_name(voice) for voice in voices[:12])
+        raise RuntimeError(
+            "None of the preferred warm demo voices were available. "
+            f"Tried: {', '.join(PREFERRED_WARM_VOICES)}. "
+            "Set ELEVENLABS_DEMO_VOICE_ID or pass --voice with one of these available voices: "
+            f"{available}"
+        )
+
     for voice in response.voices:
         if voice.name.lower() == voice_name.lower():
-            return voice.voice_id
-    # If no match, assume it's already a voice ID
-    return voice_name
+            return voice.voice_id, voice.name
+
+    if looks_like_voice_id(voice_name):
+        return voice_name, "custom voice ID"
+
+    available = ", ".join(voice.name for voice in voices[:20])
+    raise RuntimeError(
+        f"Voice '{voice_name}' was not found. Pass --voice with an exact name or set "
+        f"ELEVENLABS_DEMO_VOICE_ID. Available examples: {available}"
+    )
 
 
 def main():
+    global OUTPUT_DIR
+
     parser = argparse.ArgumentParser(description="Generate AI voiceover for demo video")
     parser.add_argument("--lang", choices=["en", "az", "both"], default="both",
                         help="Language to generate (default: both)")
-    parser.add_argument("--voice", default="Adam",
-                        help="ElevenLabs voice name (default: Adam)")
+    parser.add_argument("--input", type=Path,
+                        help="Narration markdown file to read. Use only with --lang en or --lang az.")
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR,
+                        help="Directory for generated voiceover files")
+    parser.add_argument("--voice", default="auto",
+                        help="ElevenLabs voice name, ID, or 'auto' for a warm founder voice (default: auto)")
     parser.add_argument("--model", default="eleven_multilingual_v2",
                         help="ElevenLabs model ID (default: eleven_multilingual_v2)")
-    parser.add_argument("--stability", type=float, default=0.5,
-                        help="Voice stability (0-1, default: 0.5)")
-    parser.add_argument("--similarity", type=float, default=0.75,
-                        help="Similarity boost (0-1, default: 0.75)")
-    parser.add_argument("--style", type=float, default=0.3,
-                        help="Style expressiveness (0-1, default: 0.3)")
+    parser.add_argument("--stability", type=float, default=0.38,
+                        help="Voice stability (0-1, default: 0.38)")
+    parser.add_argument("--similarity", type=float, default=0.76,
+                        help="Similarity boost (0-1, default: 0.76)")
+    parser.add_argument("--style", type=float, default=0.58,
+                        help="Style expressiveness (0-1, default: 0.58)")
     parser.add_argument("--list-voices", action="store_true",
                         help="List available voices and exit")
     args = parser.parse_args()
 
+    if args.input and args.lang == "both":
+        parser.error("--input can only be used when --lang is en or az")
+
+    OUTPUT_DIR = args.output_dir.resolve()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     api_key = get_api_key()
+    if not api_key:
+        raise RuntimeError("ELEVENLABS_API_KEY not found in environment, .env, or .env.prod")
 
     from elevenlabs import ElevenLabs
+
     client = ElevenLabs(api_key=api_key)
 
     if args.list_voices:
         list_voices(client)
         return
 
-    voice_id = resolve_voice_id(client, args.voice)
-    print(f"🔑 Using voice ID: {voice_id}")
+    voice_id, voice_label = resolve_voice_id(client, args.voice)
+    print(f"Using ElevenLabs voice: {voice_label}")
+
+    total_chars = 0
 
     if args.lang in ("en", "both"):
+        input_path = args.input if args.input else narration_path_for("en")
+        text = narration_text_from_markdown(input_path)
+        print(f"📝 English narration: {input_path}")
+        total_chars += len(text)
         generate_voiceover(
             client=client,
-            text=NARRATION_EN,
+            text=text,
             output_path=OUTPUT_DIR / "voiceover-en.mp3",
             voice_name=voice_id,
             model_id=args.model,
@@ -194,9 +246,13 @@ def main():
         )
 
     if args.lang in ("az", "both"):
+        input_path = args.input if args.input else narration_path_for("az")
+        text = narration_text_from_markdown(input_path)
+        print(f"📝 Azeri narration: {input_path}")
+        total_chars += len(text)
         generate_voiceover(
             client=client,
-            text=NARRATION_AZ,
+            text=text,
             output_path=OUTPUT_DIR / "voiceover-az.mp3",
             voice_name=voice_id,
             model_id=args.model,
@@ -205,15 +261,13 @@ def main():
             style=args.style,
         )
 
-    total_chars = 0
-    if args.lang in ("en", "both"):
-        total_chars += len(NARRATION_EN)
-    if args.lang in ("az", "both"):
-        total_chars += len(NARRATION_AZ)
-
     print(f"\n📊 Character usage: {total_chars} / 10,000 (free tier monthly limit)")
     print("✅ Voice generation complete!")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1)

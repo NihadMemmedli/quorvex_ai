@@ -1,15 +1,20 @@
 # Why We Built Quorvex AI
 
+![Quorvex dashboard overview showing the product workflow](../assets/ui/dashboard-overview.png)
+
+<p class="caption">Quorvex dashboard overview showing the product workflow.</p>
+
+
 ## The Problem
 
 Writing end-to-end tests is slow, maintaining them is painful, and most teams don't have enough QA engineers. When UI changes break selectors, someone has to manually hunt down and fix every affected test. This creates a cycle where teams either spend too much time on test maintenance or give up on comprehensive test coverage entirely.
 
 AI-powered testing tools have started to address this, but they come with trade-offs:
 
-- **No-code platforms** (testRigor, Mabl) lock your tests into proprietary formats. If you leave, your tests don't come with you.
-- **Runtime AI tools** (Shortest, ZeroStep) burn AI tokens on every test execution. In a CI/CD pipeline running tests on every commit, this gets expensive fast.
-- **SaaS-only products** (Octomind) process your application URLs, credentials, and test data on third-party infrastructure.
-- **Most tools** only handle UI testing. You still need separate solutions for API testing, load testing, security scanning, and everything else.
+- **No-code platforms** (testRigor, Mabl) optimize for plain-English hosted authoring, but the executable system is still the vendor runtime rather than standard Playwright code your team owns.
+- **Runtime-first AI tools** (Shortest, ZeroStep) keep AI in the execution path. In a CI/CD pipeline running tests on every commit, that can add cost and variability.
+- **Managed QA SaaS products** (Octomind) can be excellent for hosted Playwright E2E coverage, but the operating plane, run history, workers, and account model live primarily in the vendor platform.
+- **Most testing stacks are fragmented.** Teams still end up stitching together separate tools for API testing, load testing, security scanning, database checks, LLM evaluation, requirements, traceability, and PR quality gates.
 
 ## Our Approach
 
@@ -19,7 +24,7 @@ Quorvex AI takes a different path:
 
 **Self-healing without AI at runtime.** When tests break due to UI changes, the self-healing pipeline detects failures and regenerates the affected code. The fixed tests are again standard Playwright code that runs natively.
 
-**One platform, six testing domains.** UI testing is just the starting point. API testing, load testing (K6), security scanning (ZAP + Nuclei), database quality checks, and LLM evaluation are all built in. No need to stitch together separate tools.
+**One platform, multiple testing domains.** UI testing is just the starting point. API testing, load testing (K6), security scanning (ZAP + Nuclei), database quality checks, mobile smoke flows, LLM evaluation, requirements, RTM, coverage, schedules, and PR quality gates are all built in.
 
 **Self-hosted and open source.** Your data stays on your infrastructure. No vendor lock-in, no usage-based pricing, no data sovereignty concerns. The MIT license means you can use it however you want.
 
