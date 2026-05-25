@@ -77,9 +77,12 @@ curl -X POST http://localhost:8001/load-testing/specs \
 Click **Generate** in the dashboard, or:
 
 ```bash
-curl -X POST http://localhost:8001/load-testing/specs/user-api-perf/generate \
+curl -X POST http://localhost:8001/load-testing/generate \
   -H "Content-Type: application/json" \
-  -d '{"project_id": "your-project-id"}'
+  -d '{
+    "spec_name": "user-api-perf",
+    "project_id": "your-project-id"
+  }'
 ```
 
 The AI reads your spec and produces a K6 JavaScript file with proper stages, thresholds, and request distribution.
@@ -89,19 +92,24 @@ The AI reads your spec and produces a K6 JavaScript file with proper stages, thr
 Click **Run** in the dashboard, or:
 
 ```bash
-curl -X POST http://localhost:8001/load-testing/specs/user-api-perf/run \
+curl -X POST http://localhost:8001/load-testing/run-from-spec \
   -H "Content-Type: application/json" \
-  -d '{"project_id": "your-project-id"}'
+  -d '{
+    "spec_name": "user-api-perf",
+    "project_id": "your-project-id"
+  }'
 ```
 
-The system acquires an exclusive lock (pausing all browser operations), then executes K6.
+The system returns a job ID, acquires an exclusive lock when execution starts, and then runs K6.
 
 ### 4. Monitor in Real-Time
 
-Poll the status endpoint for live metrics:
+Poll the job first, then inspect the completed run and its timeseries metrics:
 
 ```bash
-curl http://localhost:8001/load-testing/runs/RUN_ID/status
+curl http://localhost:8001/load-testing/jobs/JOB_ID
+curl http://localhost:8001/load-testing/runs/RUN_ID
+curl http://localhost:8001/load-testing/runs/RUN_ID/timeseries
 ```
 
 The dashboard shows live charts for:

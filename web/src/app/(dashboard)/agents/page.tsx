@@ -20,7 +20,46 @@ interface AgentRun {
     project_id?: string;
     progress?: any;
     agent_task_id?: string | null;
+    temporal_workflow_id?: string | null;
+    temporal_run_id?: string | null;
+    temporal?: AgentRunTemporal | null;
     artifacts?: AgentArtifact[];
+    health?: AgentRunHealth;
+    started_at?: string | null;
+    completed_at?: string | null;
+}
+
+interface AgentRunTemporal {
+    temporal_workflow_id?: string | null;
+    temporal_run_id?: string | null;
+    temporal_ui_url?: string | null;
+    temporal_ui_workflow_url?: string | null;
+    temporal_namespace?: string | null;
+    task_queue?: string | null;
+    workflow_type?: string | null;
+    available?: boolean;
+    workflow_status?: string | null;
+    summary?: {
+        total_activities?: number;
+        failed_activities?: number;
+        retry_count?: number;
+        last_failure?: string | null;
+        last_workflow_task_failure?: string | null;
+    };
+    activities?: Array<{
+        activity_type?: string;
+        status?: string;
+        scheduled_at?: string | null;
+        started_at?: string | null;
+        completed_at?: string | null;
+    }>;
+    task_queue_status?: {
+        workflow_pollers?: number;
+        activity_pollers?: number;
+        has_workflow_pollers?: boolean;
+        has_activity_pollers?: boolean;
+    };
+    error?: string | null;
 }
 
 interface AgentArtifact {
@@ -28,6 +67,28 @@ interface AgentArtifact {
     path: string;
     type: string;
     modified_at?: string | null;
+}
+
+interface AgentRunHealth {
+    event_count?: number;
+    tool_event_count?: number;
+    error_event_count?: number;
+    latest_event?: AgentRunEvent | null;
+    latest_heartbeat_at?: string | null;
+    agent_task_id?: string | null;
+    terminal?: boolean;
+    terminal_reason?: string | null;
+}
+
+interface AgentRunEvent {
+    id: string;
+    sequence: number;
+    event_type: string;
+    level: string;
+    message: string;
+    payload?: Record<string, any>;
+    created_at: string;
+    agent_task_id?: string | null;
 }
 
 interface AgentTool {
@@ -116,6 +177,17 @@ function formatToolName(toolName?: string) {
     if (!toolName) return 'Waiting for first tool';
     const short = toolName.includes('__') ? toolName.split('__').pop() || toolName : toolName;
     return short.replace(/^browser_/, '').replace(/_/g, ' ');
+}
+
+function customAgentCurrentActivity(progress: any = {}) {
+    if (progress.last_tool_label || progress.last_tool) {
+        return progress.last_tool_label || formatToolName(progress.last_tool);
+    }
+    if (progress.phase === 'llm_retry' || progress.retry_attempt) {
+        const attempt = progress.retry_attempt ? ` ${progress.retry_attempt}${progress.retry_max_attempts ? `/${progress.retry_max_attempts}` : ''}` : '';
+        return `LLM retry${attempt}`;
+    }
+    return formatToolName('');
 }
 
 function sortArtifactsByModifiedAt(artifacts: AgentArtifact[] = []) {
@@ -291,6 +363,33 @@ function agentStatusTone(status?: string) {
     if (status === 'failed' || status === 'cancelled' || status === 'timeout') return { bg: 'var(--danger-muted)', color: 'var(--danger)' };
     if (status === 'paused') return { bg: 'rgba(245, 158, 11, 0.12)', color: 'var(--warning)' };
     return { bg: 'var(--primary-glow)', color: 'var(--primary)' };
+}
+
+function customAgentExecutionStarted(run: AgentRun) {
+    const progress = run.progress || {};
+    const executeActivity = (run.temporal?.activities || []).find(activity => activity.activity_type === 'execute_agent_run');
+    if (executeActivity?.status === 'scheduled') return false;
+    if (executeActivity && ['started', 'completed', 'failed', 'timed_out'].includes(String(executeActivity.status))) return true;
+    return Boolean(
+        run.agent_task_id ||
+        progress.agent_task_id ||
+        progress.last_tool ||
+        Number(progress.tool_calls || 0) > 0 ||
+        ['tool_use', 'tool_result', 'running', 'completed', 'failed'].includes(String(progress.phase || '')) ||
+        (run.health?.latest_heartbeat_at)
+    );
+}
+
+function customAgentWorkerMessage(run: AgentRun) {
+    const temporalError = run.temporal?.error || run.temporal?.summary?.last_workflow_task_failure;
+    if (temporalError) return temporalError;
+    if ((run.progress || {}).phase === 'queued') return 'Agent task is queued for a worker. Browser evidence will appear when the worker starts the task.';
+    const executeActivity = (run.temporal?.activities || []).find(activity => activity.activity_type === 'execute_agent_run');
+    if (executeActivity?.status === 'scheduled') {
+        return `Temporal scheduled agent execution. Waiting for a custom workflow worker on ${run.temporal?.task_queue || 'the workflow task queue'}.`;
+    }
+    if (run.temporal_workflow_id) return 'Temporal scheduled the run. Waiting for the custom workflow worker to start agent execution.';
+    return 'Waiting for the run to be scheduled.';
 }
 
 function itemPrompt(run: AgentRun, item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test idea') {
@@ -534,6 +633,131 @@ function ReportActionButton({ onClick, label, icon: Icon }: { onClick: () => voi
     );
 }
 
+function AgentRunObservabilityPanel({ run, events }: { run: AgentRun; events: AgentRunEvent[] }) {
+    const health = run.health || {};
+    const temporal = run.temporal || {};
+    const recentEvents = events.slice(-8).reverse();
+    const logArtifacts = sortArtifactsByModifiedAt((run.artifacts || []).filter(artifact => artifact.type === 'log'));
+
+    return (
+        <div style={{ display: 'grid', gap: '0.75rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '0.65rem' }}>
+                {[
+                    { label: 'Events', value: health.event_count ?? events.length, icon: List },
+                    { label: 'Tool Events', value: health.tool_event_count ?? 0, icon: Wrench },
+                    { label: 'Errors', value: health.error_event_count ?? 0, icon: AlertTriangle },
+                    { label: 'Temporal', value: temporal.error ? 'Error' : temporal.workflow_status || (run.temporal_workflow_id ? 'Scheduled' : 'Not linked'), icon: RotateCcw },
+                    { label: 'Task', value: run.agent_task_id ? run.agent_task_id.slice(0, 12) : 'Not queued', icon: Terminal },
+                ].map(item => {
+                    const Icon = item.icon;
+                    return (
+                        <div key={item.label} style={{ padding: '0.75rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)', minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--text-secondary)', fontSize: '0.72rem', marginBottom: '0.35rem', textTransform: 'uppercase' }}>
+                                <Icon size={13} /> {item.label}
+                            </div>
+                            <div style={{ fontWeight: 800, fontSize: '0.95rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.value}</div>
+                        </div>
+                    );
+                })}
+            </div>
+
+            {(run.temporal_workflow_id || temporal.error) && (
+                <div style={{ padding: '0.75rem 0.85rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)', display: 'grid', gap: '0.35rem', fontSize: '0.8rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
+                        <strong>Temporal workflow</strong>
+                        <span style={{ color: temporal.available ? 'var(--success)' : 'var(--text-secondary)', fontWeight: 700 }}>
+                            {temporal.workflow_status || (temporal.available ? 'Available' : 'Unknown')}
+                        </span>
+                    </div>
+                    {run.temporal_workflow_id && (
+                        <div style={{ color: 'var(--text-secondary)', overflowWrap: 'anywhere' }}>{run.temporal_workflow_id}</div>
+                    )}
+                    {(temporal.temporal_namespace || temporal.task_queue) && (
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.74rem', display: 'flex', gap: '0.55rem', flexWrap: 'wrap' }}>
+                            {temporal.temporal_namespace && <span>Namespace: {temporal.temporal_namespace}</span>}
+                            {temporal.task_queue && <span>Queue: {temporal.task_queue}</span>}
+                        </div>
+                    )}
+                    {temporal.summary && (
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.74rem', display: 'flex', gap: '0.55rem', flexWrap: 'wrap' }}>
+                            <span>Activities: {temporal.summary.total_activities ?? 0}</span>
+                            <span>Retries: {temporal.summary.retry_count ?? 0}</span>
+                            <span>Failures: {temporal.summary.failed_activities ?? 0}</span>
+                        </div>
+                    )}
+                    {temporal.task_queue_status && (
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.74rem', display: 'flex', gap: '0.55rem', flexWrap: 'wrap' }}>
+                            <span>Workflow pollers: {temporal.task_queue_status.workflow_pollers ?? 0}</span>
+                            <span>Activity pollers: {temporal.task_queue_status.activity_pollers ?? 0}</span>
+                        </div>
+                    )}
+                    {(temporal.activities || []).length > 0 && (
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.74rem', display: 'flex', gap: '0.55rem', flexWrap: 'wrap' }}>
+                            {(temporal.activities || []).slice(-3).map((activity, index) => (
+                                <span key={`${activity.activity_type}-${index}`}>
+                                    {activity.activity_type}: {activity.status}
+                                </span>
+                            ))}
+                        </div>
+                    )}
+                    {temporal.summary?.last_failure && (
+                        <div style={{ color: 'var(--danger)', overflowWrap: 'anywhere' }}>Last failure: {temporal.summary.last_failure}</div>
+                    )}
+                    {temporal.error && (
+                        <div style={{ color: 'var(--warning)', overflowWrap: 'anywhere' }}>{temporal.error}</div>
+                    )}
+                    {(temporal.temporal_ui_workflow_url || temporal.temporal_ui_url) && run.temporal_workflow_id && (
+                        <a href={temporal.temporal_ui_workflow_url || temporal.temporal_ui_url || '#'} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontWeight: 600 }}>
+                            Open Temporal UI <ExternalLink size={13} />
+                        </a>
+                    )}
+                </div>
+            )}
+
+            <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: 'var(--background)' }}>
+                <div style={{ padding: '0.65rem 0.85rem', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center' }}>
+                    <h4 style={{ margin: 0, fontSize: '0.86rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <Clock size={14} /> Timeline
+                    </h4>
+                    {health.latest_heartbeat_at && (
+                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
+                            Updated {new Date(health.latest_heartbeat_at).toLocaleTimeString()}
+                        </span>
+                    )}
+                </div>
+                {recentEvents.length > 0 ? (
+                    <div style={{ display: 'grid' }}>
+                        {recentEvents.map((event, index) => (
+                            <div key={event.id} style={{ padding: '0.6rem 0.85rem', borderBottom: index === recentEvents.length - 1 ? 'none' : '1px solid var(--border)', display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: '0.6rem', alignItems: 'start', fontSize: '0.8rem' }}>
+                                <span style={{ color: event.level === 'error' ? 'var(--danger)' : event.level === 'warning' ? 'var(--warning)' : 'var(--primary)', fontWeight: 800 }}>#{event.sequence}</span>
+                                <div style={{ minWidth: 0 }}>
+                                    <div style={{ fontWeight: 700, textTransform: 'capitalize' }}>{event.event_type.replace(/_/g, ' ')}</div>
+                                    <div style={{ color: 'var(--text-secondary)', overflowWrap: 'anywhere', marginTop: '0.15rem' }}>{event.message}</div>
+                                </div>
+                                <span style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{new Date(event.created_at).toLocaleTimeString()}</span>
+                            </div>
+                        ))}
+                    </div>
+                ) : (
+                    <div style={{ padding: '0.9rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                        No durable events have been recorded yet.
+                    </div>
+                )}
+            </div>
+
+            {logArtifacts.length > 0 && (
+                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    {logArtifacts.slice(0, 4).map(artifact => (
+                        <a key={artifact.path} href={getArtifactUrl(artifact)} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.38rem 0.6rem', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--primary)', textDecoration: 'none', fontSize: '0.78rem', fontWeight: 600 }}>
+                            <FileText size={13} /> {artifact.name}
+                        </a>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
+
 export default function AgentsPage() {
     const { currentProject } = useProject();
     const [selectedAgent, setSelectedAgent] = useState<'exploratory' | 'writer' | 'custom'>('exploratory');
@@ -555,6 +779,7 @@ export default function AgentsPage() {
     const [history, setHistory] = useState<AgentRun[]>([]);
     const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
     const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
+    const [agentEvents, setAgentEvents] = useState<AgentRunEvent[]>([]);
     const [specResult, setSpecResult] = useState<SpecResult | null>(null);
 
     // UI state
@@ -668,6 +893,7 @@ export default function AgentsPage() {
             if (res.ok) {
                 const data = await res.json();
                 setActiveRun(data);
+                fetchAgentEvents(id);
 
                 // If actively running, keep polling
                 if (LIVE_AGENT_STATUSES.has(data.status)) {
@@ -684,6 +910,7 @@ export default function AgentsPage() {
                             if (finalRes.ok) {
                                 const finalData = await finalRes.json();
                                 setActiveRun(finalData);
+                                fetchAgentEvents(id);
                             }
                             fetchHistory(); // Refresh list to update status
                         }, 500);
@@ -692,6 +919,18 @@ export default function AgentsPage() {
             }
         } catch (e) {
             console.error("Failed to fetch run", e);
+        }
+    };
+
+    const fetchAgentEvents = async (id: string) => {
+        try {
+            const res = await fetch(`${API_BASE}/api/agents/runs/${id}/events?limit=100`);
+            if (res.ok) {
+                const data = await res.json();
+                setAgentEvents(Array.isArray(data) ? data : []);
+            }
+        } catch (e) {
+            console.error("Failed to fetch agent events", e);
         }
     };
 
@@ -872,6 +1111,7 @@ export default function AgentsPage() {
         if (!selectedRunId) {
             setActiveRun(null);
             setSpecResult(null);
+            setAgentEvents([]);
             return;
         }
 
@@ -907,7 +1147,7 @@ export default function AgentsPage() {
             description: '',
             system_prompt: 'You are a focused QA automation agent. Use the selected tools to inspect the target, report findings clearly, and avoid actions outside the requested task.',
             timeout_seconds: 1800,
-            tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console'],
+            tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console', 'browser_screenshot'],
         });
         setBuilderOpen(true);
     };
@@ -1748,6 +1988,7 @@ export default function AgentsPage() {
                                     showHeader
                                 />
                                 <AgentRunCapturePanel activeRun={activeRun} mode="live" />
+                                <AgentRunObservabilityPanel run={activeRun} events={agentEvents} />
                                 <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem', textAlign: 'center' }}>
                                     {activeRun.status === 'paused'
                                         ? 'Resume to continue from the current state.'
@@ -1761,6 +2002,9 @@ export default function AgentsPage() {
                                 const hasBrowserTools = Boolean(progress.has_browser_tools) || selectedTools.some((tool: AgentTool) => tool.tool_name?.startsWith('mcp__playwright'));
                                 const latestImage = sortArtifactsByModifiedAt((activeRun.artifacts || []).filter(artifact => artifact.type === 'image'))[0];
                                 const recentTools = progress.recent_tools || [];
+                                const executionStarted = customAgentExecutionStarted(activeRun);
+                                const waitingForWorker = (!executionStarted || progress.phase === 'queued') && activeRun.status !== 'paused';
+                                const workerMessage = customAgentWorkerMessage(activeRun);
                                 return (
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                                         <div style={{
@@ -1778,7 +2022,7 @@ export default function AgentsPage() {
                                             </div>
                                             <div>
                                                 <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Current Tool</div>
-                                                <div style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{progress.last_tool_label || formatToolName(progress.last_tool)}</div>
+                                                <div style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{customAgentCurrentActivity(progress)}</div>
                                             </div>
                                             <div>
                                                 <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Tool Calls</div>
@@ -1790,13 +2034,46 @@ export default function AgentsPage() {
                                             </div>
                                         </div>
 
+                                        {selectedTools.length > 0 && (
+                                            <div style={{ border: '1px solid var(--border)', borderRadius: '10px', overflow: 'hidden', background: 'var(--background)' }}>
+                                                <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+                                                    <span>Granted Tools</span>
+                                                    <span style={{ color: 'var(--text-secondary)', fontSize: '0.78rem' }}>{selectedTools.length}</span>
+                                                </div>
+                                                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', padding: '0.75rem 1rem' }}>
+                                                    {selectedTools.map((tool: AgentTool) => (
+                                                        <span key={tool.id || tool.tool_name} title={tool.tool_name} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.32rem 0.5rem', border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--surface-hover)', color: 'var(--text-secondary)', fontSize: '0.78rem', fontWeight: 600 }}>
+                                                            <Wrench size={12} /> {tool.label || formatToolName(tool.tool_name)}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        <AgentRunObservabilityPanel run={activeRun} events={agentEvents} />
+
                                         {activeRun.status === 'paused' && (
                                             <div style={{ padding: '0.9rem 1rem', background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.35)', borderRadius: '8px', color: 'var(--warning)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                                                 <Pause size={16} /> Agent is paused. Resume to continue from the current browser and CLI state.
                                             </div>
                                         )}
 
-                                        {hasBrowserTools ? (
+                                        {waitingForWorker ? (
+                                            <div style={{
+                                                padding: '1rem',
+                                                background: activeRun.temporal?.error ? 'rgba(239, 68, 68, 0.12)' : 'var(--surface-hover)',
+                                                border: `1px solid ${activeRun.temporal?.error ? 'rgba(239, 68, 68, 0.35)' : 'var(--border)'}`,
+                                                borderRadius: '10px',
+                                                color: activeRun.temporal?.error ? 'var(--danger)' : 'var(--text-secondary)',
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '0.65rem',
+                                                lineHeight: 1.45
+                                            }}>
+                                                {activeRun.temporal?.error ? <AlertTriangle size={18} /> : <Loader2 className="spin" size={18} />}
+                                                <span>{workerMessage}</span>
+                                            </div>
+                                        ) : hasBrowserTools ? (
                                             <LiveBrowserView runId={activeRun.id} isActive={activeRun.status !== 'paused'} showHeader />
                                         ) : (
                                             <div style={{ padding: '1.25rem', background: 'var(--surface-hover)', border: '1px solid var(--border)', borderRadius: '10px', color: 'var(--text-secondary)', textAlign: 'center' }}>
@@ -1843,7 +2120,7 @@ export default function AgentsPage() {
                                                 </div>
                                             ) : (
                                                 <div style={{ padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                                                    Waiting for the agent to use its first tool.
+                                                    {progress.message || 'Waiting for the agent to use its first tool.'}
                                                 </div>
                                             )}
                                         </div>
@@ -1865,17 +2142,21 @@ export default function AgentsPage() {
                                 </p>
                             </div>
                         ) : activeRun.status === 'failed' ? (
-                            <div style={{ padding: '1rem', background: 'var(--danger-muted)', color: 'var(--danger)', borderRadius: '8px', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
-                                <h4 style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                    <AlertTriangle size={18} /> Run Failed
-                                </h4>
-                                <p style={{ marginTop: '0.5rem', fontFamily: 'monospace' }}>
-                                    {activeRun.result?.error || "Unknown error occurred"}
-                                </p>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                <div style={{ padding: '1rem', background: 'var(--danger-muted)', color: 'var(--danger)', borderRadius: '8px', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
+                                    <h4 style={{ fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <AlertTriangle size={18} /> Run Failed
+                                    </h4>
+                                    <p style={{ marginTop: '0.5rem', fontFamily: 'monospace' }}>
+                                        {activeRun.result?.error || activeRun.health?.terminal_reason || "Unknown error occurred"}
+                                    </p>
+                                </div>
+                                <AgentRunObservabilityPanel run={activeRun} events={agentEvents} />
                             </div>
                         ) : (
                             // Completed successfully
                             <div className="markdown-content">
+                                <AgentRunObservabilityPanel run={activeRun} events={agentEvents} />
                                 {activeRun.agent_type === 'writer' ? (
                                     <>
                                         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '1rem' }}>

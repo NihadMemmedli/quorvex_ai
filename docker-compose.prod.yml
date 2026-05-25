@@ -102,6 +102,8 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
+      TEMPORAL_WORKFLOW_TASK_QUEUE: ${TEMPORAL_WORKFLOW_TASK_QUEUE:-quorvex-custom-workflows}
+      TEMPORAL_UI_URL: ${TEMPORAL_UI_URL:-http://localhost:8233}
       # Initial admin
       INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
@@ -167,6 +169,8 @@ services:
       target: backend
     restart: unless-stopped
     command: python -m orchestrator.services.agent_worker
+    healthcheck:
+      disable: true
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-playwright}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-playwright_agent}
       ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
@@ -238,6 +242,8 @@ services:
       target: backend
     restart: unless-stopped
     command: python -m orchestrator.services.autonomous_mission_worker
+    healthcheck:
+      disable: true
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-playwright}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-playwright_agent}
       REDIS_URL: redis://redis:6379/0
@@ -275,6 +281,62 @@ services:
     networks:
       - playwright-network
     profiles:
+      - standard
+      - workers
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+  custom-workflow-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: unless-stopped
+    command: python -m orchestrator.services.custom_workflow_worker
+    healthcheck:
+      disable: true
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-playwright}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-playwright_agent}
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_WORKFLOW_TASK_QUEUE: ${TEMPORAL_WORKFLOW_TASK_QUEUE:-quorvex-custom-workflows}
+      TEMPORAL_UI_URL: ${TEMPORAL_UI_URL:-http://localhost:8233}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_AUTH_TOKENS: ${ANTHROPIC_AUTH_TOKENS:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_AUTH_TOKEN:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-glm-5.1}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-glm-5.1}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-glm-5-turbo}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-glm-4.5-air}
+      ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-glm-5-turbo}
+      API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - runs_data:/app/runs
+      - logs_data:/app/logs
+      - data_dir:/app/data
+      - test_results:/app/test-results
+      - ${SPECS_DIR:-./specs}:/app/specs
+      - ${PRDS_DIR:-./prds}:/app/prds
+      - ${TESTS_DIR:-./tests}:/app/tests
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    networks:
+      - playwright-network
+    profiles:
+      - standard
       - workers
     logging:
       driver: "json-file"
@@ -506,6 +568,8 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
       TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
+      TEMPORAL_WORKFLOW_TASK_QUEUE: ${TEMPORAL_WORKFLOW_TASK_QUEUE:-quorvex-custom-workflows}
+      TEMPORAL_UI_URL: ${TEMPORAL_UI_URL:-http://localhost:8233}
       AUTONOMOUS_MISSION_WORKER_ENABLED: ${AUTONOMOUS_MISSION_WORKER_ENABLED:-true}
       # Initial admin user (created on first startup only)
       INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}

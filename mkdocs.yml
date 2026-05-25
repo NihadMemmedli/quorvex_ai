@@ -71,12 +71,14 @@ nav:
       - vs testRigor: comparisons/vs-testrigor.md
       - Why We Built This: comparisons/why-we-built-this.md
   - Tutorials:
+      - Overview: tutorials/index.md
       - Getting Started: tutorials/getting-started.md
       - Your First API Test: tutorials/first-api-test.md
       - App Exploration & Requirements: tutorials/first-exploration.md
       - Dashboard Walkthrough: tutorials/dashboard-walkthrough.md
       - CI/CD Setup: tutorials/ci-cd-setup.md
   - How-to Guides:
+      - Overview: guides/index.md
       - Test Specifications:
           - Writing Specs: guides/writing-specs.md
           - Pipeline Modes: guides/pipeline-modes.md
@@ -102,6 +104,7 @@ nav:
           - Deployment: guides/deployment.md
           - On-Premises Deployment: guides/company-deployment.md
           - Disaster Recovery: guides/disaster-recovery.md
+          - Agent Run Temporal Runbook: guides/agent-run-temporal-runbook.md
           - Runtime Observability & Recovery: guides/runtime-observability-recovery.md
           - Troubleshooting: guides/troubleshooting.md
       - Development:
@@ -111,6 +114,7 @@ nav:
           - Contributing: guides/contributing.md
           - Documentation Maintenance: guides/documentation-maintenance.md
   - Reference:
+      - Overview: reference/index.md
       - CLI Reference: reference/cli.md
       - Spec Format: reference/spec-format.md
       - Pipeline Modes: reference/pipeline-modes.md
@@ -127,6 +131,7 @@ nav:
       - Makefile Commands: reference/makefile.md
       - FAQ: reference/faq.md
   - Explanation:
+      - Overview: explanation/index.md
       - System Architecture: explanation/system-overview.md
       - Backend Runtime Lifecycle: explanation/backend-runtime-lifecycle.md
       - Pipeline Architecture: explanation/pipeline-architecture.md

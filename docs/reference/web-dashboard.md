@@ -57,6 +57,18 @@ Backend API: `http://localhost:8001` | Frontend: `http://localhost:3000`
 | Login | `/login` | Email/password authentication (when auth is enabled) |
 | Register | `/register` | New user registration (when auth and registration are enabled) |
 
+## Complex Page Feature Matrices
+
+| Page | Views / tabs | Primary actions |
+|------|--------------|-----------------|
+| Workflow | Templates, library, builder, runs, schedules, alerts | Create workflow definitions, import/export, validate, run, pause/resume/cancel, inspect step diagnostics |
+| API Testing | Specs, Generated, Import, History | Create API specs, import OpenAPI, generate Playwright API checks, review generated code, run/retry jobs |
+| Load Testing | Overview, Scenarios, Scripts, Run History | Create K6 specs, generate scripts, run load jobs, inspect metrics/timeseries, compare runs, manage workers |
+| LLM Testing | Providers, Specs, Datasets, Run, Compare, History, Analytics, Prompts, Schedules | Register providers, manage suites and datasets, run evaluations, compare models, iterate prompts, schedule checks |
+| Memory | Agent Memory, Test Memory, Context Preview, Session Recall | Curate memories, approve/verify/archive records, inspect browser frontier work, preview injected context |
+| Autonomous Testing | Missions, proposals, work items, findings, events, diagnostics | Start/pause/resume missions, review proposals, approve materialization, recover stale work, inspect event streams |
+| CI/CD | Providers, workflows, runs, quality gates, audit events | Configure GitHub/GitLab, sync runs, dispatch workflows, generate workflow drafts, review PR quality gates |
+
 ## Navigation Discoverability
 
 | Surface | Routes |

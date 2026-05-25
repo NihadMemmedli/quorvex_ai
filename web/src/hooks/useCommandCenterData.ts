@@ -69,10 +69,17 @@ export interface AutoPilotQuestionSummary {
 }
 
 export interface AgentQueueSummary {
-    mode?: 'redis' | 'browser_pool' | string;
+    mode?: 'redis' | 'browser_pool' | 'temporal' | string;
     active?: number;
+    max?: number;
     queued?: number;
+    available?: number;
     workers_alive?: number;
+    worker_processes_alive?: number;
+    workers_busy?: number;
+    workers_idle?: number;
+    running_task_heartbeats_alive?: number;
+    capacity_state?: string;
     stale_running?: number;
     linked_tasks?: number;
     background_tasks?: number;
@@ -85,6 +92,19 @@ export interface AgentQueueSummary {
         queued?: number;
         available?: number;
         by_type?: Record<string, number>;
+    };
+    temporal?: {
+        available?: boolean;
+        status?: string;
+        error?: string | null;
+        worker_pollers?: {
+            workflow?: number;
+            activity?: number;
+        };
+        task_queue_status?: {
+            workflow_pollers?: number;
+            activity_pollers?: number;
+        };
     };
     running_tasks?: AgentQueueTaskSummary[];
 }

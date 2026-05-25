@@ -1,6 +1,7 @@
 import sys
 import types
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1197,6 +1198,130 @@ def test_autopilot_live_artifacts_cover_exploration_and_test_run_dirs(
     assert "/artifacts/explorations/explore_live/artifacts/live-step-001.png" in paths
     assert "/artifacts/run_live/artifacts/trace.webm" in paths
     assert artifacts[0].type == "image"
+
+
+def test_autopilot_live_state_merges_agent_queue_progress(monkeypatch):
+    slowapi_stub = types.ModuleType("slowapi")
+    slowapi_errors_stub = types.ModuleType("slowapi.errors")
+    slowapi_util_stub = types.ModuleType("slowapi.util")
+
+    class _Limiter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _RateLimitExceeded(Exception):
+        pass
+
+    slowapi_stub.Limiter = _Limiter
+    slowapi_errors_stub.RateLimitExceeded = _RateLimitExceeded
+    slowapi_util_stub.get_remote_address = lambda request: "127.0.0.1"
+    monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
+    monkeypatch.setitem(sys.modules, "slowapi.errors", slowapi_errors_stub)
+    monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
+
+    from orchestrator.api import autopilot as _autopilot_api
+    from orchestrator.services import agent_queue as _agent_queue
+
+    class _FakeTask:
+        telemetry = {}
+
+    class _FakeQueue:
+        async def connect(self):
+            return None
+
+        async def get_task_progress(self, task_id):
+            assert task_id == "agent-live"
+            return {
+                "phase": "tool_use",
+                "message": "Using browser click",
+                "tool_calls": 4,
+                "browser_tool_calls": 3,
+                "interactions": 2,
+                "last_tool": "mcp__playwright-test__browser_click",
+                "updated_at": "2026-05-25T12:00:00",
+            }
+
+        async def get_task(self, task_id):
+            assert task_id == "agent-live"
+            return _FakeTask()
+
+    monkeypatch.setattr(_agent_queue, "REDIS_AVAILABLE", True)
+    monkeypatch.setattr(_agent_queue, "get_agent_queue", lambda: _FakeQueue())
+
+    live = asyncio.run(
+        _autopilot_api._merge_live_agent_progress(
+            {
+                "agent_task_id": "agent-live",
+                "tool_calls": 0,
+                "browser_tool_calls": 0,
+                "interactions": 0,
+            }
+        )
+    )
+
+    assert live["tool_calls"] == 4
+    assert live["browser_tool_calls"] == 3
+    assert live["interactions"] == 2
+    assert live["last_tool_label"] == "browser click"
+    assert live["recent_tools"][-1]["name"] == "mcp__playwright-test__browser_click"
+
+
+def test_autopilot_stale_live_state_detects_terminal_agent_task(monkeypatch):
+    slowapi_stub = types.ModuleType("slowapi")
+    slowapi_errors_stub = types.ModuleType("slowapi.errors")
+    slowapi_util_stub = types.ModuleType("slowapi.util")
+
+    class _Limiter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class _RateLimitExceeded(Exception):
+        pass
+
+    slowapi_stub.Limiter = _Limiter
+    slowapi_errors_stub.RateLimitExceeded = _RateLimitExceeded
+    slowapi_util_stub.get_remote_address = lambda request: "127.0.0.1"
+    monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
+    monkeypatch.setitem(sys.modules, "slowapi.errors", slowapi_errors_stub)
+    monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
+
+    from orchestrator.api import autopilot as _autopilot_api
+    from orchestrator.api.models_db import AutoPilotSession as _AutoPilotSession
+    from orchestrator.services import agent_queue as _agent_queue
+
+    class _FakeQueue:
+        async def connect(self):
+            return None
+
+        async def get_task(self, task_id):
+            assert task_id == "agent-stale"
+            return SimpleNamespace(status=SimpleNamespace(value="failed"))
+
+    monkeypatch.setattr(_agent_queue, "REDIS_AVAILABLE", True)
+    monkeypatch.setattr(_agent_queue, "get_agent_queue", lambda: _FakeQueue())
+    monkeypatch.setattr(_autopilot_api, "find_session_processes", lambda _session_id: [])
+
+    session = _AutoPilotSession(
+        id="autopilot_2026-05-25_16-33-34",
+        status="running",
+    )
+    session.config = {
+        "live_browser": {
+            "active": True,
+            "agent_task_id": "agent-stale",
+            "updated_at": "2026-05-25T12:00:00",
+        }
+    }
+
+    assert (
+        asyncio.run(
+            _autopilot_api._is_stale_live_browser_async(
+                session,
+                now=datetime(2026, 5, 25, 12, 3, 0),
+            )
+        )
+        is True
+    )
 
 
 def test_normalize_idea_bounds_untrusted_fields():

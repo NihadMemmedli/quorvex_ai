@@ -19,6 +19,9 @@ Complete reference for all `make` targets in Quorvex AI.
 | `make run SPEC=...` | Run a specific test spec via CLI (native pipeline) | `make setup`, venv | `make run SPEC=specs/login.md` |
 | `make run-skill S=...` | Run a Playwright skill script | `make setup-skills`, venv | `make run-skill S=path/to/script.js` |
 | `make load-test SPEC=...` | Generate and run K6 load test from spec | venv, k6 installed | `make load-test SPEC=specs/load/api-test.md` |
+| `make agent-temporal-smoke-up` | Start Docker services needed for agent Temporal smoke | Docker | `make agent-temporal-smoke-up` |
+| `make agent-temporal-smoke` | Run deterministic standalone agent Temporal smoke | Docker services or equivalent Temporal/Postgres | `make agent-temporal-smoke` |
+| `make agent-temporal-smoke-logs` | Tail Temporal and custom workflow worker logs | Docker | `make agent-temporal-smoke-logs` |
 
 ## Docker (Development)
 
@@ -60,7 +63,7 @@ Complete reference for all `make` targets in Quorvex AI.
 | VNC View | 6080 | Live browser view (websockify) |
 | MinIO API | 9000 | S3-compatible artifact and backup storage |
 | MinIO Console | 9001 | Object storage admin |
-| Temporal | 7233 | Durable workflow engine for autonomous missions |
+| Temporal | 7233 | Durable workflow engine for autonomous missions, custom workflows, and standalone agent runs |
 | Temporal UI | 8233 | Workflow inspection UI |
 
 !!! warning
@@ -180,6 +183,15 @@ Default namespace: `K8S_NAMESPACE=quorvex` (overridable).
 | `make docs-serve` | Start MkDocs development server | `requirements-docs.txt` | `make docs-serve` |
 | `make docs-build` | Build MkDocs documentation (strict mode) | `requirements-docs.txt` | `make docs-build` |
 | `make docs-deploy` | Deploy docs to GitHub Pages | `requirements-docs.txt` | `make docs-deploy` |
+
+## YouTube Production
+
+| Command | Description | Prerequisites | Example |
+|---------|-------------|---------------|---------|
+| `make youtube-pack EP=...` | Generate an episode script, avatar lines, captions, metadata, shot list, and checklist | `content/youtube/episode-catalog.json` | `make youtube-pack EP=001` |
+| `make youtube-voice EP=...` | Generate ElevenLabs voiceover for an episode script | `ELEVENLABS_API_KEY`, episode pack | `make youtube-voice EP=001` |
+| `make youtube-avatar EP=...` | Generate HeyGen avatar payloads for short presenter clips | `HEYGEN_AVATAR_ID`, `HEYGEN_VOICE_ID` | `make youtube-avatar EP=001` |
+| `make youtube-assemble EP=... RECORDING=...` | Export a 1080p YouTube MP4 from a screen recording, episode voiceover, and captions | `ffmpeg`, generated voiceover | `make youtube-assemble EP=001 RECORDING=recording.mp4` |
 
 ## Maintenance & Operations
 

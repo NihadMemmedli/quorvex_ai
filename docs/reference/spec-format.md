@@ -152,7 +152,7 @@ Templates are stored in `specs/templates/`.
 | Convention | Example |
 |------------|---------|
 | Single test case | `test_login.md` |
-| Smoke/sanity check | `smoke_healing.md` |
+| Smoke/sanity check | `smoke_healing_1.md` |
 | Feature area | `crm.md` |
 
 File extension: `.md`
@@ -165,7 +165,7 @@ specs/
     myapp_login.md
   myapp/              # Project-specific specs
     crm.md
-  smoke_healing.md       # Standalone specs
+  smoke_healing_1.md     # Standalone specs
 ```
 
 ## PRD-Generated Specs

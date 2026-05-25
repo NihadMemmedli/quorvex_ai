@@ -263,19 +263,20 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standar
 
 The application degrades gracefully: rate limiting uses in-memory storage and the agent queue falls back to direct execution.
 
-### Temporal Unavailable for Autonomous Missions
+### Temporal Unavailable for Durable Runs
 
-**Symptom**: Autonomous mission APIs report durable orchestration is unavailable, or missions stay in a pending state.
+**Symptom**: Autonomous mission, custom workflow, or standalone agent run APIs report durable orchestration is unavailable. New standalone agent runs fail with `503` and a `temporal_start_failed` event.
 
-**Cause**: `TEMPORAL_ADDRESS` is not configured, the Temporal service is not reachable from the backend container, or the autonomous mission worker is not running.
+**Cause**: `TEMPORAL_ADDRESS` is not configured, the Temporal service is not reachable from the backend container, or the required Temporal worker is not running. Standalone agent runs and custom workflows require `orchestrator.services.custom_workflow_worker` on `TEMPORAL_WORKFLOW_TASK_QUEUE`.
 
 **Fix**:
 ```bash
 make prod-status
 make autopilot-logs
+make agent-temporal-smoke
 ```
 
-Verify `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, and `TEMPORAL_TASK_QUEUE` in `.env.prod`, then restart the backend and mission worker stack. If you do not need durable long-running missions, use the regular AutoPilot flow instead.
+Verify `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE`, `TEMPORAL_TASK_QUEUE`, and `TEMPORAL_WORKFLOW_TASK_QUEUE` in `.env.prod`, then restart the backend and worker stack. Standalone agent runs intentionally fail closed when Temporal is down; restore Temporal and retry the run.
 
 ### Long-Running Missions Retry Repeatedly
 

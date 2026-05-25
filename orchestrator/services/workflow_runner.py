@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import re
 from datetime import datetime
@@ -765,6 +766,8 @@ async def _dispatch_step(
         }, status="awaiting_input", external_kind="review_gate")
     if handler_kind == "wait_for_status" or action == "wait_for_status":
         return normalize_step_output(await _wait_for_status(data, context))
+    if handler_kind == "materialize_agent_report" or action == "materialize_agent_report":
+        return normalize_step_output(await _materialize_agent_report(data, context, project_id))
     if handler_kind == "agent_run" or action == "start_custom_agent":
         definition_id = data.get("definition_id")
         if not definition_id:
@@ -829,6 +832,277 @@ async def _post_json(path: str, body: dict[str, Any], *, expected_kind: str | No
     payload = response.json()
     payload = payload if isinstance(payload, dict) else {"result": payload}
     return {**payload, **_external_ref(payload, expected_kind=expected_kind)}
+
+
+PRIORITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+
+
+async def _materialize_agent_report(data: dict[str, Any], context: dict[str, Any], project_id: str | None) -> dict[str, Any]:
+    source_key = str(data.get("source_step") or "").strip()
+    if not source_key:
+        raise RuntimeError("materialize_agent_report source_step is required")
+
+    source = ((context.get("steps") or {}).get(source_key) or {}) if source_key else {}
+    structured_report = _extract_structured_report(source)
+    if not structured_report:
+        raise RuntimeError(f"Step {source_key!r} does not contain a structured agent report")
+
+    mode = str(data.get("mode") or "both").lower()
+    if mode not in {"requirements", "specs", "both"}:
+        raise RuntimeError(f"Unsupported materialize_agent_report mode: {mode}")
+
+    max_items = max(1, min(int(data.get("max_items") or 10), 50))
+    threshold = _normalize_priority(data.get("priority_threshold") or "medium")
+    items = _select_agent_report_items(structured_report, threshold=threshold, limit=max_items)
+    if not items:
+        return {
+            "status": "completed",
+            "summary": "No agent report items met the materialization criteria.",
+            "created_requirements": [],
+            "created_specs": [],
+            "skipped_items": [{"reason": "no_matching_items", "priority_threshold": threshold}],
+        }
+
+    pid = project_id or str(((context.get("run") or {}).get("project_id")) or "default")
+    created_requirements: list[dict[str, Any]] = []
+    created_specs: list[dict[str, Any]] = []
+    skipped_items: list[dict[str, Any]] = []
+
+    if mode in {"requirements", "both"}:
+        for item in items:
+            body = _requirement_from_agent_item(item)
+            try:
+                duplicate = await _post_json(
+                    f"/requirements/check-duplicate?project_id={pid}",
+                    {"title": body["title"], "description": body.get("description")},
+                )
+                if duplicate.get("has_exact_match"):
+                    skipped_items.append({
+                        "kind": item["kind"],
+                        "id": item.get("id"),
+                        "title": item["title"],
+                        "reason": "duplicate_requirement",
+                        "match": duplicate.get("exact_match"),
+                    })
+                    continue
+            except Exception as exc:
+                logger.info("Requirement duplicate check skipped for workflow materialization: %s", exc)
+            try:
+                created = await _post_json(f"/requirements?project_id={pid}", body)
+                created_requirements.append(created)
+            except Exception as exc:
+                skipped_items.append({
+                    "kind": item["kind"],
+                    "id": item.get("id"),
+                    "title": item["title"],
+                    "reason": "requirement_create_failed",
+                    "error": str(exc),
+                })
+
+    if mode in {"specs", "both"}:
+        for index, item in enumerate(items, start=1):
+            spec_name = _agent_report_spec_name(item, source, index)
+            try:
+                created = await _post_json(
+                    "/specs",
+                    {
+                        "name": spec_name,
+                        "content": _spec_from_agent_item(item, structured_report, source),
+                        "project_id": pid,
+                    },
+                )
+                created_specs.append({
+                    "spec_name": spec_name if spec_name.endswith(".md") else f"{spec_name}.md",
+                    "path": created.get("path"),
+                    "source_item_id": item.get("id"),
+                    "source_item_kind": item["kind"],
+                })
+            except Exception as exc:
+                skipped_items.append({
+                    "kind": item["kind"],
+                    "id": item.get("id"),
+                    "title": item["title"],
+                    "reason": "spec_create_failed",
+                    "spec_name": spec_name,
+                    "error": str(exc),
+                })
+
+    parts = []
+    if created_requirements:
+        parts.append(f"created {len(created_requirements)} requirement(s)")
+    if created_specs:
+        parts.append(f"created {len(created_specs)} spec(s)")
+    if skipped_items:
+        parts.append(f"skipped {len(skipped_items)} item(s)")
+    summary = "Materialized agent report: " + (", ".join(parts) if parts else "no artifacts created")
+    return {
+        "status": "completed",
+        "summary": summary,
+        "created_requirements": created_requirements,
+        "created_specs": created_specs,
+        "skipped_items": skipped_items,
+        "metrics": {
+            "selected_items": len(items),
+            "created_requirements": len(created_requirements),
+            "created_specs": len(created_specs),
+            "skipped_items": len(skipped_items),
+        },
+    }
+
+
+def _extract_structured_report(source: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(source.get("structured_report"), dict):
+        return source["structured_report"]
+    result = source.get("result")
+    if isinstance(result, dict):
+        agent_result = result.get("result")
+        if isinstance(agent_result, dict) and isinstance(agent_result.get("structured_report"), dict):
+            return agent_result["structured_report"]
+        if isinstance(result.get("structured_report"), dict):
+            return result["structured_report"]
+    return {}
+
+
+def _select_agent_report_items(report: dict[str, Any], *, threshold: str, limit: int) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for kind, key in (("test_idea", "test_ideas"), ("finding", "findings"), ("requirement", "requirements")):
+        for raw in _list_values(report.get(key)):
+            if not isinstance(raw, dict):
+                continue
+            title = _short_agent_text(raw.get("title") or raw.get("name") or raw.get("requirement"), 160)
+            if not title:
+                continue
+            priority = _normalize_priority(raw.get("priority") or raw.get("severity") or "medium")
+            if PRIORITY_ORDER.get(priority, 0) < PRIORITY_ORDER.get(threshold, 2):
+                continue
+            candidates.append({
+                "kind": kind,
+                "id": _short_agent_text(raw.get("id"), 80),
+                "title": title,
+                "description": _short_agent_text(raw.get("description") or raw.get("summary"), 1200),
+                "page": _short_agent_text(raw.get("page") or raw.get("url"), 500),
+                "evidence": _short_agent_text(raw.get("evidence"), 1200),
+                "expected": _short_agent_text(raw.get("expected") or raw.get("expected_result"), 800),
+                "suggested_action": _short_agent_text(raw.get("suggested_action") or raw.get("recommendation"), 800),
+                "priority": priority,
+                "steps": [_short_agent_text(step, 240) for step in _list_values(raw.get("steps")) if _short_agent_text(step, 240)],
+                "raw": raw,
+            })
+    candidates.sort(key=lambda item: PRIORITY_ORDER.get(item["priority"], 0), reverse=True)
+    return candidates[:limit]
+
+
+def _requirement_from_agent_item(item: dict[str, Any]) -> dict[str, Any]:
+    criteria = []
+    if item.get("expected"):
+        criteria.append(str(item["expected"]))
+    criteria.extend(str(step) for step in item.get("steps") or [])
+    if item.get("suggested_action"):
+        criteria.append(str(item["suggested_action"]))
+    if not criteria and item.get("evidence"):
+        criteria.append(f"Observed evidence remains true: {item['evidence']}")
+    return {
+        "title": item["title"],
+        "description": _agent_item_description(item),
+        "category": "functional",
+        "priority": item["priority"] if item["priority"] in {"critical", "high", "medium", "low"} else "low",
+        "acceptance_criteria": criteria[:8],
+        "truth_state": "candidate_requirement",
+        "source_type": "custom_agent_report",
+        "confidence": 0.72 if item["kind"] == "requirement" else 0.62,
+        "uncertainty_reason": "Created from a custom agent report and awaiting human confirmation.",
+    }
+
+
+def _spec_from_agent_item(item: dict[str, Any], report: dict[str, Any], source: dict[str, Any]) -> str:
+    target_url = item.get("page") or _source_url(source) or _short_agent_text(report.get("scope"), 500) or "Target application"
+    steps = item.get("steps") or ["Open the target area described by the agent report.", "Follow the observed user flow.", "Verify the expected outcome."]
+    expected = item.get("expected") or item.get("suggested_action") or "The observed behavior matches the expected product requirement."
+    evidence = item.get("evidence") or "See the source custom agent report for supporting evidence."
+    numbered_steps = "\n".join(f"{index}. {step}" for index, step in enumerate(steps, start=1))
+    return f"""# Test: {item["title"]}
+
+## Type: E2E
+## Source: Custom agent report
+## Priority: {item["priority"].title()}
+## Target: {target_url}
+
+## Description
+{_agent_item_description(item)}
+
+## Evidence
+{evidence}
+
+## Steps
+{numbered_steps}
+
+## Expected Outcome
+{expected}
+"""
+
+
+def _agent_item_description(item: dict[str, Any]) -> str:
+    parts = [
+        item.get("description"),
+        f"Page: {item['page']}" if item.get("page") else None,
+        f"Evidence: {item['evidence']}" if item.get("evidence") else None,
+    ]
+    return " ".join(str(part).strip() for part in parts if part).strip() or f"Validate {item['title']}."
+
+
+def _agent_report_spec_name(item: dict[str, Any], source: dict[str, Any], index: int) -> str:
+    external = _external_ref(source)
+    run_id = str(external.get("external_id") or "agent")[:12]
+    return f"agent-reports/{_slugify(item['title'])}-{run_id}-{index}.md"
+
+
+def _source_url(source: dict[str, Any]) -> str | None:
+    result = source.get("result")
+    if isinstance(result, dict):
+        config = result.get("config")
+        if isinstance(config, dict) and isinstance(config.get("url"), str):
+            return config["url"]
+    return None
+
+
+def _normalize_priority(value: Any) -> str:
+    normalized = str(value or "medium").strip().lower()
+    if normalized in {"critical", "blocker", "p0"}:
+        return "critical"
+    if normalized in {"high", "p1"}:
+        return "high"
+    if normalized in {"low", "p3"}:
+        return "low"
+    if normalized in {"info", "informational"}:
+        return "info"
+    return "medium"
+
+
+def _short_agent_text(value: Any, limit: int) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = json.dumps(value, ensure_ascii=False)
+        except TypeError:
+            text = str(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit].rstrip()
+
+
+def _list_values(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def _slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return (slug or "agent-report-item")[:64]
 
 
 async def _wait_for_status(data: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:

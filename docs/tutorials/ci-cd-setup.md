@@ -75,7 +75,7 @@ This workflow:
 
 - Triggers on pushes to `main` and on pull requests
 - Installs Node.js, project dependencies, and Playwright browsers
-- Runs all Playwright tests in `tests/generated/`
+- Runs all Playwright tests matched by the repository Playwright config
 - Uploads the HTML report as an artifact (available for 30 days)
 
 The checked-in `.github/workflows/playwright.yml` is intentionally secret-gated: it only runs when `ANTHROPIC_AUTH_TOKEN` is configured for the repository, and it passes that token to Playwright. That keeps forked pull requests from trying to run AI-backed tests without credentials. If you want a pure generated-test workflow with no AI dependency, use the example above and point Playwright at tests that do not call the generation pipeline.

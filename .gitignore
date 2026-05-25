@@ -55,6 +55,13 @@ specs/demo-marketing/
 scripts/demo-video/output/
 scripts/demo-video/campaign-config.json
 scripts/docs-assets/output/
+content/youtube/episodes/*/build/
+content/youtube/episodes/*/renders/
+content/youtube/episodes/*/*.mp4
+content/youtube/episodes/*/*.mov
+content/youtube/episodes/*/*.webm
+content/youtube/episodes/*/*.mp3
+content/youtube/episodes/*/*.wav
 
 # Playwright MCP temp files
 healer_result.json

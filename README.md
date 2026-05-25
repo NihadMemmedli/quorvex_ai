@@ -586,10 +586,10 @@ Full documentation is available at **[nihadmemmedli.github.io/quorvex_ai](https:
 
 | Section | Contents |
 |---------|----------|
-| [Tutorials](https://nihadmemmedli.github.io/quorvex_ai/tutorials/getting-started/) | Step-by-step guides: first test, API testing, exploration, dashboard |
-| [How-to Guides](https://nihadmemmedli.github.io/quorvex_ai/guides/writing-specs/) | Task-oriented: specs, deployment, integrations, security, load testing |
-| [Reference](https://nihadmemmedli.github.io/quorvex_ai/reference/cli/) | CLI, API endpoints, environment variables, database schema |
-| [Explanation](https://nihadmemmedli.github.io/quorvex_ai/explanation/system-overview/) | Architecture, pipeline design, memory system, browser pool |
+| [Tutorials](https://nihadmemmedli.github.io/quorvex_ai/tutorials/) | Step-by-step guides: first test, API testing, exploration, dashboard |
+| [How-to Guides](https://nihadmemmedli.github.io/quorvex_ai/guides/) | Task-oriented: specs, deployment, integrations, security, load testing |
+| [Reference](https://nihadmemmedli.github.io/quorvex_ai/reference/) | CLI, API endpoints, environment variables, database schema |
+| [Explanation](https://nihadmemmedli.github.io/quorvex_ai/explanation/) | Architecture, pipeline design, memory system, browser pool |
 
 To browse docs locally:
 

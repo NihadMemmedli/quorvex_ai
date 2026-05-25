@@ -5,6 +5,7 @@ Run with: pytest orchestrator/tests/test_migrations.py -v
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -17,6 +18,40 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 class TestDatabaseInit:
     """Test that init_db() works correctly on a fresh database."""
+
+    def test_alembic_revision_ids_are_unique_and_ordered(self):
+        versions_dir = Path(__file__).parent.parent / "migrations" / "versions"
+        revisions: dict[str, list[Path]] = {}
+        down_revisions: dict[str, str | None] = {}
+        for migration in versions_dir.glob("*.py"):
+            text = migration.read_text(encoding="utf-8")
+            match = re.search(r"^revision(?:\s*:\s*[^=]+)?\s*=\s*[\"']([^\"']+)[\"']", text, re.MULTILINE)
+            if not match:
+                continue
+            revision = match.group(1)
+            revisions.setdefault(revision, []).append(migration)
+            down_match = re.search(
+                r"^down_revision(?:\s*:\s*[^=]+)?\s*=\s*(?:[\"']([^\"']+)[\"']|None)",
+                text,
+                re.MULTILINE,
+            )
+            down_revisions[revision] = down_match.group(1) if down_match and down_match.group(1) else None
+
+        hardening = versions_dir / "033_autonomous_whole_app_hardening.py"
+        hardening_text = hardening.read_text(encoding="utf-8")
+        assert 'revision = "033"' in hardening_text
+        assert 'down_revision = "032"' in hardening_text
+        assert len(revisions.get("033", [])) == 1
+        assert len(revisions.get("034", [])) == 1
+        assert len(revisions.get("035", [])) == 1
+        assert down_revisions["032"] == "031"
+        assert down_revisions["033"] == "032"
+        assert down_revisions["034"] == "033"
+        assert down_revisions["035"] == "034"
+
+        referenced = {revision for revision in down_revisions.values() if revision}
+        heads = sorted(set(revisions) - referenced)
+        assert heads == ["035"]
 
     def test_init_db_fresh_sqlite(self, tmp_path):
         """init_db() should run cleanly on a fresh SQLite database."""

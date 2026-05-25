@@ -92,10 +92,17 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
             }
         }
         loadArtifacts();
+        if (!isActive) {
+            return () => {
+                cancelled = true;
+            };
+        }
+        const interval = window.setInterval(loadArtifacts, 3000);
         return () => {
             cancelled = true;
+            window.clearInterval(interval);
         };
-    }, [runId]);
+    }, [runId, isActive]);
 
     // Check if VNC server is available
     const checkVncAvailability = useCallback(async () => {

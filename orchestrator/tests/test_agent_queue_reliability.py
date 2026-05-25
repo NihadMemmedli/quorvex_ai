@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 import threading
@@ -11,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.services.agent_queue import AgentQueue, AgentTask, AgentTaskStatus
 from orchestrator.services.agent_worker import AgentWorker, BrowserObservationRecorder
+from orchestrator.utils import browser_cleanup
 
 
 class _MemoryPipeline:
@@ -28,6 +30,12 @@ class _MemoryPipeline:
 
     def rpush(self, key, value):
         self.redis.lists.setdefault(key, []).append(value)
+
+    def sadd(self, key, value):
+        self.redis.sets.setdefault(key, set()).add(value)
+
+    def srem(self, key, value):
+        self.redis.sets.setdefault(key, set()).discard(value)
 
     def set(self, key, value, ex=None):
         self.redis.values[key] = value
@@ -77,6 +85,13 @@ class _MemoryRedis:
         values = self.lists.get(key, [])
         return values.pop(0) if values else None
 
+    async def lpush(self, key, value):
+        self.lists.setdefault(key, []).insert(0, value)
+
+    async def blpop(self, key, timeout=0):
+        value = await self.lpop(key)
+        return (key, value) if value else None
+
     async def sadd(self, key, value):
         self.sets.setdefault(key, set()).add(value)
 
@@ -101,10 +116,17 @@ class _MemoryRedis:
     async def exists(self, key):
         return 1 if key in self.values else 0
 
+    async def scan_iter(self, pattern):
+        prefix = pattern.rstrip("*")
+        for key in list(self.values):
+            if key.startswith(prefix):
+                yield key
+
 
 class _MemoryQueue(AgentQueue):
     def __init__(self, redis):
         self._redis = redis
+        self._worker_id = "memory-worker"
 
     async def _ensure_connected(self):
         return self._redis
@@ -155,6 +177,87 @@ def test_agent_task_round_trips_execution_telemetry():
     assert restored.telemetry["error_type"] == "timeout"
 
 
+def test_autopilot_process_tree_matches_session_root_and_cleanup_descendants(monkeypatch):
+    current_pid = 999
+    processes = {
+        current_pid: browser_cleanup.ProcessInfo(
+            pid=current_pid,
+            ppid=1,
+            comm="claude",
+            args="claude --session autopilot_2026-05-25_16-33-34",
+        ),
+        101: browser_cleanup.ProcessInfo(
+            pid=101,
+            ppid=1,
+            comm="claude",
+            args="claude --session autopilot_2026-05-25_16-33-34",
+        ),
+        102: browser_cleanup.ProcessInfo(
+            pid=102,
+            ppid=101,
+            comm="node",
+            args="node playwright-mcp",
+        ),
+        103: browser_cleanup.ProcessInfo(
+            pid=103,
+            ppid=102,
+            comm="chromium",
+            args="/usr/bin/chromium --type=renderer",
+        ),
+        104: browser_cleanup.ProcessInfo(
+            pid=104,
+            ppid=101,
+            comm="python",
+            args="python unrelated-child.py",
+        ),
+        201: browser_cleanup.ProcessInfo(
+            pid=201,
+            ppid=1,
+            comm="chromium",
+            args="/usr/bin/chromium --remote-debugging-port=9222",
+        ),
+    }
+
+    monkeypatch.setattr(browser_cleanup, "_process_table", lambda: processes)
+    monkeypatch.setattr(browser_cleanup.os, "getpid", lambda: current_pid)
+
+    assert browser_cleanup.find_autopilot_process_tree("autopilot_2026-05-25_16-33-34") == {
+        101,
+        102,
+        103,
+    }
+
+
+def test_autopilot_session_ids_are_extracted_only_from_cleanup_processes(monkeypatch):
+    processes = {
+        101: browser_cleanup.ProcessInfo(
+            pid=101,
+            ppid=1,
+            comm="claude",
+            args="claude --session autopilot_2026-05-25_16-33-34",
+        ),
+        102: browser_cleanup.ProcessInfo(
+            pid=102,
+            ppid=1,
+            comm="node",
+            args="node /tmp/autopilot_2026-05-25_16-44-10/playwright-mcp",
+        ),
+        103: browser_cleanup.ProcessInfo(
+            pid=103,
+            ppid=1,
+            comm="python",
+            args="python mentions autopilot_2026-05-25_16-55-00",
+        ),
+    }
+
+    monkeypatch.setattr(browser_cleanup, "_process_table", lambda: processes)
+
+    assert browser_cleanup.find_autopilot_session_ids_in_processes() == {
+        "autopilot_2026-05-25_16-33-34",
+        "autopilot_2026-05-25_16-44-10",
+    }
+
+
 @pytest.mark.asyncio
 async def test_pause_and_resume_queued_task_requeues_after_resume():
     redis = _MemoryRedis()
@@ -174,6 +277,37 @@ async def test_pause_and_resume_queued_task_requeues_after_resume():
     assert resumed.status == AgentTaskStatus.QUEUED
     assert redis.lists[queue.QUEUE_KEY] == [task.id]
     assert await queue.is_paused(task.id) is False
+
+
+@pytest.mark.asyncio
+async def test_wait_for_result_keeps_queued_task_when_workers_are_busy():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    task = AgentTask(
+        id="agent-busy-queued", prompt="inspect", status=AgentTaskStatus.QUEUED
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, task.id)
+
+    async def worker_count():
+        return 2
+
+    async def queue_length():
+        return 4
+
+    async def running_count():
+        return 2
+
+    queue.worker_count = worker_count
+    queue.queue_length = queue_length
+    queue.running_count = running_count
+
+    with pytest.raises(asyncio.TimeoutError):
+        await queue.wait_for_result(
+            task.id, timeout=0.05, poll_interval=0.001, queued_timeout=0.01
+        )
+
+    assert await queue.get_task(task.id) is not None
 
 
 @pytest.mark.asyncio
@@ -206,7 +340,9 @@ async def test_pause_and_resume_running_task_keeps_worker_ownership():
 async def test_pause_resume_reject_terminal_task():
     redis = _MemoryRedis()
     queue = _MemoryQueue(redis)
-    task = AgentTask(id="agent-complete", prompt="inspect", status=AgentTaskStatus.COMPLETED)
+    task = AgentTask(
+        id="agent-complete", prompt="inspect", status=AgentTaskStatus.COMPLETED
+    )
     await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
 
     assert await queue.pause_task(task.id) is False
@@ -217,7 +353,9 @@ async def test_pause_resume_reject_terminal_task():
 async def test_cancel_paused_queued_task_clears_pause_and_queue():
     redis = _MemoryRedis()
     queue = _MemoryQueue(redis)
-    task = AgentTask(id="agent-paused-queued", prompt="inspect", status=AgentTaskStatus.QUEUED)
+    task = AgentTask(
+        id="agent-paused-queued", prompt="inspect", status=AgentTaskStatus.QUEUED
+    )
     await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
     await redis.rpush(queue.QUEUE_KEY, task.id)
 
@@ -233,7 +371,7 @@ async def test_cancel_paused_queued_task_clears_pause_and_queue():
 
 
 @pytest.mark.asyncio
-async def test_cancel_running_task_sets_cancel_flag_and_removes_running_membership():
+async def test_cancel_running_task_sets_cancel_requested_and_keeps_worker_membership():
     redis = _MemoryRedis()
     queue = _MemoryQueue(redis)
     task = AgentTask(
@@ -248,9 +386,32 @@ async def test_cancel_running_task_sets_cancel_flag_and_removes_running_membersh
 
     assert await queue.cancel_task(task.id) is True
     cancelled = await queue.get_task(task.id)
-    assert cancelled.status == AgentTaskStatus.CANCELLED
-    assert await redis.sismember(queue.RUNNING_KEY, task.id) is False
+    assert cancelled.status == AgentTaskStatus.CANCEL_REQUESTED
+    assert await redis.sismember(queue.RUNNING_KEY, task.id) is True
     assert await queue.is_cancelled(task.id) is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_requested_task_becomes_cancelled_when_worker_submits_cancel_result():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    task = AgentTask(
+        id="agent-running-cancel-result",
+        prompt="inspect",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-1",
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.sadd(queue.RUNNING_KEY, task.id)
+
+    assert await queue.cancel_task(task.id) is True
+    await queue.submit_result(task.id, "", success=False, error="Task cancelled")
+
+    cancelled = await queue.get_task(task.id)
+    assert cancelled.status == AgentTaskStatus.CANCELLED
+    assert cancelled.error == "Task cancelled"
+    assert await redis.sismember(queue.RUNNING_KEY, task.id) is False
 
 
 @pytest.mark.asyncio
@@ -336,6 +497,132 @@ async def test_cleanup_fails_queued_task_missing_from_queue_list():
     assert await queue.is_cancelled(task.id) is True
 
 
+@pytest.mark.asyncio
+async def test_cleanup_cancels_stale_ownerless_queued_task_in_queue_list():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=90)
+    task = AgentTask(
+        id="agent-stale-ownerless",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        created_at=created_at,
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, task.id)
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks(max_age_minutes=45)
+
+    cleaned = await queue.get_task(task.id)
+    assert counts["stale_ownerless_queued"] == 1
+    assert cleaned.status == AgentTaskStatus.CANCELLED
+    assert redis.lists[queue.QUEUE_KEY] == []
+    assert await queue.is_cancelled(task.id) is True
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_fresh_ownerless_queued_task():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    created_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=5)
+    task = AgentTask(
+        id="agent-fresh-ownerless",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        created_at=created_at,
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, task.id)
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks(max_age_minutes=45)
+
+    kept = await queue.get_task(task.id)
+    assert counts["stale_ownerless_queued"] == 0
+    assert kept.status == AgentTaskStatus.QUEUED
+    assert redis.lists[queue.QUEUE_KEY] == [task.id]
+
+
+@pytest.mark.asyncio
+async def test_dequeue_skips_stale_ownerless_task_before_valid_agent_run():
+    redis = _MemoryRedis()
+
+    class ValidOwnerQueue(_MemoryQueue):
+        async def _get_owner_state(self, task):
+            if task.owner_id == "run-1":
+                return {
+                    "type": task.owner_type,
+                    "id": task.owner_id,
+                    "label": task.owner_label,
+                    "status": "running",
+                    "terminal": False,
+                }
+            return await super()._get_owner_state(task)
+
+    queue = ValidOwnerQueue(redis)
+    stale = AgentTask(
+        id="agent-old-ownerless",
+        prompt="old",
+        status=AgentTaskStatus.QUEUED,
+        created_at=datetime.now(UTC).replace(tzinfo=None) - timedelta(minutes=90),
+    )
+    valid = AgentTask(
+        id="agent-linked-run",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        owner_type="agent_run",
+        owner_id="run-1",
+    )
+    await redis.hset(queue.TASKS_KEY, stale.id, json.dumps(stale.to_dict()))
+    await redis.hset(queue.TASKS_KEY, valid.id, json.dumps(valid.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, stale.id)
+    await redis.rpush(queue.QUEUE_KEY, valid.id)
+
+    skipped = await queue.dequeue_task(timeout=1)
+
+    cleaned = await queue.get_task(stale.id)
+    kept = await queue.get_task(valid.id)
+    assert skipped is None
+    assert cleaned.status == AgentTaskStatus.CANCELLED
+    assert kept.status == AgentTaskStatus.QUEUED
+    assert redis.lists[queue.QUEUE_KEY] == [valid.id]
+
+    dequeued = await queue.dequeue_task(timeout=1)
+    assert dequeued.id == valid.id
+    assert dequeued.status == AgentTaskStatus.RUNNING
+    assert await redis.sismember(queue.RUNNING_KEY, valid.id) is True
+
+
+@pytest.mark.asyncio
+async def test_dequeue_terminalizes_queued_task_with_terminal_owner():
+    redis = _MemoryRedis()
+
+    class OwnerTerminalQueue(_MemoryQueue):
+        async def _get_owner_state(self, task):
+            return {
+                "type": task.owner_type,
+                "id": task.owner_id,
+                "label": task.owner_label,
+                "status": "failed",
+                "terminal": True,
+            }
+
+    queue = OwnerTerminalQueue(redis)
+    task = AgentTask(
+        id="agent-terminal-owner-queued",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        owner_type="agent_run",
+        owner_id="run-failed",
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, task.id)
+
+    assert await queue.dequeue_task(timeout=1) is None
+    cleaned = await queue.get_task(task.id)
+    assert cleaned.status == AgentTaskStatus.FAILED
+    assert redis.lists[queue.QUEUE_KEY] == []
+
+
 def test_worker_effective_elapsed_excludes_paused_duration():
     worker = AgentWorker.__new__(AgentWorker)
     worker._pause_lock = threading.Lock()
@@ -397,7 +684,12 @@ def test_browser_observation_recorder_persists_snapshot_result(tmp_path):
                     {
                         "type": "tool_result",
                         "tool_use_id": "toolu_snapshot",
-                        "content": [{"type": "text", "text": "Page title: Login\nhttps://example.test/login\n- button \"Sign in\""}],
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": 'Page title: Login\nhttps://example.test/login\n- button "Sign in"',
+                            }
+                        ],
                     }
                 ]
             },
@@ -471,11 +763,11 @@ def test_browser_observation_recorder_pairs_interaction_with_next_snapshot(tmp_p
         )
 
     event_tool_use("s1", "browser_snapshot")
-    event_tool_result("s1", "https://example.test\n- button \"Open menu\"")
+    event_tool_result("s1", 'https://example.test\n- button "Open menu"')
     event_tool_use("c1", "browser_click", {"element": "Open menu"})
     event_tool_result("c1", "Clicked")
     event_tool_use("s2", "browser_snapshot")
-    event_tool_result("s2", "https://example.test\n- menuitem \"Settings\"")
+    event_tool_result("s2", 'https://example.test\n- menuitem "Settings"')
 
     assert len(service.states) == 2
     assert len(service.transitions) == 1
@@ -486,14 +778,23 @@ def test_browser_observation_recorder_pairs_interaction_with_next_snapshot(tmp_p
     assert recorder.telemetry()["browser_memory_transitions"] == 1
 
 
-def test_browser_observation_recorder_ignores_malformed_result_without_raising(tmp_path):
+def test_browser_observation_recorder_ignores_malformed_result_without_raising(
+    tmp_path,
+):
     recorder = BrowserObservationRecorder(
         session_id="explore-1",
         cwd=str(tmp_path),
-        service_factory=lambda: (_ for _ in ()).throw(AssertionError("service should not be called")),
+        service_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("service should not be called")
+        ),
     )
 
-    recorder.observe_event({"type": "user", "message": {"content": [{"type": "tool_result", "content": "orphan"}]}})
+    recorder.observe_event(
+        {
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "content": "orphan"}]},
+        }
+    )
 
     assert recorder.telemetry()["browser_memory_snapshots"] == 0
     assert recorder.telemetry()["browser_memory_transitions"] == 0

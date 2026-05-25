@@ -173,7 +173,7 @@ function MetricCard({ label, value, detail, icon, tone }: { label: string; value
 function SessionRow({ session, compact = false }: { session: AutoPilotSessionSummary; compact?: boolean }) {
     const failed = session.status === 'failed';
     const needsInput = session.status === 'awaiting_input';
-    const href = `/autopilot?session=${encodeURIComponent(session.id)}`;
+    const href = `/autopilot?sessionId=${encodeURIComponent(session.id)}`;
 
     return (
         <Link
@@ -326,14 +326,24 @@ export default function Home() {
     const unlistedBackgroundTaskCount = Math.max(0, (queue?.active ?? 0) - linkedTaskIds.size - backgroundAgentTasks.length);
     const backgroundAgentTaskCount = backgroundAgentTasks.length + unlistedBackgroundTaskCount;
     const browserSlotsRunning = queue?.browser_pool?.running ?? 0;
+    const browserSlotsAvailable = queue?.browser_pool?.available ?? queue?.available ?? 0;
+    const browserSlotsMax = queue?.browser_pool?.max_browsers ?? queue?.max ?? 0;
     const orphanedTaskCount = queue?.orphaned_tasks ?? runningTasks.filter(task => task.orphaned).length;
-    const queueSourceLabel = queue?.mode === 'redis' ? 'Redis workers' : queue?.mode === 'browser_pool' ? 'Browser pool' : 'Worker pool';
+    const queueSourceLabel = queue?.mode === 'redis' ? 'Redis workers' : queue?.mode === 'temporal' ? 'Temporal activities' : queue?.mode === 'browser_pool' ? 'Browser pool' : 'Worker pool';
+    const temporalWorkflowPollers = queue?.temporal?.worker_pollers?.workflow ?? queue?.temporal?.task_queue_status?.workflow_pollers ?? 0;
+    const temporalActivityPollers = queue?.temporal?.worker_pollers?.activity ?? queue?.temporal?.task_queue_status?.activity_pollers ?? 0;
+    const workersAlive = queue?.mode === 'temporal'
+        ? Math.min(Number(temporalWorkflowPollers), Number(temporalActivityPollers))
+        : queue?.workers_alive ?? 0;
+    const workersIdle = queue?.workers_idle ?? Math.max(0, workersAlive - (queue?.active ?? 0));
+    const oldestQueuedSeconds = queue?.oldest_queued_age_seconds ?? null;
+    const queueAgeLabel = oldestQueuedSeconds ? ` Oldest queued ${Math.round(oldestQueuedSeconds)}s.` : '';
     const nextAction = (() => {
         const pendingQuestion = pendingQuestions[0];
         if (pendingQuestion) {
             return {
                 label: 'Review Pending Gate',
-                href: `/autopilot?session=${encodeURIComponent(pendingQuestion.session_id)}`,
+                href: `/autopilot?sessionId=${encodeURIComponent(pendingQuestion.session_id)}`,
                 detail: pendingQuestion.question_text,
                 tone: 'warning' as const,
                 icon: <AlertTriangle size={18} />,
@@ -342,7 +352,7 @@ export default function Home() {
         if (failedSessions.length > 0) {
             return {
                 label: 'Investigate AutoPilot Failure',
-                href: `/autopilot?session=${encodeURIComponent(failedSessions[0].id)}`,
+                href: `/autopilot?sessionId=${encodeURIComponent(failedSessions[0].id)}`,
                 detail: failedSessions[0].error_message || 'A recent autonomous workflow failed.',
                 tone: 'danger' as const,
                 icon: <XCircle size={18} />,
@@ -351,7 +361,7 @@ export default function Home() {
         if (activeSessions.length > 0) {
             return {
                 label: 'Monitor Active AutoPilot',
-                href: `/autopilot?session=${encodeURIComponent(activeSessions[0].id)}`,
+                href: `/autopilot?sessionId=${encodeURIComponent(activeSessions[0].id)}`,
                 detail: `${formatPhase(activeSessions[0].current_phase)} is ${Math.round(activeSessions[0].overall_progress)}% complete.`,
                 tone: 'primary' as const,
                 icon: <PlayCircle size={18} />,
@@ -501,7 +511,7 @@ export default function Home() {
                                     <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{queue?.active ?? 0}</div>
                                 </div>
                                 <div>
-                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Browser slots</div>
+                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Slots active</div>
                                     <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{browserSlotsRunning}</div>
                                 </div>
                                 <div>
@@ -509,8 +519,8 @@ export default function Home() {
                                     <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{queue?.queued ?? 0}</div>
                                 </div>
                                 <div>
-                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Workers</div>
-                                    <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{queue?.workers_alive ?? 0}</div>
+                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Idle / alive</div>
+                                    <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{workersIdle}/{workersAlive}</div>
                                 </div>
                             </div>
                             <div style={{ color: orphanedTaskCount > 0 ? '#ef4444' : backgroundAgentTaskCount > 0 ? '#f59e0b' : 'var(--text-secondary)', fontSize: '0.76rem', marginTop: '0.75rem', lineHeight: 1.35 }}>
@@ -518,7 +528,9 @@ export default function Home() {
                                     ? `${orphanedTaskCount} orphaned task${orphanedTaskCount === 1 ? '' : 's'} need cleanup.`
                                     : backgroundAgentTaskCount > 0
                                     ? `${backgroundAgentTaskCount} running task${backgroundAgentTaskCount === 1 ? ' is' : 's are'} not tied to visible AutoPilot work.`
-                                    : `${queueSourceLabel}: ${queue?.active ?? 0} task${(queue?.active ?? 0) === 1 ? '' : 's'}, ${browserSlotsRunning} browser slot${browserSlotsRunning === 1 ? '' : 's'} active.`}
+                                    : queue?.mode === 'temporal' && queue?.workers_alive === 0
+                                    ? 'Temporal agent worker is not polling. Agent runs will wait until the custom workflow worker starts.'
+                                    : `${queueSourceLabel}: ${queue?.active ?? 0} task${(queue?.active ?? 0) === 1 ? '' : 's'}, ${browserSlotsRunning} browser slot${browserSlotsRunning === 1 ? '' : 's'} active${browserSlotsMax ? `, ${browserSlotsAvailable}/${browserSlotsMax} free` : ''}.${queueAgeLabel}`}
                                 {(queue?.stale_running ?? 0) > 0 ? ` ${queue?.stale_running} stale.` : ''}
                             </div>
                         </div>
@@ -585,7 +597,7 @@ export default function Home() {
                             ) : (
                                 <div>
                                     {pendingQuestions.slice(0, 3).map(question => (
-                                        <Link key={question.id} href={`/autopilot?session=${encodeURIComponent(question.session_id)}`} className="command-action-row" style={{
+                                        <Link key={question.id} href={`/autopilot?sessionId=${encodeURIComponent(question.session_id)}`} className="command-action-row" style={{
                                             display: 'block',
                                             padding: '0.95rem 1rem',
                                             borderBottom: '1px solid var(--border-subtle)',

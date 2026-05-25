@@ -32,7 +32,7 @@ from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func
 from sqlmodel import Session, select
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 from logging_config import get_logger, request_id_var, setup_logging
 from services.browser_pool import AbstractBrowserPool, get_browser_pool
@@ -105,7 +105,7 @@ from .models import (
 )
 from .middleware.auth import get_current_user_optional
 from .middleware.permissions import ProjectRole, check_project_access
-from .models_db import AgentDefinition, AgentRun, AgentToolDefinition, ExplorationSession, RegressionBatch, TestrailCaseMapping
+from .models_db import AgentDefinition, AgentRun, AgentRunEvent, AgentToolDefinition, ExplorationSession, RegressionBatch, TestrailCaseMapping
 from .models_db import ExecutionSettings as DBExecutionSettings
 from .models_db import SpecMetadata as DBSpecMetadata
 from .models_db import TestRun as DBTestRun
@@ -1434,11 +1434,29 @@ async def get_agent_queue_status():
             linked_tasks = [task for task in running_tasks if task.get("owner_type")]
             background_tasks = [task for task in running_tasks if not task.get("owner_type")]
             orphaned_tasks = [task for task in running_tasks if task.get("orphaned")]
+            worker_process_count = int(health.get("worker_count") or 0)
+            alive_running_tasks = int(health.get("alive_tasks") or 0)
+            running_count = int(metrics.get("running", 0) or 0)
+            workers_busy = min(worker_process_count, running_count)
+            workers_idle = max(0, worker_process_count - workers_busy)
+            if worker_process_count > 0:
+                capacity_state = "workers_saturated" if workers_idle == 0 and running_count > 0 else "workers_available"
+            elif running_count > 0 and alive_running_tasks > 0:
+                capacity_state = "running_tasks_alive"
+            elif running_count > 0:
+                capacity_state = "running_tasks_stale"
+            else:
+                capacity_state = "no_workers"
             return {
                 "mode": "redis",
                 "active": metrics.get("running", 0),
                 "queued": metrics.get("queue_length", 0),
                 "workers_alive": metrics.get("workers_alive", 0),
+                "worker_processes_alive": worker_process_count,
+                "workers_busy": workers_busy,
+                "workers_idle": workers_idle,
+                "running_task_heartbeats_alive": alive_running_tasks,
+                "capacity_state": capacity_state,
                 "stale_running": metrics.get("stale_running", 0),
                 "oldest_queued_age_seconds": metrics.get("oldest_queued_age_seconds"),
                 "by_status": metrics.get("by_status", {}),
@@ -1455,6 +1473,37 @@ async def get_agent_queue_status():
     pool = BROWSER_POOL or await get_browser_pool()
     status = await pool.get_status()
     agent_running = status["by_type"].get("agent", 0)
+    temporal_health = None
+    temporal_workers_alive = 0
+    active_temporal_agent_runs = 0
+    temporal_queued_agent_runs = 0
+    active_statuses = ["queued", "pending", "running", "paused"]
+    try:
+        from orchestrator.services.temporal_client import check_agent_run_temporal_health
+
+        temporal_health = await check_agent_run_temporal_health()
+        pollers = temporal_health.get("worker_pollers") or {}
+        temporal_workers_alive = min(int(pollers.get("workflow") or 0), int(pollers.get("activity") or 0))
+    except Exception as exc:
+        temporal_health = {"available": False, "status": "unavailable", "error": str(exc)}
+
+    try:
+        with Session(engine) as session:
+            active_temporal_agent_runs = session.exec(
+                select(func.count())
+                .select_from(AgentRun)
+                .where(AgentRun.status.in_(active_statuses))
+                .where(AgentRun.temporal_workflow_id != None)  # noqa: E711
+            ).one()
+            temporal_queued_agent_runs = session.exec(
+                select(func.count())
+                .select_from(AgentRun)
+                .where(AgentRun.status.in_(["queued", "pending"]))
+                .where(AgentRun.temporal_workflow_id != None)  # noqa: E711
+            ).one()
+    except Exception as exc:
+        logger.debug("Failed to count Temporal agent runs: %s", exc)
+
     running_tasks = []
     for request_id in status.get("running_requests", []):
         slot = pool.get_slot(request_id)
@@ -1478,12 +1527,19 @@ async def get_agent_queue_status():
         )
 
     return {
-        "mode": "browser_pool",
-        "active": agent_running,
+        "mode": "temporal",
+        "active": active_temporal_agent_runs or agent_running,
         "max": status["max_browsers"],
-        "queued": status["queued"],
+        "queued": temporal_queued_agent_runs,
         "available": status["available"],
+        "workers_alive": temporal_workers_alive,
+        "worker_processes_alive": temporal_workers_alive,
+        "workers_busy": min(temporal_workers_alive, active_temporal_agent_runs),
+        "workers_idle": max(0, temporal_workers_alive - min(temporal_workers_alive, active_temporal_agent_runs)),
+        "capacity_state": "workers_alive" if temporal_workers_alive > 0 else "no_temporal_workers",
+        "temporal": temporal_health,
         "pool_status": {"total_running": status["running"], "by_type": status["by_type"]},
+        "browser_pool": status,
         "running_tasks": running_tasks,
     }
 
@@ -6048,6 +6104,122 @@ AGENT_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timeout"}
 AGENT_ACTIVE_STATUSES = {"queued", "pending", "running", "paused"}
 
 
+def _record_agent_run_event(
+    run_id: str,
+    *,
+    event_type: str,
+    message: str,
+    level: str = "info",
+    payload: dict[str, Any] | None = None,
+    agent_task_id: str | None = None,
+    session: Session | None = None,
+) -> None:
+    try:
+        from orchestrator.services.agent_run_events import create_agent_run_event
+
+        create_agent_run_event(
+            run_id=run_id,
+            agent_task_id=agent_task_id,
+            event_type=event_type,
+            level=level,
+            message=message,
+            payload=payload or {},
+            session=session,
+        )
+    except Exception as exc:
+        logger.debug("Failed to record agent run event for %s: %s", run_id, exc)
+
+
+async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session) -> None:
+    from orchestrator.services.temporal_client import TemporalUnavailableError, start_agent_run_workflow
+
+    try:
+        temporal = await start_agent_run_workflow(run.id)
+    except TemporalUnavailableError as exc:
+        run.status = "failed"
+        run.completed_at = datetime.utcnow()
+        run.result = {"error": f"Failed to start Temporal workflow: {exc}"}
+        run.progress = {
+            **(run.progress or {}),
+            "phase": "failed",
+            "status": "failed",
+            "message": str(exc),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        session.add(run)
+        session.commit()
+        _record_agent_run_event(
+            run.id,
+            event_type="temporal_start_failed",
+            level="error",
+            message=f"Failed to start Temporal workflow: {exc}",
+            payload={"temporal_error": str(exc)},
+            session=session,
+        )
+        raise HTTPException(status_code=503, detail=f"Temporal is required for agent runs: {exc}") from exc
+
+    run.temporal_workflow_id = temporal.workflow_id
+    run.temporal_run_id = temporal.run_id
+    session.add(run)
+    session.commit()
+    _record_agent_run_event(
+        run.id,
+        event_type="temporal_scheduled",
+        message="Agent Temporal workflow scheduled.",
+        payload={"workflow_id": temporal.workflow_id, "temporal_run_id": temporal.run_id},
+        session=session,
+    )
+
+
+async def _agent_run_temporal_payload(run: AgentRun) -> dict[str, Any]:
+    from orchestrator.config import settings as app_settings
+    from orchestrator.services.temporal_client import TemporalUnavailableError, get_agent_run_temporal_diagnostics
+
+    workflow_url = None
+    if app_settings.temporal_ui_url and run.temporal_workflow_id:
+        workflow_url = (
+            f"{app_settings.temporal_ui_url.rstrip('/')}/namespaces/"
+            f"{app_settings.temporal_namespace}/workflows/{run.temporal_workflow_id}"
+        )
+    payload: dict[str, Any] = {
+        "temporal_workflow_id": run.temporal_workflow_id,
+        "temporal_run_id": run.temporal_run_id,
+        "temporal_ui_url": app_settings.temporal_ui_url,
+        "temporal_ui_workflow_url": workflow_url,
+        "temporal_namespace": app_settings.temporal_namespace,
+        "task_queue": app_settings.temporal_workflow_task_queue,
+        "workflow_type": "AgentRunWorkflow",
+        "available": False,
+        "workflow_status": None,
+        "activities": [],
+        "summary": {"total_activities": 0, "failed_activities": 0, "retry_count": 0, "last_failure": None},
+        "error": None,
+    }
+    if not run.temporal_workflow_id:
+        payload["error"] = "No Temporal workflow id recorded for this agent run."
+        return payload
+    try:
+        return {**payload, **await get_agent_run_temporal_diagnostics(run.temporal_workflow_id, run.temporal_run_id)}
+    except TemporalUnavailableError as exc:
+        payload["error"] = str(exc)
+    except Exception as exc:
+        payload["error"] = f"Temporal diagnostics unavailable: {exc}"
+    return payload
+
+
+async def _signal_agent_run_temporal(run: AgentRun, signal_name: str, *args) -> None:
+    if not run.temporal_workflow_id:
+        return
+    from orchestrator.services.temporal_client import TemporalUnavailableError, signal_agent_run_workflow
+
+    try:
+        await signal_agent_run_workflow(run.temporal_workflow_id, signal_name, *args)
+    except TemporalUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=f"Temporal is unavailable for agent control: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Failed to signal agent workflow: {exc}") from exc
+
+
 async def _wait_if_agent_run_paused(run_id: str, poll_interval: float = 0.5) -> bool:
     """Block background execution while the user-visible run is paused.
 
@@ -6089,8 +6261,49 @@ def _mark_agent_run_cancelled(run: AgentRun, message: str = "Agent cancelled") -
     }
 
 
-def _serialize_agent_run(run: AgentRun) -> dict[str, Any]:
+def _agent_run_health(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
+    if session is None:
+        with Session(engine) as scoped_session:
+            return _agent_run_health(run, scoped_session)
+
+    latest_event = session.exec(
+        select(AgentRunEvent).where(AgentRunEvent.run_id == run.id).order_by(AgentRunEvent.sequence.desc()).limit(1)
+    ).first()
+    event_count = session.exec(select(func.count(AgentRunEvent.id)).where(AgentRunEvent.run_id == run.id)).one()
+    tool_count = session.exec(
+        select(func.count(AgentRunEvent.id)).where(
+            AgentRunEvent.run_id == run.id,
+            AgentRunEvent.event_type.in_(["tool_call", "browser_action"]),
+        )
+    ).one()
+    error_count = session.exec(
+        select(func.count(AgentRunEvent.id)).where(
+            AgentRunEvent.run_id == run.id,
+            AgentRunEvent.level.in_(["error", "critical"]),
+        )
+    ).one()
+
+    progress = run.progress or {}
+    latest_event_response = None
+    if latest_event:
+        from orchestrator.services.agent_run_events import event_to_response
+
+        latest_event_response = event_to_response(latest_event)
+
     return {
+        "event_count": int(event_count or 0),
+        "tool_event_count": int(tool_count or 0),
+        "error_event_count": int(error_count or 0),
+        "latest_event": latest_event_response,
+        "latest_heartbeat_at": progress.get("updated_at"),
+        "agent_task_id": run.agent_task_id,
+        "terminal": run.status in AGENT_TERMINAL_STATUSES,
+        "terminal_reason": (latest_event.message if latest_event and run.status in AGENT_TERMINAL_STATUSES else None),
+    }
+
+
+def _serialize_agent_run(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
+    payload = {
         "id": run.id,
         "agent_type": run.agent_type,
         "status": run.status,
@@ -6100,8 +6313,14 @@ def _serialize_agent_run(run: AgentRun) -> dict[str, Any]:
         "project_id": run.project_id,
         "progress": run.progress,
         "agent_task_id": run.agent_task_id,
+        "temporal_workflow_id": run.temporal_workflow_id,
+        "temporal_run_id": run.temporal_run_id,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
         "artifacts": _collect_agent_run_artifacts(run.id) if run.agent_type in ("exploratory", "custom") else [],
     }
+    payload["health"] = _agent_run_health(run, session)
+    return payload
 
 
 def _report_confidence(value: str | None) -> float:
@@ -6373,6 +6592,9 @@ def _prepare_custom_agent_mcp_config(run_id: str) -> Path:
 
     mcp_server = exploration._build_playwright_mcp_server_config()
     mcp_args = list(mcp_server["args"])
+    chromium_executable = _resolve_playwright_chromium_executable()
+    if chromium_executable:
+        mcp_args.extend(["--executable-path", str(chromium_executable)])
     mcp_args.extend(["--output-dir", str(artifacts_dir), "--isolated"])
     if os.environ.get("HEADLESS", "true").lower() != "false":
         mcp_args.append("--headless")
@@ -6389,60 +6611,108 @@ def _prepare_custom_agent_mcp_config(run_id: str) -> Path:
     return run_dir
 
 
-def _ensure_custom_agent_browser_available(run_id: str) -> None:
-    """Install the Playwright browser used by @playwright/mcp if it is missing.
-
-    This is intentionally runtime-scoped because local/dev and slim backend
-    environments may have Node dependencies without the browser cache.
-    """
-    _update_agent_run_progress(
-        run_id,
-        {
-            "phase": "browser_setup",
-            "message": "Checking Playwright browser installation",
-        },
+def _resolve_playwright_chromium_executable() -> Path | None:
+    """Find a Chromium executable already installed in the backend image."""
+    override = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH") or os.environ.get(
+        "PLAYWRIGHT_MCP_EXECUTABLE_PATH"
     )
-    env = os.environ.copy()
-    env.setdefault("NPM_CONFIG_CACHE", "/tmp/quorvex-npm-cache")
-    env.setdefault("PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT", "300000")
+    if override:
+        path = Path(override)
+        return path if path.exists() else None
 
+    search_roots = [
+        Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")) if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") else None,
+        Path("/ms-playwright"),
+        Path.home() / ".cache" / "ms-playwright",
+    ]
+    candidates: list[Path] = []
+    for root in search_roots:
+        if not root or not root.exists():
+            continue
+        candidates.extend(root.glob("chromium-*/chrome-linux/chrome"))
+    existing = [candidate for candidate in candidates if candidate.exists()]
+    if not existing:
+        return None
+    return sorted(existing, key=lambda path: path.parent.parent.name, reverse=True)[0]
+
+
+def _playwright_chromium_probe_script(executable_path: str | None = None) -> str:
+    """Return a Node probe that launches and closes the installed Chromium."""
+    executable_option = (
+        f", executablePath: {json.dumps(executable_path)}"
+        if executable_path
+        else ""
+    )
+    return """
+const { chromium } = require('playwright');
+const headless = String(process.env.HEADLESS || 'true').toLowerCase() !== 'false';
+(async () => {
+  const browser = await chromium.launch({ headless%s });
+  await browser.close();
+})().catch((error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+""" % executable_option.strip()
+
+
+def _probe_custom_agent_browser(timeout_seconds: int = 30) -> tuple[bool, str]:
+    """Check whether the installed Playwright Chromium can launch without installing it."""
+    env = os.environ.copy()
+    env.setdefault("PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT", "300000")
+    executable_path = _resolve_playwright_chromium_executable()
     try:
         result = subprocess.run(
-            ["npx", "@playwright/mcp", "install-browser", "chromium"],
+            ["node", "-e", _playwright_chromium_probe_script(str(executable_path) if executable_path else None)],
             cwd=str(BASE_DIR),
             env=env,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
-        _update_agent_run_progress(
-            run_id,
-            {
-                "phase": "failed",
-                "message": "Timed out installing Playwright browser",
-            },
-        )
-        raise RuntimeError(
-            "Timed out installing the Playwright browser for custom agent browser tools. "
-            "Run `NPM_CONFIG_CACHE=/tmp/quorvex-npm-cache npx @playwright/mcp install-browser chromium` "
-            "on the backend/agent-worker host, then retry."
-        ) from exc
+        output = "\n".join(
+            str(value)
+            for value in (getattr(exc, "stdout", None), getattr(exc, "stderr", None))
+            if value
+        ).strip()
+        return False, output or f"Timed out after {timeout_seconds}s launching Playwright Chromium"
 
     combined_output = f"{result.stdout}\n{result.stderr}".strip()
-    if result.returncode != 0:
+    return result.returncode == 0, combined_output
+
+
+def _custom_agent_uses_browser_tools(allowed_tools: list[Any]) -> bool:
+    """Return whether selected custom-agent tools require Playwright Chromium."""
+    return any(str(tool).startswith("mcp__playwright") for tool in allowed_tools)
+
+
+def _ensure_custom_agent_browser_available(run_id: str) -> None:
+    """Fail fast if the Playwright browser required by @playwright/mcp is unavailable."""
+    _update_agent_run_progress(
+        run_id,
+        {
+            "phase": "browser_setup",
+            "message": "Checking Playwright browser availability",
+        },
+    )
+
+    available, output = _probe_custom_agent_browser()
+    if not available:
         _update_agent_run_progress(
             run_id,
             {
                 "phase": "failed",
-                "message": "Playwright browser installation failed",
-                "browser_install_output": combined_output[-2000:],
+                "message": "Playwright Chromium is not installed or cannot launch in the backend container",
+                "browser_probe_output": output[-2000:],
             },
         )
         raise RuntimeError(
-            "Playwright browser is not available for custom agent browser tools, and automatic install failed. "
-            "Run `NPM_CONFIG_CACHE=/tmp/quorvex-npm-cache npx @playwright/mcp install-browser chromium` "
-            f"on the backend/agent-worker host. Installer output: {combined_output[-1000:]}"
+            "Playwright Chromium is not installed or cannot launch in the backend container. "
+            "Custom agent browser tools require Chromium to be present before the run starts. "
+            "For `make start`, rebuild/recreate the backend image so Dockerfile's "
+            "`npx playwright install chromium` step runs, then retry. "
+            f"Browser probe output: {output[-1000:]}"
         )
 
     _update_agent_run_progress(
@@ -6542,6 +6812,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 run = session.get(AgentRun, run_id)
                 if run and run.status == "queued":
                     run.status = "running"
+                    run.started_at = run.started_at or datetime.utcnow()
                     session.add(run)
                     session.commit()
 
@@ -6657,7 +6928,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
 
                 allowed_tools = config.get("allowed_tools") or []
                 run_dir = None
-                has_browser_tools = any(str(tool).startswith("mcp__playwright") for tool in allowed_tools)
+                has_browser_tools = _custom_agent_uses_browser_tools(allowed_tools)
                 has_screenshot_tool = any(str(tool).endswith("__browser_take_screenshot") for tool in allowed_tools)
                 if any(str(tool).startswith("mcp__") for tool in allowed_tools):
                     if has_browser_tools:
@@ -6718,6 +6989,16 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                             "last_tool": tool_name,
                             "last_tool_input": tool_input,
                             "has_browser_tools": has_browser_tools,
+                        },
+                    )
+                    _record_agent_run_event(
+                        run_id,
+                        event_type="browser_action" if str(tool_name).startswith("mcp__playwright") else "tool_call",
+                        message=f"Using {_short_tool_name(tool_name)}.",
+                        payload={
+                            "tool_name": tool_name,
+                            "tool_label": _short_tool_name(tool_name),
+                            "tool_input": tool_input,
                         },
                     )
 
@@ -6797,6 +7078,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     run_id,
                     {
                         "phase": "completed",
+                        "status": "completed",
                         "message": "Custom agent completed",
                         "tool_calls": len(agent_result.tool_calls),
                         "browser_tool_calls": len(
@@ -6811,9 +7093,18 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 run = session.get(AgentRun, run_id)
                 if run and run.status not in AGENT_TERMINAL_STATUSES:
                     run.status = "completed"
+                    run.completed_at = datetime.utcnow()
                     run.result = result
                     session.add(run)
                     session.commit()
+                    _record_agent_run_event(
+                        run_id,
+                        event_type="complete",
+                        message="Agent run completed.",
+                        payload={"status": run.status, "summary": _agent_run_summary(run)},
+                        agent_task_id=run.agent_task_id,
+                        session=session,
+                    )
 
     except asyncio.CancelledError:
         logger.info(f"Agent {run_id} cancelled")
@@ -6821,8 +7112,17 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             run = session.get(AgentRun, run_id)
             if run:
                 run.status = "cancelled"
+                run.completed_at = datetime.utcnow()
                 session.add(run)
                 session.commit()
+                _record_agent_run_event(
+                    run_id,
+                    event_type="cancel",
+                    message="Agent run cancelled.",
+                    payload={"status": run.status},
+                    agent_task_id=run.agent_task_id,
+                    session=session,
+                )
         raise
 
     except Exception as e:
@@ -6835,33 +7135,37 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             run = session.get(AgentRun, run_id)
             if run and run.status not in AGENT_TERMINAL_STATUSES:
                 run.status = "failed"
+                run.completed_at = datetime.utcnow()
                 run.result = {"error": str(e)}
                 run.progress = {
                     **(run.progress or {}),
                     "phase": "failed",
+                    "status": "failed",
                     "message": str(e),
                     "updated_at": datetime.utcnow().isoformat(),
                 }
                 session.add(run)
                 session.commit()
+                _record_agent_run_event(
+                    run_id,
+                    event_type="error",
+                    level="error",
+                    message=f"Agent run failed: {e}",
+                    payload={"status": run.status, "error": str(e)},
+                    agent_task_id=run.agent_task_id,
+                    session=session,
+                )
 
 
 @app.post("/api/agents/runs")
-async def run_agent(
-    request: AgentRunRequest, background_tasks: BackgroundTasks, session: Session = Depends(get_session)
-):
-    """Run an autonomous agent in background.
-
-    If agent slots are full, the request is queued and will be executed
-    when a slot becomes available. The response includes queue position
-    if the request is queued.
-    """
+async def run_agent(request: AgentRunRequest, session: Session = Depends(get_session)):
+    """Run an autonomous agent through a durable Temporal workflow."""
     # Check resource availability
     resource_manager = await get_resource_manager()
     agent_status = resource_manager.get_agent_status()
 
     # Determine initial status based on slot availability
-    initial_status = "running" if resource_manager.is_slot_available(ResourceType.AGENT) else "queued"
+    initial_status = "queued"
     queue_position = None if initial_status == "running" else agent_status.queued + 1
 
     # Create DB Record
@@ -6875,13 +7179,22 @@ async def run_agent(
     )
     session.add(run)
     session.commit()
+    _record_agent_run_event(
+        run_id,
+        event_type="created",
+        message=f"Agent run created with status {initial_status}.",
+        payload={"agent_type": request.agent_type, "status": initial_status, "queue_position": queue_position},
+        session=session,
+    )
 
-    # Start Background Task (it will wait for slot if needed)
-    background_tasks.add_task(execute_agent_background, run_id, request.agent_type, request.config)
+    await _start_agent_run_temporal_or_fail(run, session)
+    session.refresh(run)
 
     response = {
         "status": initial_status,
         "run_id": run_id,
+        "temporal_workflow_id": run.temporal_workflow_id,
+        "temporal_run_id": run.temporal_run_id,
         "agent_slots": {
             "active": agent_status.active,
             "max": agent_status.max_slots,
@@ -7024,7 +7337,6 @@ async def archive_agent_definition(
 async def run_agent_definition(
     definition_id: str,
     request: CustomAgentRunRequest,
-    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
     current_user: Any = Depends(get_current_user_optional),
 ):
@@ -7037,7 +7349,7 @@ async def run_agent_definition(
 
     resource_manager = await get_resource_manager()
     agent_status = resource_manager.get_agent_status()
-    initial_status = "running" if resource_manager.is_slot_available(ResourceType.AGENT) else "queued"
+    initial_status = "queued"
     queue_position = None if initial_status == "running" else agent_status.queued + 1
 
     run_id = str(uuid.uuid4())
@@ -7065,13 +7377,28 @@ async def run_agent_definition(
     )
     session.add(run)
     session.commit()
+    _record_agent_run_event(
+        run_id,
+        event_type="created",
+        message=f"Custom agent run created with status {initial_status}.",
+        payload={
+            "agent_type": "custom",
+            "agent_definition_id": definition.id,
+            "status": initial_status,
+            "queue_position": queue_position,
+        },
+        session=session,
+    )
 
-    background_tasks.add_task(execute_agent_background, run_id, "custom", run_config)
+    await _start_agent_run_temporal_or_fail(run, session)
+    session.refresh(run)
 
     response = {
         "status": initial_status,
         "run_id": run_id,
         "agent_definition_id": definition.id,
+        "temporal_workflow_id": run.temporal_workflow_id,
+        "temporal_run_id": run.temporal_run_id,
         "agent_slots": {
             "active": agent_status.active,
             "max": agent_status.max_slots,
@@ -7113,6 +7440,8 @@ def list_agent_runs(
             "project_id": r.project_id,
             "progress": r.progress,
             "agent_task_id": r.agent_task_id,
+            "temporal_workflow_id": r.temporal_workflow_id,
+            "temporal_run_id": r.temporal_run_id,
             "artifacts": _collect_agent_run_artifacts(r.id) if r.agent_type in ("exploratory", "custom") else [],
             # Don't send full result in list view if it's huge
             "summary": _agent_run_summary(r),
@@ -7122,7 +7451,7 @@ def list_agent_runs(
 
 
 @app.get("/api/agents/runs/{id}")
-def get_agent_run(
+async def get_agent_run(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
     session: Session = Depends(get_session),
@@ -7133,7 +7462,75 @@ def get_agent_run(
 
     _filter_agent_run_project(r, project_id)
 
-    return _serialize_agent_run(r)
+    payload = _serialize_agent_run(r, session)
+    payload["temporal"] = await _agent_run_temporal_payload(r)
+    return payload
+
+
+@app.get("/api/agents/runs/{id}/events")
+def list_agent_run_events_api(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    after_sequence: int = Query(default=0, ge=0),
+    event_type: str | None = Query(default=None),
+    level: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+    session: Session = Depends(get_session),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+
+    from orchestrator.services.agent_run_events import event_to_response, list_agent_run_events
+
+    events = list_agent_run_events(
+        run_id=run.id,
+        after_sequence=after_sequence,
+        event_type=event_type,
+        level=level,
+        limit=limit,
+        session=session,
+    )
+    return [event_to_response(event) for event in events]
+
+
+@app.get("/api/agents/runs/{id}/events/stream")
+async def stream_agent_run_events_api(
+    request: Request,
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    after_sequence: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    with Session(engine) as session:
+        run = session.get(AgentRun, id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        _filter_agent_run_project(run, project_id)
+
+    async def event_generator():
+        sequence = after_sequence
+        from orchestrator.services.agent_run_events import event_to_response, list_agent_run_events
+
+        while True:
+            if await request.is_disconnected():
+                break
+            with Session(engine) as session:
+                events = list_agent_run_events(run_id=id, after_sequence=sequence, limit=limit, session=session)
+                for event in events:
+                    sequence = max(sequence, event.sequence)
+                    yield f"data: {json.dumps(event_to_response(event))}\n\n"
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/api/agents/temporal/health")
+async def get_agent_temporal_health():
+    from orchestrator.services.temporal_client import check_agent_run_temporal_health
+
+    return await check_agent_run_temporal_health()
 
 
 @app.post("/api/agents/runs/{id}/pause")
@@ -7152,26 +7549,23 @@ async def pause_agent_run(
     if run.status in AGENT_TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail=f"Cannot pause a {run.status} run")
     if run.status == "paused":
-        return _serialize_agent_run(run)
+        return _serialize_agent_run(run, session)
 
-    if run.agent_task_id:
-        try:
-            from orchestrator.services.agent_queue import get_agent_queue
-
-            queue = get_agent_queue()
-            await queue.connect()
-            paused = await queue.pause_task(run.agent_task_id)
-        except Exception as exc:
-            logger.warning("Failed to pause agent task %s for run %s: %s", run.agent_task_id, run.id, exc)
-            raise HTTPException(status_code=503, detail=f"Failed to pause agent task: {exc}") from exc
-        if not paused:
-            raise HTTPException(status_code=409, detail="Agent task is no longer pauseable")
+    await _signal_agent_run_temporal(run, "pause", "manual_pause")
 
     _mark_agent_run_paused(run)
     session.add(run)
     session.commit()
     session.refresh(run)
-    return _serialize_agent_run(run)
+    _record_agent_run_event(
+        run.id,
+        event_type="pause",
+        message="Agent run paused.",
+        payload={"status": run.status, "agent_task_id": run.agent_task_id},
+        agent_task_id=run.agent_task_id,
+        session=session,
+    )
+    return _serialize_agent_run(run, session)
 
 
 @app.post("/api/agents/runs/{id}/resume")
@@ -7190,26 +7584,12 @@ async def resume_agent_run(
     if run.status in AGENT_TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail=f"Cannot resume a {run.status} run")
     if run.status != "paused":
-        return _serialize_agent_run(run)
+        return _serialize_agent_run(run, session)
 
-    resumed_status = None
-    if run.agent_task_id:
-        try:
-            from orchestrator.services.agent_queue import get_agent_queue
-
-            queue = get_agent_queue()
-            await queue.connect()
-            resumed = await queue.resume_task(run.agent_task_id)
-            task = await queue.get_task(run.agent_task_id)
-            resumed_status = task.status.value if task else None
-        except Exception as exc:
-            logger.warning("Failed to resume agent task %s for run %s: %s", run.agent_task_id, run.id, exc)
-            raise HTTPException(status_code=503, detail=f"Failed to resume agent task: {exc}") from exc
-        if not resumed:
-            raise HTTPException(status_code=409, detail="Agent task is no longer resumable")
+    await _signal_agent_run_temporal(run, "resume")
 
     paused_from = (run.progress or {}).get("paused_from")
-    run.status = resumed_status if resumed_status in {"queued", "running"} else (paused_from if paused_from in {"queued", "running", "pending"} else "queued")
+    run.status = paused_from if paused_from in {"queued", "running", "pending"} else "queued"
     run.progress = {
         **(run.progress or {}),
         "phase": "resumed",
@@ -7220,7 +7600,15 @@ async def resume_agent_run(
     session.add(run)
     session.commit()
     session.refresh(run)
-    return _serialize_agent_run(run)
+    _record_agent_run_event(
+        run.id,
+        event_type="resume",
+        message=f"Agent run resumed as {run.status}.",
+        payload={"status": run.status, "agent_task_id": run.agent_task_id},
+        agent_task_id=run.agent_task_id,
+        session=session,
+    )
+    return _serialize_agent_run(run, session)
 
 
 @app.post("/api/agents/runs/{id}/cancel")
@@ -7239,24 +7627,21 @@ async def cancel_agent_run(
     if run.status in AGENT_TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail=f"Cannot cancel a {run.status} run")
 
-    if run.agent_task_id:
-        try:
-            from orchestrator.services.agent_queue import get_agent_queue
-
-            queue = get_agent_queue()
-            await queue.connect()
-            cancelled = await queue.cancel_task(run.agent_task_id)
-        except Exception as exc:
-            logger.warning("Failed to cancel agent task %s for run %s: %s", run.agent_task_id, run.id, exc)
-            raise HTTPException(status_code=503, detail=f"Failed to cancel agent task: {exc}") from exc
-        if not cancelled:
-            logger.warning("Agent task %s for run %s was not cancellable; marking run cancelled", run.agent_task_id, run.id)
+    await _signal_agent_run_temporal(run, "cancel", "manual_cancel")
 
     _mark_agent_run_cancelled(run)
     session.add(run)
     session.commit()
     session.refresh(run)
-    return _serialize_agent_run(run)
+    _record_agent_run_event(
+        run.id,
+        event_type="cancel",
+        message="Agent run cancelled.",
+        payload={"status": run.status, "agent_task_id": run.agent_task_id},
+        agent_task_id=run.agent_task_id,
+        session=session,
+    )
+    return _serialize_agent_run(run, session)
 
 
 @app.get("/api/agents/runs/{id}/report")
@@ -7355,7 +7740,7 @@ def search_agent_reports(
 
 @app.post("/api/agents/exploratory")
 async def run_exploratory_agent(
-    request: ExploratoryRunRequest, background_tasks: BackgroundTasks, session: Session = Depends(get_session)
+    request: ExploratoryRunRequest, session: Session = Depends(get_session)
 ):
     """
     Run enhanced exploratory testing with 10-15 minute autonomous exploration.
@@ -7393,25 +7778,35 @@ async def run_exploratory_agent(
         id=run_id,
         agent_type="exploratory",
         config_json=json.dumps(config),
-        status="running",
+        status="queued",
         project_id=request.project_id,  # Project isolation in DB field
     )
     session.add(run)
     session.commit()
 
-    # Start background task
-    background_tasks.add_task(execute_agent_background, run_id, "exploratory", config)
+    _record_agent_run_event(
+        run_id,
+        event_type="created",
+        message="Exploratory agent run created with status queued.",
+        payload={"agent_type": "exploratory", "status": "queued"},
+        session=session,
+    )
+
+    await _start_agent_run_temporal_or_fail(run, session)
+    session.refresh(run)
 
     return {
         "run_id": run_id,
-        "status": "started",
+        "status": run.status,
         "auth": auth_result.get("type", "none"),
         "project_id": request.project_id,
+        "temporal_workflow_id": run.temporal_workflow_id,
+        "temporal_run_id": run.temporal_run_id,
     }
 
 
 @app.post("/api/agents/exploratory/{run_id}/synthesize")
-async def synthesize_specs(run_id: str, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
+async def synthesize_specs(run_id: str, session: Session = Depends(get_session)):
     """
     Generate .md test specs from exploration results.
 
@@ -7460,16 +7855,30 @@ async def synthesize_specs(run_id: str, background_tasks: BackgroundTasks, sessi
         id=synthesis_run_id,
         agent_type="spec-synthesis",
         config_json=json.dumps(synthesis_config),
-        status="running",
+        status="queued",
         project_id=exploration_project_id,  # Project isolation in DB field
     )
     session.add(synthesis_run)
     session.commit()
 
-    # Start background task
-    background_tasks.add_task(execute_agent_background, synthesis_run_id, "spec-synthesis", synthesis_config)
+    _record_agent_run_event(
+        synthesis_run_id,
+        event_type="created",
+        message="Spec synthesis agent run created with status queued.",
+        payload={"agent_type": "spec-synthesis", "status": "queued", "exploration_run_id": run_id},
+        session=session,
+    )
 
-    return {"synthesis_run_id": synthesis_run_id, "exploration_run_id": run_id, "status": "started"}
+    await _start_agent_run_temporal_or_fail(synthesis_run, session)
+    session.refresh(synthesis_run)
+
+    return {
+        "synthesis_run_id": synthesis_run_id,
+        "exploration_run_id": run_id,
+        "status": synthesis_run.status,
+        "temporal_workflow_id": synthesis_run.temporal_workflow_id,
+        "temporal_run_id": synthesis_run.temporal_run_id,
+    }
 
 
 def _verify_exploration_run_project(run_id: str, project_id: str | None, session: Session) -> AgentRun:

@@ -74,6 +74,14 @@ interface Mission {
     max_runtime_minutes?: number;
     max_llm_budget_usd?: number | null;
     team_summary?: unknown;
+    monitor_summary?: Record<string, unknown> | null;
+    last_monitor_at?: string | null;
+    diagnostics_status?: string | null;
+    stale_running_count?: number | null;
+    failed_validation_count?: number | null;
+    duplicate_canonical_count?: number | null;
+    unmapped_confirmed_requirement_count?: number | null;
+    validation_artifact_count?: number | null;
     active_work_items?: unknown;
     blocked_work_items?: unknown;
     coverage_summary?: unknown;
@@ -86,6 +94,33 @@ interface Mission {
         approval_policy?: string;
     };
     created_at: string;
+}
+
+interface AutonomousDiagnostics {
+    status?: string;
+    requirements?: {
+        total?: number;
+        missing_canonical_key?: number;
+        duplicate_canonical_keys?: number;
+        unmapped_full_coverage?: number;
+    };
+    rtm?: {
+        total_entries?: number;
+        missing_dedupe_key?: number;
+    };
+    work_items?: {
+        total?: number;
+        stale_running?: number;
+        recovered?: number;
+    };
+    proposals?: {
+        total?: number;
+        materialized?: number;
+        auto_materialized?: number;
+        validation_failed?: number;
+        validation_blocked?: number;
+        validation_not_run?: number;
+    };
 }
 
 interface MissionForm {
@@ -132,6 +167,12 @@ interface TestProposal {
     approval_status: string;
     generated_spec_content?: string | null;
     materialized_file_path?: string | null;
+    validation_status?: string | null;
+    validation_result?: Record<string, unknown> | null;
+    validation_artifacts?: Array<Record<string, unknown>> | null;
+    validation_log_path?: string | null;
+    validation_trace_path?: string | null;
+    validated_at?: string | null;
     source_type?: string | null;
     source_id?: string | null;
     source_metadata?: Record<string, unknown> | null;
@@ -205,6 +246,11 @@ interface WorkItem {
     artifacts?: Array<Record<string, unknown>> | null;
     result?: Record<string, unknown> | null;
     agent_task_id?: string | null;
+    planner_key?: string | null;
+    lease_until?: string | null;
+    last_heartbeat_at?: string | null;
+    recovery_count?: number | string | null;
+    recovery_reason?: string | null;
     updated_at?: string | null;
     created_at?: string | null;
 }
@@ -330,6 +376,11 @@ interface TeamTimelineItem {
     revision_of_work_item_id?: string | null;
     revision_work_item_id?: string | null;
     revision_attempt?: string | number | null;
+    planner_key?: string | null;
+    lease_until?: string | null;
+    last_heartbeat_at?: string | null;
+    recovery_count?: number | string | null;
+    recovery_reason?: string | null;
     review?: Record<string, unknown> | null;
     review_metadata?: Record<string, unknown> | null;
     updated_at?: string | null;
@@ -354,7 +405,7 @@ const DEFAULT_FORM: MissionForm = {
     credential_scope: 'project',
 };
 
-const PROPOSAL_FILTERS = ['pending', 'approved', 'materialized', 'rejected', 'all', 'duplicate_risk', 'blocking', 'stale', 'needs_review'] as const;
+const PROPOSAL_FILTERS = ['pending', 'approved', 'materialized', 'rejected', 'all', 'duplicate_risk', 'blocking', 'stale', 'needs_review', 'validation_failed', 'blocked'] as const;
 type ProposalFilter = typeof PROPOSAL_FILTERS[number];
 
 const APP_CHANGE_STATUS_FILTERS = ['active', 'awaiting_approval', 'approved', 'rejected', 'resolved', 'all'] as const;
@@ -362,7 +413,7 @@ type AppChangeStatusFilter = typeof APP_CHANGE_STATUS_FILTERS[number];
 
 const proposalFilterSet = new Set<string>(PROPOSAL_FILTERS);
 const proposalStatusFilters = new Set<string>(['pending', 'approved', 'materialized', 'rejected']);
-const proposalReviewFilters = new Set<string>(['duplicate_risk', 'blocking', 'stale', 'needs_review']);
+const proposalReviewFilters = new Set<string>(['duplicate_risk', 'blocking', 'stale', 'needs_review', 'validation_failed', 'blocked']);
 const hiddenAppChangeStatuses = new Set<string>(['resolved']);
 
 const dateFormatter = new Intl.DateTimeFormat(undefined, {
@@ -569,6 +620,8 @@ function proposalMatchesReviewFilter(proposal: TestProposal, filter: ProposalFil
     if (filter === 'blocking') return isBlockingDuplicate(proposal);
     if (filter === 'stale') return getStalenessStatus(proposal) === 'stale';
     if (filter === 'needs_review') return getStalenessStatus(proposal) === 'needs_review';
+    if (filter === 'validation_failed') return (proposal.validation_status || '').toLowerCase() === 'failed';
+    if (filter === 'blocked') return (proposal.validation_status || '').toLowerCase() === 'blocked';
     return true;
 }
 
@@ -936,6 +989,15 @@ function getTimelineRevisionField(item: TeamTimelineItem, field: 'revision_of_wo
     );
 }
 
+function getTimelineRecoveryField(item: TeamTimelineItem, field: 'planner_key' | 'recovery_reason' | 'recovered_from_work_item_id') {
+    return asCompactText(
+        item[field as keyof TeamTimelineItem]
+            || item.result?.[field]
+            || item.progress?.[field],
+        ''
+    );
+}
+
 function canRetryWorkItemStatus(status?: string | null) {
     return ['failed', 'blocked', 'cancelled', 'error', 'timeout'].includes((status || '').toLowerCase());
 }
@@ -1006,6 +1068,8 @@ export default function AutonomousMissionsPage() {
     const [auditDetail, setAuditDetail] = useState<ProposalAudit | null>(null);
     const [auditLoading, setAuditLoading] = useState(false);
     const [reviewRefreshing, setReviewRefreshing] = useState<string | null>(null);
+    const [diagnostics, setDiagnostics] = useState<AutonomousDiagnostics | null>(null);
+    const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [showCreate, setShowCreate] = useState(false);
@@ -1072,6 +1136,18 @@ export default function AutonomousMissionsPage() {
             setProposalLoadError(err instanceof Error ? err.message : 'Failed to load generated test proposals');
         }
     }, [proposalFilter, proposalsUrl]);
+
+    const fetchDiagnostics = useCallback(async () => {
+        try {
+            const response = await fetchWithAuth(`${API_BASE}/autonomous/${encodedProjectId}/diagnostics`);
+            if (!response.ok) {
+                throw new Error(await response.text() || 'Failed to load autonomous diagnostics');
+            }
+            setDiagnostics(await response.json());
+        } catch (err) {
+            console.error('Failed to load autonomous diagnostics:', err);
+        }
+    }, [encodedProjectId]);
 
     const fetchWorkItems = useCallback(async () => {
         try {
@@ -1141,8 +1217,8 @@ export default function AutonomousMissionsPage() {
     }, [missionsUrl]);
 
     const refreshAll = useCallback(async () => {
-        await Promise.all([fetchMissions(), fetchApprovals(), fetchProposals(), fetchWorkItems()]);
-    }, [fetchApprovals, fetchMissions, fetchProposals, fetchWorkItems]);
+        await Promise.all([fetchMissions(), fetchApprovals(), fetchProposals(), fetchWorkItems(), fetchDiagnostics()]);
+    }, [fetchApprovals, fetchDiagnostics, fetchMissions, fetchProposals, fetchWorkItems]);
 
     useEffect(() => {
         setLoading(true);
@@ -1265,6 +1341,32 @@ export default function AutonomousMissionsPage() {
     const handleRefresh = async () => {
         setRefreshing(true);
         await refreshAll().finally(() => setRefreshing(false));
+    };
+
+    const handleDiagnosticsAction = async (action: 'monitor' | 'recover' | 'backfill-dry-run' | 'backfill') => {
+        setDiagnosticsLoading(true);
+        setError(null);
+        const endpoint = action === 'monitor'
+            ? 'monitor'
+            : action === 'recover'
+                ? 'recover'
+                : `backfill?dry_run=${action === 'backfill-dry-run' ? 'true' : 'false'}`;
+        try {
+            const response = await fetchWithAuth(`${API_BASE}/autonomous/${encodedProjectId}/diagnostics/${endpoint}`, {
+                method: 'POST',
+            });
+            if (!response.ok) {
+                throw new Error(await response.text() || 'Failed to run diagnostics action');
+            }
+            const data = await response.json();
+            setDiagnostics((data.diagnostics || data) as AutonomousDiagnostics);
+            await refreshAll();
+        } catch (err) {
+            console.error('Failed to run autonomous diagnostics action:', err);
+            setError(err instanceof Error ? err.message : 'Failed to run diagnostics action');
+        } finally {
+            setDiagnosticsLoading(false);
+        }
     };
 
     const handleRefreshReviews = async () => {
@@ -1883,6 +1985,76 @@ export default function AutonomousMissionsPage() {
                             </div>
                         </div>
                     ))}
+                </section>
+            )}
+
+            {hasMissions && (
+                <section className="am-panel" aria-label="Autonomous diagnostics">
+                    <div className="am-section-title-row">
+                        <div className="am-section-heading">
+                            <Gauge size={17} style={{ color: 'var(--primary)' }} />
+                            <div>
+                                <h2>Mission Health</h2>
+                                <p>{diagnostics?.status ? diagnostics.status.replace(/_/g, ' ') : 'Diagnostics pending'}</p>
+                            </div>
+                        </div>
+                        <div className="am-action-group">
+                            <MissionActionButton
+                                icon={<RefreshCw size={13} className={diagnosticsLoading ? 'am-spin' : undefined} />}
+                                label="Diagnostics"
+                                color="var(--primary)"
+                                loading={diagnosticsLoading}
+                                onClick={() => void handleDiagnosticsAction('monitor')}
+                            />
+                            <MissionActionButton
+                                icon={<Workflow size={13} />}
+                                label="Recover"
+                                color="var(--warning)"
+                                loading={diagnosticsLoading}
+                                onClick={() => void handleDiagnosticsAction('recover')}
+                            />
+                            <MissionActionButton
+                                icon={<ClipboardCheck size={13} />}
+                                label="Dry run"
+                                color="var(--text-secondary)"
+                                loading={diagnosticsLoading}
+                                onClick={() => void handleDiagnosticsAction('backfill-dry-run')}
+                            />
+                            <MissionActionButton
+                                icon={<CheckCircle size={13} />}
+                                label="Safe backfill"
+                                color="var(--success)"
+                                loading={diagnosticsLoading}
+                                onClick={() => void handleDiagnosticsAction('backfill')}
+                            />
+                        </div>
+                    </div>
+                    <div className="am-team-timeline-grid">
+                        <div>
+                            <span>Stale work</span>
+                            <strong>{diagnostics?.work_items?.stale_running ?? 0}</strong>
+                        </div>
+                        <div>
+                            <span>Recovered</span>
+                            <strong>{diagnostics?.work_items?.recovered ?? 0}</strong>
+                        </div>
+                        <div>
+                            <span>Failed validations</span>
+                            <strong>{diagnostics?.proposals?.validation_failed ?? 0}</strong>
+                        </div>
+                        <div>
+                            <span>Blocked validations</span>
+                            <strong>{diagnostics?.proposals?.validation_blocked ?? 0}</strong>
+                        </div>
+                        <div>
+                            <span>Duplicate keys</span>
+                            <strong>{diagnostics?.requirements?.duplicate_canonical_keys ?? 0}</strong>
+                        </div>
+                        <div>
+                            <span>Unmapped reqs</span>
+                            <strong>{diagnostics?.requirements?.unmapped_full_coverage ?? 0}</strong>
+                        </div>
+                    </div>
                 </section>
             )}
 
@@ -2651,6 +2823,9 @@ export default function AutonomousMissionsPage() {
                                 const reviewedBy = getTimelineReviewField(item, 'reviewed_by');
                                 const revisionOfId = getTimelineRevisionField(item, 'revision_of_work_item_id');
                                 const revisionWorkItemId = getTimelineRevisionField(item, 'revision_work_item_id');
+                                const plannerKey = getTimelineRecoveryField(item, 'planner_key');
+                                const recoveryReason = getTimelineRecoveryField(item, 'recovery_reason');
+                                const recoveredFromId = getTimelineRecoveryField(item, 'recovered_from_work_item_id');
                                 const reviewReasonInput = itemId ? workItemReviewReasons[itemId] || '' : '';
                                 const reviewReasonRequired = reviewReasonInput.trim().length === 0;
 
@@ -2677,6 +2852,11 @@ export default function AutonomousMissionsPage() {
                                                             {reviewDecision.replace(/_/g, ' ')}
                                                         </span>
                                                     )}
+                                                    {recoveryReason && (
+                                                        <span className="am-pill" style={{ color: 'var(--warning)', background: 'var(--warning-muted)' }}>
+                                                            recovered
+                                                        </span>
+                                                    )}
                                                 </div>
                                             </div>
                                             <div className="am-team-timeline-grid">
@@ -2696,8 +2876,16 @@ export default function AutonomousMissionsPage() {
                                                     <span>Updated</span>
                                                     <strong>{formatDate(item.updated_at || item.created_at)}</strong>
                                                 </div>
+                                                <div>
+                                                    <span>Planner</span>
+                                                    <strong>{clampText(plannerKey, '-', 80)}</strong>
+                                                </div>
+                                                <div>
+                                                    <span>Lease</span>
+                                                    <strong>{formatDate(item.lease_until || item.last_heartbeat_at)}</strong>
+                                                </div>
                                             </div>
-                                            {(reviewDecision || reviewReason || reviewedAt || reviewedBy || revisionOfId || revisionWorkItemId) && (
+                                            {(reviewDecision || reviewReason || reviewedAt || reviewedBy || revisionOfId || revisionWorkItemId || recoveryReason || recoveredFromId) && (
                                                 <div className="am-review-metadata">
                                                     {reviewDecision && <span>Decision: <strong>{reviewDecision.replace(/_/g, ' ')}</strong></span>}
                                                     {reviewReason && <span>Reason: <strong>{clampText(reviewReason, 'None', 140)}</strong></span>}
@@ -2705,6 +2893,8 @@ export default function AutonomousMissionsPage() {
                                                     {reviewedAt && <span>At: <strong>{formatDate(reviewedAt)}</strong></span>}
                                                     {revisionOfId && <span>Revision of: <strong>{clampText(revisionOfId, '-', 32)}</strong></span>}
                                                     {revisionWorkItemId && <span>Follow-up: <strong>{clampText(revisionWorkItemId, '-', 32)}</strong></span>}
+                                                    {recoveryReason && <span>Recovery: <strong>{recoveryReason.replace(/_/g, ' ')}</strong></span>}
+                                                    {recoveredFromId && <span>Recovered from: <strong>{clampText(recoveredFromId, '-', 32)}</strong></span>}
                                                 </div>
                                             )}
                                             {canReview && itemId && (
@@ -2878,6 +3068,8 @@ export default function AutonomousMissionsPage() {
                                 const stalenessStatus = getStalenessStatus(proposal);
                                 const staleWarning = stalenessStatus === 'stale';
                                 const needsReview = stalenessStatus === 'needs_review';
+                                const validationStatus = (proposal.validation_status || 'not_run').toLowerCase();
+                                const validationStyle = getStatusStyle(validationStatus);
                                 const mergeGate = proposal.review_context?.merge_gate;
                                 const provenance = proposal.review_context?.provenance;
 
@@ -2921,6 +3113,11 @@ export default function AutonomousMissionsPage() {
                                                 <span className="am-pill" style={{ color: statusStyle.color, background: statusStyle.background }}>
                                                     {approvalStatus.replace(/_/g, ' ')}
                                                 </span>
+                                                {validationStatus !== 'not_run' && (
+                                                    <span className="am-pill" style={{ color: validationStyle.color, background: validationStyle.background }}>
+                                                        validation {validationStatus.replace(/_/g, ' ')}
+                                                    </span>
+                                                )}
                                             </div>
                                             <div className="am-proposal-actions">
                                                 <MissionActionButton
@@ -2998,7 +3195,49 @@ export default function AutonomousMissionsPage() {
                                                             <strong>{proposal.materialized_file_path}</strong>
                                                         </div>
                                                     )}
+                                                    <div>
+                                                        <span>Validation: </span>
+                                                        <strong>{validationStatus.replace(/_/g, ' ')}</strong>
+                                                    </div>
+                                                    {proposal.validated_at && (
+                                                        <div>
+                                                            <span>Validated: </span>
+                                                            <strong>{formatDate(proposal.validated_at)}</strong>
+                                                        </div>
+                                                    )}
                                                 </div>
+                                                {validationStatus === 'failed' && (
+                                                    <div className="am-mission-error">
+                                                        <AlertCircle size={14} />
+                                                        <span>
+                                                            {clampText(
+                                                                asCompactText(proposal.validation_result?.stderr || proposal.validation_result?.stdout || proposal.validation_result?.reason, 'Validation failed.'),
+                                                                'Validation failed.',
+                                                                360
+                                                            )}
+                                                        </span>
+                                                    </div>
+                                                )}
+                                                {validationStatus === 'blocked' && (
+                                                    <div className="am-mission-error">
+                                                        <AlertCircle size={14} />
+                                                        <span>
+                                                            {clampText(asCompactText(proposal.validation_result?.reason || proposal.validation_result?.error, 'Validation blocked.'), 'Validation blocked.', 280)}
+                                                        </span>
+                                                    </div>
+                                                )}
+                                                {(proposal.validation_artifacts || []).length > 0 && (
+                                                    <div className="am-review-metadata">
+                                                        {(proposal.validation_artifacts || []).slice(0, 6).map((artifact, index) => {
+                                                            const path = asCompactText(artifact.path, '');
+                                                            return (
+                                                                <span key={`${proposal.id}:validation-artifact:${index}`}>
+                                                                    {asCompactText(artifact.type || artifact.label, 'artifact')}: <strong>{path ? <a href={path} target="_blank" rel="noreferrer">{clampText(path, path, 64)}</a> : '-'}</strong>
+                                                                </span>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                )}
                                                 {proposal.rationale && (
                                                     <p className="am-proposal-rationale">
                                                         {proposal.rationale}

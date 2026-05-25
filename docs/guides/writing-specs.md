@@ -199,14 +199,14 @@ specs/
   myapp/              # Project-specific specs
     crm.md
     new-inventory-insert.md
-  smoke_healing.md       # Standalone specs
+  smoke_healing_1.md     # Standalone specs
   test_login_1.md
 ```
 
 Naming conventions:
 
 - `test_login.md` -- single test case
-- `smoke_healing.md` -- smoke/sanity checks
+- `smoke_healing_1.md` -- smoke/sanity checks
 - `crm.md` -- feature-area name
 
 ## Step 7: Run the Spec

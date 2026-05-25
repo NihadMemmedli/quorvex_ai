@@ -17,6 +17,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -75,11 +76,42 @@ class FullNativePipeline:
     - Hybrid: Native Healer (3) + Ralph (up to 17 more)
     """
 
-    def __init__(self, project_id: str = "default"):
+    def __init__(
+        self,
+        project_id: str = "default",
+        on_tool_use: Callable[[str, dict[str, Any]], None] | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        on_task_enqueued: Callable[[str], None] | None = None,
+        owner_type: str | None = None,
+        owner_id: str | None = None,
+        owner_label: str | None = None,
+    ):
         self.project_id = project_id
+        self.on_tool_use = on_tool_use
+        self.on_progress = on_progress
+        self.on_task_enqueued = on_task_enqueued
+        self.owner_type = owner_type
+        self.owner_id = owner_id
+        self.owner_label = owner_label
+        self._memory_run_id: str | None = None
         self._load_project_credentials()
-        self.native_planner = NativePlanner(project_id=project_id)
-        self.native_generator = NativeGenerator()
+        self.native_planner = NativePlanner(
+            project_id=project_id,
+            on_tool_use=on_tool_use,
+            on_progress=on_progress,
+            on_task_enqueued=on_task_enqueued,
+            owner_type=owner_type,
+            owner_id=owner_id,
+            owner_label=owner_label,
+        )
+        self.native_generator = NativeGenerator(
+            on_tool_use=on_tool_use,
+            on_progress=on_progress,
+            on_task_enqueued=on_task_enqueued,
+            owner_type=owner_type,
+            owner_id=owner_id,
+            owner_label=owner_label,
+        )
         self.native_healer = NativeHealer()
         self.api_generator = NativeApiGenerator()
         self.api_healer = NativeApiHealer()
@@ -184,6 +216,7 @@ class FullNativePipeline:
 
         # Initialize progress reporter for real-time UI updates
         run_id = extract_run_id_from_path(run_dir)
+        self._memory_run_id = run_id
         if run_id:
             init_progress_reporter(run_id)
 
@@ -356,12 +389,21 @@ class FullNativePipeline:
                 target_url=target_url,
                 output_name=original_spec_name,
                 design_context=design_context,
+                memory_run_id=getattr(self, "_memory_run_id", None),
             )
 
             if not test_path or not test_path.exists():
                 error_msg = "Native generator failed to create test file"
                 (run_dir / "status.txt").write_text("error")
                 self._write_pipeline_error(run_dir, error_msg, "generation")
+                self._attribute_memory_outcome(
+                    stage="native_generator",
+                    success=False,
+                    outcome_status="generation_failed",
+                    source_type="spec",
+                    source_id=str(resolved_spec_path),
+                    spec_path=str(resolved_spec_path),
+                )
                 return {"success": False, "error": error_msg, "stage": "generation"}
 
             # Validate generated test content
@@ -384,6 +426,15 @@ class FullNativePipeline:
                 logger.warning(f"Could not validate generated test: {val_err}")
 
             logger.info(f"Test generated: {test_path}")
+            self._attribute_memory_outcome(
+                stage="native_generator",
+                success=True,
+                outcome_status="test_generated",
+                source_type="spec",
+                source_id=str(resolved_spec_path),
+                spec_path=str(resolved_spec_path),
+                test_path=str(test_path),
+            )
 
             logger.info("Agentic quality: reviewing generated test...")
             report_progress("generating", "Reviewing generated test for flake risks...")
@@ -410,6 +461,15 @@ class FullNativePipeline:
 
             if result.passed:
                 logger.info("Test PASSED on first run!")
+                self._attribute_memory_outcome(
+                    stage="native_generator",
+                    success=True,
+                    outcome_status="first_run_passed",
+                    source_type="spec",
+                    source_id=str(resolved_spec_path),
+                    spec_path=str(resolved_spec_path),
+                    test_path=str(test_path),
+                )
                 stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
                 if stability_result:
                     return stability_result
@@ -418,6 +478,15 @@ class FullNativePipeline:
                 return {"success": True, "test_path": str(test_path), "attempts": 0, "stage": "completed"}
 
             logger.error(f"Test FAILED: {result.error_summary}")
+            self._attribute_memory_outcome(
+                stage="native_generator",
+                success=False,
+                outcome_status="first_run_failed",
+                source_type="spec",
+                source_id=str(resolved_spec_path),
+                spec_path=str(resolved_spec_path),
+                test_path=str(test_path),
+            )
             diagnosis = self._run_failure_triage(
                 test_path=test_path,
                 run_dir=run_dir,
@@ -453,6 +522,14 @@ class FullNativePipeline:
 
             # Safety-net: clean up any orphaned browsers from healing stage
             cleanup_orphaned_browsers()
+            self._attribute_memory_outcome(
+                stage="native_healer",
+                success=bool(healing_result.get("success")),
+                outcome_status=str(healing_result.get("stage") or "healing_completed"),
+                source_type="test_file",
+                source_id=str(test_path),
+                test_path=str(test_path),
+            )
             return healing_result
 
         except Exception as e:
@@ -524,6 +601,7 @@ class FullNativePipeline:
         target_url: str,
         output_name: str | None = None,
         design_context: str | None = None,
+        memory_run_id: str | None = None,
     ) -> Path | None:
         """Run native generator to create test code.
 
@@ -538,6 +616,7 @@ class FullNativePipeline:
                 target_url=target_url,
                 output_name=output_name,
                 design_context=design_context,
+                memory_run_id=memory_run_id,
             )
             return test_path
         except Exception as e:
@@ -610,6 +689,36 @@ class FullNativePipeline:
 
         return summary
 
+    def _attribute_memory_outcome(
+        self,
+        *,
+        stage: str,
+        success: bool,
+        outcome_status: str,
+        source_type: str | None = None,
+        source_id: str | None = None,
+        spec_path: str | None = None,
+        test_path: str | None = None,
+    ) -> None:
+        if os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
+            return
+        try:
+            from orchestrator.memory.effectiveness import get_memory_effectiveness_service
+
+            get_memory_effectiveness_service().attribute_outcome(
+                project_id=self.project_id,
+                success=success,
+                outcome_status=outcome_status,
+                stage=stage,
+                source_type=source_type,
+                source_id=source_id,
+                run_id=getattr(self, "_memory_run_id", None),
+                spec_path=spec_path,
+                test_path=test_path,
+            )
+        except Exception as exc:
+            logger.debug("Memory outcome attribution skipped: %s", exc)
+
     async def _native_healing(
         self,
         test_path: Path,
@@ -636,6 +745,7 @@ class FullNativePipeline:
                     error_log,
                     timeout_seconds=int(os.environ.get("HEALER_ATTEMPT_TIMEOUT_SECONDS", "600")),
                     diagnosis_context=diagnosis_context,
+                    memory_run_id=getattr(self, "_memory_run_id", None),
                 )
 
                 if fixed_code:

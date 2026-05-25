@@ -99,3 +99,40 @@ Assemble with sound design:
 ```
 
 Use `--lang az` or `--lang both` for Azerbaijani output.
+
+## YouTube Tutorial Workflow
+
+The short demo pipeline above remains focused on GitHub, LinkedIn, and launch
+assets. Long-form YouTube tutorials use the separate content workspace in
+`content/youtube/`.
+
+Generate an episode production pack:
+
+```bash
+make youtube-pack EP=001
+```
+
+Generate ElevenLabs narration for that episode:
+
+```bash
+make youtube-voice EP=001
+```
+
+Assemble a 1080p YouTube MP4 from a product screen recording:
+
+```bash
+make youtube-assemble EP=001 RECORDING=path/to/screen-recording.mp4
+```
+
+The episode pack includes:
+
+- `script.md` for narration
+- `avatar-segments.md` for short AI-avatar clips
+- `captions.srt` for draft captions
+- `metadata.md` for title, description, tags, chapters, and pinned comment
+- `shot-list.md` for product footage
+- `production-checklist.md` for publish readiness
+
+Avatar clips should be used for hooks, transitions, and outros while the main
+runtime stays focused on real Quorvex screen footage, terminal output, generated
+Playwright code, and run artifacts.

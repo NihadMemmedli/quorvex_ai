@@ -18,13 +18,25 @@ Usage:
 
 import logging
 import os
+import re
 import signal
 import subprocess
+import time
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 # Process name fragments that indicate browser/MCP processes we should clean up
 _BROWSER_PROCESS_NAMES = {"chromium", "chrome", "node", "npx"}
+_AUTOPILOT_PROCESS_NAMES = {"claude", "chromium", "chrome", "node", "npx"}
+
+
+@dataclass(frozen=True)
+class ProcessInfo:
+    pid: int
+    ppid: int
+    comm: str
+    args: str
 
 
 def _get_child_pids(parent_pid: int = None) -> set[int]:
@@ -86,6 +98,145 @@ def _is_browser_or_mcp_process(pid: int) -> bool:
     return False
 
 
+def _process_table() -> dict[int, ProcessInfo]:
+    """Return process table entries keyed by PID."""
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,comm=,args="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return {}
+
+    if result.returncode != 0:
+        return {}
+
+    processes: dict[int, ProcessInfo] = {}
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        comm = parts[2]
+        args = parts[3] if len(parts) > 3 else ""
+        processes[pid] = ProcessInfo(pid=pid, ppid=ppid, comm=comm, args=args)
+    return processes
+
+
+def _descendants_from_table(processes: dict[int, ProcessInfo], root_pid: int) -> set[int]:
+    descendants: set[int] = set()
+    to_visit = [root_pid]
+    while to_visit:
+        current = to_visit.pop()
+        children = [pid for pid, proc in processes.items() if proc.ppid == current]
+        for child in children:
+            if child not in descendants:
+                descendants.add(child)
+                to_visit.append(child)
+    return descendants
+
+
+def _is_autopilot_cleanup_process(proc: ProcessInfo) -> bool:
+    comm = proc.comm.lower()
+    return any(name in comm for name in _AUTOPILOT_PROCESS_NAMES)
+
+
+def _is_autopilot_process_root(proc: ProcessInfo, marker: str) -> bool:
+    if marker not in proc.args:
+        return False
+    comm = proc.comm.lower()
+    args = proc.args.lower()
+    if "claude" in comm:
+        return True
+    if "node" in comm or "npx" in comm:
+        return "playwright" in args or "mcp" in args
+    if "chrome" in comm or "chromium" in comm:
+        return "playwright" in args or "user-data-dir" in args
+    return False
+
+
+def find_autopilot_process_tree(session_id: str | None = None) -> set[int]:
+    """Find AutoPilot-owned Claude/MCP/browser process trees by session marker.
+
+    The marker is intentionally session-scoped. Browser child processes usually
+    do not include the session id in their own argv, so this matches root Claude
+    or MCP processes that reference the run directory and then includes their
+    descendants.
+    """
+    marker = session_id or "autopilot_"
+    if not marker:
+        return set()
+
+    processes = _process_table()
+    roots = {
+        pid
+        for pid, proc in processes.items()
+        if _is_autopilot_process_root(proc, marker)
+    }
+    targets = set(roots)
+    for pid in roots:
+        targets.update(_descendants_from_table(processes, pid))
+
+    return {
+        pid
+        for pid in targets
+        if pid != os.getpid()
+        and pid in processes
+        and _is_autopilot_cleanup_process(processes[pid])
+    }
+
+
+def find_autopilot_session_ids_in_processes() -> set[str]:
+    """Return AutoPilot session ids visible in process command lines."""
+    pattern = re.compile(r"autopilot_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
+    session_ids: set[str] = set()
+    for proc in _process_table().values():
+        if _is_autopilot_cleanup_process(proc):
+            session_ids.update(pattern.findall(proc.args))
+    return session_ids
+
+
+def kill_autopilot_process_tree(session_id: str, grace_seconds: float = 2.0) -> dict[str, object]:
+    """Kill process trees tied to one AutoPilot session id."""
+    targets = find_autopilot_process_tree(session_id)
+    if not targets:
+        return {"session_id": session_id, "matched": 0, "terminated": 0, "killed": 0, "pids": []}
+
+    logger.info("Killing %d AutoPilot process(es) for %s: %s", len(targets), session_id, sorted(targets))
+    terminated = 0
+    for pid in sorted(targets, reverse=True):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            terminated += 1
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    time.sleep(grace_seconds)
+
+    killed = 0
+    for pid in sorted(targets, reverse=True):
+        try:
+            os.kill(pid, 0)
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    return {
+        "session_id": session_id,
+        "matched": len(targets),
+        "terminated": terminated,
+        "killed": killed,
+        "pids": sorted(targets),
+    }
+
+
 def snapshot_child_pids() -> set[int]:
     """Capture all descendant PIDs before a query() call.
 
@@ -139,8 +290,6 @@ def kill_new_children(before_pids: set[int], grace_seconds: float = 2.0) -> int:
         return 0
 
     # Wait for graceful shutdown
-    import time
-
     time.sleep(grace_seconds)
 
     # Phase 2: SIGKILL for stragglers
@@ -189,8 +338,6 @@ def cleanup_orphaned_browsers() -> int:
 
     if killed == 0:
         return 0
-
-    import time
 
     time.sleep(2.0)
 

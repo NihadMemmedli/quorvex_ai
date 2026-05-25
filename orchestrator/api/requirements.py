@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -991,10 +991,21 @@ async def _run_requirements_generation(job_id: str, project_id: str, session_id:
     """Background task for requirements generation."""
     import traceback
 
+    from orchestrator.services.domain_jobs import update_domain_job
     from workflows.requirements_generator import RequirementsGenerator
 
-    _req_gen_jobs[job_id]["status"] = "running"
-    _req_gen_jobs[job_id]["started_at"] = time.time()
+    job_state = _req_gen_jobs.setdefault(
+        job_id,
+        {
+            "status": "queued",
+            "project_id": project_id,
+            "session_id": session_id,
+            "created_at": time.time(),
+        },
+    )
+    job_state["status"] = "running"
+    job_state["started_at"] = time.time()
+    update_domain_job(job_id, status="running", started=True)
 
     try:
         generator = RequirementsGenerator(project_id=project_id)
@@ -1008,9 +1019,7 @@ async def _run_requirements_generation(job_id: str, project_id: str, session_id:
         store = get_exploration_store(project_id=project_id)
         requirements = store.get_requirements()
 
-        _req_gen_jobs[job_id]["status"] = "completed"
-        _req_gen_jobs[job_id]["completed_at"] = time.time()
-        _req_gen_jobs[job_id]["result"] = {
+        result_payload = {
             "total_requirements": result.total_requirements,
             "by_category": result.by_category,
             "by_priority": result.by_priority,
@@ -1035,19 +1044,24 @@ async def _run_requirements_generation(job_id: str, project_id: str, session_id:
                 for r in requirements
             ],
         }
+        job_state["status"] = "completed"
+        job_state["completed_at"] = time.time()
+        job_state["result"] = result_payload
+        update_domain_job(job_id, status="completed", result=result_payload, completed=True)
     except Exception as e:
         error_type = type(e).__name__
         error_msg = str(e)
         logger.error(f"Requirements generation failed: {error_type}: {error_msg}")
         logger.error(f"Stack trace:\n{traceback.format_exc()}")
-        _req_gen_jobs[job_id]["status"] = "failed"
-        _req_gen_jobs[job_id]["completed_at"] = time.time()
-        _req_gen_jobs[job_id]["error"] = f"{error_type}: {error_msg}"
+        job_state["status"] = "failed"
+        job_state["completed_at"] = time.time()
+        job_state["error"] = f"{error_type}: {error_msg}"
+        update_domain_job(job_id, status="failed", error=job_state["error"], completed=True)
 
 
 @router.post("/generate")
 async def generate_requirements(
-    request: GenerateRequirementsRequest, background_tasks: BackgroundTasks, project_id: str = Query(default="default")
+    request: GenerateRequirementsRequest, project_id: str = Query(default="default")
 ):
     """
     Generate requirements from an exploration session (async).
@@ -1058,6 +1072,14 @@ async def generate_requirements(
     _cleanup_old_req_jobs()
 
     job_id = str(uuid.uuid4())
+    from orchestrator.services.domain_jobs import create_domain_job
+
+    create_domain_job(
+        job_id=job_id,
+        job_type="requirements_generate",
+        project_id=project_id,
+        payload={"project_id": project_id, "session_id": request.exploration_session_id},
+    )
     _req_gen_jobs[job_id] = {
         "status": "queued",
         "project_id": project_id,
@@ -1069,14 +1091,46 @@ async def generate_requirements(
         f"Requirements generation queued: job_id={job_id}, session_id={request.exploration_session_id}, project_id={project_id}"
     )
 
-    background_tasks.add_task(_run_requirements_generation, job_id, project_id, request.exploration_session_id)
+    try:
+        from orchestrator.services.domain_jobs import update_domain_job
+        from orchestrator.services.temporal_client import start_domain_job_workflow
 
-    return {"job_id": job_id, "status": "queued"}
+        temporal = await start_domain_job_workflow(
+            "requirements_generate",
+            job_id,
+            {"project_id": project_id, "session_id": request.exploration_session_id},
+        )
+        _req_gen_jobs[job_id]["temporal_workflow_id"] = temporal.workflow_id
+        _req_gen_jobs[job_id]["temporal_run_id"] = temporal.run_id
+        update_domain_job(
+            job_id,
+            temporal_workflow_id=temporal.workflow_id,
+            temporal_run_id=temporal.run_id,
+        )
+    except Exception as exc:
+        _req_gen_jobs[job_id]["status"] = "failed"
+        _req_gen_jobs[job_id]["completed_at"] = time.time()
+        _req_gen_jobs[job_id]["error"] = f"Temporal start failed: {exc}"
+        update_domain_job(job_id, status="failed", error=_req_gen_jobs[job_id]["error"], completed=True)
+        raise HTTPException(status_code=503, detail=f"Temporal is required for requirements generation: {exc}") from exc
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "temporal_workflow_id": _req_gen_jobs[job_id].get("temporal_workflow_id"),
+        "temporal_run_id": _req_gen_jobs[job_id].get("temporal_run_id"),
+    }
 
 
 @router.get("/generate-jobs/{job_id}")
 async def get_generate_job_status(job_id: str):
     """Poll requirements generation job status."""
+    from orchestrator.services.domain_jobs import domain_job_to_dict, get_domain_job
+
+    durable_job = get_domain_job(job_id)
+    if durable_job and durable_job.job_type == "requirements_generate":
+        return domain_job_to_dict(durable_job)
+
     job = _req_gen_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1086,6 +1140,8 @@ async def get_generate_job_status(job_id: str):
         "status": job["status"],
         "project_id": job.get("project_id"),
         "session_id": job.get("session_id"),
+        "temporal_workflow_id": job.get("temporal_workflow_id"),
+        "temporal_run_id": job.get("temporal_run_id"),
     }
 
     if job["status"] == "completed":
@@ -1140,9 +1196,36 @@ async def _run_bulk_spec_generation(
     from api.db import get_session
     from api.models_db import RtmEntry
     from memory.exploration_store import get_exploration_store
+    from orchestrator.services.domain_jobs import update_domain_job
 
-    _bulk_gen_jobs[job_id]["status"] = "running"
-    _bulk_gen_jobs[job_id]["started_at"] = time.time()
+    job_state = _bulk_gen_jobs.setdefault(
+        job_id,
+        {
+            "status": "queued",
+            "project_id": project_id,
+            "target_url": target_url,
+            "created_at": time.time(),
+            "total": 0,
+            "completed": 0,
+            "failed": 0,
+            "results": [],
+            "error": None,
+        },
+    )
+    job_state["status"] = "running"
+    job_state["started_at"] = time.time()
+    update_domain_job(
+        job_id,
+        status="running",
+        progress={
+            "total": job_state.get("total", 0),
+            "completed": job_state.get("completed", 0),
+            "failed": job_state.get("failed", 0),
+            "results": job_state.get("results", []),
+            "error": job_state.get("error"),
+        },
+        started=True,
+    )
 
     try:
         store = get_exploration_store(project_id=project_id)
@@ -1159,11 +1242,28 @@ async def _run_bulk_spec_generation(
         # Find uncovered requirements
         uncovered = [r for r in all_requirements if r.id not in covered_req_ids]
 
-        _bulk_gen_jobs[job_id]["total"] = len(uncovered)
+        job_state["total"] = len(uncovered)
+        update_domain_job(
+            job_id,
+            progress={
+                "total": job_state["total"],
+                "completed": job_state["completed"],
+                "failed": job_state["failed"],
+                "results": job_state["results"],
+                "error": job_state.get("error"),
+            },
+        )
 
         if not uncovered:
-            _bulk_gen_jobs[job_id]["status"] = "completed"
-            _bulk_gen_jobs[job_id]["completed_at"] = time.time()
+            job_state["status"] = "completed"
+            job_state["completed_at"] = time.time()
+            result_payload = {
+                "total": job_state["total"],
+                "completed": job_state["completed"],
+                "failed": job_state["failed"],
+                "results": job_state["results"],
+            }
+            update_domain_job(job_id, status="completed", progress=result_payload, result=result_payload, completed=True)
             return
 
         # Generate specs for each uncovered requirement
@@ -1177,8 +1277,8 @@ async def _run_bulk_spec_generation(
                     req_id=req.id, request=spec_request, project_id=project_id
                 )
 
-                _bulk_gen_jobs[job_id]["completed"] += 1
-                _bulk_gen_jobs[job_id]["results"].append(
+                job_state["completed"] += 1
+                job_state["results"].append(
                     {
                         "req_code": req.req_code,
                         "req_id": req.id,
@@ -1188,28 +1288,58 @@ async def _run_bulk_spec_generation(
                     }
                 )
             except Exception as e:
-                _bulk_gen_jobs[job_id]["failed"] += 1
-                _bulk_gen_jobs[job_id]["results"].append(
+                job_state["failed"] += 1
+                job_state["results"].append(
                     {"req_code": req.req_code, "req_id": req.id, "status": "failed", "spec_name": None, "error": str(e)}
                 )
                 logger.warning(f"Bulk spec generation failed for {req.req_code}: {e}")
+            update_domain_job(
+                job_id,
+                progress={
+                    "total": job_state["total"],
+                    "completed": job_state["completed"],
+                    "failed": job_state["failed"],
+                    "results": job_state["results"],
+                    "error": job_state.get("error"),
+                },
+            )
 
-        _bulk_gen_jobs[job_id]["status"] = "completed"
-        _bulk_gen_jobs[job_id]["completed_at"] = time.time()
+        job_state["status"] = "completed"
+        job_state["completed_at"] = time.time()
+        result_payload = {
+            "total": job_state["total"],
+            "completed": job_state["completed"],
+            "failed": job_state["failed"],
+            "results": job_state["results"],
+        }
+        update_domain_job(job_id, status="completed", progress=result_payload, result=result_payload, completed=True)
 
     except Exception as e:
         error_type = type(e).__name__
         error_msg = str(e)
         logger.error(f"Bulk spec generation failed: {error_type}: {error_msg}")
         logger.error(f"Stack trace:\n{traceback.format_exc()}")
-        _bulk_gen_jobs[job_id]["status"] = "failed"
-        _bulk_gen_jobs[job_id]["completed_at"] = time.time()
-        _bulk_gen_jobs[job_id]["error"] = f"{error_type}: {error_msg}"
+        job_state["status"] = "failed"
+        job_state["completed_at"] = time.time()
+        job_state["error"] = f"{error_type}: {error_msg}"
+        update_domain_job(
+            job_id,
+            status="failed",
+            progress={
+                "total": job_state.get("total", 0),
+                "completed": job_state.get("completed", 0),
+                "failed": job_state.get("failed", 0),
+                "results": job_state.get("results", []),
+                "error": job_state.get("error"),
+            },
+            error=job_state["error"],
+            completed=True,
+        )
 
 
 @router.post("/bulk-generate-specs")
 async def bulk_generate_specs(
-    request: BulkGenerateSpecsRequest, background_tasks: BackgroundTasks, project_id: str = Query(default="default")
+    request: BulkGenerateSpecsRequest, project_id: str = Query(default="default")
 ):
     """
     Generate specs for all uncovered requirements (async).
@@ -1220,6 +1350,20 @@ async def bulk_generate_specs(
     _cleanup_old_req_jobs()
 
     job_id = str(uuid.uuid4())
+    from orchestrator.services.domain_jobs import create_domain_job
+
+    create_domain_job(
+        job_id=job_id,
+        job_type="requirements_bulk_generate",
+        project_id=project_id,
+        payload={
+            "project_id": project_id,
+            "target_url": request.target_url,
+            "login_url": request.login_url,
+            "credentials": request.credentials,
+        },
+        progress={"total": 0, "completed": 0, "failed": 0, "results": [], "error": None},
+    )
     _bulk_gen_jobs[job_id] = {
         "status": "queued",
         "project_id": project_id,
@@ -1234,16 +1378,57 @@ async def bulk_generate_specs(
 
     logger.info(f"Bulk spec generation queued: job_id={job_id}, project_id={project_id}")
 
-    background_tasks.add_task(
-        _run_bulk_spec_generation, job_id, project_id, request.target_url, request.login_url, request.credentials
-    )
+    try:
+        from orchestrator.services.domain_jobs import update_domain_job
+        from orchestrator.services.temporal_client import start_domain_job_workflow
 
-    return {"job_id": job_id, "status": "queued"}
+        temporal = await start_domain_job_workflow(
+            "requirements_bulk_generate",
+            job_id,
+            {
+                "project_id": project_id,
+                "target_url": request.target_url,
+                "login_url": request.login_url,
+                "credentials": request.credentials,
+            },
+        )
+        _bulk_gen_jobs[job_id]["temporal_workflow_id"] = temporal.workflow_id
+        _bulk_gen_jobs[job_id]["temporal_run_id"] = temporal.run_id
+        update_domain_job(
+            job_id,
+            temporal_workflow_id=temporal.workflow_id,
+            temporal_run_id=temporal.run_id,
+        )
+    except Exception as exc:
+        _bulk_gen_jobs[job_id]["status"] = "failed"
+        _bulk_gen_jobs[job_id]["completed_at"] = time.time()
+        _bulk_gen_jobs[job_id]["error"] = f"Temporal start failed: {exc}"
+        update_domain_job(job_id, status="failed", error=_bulk_gen_jobs[job_id]["error"], completed=True)
+        raise HTTPException(status_code=503, detail=f"Temporal is required for bulk spec generation: {exc}") from exc
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "temporal_workflow_id": _bulk_gen_jobs[job_id].get("temporal_workflow_id"),
+        "temporal_run_id": _bulk_gen_jobs[job_id].get("temporal_run_id"),
+    }
 
 
 @router.get("/bulk-generate-jobs/{job_id}")
 async def get_bulk_generate_job_status(job_id: str):
     """Poll bulk spec generation job status."""
+    from orchestrator.services.domain_jobs import domain_job_to_dict, get_domain_job
+
+    durable_job = get_domain_job(job_id)
+    if durable_job and durable_job.job_type == "requirements_bulk_generate":
+        response = domain_job_to_dict(durable_job)
+        response.setdefault("total", 0)
+        response.setdefault("completed", 0)
+        response.setdefault("failed", 0)
+        response.setdefault("results", [])
+        response.setdefault("error", None)
+        return response
+
     job = _bulk_gen_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1256,6 +1441,8 @@ async def get_bulk_generate_job_status(job_id: str):
         "failed": job.get("failed", 0),
         "results": job.get("results", []),
         "error": job.get("error"),
+        "temporal_workflow_id": job.get("temporal_workflow_id"),
+        "temporal_run_id": job.get("temporal_run_id"),
     }
 
 

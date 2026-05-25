@@ -63,6 +63,7 @@ class NativeHealer:
         error_log: str | None = None,
         timeout_seconds: int | None = None,
         diagnosis_context: str | None = None,
+        memory_run_id: str | None = None,
     ) -> str | None:
         """
         Attempt to heal a failing test.
@@ -88,6 +89,7 @@ class NativeHealer:
             test_content=test_content,
             error_log=error_log,
             diagnosis_context=diagnosis_context,
+            memory_run_id=memory_run_id,
         )
 
         # Invoke the Healer Agent
@@ -132,6 +134,7 @@ class NativeHealer:
         test_content: str,
         error_log: str | None,
         diagnosis_context: str | None = None,
+        memory_run_id: str | None = None,
     ) -> str:
         """Build prompt for the playwright-test-healer agent."""
 
@@ -157,6 +160,7 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
             query=f"{test_file}\n{error_log or ''}\n{diagnosis_context or ''}\n{test_content[:3000]}",
             project_id=os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID"),
             source_id=test_file,
+            run_id=memory_run_id,
         )
 
         prompt = f"""You are the Playwright Test Healer.
@@ -212,7 +216,14 @@ Start by running the test to see the current state.
 """
         return prompt
 
-    def _build_memory_context_section(self, *, query: str, project_id: str | None, source_id: str) -> str:
+    def _build_memory_context_section(
+        self,
+        *,
+        query: str,
+        project_id: str | None,
+        source_id: str,
+        run_id: str | None = None,
+    ) -> str:
         if os.environ.get("MEMORY_ENABLED", "true").lower() != "true" or not project_id:
             return ""
         try:
@@ -230,15 +241,23 @@ Start by running the test to see the current state.
             context = builder.format_prompt_context(bundle, token_budget=1200)
             if not context:
                 return ""
+            bundle_dict = bundle.to_dict()
+            ranking = (bundle_dict.get("unified") or {}).get("ranking") or {}
             record_memory_injection(
                 project_id=project_id,
                 actor_type="agent",
                 stage="native_healer",
                 query=query[:1000],
-                bundle=bundle.to_dict(),
+                bundle=bundle_dict,
                 context_text=context,
                 source_type="test_file",
                 source_id=source_id,
+                extra_data={
+                    "test_path": source_id,
+                    **({"run_id": run_id} if run_id else {}),
+                    "empty_recall": not bool(ranking.get("selected_items")),
+                    "memory_score_summary": ranking.get("score_summary", {}),
+                },
             )
             return f"""
 ## Memory Context

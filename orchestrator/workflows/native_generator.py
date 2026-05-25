@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,21 @@ class NativeGenerator:
        - Write the test with generator_write_test
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        on_tool_use: Callable[[str, dict[str, Any]], None] | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        on_task_enqueued: Callable[[str], None] | None = None,
+        owner_type: str | None = None,
+        owner_id: str | None = None,
+        owner_label: str | None = None,
+    ):
+        self.on_tool_use = on_tool_use
+        self.on_progress = on_progress
+        self.on_task_enqueued = on_task_enqueued
+        self.owner_type = owner_type
+        self.owner_id = owner_id
+        self.owner_label = owner_label
         # Use absolute path to project's tests directory (not relative to cwd)
         # This fixes Docker issue where cwd changes to run directory
         self.tests_dir = BASE_DIR / "tests" / "generated"
@@ -63,6 +78,7 @@ class NativeGenerator:
         target_url: str | None = None,
         output_name: str | None = None,
         design_context: str | None = None,
+        memory_run_id: str | None = None,
     ) -> Path:
         """
         Generate a Playwright test from a markdown spec.
@@ -184,6 +200,7 @@ Use this design guidance to reduce flaky output. Treat it as advisory context fr
             query=f"{target_url or ''}\n{spec_content}",
             project_id=os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID"),
             source_id=spec_path,
+            run_id=memory_run_id,
         )
 
         prompt = f"""You are the Playwright Test Generator.
@@ -249,7 +266,14 @@ Save the generated test file to: {output_path}
         )
         return attach_prompt_metadata(prompt, metadata)
 
-    def _build_memory_context_section(self, *, query: str, project_id: str | None, source_id: str) -> str:
+    def _build_memory_context_section(
+        self,
+        *,
+        query: str,
+        project_id: str | None,
+        source_id: str,
+        run_id: str | None = None,
+    ) -> str:
         if os.environ.get("MEMORY_ENABLED", "true").lower() != "true" or not project_id:
             return ""
         try:
@@ -267,15 +291,23 @@ Save the generated test file to: {output_path}
             context = builder.format_prompt_context(bundle, token_budget=1200)
             if not context:
                 return ""
+            bundle_dict = bundle.to_dict()
+            ranking = (bundle_dict.get("unified") or {}).get("ranking") or {}
             record_memory_injection(
                 project_id=project_id,
                 actor_type="agent",
                 stage="native_generator",
                 query=query[:1000],
-                bundle=bundle.to_dict(),
+                bundle=bundle_dict,
                 context_text=context,
                 source_type="spec",
                 source_id=source_id,
+                extra_data={
+                    "spec_path": source_id,
+                    **({"run_id": run_id} if run_id else {}),
+                    "empty_recall": not bool(ranking.get("selected_items")),
+                    "memory_score_summary": ranking.get("score_summary", {}),
+                },
             )
             return f"""
 
@@ -302,6 +334,12 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
             timeout_seconds=timeout,
             allowed_tools=get_agent_allowed_tools("playwright-test-generator"),
             log_tools=True,
+            on_tool_use=self.on_tool_use,
+            on_progress=self.on_progress,
+            on_task_enqueued=self.on_task_enqueued,
+            owner_type=self.owner_type,
+            owner_id=self.owner_id,
+            owner_label=self.owner_label,
         )
 
         result = await runner.run(prompt)

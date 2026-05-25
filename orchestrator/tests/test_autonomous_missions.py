@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import types
@@ -42,6 +43,7 @@ from sqlmodel import Session, SQLModel, select
 from orchestrator.api import autonomous as autonomous_api
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import (
+    ApplicationMap,
     AutonomousAgentEvent,
     AutonomousAgentWorkItem,
     AutonomousApproval,
@@ -54,23 +56,34 @@ from orchestrator.api.models_db import (
     ExplorationSession,
     Project,
     Requirement,
+    RtmEntry,
+    RtmSnapshot,
 )
 from orchestrator.services.autonomous_activities import (
     _allowed_tools_for_work_item,
+    _auto_materialize_low_risk_proposals,
     _create_findings_from_completed_work_items,
     _create_proposals_for_approved_findings,
     _generate_pytest_content,
+    _plan_whole_app_work_items,
+    _recover_stale_work_items,
+    autonomous_health_diagnostics,
+    backfill_autonomous_canonical_state,
     complete_mission_run,
     create_mission_run,
     execute_mission_iteration,
     fail_mission_run,
     load_mission_policy,
+    monitor_autonomous_project,
 )
 from orchestrator.services.autonomous_events import create_autonomous_agent_event
 
 
 def _ensure_tables() -> None:
     SQLModel.metadata.create_all(engine, checkfirst=True)
+    import orchestrator.api.db as db_module
+
+    db_module._run_migrations()
 
 
 def _create_project_and_mission(session: Session, *, mission_type: str = "coverage") -> AutonomousMission:
@@ -1033,6 +1046,508 @@ def test_execute_mission_iteration_creates_parallel_team_work_items(monkeypatch)
 
     assert {item.role for item in items} == {"surface_mapper", "requirements_analyst", "rtm_mapper"}
     assert len([item for item in items if item.status == "running"]) == 2
+
+
+def test_completed_team_work_items_merge_structured_artifacts_without_duplicates():
+    _ensure_tables()
+    unique = uuid4().hex
+    target_url = f"https://example.com/{unique}/checkout"
+    structured_output = {
+        "summary": "Checkout coverage analysis.",
+        "app_map_updates": [
+            {
+                "url": target_url,
+                "page_title": "Checkout",
+                "linked_urls": [f"https://example.com/{unique}/cart"],
+                "elements": {"buttons": ["Pay"]},
+            }
+        ],
+        "requirements": [
+            {
+                "title": "Checkout blocks declined card payments",
+                "description": "The checkout flow should reject declined card payments with a clear message.",
+                "category": "checkout",
+                "priority": "high",
+                "truth_state": "confirmed_requirement",
+                "confidence": 0.95,
+                "acceptance_criteria": ["Declined cards show an error without creating an order."],
+            }
+        ],
+        "rtm_candidates": [
+            {
+                "requirement_title": "Checkout blocks declined card payments",
+                "test_spec_name": "checkout-declined-card.spec.ts",
+                "test_spec_path": "tests/generated/checkout-declined-card.spec.ts",
+                "mapping_type": "full",
+                "confidence": 0.9,
+                "coverage_notes": "Covers declined-card payment failure.",
+            }
+        ],
+        "test_proposals": [
+            {
+                "title": "Checkout declined card regression",
+                "rationale": "Covers the critical checkout payment failure path.",
+                "target_url": target_url,
+                "test_type": "e2e",
+                "risk_level": "high",
+            }
+        ],
+        "bugs": [
+            {
+                "title": "Checkout spinner does not stop after declined card",
+                "description": "The page remains loading after a declined card response.",
+                "severity": "high",
+                "target_url": target_url,
+                "action": "Submit declined card",
+                "observed_failure": "Spinner remains visible after the decline response.",
+                "expected_behavior": "The checkout page shows a payment error.",
+            }
+        ],
+        "blockers": [],
+    }
+
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        mission.config = {"whole_app_team": True, "exploration_enabled": False}
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        first = AutonomousAgentWorkItem(
+            id=f"amwork-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            role="requirements_analyst",
+            objective="Analyze checkout.",
+            status="completed",
+        )
+        first.result = {"output": json.dumps(structured_output)}
+        second = AutonomousAgentWorkItem(
+            id=f"amwork-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            role="spec_writer",
+            objective="Draft checkout coverage.",
+            status="completed",
+        )
+        second.result = {"output": json.dumps(structured_output)}
+        session.add(run)
+        session.add(first)
+        session.add(second)
+        session.commit()
+        mission_id = mission.id
+        project_id = mission.project_id
+        run_id = run.id
+
+    with Session(engine) as session:
+        mission = session.get(AutonomousMission, mission_id)
+        run = session.get(AutonomousMissionRun, run_id)
+        created = _create_findings_from_completed_work_items(session, mission, run)
+        requirements = session.exec(select(Requirement).where(Requirement.project_id == project_id)).all()
+        rtm_entries = session.exec(select(RtmEntry).where(RtmEntry.project_id == project_id)).all()
+        proposals = session.exec(select(AutonomousTestProposal).where(AutonomousTestProposal.project_id == project_id)).all()
+        findings = session.exec(select(AutonomousFinding).where(AutonomousFinding.project_id == project_id)).all()
+        snapshots = session.exec(select(RtmSnapshot).where(RtmSnapshot.project_id == project_id)).all()
+        app_map = session.exec(select(ApplicationMap).where(ApplicationMap.url == target_url)).first()
+        merge_summaries = [
+            item.result.get("structured_merge")
+            for item in session.exec(select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)).all()
+        ]
+
+    assert created == 1
+    assert len(requirements) == 1
+    assert requirements[0].truth_state == "confirmed_requirement"
+    assert len(rtm_entries) == 1
+    assert rtm_entries[0].mapping_type == "full"
+    assert len(proposals) == 1
+    assert proposals[0].source_metadata["artifact_type"] == "test_proposal"
+    assert proposals[0].source_metadata["requirement_id"] == requirements[0].id
+    assert len(findings) == 1
+    assert findings[0].finding_type == "bug"
+    assert findings[0].evidence["artifact_type"] == "bug"
+    assert len(snapshots) == 1
+    assert app_map is not None
+    assert merge_summaries[0]["requirements_created"] == 1
+    assert merge_summaries[1]["requirements_reused"] == 1
+    assert merge_summaries[1]["findings_reused"] == 1
+
+
+def test_invalid_structured_agent_output_creates_revision_work_item():
+    _ensure_tables()
+    invalid_output = {
+        "summary": "Invalid requirement payload.",
+        "requirements": [{"description": "Missing the required title field."}],
+    }
+
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        item = AutonomousAgentWorkItem(
+            id=f"amwork-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            role="requirements_analyst",
+            objective="Analyze checkout.",
+            status="completed",
+        )
+        item.result = {"output": json.dumps(invalid_output)}
+        session.add(run)
+        session.add(item)
+        session.commit()
+        mission_id = mission.id
+        item_id = item.id
+        run_id = run.id
+
+    with Session(engine) as session:
+        mission = session.get(AutonomousMission, mission_id)
+        run = session.get(AutonomousMissionRun, run_id)
+        created = _create_findings_from_completed_work_items(session, mission, run)
+        original = session.get(AutonomousAgentWorkItem, item_id)
+        revisions = session.exec(
+            select(AutonomousAgentWorkItem).where(
+                AutonomousAgentWorkItem.mission_id == mission_id,
+                AutonomousAgentWorkItem.status == "queued",
+            )
+        ).all()
+
+    assert created == 0
+    assert original.result["review_decision"] == "needs_revision"
+    assert original.result["validation_errors"]
+    assert len(revisions) == 1
+    assert revisions[0].progress["revision_of_work_item_id"] == item_id
+    assert revisions[0].progress["review_reason"] == "structured_contract_validation"
+
+
+def test_whole_app_planner_creates_idempotent_rtm_gap_work_items():
+    _ensure_tables()
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        mission.config = {"whole_app_team": True, "exploration_enabled": False}
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        requirement = Requirement(
+            project_id=mission.project_id,
+            req_code=f"REQ-PLAN-{uuid4().hex[:6]}",
+            title="Checkout rejects expired cards",
+            description="Expired cards should be rejected with a user-facing error.",
+            category="checkout",
+            priority="high",
+            status="confirmed",
+            truth_state="confirmed_requirement",
+            source_type="manual",
+            confidence=1.0,
+            canonical_key=f"plan-{uuid4().hex}",
+        )
+        session.add(run)
+        session.add(requirement)
+        session.add(mission)
+        session.commit()
+        mission_id = mission.id
+        run_id = run.id
+
+    with Session(engine) as session:
+        mission = session.get(AutonomousMission, mission_id)
+        run = session.get(AutonomousMissionRun, run_id)
+        first = _plan_whole_app_work_items(session, mission, run)
+        second = _plan_whole_app_work_items(session, mission, run)
+        items = session.exec(select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)).all()
+
+    assert first == 1
+    assert second == 0
+    assert len(items) == 1
+    assert items[0].role == "spec_writer"
+    assert items[0].planner_key.startswith("rtm_gap:")
+
+
+def test_stale_running_work_item_is_recovered_once(monkeypatch):
+    _ensure_tables()
+    monkeypatch.setattr(
+        "orchestrator.services.autonomous_activities._agent_task_recovery_state",
+        lambda task_id: "missing_agent_task",
+    )
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        item = AutonomousAgentWorkItem(
+            id=f"amwork-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            role="explorer",
+            planner_key=f"frontier:{uuid4().hex}",
+            objective="Explore stale frontier.",
+            status="running",
+            agent_task_id=f"missing-{uuid4().hex}",
+            lease_until=datetime.utcnow() - timedelta(minutes=5),
+            last_heartbeat_at=datetime.utcnow() - timedelta(hours=2),
+        )
+        item.progress = {"planner_key": item.planner_key}
+        session.add(run)
+        session.add(item)
+        session.commit()
+        mission_id = mission.id
+        run_id = run.id
+        item_id = item.id
+
+    with Session(engine) as session:
+        mission = session.get(AutonomousMission, mission_id)
+        run = session.get(AutonomousMissionRun, run_id)
+        first = _recover_stale_work_items(session, mission, run)
+        second = _recover_stale_work_items(session, mission, run)
+        original = session.get(AutonomousAgentWorkItem, item_id)
+        replacements = session.exec(
+            select(AutonomousAgentWorkItem).where(
+                AutonomousAgentWorkItem.mission_id == mission_id,
+                AutonomousAgentWorkItem.status == "queued",
+            )
+        ).all()
+
+    assert first == 1
+    assert second == 0
+    assert original.status == "failed"
+    assert original.recovery_reason == "missing_agent_task"
+    assert len(replacements) == 1
+    assert replacements[0].planner_key == original.planner_key
+    assert replacements[0].progress["recovered_from_work_item_id"] == item_id
+    assert replacements[0].recovery_count == 1
+
+
+def test_auto_materialize_low_risk_policy_writes_and_validates(monkeypatch, tmp_path):
+    _ensure_tables()
+    monkeypatch.setattr("orchestrator.services.autonomous_activities.REPOSITORY_ROOT", tmp_path)
+
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        mission.approval_policy = "auto_materialize_low_risk"
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        proposal = AutonomousTestProposal(
+            id=f"amprop-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            title="Generated pytest smoke",
+            target_url="https://example.com",
+            route="/",
+            test_type="unit",
+            rationale="Low risk generated smoke test.",
+            generated_spec_content="def test_generated_smoke():\n    assert True\n",
+            suggested_file_path=f"orchestrator/tests/generated/test_generated_{uuid4().hex}.py",
+            risk_level="low",
+            approval_status="pending",
+            dedupe_key=f"proposal-{uuid4().hex}",
+            source_type="autonomous_structured_spec",
+            source_id=f"source-{uuid4().hex}",
+        )
+        session.add(run)
+        session.add(proposal)
+        session.add(mission)
+        session.commit()
+        mission_id = mission.id
+        run_id = run.id
+        proposal_id = proposal.id
+
+    with Session(engine) as session:
+        mission = session.get(AutonomousMission, mission_id)
+        run = session.get(AutonomousMissionRun, run_id)
+        summary = _auto_materialize_low_risk_proposals(session, mission, run)
+        proposal = session.get(AutonomousTestProposal, proposal_id)
+
+    assert summary["materialized"] == 1
+    assert summary["validated"] == 1
+    assert proposal.approval_status == "materialized"
+    assert proposal.validation_status == "passed"
+    assert proposal.validation_artifacts
+    assert proposal.validation_log_path
+    assert (tmp_path / proposal.materialized_file_path).exists()
+
+
+def test_failed_auto_materialized_validation_creates_repair_work_item(monkeypatch, tmp_path):
+    _ensure_tables()
+    monkeypatch.setattr("orchestrator.services.autonomous_activities.REPOSITORY_ROOT", tmp_path)
+
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        mission.approval_policy = "auto_materialize_low_risk"
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        proposal = AutonomousTestProposal(
+            id=f"amprop-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            title="Generated failing pytest smoke",
+            target_url="https://example.com",
+            route="/",
+            test_type="unit",
+            rationale="Low risk generated smoke test.",
+            generated_spec_content="def test_generated_smoke_failure():\n    assert False\n",
+            suggested_file_path=f"orchestrator/tests/generated/test_generated_failure_{uuid4().hex}.py",
+            risk_level="low",
+            approval_status="pending",
+            dedupe_key=f"proposal-{uuid4().hex}",
+            source_type="autonomous_structured_spec",
+            source_id=f"source-{uuid4().hex}",
+        )
+        session.add(run)
+        session.add(proposal)
+        session.add(mission)
+        session.commit()
+        mission_id = mission.id
+        run_id = run.id
+        proposal_id = proposal.id
+
+    with Session(engine) as session:
+        mission = session.get(AutonomousMission, mission_id)
+        run = session.get(AutonomousMissionRun, run_id)
+        summary = _auto_materialize_low_risk_proposals(session, mission, run)
+        proposal = session.get(AutonomousTestProposal, proposal_id)
+        repair = session.exec(
+            select(AutonomousAgentWorkItem).where(
+                AutonomousAgentWorkItem.mission_id == mission_id,
+                AutonomousAgentWorkItem.planner_key == f"proposal_validation_failure:{proposal_id}",
+            )
+        ).first()
+
+    assert summary["validation_failed"] == 1
+    assert proposal.validation_status == "failed"
+    assert proposal.validation_result["returncode"] != 0
+    assert proposal.validation_artifacts
+    assert proposal.validation_log_path
+    assert repair is not None
+    assert repair.status == "queued"
+
+
+def test_autonomous_diagnostics_and_backfill_canonical_state():
+    _ensure_tables()
+    unique = uuid4().hex
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        requirement = Requirement(
+            project_id=mission.project_id,
+            req_code=f"REQ-BACKFILL-{unique[:8]}",
+            title="Backfilled requirement",
+            category="navigation",
+            priority="medium",
+            status="draft",
+            truth_state="confirmed_requirement",
+            source_type="manual",
+            confidence=1.0,
+        )
+        session.add(requirement)
+        session.flush()
+        entry = RtmEntry(
+            project_id=mission.project_id,
+            requirement_id=requirement.id,
+            test_spec_name=f"backfill-{unique}.spec.ts",
+            mapping_type="full",
+        )
+        app_map = ApplicationMap(url=f"https://example.com/{unique}/backfill")
+        session.add(entry)
+        session.add(app_map)
+        session.commit()
+        project_id = mission.project_id
+
+    with Session(engine) as session:
+        before = autonomous_health_diagnostics(session, project_id=project_id)
+        dry_run = backfill_autonomous_canonical_state(session, project_id=project_id, dry_run=True)
+        still_before = autonomous_health_diagnostics(session, project_id=project_id)
+        summary = backfill_autonomous_canonical_state(session, project_id=project_id)
+        after = autonomous_health_diagnostics(session, project_id=project_id)
+
+    assert before["requirements"]["missing_canonical_key"] >= 1
+    assert dry_run["dry_run"] is True
+    assert still_before["requirements"]["missing_canonical_key"] == before["requirements"]["missing_canonical_key"]
+    assert summary["requirements_backfilled"] >= 1
+    assert summary["rtm_entries_backfilled"] >= 1
+    assert after["requirements"]["missing_canonical_key"] == 0
+    assert after["rtm"]["missing_dedupe_key"] == 0
+
+
+def test_autonomous_monitor_recovers_stale_work_and_updates_mission(monkeypatch):
+    _ensure_tables()
+    monkeypatch.setattr(
+        "orchestrator.services.autonomous_activities._agent_task_recovery_state",
+        lambda task_id: "missing_agent_task",
+    )
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        mission.status = "running"
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        mission.latest_run_id = run.id
+        item = AutonomousAgentWorkItem(
+            id=f"amwork-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            role="explorer",
+            planner_key=f"frontier:{uuid4().hex}",
+            objective="Explore stale frontier.",
+            status="running",
+            agent_task_id=f"missing-{uuid4().hex}",
+            lease_until=datetime.utcnow() - timedelta(minutes=5),
+            last_heartbeat_at=datetime.utcnow() - timedelta(hours=2),
+        )
+        session.add(run)
+        session.add(item)
+        session.add(mission)
+        session.commit()
+        project_id = mission.project_id
+        mission_id = mission.id
+
+    with Session(engine) as session:
+        result = monitor_autonomous_project(session, project_id)
+        mission = session.get(AutonomousMission, mission_id)
+        replacements = session.exec(
+            select(AutonomousAgentWorkItem).where(
+                AutonomousAgentWorkItem.mission_id == mission_id,
+                AutonomousAgentWorkItem.status == "queued",
+            )
+        ).all()
+
+    assert result["recovery"]["stale_recovered_count"] == 1
+    assert mission.config["autonomous_monitor"]["last_monitor_at"]
+    assert mission.config["autonomous_monitor"]["stale_running_count"] == 0
+    assert len(replacements) == 1
 
 
 def test_execute_mission_iteration_prioritizes_revision_work_items(monkeypatch):

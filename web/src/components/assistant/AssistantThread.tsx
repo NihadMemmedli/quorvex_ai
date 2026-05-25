@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import type { CSSProperties, Dispatch, SetStateAction } from 'react';
 import {
   ThreadPrimitive,
@@ -1835,6 +1835,20 @@ const toolPageMap: Record<string, string> = {
   planUiTestCoverage: '/analytics',
   analyzeUiTestRunArtifacts: '/runs',
   executeUiTestCoveragePlan: '/runs',
+  listWorkflows: '/workflow',
+  listWorkflowCatalog: '/workflow',
+  getWorkflow: '/workflow',
+  createWorkflow: '/workflow',
+  updateWorkflow: '/workflow',
+  duplicateWorkflow: '/workflow',
+  archiveWorkflow: '/workflow',
+  startWorkflow: '/workflow',
+  startWorkflowFromStep: '/workflow',
+  getWorkflowStatus: '/workflow',
+  retryWorkflowFailedStep: '/workflow',
+  pauseWorkflowRun: '/workflow',
+  resumeWorkflowRun: '/workflow',
+  cancelWorkflowRun: '/workflow',
   // Extended spec management
   listSpecFolders: '/specs',
   listAutomatedSpecs: '/specs',
@@ -1939,6 +1953,21 @@ function normalizeCustomAgentArgs(args: Record<string, unknown>): Record<string,
     toolIds: Array.isArray(args.toolIds) && args.toolIds.every((toolId) => typeof toolId === 'string')
       ? args.toolIds
       : DEFAULT_CUSTOM_AGENT_TOOL_IDS,
+  };
+}
+
+function normalizeWorkflowArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const definition = isRecord(args.definition) ? args.definition : {};
+  const steps = Array.isArray(args.steps)
+    ? args.steps
+    : Array.isArray(definition.steps)
+      ? definition.steps
+      : [];
+  return {
+    ...args,
+    name: typeof args.name === 'string' ? args.name : 'Chat-created workflow',
+    description: typeof args.description === 'string' ? args.description : '',
+    steps,
   };
 }
 
@@ -2165,6 +2194,109 @@ function CustomAgentApprovalEditor({
   );
 }
 
+function workflowStepRows(steps: unknown[]): Array<{ key: string; type: string; label: string }> {
+  return steps
+    .filter(isRecord)
+    .map((step, index) => ({
+      key: typeof step.key === 'string' && step.key ? step.key : `step_${index + 1}`,
+      type: typeof step.type === 'string' && step.type ? step.type : 'unknown',
+      label: typeof step.label === 'string' && step.label ? step.label : compactLabel(String(step.type || `Step ${index + 1}`)),
+    }));
+}
+
+function WorkflowApprovalEditor({
+  args,
+  setArgs,
+  disabled,
+}: {
+  args: Record<string, unknown>;
+  setArgs: Dispatch<SetStateAction<Record<string, unknown>>>;
+  disabled: boolean;
+}) {
+  const steps = Array.isArray(args.steps) ? args.steps : [];
+  const rows = workflowStepRows(steps);
+  const updateField = (key: string, value: unknown) => {
+    setArgs((prev) => ({ ...prev, [key]: value }));
+  };
+
+  return (
+    <div style={{
+      padding: '0.65rem',
+      background: 'var(--code-bg)',
+      borderRadius: '6px',
+      marginBottom: '0.65rem',
+      fontSize: '0.75rem',
+    }}>
+      <div style={{ display: 'grid', gap: '0.55rem' }}>
+        <label style={{ display: 'grid', gap: '0.25rem' }}>
+          <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Workflow name</span>
+          <input
+            value={String(args.name || '')}
+            onChange={(e) => updateField('name', e.target.value)}
+            disabled={disabled}
+            style={approvalInputStyle}
+          />
+        </label>
+
+        <label style={{ display: 'grid', gap: '0.25rem' }}>
+          <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Description</span>
+          <textarea
+            value={String(args.description || '')}
+            onChange={(e) => updateField('description', e.target.value)}
+            disabled={disabled}
+            rows={3}
+            style={approvalTextareaStyle}
+          />
+        </label>
+
+        <div>
+          <div style={{ color: 'var(--text-secondary)', fontWeight: 700, textTransform: 'uppercase', fontSize: '0.68rem', marginBottom: '0.35rem' }}>
+            Steps ({rows.length})
+          </div>
+          <div style={{ display: 'grid', gap: '0.35rem' }}>
+            {rows.map((step, index) => (
+              <div key={`${step.key}-${index}`} style={{
+                display: 'grid',
+                gridTemplateColumns: '1.25rem minmax(0, 1fr)',
+                gap: '0.45rem',
+                alignItems: 'start',
+                padding: '0.45rem',
+                border: '1px solid var(--border)',
+                borderRadius: '6px',
+                background: 'var(--surface)',
+              }}>
+                <span style={{
+                  width: '1.25rem',
+                  height: '1.25rem',
+                  borderRadius: '999px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: 'rgba(59, 130, 246, 0.12)',
+                  color: 'var(--primary)',
+                  fontWeight: 700,
+                  fontSize: '0.68rem',
+                }}>
+                  {index + 1}
+                </span>
+                <span style={{ minWidth: 0 }}>
+                  <span style={{ display: 'block', fontWeight: 650, color: 'var(--text)' }}>{step.label}</span>
+                  <span style={{ display: 'block', color: 'var(--text-secondary)', overflowWrap: 'anywhere' }}>
+                    {step.key} · {step.type}
+                  </span>
+                </span>
+              </div>
+            ))}
+            {rows.length === 0 && (
+              <div style={{ color: 'var(--danger)' }}>No workflow steps were provided.</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ApprovalCard({ toolName, args, addResult, toolCallId }: {
   toolName: string;
   args: Record<string, unknown>;
@@ -2173,6 +2305,7 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
 }) {
   const [status, setStatus] = useState<'pending' | 'executing' | 'done'>('pending');
   const [customArgs, setCustomArgs] = useState<Record<string, unknown>>(() => normalizeCustomAgentArgs(args));
+  const [workflowArgs, setWorkflowArgs] = useState<Record<string, unknown>>(() => normalizeWorkflowArgs(args));
   const [agentTools, setAgentTools] = useState<AgentToolOption[]>([]);
   const [toolsLoading, setToolsLoading] = useState(false);
   const [toolsExpanded, setToolsExpanded] = useState(true);
@@ -2181,11 +2314,17 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
   const config = MUTATING_TOOL_CONFIGS[toolName];
   const label = config?.label || toolName;
   const isCustomAgentApproval = toolName === 'startAdhocCustomAgent' || toolName === 'createCustomAgentDefinition';
+  const isWorkflowApproval = toolName === 'createWorkflow';
 
   useEffect(() => {
     if (!isCustomAgentApproval) return;
     setCustomArgs(normalizeCustomAgentArgs(args));
   }, [args, isCustomAgentApproval]);
+
+  useEffect(() => {
+    if (!isWorkflowApproval) return;
+    setWorkflowArgs(normalizeWorkflowArgs(args));
+  }, [args, isWorkflowApproval]);
 
   useEffect(() => {
     if (!isCustomAgentApproval) return;
@@ -2205,7 +2344,7 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
     return () => { cancelled = true; };
   }, [isCustomAgentApproval]);
 
-  const approvalArgs = isCustomAgentApproval ? customArgs : args;
+  const approvalArgs = isCustomAgentApproval ? customArgs : isWorkflowApproval ? workflowArgs : args;
   const displayArgs = Object.entries(approvalArgs || {}).filter(
     ([k]) => !k.startsWith('_')
   );
@@ -2303,6 +2442,12 @@ function ApprovalCard({ toolName, args, addResult, toolCallId }: {
           toolsLoading={toolsLoading}
           toolsExpanded={toolsExpanded}
           setToolsExpanded={setToolsExpanded}
+          disabled={status !== 'pending'}
+        />
+      ) : isWorkflowApproval ? (
+        <WorkflowApprovalEditor
+          args={workflowArgs}
+          setArgs={setWorkflowArgs}
           disabled={status !== 'pending'}
         />
       ) : displayArgs.length > 0 && (
@@ -3317,6 +3462,8 @@ const toolFollowUps: Record<string, string[]> = {
   startAutoPilot: ['Check Auto Pilot status', 'List all Auto Pilot sessions', 'View Auto Pilot dashboard'],
   startAdhocCustomAgent: ['View agent run', 'Check agent status', 'Show custom agent reports'],
   createCustomAgentDefinition: ['Open agents dashboard', 'Run saved custom agent', 'Show custom agent reports'],
+  createWorkflow: ['Open workflow dashboard', 'Start saved workflow', 'List workflow catalog'],
+  startWorkflow: ['Check workflow status', 'Open workflow dashboard', 'Show workflow run steps'],
   getAutoPilotStatus: ['Answer a pending question', 'Pause Auto Pilot', 'Check status again later'],
   pauseAutoPilot: ['Resume Auto Pilot', 'Check Auto Pilot status', 'View Auto Pilot dashboard'],
   resumeAutoPilot: ['Check Auto Pilot status', 'View Auto Pilot dashboard'],
@@ -3740,9 +3887,12 @@ function Composer() {
   }, [runtime]);
 
   // Filter commands based on current input
-  const filtered = inputText.startsWith('/')
-    ? slashCommands.filter(cmd => cmd.command.startsWith(inputText.toLowerCase()))
-    : [];
+  const filtered = useMemo(
+    () => inputText.startsWith('/')
+      ? slashCommands.filter(cmd => cmd.command.startsWith(inputText.toLowerCase()))
+      : [],
+    [inputText]
+  );
 
   useEffect(() => {
     if (filtered.length > 0 && inputText.startsWith('/')) {

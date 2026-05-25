@@ -46,6 +46,115 @@ interface MemoryStats {
     project_id: string;
 }
 
+interface MemoryDiagnosticCheck {
+    status: 'healthy' | 'warning' | 'broken' | string;
+    message: string;
+    details?: Record<string, unknown>;
+}
+
+interface MemoryDiagnostics {
+    project_id?: string | null;
+    memory_enabled: boolean;
+    embedding_model: string;
+    generated_at: string;
+    overall_status: 'healthy' | 'warning' | 'broken' | string;
+    checks: MemoryDiagnosticCheck[];
+    agent_memory: {
+        total: number;
+        ready: number;
+        review_required: number;
+        archived_or_inactive: number;
+        by_kind?: Record<string, number>;
+        by_type?: Record<string, number>;
+        by_status?: Record<string, number>;
+        by_source?: Record<string, number>;
+    };
+    browser_memory: {
+        states: number;
+        elements: number;
+        frontier: number;
+        frontier_by_status?: Record<string, number>;
+    };
+    selector_patterns: {
+        patterns: number;
+        avg_success_rate: number;
+        actions?: Record<string, number>;
+    };
+    graph: {
+        nodes: number;
+        edges: number;
+        node_types?: Record<string, number>;
+        edge_statuses?: Record<string, number>;
+        memory_nodes_without_backing_memory?: string[];
+    };
+    injections: {
+        total: number;
+        by_stage?: Record<string, number>;
+        by_outcome?: Record<string, number>;
+        missing_memory_ids?: string[];
+        missing_memory_count: number;
+    };
+    stale_memory: {
+        high_impact_count: number;
+        older_than_days: number;
+        items?: Array<Record<string, unknown>>;
+    };
+    recommended_actions: string[];
+}
+
+interface MemoryEffectiveness {
+    project_id?: string | null;
+    days: number;
+    total_injections: number;
+    stage_stats: Array<{
+        stage: string;
+        injections: number;
+        successes: number;
+        failures: number;
+        empty_recall: number;
+        success_rate?: number | null;
+        last_injected_at?: string | null;
+    }>;
+    top_helpful_memories: Array<{
+        memory_id: string;
+        summary: string;
+        kind: string;
+        injections: number;
+        successes: number;
+        failures: number;
+        feedback_score: number;
+        missing?: boolean;
+    }>;
+    top_harmful_memories: Array<{
+        memory_id: string;
+        summary: string;
+        kind: string;
+        injections: number;
+        successes: number;
+        failures: number;
+        feedback_score: number;
+        missing?: boolean;
+    }>;
+    empty_recall_stages: string[];
+    stale_injections: Array<Record<string, unknown>>;
+    recommended_actions: string[];
+}
+
+interface MemoryRepairResult {
+    action: string;
+    dry_run: boolean;
+    changed_count: number;
+    items: Array<Record<string, unknown>>;
+    warnings: string[];
+}
+
+interface ContextPreviewResponse {
+    context?: string;
+    score_breakdown?: Array<Record<string, unknown>>;
+    warnings?: string[];
+    ranking?: Record<string, unknown>;
+}
+
 interface BrowserMemoryState {
     id: string;
     url: string;
@@ -357,8 +466,12 @@ function EmptyPanel({
 export default function MemoryPage() {
     const { currentProject, isLoading: projectLoading } = useProject();
     const projectId = currentProject?.id || 'default';
-    const [activeTab, setActiveTab] = useState<'test' | 'agent' | 'graph' | 'telemetry'>('agent');
+    const [activeTab, setActiveTab] = useState<'health' | 'test' | 'agent' | 'graph' | 'telemetry'>('health');
 
+    const [diagnostics, setDiagnostics] = useState<MemoryDiagnostics | null>(null);
+    const [effectiveness, setEffectiveness] = useState<MemoryEffectiveness | null>(null);
+    const [repairResult, setRepairResult] = useState<MemoryRepairResult | null>(null);
+    const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
     const [patterns, setPatterns] = useState<Pattern[]>([]);
     const [stats, setStats] = useState<MemoryStats | null>(null);
     const [browserMemory, setBrowserMemory] = useState<BrowserMemoryBundle | null>(null);
@@ -376,6 +489,7 @@ export default function MemoryPage() {
     const [deleteTarget, setDeleteTarget] = useState<AgentMemory | null>(null);
     const [contextQuery, setContextQuery] = useState('Generate a reliable test for this project');
     const [contextPreview, setContextPreview] = useState('');
+    const [contextPreviewMeta, setContextPreviewMeta] = useState<ContextPreviewResponse | null>(null);
     const [recallQuery, setRecallQuery] = useState('');
     const [recallResults, setRecallResults] = useState<RecallResult[]>([]);
     const [injections, setInjections] = useState<MemoryInjectionEvent[]>([]);
@@ -385,6 +499,26 @@ export default function MemoryPage() {
     const [knowledgeGraph, setKnowledgeGraph] = useState<MemoryKnowledgeGraph | null>(null);
     const [graphReviewEdges, setGraphReviewEdges] = useState<MemoryGraphReviewEdge[]>([]);
     const [graphLoading, setGraphLoading] = useState(false);
+
+    const fetchDiagnostics = useCallback(async () => {
+        setDiagnosticsLoading(true);
+        try {
+            const params = new URLSearchParams({ project_id: projectId, stale_days: '30' });
+            const effectivenessParams = new URLSearchParams({ project_id: projectId, days: '30' });
+            const [res, effectivenessRes] = await Promise.all([
+                fetchWithAuth(`${API_BASE}/api/memory/diagnostics?${params.toString()}`),
+                fetchWithAuth(`${API_BASE}/api/memory/effectiveness?${effectivenessParams.toString()}`),
+            ]);
+            if (!res.ok) throw new Error((await res.json()).detail || 'Failed to load memory diagnostics');
+            if (!effectivenessRes.ok) throw new Error((await effectivenessRes.json()).detail || 'Failed to load memory effectiveness');
+            setDiagnostics(await res.json());
+            setEffectiveness(await effectivenessRes.json());
+        } catch (err) {
+            setStatusMessage(err instanceof Error ? err.message : 'Failed to load memory diagnostics');
+        } finally {
+            setDiagnosticsLoading(false);
+        }
+    }, [projectId]);
 
     const fetchTestMemory = useCallback(async () => {
         setTestLoading(true);
@@ -466,12 +600,13 @@ export default function MemoryPage() {
 
     useEffect(() => {
         if (projectLoading) return;
+        fetchDiagnostics();
         fetchAgentMemory(agentFilters);
         fetchTestMemory();
         fetchTelemetry(telemetryFilters);
         fetchKnowledgeGraph();
         fetchGraphReview();
-    }, [agentFilters, fetchAgentMemory, fetchGraphReview, fetchKnowledgeGraph, fetchTelemetry, fetchTestMemory, projectLoading, telemetryFilters]);
+    }, [agentFilters, fetchAgentMemory, fetchDiagnostics, fetchGraphReview, fetchKnowledgeGraph, fetchTelemetry, fetchTestMemory, projectLoading, telemetryFilters]);
 
     const filteredPatterns = useMemo(
         () => patterns.filter(pattern => actionFilter === 'all' || pattern.action === actionFilter),
@@ -566,6 +701,24 @@ export default function MemoryPage() {
         setStatusMessage(`Graph relationship ${action === 'approve' ? 'approved' : 'rejected'}.`);
         await fetchKnowledgeGraph();
         await fetchGraphReview();
+    }
+
+    async function runRepair(action: string, dryRun = true) {
+        setStatusMessage(null);
+        const res = await fetchWithAuth(`${API_BASE}/api/memory/repair`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_id: projectId, action, dry_run: dryRun }),
+        });
+        if (!res.ok) {
+            const error = await res.json().catch(() => ({}));
+            setStatusMessage(error.detail || 'Failed to run memory repair');
+            return;
+        }
+        const result = await res.json();
+        setRepairResult(result);
+        setStatusMessage(`${compactLabel(action)} ${dryRun ? 'dry run' : 'repair'} found ${result.changed_count} item${result.changed_count === 1 ? '' : 's'}.`);
+        await fetchDiagnostics();
     }
 
     async function handlePatternSearch() {
@@ -682,10 +835,12 @@ export default function MemoryPage() {
         const res = await fetchWithAuth(`${API_BASE}/api/memory/context-preview?${params.toString()}`);
         if (!res.ok) {
             setContextPreview('Failed to load context preview.');
+            setContextPreviewMeta(null);
             return;
         }
-        const data = await res.json();
+        const data: ContextPreviewResponse = await res.json();
         setContextPreview(data.context || 'No memory would be injected for this query.');
+        setContextPreviewMeta(data);
     }
 
     async function searchRecall() {
@@ -724,7 +879,7 @@ export default function MemoryPage() {
                                 New memory
                             </button>
                         )}
-                        <button className="btn" onClick={() => { fetchAgentMemory(agentFilters); fetchTestMemory(); fetchTelemetry(telemetryFilters); fetchKnowledgeGraph(); fetchGraphReview(); }}>
+                        <button className="btn" onClick={() => { fetchDiagnostics(); fetchAgentMemory(agentFilters); fetchTestMemory(); fetchTelemetry(telemetryFilters); fetchKnowledgeGraph(); fetchGraphReview(); }}>
                             <RefreshCw size={16} />
                             Refresh
                         </button>
@@ -733,6 +888,15 @@ export default function MemoryPage() {
             />
 
             <div className="memory-tabs" role="tablist" aria-label="Memory sections">
+                <button
+                    className={activeTab === 'health' ? 'memory-tab active' : 'memory-tab'}
+                    onClick={() => setActiveTab('health')}
+                    role="tab"
+                    aria-selected={activeTab === 'health'}
+                >
+                    <Activity size={16} />
+                    Health
+                </button>
                 <button
                     className={activeTab === 'agent' ? 'memory-tab active' : 'memory-tab'}
                     onClick={() => setActiveTab('agent')}
@@ -777,7 +941,208 @@ export default function MemoryPage() {
                 </div>
             )}
 
-            {activeTab === 'agent' ? (
+            {activeTab === 'health' ? (
+                <div className="memory-agent-stack">
+                    <section className="memory-metrics" aria-label="Memory health summary">
+                        <MetricCard label="Overall" value={diagnostics ? compactLabel(diagnostics.overall_status) : 'Loading'} tone={diagnostics?.overall_status === 'healthy' ? 'success' : diagnostics ? 'warning' : 'muted'} />
+                        <MetricCard label="Agent memories" value={diagnostics?.agent_memory.total ?? 0} tone={(diagnostics?.agent_memory.total ?? 0) > 0 ? 'success' : 'warning'} />
+                        <MetricCard label="Browser states" value={diagnostics?.browser_memory.states ?? 0} tone={(diagnostics?.browser_memory.states ?? 0) > 0 ? 'success' : 'muted'} />
+                        <MetricCard label="Injections" value={diagnostics?.injections.total ?? 0} tone={(diagnostics?.injections.total ?? 0) > 0 ? 'success' : 'muted'} />
+                    </section>
+
+                    <section className="memory-panel">
+                        <div className="memory-panel-heading">
+                            <div>
+                                <h2>Operational health</h2>
+                                <p>{diagnostics ? `Generated ${formatDate(diagnostics.generated_at)}` : 'Loading memory diagnostics'}</p>
+                            </div>
+                            <button className="btn" onClick={fetchDiagnostics}>
+                                <RefreshCw size={16} />
+                                Refresh
+                            </button>
+                        </div>
+
+                        {diagnosticsLoading ? (
+                            <div className="memory-loading">Loading memory diagnostics...</div>
+                        ) : !diagnostics ? (
+                            <EmptyPanel
+                                icon={<Activity size={22} />}
+                                title="No diagnostics loaded"
+                                description="Refresh diagnostics to inspect memory capture, recall, graph, and telemetry health."
+                            />
+                        ) : (
+                            <div className="memory-telemetry-list">
+                                {diagnostics.checks.map((check, index) => (
+                                    <article key={`${check.message}-${index}`} className="memory-telemetry-card">
+                                        <div className="memory-telemetry-row">
+                                            <div className="memory-telemetry-main">
+                                                <div className="memory-card-title-row">
+                                                    <h3>{check.message}</h3>
+                                                    <Pill tone={check.status === 'healthy' ? 'success' : check.status === 'broken' ? 'danger' : 'warning'}>
+                                                        {compactLabel(check.status)}
+                                                    </Pill>
+                                                </div>
+                                                {check.details && Object.keys(check.details).length > 0 && (
+                                                    <pre className="memory-preview">{JSON.stringify(check.details, null, 2)}</pre>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </article>
+                                ))}
+                            </div>
+                        )}
+                    </section>
+
+                    {diagnostics && (
+                        <section className="memory-support-grid">
+                            <div className="memory-panel">
+                                <div className="memory-tool-heading">
+                                    <Database size={18} />
+                                    <div>
+                                        <h2>Stored signals</h2>
+                                        <p>Capture and retrieval inputs for this project.</p>
+                                    </div>
+                                </div>
+                                <div className="memory-card-chips">
+                                    <Pill tone={diagnostics.memory_enabled ? 'success' : 'danger'}>{diagnostics.memory_enabled ? 'Enabled' : 'Disabled'}</Pill>
+                                    <Pill>{diagnostics.embedding_model}</Pill>
+                                    <Pill>Ready {diagnostics.agent_memory.ready}</Pill>
+                                    <Pill>Review {diagnostics.agent_memory.review_required}</Pill>
+                                    <Pill>Selectors {diagnostics.selector_patterns.patterns}</Pill>
+                                    <Pill>Graph {diagnostics.graph.nodes}/{diagnostics.graph.edges}</Pill>
+                                    <Pill>Missing refs {diagnostics.injections.missing_memory_count}</Pill>
+                                    <Pill>Stale high impact {diagnostics.stale_memory.high_impact_count}</Pill>
+                                </div>
+                                <pre className="memory-preview">{JSON.stringify({
+                                    agent_by_kind: diagnostics.agent_memory.by_kind,
+                                    agent_by_source: diagnostics.agent_memory.by_source,
+                                    frontier_by_status: diagnostics.browser_memory.frontier_by_status,
+                                    injections_by_stage: diagnostics.injections.by_stage,
+                                }, null, 2)}</pre>
+                            </div>
+
+                            <div className="memory-panel">
+                                <div className="memory-tool-heading">
+                                    <Sparkles size={18} />
+                                    <div>
+                                        <h2>Recommended actions</h2>
+                                        <p>Concrete next steps from the diagnostics pass.</p>
+                                    </div>
+                                </div>
+                                {diagnostics.recommended_actions.length === 0 ? (
+                                    <div className="memory-empty">
+                                        <div className="memory-empty-icon"><CheckCircle size={22} /></div>
+                                        <strong>No action needed</strong>
+                                        <p>Diagnostics did not find memory health gaps for this project.</p>
+                                    </div>
+                                ) : (
+                                    <div className="memory-recall-list">
+                                        {diagnostics.recommended_actions.map(action => (
+                                            <div key={action} className="memory-recall-item">
+                                                <strong>{action}</strong>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </section>
+                    )}
+
+                    {effectiveness && (
+                        <section className="memory-support-grid">
+                            <div className="memory-panel">
+                                <div className="memory-tool-heading">
+                                    <Activity size={18} />
+                                    <div>
+                                        <h2>Effectiveness</h2>
+                                        <p>Outcome attribution for injected memory over {effectiveness.days} days.</p>
+                                    </div>
+                                </div>
+                                <div className="memory-card-chips">
+                                    <Pill>Total injections {effectiveness.total_injections}</Pill>
+                                    <Pill tone={effectiveness.empty_recall_stages.length ? 'warning' : 'success'}>
+                                        Empty recall {effectiveness.empty_recall_stages.length}
+                                    </Pill>
+                                    <Pill tone={effectiveness.stale_injections.length ? 'warning' : 'success'}>
+                                        Stale injected {effectiveness.stale_injections.length}
+                                    </Pill>
+                                </div>
+                                <div className="memory-recall-list">
+                                    {effectiveness.stage_stats.map(stage => (
+                                        <div key={stage.stage} className="memory-recall-item">
+                                            <strong>{compactLabel(stage.stage)}</strong>
+                                            <p>
+                                                {stage.injections} injections · {stage.successes} successful · {stage.failures} failed · {stage.empty_recall} empty recall
+                                            </p>
+                                            <small>Success rate {stage.success_rate == null ? 'n/a' : pct(stage.success_rate)}</small>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="memory-panel">
+                                <div className="memory-tool-heading">
+                                    <ShieldCheck size={18} />
+                                    <div>
+                                        <h2>Helpful and risky memories</h2>
+                                        <p>Top memories associated with outcome feedback.</p>
+                                    </div>
+                                </div>
+                                <div className="memory-graph-layout">
+                                    <div className="memory-graph-column">
+                                        <h3>Helpful</h3>
+                                        <div className="memory-recall-list">
+                                            {effectiveness.top_helpful_memories.slice(0, 4).map(memory => (
+                                                <div key={`helpful-${memory.memory_id}`} className="memory-recall-item">
+                                                    <strong>{memory.summary}</strong>
+                                                    <p>{memory.successes} successful · feedback {memory.feedback_score}</p>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div className="memory-graph-column">
+                                        <h3>Risky</h3>
+                                        <div className="memory-recall-list">
+                                            {effectiveness.top_harmful_memories.slice(0, 4).map(memory => (
+                                                <div key={`harmful-${memory.memory_id}`} className="memory-recall-item">
+                                                    <strong>{memory.summary}</strong>
+                                                    <p>{memory.failures} failed · feedback {memory.feedback_score}</p>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+                    )}
+
+                    <section className="memory-panel">
+                        <div className="memory-panel-heading">
+                            <div>
+                                <h2>Repair actions</h2>
+                                <p>Conservative repairs never delete memories or auto-approve review-required items.</p>
+                            </div>
+                        </div>
+                        <div className="memory-action-chips">
+                            <button className="memory-chip" onClick={() => runRepair('mark_missing_injection_refs')}>
+                                Mark missing refs
+                            </button>
+                            <button className="memory-chip" onClick={() => runRepair('verify_stale')}>
+                                Verify stale
+                            </button>
+                            <button className="memory-chip" onClick={() => runRepair('archive_low_trust')}>
+                                Archive low trust
+                            </button>
+                            <button className="memory-chip" onClick={() => runRepair('rebuild_graph', false)}>
+                                Rebuild graph
+                            </button>
+                        </div>
+                        {repairResult && (
+                            <pre className="memory-preview">{JSON.stringify(repairResult, null, 2)}</pre>
+                        )}
+                    </section>
+                </div>
+            ) : activeTab === 'agent' ? (
                 <div className="memory-agent-stack">
                     <section className="memory-metrics" aria-label="Agent memory summary">
                         <MetricCard label="Total" value={memoryCounts.total} />
@@ -1021,6 +1386,16 @@ export default function MemoryPage() {
                                 </button>
                             </div>
                             {contextPreview && <pre className="memory-preview">{contextPreview}</pre>}
+                            {contextPreviewMeta?.warnings && contextPreviewMeta.warnings.length > 0 && (
+                                <div className="memory-card-chips">
+                                    {contextPreviewMeta.warnings.map(warning => (
+                                        <Pill key={warning} tone="warning">{warning}</Pill>
+                                    ))}
+                                </div>
+                            )}
+                            {contextPreviewMeta?.score_breakdown && contextPreviewMeta.score_breakdown.length > 0 && (
+                                <pre className="memory-preview">{JSON.stringify(contextPreviewMeta.score_breakdown.slice(0, 8), null, 2)}</pre>
+                            )}
                         </div>
 
                         <div className="memory-panel">

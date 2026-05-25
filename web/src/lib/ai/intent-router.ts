@@ -6,6 +6,8 @@ export type AssistantIntentName =
   | 'startExplorerAgent'
   | 'startDiscoveryExploration'
   | 'startAdhocCustomAgent'
+  | 'createCustomAgentDefinition'
+  | 'createWorkflow'
   | 'startAutoPilot'
   | 'importOpenApiSpec'
   | 'createAndGenerateApiTest'
@@ -70,6 +72,8 @@ const intentSchema = z.object({
     'startExplorerAgent',
     'startDiscoveryExploration',
     'startAdhocCustomAgent',
+    'createCustomAgentDefinition',
+    'createWorkflow',
     'startAutoPilot',
     'importOpenApiSpec',
     'createAndGenerateApiTest',
@@ -318,6 +322,82 @@ function buildApiSpecName(input: Record<string, unknown>, fallback: string) {
   return `${slug || 'chat-api-test'}-${Date.now()}.md`;
 }
 
+function slugLabel(value: string, fallback = 'workflow') {
+  const slug = value
+    .toLowerCase()
+    .replace(/https?:\/\//g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  return slug || fallback;
+}
+
+function buildWorkflowSteps(input: Record<string, unknown>, latestUserText: string, url?: string) {
+  const agentDefinitionId = asString(input.agentDefinitionId)
+    || asString(input.agent_definition_id)
+    || '{{inputs.agent_definition_id}}';
+  const targetUrl = url || asString(input.targetUrl) || asString(input.url) || '{{inputs.target_url}}';
+  const prompt = asString(input.prompt)
+    || asString(input.instructions)
+    || latestUserText
+    || 'Inspect the target app area, capture observed requirements, findings, evidence, and test ideas.';
+  const mode = asString(input.mode) || 'both';
+  const priorityThreshold = asString(input.priorityThreshold) || 'medium';
+  const maxItems = asNumber(input.maxItems, 10);
+
+  return [
+    {
+      key: 'agent',
+      type: 'start_custom_agent',
+      label: 'Run Custom Agent',
+      input: {
+        definition_id: agentDefinitionId,
+        url: targetUrl,
+        prompt,
+      },
+    },
+    {
+      key: 'wait_agent',
+      type: 'wait_for_status',
+      label: 'Wait for Agent',
+      input: {
+        source_step: 'agent',
+        timeout_seconds: asNumber(input.timeoutSeconds, 3600),
+        poll_seconds: 10,
+      },
+    },
+    {
+      key: 'review_agent',
+      type: 'review_gate',
+      label: 'Review Agent Report',
+      input: {
+        question: 'Review the custom agent report before creating requirements and specs.',
+        suggested_answers: ['Create requirements and specs', 'Revise agent prompt'],
+      },
+    },
+    {
+      key: 'materialize',
+      type: 'materialize_agent_report',
+      label: 'Create Requirements And Specs',
+      input: {
+        source_step: 'wait_agent',
+        mode: ['requirements', 'specs', 'both'].includes(mode) ? mode : 'both',
+        max_items: maxItems,
+        priority_threshold: ['critical', 'high', 'medium', 'low', 'info'].includes(priorityThreshold) ? priorityThreshold : 'medium',
+      },
+    },
+    {
+      key: 'review_output',
+      type: 'review_gate',
+      label: 'Review Created Artifacts',
+      input: {
+        question: 'Review the created requirements and specs before running tests.',
+        suggested_answers: ['Accept', 'Edit artifacts first'],
+      },
+    },
+  ];
+}
+
 function normalizeRoute(route: RawIntentRoute, ctx: IntentRouterContext): Promise<AssistantIntentRoute> | AssistantIntentRoute {
   if (route.intent === 'unknown' || route.intent === 'prdFeatureLookup') return passthrough(route);
 
@@ -330,7 +410,7 @@ function normalizeRoute(route: RawIntentRoute, ctx: IntentRouterContext): Promis
   const url = firstUrlFromInput(input);
   const latestUserText = extractLatestUserText(ctx.messages);
 
-  if (['startExplorerAgent', 'startDiscoveryExploration', 'startAdhocCustomAgent', 'startAutoPilot', 'importOpenApiSpec'].includes(route.intent) && !url) {
+  if (['startExplorerAgent', 'startDiscoveryExploration', 'startAdhocCustomAgent', 'createCustomAgentDefinition', 'startAutoPilot', 'importOpenApiSpec'].includes(route.intent) && !url) {
     return clarify(route, Array.from(new Set([...missingFields, 'url'])));
   }
 
@@ -382,6 +462,50 @@ function normalizeRoute(route: RawIntentRoute, ctx: IntentRouterContext): Promis
         timeoutSeconds: asNumber(input.timeoutSeconds, 1800),
       },
       'I prepared an editable custom agent start action below. Review the prompt and tools, then approve to create the agent and start the run.'
+    );
+  }
+
+  if (route.intent === 'createCustomAgentDefinition') {
+    const host = hostnameLabel(url || '');
+    return action(
+      route,
+      'createCustomAgentDefinition',
+      {
+        url,
+        agentName: asString(input.agentName) || `QA Agent - ${host}`,
+        description: asString(input.description) || `Chat-created reusable QA agent for ${url}.`,
+        systemPrompt: asString(input.systemPrompt) || 'You are a focused QA automation agent. Inspect observable UI behavior and report concise findings, requirements, test ideas, evidence, and follow-up actions.',
+        prompt: asString(input.prompt) || latestUserText || `Inspect ${url} and report useful QA findings.`,
+        toolIds: asStringArray(input.toolIds).length > 0 ? asStringArray(input.toolIds) : DEFAULT_CHAT_CUSTOM_AGENT_TOOL_IDS,
+        focusAreas: asStringArray(input.focusAreas),
+        timeoutSeconds: asNumber(input.timeoutSeconds, 1800),
+      },
+      'I prepared an editable custom agent definition below. Review the prompt and tools, then approve to save it.'
+    );
+  }
+
+  if (route.intent === 'createWorkflow') {
+    const name = asString(input.name)
+      || `Agent requirements workflow - ${url ? hostnameLabel(url) : slugLabel(latestUserText, 'custom')}`;
+    const description = asString(input.description)
+      || 'Chat-created workflow that runs a browser QA agent, waits for its report, pauses for review, and creates candidate requirements and markdown specs.';
+    return action(
+      route,
+      'createWorkflow',
+      {
+        name,
+        description,
+        steps: buildWorkflowSteps(input, latestUserText, url),
+        trigger: { type: 'manual', source: 'chat' },
+        config: {
+          requiresRuntimeInputs: {
+            agent_definition_id: !asString(input.agentDefinitionId) && !asString(input.agent_definition_id),
+            target_url: !url && !asString(input.targetUrl) && !asString(input.url),
+          },
+          output: 'requirements_and_specs',
+        },
+      },
+      'I prepared a reusable custom workflow approval action below. Approve it to save the workflow; when run, it will execute a saved custom agent, review the report, then create requirements and specs.'
     );
   }
 
@@ -450,6 +574,8 @@ export async function routeAssistantIntent(ctx: IntentRouterContext): Promise<As
       system: [
         'You classify Quorvex AI chatbot requests into structured intents.',
         'Only classify a mutating or start/generate intent when the user explicitly asks to create, generate, import, run, start, launch, or proceed.',
+        'Use createCustomAgentDefinition when the user asks to save, define, or build a reusable custom agent without starting it now.',
+        'Use createWorkflow when the user asks to create, save, define, or build a reusable workflow/process/pipeline that runs a custom agent and turns its report into requirements or specs.',
         'For normal questions, status questions, explanations, analysis requests, and vague asks, use intent "unknown" so the main assistant can answer.',
         'Never invent required identifiers. If a required URL, spec name, or database connection is missing, set missingFields and write one concise clarifyingQuestion.',
         'Return tool input using camelCase keys expected by the UI action cards.',

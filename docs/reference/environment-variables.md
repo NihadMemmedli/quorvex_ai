@@ -92,6 +92,15 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | `PLANNER_TIMEOUT_SECONDS` | `1800` | No | Timeout for the planner agent |
 | `GENERATOR_TIMEOUT_SECONDS` | `1800` | No | Timeout for the generator agent |
 
+## Autonomous Validation and Queue Recovery
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `AGENT_QUEUE_STALE_OWNERLESS_MINUTES` | internal default | No | Minutes before queued agent work without an owner is treated as stale and eligible for recovery |
+| `AUTONOMOUS_VALIDATION_BASE_URL` | proposal target URL, then local web app | No | Base URL used when validating autonomous test proposals |
+| `AUTONOMOUS_VALIDATION_DEV_SERVER_COMMAND` | `npm --prefix web run dev -- --hostname <host> --port <port>` | No | Command used to start a local validation server when the autonomous validator targets localhost and the app is not already reachable |
+| `AUTONOMOUS_VALIDATION_SERVER_READY_SECONDS` | `45` | No | Seconds to wait for the autonomous validation dev server to become reachable |
+
 ## Concurrency Limits
 
 | Variable | Default | Required | Description |
@@ -178,17 +187,17 @@ When `VNC_ENABLED=true`, parallel browser execution is limited to 1 instance.
 | `NUCLEI_TIMEOUT_SECONDS` | `600` | No | Nuclei scan timeout |
 | `SECURITY_SCAN_TIMEOUT` | `1800` | No | Overall scan timeout |
 
-## Temporal / Autonomous Missions
+## Temporal / Durable Runs
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `TEMPORAL_ADDRESS` | configured in app settings | Autonomous missions with Temporal | Temporal frontend address |
-| `TEMPORAL_NAMESPACE` | configured in app settings | No | Temporal namespace for autonomous mission workflows |
+| `TEMPORAL_ADDRESS` | configured in app settings | Durable missions, workflows, and agent runs | Temporal frontend address |
+| `TEMPORAL_NAMESPACE` | configured in app settings | No | Temporal namespace for durable workflows |
 | `TEMPORAL_TASK_QUEUE` | configured in app settings | No | Task queue consumed by the autonomous mission worker |
-| `TEMPORAL_WORKFLOW_TASK_QUEUE` | `quorvex-custom-workflows` | No | Task queue consumed by custom workflow workers |
+| `TEMPORAL_WORKFLOW_TASK_QUEUE` | `quorvex-custom-workflows` | No | Task queue consumed by the custom workflow worker for custom workflows, standalone agent runs, and domain jobs |
 | `TEMPORAL_UI_URL` | -- | No | Internal or external Temporal UI URL used by backend status surfaces |
 
-Temporal-backed missions support durable long-running and recurring autonomous agent workflows. If Temporal is not reachable, mission APIs report that durable orchestration is unavailable.
+Temporal-backed missions, custom workflows, standalone agent runs, and domain jobs support durable long-running execution. If Temporal is not reachable, these APIs report that durable orchestration is unavailable instead of silently falling back to non-durable execution.
 
 ## Frontend
 
@@ -284,7 +293,7 @@ These variables are read by source code paths but are usually set by Docker Comp
 | `RUNS_DIR` | `/app/runs` | No | Run artifact directory override |
 | `SUBSET_MANIFEST` | -- | No | CI test subset manifest path |
 | `SUBSET_MODE` | -- | No | CI test subset selection mode |
-| `USE_AGENT_QUEUE` | `true` | No | Enable Redis-backed agent queue dispatch |
+| `USE_AGENT_QUEUE` | `false` | No | Opt into legacy Redis-backed agent queue dispatch instead of direct Temporal activity execution |
 | `USE_DIRECT_CLI` | `false` | No | Force direct CLI execution instead of SDK path in selected agents |
 | `USE_K6_QUEUE` | `true` | No | Enable Redis-backed K6 queue dispatch |
 | `VNC_PUBLIC_URL` | -- | No | Public VNC URL shown in dashboard contexts |

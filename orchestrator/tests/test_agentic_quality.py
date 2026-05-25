@@ -5,6 +5,10 @@ import types
 from pathlib import Path
 
 import pytest
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel, Session, create_engine, select
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.workflows.agentic_quality import (
     FailureTriageAgent,
@@ -95,7 +99,7 @@ def test_stability_verifier_aggregates_passes_and_failures(tmp_path: Path):
 
 
 class _FakeGenerator:
-    async def generate_test(self, spec_path, target_url=None, output_name=None, design_context=None):
+    async def generate_test(self, spec_path, target_url=None, output_name=None, design_context=None, **kwargs):
         path = Path(spec_path).parent / f"{output_name or 'generated'}.spec.ts"
         path.write_text(
             "import { test, expect } from '@playwright/test';\n"
@@ -106,7 +110,7 @@ class _FakeGenerator:
 
 
 class _FakeHealer:
-    async def heal_test(self, test_file, error_log=None, timeout_seconds=None, diagnosis_context=None):
+    async def heal_test(self, test_file, error_log=None, timeout_seconds=None, diagnosis_context=None, **kwargs):
         Path(test_file).write_text(
             "import { test, expect } from '@playwright/test';\n"
             "test('healed', async ({ page }) => { await expect(page).toHaveURL(/.*/); });\n"
@@ -241,3 +245,121 @@ async def test_pipeline_skips_healing_for_non_healable_failure(tmp_path: Path):
     diagnosis = json.loads((run_dir / "failure_diagnosis.json").read_text())
     assert diagnosis["category"] == "product_bug"
     assert diagnosis["heal_allowed"] is False
+
+
+@pytest.mark.asyncio
+async def test_memory_full_loop_attributes_pipeline_outcomes(monkeypatch, tmp_path: Path):
+    from orchestrator.api import db as db_module
+    from orchestrator.api.models_db import MemoryFeedbackEvent, MemoryInjectionEvent
+    from orchestrator.memory import agent_memory as agent_memory_module
+    from orchestrator.memory import telemetry as telemetry_module
+    from orchestrator.memory.agent_memory import AgentMemoryService
+    from orchestrator.memory.effectiveness import MemoryEffectivenessService
+    from orchestrator.memory.telemetry import record_memory_injection
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(db_module, "engine", engine)
+    monkeypatch.setattr(agent_memory_module, "engine", engine)
+    monkeypatch.setattr(telemetry_module, "engine", engine)
+    monkeypatch.setattr(AgentMemoryService, "_index_memory", lambda self, memory: None)
+    monkeypatch.setenv("MEMORY_ENABLED", "true")
+    monkeypatch.setenv("MEMORY_PROJECT_ID", "project-memory-loop")
+
+    memory_service = AgentMemoryService()
+    helpful = memory_service.create_memory(
+        kind="project_fact",
+        content="Login starts on /login and uses email plus password.",
+        project_id="project-memory-loop",
+        confidence=0.9,
+        importance=0.85,
+    )
+    risky = memory_service.create_memory(
+        kind="agent_lesson",
+        content="Old login selector used text Submit.",
+        project_id="project-memory-loop",
+        confidence=0.4,
+        importance=0.7,
+    )
+
+    class MemoryRecordingGenerator:
+        def __init__(self, memory_id: str):
+            self.memory_id = memory_id
+
+        async def generate_test(self, spec_path, target_url=None, output_name=None, design_context=None, **kwargs):
+            path = Path(spec_path).parent / f"{output_name or 'generated'}.spec.ts"
+            path.write_text(
+                "import { test, expect } from '@playwright/test';\n"
+                "test('generated', async ({ page }) => { await expect(page).toHaveURL(/.*/); });\n"
+            )
+            record_memory_injection(
+                project_id="project-memory-loop",
+                actor_type="agent",
+                stage="native_generator",
+                source_type="spec",
+                source_id=str(spec_path),
+                query="login",
+                bundle={"unified": {"agent_memories": {"semantic": [{"id": self.memory_id}]}}},
+                context_text="## Memory Context\n- seeded memory",
+                extra_data={
+                    "spec_path": str(spec_path),
+                    "run_id": kwargs.get("memory_run_id"),
+                    "empty_recall": False,
+                },
+            )
+            return path
+
+    passing_run = tmp_path / "memory-pass-run"
+    passing_run.mkdir()
+    passing_spec = tmp_path / "passing-spec.md"
+    passing_spec.write_text("# Login\nNavigate to https://example.test\n1. Log in")
+    passing_pipeline = _pipeline_with_results(
+        [
+            PipelineTestResult(passed=True, exit_code=0, output="1 passed"),
+            PipelineTestResult(passed=True, exit_code=0, output="1 passed"),
+            PipelineTestResult(passed=True, exit_code=0, output="1 passed"),
+        ],
+        tmp_path,
+    )
+    passing_pipeline.project_id = "project-memory-loop"
+    passing_pipeline.native_generator = MemoryRecordingGenerator(helpful.id)
+
+    passing_result = await passing_pipeline.run(str(passing_spec), passing_run, skip_planning=True)
+
+    failing_run = tmp_path / "memory-fail-run"
+    failing_run.mkdir()
+    failing_spec = tmp_path / "failing-spec.md"
+    failing_spec.write_text("# Login\nNavigate to https://example.test\n1. Log in with old selector")
+    failing_pipeline = _pipeline_with_results(
+        [
+            PipelineTestResult(
+                passed=False,
+                exit_code=1,
+                output="Error: 500 Internal Server Error",
+                error_summary="500",
+            ),
+        ],
+        tmp_path,
+    )
+    failing_pipeline.project_id = "project-memory-loop"
+    failing_pipeline.native_generator = MemoryRecordingGenerator(risky.id)
+
+    failing_result = await failing_pipeline.run(str(failing_spec), failing_run, skip_planning=True)
+
+    summary = MemoryEffectivenessService().summarize(project_id="project-memory-loop")
+    helpful_ids = {item["memory_id"] for item in summary["top_helpful_memories"]}
+    harmful_ids = {item["memory_id"] for item in summary["top_harmful_memories"]}
+
+    with Session(engine) as session:
+        events = session.exec(select(MemoryInjectionEvent)).all()
+        feedback = session.exec(select(MemoryFeedbackEvent)).all()
+
+    assert passing_result["success"] is True
+    assert failing_result["success"] is False
+    assert {event.extra_data.get("run_id") for event in events} == {"memory-pass-run", "memory-fail-run"}
+    assert any(event.extra_data.get("outcome_status") == "first_run_passed" for event in events)
+    assert any(event.extra_data.get("outcome_status") == "first_run_failed" for event in events)
+    assert any(row.rating == "up" and row.memory_id == helpful.id for row in feedback)
+    assert any(row.rating == "down" and row.memory_id == risky.id for row in feedback)
+    assert helpful.id in helpful_ids
+    assert risky.id in harmful_ids

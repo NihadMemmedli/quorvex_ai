@@ -37,6 +37,18 @@ def _graph_memory_ids_from_bundle(bundle: dict[str, Any]) -> list[str]:
     return ids
 
 
+def _ranking_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+    if "unified" in bundle and isinstance(bundle.get("unified"), dict):
+        bundle = bundle["unified"]
+    return bundle.get("ranking") if isinstance(bundle.get("ranking"), dict) else {}
+
+
+def _diagnostics_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+    if "unified" in bundle and isinstance(bundle.get("unified"), dict):
+        bundle = bundle["unified"]
+    return bundle.get("diagnostics") if isinstance(bundle.get("diagnostics"), dict) else {}
+
+
 def record_memory_injection(
     *,
     project_id: str | None = None,
@@ -59,12 +71,22 @@ def record_memory_injection(
         memory_ids = _memory_ids_from_bundle(bundle)
         graph_memory_ids = [memory_id for memory_id in _graph_memory_ids_from_bundle(bundle) if memory_id not in memory_ids]
         event_extra = dict(extra_data or {})
+        ranking = _ranking_from_bundle(bundle)
+        diagnostics = _diagnostics_from_bundle(bundle)
         if conversation_id:
             event_extra["conversation_id"] = conversation_id
         if message_index is not None:
             event_extra["message_index"] = message_index
         if graph_memory_ids:
             event_extra["graph_expanded_memory_ids"] = graph_memory_ids
+        if ranking:
+            event_extra.setdefault("score_summary", ranking.get("score_summary") or {})
+            event_extra.setdefault("rejected_candidates", ranking.get("rejected_candidates") or [])
+            event_extra.setdefault("selected_items", ranking.get("selected_items") or [])
+        if diagnostics:
+            event_extra.setdefault("candidate_count", diagnostics.get("candidate_count", 0))
+            event_extra.setdefault("diagnostic_warnings", diagnostics.get("warnings") or [])
+        event_extra.setdefault("context_characters", len(context_text or ""))
         event = MemoryInjectionEvent(
             project_id=project_id,
             actor_type=actor_type,

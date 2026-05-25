@@ -1,0 +1,237 @@
+{
+  "channel": {
+    "name": "Quorvex AI",
+    "language": "en",
+    "repo_url": "https://github.com/NihadMemmedli/quorvex_ai",
+    "docs_url": "https://nihadmemmedli.github.io/quorvex_ai/",
+    "positioning": "Self-hosted AI testing agents that turn specs, PRDs, and app exploration into validated Playwright tests your team can inspect, commit, and run in CI."
+  },
+  "defaults": {
+    "target_minutes": 8,
+    "audience": "Playwright teams, QA automation engineers, self-hosted devtool users, and engineering teams evaluating AI testing tools",
+    "voice_style": "direct senior-engineer explanation with low hype and concrete product proof",
+    "avatar_policy": "Use AI avatar only for hook, transitions, and outro. Main footage must be real Quorvex usage."
+  },
+  "episodes": [
+    {
+      "id": "001",
+      "title": "Quorvex AI in 10 Minutes: Generate Your First Playwright Test",
+      "slug": "first-playwright-test",
+      "primary_doc": "docs/tutorials/getting-started.md",
+      "supporting_docs": [
+        "README.md",
+        "README.minimal.md"
+      ],
+      "promise": "Show the fastest credible path from repo setup to a generated Playwright test.",
+      "audience_problem": "Teams want AI to speed up test creation, but they still need readable Playwright code they can own.",
+      "cta": "Star Quorvex AI on GitHub and try the minimal setup path.",
+      "thumbnail": "AI Playwright Test in 10 Minutes",
+      "keywords": [
+        "Quorvex AI",
+        "Playwright",
+        "AI testing",
+        "test automation",
+        "self hosted QA",
+        "end to end testing"
+      ],
+      "screen_flow": [
+        "Open GitHub repo and docs landing page.",
+        "Show minimal or Docker setup command.",
+        "Open the Quorvex dashboard.",
+        "Create or show a plain-English test spec.",
+        "Run the pipeline.",
+        "Show generated Playwright TypeScript.",
+        "Show validation result and artifacts."
+      ]
+    },
+    {
+      "id": "002",
+      "title": "Why AI-Generated Tests Fail, and How Quorvex Validates Them",
+      "slug": "validated-ai-generated-tests",
+      "primary_doc": "README.md",
+      "supporting_docs": [
+        "docs/explanation/pipeline-architecture.md",
+        "docs/explanation/browser-pool.md"
+      ],
+      "promise": "Explain why prompt-only generated tests are fragile and how browser validation changes the workflow.",
+      "audience_problem": "AI can draft tests, but drafts are not useful if selectors, waits, and assumptions are never executed.",
+      "cta": "Compare Quorvex against your current Playwright workflow.",
+      "thumbnail": "AI Tests Need Validation",
+      "keywords": [
+        "AI test generation",
+        "Playwright validation",
+        "self healing tests",
+        "browser automation"
+      ],
+      "screen_flow": [
+        "Show a brittle generated-test example.",
+        "Show Quorvex planning.",
+        "Show browser execution.",
+        "Show failed run artifacts.",
+        "Show healing or review path."
+      ]
+    },
+    {
+      "id": "003",
+      "title": "From Plain-English Spec to Playwright Code",
+      "slug": "spec-to-playwright-code",
+      "primary_doc": "docs/guides/writing-specs.md",
+      "supporting_docs": [
+        "docs/reference/spec-format.md"
+      ],
+      "promise": "Teach the spec format and show how a clear test request becomes reviewable code.",
+      "audience_problem": "Teams need a simple authoring format that QA and engineers can both review.",
+      "cta": "Write one spec from a real workflow and run it locally.",
+      "thumbnail": "Spec to Playwright",
+      "keywords": [
+        "Playwright spec",
+        "test specification",
+        "QA automation",
+        "markdown tests"
+      ],
+      "screen_flow": [
+        "Open the spec docs.",
+        "Write a small markdown spec.",
+        "Run the generation pipeline.",
+        "Review generated TypeScript.",
+        "Run the generated test directly."
+      ]
+    },
+    {
+      "id": "004",
+      "title": "Quorvex Dashboard Walkthrough",
+      "slug": "dashboard-walkthrough",
+      "primary_doc": "docs/tutorials/dashboard-walkthrough.md",
+      "supporting_docs": [
+        "docs/reference/web-dashboard.md",
+        "docs/reference/dashboard-ui-patterns.md"
+      ],
+      "promise": "Map the dashboard to the real QA workflow: specs, runs, requirements, coverage, agents, and analytics.",
+      "audience_problem": "A testing platform is only useful if teams can see status, evidence, ownership, and next actions.",
+      "cta": "Open the dashboard locally and follow the same route.",
+      "thumbnail": "Quorvex Dashboard Tour",
+      "keywords": [
+        "QA dashboard",
+        "test automation dashboard",
+        "Playwright dashboard",
+        "AI QA agents"
+      ],
+      "screen_flow": [
+        "Show dashboard overview.",
+        "Open specs.",
+        "Open runs.",
+        "Open requirements and RTM.",
+        "Open agents and assistant.",
+        "Open analytics."
+      ]
+    },
+    {
+      "id": "005",
+      "title": "Self-Hosted Setup with Docker",
+      "slug": "docker-self-hosted-setup",
+      "primary_doc": "docs/guides/setup-options.md",
+      "supporting_docs": [
+        "docs/guides/deployment.md",
+        "README.minimal.md"
+      ],
+      "promise": "Show a practical local self-hosted setup and explain which services matter.",
+      "audience_problem": "Teams want AI testing without sending their workflow into a closed hosted platform.",
+      "cta": "Run the minimal setup first, then move to the full stack when needed.",
+      "thumbnail": "Self-Host AI Testing",
+      "keywords": [
+        "self hosted AI",
+        "Docker QA",
+        "Playwright Docker",
+        "AI testing platform"
+      ],
+      "screen_flow": [
+        "Explain minimal versus full stack.",
+        "Copy environment example.",
+        "Configure model credentials.",
+        "Start Docker stack.",
+        "Verify dashboard and API health."
+      ]
+    },
+    {
+      "id": "006",
+      "title": "PRD to Tests: Turning Product Requirements into Coverage",
+      "slug": "prd-to-tests",
+      "primary_doc": "docs/guides/prd-to-tests.md",
+      "supporting_docs": [
+        "docs/assets/ui/prd.png",
+        "docs/assets/ui/requirements.png",
+        "docs/assets/ui/rtm.png"
+      ],
+      "promise": "Show how product requirements become candidate tests and coverage signals.",
+      "audience_problem": "Product docs often drift away from actual test coverage.",
+      "cta": "Try the flow with one small PRD before using it for a release.",
+      "thumbnail": "PRD to Tests",
+      "keywords": [
+        "PRD to tests",
+        "requirements coverage",
+        "test coverage",
+        "QA planning"
+      ],
+      "screen_flow": [
+        "Import or open a PRD.",
+        "Generate requirements.",
+        "Review proposed tests.",
+        "Open RTM coverage.",
+        "Launch follow-up work."
+      ]
+    },
+    {
+      "id": "007",
+      "title": "API Testing with OpenAPI Import",
+      "slug": "api-testing-openapi",
+      "primary_doc": "docs/guides/api-testing.md",
+      "supporting_docs": [
+        "docs/assets/ui/api-testing.png"
+      ],
+      "promise": "Show how Quorvex can turn API descriptions into test coverage.",
+      "audience_problem": "Teams need API checks next to UI workflows, not in a disconnected tool.",
+      "cta": "Import one OpenAPI file and inspect the generated test before running it.",
+      "thumbnail": "OpenAPI to Tests",
+      "keywords": [
+        "OpenAPI testing",
+        "API test generation",
+        "Playwright API tests",
+        "AI API testing"
+      ],
+      "screen_flow": [
+        "Open API Testing page.",
+        "Import OpenAPI file.",
+        "Review generated specs.",
+        "Run API checks.",
+        "Inspect result history."
+      ]
+    },
+    {
+      "id": "008",
+      "title": "CI/CD Quality Gates with Generated Playwright Tests",
+      "slug": "ci-cd-quality-gates",
+      "primary_doc": "docs/tutorials/ci-cd-setup.md",
+      "supporting_docs": [
+        "docs/guides/integrations.md",
+        "docs/explanation/ci-pr-advisor-architecture.md"
+      ],
+      "promise": "Show how generated tests become normal CI assets and how quality gates fit into pull requests.",
+      "audience_problem": "AI test generation is not enough unless the output can be reviewed and run in existing CI.",
+      "cta": "Commit one generated test and wire it into your normal Playwright CI job.",
+      "thumbnail": "AI Tests in CI",
+      "keywords": [
+        "Playwright CI",
+        "quality gates",
+        "GitHub Actions testing",
+        "AI generated tests"
+      ],
+      "screen_flow": [
+        "Show generated Playwright file.",
+        "Show CI setup docs.",
+        "Run tests in CI-like command.",
+        "Show quality gate result.",
+        "Show PR advisor context."
+      ]
+    }
+  ]
+}

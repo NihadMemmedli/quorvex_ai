@@ -1186,8 +1186,13 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                             "run_id": run_id,
                             "spec_name": spec_name,
                             "current_stage": generation_mode,
+                            "agent_task_id": None,
                             "last_tool": "",
                             "last_tool_label": "",
+                            "tool_calls": 0,
+                            "browser_tool_calls": 0,
+                            "interactions": 0,
+                            "recent_tools": [],
                         }
                     )
 
@@ -1195,7 +1200,71 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                     run_dir = Path("runs") / run_id
                     run_dir.mkdir(parents=True, exist_ok=True)
 
-                    pipeline = FullNativePipeline(project_id=config.project_id)
+                    def on_task_enqueued(task_id: str) -> None:
+                        self._update_live_browser_state(
+                            {
+                                "active": True,
+                                "phase": "test_generation",
+                                "activity_label": f"Generating test for {spec_name}",
+                                "test_task_id": test_task_id,
+                                "run_id": run_id,
+                                "spec_name": spec_name,
+                                "current_stage": generation_mode,
+                                "agent_task_id": task_id,
+                                "status": "queued",
+                                "message": "Agent task queued for worker",
+                            }
+                        )
+
+                    def on_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
+                        self._record_live_tool_use(
+                            tool_name,
+                            {
+                                "active": True,
+                                "phase": "test_generation",
+                                "activity_label": f"Generating test for {spec_name}",
+                                "test_task_id": test_task_id,
+                                "run_id": run_id,
+                                "spec_name": spec_name,
+                                "current_stage": generation_mode,
+                                "status": "tool_use",
+                                "message": f"Using {self._short_tool_name(tool_name)}",
+                                "last_tool_input": tool_input,
+                            },
+                        )
+
+                    def on_progress(progress: dict[str, Any]) -> None:
+                        last_tool = str(progress.get("last_tool") or "")
+                        patch = {
+                            **progress,
+                            "active": True,
+                            "phase": "test_generation",
+                            "activity_label": f"Generating test for {spec_name}",
+                            "test_task_id": test_task_id,
+                            "run_id": run_id,
+                            "spec_name": spec_name,
+                            "current_stage": progress.get("current_stage") or generation_mode,
+                            "status": progress.get("phase") or "running",
+                            "message": (
+                                f"Using {self._short_tool_name(last_tool)}"
+                                if last_tool
+                                else "Agent is running"
+                            ),
+                        }
+                        if last_tool:
+                            self._record_live_tool_use(last_tool, patch)
+                        else:
+                            self._update_live_browser_state(patch)
+
+                    pipeline = FullNativePipeline(
+                        project_id=config.project_id,
+                        on_task_enqueued=on_task_enqueued,
+                        on_progress=on_progress,
+                        on_tool_use=on_tool_use,
+                        owner_type="autopilot",
+                        owner_id=self.session_id,
+                        owner_label=f"AutoPilot {self.session_id}",
+                    )
                     try:
                         if generation_mode == "conservative_smoke":
                             result = self._run_conservative_test_generation(

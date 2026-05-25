@@ -27,7 +27,7 @@ const CI_TEST_SUBSET_ITEM_SCHEMA = z.object({
 const CHAT_CONTROL_DOMAINS = [
   { domain: 'Core UI testing', status: 'supported', tools: ['listTestSpecs', 'createTestSpec', 'runTestSpec', 'getRunLogs', 'healFailedRun', 'runRegressionBatch'] },
   { domain: 'Coverage planning', status: 'supported', tools: ['planUiTestCoverage', 'getRTMSummary', 'getRTMGaps', 'getCoverageGaps', 'getTestSuggestions'] },
-  { domain: 'Custom workflows', status: 'supported', tools: ['listWorkflows', 'listWorkflowCatalog', 'getWorkflow', 'createWorkflow', 'updateWorkflow', 'duplicateWorkflow', 'archiveWorkflow', 'startWorkflow', 'startWorkflowFromStep', 'getWorkflowStatus', 'retryWorkflowFailedStep', 'pauseWorkflowRun', 'resumeWorkflowRun', 'cancelWorkflowRun'] },
+  { domain: 'Custom workflows', status: 'supported', tools: ['listWorkflows', 'listWorkflowCatalog', 'getWorkflow', 'createWorkflow', 'updateWorkflow', 'duplicateWorkflow', 'archiveWorkflow', 'startWorkflow', 'startWorkflowFromStep', 'getWorkflowStatus', 'retryWorkflowFailedStep', 'pauseWorkflowRun', 'resumeWorkflowRun', 'cancelWorkflowRun'], notes: ['Workflow catalog includes agent report materialization into requirements/specs'] },
   { domain: 'Explorer Agent', status: 'supported', tools: ['startExplorerAgent', 'getAgentRun', 'getExplorerGeneratedSpecs', 'generateExplorerFlowTest'] },
   { domain: 'Discovery exploration', status: 'supported', tools: ['startDiscoveryExploration', 'getExplorationDetails', 'getExplorationFlows', 'generateApiTestsFromExploration'] },
   { domain: 'Specs and artifacts', status: 'supported', tools: ['getSpecContent', 'getSpecGeneratedCode', 'moveSpec', 'renameSpec', 'splitSpec'] },
@@ -1487,6 +1487,20 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         prompt: z.string().describe('The task prompt for the custom agent run'),
         focusAreas: z.array(z.string()).optional().describe('Specific features, pages, or behaviors to focus on'),
         timeoutSeconds: z.number().optional().default(1800).describe('Maximum custom agent runtime in seconds'),
+      }),
+    }),
+
+    createCustomAgentDefinition: tool({
+      description: 'Save a reusable custom QA agent definition from chatbot instructions without starting a run. Use when the user asks to create, define, save, or build a custom agent/template. Requires user approval.',
+      inputSchema: z.object({
+        url: z.string().describe('Default website URL or app area for the custom agent'),
+        agentName: z.string().optional().describe('Agent display name'),
+        description: z.string().optional().describe('Short description of the saved agent'),
+        systemPrompt: z.string().describe('Reusable system prompt for the agent'),
+        prompt: z.string().optional().describe('Default operating brief to append to the saved agent prompt'),
+        toolIds: z.array(z.string()).optional().describe('Allowed custom-agent tool IDs'),
+        focusAreas: z.array(z.string()).optional().describe('Specific features, pages, or behaviors to focus on'),
+        timeoutSeconds: z.number().optional().default(1800).describe('Default custom agent runtime in seconds'),
       }),
     }),
 
@@ -3321,7 +3335,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
     }),
 
     createWorkflow: tool({
-      description: 'Create a reusable custom workflow definition. Requires approval.',
+      description: 'Create a reusable custom workflow definition. For chatbot-created QA workflows, prefer steps that run a saved custom agent, wait for it, review the report, then use materialize_agent_report to create requirements/specs. Requires approval.',
       inputSchema: z.object({
         name: z.string().describe('Workflow name'),
         description: z.string().optional(),

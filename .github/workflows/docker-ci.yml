@@ -32,7 +32,7 @@ jobs:
             -e ANTHROPIC_BASE_URL \
             -e ANTHROPIC_DEFAULT_SONNET_MODEL \
             -v ${{ github.workspace }}/runs:/app/runs \
-            quorvex-ai specs/smoke_healing.md
+            quorvex-ai specs/smoke_healing_1.md
 
       - name: Upload Artifacts
         if: always()

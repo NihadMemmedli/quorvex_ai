@@ -61,7 +61,7 @@ rg -n "add_argument|click\\.option|typer\\.Option" orchestrator
 
 When updating reference docs, prefer compact tables over prose. Include source file names when the page already uses them.
 
-Run the automated drift check after reference changes. It verifies environment variables, CLI flags, selected public API routes, dashboard pages, MkDocs navigation coverage, local documentation image assets, UI visual coverage, and common stale setup strings before running the strict docs build:
+Run the automated drift check after reference changes. It verifies environment variables, CLI flags, selected public API routes, `localhost:8001` API examples, dashboard pages, MkDocs navigation coverage, local documentation image assets, UI visual coverage, and common stale setup strings before running the strict docs build:
 
 ```bash
 make docs-check
@@ -110,7 +110,7 @@ Use this checklist for every docs PR:
 - The page has one clear purpose and one audience.
 - Commands are copy-pasteable from the repository root unless stated otherwise.
 - Links are relative for internal docs.
-- API paths, env vars, dashboard routes, CLI flags, nav entries, and referenced local assets match the code and repository.
+- API paths, local `localhost:8001` curl examples, env vars, dashboard routes, CLI flags, nav entries, and referenced local assets match the code and repository.
 - Each published docs page renders a UI screenshot or GIF from `docs/assets/ui/`.
 - Examples avoid real credentials and use placeholders.
 - New docs are included in `mkdocs.yml`.

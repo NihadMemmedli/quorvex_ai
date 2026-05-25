@@ -542,6 +542,13 @@ def _collect_exploration_artifacts(session_id: str) -> list[ExplorationArtifactR
         ".webm": "video",
         ".mp4": "video",
     }
+    log_artifact_names = {
+        "agent-stream.jsonl",
+        "raw_output.txt",
+        "tool_calls.json",
+        "agent_summary.json",
+        "browser-memory-observations.jsonl",
+    }
     artifacts: list[ExplorationArtifactResponse] = []
     seen: set[str] = set()
 
@@ -552,7 +559,7 @@ def _collect_exploration_artifacts(session_id: str) -> list[ExplorationArtifactR
         for path in session_dir.glob("**/*"):
             if not path.is_file():
                 continue
-            artifact_type = suffix_types.get(path.suffix.lower())
+            artifact_type = "log" if path.name in log_artifact_names else suffix_types.get(path.suffix.lower())
             if not artifact_type:
                 continue
             try:

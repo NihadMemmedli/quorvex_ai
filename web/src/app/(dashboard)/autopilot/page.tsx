@@ -918,7 +918,8 @@ export default function AutoPilotPage() {
 
     useEffect(() => {
         if (typeof window === 'undefined') return;
-        const sessionId = new URLSearchParams(window.location.search).get('sessionId');
+        const params = new URLSearchParams(window.location.search);
+        const sessionId = params.get('sessionId') || params.get('session');
         if (sessionId) {
             setActiveSessionId(sessionId);
             void fetchSessionDetail(sessionId);

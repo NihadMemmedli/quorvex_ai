@@ -82,19 +82,31 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
 
 | Setup | Best for | Command |
 |-------|----------|---------|
-| Full Docker dev | Self-hosted evaluation with dashboard, queues, storage, VNC, and security scanning | `make prod-dev` |
 | Minimal Docker | Fast demo on smaller machines with SQLite | `docker compose -f docker-compose.minimal.yml up -d` |
+| Full Docker dev | Self-hosted evaluation with dashboard, queues, storage, VNC, and security scanning | `make prod-dev` |
 | Local dev | Contributor workflow with native backend/frontend processes | `make setup && make dev` |
 | Production | Hardened single-host deployment | `make prod-up` |
 
-=== "Docker (Recommended)"
+=== "Minimal Docker (Recommended)"
+
+    ```bash
+    git clone https://github.com/NihadMemmedli/quorvex_ai.git
+    cd quorvex_ai
+    cp .env.example .env
+    # Edit .env with your AI provider token
+    make check-env
+    docker compose -f docker-compose.minimal.yml up -d
+    ```
+
+    Open [http://localhost:3000](http://localhost:3000) for the dashboard.
+
+=== "Full Docker Dev"
 
     ```bash
     git clone https://github.com/NihadMemmedli/quorvex_ai.git
     cd quorvex_ai
     cp .env.prod.example .env.prod
     # Edit .env.prod with your AI provider token
-    make check-env
     make prod-dev
     ```
 

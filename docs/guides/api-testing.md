@@ -109,9 +109,12 @@ From the dashboard, click the **Run** button on any API spec. The system:
 Via the API:
 
 ```bash
-curl -X POST http://localhost:8001/api-testing/specs/user-management/run \
+curl -X POST http://localhost:8001/api-testing/run \
   -H "Content-Type: application/json" \
-  -d '{"project_id": "your-project-id"}'
+  -d '{
+    "spec_name": "user-management",
+    "project_id": "your-project-id"
+  }'
 ```
 
 ### 4. View Results

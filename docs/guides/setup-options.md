@@ -33,7 +33,7 @@ Use **Production single host** for the first real team deployment. Move to brows
 | Path | Required |
 |------|----------|
 | Minimal Docker | Docker Compose v2, `.env` with `ANTHROPIC_AUTH_TOKEN` |
-| Full Docker dev | Docker Compose v2, `.env.prod`, 8 GB+ available Docker memory |
+| Full Docker dev | Docker Compose v2, 8 GB+ available Docker memory. `make prod-dev` can create `.env.prod` from `.env.prod.example` for local evaluation; edit it with your provider token before real use. |
 | Local native dev | Python 3.10+, Node.js 20+, Playwright browsers, optional Docker for PostgreSQL |
 | Production single host | Docker Compose v2, `.env.prod` with rotated secrets, backup location, TLS or trusted network |
 | Kubernetes | `kubectl`, cluster storage classes, ingress/TLS plan, namespace permissions |

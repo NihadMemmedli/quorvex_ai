@@ -46,6 +46,7 @@ class AgentTaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     TIMEOUT = "timeout"
+    CANCEL_REQUESTED = "cancel_requested"
     CANCELLED = "cancelled"
 
 
@@ -80,7 +81,9 @@ class AgentTask:
     owner_type: str | None = None  # Logical owner, e.g. autopilot or agent_run
     owner_id: str | None = None
     owner_label: str | None = None
-    telemetry: dict[str, Any] = field(default_factory=dict)  # Structured execution diagnostics
+    telemetry: dict[str, Any] = field(
+        default_factory=dict
+    )  # Structured execution diagnostics
 
     def to_dict(self) -> dict:
         """Convert to dictionary for Redis storage."""
@@ -93,7 +96,9 @@ class AgentTask:
             "worker_id": self.worker_id,
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "completed_at": (
+                self.completed_at.isoformat() if self.completed_at else None
+            ),
             "result": self.result,
             "error": self.error,
             "agent_type": self.agent_type,
@@ -124,9 +129,21 @@ class AgentTask:
             timeout_seconds=data.get("timeout_seconds", 1800),
             status=AgentTaskStatus(data.get("status", "queued")),
             worker_id=data.get("worker_id"),
-            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.utcnow(),
-            started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
-            completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
+            created_at=(
+                datetime.fromisoformat(data["created_at"])
+                if data.get("created_at")
+                else datetime.utcnow()
+            ),
+            started_at=(
+                datetime.fromisoformat(data["started_at"])
+                if data.get("started_at")
+                else None
+            ),
+            completed_at=(
+                datetime.fromisoformat(data["completed_at"])
+                if data.get("completed_at")
+                else None
+            ),
             result=data.get("result"),
             error=data.get("error"),
             agent_type=data.get("agent_type"),
@@ -167,17 +184,53 @@ class AgentQueue:
     PAUSE_PREFIX = "playwright:agents:pause:"
     WORKER_HEARTBEAT_PREFIX = "playwright:agents:worker_alive:"
     WORKER_HEARTBEAT_TTL_SECONDS = 30
+    DEFAULT_STALE_OWNERLESS_QUEUE_MINUTES = 45
 
     def __init__(self, redis_url: str | None = None):
         """Initialize the agent queue."""
         if not REDIS_AVAILABLE:
-            raise ImportError("redis package not installed. Run: pip install redis[hiredis]")
+            raise ImportError(
+                "redis package not installed. Run: pip install redis[hiredis]"
+            )
 
-        self.redis_url = redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        self.redis_url = redis_url or os.environ.get(
+            "REDIS_URL", "redis://localhost:6379/0"
+        )
         self._redis: aioredis.Redis | None = None
-        self._worker_id = os.environ.get("AGENT_WORKER_ID", f"agent-worker-{uuid.uuid4().hex[:8]}")
+        self._worker_id = os.environ.get(
+            "AGENT_WORKER_ID", f"agent-worker-{uuid.uuid4().hex[:8]}"
+        )
         self._last_ping_time: float = 0.0
         self._ping_interval: float = 5.0
+
+    def _emit_agent_run_event(
+        self,
+        task: AgentTask | None,
+        *,
+        event_type: str,
+        message: str,
+        level: str = "info",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if not task or task.owner_type != "agent_run" or not task.owner_id:
+            return
+        try:
+            from orchestrator.services.agent_run_events import create_agent_run_event
+
+            create_agent_run_event(
+                run_id=task.owner_id,
+                agent_task_id=task.id,
+                event_type=event_type,
+                level=level,
+                message=message,
+                payload=payload or {},
+            )
+        except Exception as exc:
+            logger.debug(
+                "Failed to emit agent run event for task %s: %s",
+                getattr(task, "id", None),
+                exc,
+            )
 
     async def connect(self) -> None:
         """Establish Redis connection."""
@@ -211,7 +264,10 @@ class AgentQueue:
     async def _ensure_connected(self) -> aioredis.Redis:
         """Ensure Redis is connected and return client, with auto-reconnect."""
         now = time.monotonic()
-        if self._redis is not None and (now - self._last_ping_time) < self._ping_interval:
+        if (
+            self._redis is not None
+            and (now - self._last_ping_time) < self._ping_interval
+        ):
             return self._redis
 
         if self._redis is not None:
@@ -309,7 +365,19 @@ class AgentQueue:
             pipe.rpush(self.QUEUE_KEY, task.id)
             await pipe.execute()
 
-        logger.info(f"Enqueued agent task {task.id} (type={agent_type}, op={operation_type})")
+        self._emit_agent_run_event(
+            task,
+            event_type="queued",
+            message="Agent task queued.",
+            payload={
+                "agent_type": agent_type,
+                "operation_type": operation_type,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+        logger.info(
+            f"Enqueued agent task {task.id} (type={agent_type}, op={operation_type})"
+        )
         return task.id
 
     async def get_task(self, task_id: str) -> AgentTask | None:
@@ -320,7 +388,9 @@ class AgentQueue:
             return AgentTask.from_dict(json.loads(task_data))
         return None
 
-    async def update_heartbeat(self, task_id: str, progress: dict[str, Any] | None = None) -> None:
+    async def update_heartbeat(
+        self, task_id: str, progress: dict[str, Any] | None = None
+    ) -> None:
         """Update the heartbeat timestamp for a running task.
 
         Args:
@@ -432,6 +502,7 @@ class AgentQueue:
         paused_total_seconds = 0.0
         stale_heartbeat_checks = 0
         queued_warning_logged = False
+        queued_busy_warning_logged = False
         last_progress_log = 0.0  # timestamp of last progress log
         last_progress_payload: dict[str, Any] | None = None
 
@@ -454,7 +525,11 @@ class AgentQueue:
 
                 if task.status == AgentTaskStatus.COMPLETED:
                     return task.result
-                elif task.status in (AgentTaskStatus.FAILED, AgentTaskStatus.TIMEOUT, AgentTaskStatus.CANCELLED):
+                elif task.status in (
+                    AgentTaskStatus.FAILED,
+                    AgentTaskStatus.TIMEOUT,
+                    AgentTaskStatus.CANCELLED,
+                ):
                     error_msg = task.error or f"Task {task.status.value}"
                     raise RuntimeError(error_msg)
 
@@ -472,27 +547,36 @@ class AgentQueue:
                         )
                         queued_warning_logged = True
 
-                    if elapsed >= queued_timeout:
+                    if elapsed >= queued_timeout and not queued_busy_warning_logged:
                         workers = await self.worker_count()
                         queue_len = await self.queue_length()
                         running = await self.running_count()
-                        # Cancel the stuck task
-                        await self.cancel_task(task_id)
-                        if workers == 0:
+                        health = await self.get_worker_health()
+                        alive_running_tasks = int(health.get("alive_tasks") or 0)
+                        # Cancel only when there is no evidence of worker capacity
+                        # or in-flight task heartbeat. A busy worker can lose its
+                        # worker-level heartbeat briefly while the task heartbeat
+                        # remains fresh.
+                        if workers == 0 and running == 0 and alive_running_tasks == 0:
+                            await self.cancel_task(task_id)
                             raise RuntimeError(
                                 f"Task stuck in QUEUED for {elapsed:.0f}s — no agent workers are alive. "
                                 f"Check that the agent_worker process is running (supervisord)."
                             )
-                        else:
-                            raise RuntimeError(
-                                f"Task stuck in QUEUED for {elapsed:.0f}s — "
-                                f"{workers} worker(s) alive but all busy "
-                                f"(running={running}, queue_depth={queue_len}). "
-                                f"Try again later or scale up workers."
-                            )
+                        logger.warning(
+                            f"Task {task_id} still QUEUED after {elapsed:.0f}s — "
+                            f"worker_processes={workers}, running={running}, "
+                            f"alive_running_tasks={alive_running_tasks}, queue_depth={queue_len}; "
+                            "continuing to wait."
+                        )
+                        queued_busy_warning_logged = True
 
                 # --- RUNNING state monitoring ---
-                if task.status in (AgentTaskStatus.RUNNING, AgentTaskStatus.PAUSED):
+                if task.status in (
+                    AgentTaskStatus.RUNNING,
+                    AgentTaskStatus.PAUSED,
+                    AgentTaskStatus.CANCEL_REQUESTED,
+                ):
                     progress = await self.get_task_progress(task_id)
                     if progress and progress != last_progress_payload:
                         last_progress_payload = progress
@@ -509,7 +593,11 @@ class AgentQueue:
                             last_tool = progress.get("last_tool", "")
                             interactions = progress.get("interactions", 0)
                             # Strip MCP prefix for readability
-                            short_tool = last_tool.rsplit("__", 1)[-1] if "__" in last_tool else last_tool
+                            short_tool = (
+                                last_tool.rsplit("__", 1)[-1]
+                                if "__" in last_tool
+                                else last_tool
+                            )
                             logger.info(
                                 f"Task {task_id} progress: {tool_calls} tool calls, "
                                 f"{interactions} interactions, last_tool={short_tool}"
@@ -527,14 +615,20 @@ class AgentQueue:
                             if stale_heartbeat_checks >= 5:
                                 # Final re-check: worker may have submitted results between stale checks
                                 final_task = await self.get_task(task_id)
-                                if final_task and final_task.status == AgentTaskStatus.COMPLETED:
+                                if (
+                                    final_task
+                                    and final_task.status == AgentTaskStatus.COMPLETED
+                                ):
                                     return final_task.result
                                 elif final_task and final_task.status in (
                                     AgentTaskStatus.FAILED,
                                     AgentTaskStatus.TIMEOUT,
                                     AgentTaskStatus.CANCELLED,
                                 ):
-                                    error_msg = final_task.error or f"Task {final_task.status.value}"
+                                    error_msg = (
+                                        final_task.error
+                                        or f"Task {final_task.status.value}"
+                                    )
                                     raise RuntimeError(error_msg)
 
                                 logger.warning(
@@ -542,9 +636,20 @@ class AgentQueue:
                                 )
                                 task.status = AgentTaskStatus.FAILED
                                 task.completed_at = datetime.utcnow()
-                                task.error = "Worker heartbeat lost - worker may have crashed"
-                                await redis.hset(self.TASKS_KEY, task_id, json.dumps(task.to_dict()))
+                                task.error = (
+                                    "Worker heartbeat lost - worker may have crashed"
+                                )
+                                await redis.hset(
+                                    self.TASKS_KEY, task_id, json.dumps(task.to_dict())
+                                )
                                 await redis.srem(self.RUNNING_KEY, task_id)
+                                self._emit_agent_run_event(
+                                    task,
+                                    event_type="recovery",
+                                    level="error",
+                                    message=task.error,
+                                    payload={"status": task.status.value},
+                                )
                                 raise RuntimeError(task.error)
                         else:
                             stale_heartbeat_checks = 0
@@ -564,7 +669,10 @@ class AgentQueue:
         """
         redis = await self._ensure_connected()
         task = await self.get_task(task_id)
-        if not task or task.status not in (AgentTaskStatus.QUEUED, AgentTaskStatus.RUNNING):
+        if not task or task.status not in (
+            AgentTaskStatus.QUEUED,
+            AgentTaskStatus.RUNNING,
+        ):
             return False
 
         if task.status == AgentTaskStatus.QUEUED:
@@ -578,10 +686,20 @@ class AgentQueue:
 
         async with redis.pipeline(transaction=True) as pipe:
             pipe.hset(self.TASKS_KEY, task_id, json.dumps(task.to_dict()))
-            pipe.set(f"{self.PAUSE_PREFIX}{task_id}", "1", ex=max(task.timeout_seconds + 86400, 86400))
+            pipe.set(
+                f"{self.PAUSE_PREFIX}{task_id}",
+                "1",
+                ex=max(task.timeout_seconds + 86400, 86400),
+            )
             await pipe.execute()
 
         logger.info(f"Paused agent task {task_id}")
+        self._emit_agent_run_event(
+            task,
+            event_type="pause",
+            message="Agent task pause requested.",
+            payload={"paused_from": task.telemetry.get("paused_from")},
+        )
         return True
 
     async def resume_task(self, task_id: str) -> bool:
@@ -591,7 +709,11 @@ class AgentQueue:
         if not task or task.status != AgentTaskStatus.PAUSED:
             return False
 
-        was_running = bool(task.worker_id and task.started_at and await redis.sismember(self.RUNNING_KEY, task_id))
+        was_running = bool(
+            task.worker_id
+            and task.started_at
+            and await redis.sismember(self.RUNNING_KEY, task_id)
+        )
         task.status = AgentTaskStatus.RUNNING if was_running else AgentTaskStatus.QUEUED
         task.telemetry = {
             **(task.telemetry or {}),
@@ -606,6 +728,12 @@ class AgentQueue:
             await pipe.execute()
 
         logger.info(f"Resumed agent task {task_id} as {task.status.value}")
+        self._emit_agent_run_event(
+            task,
+            event_type="resume",
+            message=f"Agent task resumed as {task.status.value}.",
+            payload={"status": task.status.value},
+        )
         return True
 
     async def cancel_task(self, task_id: str) -> bool:
@@ -616,16 +744,41 @@ class AgentQueue:
         await redis.lrem(self.QUEUE_KEY, 0, task_id)
 
         task = await self.get_task(task_id)
-        if task and task.status in (AgentTaskStatus.QUEUED, AgentTaskStatus.RUNNING, AgentTaskStatus.PAUSED):
-            task.status = AgentTaskStatus.CANCELLED
-            task.completed_at = datetime.utcnow()
-            task.error = "Task cancelled"
-            await redis.hset(self.TASKS_KEY, task_id, json.dumps(task.to_dict()))
-            await redis.srem(self.RUNNING_KEY, task_id)
-            # Set cancel flag for worker to detect
+        if task and task.status in (
+            AgentTaskStatus.QUEUED,
+            AgentTaskStatus.RUNNING,
+            AgentTaskStatus.PAUSED,
+            AgentTaskStatus.CANCEL_REQUESTED,
+        ):
+            previous_status = task.status.value
+            is_running = await redis.sismember(self.RUNNING_KEY, task_id)
             await redis.set(f"{self.CANCEL_PREFIX}{task_id}", "1", ex=3600)
             await redis.delete(f"{self.PAUSE_PREFIX}{task_id}")
-            logger.info(f"Cancelled agent task {task_id}")
+
+            if is_running and task.status != AgentTaskStatus.QUEUED:
+                task.status = AgentTaskStatus.CANCEL_REQUESTED
+                task.error = "Task cancellation requested"
+                task.telemetry = {
+                    **(task.telemetry or {}),
+                    "cancel_requested_at": datetime.utcnow().isoformat(),
+                    "cancelled_from": previous_status,
+                }
+                await redis.hset(self.TASKS_KEY, task_id, json.dumps(task.to_dict()))
+                logger.info(f"Requested cancellation for running agent task {task_id}")
+            else:
+                task.status = AgentTaskStatus.CANCELLED
+                task.completed_at = datetime.utcnow()
+                task.error = "Task cancelled"
+                await redis.hset(self.TASKS_KEY, task_id, json.dumps(task.to_dict()))
+                await redis.srem(self.RUNNING_KEY, task_id)
+                logger.info(f"Cancelled queued agent task {task_id}")
+
+            self._emit_agent_run_event(
+                task,
+                event_type="cancel",
+                message="Agent task cancellation requested.",
+                payload={"cancelled_from": previous_status},
+            )
             return True
         return False
 
@@ -667,11 +820,33 @@ class AgentQueue:
                 if task_data:
                     task = AgentTask.from_dict(json.loads(task_data))
                     if task.status == AgentTaskStatus.PAUSED:
-                        logger.info(f"Worker {self._worker_id} skipped paused task {task_id}")
+                        logger.info(
+                            f"Worker {self._worker_id} skipped paused task {task_id}"
+                        )
                         return None
                     if task.status != AgentTaskStatus.QUEUED:
-                        logger.info(f"Worker {self._worker_id} skipped task {task_id} in status {task.status.value}")
+                        logger.info(
+                            f"Worker {self._worker_id} skipped task {task_id} in status {task.status.value}"
+                        )
                         return None
+
+                    invalid = await self._queued_task_invalid_reason(task)
+                    if invalid:
+                        status, _, message = invalid
+                        await self._finish_task_for_cleanup(
+                            redis,
+                            task,
+                            status,
+                            message,
+                        )
+                        logger.warning(
+                            "Worker %s skipped invalid queued task %s: %s",
+                            self._worker_id,
+                            task_id,
+                            message,
+                        )
+                        return None
+
                     task.status = AgentTaskStatus.RUNNING
                     task.worker_id = self._worker_id
                     task.started_at = datetime.utcnow()
@@ -688,7 +863,9 @@ class AgentQueue:
                     logger.warning(f"Task {task_id} dequeued but not found in hash")
                     return None
             except Exception as e:
-                logger.error(f"Failed after dequeue for {task_id}: {e}. Re-pushing to queue.")
+                logger.error(
+                    f"Failed after dequeue for {task_id}: {e}. Re-pushing to queue."
+                )
                 try:
                     await redis.lpush(self.QUEUE_KEY, task_id)
                 except Exception as re_err:
@@ -740,7 +917,12 @@ class AgentQueue:
                     await redis.srem(self.RUNNING_KEY, task_id)
                     return
 
-            task.status = AgentTaskStatus.COMPLETED if success else AgentTaskStatus.FAILED
+            if task.status == AgentTaskStatus.CANCEL_REQUESTED and not success:
+                task.status = AgentTaskStatus.CANCELLED
+            else:
+                task.status = (
+                    AgentTaskStatus.COMPLETED if success else AgentTaskStatus.FAILED
+                )
             task.completed_at = datetime.utcnow()
             task.result = result
             task.error = error
@@ -758,7 +940,9 @@ class AgentQueue:
                     break
                 except Exception as e:
                     if attempt < 3:
-                        logger.warning(f"submit_result attempt {attempt} failed for {task_id}: {e}")
+                        logger.warning(
+                            f"submit_result attempt {attempt} failed for {task_id}: {e}"
+                        )
                         await asyncio.sleep(0.5 * attempt)
                         redis = await self._ensure_connected()
                     else:
@@ -808,7 +992,10 @@ class AgentQueue:
                 age = (now - task.created_at).total_seconds()
                 if oldest_queued_age_seconds is None or age > oldest_queued_age_seconds:
                     oldest_queued_age_seconds = age
-            elif task.status == AgentTaskStatus.RUNNING and not await self.check_heartbeat(task_id):
+            elif task.status in (
+                AgentTaskStatus.RUNNING,
+                AgentTaskStatus.CANCEL_REQUESTED,
+            ) and not await self.check_heartbeat(task_id):
                 stale_running += 1
 
         return {
@@ -852,12 +1039,22 @@ class AgentQueue:
             summaries.append(
                 {
                     "id": task_id,
-                    "status": task.status.value if task else AgentTaskStatus.RUNNING.value,
+                    "status": (
+                        task.status.value if task else AgentTaskStatus.RUNNING.value
+                    ),
                     "worker_id": task.worker_id if task else None,
                     "agent_type": task.agent_type if task else None,
                     "operation_type": task.operation_type if task else None,
-                    "created_at": task.created_at.isoformat() if task and task.created_at else None,
-                    "started_at": task.started_at.isoformat() if task and task.started_at else None,
+                    "created_at": (
+                        task.created_at.isoformat()
+                        if task and task.created_at
+                        else None
+                    ),
+                    "started_at": (
+                        task.started_at.isoformat()
+                        if task and task.started_at
+                        else None
+                    ),
                     "timeout_seconds": task.timeout_seconds if task else None,
                     "heartbeat_alive": heartbeat_alive,
                     "owner_type": task.owner_type if task else None,
@@ -865,7 +1062,8 @@ class AgentQueue:
                     "owner_label": task.owner_label if task else None,
                     "owner_status": owner_state.get("status") if owner_state else None,
                     "owner_terminal": bool(owner_state and owner_state.get("terminal")),
-                    "orphaned": (not heartbeat_alive) or bool(owner_state and owner_state.get("terminal")),
+                    "orphaned": (not heartbeat_alive)
+                    or bool(owner_state and owner_state.get("terminal")),
                     "progress": progress_summary,
                 }
             )
@@ -913,7 +1111,12 @@ class AgentQueue:
             from sqlmodel import Session
 
             from orchestrator.api.db import engine
-            from orchestrator.api.models_db import AgentRun, AutoPilotSession, AutonomousAgentWorkItem, AutonomousMission
+            from orchestrator.api.models_db import (
+                AgentRun,
+                AutoPilotSession,
+                AutonomousAgentWorkItem,
+                AutonomousMission,
+            )
 
             with Session(engine) as session:
                 if task.owner_type == "autopilot":
@@ -974,8 +1177,81 @@ class AgentQueue:
         await redis.set(f"{self.CANCEL_PREFIX}{task.id}", "1", ex=3600)
         await redis.delete(f"{self.PAUSE_PREFIX}{task.id}")
         await redis.delete(f"{self.HEARTBEAT_PREFIX}{task.id}")
+        self._emit_agent_run_event(
+            task,
+            event_type="recovery",
+            level="warning" if status != AgentTaskStatus.CANCELLED else "info",
+            message=error,
+            payload={"status": status.value},
+        )
 
-    async def cleanup_orphaned_and_stale_tasks(self, max_age_minutes: int = 45) -> dict[str, int]:
+    def _stale_ownerless_queue_minutes(self) -> int:
+        raw = os.environ.get("AGENT_QUEUE_STALE_OWNERLESS_MINUTES", "")
+        try:
+            return max(1, int(raw)) if raw else self.DEFAULT_STALE_OWNERLESS_QUEUE_MINUTES
+        except ValueError:
+            return self.DEFAULT_STALE_OWNERLESS_QUEUE_MINUTES
+
+    def _task_age_minutes(self, task: AgentTask, now: datetime | None = None) -> float:
+        reference = now or datetime.utcnow()
+        return (
+            (reference - task.created_at).total_seconds() / 60
+            if task.created_at
+            else 0.0
+        )
+
+    def _is_stale_ownerless_queued(
+        self,
+        task: AgentTask,
+        now: datetime | None = None,
+        max_age_minutes: int | None = None,
+    ) -> bool:
+        if task.status != AgentTaskStatus.QUEUED:
+            return False
+        if task.owner_type or task.owner_id:
+            return False
+        age_limit = (
+            max_age_minutes
+            if max_age_minutes is not None
+            else self._stale_ownerless_queue_minutes()
+        )
+        return self._task_age_minutes(task, now) > max(1, int(age_limit))
+
+    async def _queued_task_invalid_reason(
+        self,
+        task: AgentTask,
+        now: datetime | None = None,
+        max_age_minutes: int | None = None,
+    ) -> tuple[AgentTaskStatus, str, str] | None:
+        owner_state = await self._get_owner_state(task)
+        if owner_state and owner_state.get("terminal"):
+            owner_status = owner_state.get("status")
+            status = (
+                AgentTaskStatus.CANCELLED
+                if owner_status == "cancelled"
+                else AgentTaskStatus.FAILED
+            )
+            return (
+                status,
+                "terminal_owner",
+                f"Agent task stopped because owner {task.owner_type}:{task.owner_id} is {owner_status}",
+            )
+
+        if self._is_stale_ownerless_queued(task, now, max_age_minutes):
+            return (
+                AgentTaskStatus.CANCELLED,
+                "stale_ownerless_queued",
+                (
+                    "Stale ownerless queued task cancelled so linked agent runs "
+                    "can continue"
+                ),
+            )
+
+        return None
+
+    async def cleanup_orphaned_and_stale_tasks(
+        self, max_age_minutes: int = 45
+    ) -> dict[str, int]:
         """Clean tasks whose worker, owner, or timeout state is no longer valid."""
         redis = await self._ensure_connected()
         now = datetime.utcnow()
@@ -985,6 +1261,7 @@ class AgentQueue:
             "timed_out": 0,
             "terminal_owner": 0,
             "orphaned_queued": 0,
+            "stale_ownerless_queued": 0,
             "missing_task_refs": 0,
             "skipped_active": 0,
         }
@@ -1001,7 +1278,11 @@ class AgentQueue:
                 owner_state = await self._get_owner_state(task)
                 if owner_state and owner_state.get("terminal"):
                     owner_status = owner_state.get("status")
-                    status = AgentTaskStatus.CANCELLED if owner_status == "cancelled" else AgentTaskStatus.FAILED
+                    status = (
+                        AgentTaskStatus.CANCELLED
+                        if owner_status == "cancelled"
+                        else AgentTaskStatus.FAILED
+                    )
                     await self._finish_task_for_cleanup(
                         redis,
                         task,
@@ -1013,7 +1294,10 @@ class AgentQueue:
                     counts["skipped_active"] += 1
                 continue
 
-            if task.status != AgentTaskStatus.RUNNING:
+            if task.status not in (
+                AgentTaskStatus.RUNNING,
+                AgentTaskStatus.CANCEL_REQUESTED,
+            ):
                 await redis.srem(self.RUNNING_KEY, task_id)
                 counts["cancelled_orphaned"] += 1
                 continue
@@ -1027,7 +1311,11 @@ class AgentQueue:
 
             if owner_terminal:
                 owner_status = owner_state.get("status") if owner_state else "terminal"
-                status = AgentTaskStatus.CANCELLED if owner_status == "cancelled" else AgentTaskStatus.FAILED
+                status = (
+                    AgentTaskStatus.CANCELLED
+                    if owner_status == "cancelled"
+                    else AgentTaskStatus.FAILED
+                )
                 await self._finish_task_for_cleanup(
                     redis,
                     task,
@@ -1075,21 +1363,22 @@ class AgentQueue:
             if task.status not in (AgentTaskStatus.QUEUED, AgentTaskStatus.PAUSED):
                 continue
 
-            owner_state = await self._get_owner_state(task)
-            if owner_state and owner_state.get("terminal"):
-                owner_status = owner_state.get("status")
-                status = AgentTaskStatus.CANCELLED if owner_status == "cancelled" else AgentTaskStatus.FAILED
+            invalid = await self._queued_task_invalid_reason(
+                task, now, max_age_minutes
+            )
+            if invalid:
+                status, count_key, message = invalid
                 await self._finish_task_for_cleanup(
                     redis,
                     task,
                     status,
-                    f"Agent task stopped because owner {task.owner_type}:{task.owner_id} is {owner_status}",
+                    message,
                 )
-                counts["terminal_owner"] += 1
+                counts[count_key] += 1
                 continue
 
             if task.status == AgentTaskStatus.QUEUED and task_id not in queue_set:
-                age_minutes = (now - task.created_at).total_seconds() / 60 if task.created_at else 0
+                age_minutes = self._task_age_minutes(task, now)
                 if age_minutes > 5:
                     await self._finish_task_for_cleanup(
                         redis,
@@ -1121,24 +1410,37 @@ class AgentQueue:
             task = await self.get_task(task_id)
             if task and task.status == AgentTaskStatus.RUNNING:
                 if await self.check_heartbeat(task_id, max_stale_seconds=120):
-                    logger.info(f"Skipping running task {task_id}: heartbeat is still fresh")
+                    logger.info(
+                        f"Skipping running task {task_id}: heartbeat is still fresh"
+                    )
                     continue
-                if task.started_at and (now - task.started_at).total_seconds() < grace_seconds:
-                    logger.info(f"Skipping newly-started running task {task_id}: within startup grace period")
+                if (
+                    task.started_at
+                    and (now - task.started_at).total_seconds() < grace_seconds
+                ):
+                    logger.info(
+                        f"Skipping newly-started running task {task_id}: within startup grace period"
+                    )
                     continue
                 task.status = AgentTaskStatus.FAILED
                 task.completed_at = now
-                task.error = "Orphaned task cleaned up on startup — previous worker died"
+                task.error = (
+                    "Orphaned task cleaned up on startup — previous worker died"
+                )
                 await redis.hset(self.TASKS_KEY, task_id, json.dumps(task.to_dict()))
                 await redis.srem(self.RUNNING_KEY, task_id)
                 await redis.delete(f"{self.HEARTBEAT_PREFIX}{task_id}")
                 cleaned += 1
-                logger.warning(f"Cleaned orphaned task {task_id} (started={task.started_at})")
+                logger.warning(
+                    f"Cleaned orphaned task {task_id} (started={task.started_at})"
+                )
 
         cleanup_counts = await self.cleanup_orphaned_and_stale_tasks()
         cleaned += sum(v for k, v in cleanup_counts.items() if k != "skipped_active")
         if cleaned:
-            logger.info(f"Startup cleanup: cleared {cleaned} orphaned/stale agent tasks")
+            logger.info(
+                f"Startup cleanup: cleared {cleaned} orphaned/stale agent tasks"
+            )
         return cleaned
 
     async def flush_queue(self) -> dict:
@@ -1177,7 +1479,9 @@ class AgentQueue:
             await redis.delete(f"{self.HEARTBEAT_PREFIX}{task_id}")
             running_failed += 1
 
-        logger.info(f"Queue flushed: {queued_cancelled} queued cancelled, {running_failed} running failed")
+        logger.info(
+            f"Queue flushed: {queued_cancelled} queued cancelled, {running_failed} running failed"
+        )
         return {
             "queued_cancelled": queued_cancelled,
             "running_failed": running_failed,
@@ -1189,7 +1493,9 @@ class AgentQueue:
         Default 45 min, provides buffer above 30-min agent timeout.
         Also detects tasks in QUEUED status that are missing from the queue list.
         """
-        counts = await self.cleanup_orphaned_and_stale_tasks(max_age_minutes=max_age_minutes)
+        counts = await self.cleanup_orphaned_and_stale_tasks(
+            max_age_minutes=max_age_minutes
+        )
         cleaned = sum(v for k, v in counts.items() if k != "skipped_active")
         if cleaned:
             logger.warning("Cleaned agent queue tasks: %s", counts)
@@ -1218,7 +1524,9 @@ class AgentQueue:
                 continue
 
         if removed:
-            logger.info(f"Cleaned up {removed} completed tasks older than {max_age_hours}h")
+            logger.info(
+                f"Cleaned up {removed} completed tasks older than {max_age_hours}h"
+            )
         return removed
 
     async def start_cleanup_loop(self, interval_seconds: int = 300):
@@ -1262,7 +1570,7 @@ def should_use_agent_queue() -> bool:
     """Check if Redis is available and agent queue mode is enabled."""
     if not REDIS_AVAILABLE:
         return False
-    # Enable by default if Redis URL is set
+    # Agent queue is now legacy/opt-in. Temporal activities execute agents directly.
     redis_url = os.environ.get("REDIS_URL", "")
-    use_queue = os.environ.get("USE_AGENT_QUEUE", "true").lower() == "true"
+    use_queue = os.environ.get("USE_AGENT_QUEUE", "false").lower() == "true"
     return bool(redis_url) and use_queue

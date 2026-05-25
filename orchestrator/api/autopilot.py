@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 MAX_TRACKED_PIPELINES = 5
 MAX_ACTIVE_SESSIONS_PER_USER = 2
+AUTOPILOT_STALE_LIVE_SECONDS = 120
 
 router = APIRouter(prefix="/autopilot", tags=["autopilot"])
 
@@ -271,6 +272,202 @@ def _sweep_done_tasks():
         logger.debug(f"Swept {len(done_keys)} completed Auto Pilot tasks")
 
 
+def _parse_live_timestamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None
+
+
+def _active_pipeline_entry(session_id: str):
+    entry = _running_pipelines.get(session_id)
+    if entry and not entry[0].done():
+        return entry
+    return None
+
+
+def _session_process_cleanup(session_id: str) -> dict[str, Any]:
+    try:
+        from orchestrator.utils.browser_cleanup import kill_autopilot_process_tree
+
+        return kill_autopilot_process_tree(session_id)
+    except Exception as exc:
+        logger.warning("Failed AutoPilot process cleanup for %s: %s", session_id, exc)
+        return {"session_id": session_id, "matched": 0, "terminated": 0, "killed": 0, "pids": [], "error": str(exc)}
+
+
+async def _session_process_cleanup_async(session_id: str) -> dict[str, Any]:
+    return await asyncio.to_thread(_session_process_cleanup, session_id)
+
+
+def _is_stale_live_browser(ap_session: AutoPilotSession, now: datetime | None = None) -> bool:
+    if ap_session.status not in {"pending", "running", "awaiting_input", "paused"}:
+        return False
+    live = dict((ap_session.config or {}).get("live_browser") or {})
+    if not live.get("active"):
+        return False
+    if live.get("agent_task_id"):
+        return False
+    if find_session_processes(ap_session.id):
+        return False
+
+    updated_at = _parse_live_timestamp(live.get("updated_at"))
+    if not updated_at:
+        return False
+    now = now or datetime.utcnow()
+    age_seconds = (now - updated_at).total_seconds()
+    if age_seconds < AUTOPILOT_STALE_LIVE_SECONDS:
+        return False
+
+    return str(live.get("status") or "").lower() in {"starting", "running", "queued", "tool_use"} or bool(
+        live.get("message")
+    )
+
+
+async def _live_agent_task_is_stale(live: dict[str, Any]) -> bool:
+    task_id = live.get("agent_task_id")
+    if not task_id:
+        return False
+    try:
+        from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue
+
+        if not REDIS_AVAILABLE:
+            return False
+        queue = get_agent_queue()
+        await queue.connect()
+        task = await queue.get_task(str(task_id))
+        if not task:
+            return True
+        status = task.status.value
+        if status in {"completed", "failed", "timeout", "cancelled"}:
+            return True
+        if status in {"running", "paused", "cancel_requested"}:
+            return not await queue.check_heartbeat(str(task_id), max_stale_seconds=120)
+        return False
+    except Exception as exc:
+        logger.debug("Unable to inspect AutoPilot live agent task %s: %s", task_id, exc)
+        return False
+
+
+async def _is_stale_live_browser_async(
+    ap_session: AutoPilotSession,
+    now: datetime | None = None,
+) -> bool:
+    if ap_session.status not in {"pending", "running", "awaiting_input", "paused"}:
+        return False
+    live = dict((ap_session.config or {}).get("live_browser") or {})
+    if not live.get("active"):
+        return False
+    if find_session_processes(ap_session.id):
+        return False
+
+    updated_at = _parse_live_timestamp(live.get("updated_at"))
+    if not updated_at:
+        return False
+    now = now or datetime.utcnow()
+    if (now - updated_at).total_seconds() < AUTOPILOT_STALE_LIVE_SECONDS:
+        return False
+
+    if live.get("agent_task_id"):
+        return await _live_agent_task_is_stale(live)
+    return str(live.get("status") or "").lower() in {"starting", "running", "queued", "tool_use"} or bool(
+        live.get("message")
+    )
+
+
+def find_session_processes(session_id: str) -> list[int]:
+    try:
+        from orchestrator.utils.browser_cleanup import find_autopilot_process_tree
+
+        return sorted(find_autopilot_process_tree(session_id))
+    except Exception as exc:
+        logger.debug("Failed to inspect AutoPilot processes for %s: %s", session_id, exc)
+        return []
+
+
+def _mark_session_interrupted(
+    db: Session,
+    ap_session: AutoPilotSession,
+    reason: str,
+    *,
+    cleanup: dict[str, Any] | None = None,
+) -> bool:
+    if ap_session.status not in {"pending", "running", "awaiting_input", "paused"}:
+        return False
+
+    entry = _running_pipelines.pop(ap_session.id, None)
+    if entry and not entry[0].done():
+        try:
+            entry[1].cancel()
+        except Exception as exc:
+            logger.debug("Failed to signal stale AutoPilot pipeline %s: %s", ap_session.id, exc)
+        entry[0].cancel()
+
+    now = datetime.utcnow()
+    config = dict(ap_session.config or {})
+    live = dict(config.get("live_browser") or {})
+    live.update(
+        {
+            "active": False,
+            "status": "interrupted",
+            "message": reason,
+            "cleanup": cleanup or {},
+            "updated_at": now.isoformat(),
+        }
+    )
+    config["live_browser"] = live
+    ap_session.config = config
+    ap_session.status = "failed"
+    ap_session.error_message = reason
+    ap_session.completed_at = now
+    db.add(ap_session)
+
+    stmt = (
+        select(AutoPilotPhase)
+        .where(AutoPilotPhase.session_id == ap_session.id)
+        .where(AutoPilotPhase.status.in_(["running", "pending", "paused"]))
+    )
+    for phase in db.exec(stmt).all():
+        if phase.status in {"running", "paused"}:
+            phase.status = "failed"
+            phase.error_message = reason
+            phase.completed_at = now
+            db.add(phase)
+        elif phase.status == "pending":
+            phase.status = "cancelled"
+            phase.error_message = reason
+            phase.completed_at = now
+            db.add(phase)
+
+    return True
+
+
+def _reconcile_stale_session(db: Session, ap_session: AutoPilotSession) -> bool:
+    if not _is_stale_live_browser(ap_session):
+        return False
+    cleanup = _session_process_cleanup(ap_session.id)
+    reason = "AutoPilot runtime became stale: no active browser slot, agent task, or owned browser process was found."
+    changed = _mark_session_interrupted(db, ap_session, reason, cleanup=cleanup)
+    if changed:
+        db.commit()
+        logger.warning("Reconciled stale AutoPilot session %s: %s", ap_session.id, cleanup)
+    return changed
+
+
+async def _reconcile_stale_session_async(db: Session, ap_session: AutoPilotSession) -> bool:
+    if not await _is_stale_live_browser_async(ap_session):
+        return False
+    cleanup = await _session_process_cleanup_async(ap_session.id)
+    reason = "AutoPilot runtime became stale: no active browser slot, agent task, or owned browser process was found."
+    changed = _mark_session_interrupted(db, ap_session, reason, cleanup=cleanup)
+    if changed:
+        db.commit()
+        logger.warning("Reconciled stale AutoPilot session %s: %s", ap_session.id, cleanup)
+    return changed
+
+
 def _count_user_active_sessions(user_key: str) -> int:
     """Count active (non-done) sessions for a user."""
     return sum(1 for _, (task, _, uk) in _running_pipelines.items() if uk == user_key and not task.done())
@@ -393,6 +590,79 @@ def _collect_live_artifacts(
     )
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _short_tool_label(tool_name: str | None) -> str:
+    if not tool_name:
+        return ""
+    if "__" in tool_name:
+        return tool_name.rsplit("__", 1)[-1].replace("_", " ")
+    return tool_name.replace("_", " ")
+
+
+async def _merge_live_agent_progress(live: dict[str, Any]) -> dict[str, Any]:
+    """Fill live state from Redis heartbeat telemetry when DB progress lags."""
+    task_id = live.get("agent_task_id")
+    if not task_id:
+        return live
+
+    try:
+        from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue
+
+        if not REDIS_AVAILABLE:
+            return live
+
+        queue = get_agent_queue()
+        await queue.connect()
+        progress = await queue.get_task_progress(str(task_id)) or {}
+        task = await queue.get_task(str(task_id))
+        telemetry = task.telemetry if task and isinstance(task.telemetry, dict) else {}
+    except Exception as exc:
+        logger.debug("Unable to read live AutoPilot agent progress for %s: %s", task_id, exc)
+        return live
+
+    source = progress or telemetry
+    if not source:
+        return live
+
+    merged = dict(live)
+    for key in ("tool_calls", "browser_tool_calls", "interactions"):
+        merged[key] = max(_safe_int(merged.get(key)), _safe_int(source.get(key)))
+
+    last_tool = str(source.get("last_tool") or merged.get("last_tool") or "")
+    if last_tool and (
+        not merged.get("last_tool")
+        or _safe_int(source.get("tool_calls")) >= _safe_int(merged.get("tool_calls"))
+    ):
+        label = str(source.get("last_tool_label") or _short_tool_label(last_tool))
+        merged["last_tool"] = last_tool
+        merged["last_tool_label"] = label
+        recent_tools = list(merged.get("recent_tools") or [])
+        if not recent_tools or recent_tools[-1].get("name") != last_tool:
+            recent_tools.append(
+                {
+                    "name": last_tool,
+                    "label": label,
+                    "at": source.get("updated_at") or datetime.utcnow().isoformat(),
+                }
+            )
+            merged["recent_tools"] = recent_tools[-12:]
+
+    if source.get("phase") and not source.get("status"):
+        merged["status"] = source["phase"]
+
+    for key in ("status", "message", "current_stage", "activity_label", "updated_at"):
+        if source.get(key):
+            merged[key] = source[key]
+
+    return merged
+
+
 def _task_artifact_summary(task: AutoPilotTestTask) -> tuple[int, bool]:
     run_dir = _fallback_task_run_dir(task)
     if not run_dir or not run_dir.exists():
@@ -449,6 +719,8 @@ def _session_to_response(
     session: Session | None = None,
 ) -> AutoPilotSessionResponse:
     """Convert a DB session model to the API response model."""
+    if session is not None:
+        _reconcile_stale_session(session, ap_session)
     can_resume, resume_reason, failed_phase = _get_resume_metadata(ap_session, session)
     return AutoPilotSessionResponse(
         id=ap_session.id,
@@ -885,6 +1157,63 @@ async def list_sessions(
     return [_session_to_response(s, session) for s in sessions]
 
 
+@router.post("/recover-orphans", response_model=dict)
+async def recover_orphaned_autopilot_runtime(
+    session: Session = Depends(get_session),
+):
+    """Clean AutoPilot-owned orphan processes and reconcile stale running sessions."""
+    try:
+        from orchestrator.utils.browser_cleanup import find_autopilot_session_ids_in_processes
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AutoPilot cleanup unavailable: {exc}") from exc
+
+    process_session_ids = find_autopilot_session_ids_in_processes()
+    candidate_ids = set(process_session_ids)
+    active_statuses = {"pending", "running", "awaiting_input", "paused"}
+    stmt = select(AutoPilotSession).where(
+        AutoPilotSession.status.in_(["pending", "running", "awaiting_input", "paused", "failed", "cancelled"])
+    )
+    db_sessions = {item.id: item for item in session.exec(stmt).all()}
+    candidate_ids.update(db_sessions.keys())
+
+    cleanup_results: list[dict[str, Any]] = []
+    reconciled: list[str] = []
+    for session_id in sorted(candidate_ids):
+        ap_session = db_sessions.get(session_id) or session.get(AutoPilotSession, session_id)
+        should_cleanup = False
+        if ap_session is None:
+            should_cleanup = session_id in process_session_ids
+        elif ap_session.status not in active_statuses:
+            should_cleanup = session_id in process_session_ids
+        elif await _is_stale_live_browser_async(ap_session):
+            should_cleanup = True
+
+        cleanup: dict[str, Any] | None = None
+        if should_cleanup:
+            cleanup = await _session_process_cleanup_async(session_id)
+            cleanup_results.append(cleanup)
+
+        if ap_session and ap_session.status in active_statuses and await _is_stale_live_browser_async(ap_session):
+            reason = "AutoPilot runtime was recovered after stale live browser state."
+            if _mark_session_interrupted(session, ap_session, reason, cleanup=cleanup):
+                reconciled.append(session_id)
+
+    if reconciled:
+        session.commit()
+
+    killed = sum(int(item.get("killed") or 0) for item in cleanup_results)
+    terminated = sum(int(item.get("terminated") or 0) for item in cleanup_results)
+    matched = sum(int(item.get("matched") or 0) for item in cleanup_results)
+    return {
+        "status": "ok",
+        "matched_processes": matched,
+        "terminated_processes": terminated,
+        "killed_processes": killed,
+        "reconciled_sessions": reconciled,
+        "cleanup": cleanup_results,
+    }
+
+
 @router.get("/{session_id}", response_model=AutoPilotSessionResponse)
 async def get_session_detail(
     session_id: str,
@@ -907,7 +1236,8 @@ async def get_live_browser_state(
     if not ap_session:
         raise HTTPException(status_code=404, detail="Auto Pilot session not found")
 
-    live = dict((ap_session.config or {}).get("live_browser") or {})
+    await _reconcile_stale_session_async(session, ap_session)
+    live = await _merge_live_agent_progress(dict((ap_session.config or {}).get("live_browser") or {}))
     phase = live.get("phase") or ap_session.current_phase
     exploration_session_id = live.get("exploration_session_id")
     run_id = live.get("run_id")
@@ -945,9 +1275,9 @@ async def get_live_browser_state(
         agent_task_id=live.get("agent_task_id"),
         last_tool=live.get("last_tool"),
         last_tool_label=live.get("last_tool_label"),
-        tool_calls=int(live.get("tool_calls") or 0),
-        browser_tool_calls=int(live.get("browser_tool_calls") or 0),
-        interactions=int(live.get("interactions") or 0),
+        tool_calls=_safe_int(live.get("tool_calls")),
+        browser_tool_calls=_safe_int(live.get("browser_tool_calls")),
+        interactions=_safe_int(live.get("interactions")),
         recent_tools=list(live.get("recent_tools") or []),
         artifacts=artifacts,
         latest_image=latest_image,
@@ -955,11 +1285,12 @@ async def get_live_browser_state(
     )
 
 
-async def _cancel_live_agent_task(ap_session: AutoPilotSession, reason: str) -> None:
+async def _cancel_live_agent_task(ap_session: AutoPilotSession, reason: str) -> dict[str, Any]:
     """Cancel any Redis agent task linked to this session's live browser state."""
     config = dict(ap_session.config or {})
     live = dict(config.get("live_browser") or {})
     task_id = live.get("agent_task_id")
+    result: dict[str, Any] = {"agent_task_cancel": "not_found", "cleanup": None}
 
     if task_id:
         try:
@@ -968,9 +1299,27 @@ async def _cancel_live_agent_task(ap_session: AutoPilotSession, reason: str) -> 
             if REDIS_AVAILABLE and should_use_agent_queue():
                 queue = get_agent_queue()
                 await queue.connect()
-                await queue.cancel_task(str(task_id))
+                before = await queue.get_task(str(task_id))
+                cancelled = await queue.cancel_task(str(task_id))
+                after = await queue.get_task(str(task_id))
+                if cancelled and after:
+                    status = after.status.value
+                    if status == "cancel_requested":
+                        result["agent_task_cancel"] = "running_cancel_requested"
+                    elif status == "cancelled":
+                        result["agent_task_cancel"] = "cancelled"
+                    elif status in {"completed", "failed", "timeout"}:
+                        result["agent_task_cancel"] = f"already_{status}"
+                    else:
+                        result["agent_task_cancel"] = status
+                elif before and before.status.value in {"completed", "failed", "timeout", "cancelled"}:
+                    result["agent_task_cancel"] = "already_terminal"
         except Exception as exc:
             logger.warning("Failed to cancel AutoPilot agent task %s for %s: %s", task_id, ap_session.id, exc)
+            result["agent_task_cancel"] = "error"
+            result["error"] = str(exc)
+
+    result["cleanup"] = await _session_process_cleanup_async(ap_session.id)
 
     if live:
         live.update(
@@ -978,11 +1327,13 @@ async def _cancel_live_agent_task(ap_session: AutoPilotSession, reason: str) -> 
                 "active": False,
                 "status": reason,
                 "message": f"Auto Pilot {reason}",
+                "cleanup": result["cleanup"],
                 "updated_at": datetime.utcnow().isoformat(),
             }
         )
         config["live_browser"] = live
         ap_session.config = config
+    return result
 
 
 @router.get("/{session_id}/phases", response_model=list[AutoPilotPhaseResponse])
@@ -1327,9 +1678,13 @@ async def cancel_session(
         except Exception as e:
             logger.warning(f"Error calling pipeline.cancel() for {session_id}: {e}")
         task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
         _running_pipelines.pop(session_id, None)
 
-    await _cancel_live_agent_task(ap_session, "cancelled")
+    cancel_result = await _cancel_live_agent_task(ap_session, "cancelled")
 
     # Update session
     now = datetime.utcnow()
@@ -1399,7 +1754,7 @@ async def cancel_session(
     session.commit()
 
     logger.info(f"Auto Pilot {session_id} cancelled")
-    return {"status": "cancelled", "session_id": session_id}
+    return {"status": "cancelled", "session_id": session_id, **cancel_result}
 
 
 @router.post("/{session_id}/test-tasks/{task_id}/stop", response_model=dict)
@@ -1531,6 +1886,17 @@ async def resume_interrupted_sessions() -> int:
         for ap_session in interrupted:
             try:
                 logger.info(f"Resuming interrupted Auto Pilot: {ap_session.id}")
+                cleanup = await _session_process_cleanup_async(ap_session.id)
+                if await _is_stale_live_browser_async(ap_session):
+                    reason = "AutoPilot runtime was stale during backend startup recovery."
+                    if _mark_session_interrupted(db, ap_session, reason, cleanup=cleanup):
+                        db.commit()
+                        logger.warning(
+                            "Marked stale AutoPilot %s failed during startup recovery: %s",
+                            ap_session.id,
+                            cleanup,
+                        )
+                    continue
                 user_key = ap_session.triggered_by or "system"
                 _reset_resumable_state(db, ap_session, _get_failed_phase(db, ap_session.id))
                 _launch_pipeline(ap_session.id, ap_session.project_id, user_key)

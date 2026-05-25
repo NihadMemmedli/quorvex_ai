@@ -1,0 +1,603 @@
+1
+00:00:00,500 --> 00:00:03,871
+If your team already uses Playwright, the hard part is not
+
+2
+00:00:03,871 --> 00:00:07,242
+believing that automated tests matter.
+
+3
+00:00:07,242 --> 00:00:10,613
+The hard part is writing enough useful coverage without spending
+
+4
+00:00:10,613 --> 00:00:13,983
+every sprint inside selectors, waits, setup code, and flaky
+
+5
+00:00:13,983 --> 00:00:17,354
+failures.
+
+6
+00:00:17,354 --> 00:00:20,725
+Quorvex AI is built around one practical idea: let agents help
+
+7
+00:00:20,725 --> 00:00:24,096
+create and validate tests, but keep the final output as normal
+
+8
+00:00:24,096 --> 00:00:27,467
+Playwright code your team can inspect, commit, and run in CI.
+
+9
+00:00:27,467 --> 00:00:30,838
+In this tutorial, I will show the first workflow end to end.
+
+10
+00:00:30,838 --> 00:00:34,209
+We will start from the repo, open the dashboard, describe a
+
+11
+00:00:34,209 --> 00:00:37,579
+small test in plain English, run it through the pipeline, and
+
+12
+00:00:37,579 --> 00:00:40,950
+inspect the generated Playwright file.
+
+13
+00:00:40,950 --> 00:00:44,321
+The point is not to watch a polished demo and assume everything
+
+14
+00:00:44,321 --> 00:00:47,692
+is automatic.
+
+15
+00:00:47,692 --> 00:00:51,063
+The point is to understand the loop: write a clear spec, let
+
+16
+00:00:51,063 --> 00:00:54,434
+Quorvex plan against the target, generate a test, validate it in
+
+17
+00:00:54,434 --> 00:00:57,805
+a browser, and then review the output like engineering work.
+
+18
+00:00:57,805 --> 00:01:01,175
+Start on the GitHub repo.
+
+19
+00:01:01,175 --> 00:01:04,546
+The README gives the product shape: Quorvex is self-hosted,
+
+20
+00:01:04,546 --> 00:01:07,917
+AI-assisted, and code-first.
+
+21
+00:01:07,917 --> 00:01:11,288
+It can work with specs, PRDs, exploration, API checks, load
+
+22
+00:01:11,288 --> 00:01:14,659
+tests, security checks, database checks, CI gates, and
+
+23
+00:01:14,659 --> 00:01:18,030
+autonomous coverage discovery, but the first video should stay
+
+24
+00:01:18,030 --> 00:01:21,401
+narrow.
+
+25
+00:01:21,401 --> 00:01:24,772
+The fastest path is the minimal setup.
+
+26
+00:01:24,772 --> 00:01:28,142
+For a local evaluation, it keeps the number of services low
+
+27
+00:01:28,142 --> 00:01:31,513
+while still showing the real dashboard and generation flow.
+
+28
+00:01:31,513 --> 00:01:34,884
+For production or team usage, Quorvex also supports the full
+
+29
+00:01:34,884 --> 00:01:38,255
+stack with queues, storage, browser viewing, credentials,
+
+30
+00:01:38,255 --> 00:01:41,626
+schedules, and integrations.
+
+31
+00:01:41,626 --> 00:01:44,997
+If you want the quickest trial, use the minimal README.
+
+32
+00:01:44,997 --> 00:01:48,368
+If you want to evaluate the full platform shape, use the main
+
+33
+00:01:48,368 --> 00:01:51,738
+getting-started tutorial.
+
+34
+00:01:51,738 --> 00:01:55,109
+Either way, the first target is simple: get the backend and
+
+35
+00:01:55,109 --> 00:01:58,480
+dashboard running, then generate one test.
+
+36
+00:01:58,480 --> 00:02:01,851
+Before adding credentials, pause on the model configuration.
+
+37
+00:02:01,851 --> 00:02:05,222
+Quorvex uses an Anthropic-compatible setup.
+
+38
+00:02:05,222 --> 00:02:08,593
+That can point to Anthropic, OpenRouter, Z.ai, or another
+
+39
+00:02:08,593 --> 00:02:11,964
+compatible endpoint, depending on how you run it.
+
+40
+00:02:11,964 --> 00:02:15,334
+The exact provider matters less than having a working token and
+
+41
+00:02:15,334 --> 00:02:18,705
+a model that can follow the generation workflow.
+
+42
+00:02:18,705 --> 00:02:22,076
+Once the app is running, open the dashboard.
+
+43
+00:02:22,076 --> 00:02:25,447
+The dashboard is not just decoration around a CLI.
+
+44
+00:02:25,447 --> 00:02:28,818
+It is where a team can create specs, inspect runs, review
+
+45
+00:02:28,818 --> 00:02:32,189
+artifacts, track requirements, see regression history, and
+
+46
+00:02:32,189 --> 00:02:35,560
+understand what the agents did.
+
+47
+00:02:35,560 --> 00:02:38,930
+For the first video, keep the dashboard tour brief.
+
+48
+00:02:38,930 --> 00:02:42,301
+We only need enough context to create or run a spec.
+
+49
+00:02:42,301 --> 00:02:45,672
+Later videos can go deeper into requirements, API testing, PRDs,
+
+50
+00:02:45,672 --> 00:02:49,043
+autonomous missions, and CI quality gates.
+
+51
+00:02:49,043 --> 00:02:52,414
+Now move to the most important object in the first workflow: the
+
+52
+00:02:52,414 --> 00:02:55,785
+spec.
+
+53
+00:02:55,785 --> 00:02:59,156
+A Quorvex spec is just markdown.
+
+54
+00:02:59,156 --> 00:03:02,526
+It names the test, describes the steps, and states the expected
+
+55
+00:03:02,526 --> 00:03:05,897
+outcome.
+
+56
+00:03:05,897 --> 00:03:09,268
+That makes the request reviewable before any code is generated.
+
+57
+00:03:09,268 --> 00:03:12,639
+This is an important design choice.
+
+58
+00:03:12,639 --> 00:03:16,010
+If the input is vague, the generated code will probably be vague
+
+59
+00:03:16,010 --> 00:03:19,381
+too.
+
+60
+00:03:19,381 --> 00:03:22,752
+A good spec gives the agent a clear target URL, a small user
+
+61
+00:03:22,752 --> 00:03:26,123
+flow, and an observable outcome.
+
+62
+00:03:26,123 --> 00:03:29,493
+For the first run, use a simple public page or one workflow in
+
+63
+00:03:29,493 --> 00:03:32,864
+your own application.
+
+64
+00:03:32,864 --> 00:03:36,235
+Keep it small.
+
+65
+00:03:36,235 --> 00:03:39,606
+A good first test proves the pipeline and gives you generated
+
+66
+00:03:39,606 --> 00:03:42,977
+code that is easy to inspect.
+
+67
+00:03:42,977 --> 00:03:46,348
+In the getting-started tutorial, the example checks a dynamic
+
+68
+00:03:46,348 --> 00:03:49,719
+loading page and verifies that the Hello World message appears
+
+69
+00:03:49,719 --> 00:03:53,089
+after the loading step completes.
+
+70
+00:03:53,089 --> 00:03:56,460
+That is not a business-critical workflow, but it is a good first
+
+71
+00:03:56,460 --> 00:03:59,831
+proof because the expected result is easy to see.
+
+72
+00:03:59,831 --> 00:04:03,202
+After the spec is ready, run the pipeline.
+
+73
+00:04:03,202 --> 00:04:06,573
+Under the hood, Quorvex is not trying to give you a cute code
+
+74
+00:04:06,573 --> 00:04:09,944
+snippet.
+
+75
+00:04:09,944 --> 00:04:13,315
+The workflow is planning, generation, validation, and repair
+
+76
+00:04:13,315 --> 00:04:16,685
+attempts when failures are concrete enough to address.
+
+77
+00:04:16,685 --> 00:04:20,056
+Planning matters because web tests need sequencing.
+
+78
+00:04:20,056 --> 00:04:23,427
+The agent has to understand where to navigate, what to click,
+
+79
+00:04:23,427 --> 00:04:26,798
+what to wait for, and what assertion proves the flow worked.
+
+80
+00:04:26,798 --> 00:04:30,169
+Browser context matters because selectors are not reliable when
+
+81
+00:04:30,169 --> 00:04:33,540
+they are guessed from a prompt alone.
+
+82
+00:04:33,540 --> 00:04:36,911
+A real browser gives the system evidence about what is actually
+
+83
+00:04:36,911 --> 00:04:40,281
+on the page.
+
+84
+00:04:40,281 --> 00:04:43,652
+Generation matters because the output should be standard
+
+85
+00:04:43,652 --> 00:04:47,023
+Playwright TypeScript.
+
+86
+00:04:47,023 --> 00:04:50,394
+This is the key ownership point.
+
+87
+00:04:50,394 --> 00:04:53,765
+You should be able to open the file, read it, edit it, commit
+
+88
+00:04:53,765 --> 00:04:57,136
+it, and run it without Quorvex sitting in the middle of every
+
+89
+00:04:57,136 --> 00:05:00,507
+future CI job.
+
+90
+00:05:00,507 --> 00:05:03,877
+Validation matters because generated code is only useful after
+
+91
+00:05:03,877 --> 00:05:07,248
+it runs.
+
+92
+00:05:07,248 --> 00:05:10,619
+A failing generated test is not worthless, but it is not done.
+
+93
+00:05:10,619 --> 00:05:13,990
+The run artifacts tell you whether the failure is in the target
+
+94
+00:05:13,990 --> 00:05:17,361
+app, the spec, timing, selectors, authentication, or the
+
+95
+00:05:17,361 --> 00:05:20,732
+generated code itself.
+
+96
+00:05:20,732 --> 00:05:24,103
+When the run completes, do not just look for a green status.
+
+97
+00:05:24,103 --> 00:05:27,474
+Open the generated file.
+
+98
+00:05:27,474 --> 00:05:30,844
+Check the locators.
+
+99
+00:05:30,844 --> 00:05:34,215
+Check the assertions.
+
+100
+00:05:34,215 --> 00:05:37,586
+Check whether the code reads like something you would accept in
+
+101
+00:05:37,586 --> 00:05:40,957
+a pull request.
+
+102
+00:05:40,957 --> 00:05:44,328
+This review habit is what separates useful AI automation from
+
+103
+00:05:44,328 --> 00:05:47,699
+throwaway demos.
+
+104
+00:05:47,699 --> 00:05:51,070
+If the test is readable and the assertion is meaningful, the
+
+105
+00:05:51,070 --> 00:05:54,440
+generated file can become part of the suite.
+
+106
+00:05:54,440 --> 00:05:57,811
+If it is too broad, too brittle, or too clever, edit it or
+
+107
+00:05:57,811 --> 00:06:01,182
+improve the spec and run again.
+
+108
+00:06:01,182 --> 00:06:04,553
+If validation fails, the run artifacts still matter.
+
+109
+00:06:04,553 --> 00:06:07,924
+Screenshots, logs, browser evidence, and failure details make
+
+110
+00:06:07,924 --> 00:06:11,295
+the problem concrete.
+
+111
+00:06:11,295 --> 00:06:14,666
+The goal is not magic.
+
+112
+00:06:14,666 --> 00:06:18,036
+The goal is a faster loop with evidence.
+
+113
+00:06:18,036 --> 00:06:21,407
+In a real team, this also changes the review conversation.
+
+114
+00:06:21,407 --> 00:06:24,778
+Instead of asking whether AI wrote a perfect test, the better
+
+115
+00:06:24,778 --> 00:06:28,149
+question is whether the system produced a useful candidate with
+
+116
+00:06:28,149 --> 00:06:31,520
+enough evidence for an engineer or QA automation owner to make a
+
+117
+00:06:31,520 --> 00:06:34,891
+decision.
+
+118
+00:06:34,891 --> 00:06:38,262
+This workflow is why Quorvex is self-hosted and code-first.
+
+119
+00:06:38,262 --> 00:06:41,632
+AI helps with planning, generation, validation, exploration, and
+
+120
+00:06:41,632 --> 00:06:45,003
+repair, but your team keeps normal tests that can run without an
+
+121
+00:06:45,003 --> 00:06:48,374
+AI dependency during every CI job.
+
+122
+00:06:48,374 --> 00:06:51,745
+That also means you can start small.
+
+123
+00:06:51,745 --> 00:06:55,116
+You do not need to migrate a whole test suite.
+
+124
+00:06:55,116 --> 00:06:58,487
+Pick one flow with clear value.
+
+125
+00:06:58,487 --> 00:07:01,858
+Generate one test.
+
+126
+00:07:01,858 --> 00:07:05,228
+Review the output.
+
+127
+00:07:05,228 --> 00:07:08,599
+Run it locally.
+
+128
+00:07:08,599 --> 00:07:11,970
+Then decide whether the next workflow should be another UI test,
+
+129
+00:07:11,970 --> 00:07:15,341
+an API check, a PRD-to-tests flow, or a CI gate.
+
+130
+00:07:15,341 --> 00:07:18,712
+If you are evaluating Quorvex for a team, I would measure three
+
+131
+00:07:18,712 --> 00:07:22,083
+things after this first run.
+
+132
+00:07:22,083 --> 00:07:25,454
+First, did it save time compared with writing the same
+
+133
+00:07:25,454 --> 00:07:28,825
+Playwright test by hand?
+
+134
+00:07:28,825 --> 00:07:32,195
+Second, is the generated code readable enough to maintain?
+
+135
+00:07:32,195 --> 00:07:35,566
+Third, did the artifacts explain what happened when the run
+
+136
+00:07:35,566 --> 00:07:38,937
+passed or failed?
+
+137
+00:07:38,937 --> 00:07:42,308
+If the answer is no, the feedback is still useful.
+
+138
+00:07:42,308 --> 00:07:45,679
+It tells us whether the spec format needs better guidance,
+
+139
+00:07:45,679 --> 00:07:49,050
+whether the dashboard needs clearer evidence, or whether the
+
+140
+00:07:49,050 --> 00:07:52,421
+generation pipeline needs a stronger constraint.
+
+141
+00:07:52,421 --> 00:07:55,791
+To try this yourself, open the repo, follow the minimal setup,
+
+142
+00:07:55,791 --> 00:07:59,162
+and create one spec from a real workflow your team cares about.
+
+143
+00:07:59,162 --> 00:08:02,533
+If that first generated test is useful, the next step is to add
+
+144
+00:08:02,533 --> 00:08:05,904
+PRD coverage, API checks, regression batches, and CI quality
+
+145
+00:08:05,904 --> 00:08:09,275
+gates.
+
+146
+00:08:09,275 --> 00:08:12,646
+The repo is https://github.com/NihadMemmedli/quorvex_ai, and the
+
+147
+00:08:12,646 --> 00:08:16,017
+docs are at https://nihadmemmedli.github.io/quorvex_ai/.
+
+148
+00:08:16,017 --> 00:08:19,387
+Star Quorvex AI if you want to follow the project, and send
+
+149
+00:08:19,387 --> 00:08:22,758
+feedback from real Playwright workflows.
+
+150
+00:08:22,758 --> 00:08:26,129
+That feedback is the most useful signal for what to improve
+
+151
+00:08:26,129 --> 00:08:29,500
+next.

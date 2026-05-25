@@ -45,6 +45,8 @@ from orchestrator.services.api_key_rotator import (
     parse_retry_after,
 )
 from orchestrator.services.autonomous_events import create_event_for_work_item
+from orchestrator.services.agent_run_events import create_agent_run_event
+from orchestrator.utils.browser_cleanup import kill_autopilot_process_tree
 
 # Claude CLI path
 CLAUDE_CLI_PATH = "/usr/local/lib/python3.10/dist-packages/claude_agent_sdk/_bundled/claude"
@@ -301,7 +303,7 @@ class AgentWorker:
         self.running = False
         self.cwd = str(project_root)
         # Live progress tracking (updated by reader thread, read by heartbeat loop)
-        self._progress_lock = threading.Lock()
+        self._progress_lock = threading.RLock()
         self._current_progress = self._empty_progress()
         self._process_lock = threading.Lock()
         self._running_processes: dict[str, subprocess.Popen] = {}
@@ -324,6 +326,8 @@ class AgentWorker:
             "tool_names": [],
             "chars": 0,
             "interactions": 0,
+            "phase": "running",
+            "message": "Agent is running",
         }
 
     def _emit_autonomous_event(
@@ -351,6 +355,31 @@ class AgentWorker:
         except Exception as exc:
             logger.debug("Failed to emit autonomous event for task %s: %s", task_id, exc)
 
+    def _emit_agent_run_event(
+        self,
+        *,
+        owner_type: str | None,
+        owner_id: str | None,
+        task_id: str,
+        event_type: str,
+        message: str,
+        level: str = "info",
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        if owner_type != "agent_run" or not owner_id:
+            return
+        try:
+            create_agent_run_event(
+                run_id=owner_id,
+                agent_task_id=task_id,
+                event_type=event_type,
+                level=level,
+                message=message,
+                payload=payload or {},
+            )
+        except Exception as exc:
+            logger.debug("Failed to emit agent run event for task %s: %s", task_id, exc)
+
     async def start(self):
         """Start the worker loop."""
         logger.info(f"Starting agent worker: {self.worker_id}")
@@ -371,7 +400,15 @@ class AgentWorker:
             logger.warning(f"API key rotator init failed (non-fatal): {e}")
 
         self.running = True
+        try:
+            cleaned = await self.queue.cleanup_stale_tasks()
+            if cleaned:
+                logger.info("Initial agent queue cleanup cleared %s stale task(s)", cleaned)
+        except Exception as e:
+            logger.warning("Initial agent queue cleanup failed (non-fatal): %s", e)
+
         worker_heartbeat = asyncio.create_task(self._worker_heartbeat_loop())
+        cleanup_loop = asyncio.create_task(self.queue.start_cleanup_loop())
         consecutive_empty = 0
 
         try:
@@ -400,6 +437,11 @@ class AgentWorker:
                     logger.error(f"Worker error: {e}", exc_info=True)
                     await asyncio.sleep(5)  # Back off on error
         finally:
+            cleanup_loop.cancel()
+            try:
+                await cleanup_loop
+            except asyncio.CancelledError:
+                pass
             worker_heartbeat.cancel()
             try:
                 await worker_heartbeat
@@ -439,6 +481,7 @@ class AgentWorker:
             while True:
                 if await self.queue.is_cancelled(task_id):
                     logger.info(f"Task {task_id} cancellation detected; terminating Claude CLI process")
+                    task = await self.queue.get_task(task_id)
                     with self._process_lock:
                         proc = self._running_processes.get(task_id)
                         self._cancelled_task_ids.add(task_id)
@@ -462,6 +505,24 @@ class AgentWorker:
                                     proc.kill()
                                 except (ProcessLookupError, OSError):
                                     pass
+                    if task and task.owner_type == "autopilot" and task.owner_id:
+                        try:
+                            cleanup = await asyncio.to_thread(
+                                kill_autopilot_process_tree,
+                                task.owner_id,
+                            )
+                            if cleanup.get("matched"):
+                                logger.info(
+                                    "AutoPilot cleanup for %s after cancellation: %s",
+                                    task.owner_id,
+                                    cleanup,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed AutoPilot cleanup for cancelled task %s: %s",
+                                task_id,
+                                exc,
+                            )
                     return
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
@@ -595,6 +656,18 @@ class AgentWorker:
                 message="Agent task started.",
                 payload={"agent_type": task.agent_type, "operation_type": task.operation_type},
             )
+            self._emit_agent_run_event(
+                owner_type=task.owner_type,
+                owner_id=task.owner_id,
+                task_id=task.id,
+                event_type="lifecycle",
+                message="Agent task started.",
+                payload={
+                    "agent_type": task.agent_type,
+                    "operation_type": task.operation_type,
+                    "worker_id": self.worker_id,
+                },
+            )
             for attempt in range(1, max_retries + 1):
                 # Select API key before each attempt
                 slot = rotator.get_active_key()
@@ -637,6 +710,14 @@ class AgentWorker:
                         message="Agent task completed.",
                         payload={"telemetry": telemetry, "result_preview": result[:1200]},
                     )
+                    self._emit_agent_run_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="complete",
+                        message="Agent task completed.",
+                        payload={"telemetry": telemetry, "result_preview": result[:1200]},
+                    )
                     await self.queue.submit_result(task.id, result, success=True, telemetry=telemetry)
                     _result_submitted = True
                     return
@@ -646,6 +727,15 @@ class AgentWorker:
                     logger.error(f"Task {task.id} timed out: {e}")
                     telemetry = self._build_task_telemetry(task, attempt, error_type="timeout")
                     self._emit_autonomous_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=f"Agent task timed out: {e}",
+                        payload={"telemetry": telemetry},
+                    )
+                    self._emit_agent_run_event(
                         owner_type=task.owner_type,
                         owner_id=task.owner_id,
                         task_id=task.id,
@@ -671,15 +761,68 @@ class AgentWorker:
                             message="Agent task cancelled.",
                             payload={"telemetry": telemetry},
                         )
+                        self._emit_agent_run_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="lifecycle",
+                            message="Agent task cancelled.",
+                            payload={"telemetry": telemetry},
+                        )
                         await self.queue.submit_result(task.id, "", success=False, error="Task cancelled", telemetry=telemetry)
                         _result_submitted = True
                         return
-                    if is_rate_limit_error(error_str) and attempt < max_retries:
+                    if is_rate_limit_error(error_str):
                         retry_after = parse_retry_after(error_str)
-                        wait_seconds = min(retry_after or 30, 120)
+                        hard_quota_reset = (
+                            "usage limit reached" in error_str.lower()
+                            or "limit will reset" in error_str.lower()
+                            or (retry_after is not None and retry_after >= task.timeout_seconds)
+                        )
 
                         if slot:
                             rotator.report_rate_limit(slot, retry_after)
+
+                        if hard_quota_reset and rotator.key_count <= 1:
+                            telemetry = self._build_task_telemetry(task, attempt, error_type="rate_limit_exhausted")
+                            message = (
+                                "LLM provider quota is exhausted; the agent cannot start until the provider limit resets."
+                            )
+                            if retry_after:
+                                message = f"{message} Retry after approximately {int(retry_after)} seconds."
+                            logger.error("Task %s failed due to provider quota exhaustion: %s", task.id, error_str)
+                            with self._progress_lock:
+                                self._current_progress.update(
+                                    {
+                                        "status": "failed",
+                                        "phase": "failed",
+                                        "message": message,
+                                        "retry_reason": "rate_limited",
+                                        "retry_error_status": 429,
+                                        "retry_after_seconds": retry_after,
+                                    }
+                                )
+                            self._emit_agent_run_event(
+                                owner_type=task.owner_type,
+                                owner_id=task.owner_id,
+                                task_id=task.id,
+                                event_type="error",
+                                level="error",
+                                message=message,
+                                payload={
+                                    "telemetry": telemetry,
+                                    "retry_after_seconds": retry_after,
+                                    "provider_error": error_str[:2000],
+                                },
+                            )
+                            await self.queue.submit_result(task.id, "", success=False, error=message, telemetry=telemetry)
+                            _result_submitted = True
+                            return
+
+                        if attempt >= max_retries:
+                            break
+
+                        wait_seconds = min(retry_after or 30, 120)
 
                         logger.warning(
                             f"Task {task.id}: 429 on key "
@@ -687,13 +830,26 @@ class AgentWorker:
                             f"waiting {wait_seconds:.0f}s before retry "
                             f"{attempt + 1}/{max_retries}"
                         )
+                        self._emit_agent_run_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="retry",
+                            level="warning",
+                            message=f"Agent task rate limited; retrying attempt {attempt + 1}/{max_retries}.",
+                            payload={"retry_attempt": attempt + 1, "retry_wait_seconds": wait_seconds},
+                        )
                         # Surface retry state in heartbeat so frontend can show it
                         with self._progress_lock:
                             self._current_progress = self._empty_progress()
                             self._current_progress.update(
                                 {
+                                    "phase": "llm_retry",
+                                    "status": "running",
+                                    "message": f"LLM provider rate limited the request; retrying in {int(wait_seconds)}s.",
                                     "retry_attempt": attempt + 1,
                                     "retry_reason": "rate_limited",
+                                    "retry_error_status": 429,
                                     "retry_wait_seconds": wait_seconds,
                                 }
                             )
@@ -704,6 +860,15 @@ class AgentWorker:
                         logger.error(f"Task {task.id} failed: {e}", exc_info=True)
                         telemetry = self._build_task_telemetry(task, attempt, error_type="runtime_error")
                         self._emit_autonomous_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="error",
+                            level="error",
+                            message=f"Agent task failed: {error_str}",
+                            payload={"telemetry": telemetry},
+                        )
+                        self._emit_agent_run_event(
                             owner_type=task.owner_type,
                             owner_id=task.owner_id,
                             task_id=task.id,
@@ -729,6 +894,15 @@ class AgentWorker:
                         message=f"Agent task failed: {e}",
                         payload={"telemetry": telemetry},
                     )
+                    self._emit_agent_run_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=f"Agent task failed: {e}",
+                        payload={"telemetry": telemetry},
+                    )
                     await self.queue.submit_result(task.id, "", success=False, error=str(e), telemetry=telemetry)
                     _result_submitted = True
                     return
@@ -736,6 +910,15 @@ class AgentWorker:
             # Exhausted all retries (shouldn't normally reach here)
             telemetry = self._build_task_telemetry(task, max_retries, error_type="rate_limit_exhausted")
             self._emit_autonomous_event(
+                owner_type=task.owner_type,
+                owner_id=task.owner_id,
+                task_id=task.id,
+                event_type="error",
+                level="error",
+                message=f"Agent task exhausted {max_retries} retries due to rate limiting.",
+                payload={"telemetry": telemetry},
+            )
+            self._emit_agent_run_event(
                 owner_type=task.owner_type,
                 owner_id=task.owner_id,
                 task_id=task.id,
@@ -940,6 +1123,7 @@ class AgentWorker:
             "session_id": None,
             "total_cost_usd": None,
             "parse_errors": 0,
+            "api_retries": 0,
             "exit_code": None,
         }
         browser_recorder = (
@@ -1000,7 +1184,16 @@ class AgentWorker:
         )
 
         proc = None
+        stream_file = None
         try:
+            if owner_type == "agent_run" and owner_id:
+                try:
+                    artifact_path = Path(effective_cwd) / "agent-stream.jsonl"
+                    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                    stream_file = artifact_path.open("a", encoding="utf-8")
+                except Exception as exc:
+                    logger.debug("Failed to open agent stream artifact for task %s: %s", task_id, exc)
+
             # Use Popen with subprocess.PIPE - no TTY needed for --print mode
             proc = subprocess.Popen(
                 cli_args,
@@ -1023,6 +1216,12 @@ class AgentWorker:
                         if line:
                             decoded = line.decode("utf-8", errors="replace")
                             output_chunks.append(decoded)
+                            if stream_file is not None:
+                                try:
+                                    stream_file.write(decoded)
+                                    stream_file.flush()
+                                except Exception:
+                                    pass
                             # Track tool_use events in stream-json for progress
                             stripped = decoded.strip()
                             if stripped and stripped.startswith("{"):
@@ -1034,6 +1233,48 @@ class AgentWorker:
                                         stream_stats["assistant_messages"] += 1
                                     elif evt_type == "system":
                                         stream_stats["system_messages"] += 1
+                                        if evt.get("subtype") == "api_retry":
+                                            attempt = int(evt.get("attempt") or 0)
+                                            max_retries = int(evt.get("max_retries") or 0)
+                                            error_status = evt.get("error_status")
+                                            retry_delay_ms = evt.get("retry_delay_ms")
+                                            stream_stats["api_retries"] = max(
+                                                int(stream_stats.get("api_retries") or 0),
+                                                attempt,
+                                            )
+                                            stream_stats["api_error_status"] = error_status
+                                            retry_message = (
+                                                f"LLM provider rate limited the request"
+                                                f" (retry {attempt}/{max_retries})"
+                                            )
+                                            with self._progress_lock:
+                                                self._current_progress.update(
+                                                    {
+                                                        "phase": "llm_retry",
+                                                        "status": "running",
+                                                        "message": retry_message,
+                                                        "retry_attempt": attempt,
+                                                        "retry_max_attempts": max_retries,
+                                                        "retry_reason": evt.get("error") or "rate_limit",
+                                                        "retry_error_status": error_status,
+                                                        "retry_delay_ms": retry_delay_ms,
+                                                    }
+                                                )
+                                            self._emit_agent_run_event(
+                                                owner_type=owner_type,
+                                                owner_id=owner_id,
+                                                task_id=task_id,
+                                                event_type="retry",
+                                                level="warning",
+                                                message=retry_message,
+                                                payload={
+                                                    "attempt": attempt,
+                                                    "max_retries": max_retries,
+                                                    "error_status": error_status,
+                                                    "error": evt.get("error"),
+                                                    "retry_delay_ms": retry_delay_ms,
+                                                },
+                                            )
                                     elif evt_type == "result":
                                         stream_stats["result_events"] += 1
                                         stream_stats["api_error_status"] = evt.get("api_error_status")
@@ -1061,9 +1302,19 @@ class AgentWorker:
                                                             message=text,
                                                             payload={"chars": len(text)},
                                                         )
+                                                        self._emit_agent_run_event(
+                                                            owner_type=owner_type,
+                                                            owner_id=owner_id,
+                                                            task_id=task_id,
+                                                            event_type="assistant_output",
+                                                            message=text,
+                                                            payload={"chars": len(text)},
+                                                        )
                                                 if item.get("type") == "tool_use":
                                                     tool_name = item.get("name", "")
                                                     self._current_progress["tool_calls"] += 1
+                                                    self._current_progress["phase"] = "tool_use"
+                                                    self._current_progress["message"] = f"Using {_short_tool_name(tool_name) or tool_name}"
                                                     self._current_progress["last_tool"] = tool_name
                                                     tool_names = self._current_progress.setdefault("tool_names", [])
                                                     if isinstance(tool_names, list) and len(tool_names) < 200:
@@ -1078,6 +1329,18 @@ class AgentWorker:
                                                     if short_name in INTERACTION_TOOLS:
                                                         self._current_progress["interactions"] += 1
                                                     self._emit_autonomous_event(
+                                                        owner_type=owner_type,
+                                                        owner_id=owner_id,
+                                                        task_id=task_id,
+                                                        event_type=event_type,
+                                                        message=f"Tool call: {short_name or tool_name}",
+                                                        payload={
+                                                            "tool_name": tool_name,
+                                                            "short_name": short_name,
+                                                            "input": item.get("input") or {},
+                                                        },
+                                                    )
+                                                    self._emit_agent_run_event(
                                                         owner_type=owner_type,
                                                         owner_id=owner_id,
                                                         task_id=task_id,
@@ -1155,6 +1418,11 @@ class AgentWorker:
                         pass
             raise
         finally:
+            if stream_file is not None:
+                try:
+                    stream_file.close()
+                except Exception:
+                    pass
             with self._process_lock:
                 self._running_processes.pop(task_id, None)
 

@@ -61,14 +61,14 @@ kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/cont
 
 ```bash
 # Copy secrets template
-cp secrets.yaml secrets.local.yaml
+cp k8s/secrets.yaml k8s/secrets.local.yaml
 
 # Edit with your values
-vim secrets.local.yaml
+vim k8s/secrets.local.yaml
 
 # Apply secrets before the rest of the manifests.
 # make k8s-deploy does this automatically when k8s/secrets.local.yaml exists.
-kubectl apply -f secrets.local.yaml
+kubectl apply -f k8s/secrets.local.yaml
 ```
 
 ### 3. Build and push images

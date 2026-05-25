@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -225,18 +225,26 @@ async def _run_rtm_generation(job_id: str, project_id: str, specs_paths: list[st
     """Background task for RTM generation."""
     import traceback
 
+    from orchestrator.services.domain_jobs import update_domain_job
     from workflows.rtm_generator import RtmGenerator
 
-    _rtm_gen_jobs[job_id]["status"] = "running"
-    _rtm_gen_jobs[job_id]["started_at"] = time.time()
+    job_state = _rtm_gen_jobs.setdefault(
+        job_id,
+        {
+            "status": "queued",
+            "project_id": project_id,
+            "created_at": time.time(),
+        },
+    )
+    job_state["status"] = "running"
+    job_state["started_at"] = time.time()
+    update_domain_job(job_id, status="running", started=True)
 
     try:
         generator = RtmGenerator(project_id=project_id)
         result = await generator.generate_rtm(specs_paths=specs_paths, use_ai_matching=use_ai_matching)
 
-        _rtm_gen_jobs[job_id]["status"] = "completed"
-        _rtm_gen_jobs[job_id]["completed_at"] = time.time()
-        _rtm_gen_jobs[job_id]["result"] = {
+        result_payload = {
             "status": "generated",
             "total_requirements": result.total_requirements,
             "covered": result.covered_requirements,
@@ -246,19 +254,24 @@ async def _run_rtm_generation(job_id: str, project_id: str, specs_paths: list[st
             "mappings_created": len(result.mappings),
             "gaps_found": len(result.gaps),
         }
+        job_state["status"] = "completed"
+        job_state["completed_at"] = time.time()
+        job_state["result"] = result_payload
+        update_domain_job(job_id, status="completed", result=result_payload, completed=True)
     except Exception as e:
         error_type = type(e).__name__
         error_msg = str(e)
         logger.error(f"Failed to generate RTM: {error_type}: {error_msg}")
         logger.error(f"Stack trace:\n{traceback.format_exc()}")
-        _rtm_gen_jobs[job_id]["status"] = "failed"
-        _rtm_gen_jobs[job_id]["completed_at"] = time.time()
-        _rtm_gen_jobs[job_id]["error"] = f"{error_type}: {error_msg}"
+        job_state["status"] = "failed"
+        job_state["completed_at"] = time.time()
+        job_state["error"] = f"{error_type}: {error_msg}"
+        update_domain_job(job_id, status="failed", error=job_state["error"], completed=True)
 
 
 @router.post("/generate")
 async def generate_rtm(
-    request: GenerateRtmRequest, background_tasks: BackgroundTasks, project_id: str = Query(default="default")
+    request: GenerateRtmRequest, project_id: str = Query(default="default")
 ):
     """
     Generate or refresh the RTM (async).
@@ -269,6 +282,18 @@ async def generate_rtm(
     _cleanup_old_rtm_jobs()
 
     job_id = str(uuid.uuid4())
+    from orchestrator.services.domain_jobs import create_domain_job
+
+    create_domain_job(
+        job_id=job_id,
+        job_type="rtm_generate",
+        project_id=project_id,
+        payload={
+            "project_id": project_id,
+            "specs_paths": request.specs_paths,
+            "use_ai_matching": request.use_ai_matching,
+        },
+    )
     _rtm_gen_jobs[job_id] = {
         "status": "queued",
         "project_id": project_id,
@@ -277,14 +302,50 @@ async def generate_rtm(
 
     logger.info(f"RTM generation queued: job_id={job_id}, project_id={project_id}")
 
-    background_tasks.add_task(_run_rtm_generation, job_id, project_id, request.specs_paths, request.use_ai_matching)
+    try:
+        from orchestrator.services.domain_jobs import update_domain_job
+        from orchestrator.services.temporal_client import start_domain_job_workflow
 
-    return {"job_id": job_id, "status": "queued"}
+        temporal = await start_domain_job_workflow(
+            "rtm_generate",
+            job_id,
+            {
+                "project_id": project_id,
+                "specs_paths": request.specs_paths,
+                "use_ai_matching": request.use_ai_matching,
+            },
+        )
+        _rtm_gen_jobs[job_id]["temporal_workflow_id"] = temporal.workflow_id
+        _rtm_gen_jobs[job_id]["temporal_run_id"] = temporal.run_id
+        update_domain_job(
+            job_id,
+            temporal_workflow_id=temporal.workflow_id,
+            temporal_run_id=temporal.run_id,
+        )
+    except Exception as exc:
+        _rtm_gen_jobs[job_id]["status"] = "failed"
+        _rtm_gen_jobs[job_id]["completed_at"] = time.time()
+        _rtm_gen_jobs[job_id]["error"] = f"Temporal start failed: {exc}"
+        update_domain_job(job_id, status="failed", error=_rtm_gen_jobs[job_id]["error"], completed=True)
+        raise HTTPException(status_code=503, detail=f"Temporal is required for RTM generation: {exc}") from exc
+
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "temporal_workflow_id": _rtm_gen_jobs[job_id].get("temporal_workflow_id"),
+        "temporal_run_id": _rtm_gen_jobs[job_id].get("temporal_run_id"),
+    }
 
 
 @router.get("/generate-jobs/{job_id}")
 async def get_rtm_generate_job_status(job_id: str):
     """Poll RTM generation job status."""
+    from orchestrator.services.domain_jobs import domain_job_to_dict, get_domain_job
+
+    durable_job = get_domain_job(job_id)
+    if durable_job and durable_job.job_type == "rtm_generate":
+        return domain_job_to_dict(durable_job)
+
     job = _rtm_gen_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -293,6 +354,8 @@ async def get_rtm_generate_job_status(job_id: str):
         "job_id": job_id,
         "status": job["status"],
         "project_id": job.get("project_id"),
+        "temporal_workflow_id": job.get("temporal_workflow_id"),
+        "temporal_run_id": job.get("temporal_run_id"),
     }
 
     if job["status"] == "completed":

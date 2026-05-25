@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +55,23 @@ class NativePlanner:
     5. Save the resulting spec to specs/prd-{feature}.md
     """
 
-    def __init__(self, project_id: str = "default"):
+    def __init__(
+        self,
+        project_id: str = "default",
+        on_tool_use: Callable[[str, dict[str, Any]], None] | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        on_task_enqueued: Callable[[str], None] | None = None,
+        owner_type: str | None = None,
+        owner_id: str | None = None,
+        owner_label: str | None = None,
+    ):
         self.project_id = project_id
+        self.on_tool_use = on_tool_use
+        self.on_progress = on_progress
+        self.on_task_enqueued = on_task_enqueued
+        self.owner_type = owner_type
+        self.owner_id = owner_id
+        self.owner_label = owner_label
         self.memory_manager = get_memory_manager(project_id=project_id)
         # Use absolute path relative to project root (up from orchestrator/workflows/native_planner.py)
         self.specs_dir = Path(__file__).resolve().parent.parent.parent / "specs"
@@ -295,6 +311,12 @@ Start the test plan with:
             timeout_seconds=timeout,
             allowed_tools=get_agent_allowed_tools("playwright-test-planner"),
             log_tools=True,
+            on_tool_use=self.on_tool_use,
+            on_progress=self.on_progress,
+            on_task_enqueued=self.on_task_enqueued,
+            owner_type=self.owner_type,
+            owner_id=self.owner_id,
+            owner_label=self.owner_label,
         )
 
         result = await runner.run(prompt)

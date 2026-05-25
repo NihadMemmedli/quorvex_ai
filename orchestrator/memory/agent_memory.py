@@ -71,6 +71,20 @@ INVISIBLE_CHARS = {
     "\u202e",
 }
 
+URL_PATTERN = re.compile(r"https?://[^\s\"'<>),]+")
+ROUTE_FACT_PATTERN = re.compile(
+    r"\b(?:route|url|page|flow|starts at|loads at|navigate(?:s|d)? to)\b.{0,160}(https?://[^\s\"'<>),]+|/[A-Za-z0-9_./{}:-]+)",
+    re.I,
+)
+SELECTOR_FACT_PATTERN = re.compile(
+    r"\b(?:selector|locator|getByRole|getByLabel|getByText|getByTestId|data-testid|aria-label)\b.{8,220}",
+    re.I,
+)
+PROJECT_FACT_PATTERN = re.compile(
+    r"\b(?:project uses|app uses|application uses|base url|login flow|auth flow|test data|environment uses)\b.{8,220}",
+    re.I,
+)
+
 
 @dataclass
 class MemoryCandidate:
@@ -328,6 +342,13 @@ class AgentMemoryService:
                 candidates.append(MemoryCandidate("failure_pattern", line, 0.78, ["failure"]))
             elif re.search(r"\b(lesson learned|next time|in future|avoid|do not)\b", low):
                 candidates.append(MemoryCandidate("agent_lesson", line, 0.74, ["lesson"]))
+            elif SELECTOR_FACT_PATTERN.search(line):
+                candidates.append(MemoryCandidate("agent_lesson", line, 0.72, ["selector", "locator"]))
+            elif PROJECT_FACT_PATTERN.search(line) or ROUTE_FACT_PATTERN.search(line):
+                tags = ["project"]
+                if URL_PATTERN.search(line) or "/" in line:
+                    tags.append("route")
+                candidates.append(MemoryCandidate("project_fact", line, 0.7, tags))
 
         if not candidates and agent_type and re.search(r"\b(project uses|app uses|base url|login flow|test data)\b", lowered):
             first_sentence = re.split(r"(?<=[.!?])\s+", text.strip())[0]

@@ -85,6 +85,18 @@ DOCS_WITH_ASSETS = [
     *DOCS_DIR.rglob("*.md"),
 ]
 
+LOCAL_API_EXAMPLE_DOCS = [
+    REPO_ROOT / "README.md",
+    REPO_ROOT / "README.minimal.md",
+    *DOCS_DIR.rglob("*.md"),
+]
+
+DOC_ONLY_API_PATHS = {
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+}
+
 PUBLIC_DOC_EXCLUDES = {
     DOCS_DIR / ".style-guide.md",
 }
@@ -272,6 +284,39 @@ def route_key(route: tuple[str, str]) -> tuple[str, str]:
     return method, canonical_endpoint_path(path)
 
 
+def canonical_doc_example_path(path: str) -> str:
+    parts = [part for part in normalize_path(path).split("/") if part]
+    canonical_parts: list[str] = []
+
+    for index, part in enumerate(parts):
+        previous = parts[index - 1] if index else ""
+        before_previous = parts[index - 2] if index >= 2 else ""
+        is_placeholder = (
+            re.fullmatch(r"[A-Z][A-Z0-9_]*", part) is not None
+            or re.fullmatch(r"\d+", part) is not None
+            or part.startswith("your-")
+            or (previous == "projects" and part == "default")
+            or (before_previous == "rtm" and previous == "export" and part in {"csv", "html", "markdown", "json"})
+        )
+        canonical_parts.append("{param}" if is_placeholder else part)
+
+    return canonical_endpoint_path("/" + "/".join(canonical_parts))
+
+
+def documented_local_api_examples() -> list[tuple[Path, str, str]]:
+    examples: list[tuple[Path, str, str]] = []
+    pattern = re.compile(r"http://localhost:8001([^\s`\"<>)]*)")
+    for doc in LOCAL_API_EXAMPLE_DOCS:
+        text = read_text(doc)
+        for match in pattern.finditer(text):
+            raw = match.group(1).rstrip(".,")
+            path = normalize_path(unquote(urlsplit(raw).path))
+            if path in DOC_ONLY_API_PATHS or not path or path == "/":
+                continue
+            examples.append((doc, path, canonical_doc_example_path(path)))
+    return examples
+
+
 def dashboard_route_from_page(path: Path) -> str | None:
     relative = path.relative_to(DASHBOARD_SOURCE_DIR)
     parts = list(relative.parts[:-1])
@@ -344,6 +389,18 @@ def check_api_docs() -> list[str]:
 
     formatted = ", ".join(f"{method} {path}" for method, path in missing)
     return ["docs/reference/api-endpoints.md is missing selected public API routes: " + formatted]
+
+
+def check_local_api_examples() -> list[str]:
+    discovered_paths = {route_key(route)[1] for route in discovered_api_routes()}
+    missing: list[str] = []
+    for doc, path, canonical in documented_local_api_examples():
+        if canonical not in discovered_paths:
+            missing.append(f"{doc.relative_to(REPO_ROOT)} references http://localhost:8001{path}")
+
+    if not missing:
+        return []
+    return ["docs contain localhost API examples for unknown routes: " + "; ".join(sorted(set(missing)))]
 
 
 def check_dashboard_docs() -> list[str]:
@@ -568,6 +625,7 @@ def main() -> int:
         + check_cli_docs()
         + check_stale_setup_docs()
         + check_api_docs()
+        + check_local_api_examples()
         + check_dashboard_docs()
         + check_nav_docs()
         + check_doc_assets()

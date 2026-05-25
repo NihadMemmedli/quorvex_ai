@@ -246,6 +246,9 @@ Prefix: `/api/memory` | Source: `orchestrator/api/memory.py`
 | GET | `/api/memory/session-recall/search` | Search assistant conversation memory | Optional |
 | GET | `/api/memory/session-recall/window` | Return an anchored conversation window | Optional |
 | GET | `/api/memory/health` | Report memory system health and embedding mode | Optional |
+| GET | `/api/memory/diagnostics` | Report memory health, stale records, and recommended repair actions | Optional |
+| GET | `/api/memory/effectiveness` | Summarize whether injected memory correlates with successful outcomes | Optional |
+| POST | `/api/memory/repair` | Run conservative memory repair actions, optionally as a dry run | Optional |
 | GET | `/api/memory/browser` | Inspect browser exploration memory | Optional |
 | GET | `/api/memory/browser/frontier` | Inspect ranked browser frontier work | Optional |
 | POST | `/api/memory/browser/frontier/claim` | Lease frontier items for a worker | Optional |
@@ -253,6 +256,17 @@ Prefix: `/api/memory` | Source: `orchestrator/api/memory.py`
 | PATCH | `/api/memory/browser/frontier/{frontier_id}/fail` | Mark frontier work failed and retryable | Optional |
 | PATCH | `/api/memory/browser/frontier/{frontier_id}/skip` | Skip stale, risky, or irrelevant frontier work | Optional |
 | GET | `/api/memory/projects` | Memory data grouped by project | Optional |
+
+## Autonomous Diagnostics
+
+Source: `orchestrator/api/autonomous.py`
+
+| Method | Path | Description | Auth Required |
+|--------|------|-------------|---------------|
+| GET | `/autonomous/{project_id}/diagnostics` | Inspect autonomous mission health for a project | Optional |
+| POST | `/autonomous/{project_id}/diagnostics/backfill` | Backfill canonical autonomous state and return refreshed diagnostics | Yes |
+| POST | `/autonomous/{project_id}/diagnostics/monitor` | Run the autonomous diagnostics monitor for a project | Yes |
+| POST | `/autonomous/{project_id}/diagnostics/recover` | Recover stale autonomous work and return refreshed diagnostics | Yes |
 
 ## PRD Processing
 
@@ -286,6 +300,9 @@ Source: `orchestrator/api/main.py`
 | POST | `/api/agents/runs` | Run an autonomous agent (exploratory, writer, synthesis) | Optional |
 | GET | `/api/agents/runs` | List agent runs | Optional |
 | GET | `/api/agents/runs/{id}` | Get agent run details | Optional |
+| GET | `/api/agents/runs/{id}/events` | List persisted lifecycle events for an agent run | Optional |
+| GET | `/api/agents/runs/{id}/events/stream` | Stream agent run lifecycle events over SSE | Optional |
+| GET | `/api/agents/temporal/health` | Check Temporal readiness for standalone agent runs | Optional |
 | POST | `/api/agents/runs/{id}/pause` | Pause an agent run | Optional |
 | POST | `/api/agents/runs/{id}/resume` | Resume an agent run | Optional |
 | POST | `/api/agents/runs/{id}/cancel` | Cancel an agent run | Optional |
@@ -422,11 +439,41 @@ Prefix: `/api-testing` | Source: `orchestrator/api/api_testing.py`
 | GET | `/api-testing/specs/{folder}` | Get API test spec details | Optional |
 | PUT | `/api-testing/specs/{folder}` | Update API test spec | Optional |
 | DELETE | `/api-testing/specs/{folder}` | Delete API test spec | Optional |
+| POST | `/api-testing/specs/folder` | Create a nested API spec folder | Optional |
+| PUT | `/api-testing/specs/{name}/tags` | Update tags for an API test spec | Optional |
+| POST | `/api-testing/specs/bulk-generate` | Generate tests for multiple API specs | Optional |
+| POST | `/api-testing/specs/bulk-run` | Run multiple API specs | Optional |
+| POST | `/api-testing/generate` | Generate a Playwright API test from a saved spec | Optional |
+| POST | `/api-testing/create-and-generate` | Create a spec and immediately start generation | Optional |
+| POST | `/api-testing/edge-cases` | Generate edge-case checks for an API spec | Optional |
+| GET | `/api-testing/jobs` | List API generation jobs | Optional |
+| GET | `/api-testing/jobs/{job_id}` | Get API generation job status | Optional |
+| GET | `/api-testing/jobs/{job_id}/logs` | Get API generation job logs | Optional |
+| GET | `/api-testing/generated-tests` | List generated API test files | Optional |
+| GET | `/api-testing/generated-tests/summary` | Summary of generated API tests | Optional |
+| GET | `/api-testing/generated-tests/{name}` | Get generated API test code | Optional |
+| PUT | `/api-testing/generated-tests/{name}` | Update generated API test code | Optional |
+| DELETE | `/api-testing/generated-tests/{name}` | Delete generated API test code | Optional |
 | POST | `/api-testing/import-openapi` | Import OpenAPI/Swagger spec | Optional |
+| POST | `/api-testing/import-openapi-file` | Import an uploaded OpenAPI/Swagger file | Optional |
+| GET | `/api-testing/import-history` | List OpenAPI import history | Optional |
 | POST | `/api-testing/run` | Run API test (background job) | Optional |
 | POST | `/api-testing/run-direct` | Run API test directly | Optional |
 | GET | `/api-testing/runs` | List API test run history | Optional |
+| GET | `/api-testing/runs/latest-by-spec` | Get the latest run for a spec | Optional |
 | GET | `/api-testing/runs/{run_id}` | Get run details with logs | Optional |
+| POST | `/api-testing/runs/{run_id}/retry` | Retry an API test run | Optional |
+
+API Testing coverage groups:
+
+| Group | Main endpoints |
+|-------|----------------|
+| Specs | `/api-testing/specs`, `/api-testing/specs/{name}`, `/api-testing/specs/folder`, `/api-testing/specs/{name}/tags` |
+| Generation jobs | `/api-testing/generate`, `/api-testing/create-and-generate`, `/api-testing/jobs`, `/api-testing/jobs/{job_id}/logs` |
+| Generated tests | `/api-testing/generated-tests`, `/api-testing/generated-tests/{name}`, `/api-testing/generated-tests/summary` |
+| OpenAPI import | `/api-testing/import-openapi`, `/api-testing/import-openapi-file`, `/api-testing/import-history` |
+| Runs | `/api-testing/run`, `/api-testing/run-direct`, `/api-testing/runs`, `/api-testing/runs/latest-by-spec`, `/api-testing/runs/{run_id}/retry` |
+| Bulk operations | `/api-testing/specs/bulk-generate`, `/api-testing/specs/bulk-run`, `/api-testing/edge-cases` |
 
 ## Load Testing
 
@@ -482,6 +529,10 @@ Prefix: `/llm-testing` | Source: `orchestrator/api/llm_testing.py`
 | GET | `/llm-testing/providers` | List providers | Optional |
 | PUT | `/llm-testing/providers/{id}` | Update provider | Optional |
 | DELETE | `/llm-testing/providers/{id}` | Delete provider | Optional |
+| POST | `/llm-testing/providers/{id}/health-check` | Check provider connectivity and model response health | Optional |
+| GET | `/llm-testing/openrouter/models` | List OpenRouter model metadata | Optional |
+| POST | `/llm-testing/openrouter/demo` | Run an OpenRouter demo request | Optional |
+| POST | `/llm-testing/demo-content` | Seed demo providers, specs, datasets, or runs | Optional |
 
 ### Specs
 
@@ -492,6 +543,9 @@ Prefix: `/llm-testing` | Source: `orchestrator/api/llm_testing.py`
 | PUT | `/llm-testing/specs/{name}` | Update spec | Optional |
 | DELETE | `/llm-testing/specs/{name}` | Delete spec | Optional |
 | GET | `/llm-testing/specs/{name}/versions` | List spec versions | Optional |
+| POST | `/llm-testing/specs/{name}/versions` | Create a saved spec version | Optional |
+| GET | `/llm-testing/specs/{name}/versions/{version}` | Get one saved spec version | Optional |
+| POST | `/llm-testing/specs/{name}/versions/{version}/restore` | Restore a saved spec version | Optional |
 | POST | `/llm-testing/specs/{name}/suggest-improvements` | AI spec improvements | Optional |
 
 ### Execution
@@ -499,11 +553,20 @@ Prefix: `/llm-testing` | Source: `orchestrator/api/llm_testing.py`
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
 | POST | `/llm-testing/run` | Run suite against a provider (background) | Optional |
+| GET | `/llm-testing/jobs/{job_id}` | Get LLM test job status | Optional |
+| GET | `/llm-testing/runs` | List LLM test runs | Optional |
+| GET | `/llm-testing/runs/{run_id}` | Get LLM test run detail | Optional |
+| GET | `/llm-testing/runs/{run_id}/results` | Get case-level LLM test results | Optional |
 | POST | `/llm-testing/compare` | Compare multiple providers | Optional |
+| GET | `/llm-testing/comparisons` | List comparison runs | Optional |
+| GET | `/llm-testing/comparisons/{comparison_id}` | Get comparison detail | Optional |
+| GET | `/llm-testing/comparisons/{comparison_id}/matrix` | Get provider/spec scoring matrix | Optional |
 | POST | `/llm-testing/bulk-run` | Batch dataset operations | Optional |
 | POST | `/llm-testing/bulk-compare` | Batch comparison | Optional |
 | POST | `/llm-testing/generate-suite` | AI-generated test suite | Optional |
+| GET | `/llm-testing/prompt-iterations` | List prompt-iteration experiments | Optional |
 | POST | `/llm-testing/prompt-iterations` | A/B prompt testing | Optional |
+| GET | `/llm-testing/prompt-iterations/{iteration_id}` | Get prompt-iteration detail | Optional |
 
 ### Datasets
 
@@ -513,7 +576,22 @@ Prefix: `/llm-testing` | Source: `orchestrator/api/llm_testing.py`
 | GET | `/llm-testing/datasets` | List datasets | Optional |
 | PUT | `/llm-testing/datasets/{id}` | Update dataset | Optional |
 | DELETE | `/llm-testing/datasets/{id}` | Delete dataset | Optional |
+| GET | `/llm-testing/datasets/{id}` | Get dataset detail | Optional |
+| POST | `/llm-testing/datasets/import-csv` | Import dataset cases from CSV | Optional |
+| POST | `/llm-testing/datasets/from-spec/{spec_name}` | Create a dataset from a spec | Optional |
+| POST | `/llm-testing/datasets/{id}/cases` | Add a dataset case | Optional |
+| PUT | `/llm-testing/datasets/{id}/cases/{case_id}` | Update a dataset case | Optional |
+| DELETE | `/llm-testing/datasets/{id}/cases/{case_id}` | Delete a dataset case | Optional |
 | POST | `/llm-testing/datasets/{id}/augment` | AI dataset augmentation | Optional |
+| POST | `/llm-testing/datasets/{id}/augment/{job_id}/accept` | Accept generated augmentation cases | Optional |
+| GET | `/llm-testing/datasets/{id}/export` | Export dataset cases | Optional |
+| POST | `/llm-testing/datasets/{id}/to-spec` | Convert a dataset to a spec | Optional |
+| POST | `/llm-testing/datasets/{id}/duplicate` | Duplicate a dataset | Optional |
+| POST | `/llm-testing/datasets/{id}/golden` | Mark dataset as golden baseline | Optional |
+| GET | `/llm-testing/datasets/{id}/diff` | Diff dataset versions | Optional |
+| GET | `/llm-testing/datasets/{id}/versions` | List dataset versions | Optional |
+| POST | `/llm-testing/datasets/{id}/compare` | Compare dataset runs | Optional |
+| POST | `/llm-testing/datasets/{id}/run` | Run a dataset directly | Optional |
 
 ### Schedules
 
@@ -521,8 +599,10 @@ Prefix: `/llm-testing` | Source: `orchestrator/api/llm_testing.py`
 |--------|------|-------------|---------------|
 | POST | `/llm-testing/schedules` | Create schedule | Optional |
 | GET | `/llm-testing/schedules` | List schedules | Optional |
+| GET | `/llm-testing/schedules/{id}` | Get schedule detail | Optional |
 | PUT | `/llm-testing/schedules/{id}` | Update schedule | Optional |
 | DELETE | `/llm-testing/schedules/{id}` | Delete schedule | Optional |
+| POST | `/llm-testing/schedules/{id}/run-now` | Trigger schedule immediately | Optional |
 
 ### Analytics
 
@@ -622,17 +702,41 @@ Prefix: `/github` | Source: `orchestrator/api/github_ci.py`
 
 GitHub Actions workflow generation and webhook handling.
 
+| Surface | Endpoints | Auth/secret expectations |
+|---------|-----------|--------------------------|
+| Configuration | `GET/POST/DELETE /github/{project_id}/config`, `POST /github/{project_id}/test-connection` | Stores provider token/config in project-scoped credentials |
+| Remote discovery | `GET /github/{project_id}/remote-repos`, `GET /github/{project_id}/remote-workflows`, `GET /github/{project_id}/pull-requests` | Requires GitHub token with repository read access |
+| Workflow runs | `GET /github/{project_id}/pipelines`, `GET /github/{project_id}/pipelines/{pipeline_mapping_id}`, `POST /github/{project_id}/trigger-workflow`, `POST /github/{project_id}/sync-runs` | Requires workflow read/dispatch permissions for the target repository |
+| PR advisor | `POST /github/{project_id}/pr-advisor/analyze`, `GET /github/{project_id}/pr-advisor/analyses`, `POST /github/{project_id}/pr-advisor/analyses/{analysis_id}/run` | Requires pull request and repository read access |
+| Quality gates | `GET/PUT /github/{project_id}/quality-gates/config`, `POST /github/{project_id}/quality-gates/pr/start`, `GET /github/{project_id}/quality-gates/pr/status` | Requires repository read access; status posting depends on configured write permissions |
+| Repository index | `POST /github/{project_id}/repository-index`, `GET /github/{project_id}/repository-index/latest` | Requires repository content read access |
+| Webhook | `POST /github/webhook/github` | Verify using the configured GitHub webhook secret |
+
 ### GitLab
 
 Prefix: `/gitlab` | Source: `orchestrator/api/gitlab_ci.py`
 
 GitLab CI pipeline configuration.
 
+| Surface | Endpoints | Auth/secret expectations |
+|---------|-----------|--------------------------|
+| Configuration | `GET/POST/DELETE /gitlab/{project_id}/config`, `POST /gitlab/{project_id}/test-connection` | Stores GitLab token/config in project-scoped credentials |
+| Remote discovery | `GET /gitlab/{project_id}/remote-projects` | Requires GitLab project read access |
+| Pipeline runs | `GET /gitlab/{project_id}/pipelines`, `GET /gitlab/{project_id}/pipelines/{mapping_id}`, `POST /gitlab/{project_id}/trigger-pipeline` | Requires pipeline read/trigger permissions |
+| Webhook | `POST /gitlab/webhook/gitlab` | Verify using the configured GitLab webhook secret |
+
 ## Jira Integration
 
 Prefix: `/jira` | Source: `orchestrator/api/jira.py`
 
 Issue tracking integration for linking test results to Jira tickets.
+
+| Surface | Endpoints | Auth/secret expectations |
+|---------|-----------|--------------------------|
+| Configuration | `GET/POST/DELETE /jira/{project_id}/config`, `POST /jira/{project_id}/test-connection` | Stores Jira URL, user, and token in project-scoped credentials |
+| Remote discovery | `GET /jira/{project_id}/remote-projects`, `GET /jira/{project_id}/remote-issue-types/{jira_project_key}` | Requires Jira project read access |
+| Issue creation | `POST /jira/{project_id}/create-issue`, `GET /jira/{project_id}/issues`, `GET /jira/{project_id}/issues/{run_id}` | Requires issue create/read permissions |
+| Bug reports | `POST /jira/{project_id}/generate-bug-report/{run_id}`, `GET /jira/{project_id}/bug-report-jobs/{job_id}` | Uses run artifacts and stored Jira config |
 
 ## Analytics
 
@@ -737,6 +841,8 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | POST | `/api/agents/runs` | `orchestrator/api/main.py` |
 | GET | `/api/agents/runs/{id}` | `orchestrator/api/main.py` |
 | POST | `/api/agents/runs/{id}/cancel` | `orchestrator/api/main.py` |
+| GET | `/api/agents/runs/{id}/events` | `orchestrator/api/main.py` |
+| GET | `/api/agents/runs/{id}/events/stream` | `orchestrator/api/main.py` |
 | POST | `/api/agents/runs/{id}/pause` | `orchestrator/api/main.py` |
 | GET | `/api/agents/runs/{id}/report` | `orchestrator/api/main.py` |
 | POST | `/api/agents/runs/{id}/resume` | `orchestrator/api/main.py` |
@@ -771,6 +877,8 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/api/memory/coverage/gaps` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/coverage/suggestions` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/coverage/summary` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/diagnostics` | `orchestrator/api/memory.py` |
+| GET | `/api/memory/effectiveness` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/feedback` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/graph/flows` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/graph/knowledge` | `orchestrator/api/memory.py` |
@@ -786,6 +894,7 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | POST | `/api/memory/injections/{injection_event_id}/feedback` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/patterns` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/projects` | `orchestrator/api/memory.py` |
+| POST | `/api/memory/repair` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/selectors` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/session-recall/recent` | `orchestrator/api/memory.py` |
 | GET | `/api/memory/session-recall/search` | `orchestrator/api/memory.py` |
@@ -820,6 +929,10 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/autonomous/{project_id}/approvals` | `orchestrator/api/autonomous.py` |
 | POST | `/autonomous/{project_id}/approvals/{approval_id}/approve` | `orchestrator/api/autonomous.py` |
 | POST | `/autonomous/{project_id}/approvals/{approval_id}/reject` | `orchestrator/api/autonomous.py` |
+| GET | `/autonomous/{project_id}/diagnostics` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/diagnostics/backfill` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/diagnostics/monitor` | `orchestrator/api/autonomous.py` |
+| POST | `/autonomous/{project_id}/diagnostics/recover` | `orchestrator/api/autonomous.py` |
 | POST | `/autonomous/{project_id}/findings/{finding_id}/approve` | `orchestrator/api/autonomous.py` |
 | POST | `/autonomous/{project_id}/findings/{finding_id}/reject` | `orchestrator/api/autonomous.py` |
 | POST | `/autonomous/{project_id}/findings/{finding_id}/resolve` | `orchestrator/api/autonomous.py` |

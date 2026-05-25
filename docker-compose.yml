@@ -53,6 +53,8 @@ services:
       - TEMPORAL_ADDRESS=temporal:7233
       - TEMPORAL_NAMESPACE=${TEMPORAL_NAMESPACE:-default}
       - TEMPORAL_TASK_QUEUE=${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
+      - TEMPORAL_WORKFLOW_TASK_QUEUE=${TEMPORAL_WORKFLOW_TASK_QUEUE:-quorvex-custom-workflows}
+      - TEMPORAL_UI_URL=${TEMPORAL_UI_URL:-http://localhost:8233}
       # Test Credentials (pass through from .env)
       - LOGIN_USERNAME=${LOGIN_USERNAME:-}
       - LOGIN_PASSWORD=${LOGIN_PASSWORD:-}
@@ -80,6 +82,8 @@ services:
       dockerfile: Dockerfile
     container_name: quorvex-autonomous-mission-worker
     command: python -m orchestrator.services.autonomous_mission_worker
+    healthcheck:
+      disable: true
     volumes:
       - ./runs:/app/runs
       - ./specs:/app/specs
@@ -93,6 +97,49 @@ services:
       - TEMPORAL_ADDRESS=temporal:7233
       - TEMPORAL_NAMESPACE=${TEMPORAL_NAMESPACE:-default}
       - TEMPORAL_TASK_QUEUE=${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
+      - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
+      - ANTHROPIC_AUTH_TOKENS=${ANTHROPIC_AUTH_TOKENS:-}
+      - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-glm-5.1}
+      - ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL:-glm-5.1}
+      - ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL:-glm-5-turbo}
+      - ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL:-glm-4.5-air}
+      - ANTHROPIC_CHAT_MODEL=${ANTHROPIC_CHAT_MODEL:-glm-5-turbo}
+      - API_TIMEOUT_MS=${API_TIMEOUT_MS:-3000000}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - MEMORY_ENABLED=${MEMORY_ENABLED:-true}
+      - CHROMADB_PERSIST_DIRECTORY=/app/data/chromadb
+    depends_on:
+      db:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    networks:
+      - playwright-network
+    restart: unless-stopped
+
+  custom-workflow-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quorvex-custom-workflow-worker
+    command: python -m orchestrator.services.custom_workflow_worker
+    healthcheck:
+      disable: true
+    volumes:
+      - ./runs:/app/runs
+      - ./specs:/app/specs
+      - ./tests:/app/tests
+      - ./data:/app/data
+      - ./orchestrator:/app/orchestrator
+      - ./.claude:/app/.claude
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/playwright_agent
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_NAMESPACE=${TEMPORAL_NAMESPACE:-default}
+      - TEMPORAL_WORKFLOW_TASK_QUEUE=${TEMPORAL_WORKFLOW_TASK_QUEUE:-quorvex-custom-workflows}
+      - TEMPORAL_UI_URL=${TEMPORAL_UI_URL:-http://localhost:8233}
       - ANTHROPIC_AUTH_TOKEN=${ANTHROPIC_AUTH_TOKEN}
       - ANTHROPIC_AUTH_TOKENS=${ANTHROPIC_AUTH_TOKENS:-}
       - ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}

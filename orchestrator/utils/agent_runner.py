@@ -469,6 +469,90 @@ class AgentRunner:
                 nonlocal tool_calls, current_tool_start, current_tool_name, current_tool_input
                 nonlocal hook_events_received, api_error_status, stop_reason, session_id, total_cost_usd
 
+                def _field(item: Any, name: str, default: Any = None) -> Any:
+                    if isinstance(item, dict):
+                        return item.get(name, default)
+                    return getattr(item, name, default)
+
+                def _as_content_items(message: Any) -> list[Any]:
+                    content = _field(message, "content", [])
+                    return content if isinstance(content, list) else []
+
+                def _handle_tool_use(tool_name: str, tool_input: dict[str, Any] | None) -> None:
+                    nonlocal current_tool_name, current_tool_start, current_tool_input
+                    current_tool_name = tool_name
+                    current_tool_start = datetime.now()
+                    current_tool_input = tool_input or {}
+
+                    if self.log_tools:
+                        if tool_name.startswith("mcp__playwright"):
+                            action = tool_name.split("__")[-1] if "__" in tool_name else tool_name
+                            print(f"   🔧 {action}...", flush=True)
+                        else:
+                            print(f"   🔧 {tool_name}...", flush=True)
+
+                    if self.on_tool_use:
+                        self.on_tool_use(tool_name, current_tool_input)
+                    self._emit_progress(
+                        {
+                            "phase": "tool_use",
+                            "tool_calls": len(tool_calls) + 1,
+                            "browser_tool_calls": len(
+                                [tc for tc in tool_calls if tc.name.startswith("mcp__playwright")]
+                            )
+                            + (1 if str(tool_name).startswith("mcp__playwright") else 0),
+                            "interactions": len(tool_calls) + 1,
+                            "last_tool": tool_name,
+                            "updated_at": datetime.utcnow().isoformat(),
+                        }
+                    )
+
+                def _handle_tool_result(message: Any) -> None:
+                    nonlocal current_tool_name, current_tool_start, current_tool_input
+                    if current_tool_name and current_tool_start:
+                        duration = (datetime.now() - current_tool_start).total_seconds() * 1000
+                        is_error = bool(_field(message, "is_error", False))
+                        tool_calls.append(
+                            ToolCall(
+                                name=current_tool_name,
+                                timestamp=current_tool_start,
+                                duration_ms=duration,
+                                success=not is_error,
+                                error=str(_field(message, "content", ""))[:200] if is_error else None,
+                                input=current_tool_input,
+                            )
+                        )
+                        completed_browser_calls = len(
+                            [
+                                tc
+                                for tc in tool_calls
+                                if tc.success and tc.name.startswith("mcp__") and "__browser_" in tc.name
+                            ]
+                        )
+                        self._emit_progress(
+                            {
+                                "phase": "tool_result",
+                                "tool_calls": len(tool_calls),
+                                "browser_tool_calls": len(
+                                    [tc for tc in tool_calls if tc.name.startswith("mcp__playwright")]
+                                ),
+                                "interactions": len(tool_calls),
+                                "last_tool": current_tool_name,
+                                "updated_at": datetime.utcnow().isoformat(),
+                            }
+                        )
+                        if (
+                            self.max_browser_tool_calls is not None
+                            and completed_browser_calls >= self.max_browser_tool_calls
+                        ):
+                            raise RuntimeError(
+                                f"Browser tool budget reached ({completed_browser_calls}/"
+                                f"{self.max_browser_tool_calls})"
+                            )
+                    current_tool_name = None
+                    current_tool_start = None
+                    current_tool_input = None
+
                 async for message in query(
                     prompt=prompt,
                     options=ClaudeAgentOptions(**self._claude_options_kwargs()),
@@ -502,113 +586,39 @@ class AgentRunner:
                             hook_events_received += 1
 
                         if message.type == "tool_use":
-                            tool_name = getattr(message, "name", "unknown")
-                            current_tool_name = tool_name
-                            current_tool_start = datetime.now()
-                            current_tool_input = getattr(message, "input", None)
-
-                            # Log tool use
-                            if self.log_tools:
-                                if tool_name.startswith("mcp__playwright"):
-                                    action = (
-                                        tool_name.split("__")[-1]
-                                        if "__" in tool_name
-                                        else tool_name
-                                    )
-                                    print(f"   🔧 {action}...", flush=True)
-                                else:
-                                    print(f"   🔧 {tool_name}...", flush=True)
-
-                            # Callback
-                            if self.on_tool_use:
-                                tool_input = getattr(message, "input", {})
-                                self.on_tool_use(tool_name, tool_input)
-                            self._emit_progress(
-                                {
-                                    "phase": "tool_use",
-                                    "tool_calls": len(tool_calls) + 1,
-                                    "browser_tool_calls": len(
-                                        [
-                                            tc
-                                            for tc in tool_calls
-                                            if tc.name.startswith("mcp__playwright")
-                                        ]
-                                    )
-                                    + (
-                                        1
-                                        if str(tool_name).startswith("mcp__playwright")
-                                        else 0
-                                    ),
-                                    "interactions": len(tool_calls) + 1,
-                                    "last_tool": tool_name,
-                                    "updated_at": datetime.utcnow().isoformat(),
-                                }
+                            _handle_tool_use(
+                                getattr(message, "name", "unknown"),
+                                getattr(message, "input", None),
                             )
 
                         elif message.type == "tool_result":
                             # Record completed tool call
-                            if current_tool_name and current_tool_start:
-                                duration = (
-                                    datetime.now() - current_tool_start
-                                ).total_seconds() * 1000
-                                is_error = getattr(message, "is_error", False)
-                                tool_calls.append(
-                                    ToolCall(
-                                        name=current_tool_name,
-                                        timestamp=current_tool_start,
-                                        duration_ms=duration,
-                                        success=not is_error,
-                                        error=(
-                                            str(getattr(message, "content", ""))[:200]
-                                            if is_error
-                                            else None
-                                        ),
-                                        input=current_tool_input,
-                                    )
-                                )
-                                completed_browser_calls = len(
-                                    [
-                                        tc
-                                        for tc in tool_calls
-                                        if tc.success
-                                        and tc.name.startswith("mcp__")
-                                        and "__browser_" in tc.name
-                                    ]
-                                )
-                                self._emit_progress(
-                                    {
-                                        "phase": "tool_result",
-                                        "tool_calls": len(tool_calls),
-                                        "browser_tool_calls": len(
-                                            [
-                                                tc
-                                                for tc in tool_calls
-                                                if tc.name.startswith("mcp__playwright")
-                                            ]
-                                        ),
-                                        "interactions": len(tool_calls),
-                                        "last_tool": current_tool_name,
-                                        "updated_at": datetime.utcnow().isoformat(),
-                                    }
-                                )
-                                if (
-                                    self.max_browser_tool_calls is not None
-                                    and completed_browser_calls
-                                    >= self.max_browser_tool_calls
-                                ):
-                                    raise RuntimeError(
-                                        f"Browser tool budget reached ({completed_browser_calls}/"
-                                        f"{self.max_browser_tool_calls})"
-                                    )
-                            current_tool_name = None
-                            current_tool_start = None
-                            current_tool_input = None
+                            _handle_tool_result(message)
 
                         elif message.type == "text":
                             text_content = getattr(message, "text", "")
                             if text_content:
                                 result_parts.append(text_content)
                                 text_blocks_received += 1
+
+                        elif message.type == "assistant":
+                            for item in _as_content_items(message):
+                                item_type = _field(item, "type")
+                                if item_type == "tool_use":
+                                    _handle_tool_use(
+                                        str(_field(item, "name", "unknown")),
+                                        _field(item, "input", {}) or {},
+                                    )
+                                elif item_type == "text":
+                                    text_content = str(_field(item, "text", "") or "")
+                                    if text_content:
+                                        result_parts.append(text_content)
+                                        text_blocks_received += 1
+
+                        elif message.type == "user":
+                            for item in _as_content_items(message):
+                                if _field(item, "type") == "tool_result":
+                                    _handle_tool_result(item)
                                 if text_blocks_received == 1:
                                     logger.info(
                                         f"Agent: first text output received at msg #{messages_received}"
@@ -840,16 +850,26 @@ class AgentRunner:
             context = builder.format_prompt_context(bundle, token_budget=1200)
             if not context:
                 return prompt
+            bundle_dict = bundle.to_dict()
+            unified = bundle_dict.get("unified") or {}
+            ranking = unified.get("ranking") or {}
             record_memory_injection(
                 project_id=project_id,
                 actor_type="agent",
                 stage=self.memory_stage,
                 query=prompt[:1000],
-                bundle=bundle.to_dict(),
+                bundle=bundle_dict,
                 context_text=context,
                 source_type=self.memory_source_type,
                 source_id=self.memory_source_id or self.owner_id,
-                extra_data={"agent_type": self.memory_agent_type},
+                extra_data={
+                    "agent_type": self.memory_agent_type,
+                    "owner_type": self.owner_type,
+                    "owner_id": self.owner_id,
+                    **({"run_id": self.memory_source_id} if self.memory_source_id else {}),
+                    "empty_recall": not bool(ranking.get("selected_items")),
+                    "memory_score_summary": ranking.get("score_summary", {}),
+                },
             )
             return f"{context}\n\n---\n\n{prompt}"
         except Exception as exc:

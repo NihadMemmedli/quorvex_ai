@@ -156,6 +156,12 @@ class MemoryInjectionFeedbackRequest(BaseModel):
     comment: str | None = None
 
 
+class MemoryRepairRequest(BaseModel):
+    project_id: str | None = None
+    action: str
+    dry_run: bool = True
+
+
 class AgentMemoryResponse(BaseModel):
     id: str
     project_id: str | None = None
@@ -830,10 +836,14 @@ async def get_agent_memory_context(
         memories = []
         for section in bundle.sections:
             memories.extend(section.items)
+        unified = bundle.unified or {}
         return {
             "context": context,
             "bundle": bundle.to_dict(),
             "memories": memories,
+            "ranking": unified.get("ranking", {}),
+            "score_breakdown": (unified.get("ranking") or {}).get("selected_items", []),
+            "warnings": (unified.get("diagnostics") or {}).get("warnings", []),
         }
     except Exception as e:
         logger.error(f"Failed to get agent memory context: {e}", exc_info=True)
@@ -1327,6 +1337,55 @@ async def get_memory_health(project_id: str | None = Query(None)) -> dict[str, A
         }
     except Exception as e:
         logger.error(f"Failed to get memory health: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/diagnostics")
+async def get_memory_diagnostics(
+    project_id: str | None = Query(None, description="Project ID for isolation"),
+    stale_days: int = Query(30, ge=1, le=3650, description="Age threshold for stale-memory warnings"),
+) -> dict[str, Any]:
+    """Report operational memory health, gaps, and recommended actions."""
+    try:
+        from orchestrator.memory.diagnostics import get_memory_diagnostics_service
+
+        return get_memory_diagnostics_service().run(project_id=project_id, stale_days=stale_days)
+    except Exception as e:
+        logger.error(f"Failed to get memory diagnostics: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/effectiveness")
+async def get_memory_effectiveness(
+    project_id: str | None = Query(None, description="Project ID for isolation"),
+    days: int = Query(30, ge=1, le=3650, description="Lookback window"),
+    stage: str | None = Query(None, description="Optional memory injection stage"),
+) -> dict[str, Any]:
+    """Report whether injected memory is associated with successful outcomes."""
+    try:
+        from orchestrator.memory.effectiveness import get_memory_effectiveness_service
+
+        return get_memory_effectiveness_service().summarize(project_id=project_id, days=days, stage=stage)
+    except Exception as e:
+        logger.error(f"Failed to get memory effectiveness: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/repair")
+async def repair_memory(request: MemoryRepairRequest) -> dict[str, Any]:
+    """Run conservative memory repair actions."""
+    try:
+        from orchestrator.memory.effectiveness import get_memory_repair_service
+
+        return get_memory_repair_service().run(
+            project_id=request.project_id,
+            action=request.action,
+            dry_run=request.dry_run,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to repair memory: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

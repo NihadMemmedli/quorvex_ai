@@ -6,16 +6,27 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
+import re
+import shlex
+import subprocess
+import tempfile
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
+from pydantic import BaseModel, ValidationError
+from pydantic import Field as PydanticField
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import (
+    ApplicationMap,
     AutonomousAgentWorkItem,
     AutonomousApproval,
     AutonomousFinding,
@@ -24,9 +35,13 @@ from orchestrator.api.models_db import (
     AutonomousTestProposal,
     CoverageGap,
     ExplorationSession,
+    Project,
     Requirement,
+    RtmEntry,
+    RtmSnapshot,
 )
-from orchestrator.services.autonomous_events import emit_work_item_status_event
+from orchestrator.services.autonomous_events import emit_mission_event, emit_work_item_status_event
+from orchestrator.utils.json_utils import extract_json_from_markdown
 from orchestrator.utils.string_utils import slugify
 
 logger = logging.getLogger(__name__)
@@ -37,6 +52,7 @@ DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
 DEFAULT_MAX_PENDING_APPROVALS = 25
 DEFAULT_MAX_PARALLEL_AGENTS = 2
 DEFAULT_WORK_ITEM_BATCH_SIZE = 7
+DEFAULT_WORK_ITEM_STALE_MINUTES = 45
 WORK_ITEM_ACTIVE_STATUSES = {"queued", "running"}
 WORK_ITEM_TERMINAL_STATUSES = {"completed", "failed", "blocked", "cancelled"}
 WHOLE_APP_TEAM_ROLES = (
@@ -54,6 +70,83 @@ REVISION_METADATA_KEYS = (
     "review_reason",
     "revision_attempt",
 )
+STRUCTURED_AGENT_ARTIFACT_KEYS = (
+    "requirements",
+    "rtm_candidates",
+    "test_proposals",
+    "bugs",
+    "findings",
+    "app_map_updates",
+)
+LOW_RISK_LEVELS = {"low", "info"}
+PROPOSAL_VALIDATION_TIMEOUT_SECONDS = 120
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+RUNS_DIR = REPOSITORY_ROOT / "runs"
+
+
+class StructuredRequirementArtifact(BaseModel):
+    title: str
+    description: str | None = None
+    category: str = "other"
+    priority: str = "medium"
+    acceptance_criteria: list[str] = PydanticField(default_factory=list)
+    truth_state: str = "candidate_requirement"
+    confidence: float = 0.7
+    uncertainty_reason: str | None = None
+
+
+class StructuredRtmCandidateArtifact(BaseModel):
+    requirement_id: int | None = None
+    requirement_code: str | None = None
+    test_spec_name: str
+    test_spec_path: str | None = None
+    mapping_type: str = "suggested"
+    confidence: float = 0.7
+    coverage_notes: str | None = None
+    gap_notes: str | None = None
+    allow_candidate: bool = False
+
+
+class StructuredTestProposalArtifact(BaseModel):
+    title: str
+    rationale: str
+    target_url: str | None = None
+    route: str | None = None
+    test_type: str = "e2e"
+    risk_level: str = "medium"
+    requirement_ids: list[int] = PydanticField(default_factory=list)
+
+
+class StructuredBugArtifact(BaseModel):
+    title: str
+    description: str
+    severity: str = "medium"
+    target_url: str | None = None
+    route: str | None = None
+    action: str | None = None
+    observed_failure: str | None = None
+    expected_behavior: str | None = None
+    evidence: dict[str, Any] = PydanticField(default_factory=dict)
+
+
+class StructuredAppMapUpdateArtifact(BaseModel):
+    url: str
+    page_title: str | None = None
+    linked_urls: list[str] = PydanticField(default_factory=list)
+    elements: dict[str, Any] = PydanticField(default_factory=dict)
+    forms: list[dict[str, Any]] = PydanticField(default_factory=list)
+    api_endpoints: list[dict[str, Any]] = PydanticField(default_factory=list)
+
+
+class StructuredAgentContract(BaseModel):
+    summary: str = ""
+    requirements: list[StructuredRequirementArtifact] = PydanticField(default_factory=list)
+    rtm_candidates: list[StructuredRtmCandidateArtifact] = PydanticField(default_factory=list)
+    test_proposals: list[StructuredTestProposalArtifact] = PydanticField(default_factory=list)
+    bugs: list[StructuredBugArtifact] = PydanticField(default_factory=list)
+    findings: list[StructuredBugArtifact] = PydanticField(default_factory=list)
+    app_map_updates: list[StructuredAppMapUpdateArtifact] = PydanticField(default_factory=list)
+    blockers: list[str] = PydanticField(default_factory=list)
 
 
 def _utcnow() -> datetime:
@@ -92,6 +185,191 @@ def _work_item_revision_metadata(item: AutonomousAgentWorkItem) -> dict[str, Any
         value = progress.get(key) if progress.get(key) is not None else result.get(key)
         if value is not None:
             metadata[key] = value
+    return metadata
+
+
+def _normalize_fingerprint_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_normalize_fingerprint_value(item) for item in value)
+    if isinstance(value, dict):
+        return " ".join(
+            f"{_normalize_fingerprint_value(key)} {_normalize_fingerprint_value(value[key])}"
+            for key in sorted(value)
+        )
+    text = str(value).lower()
+    text = re.sub(r"https?://[^/\s]+", "", text)
+    text = re.sub(r"[^a-z0-9/._ -]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _stable_dedupe_hash(*parts: Any, length: int = 32) -> str:
+    raw = "|".join(_normalize_fingerprint_value(part) for part in parts)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:length]
+
+
+def _requirement_fingerprint(row: dict[str, Any]) -> str:
+    return _stable_dedupe_hash(
+        "requirement",
+        row.get("category") or "other",
+        row.get("title"),
+        row.get("acceptance_criteria") or row.get("criteria") or [],
+    )
+
+
+def _spec_fingerprint(row: dict[str, Any], requirement_ids: list[int] | None = None) -> str:
+    route = row.get("route") or _route_from_url(row.get("target_url"))
+    return _stable_dedupe_hash(
+        "spec",
+        row.get("test_type") or "e2e",
+        route or row.get("target_url"),
+        requirement_ids or row.get("requirement_ids") or row.get("requirements") or [],
+        row.get("scenario") or row.get("title") or row.get("intent"),
+    )
+
+
+def _bug_fingerprint(row: dict[str, Any]) -> str:
+    return _stable_dedupe_hash(
+        "bug",
+        row.get("route") or _route_from_url(row.get("target_url")) or row.get("url"),
+        row.get("action") or row.get("steps") or row.get("reproduction_steps"),
+        row.get("observed_failure") or row.get("actual") or row.get("description"),
+        row.get("error") or row.get("error_message"),
+    )
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _as_text_list(value: Any) -> list[str]:
+    return [str(item).strip() for item in _as_list(value) if str(item or "").strip()]
+
+
+def _as_float(value: Any, default: float) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_int_list(value: Any) -> list[int]:
+    ids: list[int] = []
+    for item in _as_list(value):
+        try:
+            ids.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _extract_structured_agent_output(output: str) -> dict[str, Any] | None:
+    contract, _, _ = _extract_structured_agent_contract(output)
+    return contract
+
+
+def _extract_structured_agent_contract(output: str) -> tuple[dict[str, Any] | None, list[str], bool]:
+    if not output.strip():
+        return None, [], False
+    try:
+        parsed = extract_json_from_markdown(output)
+    except Exception:
+        match = re.search(r"\{.*\}", output, re.DOTALL)
+        if not match:
+            return None, [], False
+        try:
+            parsed = json.loads(match.group(0))
+        except Exception as exc:
+            return None, [f"Invalid JSON: {exc}"], True
+    if isinstance(parsed, list):
+        parsed = {"findings": parsed}
+    if not isinstance(parsed, dict):
+        return None, ["Structured output must be a JSON object."], True
+    if not any(key in parsed for key in STRUCTURED_AGENT_ARTIFACT_KEYS):
+        return None, [], False
+    try:
+        if hasattr(StructuredAgentContract, "model_validate"):
+            contract = StructuredAgentContract.model_validate(parsed)
+            return contract.model_dump(exclude_none=True), [], True
+        contract = StructuredAgentContract.parse_obj(parsed)
+        return contract.dict(exclude_none=True), [], True
+    except ValidationError as exc:
+        errors = []
+        for error in exc.errors()[:12]:
+            loc = ".".join(str(part) for part in error.get("loc", ())) or "root"
+            errors.append(f"{loc}: {error.get('msg', 'invalid value')}")
+        return None, errors or ["Structured output failed schema validation."], True
+
+
+def _next_requirement_code(session: Session, project_id: str | None) -> str:
+    requirements = session.exec(select(Requirement).where(Requirement.project_id == project_id)).all()
+    highest = 0
+    for requirement in requirements:
+        match = re.search(r"REQ-(\d+)", requirement.req_code or "", re.IGNORECASE)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"REQ-{highest + 1:03d}"
+
+
+def _resolve_requirement_ids(
+    session: Session,
+    project_id: str | None,
+    row: dict[str, Any],
+) -> list[int]:
+    ids = _as_int_list(row.get("requirement_ids") or row.get("requirement_id"))
+    code = str(row.get("requirement_code") or "").strip()
+    title = str(row.get("requirement_title") or row.get("title") or "").strip()
+    if code:
+        requirement = session.exec(
+            select(Requirement).where(Requirement.project_id == project_id, Requirement.req_code == code)
+        ).first()
+        if requirement and requirement.id is not None:
+            ids.append(requirement.id)
+    if title:
+        fingerprint = _requirement_fingerprint({"title": title, "category": row.get("category"), "acceptance_criteria": []})
+        for requirement in session.exec(select(Requirement).where(Requirement.project_id == project_id)).all():
+            existing_fingerprint = _requirement_fingerprint(
+                {
+                    "title": requirement.title,
+                    "category": requirement.category,
+                    "acceptance_criteria": requirement.acceptance_criteria,
+                }
+            )
+            if existing_fingerprint == fingerprint and requirement.id is not None:
+                ids.append(requirement.id)
+            elif (
+                _normalize_fingerprint_value(requirement.title) == _normalize_fingerprint_value(title)
+                and requirement.id is not None
+            ):
+                ids.append(requirement.id)
+    seen: set[int] = set()
+    return [req_id for req_id in ids if not (req_id in seen or seen.add(req_id))]
+
+
+def _artifact_source_metadata(
+    item: AutonomousAgentWorkItem,
+    *,
+    artifact_type: str,
+    fingerprint: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata = {
+        "work_item_id": item.id,
+        "role": item.role,
+        "artifact_type": artifact_type,
+        "artifact_fingerprint": fingerprint,
+        **_work_item_revision_metadata(item),
+    }
+    if extra:
+        metadata.update(extra)
     return metadata
 
 
@@ -241,13 +519,20 @@ def execute_mission_iteration(payload: dict[str, Any]) -> dict[str, Any]:
             "work_items_enqueued": 0,
             "work_items_completed": 0,
             "work_items_blocked": 0,
+            "stale_recovered_count": 0,
             "notes": [],
         }
 
         if _whole_app_team_enabled(mission):
             _update_run_checkpoint(session, mission, run, "team_supervising")
             team_summary = _run_parallel_team_supervisor(session, mission, run)
-            for key in ("work_items_created", "work_items_enqueued", "work_items_completed", "work_items_blocked"):
+            for key in (
+                "work_items_created",
+                "work_items_enqueued",
+                "work_items_completed",
+                "work_items_blocked",
+                "stale_recovered_count",
+            ):
                 summary[key] += int(team_summary.get(key, 0) or 0)
             if team_summary.get("findings_created"):
                 summary["findings_created"] += int(team_summary["findings_created"])
@@ -304,6 +589,17 @@ def execute_mission_iteration(payload: dict[str, Any]) -> dict[str, Any]:
         summary["test_proposals_created"] += approved_finding_count
         if approved_finding_count:
             summary["notes"].append(f"Generated {approved_finding_count} pending test proposal(s) from approved findings.")
+
+        materialization_summary = _auto_materialize_low_risk_proposals(session, mission, run)
+        summary["auto_materialization"] = materialization_summary
+        if materialization_summary["materialized"]:
+            summary["notes"].append(
+                f"Auto-materialized {materialization_summary['materialized']} low-risk proposal(s) by mission policy."
+            )
+        if materialization_summary["validated"]:
+            summary["notes"].append(
+                f"Validated {materialization_summary['validated']} materialized proposal(s) after writing files."
+            )
 
         if mission.mission_type in {"regression", "mixed"}:
             _update_run_checkpoint(session, mission, run, "regression_watch_ready")
@@ -857,14 +1153,20 @@ def _run_parallel_team_supervisor(
         "work_items_enqueued": 0,
         "work_items_completed": 0,
         "work_items_blocked": 0,
+        "stale_recovered_count": 0,
         "findings_created": 0,
+        "planner_created": 0,
         "active_count": 0,
         "completed_count": 0,
         "blocked_count": 0,
     }
     summary["work_items_completed"] = _sync_agent_work_items(session, mission)
+    summary["stale_recovered_count"] = _recover_stale_work_items(session, mission, run)
+    summary["work_items_created"] += summary["stale_recovered_count"]
     if summary["work_items_completed"]:
         summary["findings_created"] = _create_findings_from_completed_work_items(session, mission, run)
+    summary["planner_created"] = _plan_whole_app_work_items(session, mission, run)
+    summary["work_items_created"] += summary["planner_created"]
 
     existing = session.exec(
         select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission.id)
@@ -881,8 +1183,13 @@ def _run_parallel_team_supervisor(
                 assigned_surface_json=json.dumps(_role_surface(role, mission)),
                 status="queued",
                 priority=10 + index,
+                planner_key=f"bootstrap:{role}",
             )
-            item.progress = {"phase": "created", "message": "Waiting for an available agent worker."}
+            item.progress = {
+                "phase": "created",
+                "message": "Waiting for an available agent worker.",
+                "planner_key": item.planner_key,
+            }
             session.add(item)
             summary["work_items_created"] += 1
         session.commit()
@@ -912,6 +1219,344 @@ def _run_parallel_team_supervisor(
     summary["blocked_count"] = _count_work_items(session, mission.id, {"blocked", "failed"})
     _update_mission_team_progress(session, mission)
     return summary
+
+
+def _recover_stale_work_items(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+) -> int:
+    now = _utcnow()
+    stale_after = now - timedelta(
+        minutes=max(5, _config_int(mission.config, "work_item_stale_minutes", DEFAULT_WORK_ITEM_STALE_MINUTES))
+    )
+    running_items = session.exec(
+        select(AutonomousAgentWorkItem).where(
+            AutonomousAgentWorkItem.mission_id == mission.id,
+            AutonomousAgentWorkItem.status == "running",
+        )
+    ).all()
+    created = 0
+    for item in running_items:
+        if not _work_item_is_stale(item, now=now, stale_after=stale_after):
+            continue
+        task_state = _agent_task_recovery_state(str(item.agent_task_id or ""))
+        if task_state in {"running", "paused"}:
+            item.lease_until = now + timedelta(minutes=30)
+            item.last_heartbeat_at = now
+            item.updated_at = now
+            session.add(item)
+            continue
+        if _active_recovery_work_item_exists(session, mission.id, item.id):
+            continue
+        reason = task_state if task_state != "unknown" else _stale_work_item_reason(item, now=now, stale_after=stale_after)
+        replacement = _create_recovery_work_item(session, mission, run, item, reason=reason)
+        if not replacement:
+            continue
+        item.status = "failed"
+        item.error_message = f"Recovered stale autonomous work item: {reason}"
+        item.completed_at = now
+        item.updated_at = now
+        item.recovery_reason = reason
+        item.progress = {
+            **item.progress,
+            "phase": "recovered",
+            "message": item.error_message,
+            "recovery_reason": reason,
+            "recovery_work_item_id": replacement.id,
+        }
+        item.result = {
+            **item.result,
+            "recovery_reason": reason,
+            "recovery_work_item_id": replacement.id,
+            "recovered_at": now.isoformat(),
+        }
+        session.add(item)
+        emit_work_item_status_event(item, item.error_message, event_type="error")
+        created += 1
+    if created:
+        session.commit()
+    return created
+
+
+def _work_item_is_stale(item: AutonomousAgentWorkItem, *, now: datetime, stale_after: datetime) -> bool:
+    if item.lease_until and item.lease_until <= now:
+        return True
+    if item.last_heartbeat_at and item.last_heartbeat_at <= stale_after:
+        return True
+    if not item.last_heartbeat_at and item.updated_at <= stale_after:
+        return True
+    return False
+
+
+def _stale_work_item_reason(item: AutonomousAgentWorkItem, *, now: datetime, stale_after: datetime) -> str:
+    if item.lease_until and item.lease_until <= now:
+        return "lease_expired"
+    if item.last_heartbeat_at and item.last_heartbeat_at <= stale_after:
+        return "heartbeat_stale"
+    return "updated_at_stale"
+
+
+def _agent_task_recovery_state(task_id: str) -> str:
+    if not task_id:
+        return "missing_agent_task"
+    try:
+        from orchestrator.services.agent_queue import AgentTaskStatus, get_agent_queue
+
+        async def _load() -> str:
+            queue = get_agent_queue()
+            await queue.connect()
+            try:
+                task = await queue.get_task(task_id)
+            finally:
+                await queue.disconnect()
+            if not task:
+                return "missing_agent_task"
+            if task.status == AgentTaskStatus.COMPLETED:
+                return "completed_out_of_band"
+            if task.status == AgentTaskStatus.FAILED:
+                return "agent_task_failed"
+            if task.status == AgentTaskStatus.TIMEOUT:
+                return "agent_task_timeout"
+            if task.status == AgentTaskStatus.CANCELLED:
+                return "agent_task_cancelled"
+            if task.status == AgentTaskStatus.PAUSED:
+                return "paused"
+            return "running"
+
+        return asyncio.run(_load())
+    except Exception:
+        logger.debug("Unable to inspect agent task %s during recovery.", task_id, exc_info=True)
+        return "unknown"
+
+
+def _active_recovery_work_item_exists(session: Session, mission_id: str, stale_item_id: str) -> bool:
+    items = session.exec(
+        select(AutonomousAgentWorkItem).where(
+            AutonomousAgentWorkItem.mission_id == mission_id,
+            col(AutonomousAgentWorkItem.status).in_(("queued", "running")),
+        )
+    ).all()
+    return any((item.progress or {}).get("recovered_from_work_item_id") == stale_item_id for item in items)
+
+
+def _create_recovery_work_item(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+    stale_item: AutonomousAgentWorkItem,
+    *,
+    reason: str,
+) -> AutonomousAgentWorkItem | None:
+    progress = stale_item.progress or {}
+    recovery_count = int(stale_item.recovery_count or progress.get("recovery_count") or 0) + 1
+    replacement = AutonomousAgentWorkItem(
+        id=f"amwork-{uuid.uuid4().hex[:12]}",
+        mission_id=mission.id,
+        run_id=run.id,
+        project_id=mission.project_id,
+        role=stale_item.role,
+        planner_key=stale_item.planner_key or progress.get("planner_key"),
+        objective=stale_item.objective,
+        assigned_surface_json=stale_item.assigned_surface_json,
+        status="queued",
+        priority=max(1, int(stale_item.priority or 50) - 1),
+        recovery_count=recovery_count,
+        recovery_reason=reason,
+    )
+    replacement.progress = {
+        **progress,
+        "phase": "created",
+        "message": "Recovered from a stale autonomous work item.",
+        "planner_key": replacement.planner_key,
+        "recovered_from_work_item_id": stale_item.id,
+        "recovery_reason": reason,
+        "recovery_count": recovery_count,
+    }
+    session.add(replacement)
+    return replacement
+
+
+def _plan_whole_app_work_items(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+) -> int:
+    """Create bounded, idempotent work items from canonical app state."""
+    config = mission.config or {}
+    limit = max(1, min(_config_int(config, "planner_batch_size", DEFAULT_WORK_ITEM_BATCH_SIZE), 20))
+    created = 0
+
+    requirements = session.exec(
+        select(Requirement)
+        .where(Requirement.project_id == mission.project_id)
+        .order_by(col(Requirement.updated_at).desc())
+        .limit(100)
+    ).all()
+    for requirement in requirements:
+        if created >= limit:
+            break
+        if requirement.id is None or _requirement_truth_state(requirement) == "rejected_requirement":
+            continue
+        mappings = session.exec(
+            select(RtmEntry).where(
+                RtmEntry.project_id == mission.project_id,
+                RtmEntry.requirement_id == requirement.id,
+            )
+        ).all()
+        if any(entry.mapping_type == "full" for entry in mappings):
+            continue
+        planner_key = f"rtm_gap:{requirement.id}:{requirement.canonical_key or requirement.req_code}"
+        if _planner_work_item_exists(session, mission.id, planner_key):
+            continue
+        objective = (
+            f"Close RTM coverage for {requirement.req_code}: {requirement.title}. "
+            "Inspect existing specs and propose missing automated coverage without writing files."
+        )
+        if _create_planned_work_item(
+            session,
+            mission,
+            run,
+            planner_key=planner_key,
+            role="spec_writer",
+            objective=objective,
+            priority=18,
+            surfaces=[],
+            metadata={"requirement_id": requirement.id, "requirement_code": requirement.req_code},
+        ):
+            created += 1
+
+    findings = session.exec(
+        select(AutonomousFinding)
+        .where(
+            AutonomousFinding.project_id == mission.project_id,
+            col(AutonomousFinding.status).in_(("open", "awaiting_approval", "approved")),
+        )
+        .order_by(col(AutonomousFinding.updated_at).desc())
+        .limit(50)
+    ).all()
+    for finding in findings:
+        if created >= limit:
+            break
+        planner_key = f"finding_followup:{finding.id}:{finding.dedupe_key}"
+        if _planner_work_item_exists(session, mission.id, planner_key):
+            continue
+        evidence = finding.evidence
+        objective = (
+            f"Review finding '{finding.title}' and map it to affected routes, requirements, and a regression proposal. "
+            "Do not duplicate existing proposals."
+        )
+        if _create_planned_work_item(
+            session,
+            mission,
+            run,
+            planner_key=planner_key,
+            role="regression_scout",
+            objective=objective,
+            priority=24 if finding.severity in {"critical", "high"} else 34,
+            surfaces=[str(evidence.get("target_url") or evidence.get("url") or "")],
+            metadata={"finding_id": finding.id, "finding_type": finding.finding_type},
+        ):
+            created += 1
+
+    for frontier in _frontier_planner_items(session, mission, limit=max(0, limit - created)):
+        if created >= limit:
+            break
+        frontier_id = str(frontier.get("id") or "")
+        if not frontier_id:
+            continue
+        planner_key = f"frontier:{frontier_id}"
+        if _planner_work_item_exists(session, mission.id, planner_key):
+            continue
+        url = str(frontier.get("url") or frontier.get("state_url") or frontier.get("url_template") or "")
+        action = str(frontier.get("action_type") or frontier.get("action") or "explore")
+        objective = (
+            f"Explore browser-memory frontier item {frontier_id}: {action}. "
+            "Record app map updates, requirements, bugs, and test proposals as structured JSON."
+        )
+        if _create_planned_work_item(
+            session,
+            mission,
+            run,
+            planner_key=planner_key,
+            role="explorer",
+            objective=objective,
+            priority=28,
+            surfaces=[url] if url else mission.target_urls,
+            metadata={"frontier_item": frontier},
+        ):
+            created += 1
+
+    if created:
+        session.commit()
+    return created
+
+
+def _planner_work_item_exists(session: Session, mission_id: str, planner_key: str) -> bool:
+    if not planner_key:
+        return False
+    direct = session.exec(
+        select(AutonomousAgentWorkItem).where(
+            AutonomousAgentWorkItem.mission_id == mission_id,
+            AutonomousAgentWorkItem.planner_key == planner_key,
+        )
+    ).first()
+    if direct:
+        return True
+    candidates = session.exec(select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)).all()
+    return any((candidate.progress or {}).get("planner_key") == planner_key for candidate in candidates)
+
+
+def _create_planned_work_item(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+    *,
+    planner_key: str,
+    role: str,
+    objective: str,
+    priority: int,
+    surfaces: list[str],
+    metadata: dict[str, Any],
+) -> AutonomousAgentWorkItem | None:
+    item = AutonomousAgentWorkItem(
+        id=f"amwork-{uuid.uuid4().hex[:12]}",
+        mission_id=mission.id,
+        run_id=run.id,
+        project_id=mission.project_id,
+        role=role,
+        planner_key=planner_key,
+        objective=objective,
+        assigned_surface_json=json.dumps([surface for surface in surfaces if surface]),
+        status="queued",
+        priority=priority,
+    )
+    item.progress = {
+        "phase": "created",
+        "message": "Planner created this work item from canonical app state.",
+        "planner_key": planner_key,
+        **metadata,
+    }
+    session.add(item)
+    return item
+
+
+def _frontier_planner_items(session: Session, mission: AutonomousMission, *, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0 or not mission.project_id:
+        return []
+    try:
+        from orchestrator.memory.browser_memory import get_exploration_memory_service
+
+        service = get_exploration_memory_service(session=session, project_id=mission.project_id)
+        return service.get_frontier_work(
+            query=" ".join(mission.target_urls or []),
+            limit=limit,
+            risk_max=str((mission.config or {}).get("frontier_risk_max") or "medium"),
+            db=session,
+        )
+    except Exception:
+        logger.debug("Unable to load browser frontier work for autonomous planner.", exc_info=True)
+        return []
 
 
 def _count_work_items(session: Session, mission_id: str, statuses: set[str]) -> int:
@@ -951,6 +1596,13 @@ def _role_objective(role: str, mission: AutonomousMission) -> str:
 def _agent_prompt_for_work_item(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> str:
     surfaces = item.assigned_surface or mission.target_urls
     revision_context = item.progress or {}
+    context_bundle = _work_item_context_bundle(mission, item)
+    context_note = ""
+    if context_bundle:
+        context_note = f"""
+Canonical context bundle:
+{_compact_json(context_bundle, max_chars=7000)}
+"""
     revision_note = ""
     if revision_context.get("revision_of_work_item_id"):
         revision_note = f"""
@@ -966,19 +1618,145 @@ Address the reviewer feedback directly and explain what changed from the prior o
 Mission: {mission.name}
 Objective: {item.objective}
 Target surfaces: {', '.join(surfaces or ['project data and known app artifacts'])}
+{context_note}
 {revision_note}
 
 Work only by inspecting the app/project through available tools. Do not write repository files.
-Return a concise report with these sections:
-- summary
-- findings
-- requirements
-- rtm_candidates
-- test_proposals
-- blockers
+Return JSON only, preferably in a ```json fenced block, with this exact top-level shape:
+{{
+  "summary": "short factual summary",
+  "requirements": [
+    {{
+      "title": "requirement title",
+      "description": "what the product should do",
+      "category": "authentication|navigation|crud|validation|checkout|other",
+      "priority": "low|medium|high|critical",
+      "acceptance_criteria": ["observable criterion"],
+      "truth_state": "candidate_requirement",
+      "confidence": 0.0,
+      "uncertainty_reason": "why this is candidate/uncertain"
+    }}
+  ],
+  "rtm_candidates": [
+    {{
+      "requirement_id": 0,
+      "requirement_code": "REQ-001",
+      "test_spec_name": "existing-or-proposed spec name",
+      "test_spec_path": "path if known",
+      "mapping_type": "full|partial|suggested",
+      "confidence": 0.0,
+      "coverage_notes": "covered behavior",
+      "gap_notes": "remaining gap",
+      "allow_candidate": false
+    }}
+  ],
+  "test_proposals": [
+    {{
+      "title": "test proposal title",
+      "rationale": "why this test matters",
+      "target_url": "absolute URL if known",
+      "route": "/route if known",
+      "test_type": "e2e|api|regression|security|accessibility|unit",
+      "risk_level": "low|medium|high|critical",
+      "requirement_ids": []
+    }}
+  ],
+  "bugs": [
+    {{
+      "title": "bug title",
+      "description": "observed problem",
+      "severity": "low|medium|high|critical",
+      "target_url": "absolute URL if known",
+      "route": "/route if known",
+      "action": "user action",
+      "observed_failure": "what happened",
+      "expected_behavior": "what should happen",
+      "evidence": {{}}
+    }}
+  ],
+  "app_map_updates": [
+    {{
+      "url": "absolute URL",
+      "page_title": "page title",
+      "linked_urls": [],
+      "elements": {{}},
+      "forms": [],
+      "api_endpoints": []
+    }}
+  ],
+  "blockers": []
+}}
 
 Every proposed file or repository change must be a proposal only. The human approval flow will materialize files later.
 """
+
+
+def _work_item_context_bundle(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> dict[str, Any]:
+    bundle: dict[str, Any] = {}
+    try:
+        from orchestrator.memory.unified import get_unified_memory_service
+
+        bundle["memory"] = get_unified_memory_service().build_bundle(
+            query=item.objective,
+            project_id=mission.project_id,
+            agent_type=item.role,
+            limit=8,
+            include_review_required=True,
+            include_usage=False,
+        )
+    except Exception:
+        logger.debug("Unable to build autonomous work item memory context.", exc_info=True)
+
+    try:
+        requirements = []
+        with Session(engine) as context_session:
+            for requirement in context_session.exec(
+                select(Requirement)
+                .where(Requirement.project_id == mission.project_id)
+                .order_by(col(Requirement.updated_at).desc())
+                .limit(12)
+            ).all():
+                requirements.append(
+                    {
+                        "id": requirement.id,
+                        "req_code": requirement.req_code,
+                        "title": requirement.title,
+                        "truth_state": _requirement_truth_state(requirement),
+                        "priority": requirement.priority,
+                    }
+                )
+            open_proposals = context_session.exec(
+                select(AutonomousTestProposal)
+                .where(
+                    AutonomousTestProposal.project_id == mission.project_id,
+                    col(AutonomousTestProposal.approval_status).in_(("pending", "approved", "materialized")),
+                )
+                .order_by(col(AutonomousTestProposal.updated_at).desc())
+                .limit(12)
+            ).all()
+            bundle["canonical"] = {
+                "requirements": requirements,
+                "active_test_proposals": [
+                    {
+                        "id": proposal.id,
+                        "title": proposal.title,
+                        "status": proposal.approval_status,
+                        "validation_status": proposal.validation_status,
+                        "path": proposal.materialized_file_path or proposal.suggested_file_path,
+                    }
+                    for proposal in open_proposals
+                ],
+            }
+    except Exception:
+        logger.debug("Unable to build autonomous canonical context.", exc_info=True)
+    return bundle
+
+
+def _compact_json(value: Any, *, max_chars: int) -> str:
+    text = json.dumps(value, default=str, sort_keys=True)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
 
 
 def _allowed_tools_for_work_item(item: AutonomousAgentWorkItem) -> list[str]:
@@ -994,6 +1772,151 @@ def _allowed_tools_for_work_item(item: AutonomousAgentWorkItem) -> list[str]:
 
 
 def _enqueue_agent_work_item(
+    session: Session,
+    mission: AutonomousMission,
+    item: AutonomousAgentWorkItem,
+) -> bool:
+    return _execute_agent_work_item_direct(session, mission, item)
+
+
+def _execute_agent_work_item_direct(
+    session: Session,
+    mission: AutonomousMission,
+    item: AutonomousAgentWorkItem,
+) -> bool:
+    """Execute one autonomous work item inside the Temporal activity worker."""
+    now = _utcnow()
+    timeout_seconds = max(300, min(mission.max_runtime_minutes * 60, 7200))
+    item.agent_task_id = None
+    item.status = "running"
+    item.attempt_count += 1
+    item.started_at = item.started_at or now
+    item.lease_until = now + timedelta(seconds=timeout_seconds)
+    item.last_heartbeat_at = now
+    item.updated_at = now
+    item.progress = {
+        **item.progress,
+        "phase": "running",
+        "message": "Agent work item is running in a Temporal activity.",
+    }
+    session.add(item)
+    session.commit()
+    emit_work_item_status_event(
+        item,
+        "Agent work item started in Temporal activity.",
+        event_type="lifecycle",
+    )
+
+    try:
+        from orchestrator.utils.agent_runner import AgentRunner
+
+        def _on_progress(progress: dict[str, Any]) -> None:
+            try:
+                current = session.get(AutonomousAgentWorkItem, item.id)
+                if not current or current.status != "running":
+                    return
+                heartbeat_at = _utcnow()
+                current.progress = {
+                    **(current.progress or {}),
+                    **{key: value for key, value in progress.items() if value is not None},
+                    "phase": progress.get("phase") or "running",
+                    "message": progress.get("message") or "Agent is running.",
+                    "last_event_at": heartbeat_at.isoformat(),
+                }
+                current.last_heartbeat_at = heartbeat_at
+                current.lease_until = heartbeat_at + timedelta(seconds=timeout_seconds)
+                current.updated_at = heartbeat_at
+                session.add(current)
+                session.commit()
+            except Exception:
+                logger.debug("Failed to persist autonomous work item progress", exc_info=True)
+
+        async def _run_agent():
+            runner = AgentRunner(
+                timeout_seconds=timeout_seconds,
+                allowed_tools=_allowed_tools_for_work_item(item),
+                max_budget_usd=mission.max_llm_budget_usd,
+                log_tools=True,
+                on_progress=_on_progress,
+                owner_type="autonomous_work_item",
+                owner_id=item.id,
+                owner_label=f"{mission.name}: {item.role}",
+                memory_project_id=mission.project_id,
+                memory_agent_type=item.role,
+                memory_source_type="autonomous_work_item",
+                memory_source_id=item.id,
+                memory_stage="autonomous_mission",
+            )
+            return await runner.run(_agent_prompt_for_work_item(mission, item))
+
+        result = asyncio.run(_run_agent())
+    except Exception as exc:
+        now = _utcnow()
+        item = session.get(AutonomousAgentWorkItem, item.id) or item
+        item.status = "failed"
+        item.error_message = str(exc)
+        item.completed_at = now
+        item.updated_at = now
+        item.last_heartbeat_at = now
+        item.progress = {"phase": "failed", "message": item.error_message}
+        session.add(item)
+        session.commit()
+        emit_work_item_status_event(item, item.error_message, event_type="error")
+        logger.warning("Failed to execute autonomous work item %s: %s", item.id, exc)
+        return False
+
+    now = _utcnow()
+    item = session.get(AutonomousAgentWorkItem, item.id) or item
+    telemetry = {
+        "tool_calls": len(result.tool_calls),
+        "messages_received": result.messages_received,
+        "text_blocks_received": result.text_blocks_received,
+        "duration_seconds": result.duration_seconds,
+        "timed_out": result.timed_out,
+        "total_cost_usd": result.total_cost_usd,
+        "stop_reason": result.stop_reason,
+    }
+    if result.success:
+        item.status = "completed"
+        item.completed_at = now
+        item.result = {
+            "output": result.output or "",
+            "telemetry": telemetry,
+        }
+        item.artifacts = [
+            {
+                "type": "agent_report",
+                "label": f"{item.role} report",
+                "content": result.output or "",
+            }
+        ]
+        item.progress = {"phase": "completed", "message": "Agent completed this assignment."}
+        item.budget_used_usd = float(result.total_cost_usd or 0.0)
+        item.updated_at = now
+        item.last_heartbeat_at = now
+        mission.budget_used_usd += item.budget_used_usd
+        mission.updated_at = now
+        session.add(item)
+        session.add(mission)
+        session.commit()
+        emit_work_item_status_event(item, "Agent completed this assignment.", event_type="complete")
+        return True
+
+    item.status = "failed"
+    item.error_message = result.error or "Agent work item failed"
+    item.completed_at = now
+    item.result = {"output": result.output or "", "telemetry": telemetry, "error": item.error_message}
+    item.progress = {"phase": "failed", "message": item.error_message}
+    item.updated_at = now
+    item.last_heartbeat_at = now
+    item.budget_used_usd = float(result.total_cost_usd or 0.0)
+    session.add(item)
+    session.commit()
+    emit_work_item_status_event(item, item.error_message, event_type="error")
+    return False
+
+
+def _enqueue_agent_work_item_legacy(
     session: Session,
     mission: AutonomousMission,
     item: AutonomousAgentWorkItem,
@@ -1037,8 +1960,15 @@ def _enqueue_agent_work_item(
     item.status = "running"
     item.attempt_count += 1
     item.started_at = item.started_at or now
+    item.lease_until = now + timedelta(seconds=max(300, min(mission.max_runtime_minutes * 60, 7200)))
+    item.last_heartbeat_at = now
     item.updated_at = now
-    item.progress = {"phase": "queued", "message": "Agent task has been queued.", "agent_task_id": task_id}
+    item.progress = {
+        **item.progress,
+        "phase": "queued",
+        "message": "Agent task has been queued.",
+        "agent_task_id": task_id,
+    }
     session.add(item)
     session.commit()
     emit_work_item_status_event(item, "Agent task queued for autonomous work item.", event_type="lifecycle")
@@ -1091,6 +2021,7 @@ def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
                 "last_event_at": now.isoformat(),
             }
             item.updated_at = now
+            item.last_heartbeat_at = now
             session.add(item)
             continue
         if task.status.value == "running":
@@ -1104,6 +2035,8 @@ def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
                 "last_event_at": now.isoformat(),
             }
             item.updated_at = now
+            item.last_heartbeat_at = now
+            item.lease_until = now + timedelta(minutes=30)
             session.add(item)
             continue
         if task.status == AgentTaskStatus.COMPLETED:
@@ -1117,6 +2050,7 @@ def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
             item.progress = {"phase": "completed", "message": "Agent completed this assignment."}
             item.budget_used_usd = float(telemetry.get("total_cost_usd") or 0.0)
             item.updated_at = now
+            item.last_heartbeat_at = now
             completed_count += 1
             session.add(item)
             emit_work_item_status_event(item, "Agent completed this assignment.", event_type="complete")
@@ -1126,6 +2060,7 @@ def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
             item.completed_at = task.completed_at or now
             item.progress = {"phase": item.status, "message": item.error_message}
             item.updated_at = now
+            item.last_heartbeat_at = now
             session.add(item)
             emit_work_item_status_event(item, item.error_message, event_type="error")
     if completed_count:
@@ -1155,6 +2090,29 @@ def _create_findings_from_completed_work_items(
         output = str(result.get("output") or "").strip()
         if not output:
             continue
+        structured, validation_errors, saw_structured_output = _extract_structured_agent_contract(output)
+        if saw_structured_output and validation_errors:
+            _create_contract_revision_work_item(session, mission, run, item, validation_errors)
+            continue
+        if structured:
+            merge_summary = _merge_structured_work_item_artifacts(session, mission, run, item, structured)
+            item.result = {**item.result, "structured_merge": merge_summary}
+            session.add(item)
+            session.commit()
+            created += int(merge_summary.get("findings_created", 0) or 0)
+            if any(
+                int(merge_summary.get(key, 0) or 0)
+                for key in (
+                    "requirements_created",
+                    "requirements_reused",
+                    "rtm_entries_created",
+                    "rtm_entries_reused",
+                    "test_proposals_created",
+                    "findings_reused",
+                    "app_map_updates",
+                )
+            ):
+                continue
         dedupe_key = hashlib.sha256(f"{mission.project_id}|work_item|{item.id}|finding".encode()).hexdigest()[:32]
         existing = session.exec(
             select(AutonomousFinding).where(
@@ -1195,6 +2153,495 @@ def _create_findings_from_completed_work_items(
         session.add(mission)
         session.commit()
     return created
+
+
+def _create_contract_revision_work_item(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+    item: AutonomousAgentWorkItem,
+    validation_errors: list[str],
+) -> AutonomousAgentWorkItem | None:
+    existing = session.exec(
+        select(AutonomousAgentWorkItem).where(
+            AutonomousAgentWorkItem.mission_id == mission.id,
+            col(AutonomousAgentWorkItem.status).in_(("queued", "running", "completed")),
+        )
+    ).all()
+    for candidate in existing:
+        progress = candidate.progress
+        if progress.get("revision_of_work_item_id") == item.id and progress.get("review_reason") == "structured_contract_validation":
+            item.result = {
+                **item.result,
+                "review_decision": "needs_revision",
+                "revision_work_item_id": candidate.id,
+                "validation_errors": validation_errors,
+            }
+            session.add(item)
+            session.commit()
+            return candidate
+
+    attempt = int((item.progress or {}).get("revision_attempt") or 0) + 1
+    revision = AutonomousAgentWorkItem(
+        id=f"amwork-{uuid.uuid4().hex[:12]}",
+        mission_id=mission.id,
+        run_id=run.id,
+        project_id=mission.project_id,
+        role=item.role,
+        objective=(
+            f"Revise the structured JSON output for work item {item.id}. "
+            "Return only contract-valid JSON and preserve any valid discoveries."
+        ),
+        assigned_surface_json=item.assigned_surface_json,
+        status="queued",
+        priority=max(1, int(item.priority or 50) - 5),
+    )
+    revision.progress = {
+        "phase": "created",
+        "message": "Queued because the previous agent output did not match the structured contract.",
+        "revision_of_work_item_id": item.id,
+        "reviewer_work_item_id": item.id,
+        "review_reason": "structured_contract_validation",
+        "validation_errors": validation_errors[:20],
+        "revision_attempt": attempt,
+    }
+    item.result = {
+        **item.result,
+        "review_decision": "needs_revision",
+        "revision_work_item_id": revision.id,
+        "validation_errors": validation_errors,
+    }
+    session.add(item)
+    session.add(revision)
+    session.commit()
+    return revision
+
+
+def _merge_structured_work_item_artifacts(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+    item: AutonomousAgentWorkItem,
+    contract: dict[str, Any],
+) -> dict[str, int]:
+    summary = {
+        "requirements_created": 0,
+        "requirements_reused": 0,
+        "rtm_entries_created": 0,
+        "rtm_entries_reused": 0,
+        "test_proposals_created": 0,
+        "findings_created": 0,
+        "findings_reused": 0,
+        "app_map_updates": 0,
+        "rtm_snapshots_created": 0,
+    }
+
+    for row in _dict_rows(contract.get("app_map_updates")):
+        if _merge_app_map_update(session, mission, row):
+            summary["app_map_updates"] += 1
+
+    requirement_id_by_fingerprint: dict[str, int] = {}
+    for row in _dict_rows(contract.get("requirements")):
+        requirement, created, fingerprint = _merge_requirement_artifact(session, mission, item, row)
+        if not requirement or requirement.id is None:
+            continue
+        requirement_id_by_fingerprint[fingerprint] = requirement.id
+        if created:
+            summary["requirements_created"] += 1
+        else:
+            summary["requirements_reused"] += 1
+
+    for row in _dict_rows(contract.get("rtm_candidates")):
+        if not _resolve_requirement_ids(session, mission.project_id, row) and len(requirement_id_by_fingerprint) == 1:
+            row = {**row, "requirement_id": next(iter(requirement_id_by_fingerprint.values()))}
+        created = _merge_rtm_candidate(session, mission, row)
+        if created is True:
+            summary["rtm_entries_created"] += 1
+        elif created is False:
+            summary["rtm_entries_reused"] += 1
+
+    for row in _dict_rows(contract.get("test_proposals")):
+        requirement_ids = _resolve_requirement_ids(session, mission.project_id, row)
+        if not requirement_ids and row.get("requirement_fingerprint"):
+            req_id = requirement_id_by_fingerprint.get(str(row["requirement_fingerprint"]))
+            if req_id:
+                requirement_ids = [req_id]
+        if not requirement_ids and len(requirement_id_by_fingerprint) == 1:
+            requirement_ids = [next(iter(requirement_id_by_fingerprint.values()))]
+        proposal = _merge_test_proposal_artifact(session, mission, run, item, row, requirement_ids=requirement_ids)
+        if proposal:
+            summary["test_proposals_created"] += 1
+
+    for row in _dict_rows(contract.get("bugs")) + _dict_rows(contract.get("findings")):
+        finding, created = _merge_bug_or_finding_artifact(session, mission, run, item, row)
+        if not finding:
+            continue
+        if created:
+            summary["findings_created"] += 1
+        else:
+            summary["findings_reused"] += 1
+
+    if summary["rtm_entries_created"]:
+        _create_rtm_snapshot(session, mission, source_work_item_id=item.id)
+        summary["rtm_snapshots_created"] = 1
+
+    session.commit()
+    return summary
+
+
+def _dict_rows(value: Any) -> list[dict[str, Any]]:
+    return [row for row in _as_list(value) if isinstance(row, dict)]
+
+
+def _merge_app_map_update(session: Session, mission: AutonomousMission, row: dict[str, Any]) -> bool:
+    url = str(row.get("url") or row.get("target_url") or "").strip()
+    if not url:
+        return False
+    surface_key = _stable_dedupe_hash("surface", mission.project_id or "default", _route_from_url(url) or url)
+    existing = session.exec(
+        select(ApplicationMap).where(
+            ApplicationMap.project_id == mission.project_id,
+            ApplicationMap.app_surface_key == surface_key,
+        )
+    ).first()
+    if not existing:
+        existing = session.exec(select(ApplicationMap).where(ApplicationMap.url == url)).first()
+    now = _utcnow()
+    if existing:
+        existing.project_id = existing.project_id or mission.project_id
+        existing.app_surface_key = existing.app_surface_key or surface_key
+        existing.page_title = str(row.get("page_title") or row.get("title") or existing.page_title or "") or None
+        existing.linked_urls = _as_text_list(row.get("linked_urls")) or existing.linked_urls
+        if isinstance(row.get("elements"), dict):
+            existing.elements = row["elements"]
+        forms = row.get("forms")
+        if isinstance(forms, list):
+            existing.forms = [form for form in forms if isinstance(form, dict)]
+        endpoints = row.get("api_endpoints")
+        if isinstance(endpoints, list):
+            existing.api_endpoints = [endpoint for endpoint in endpoints if isinstance(endpoint, dict)]
+        existing.last_crawled = now
+        session.add(existing)
+        return True
+    app_map = ApplicationMap(
+        project_id=mission.project_id,
+        app_surface_key=surface_key,
+        url=url,
+        page_title=str(row.get("page_title") or row.get("title") or "") or None,
+        linked_urls=_as_text_list(row.get("linked_urls")) or None,
+        elements=row.get("elements") if isinstance(row.get("elements"), dict) else None,
+        forms=[form for form in _as_list(row.get("forms")) if isinstance(form, dict)] or None,
+        api_endpoints=[endpoint for endpoint in _as_list(row.get("api_endpoints")) if isinstance(endpoint, dict)] or None,
+        last_crawled=now,
+    )
+    session.add(app_map)
+    return True
+
+
+def _merge_requirement_artifact(
+    session: Session,
+    mission: AutonomousMission,
+    item: AutonomousAgentWorkItem,
+    row: dict[str, Any],
+) -> tuple[Requirement | None, bool, str]:
+    title = str(row.get("title") or "").strip()
+    if not title:
+        return None, False, ""
+    category = str(row.get("category") or "other").strip() or "other"
+    criteria = _as_text_list(row.get("acceptance_criteria") or row.get("criteria"))
+    fingerprint = _requirement_fingerprint({"title": title, "category": category, "acceptance_criteria": criteria})
+    existing_by_key = session.exec(
+        select(Requirement).where(Requirement.project_id == mission.project_id, Requirement.canonical_key == fingerprint)
+    ).first()
+    candidates = [existing_by_key] if existing_by_key else session.exec(
+        select(Requirement).where(Requirement.project_id == mission.project_id)
+    ).all()
+    for requirement in candidates:
+        if not requirement:
+            continue
+        existing_fingerprint = _requirement_fingerprint(
+            {
+                "title": requirement.title,
+                "category": requirement.category,
+                "acceptance_criteria": requirement.acceptance_criteria,
+            }
+        )
+        if existing_fingerprint != fingerprint:
+            continue
+        existing_criteria = requirement.acceptance_criteria
+        merged_criteria = sorted({*existing_criteria, *criteria})
+        if merged_criteria != existing_criteria:
+            requirement.acceptance_criteria = merged_criteria
+        if row.get("description") and not requirement.description:
+            requirement.description = str(row.get("description"))
+        requirement.canonical_key = requirement.canonical_key or fingerprint
+        requirement.confidence = max(float(requirement.confidence or 0), _as_float(row.get("confidence"), 0.7))
+        requirement.updated_at = _utcnow()
+        session.add(requirement)
+        return requirement, False, fingerprint
+
+    truth_state = str(row.get("truth_state") or "candidate_requirement")
+    if truth_state not in {"candidate_requirement", "confirmed_requirement", "manual_requirement", "observed_behavior"}:
+        truth_state = "candidate_requirement"
+    now = _utcnow()
+    requirement = Requirement(
+        project_id=mission.project_id,
+        req_code=_next_requirement_code(session, mission.project_id),
+        title=title,
+        description=str(row.get("description") or "") or None,
+        category=category,
+        priority=_normalize_risk(str(row.get("priority") or "medium")),
+        status="confirmed" if truth_state == "confirmed_requirement" else "draft",
+        canonical_key=fingerprint,
+        truth_state=truth_state,
+        source_type="autonomous_agent",
+        confidence=_as_float(row.get("confidence"), 0.7),
+        uncertainty_reason=str(
+            row.get("uncertainty_reason") or "Generated from autonomous agent evidence and awaiting human review."
+        ),
+        acceptance_criteria_json=json.dumps(criteria),
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(requirement)
+    session.flush()
+    return requirement, True, fingerprint
+
+
+def _merge_rtm_candidate(
+    session: Session,
+    mission: AutonomousMission,
+    row: dict[str, Any],
+) -> bool | None:
+    requirement_ids = _resolve_requirement_ids(session, mission.project_id, row)
+    if not requirement_ids:
+        return None
+    test_spec_name = str(row.get("test_spec_name") or row.get("spec_name") or row.get("suggested_file_path") or "").strip()
+    if not test_spec_name:
+        return None
+    created_any = False
+    reused_any = False
+    for requirement_id in requirement_ids:
+        requirement = session.get(Requirement, requirement_id)
+        if not requirement or requirement.project_id != mission.project_id:
+            continue
+        allow_candidate = bool(row.get("allow_candidate") or row.get("accepted_candidate"))
+        if _requirement_truth_state(requirement) != "confirmed_requirement" and not allow_candidate:
+            continue
+        dedupe_key = _stable_dedupe_hash(
+            mission.project_id or "default",
+            "rtm",
+            requirement_id,
+            test_spec_name,
+            row.get("test_spec_path") or row.get("spec_path"),
+        )
+        existing = session.exec(
+            select(RtmEntry).where(
+                RtmEntry.project_id == mission.project_id,
+                RtmEntry.dedupe_key == dedupe_key,
+            )
+        ).first()
+        if not existing:
+            existing = session.exec(
+                select(RtmEntry).where(
+                    RtmEntry.project_id == mission.project_id,
+                    RtmEntry.requirement_id == requirement_id,
+                    RtmEntry.test_spec_name == test_spec_name,
+                )
+            ).first()
+        now = _utcnow()
+        if existing:
+            existing.dedupe_key = existing.dedupe_key or dedupe_key
+            existing.mapping_type = str(row.get("mapping_type") or existing.mapping_type or "suggested")
+            existing.test_spec_path = str(row.get("test_spec_path") or row.get("spec_path") or existing.test_spec_path or "") or None
+            existing.confidence = max(float(existing.confidence or 0), _as_float(row.get("confidence"), 0.7))
+            existing.coverage_notes = str(row.get("coverage_notes") or existing.coverage_notes or "") or None
+            existing.gap_notes = str(row.get("gap_notes") or existing.gap_notes or "") or None
+            existing.updated_at = now
+            session.add(existing)
+            reused_any = True
+            continue
+        entry = RtmEntry(
+            project_id=mission.project_id,
+            requirement_id=requirement_id,
+            test_spec_name=test_spec_name,
+            test_spec_path=str(row.get("test_spec_path") or row.get("spec_path") or "") or None,
+            mapping_type=str(row.get("mapping_type") or "suggested"),
+            dedupe_key=dedupe_key,
+            confidence=_as_float(row.get("confidence"), 0.7),
+            coverage_notes=str(row.get("coverage_notes") or "") or None,
+            gap_notes=str(row.get("gap_notes") or "") or None,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(entry)
+        created_any = True
+    if created_any:
+        return True
+    if reused_any:
+        return False
+    return None
+
+
+def _merge_test_proposal_artifact(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+    item: AutonomousAgentWorkItem,
+    row: dict[str, Any],
+    *,
+    requirement_ids: list[int],
+) -> AutonomousTestProposal | None:
+    title = str(row.get("title") or row.get("scenario") or "").strip()
+    rationale = str(row.get("rationale") or row.get("description") or title).strip()
+    if not title or not rationale:
+        return None
+    target_url = str(row.get("target_url") or row.get("url") or "").strip() or _default_target_url(mission)
+    if row.get("route") and not row.get("target_url"):
+        target_url = _url_for_route(_default_target_url(mission), str(row["route"]))
+    fingerprint = _spec_fingerprint(row, requirement_ids=requirement_ids)
+    metadata = _artifact_source_metadata(
+        item,
+        artifact_type="test_proposal",
+        fingerprint=fingerprint,
+        extra={
+            "requirement_ids": requirement_ids,
+            "route": row.get("route") or _route_from_url(target_url),
+            "agent_rationale": rationale,
+        },
+    )
+    if requirement_ids:
+        metadata["requirement_id"] = requirement_ids[0]
+    return _create_test_proposal(
+        session,
+        mission,
+        run,
+        source_type="autonomous_structured_spec",
+        source_id=fingerprint,
+        title=title,
+        rationale=rationale,
+        target_url=target_url,
+        risk_level=str(row.get("risk_level") or row.get("severity") or "medium"),
+        source_metadata=metadata,
+    )
+
+
+def _merge_bug_or_finding_artifact(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+    item: AutonomousAgentWorkItem,
+    row: dict[str, Any],
+) -> tuple[AutonomousFinding | None, bool]:
+    title = str(row.get("title") or "").strip()
+    description = str(row.get("description") or row.get("observed_failure") or "").strip()
+    if not title or not description:
+        return None, False
+    kind = "bug" if row.get("observed_failure") or row.get("expected_behavior") else str(row.get("finding_type") or "coverage_gap")
+    fingerprint = _bug_fingerprint(row) if kind == "bug" else _stable_dedupe_hash(
+        "finding",
+        kind,
+        row.get("route") or row.get("target_url") or row.get("url"),
+        title,
+        description,
+    )
+    dedupe_key = _stable_dedupe_hash(mission.project_id or "default", kind, fingerprint)
+    existing = session.exec(
+        select(AutonomousFinding).where(
+            AutonomousFinding.project_id == mission.project_id,
+            AutonomousFinding.dedupe_key == dedupe_key,
+        )
+    ).first()
+    if existing:
+        return existing, False
+    now = _utcnow()
+    evidence = _artifact_source_metadata(
+        item,
+        artifact_type=kind,
+        fingerprint=fingerprint,
+        extra={
+            "target_url": row.get("target_url") or row.get("url"),
+            "route": row.get("route") or _route_from_url(row.get("target_url") or row.get("url")),
+            "action": row.get("action"),
+            "observed_failure": row.get("observed_failure"),
+            "expected_behavior": row.get("expected_behavior"),
+            "evidence": row.get("evidence") if isinstance(row.get("evidence"), dict) else {},
+        },
+    )
+    finding = AutonomousFinding(
+        id=f"amfind-{uuid.uuid4().hex[:12]}",
+        mission_id=mission.id,
+        run_id=run.id,
+        project_id=mission.project_id,
+        finding_type=kind,
+        severity=_normalize_risk(str(row.get("severity") or row.get("risk_level") or "medium")),
+        title=title,
+        description=description,
+        status="awaiting_approval" if kind == "bug" else "open",
+        confidence=_as_float(row.get("confidence"), 0.75),
+        dedupe_key=dedupe_key,
+        evidence_json=json.dumps(evidence),
+        source_type="autonomous_work_item",
+        source_id=item.id,
+        approval_required=True,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(finding)
+    return finding, True
+
+
+def _create_rtm_snapshot(session: Session, mission: AutonomousMission, *, source_work_item_id: str) -> None:
+    requirements = session.exec(select(Requirement).where(Requirement.project_id == mission.project_id)).all()
+    entries = session.exec(select(RtmEntry).where(RtmEntry.project_id == mission.project_id)).all()
+    entries_by_requirement: dict[int, list[RtmEntry]] = {}
+    for entry in entries:
+        entries_by_requirement.setdefault(entry.requirement_id, []).append(entry)
+    covered = 0
+    partial = 0
+    uncovered = 0
+    rows = []
+    for requirement in requirements:
+        req_entries = entries_by_requirement.get(requirement.id or -1, [])
+        if any(entry.mapping_type == "full" for entry in req_entries):
+            covered += 1
+            status = "covered"
+        elif req_entries:
+            partial += 1
+            status = "partial"
+        else:
+            uncovered += 1
+            status = "uncovered"
+        rows.append(
+            {
+                "requirement_id": requirement.id,
+                "req_code": requirement.req_code,
+                "title": requirement.title,
+                "status": status,
+                "entries": [entry.test_spec_name for entry in req_entries],
+            }
+        )
+    total = len(requirements)
+    snapshot = RtmSnapshot(
+        project_id=mission.project_id,
+        snapshot_name=f"autonomous-{mission.id}-{source_work_item_id}",
+        total_requirements=total,
+        covered_requirements=covered,
+        partial_requirements=partial,
+        uncovered_requirements=uncovered,
+        coverage_percentage=round((covered / total) * 100, 2) if total else 0.0,
+        snapshot_data_json=json.dumps({"source_work_item_id": source_work_item_id, "rows": rows[:500]}),
+        created_at=_utcnow(),
+    )
+    session.add(snapshot)
+
+
+def _url_for_route(base_url: str, route: str) -> str:
+    parsed = urlparse(base_url)
+    if not parsed.scheme or not parsed.netloc:
+        return route
+    path = route if route.startswith("/") else f"/{route}"
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
 
 
 def _update_mission_team_progress(session: Session, mission: AutonomousMission) -> None:
@@ -1381,6 +2828,676 @@ def _create_proposals_for_approved_findings(session: Session, mission: Autonomou
             session.rollback()
             return 0
     return created
+
+
+def _auto_materialize_low_risk_proposals(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+) -> dict[str, int]:
+    summary = {"materialized": 0, "validated": 0, "validation_failed": 0, "skipped": 0}
+    if mission.approval_policy != "auto_materialize_low_risk":
+        return summary
+
+    proposals = session.exec(
+        select(AutonomousTestProposal)
+        .where(
+            AutonomousTestProposal.project_id == mission.project_id,
+            col(AutonomousTestProposal.approval_status).in_(("pending", "approved")),
+            AutonomousTestProposal.materialized_file_path == None,  # noqa: E711
+        )
+        .order_by(col(AutonomousTestProposal.created_at).asc())
+        .limit(MAX_PROPOSALS_PER_ITERATION)
+    ).all()
+    for proposal in proposals:
+        if _normalize_risk(proposal.risk_level) not in LOW_RISK_LEVELS:
+            summary["skipped"] += 1
+            continue
+        review_context = _proposal_review_context_for_policy(session, proposal)
+        duplicate = review_context.get("duplicate") if isinstance(review_context, dict) else {}
+        if isinstance(duplicate, dict) and duplicate.get("blocking"):
+            proposal.validation_status = "blocked"
+            proposal.validation_result = {
+                "reason": "blocking_duplicate",
+                "review_context": review_context,
+            }
+            proposal.updated_at = _utcnow()
+            session.add(proposal)
+            summary["skipped"] += 1
+            continue
+        try:
+            relative_path = _validate_materialize_path_for_policy(proposal.suggested_file_path, proposal.test_type)
+        except ValueError as exc:
+            proposal.validation_status = "blocked"
+            proposal.validation_result = {"reason": "invalid_path", "error": str(exc)}
+            proposal.updated_at = _utcnow()
+            session.add(proposal)
+            summary["skipped"] += 1
+            continue
+        target = (REPOSITORY_ROOT / relative_path).resolve()
+        try:
+            target.relative_to(REPOSITORY_ROOT.resolve())
+        except ValueError:
+            proposal.validation_status = "blocked"
+            proposal.validation_result = {"reason": "path_escape", "path": relative_path}
+            proposal.updated_at = _utcnow()
+            session.add(proposal)
+            summary["skipped"] += 1
+            continue
+        if target.exists():
+            proposal.validation_status = "blocked"
+            proposal.validation_result = {"reason": "file_exists", "path": relative_path}
+            proposal.updated_at = _utcnow()
+            session.add(proposal)
+            summary["skipped"] += 1
+            continue
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as temp_file:
+            temp_file.write(proposal.generated_spec_content)
+            temp_path = Path(temp_file.name)
+        temp_path.replace(target)
+
+        now = _utcnow()
+        proposal.approval_status = "materialized"
+        proposal.approved_at = proposal.approved_at or now
+        proposal.materialized_at = now
+        proposal.materialized_by = "autonomous_policy"
+        proposal.materialized_file_path = relative_path
+        proposal.materialization_result = {
+            "file_path": relative_path,
+            "policy": mission.approval_policy,
+            "run_id": run.id,
+            "risk_level": proposal.risk_level,
+            "review_context": review_context,
+        }
+        proposal.updated_at = now
+        session.add(proposal)
+        session.flush()
+        summary["materialized"] += 1
+
+        validation = _validate_materialized_proposal(proposal)
+        proposal.validation_status = str(validation.get("status") or "failed")
+        proposal.validation_result = validation
+        proposal.validation_artifacts = [item for item in _as_list(validation.get("artifacts")) if isinstance(item, dict)]
+        proposal.validation_log_path = str(validation.get("log_path") or "") or None
+        proposal.validation_trace_path = str(validation.get("trace_path") or "") or None
+        proposal.validated_at = _utcnow()
+        proposal.updated_at = proposal.validated_at
+        session.add(proposal)
+        if proposal.validation_status == "passed":
+            summary["validated"] += 1
+        else:
+            summary["validation_failed"] += 1
+            _create_validation_failure_work_item(session, mission, run, proposal, validation)
+
+    session.commit()
+    return summary
+
+
+def _proposal_review_context_for_policy(session: Session, proposal: AutonomousTestProposal) -> dict[str, Any]:
+    try:
+        from orchestrator.services.autonomous_proposal_review import AutonomousProposalReviewService
+
+        return AutonomousProposalReviewService(session, base_dir=REPOSITORY_ROOT).build_review_context(proposal)
+    except Exception:
+        logger.debug("Unable to build proposal review context before auto-materialization.", exc_info=True)
+        return {}
+
+
+def _validate_materialize_path_for_policy(requested_path: str, test_type: str) -> str:
+    normalized = str(requested_path or "").replace("\\", "/").strip().lstrip("/")
+    if not normalized or normalized.startswith("../") or "/../" in normalized:
+        raise ValueError("Materialization path must stay inside the repository.")
+    suffixes = {
+        "api": (".spec.ts", ".test.ts", ".py"),
+        "unit": (".spec.ts", ".test.ts", ".py"),
+        "e2e": (".spec.ts", ".test.ts"),
+        "regression": (".spec.ts", ".test.ts"),
+        "security": (".spec.ts", ".test.ts", ".py"),
+        "accessibility": (".spec.ts", ".test.ts"),
+    }.get(test_type, (".spec.ts", ".test.ts", ".py"))
+    if not normalized.endswith(suffixes):
+        raise ValueError(f"Unsupported generated test extension for {test_type}: {normalized}")
+    if not normalized.startswith(("tests/", "orchestrator/tests/", "web/tests/", "e2e/")):
+        raise ValueError("Auto-materialized tests must be written under an approved test directory.")
+    return normalized
+
+
+def _validate_materialized_proposal(proposal: AutonomousTestProposal) -> dict[str, Any]:
+    relative_path = proposal.materialized_file_path
+    if not relative_path:
+        return {"status": "not_run", "reason": "proposal has no materialized file"}
+    path = (REPOSITORY_ROOT / relative_path).resolve()
+    if not path.exists():
+        return {"status": "failed", "reason": "materialized file is missing", "path": relative_path}
+
+    artifact_dir = _validation_artifact_dir(proposal)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = artifact_dir / "stdout.log"
+    stderr_path = artifact_dir / "stderr.log"
+    metadata_path = artifact_dir / "metadata.json"
+    playwright_output_dir = artifact_dir / "playwright-output"
+    base_url = _validation_base_url(proposal)
+    server_process: subprocess.Popen[str] | None = None
+    server_info: dict[str, Any] = {"base_url": base_url}
+    if path.suffix == ".py":
+        command = ["python", "-m", "pytest", relative_path, "-q"]
+    elif relative_path.endswith((".spec.ts", ".test.ts")):
+        package_json = REPOSITORY_ROOT / "package.json"
+        web_package_json = REPOSITORY_ROOT / "web" / "package.json"
+        if package_json.exists():
+            command = ["npx", "playwright", "test", relative_path]
+        elif web_package_json.exists():
+            command = ["npm", "--prefix", "web", "exec", "playwright", "test", str(Path("..") / relative_path)]
+        else:
+            return {"status": "not_run", "reason": "no Node package found for Playwright validation", "path": relative_path}
+        command.extend(["--trace", "retain-on-failure", "--output", str(playwright_output_dir)])
+    else:
+        return {"status": "not_run", "reason": "no validator for file type", "path": relative_path}
+
+    started_at = _utcnow()
+    try:
+        if relative_path.endswith((".spec.ts", ".test.ts")):
+            server_process, server_info = _ensure_validation_server(base_url)
+        env = os.environ.copy()
+        if base_url:
+            env.setdefault("PLAYWRIGHT_BASE_URL", base_url)
+            env.setdefault("BASE_URL", base_url)
+        completed = subprocess.run(
+            command,
+            cwd=REPOSITORY_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=PROPOSAL_VALIDATION_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
+        stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
+        stdout_path.write_text(stdout, encoding="utf-8")
+        stderr_path.write_text(stderr, encoding="utf-8")
+        result = {
+            "status": "failed",
+            "reason": "validation_timeout",
+            "command": command,
+            "stdout": stdout[-4000:],
+            "stderr": stderr[-4000:],
+            "base_url": base_url,
+            "server": server_info,
+        }
+        return _finalize_validation_artifacts(
+            proposal=proposal,
+            artifact_dir=artifact_dir,
+            metadata_path=metadata_path,
+            result=result,
+            started_at=started_at,
+            completed_at=_utcnow(),
+        )
+    finally:
+        _stop_validation_server(server_process)
+    stdout_path.write_text(completed.stdout, encoding="utf-8")
+    stderr_path.write_text(completed.stderr, encoding="utf-8")
+    result = {
+        "status": "passed" if completed.returncode == 0 else "failed",
+        "command": command,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout[-4000:],
+        "stderr": completed.stderr[-4000:],
+        "base_url": base_url,
+        "server": server_info,
+    }
+    return _finalize_validation_artifacts(
+        proposal=proposal,
+        artifact_dir=artifact_dir,
+        metadata_path=metadata_path,
+        result=result,
+        started_at=started_at,
+        completed_at=_utcnow(),
+    )
+
+
+def _validation_artifact_dir(proposal: AutonomousTestProposal) -> Path:
+    safe_id = slugify(proposal.id or f"proposal-{uuid.uuid4().hex}")
+    stamp = _utcnow().strftime("%Y%m%d%H%M%S")
+    return RUNS_DIR / "autonomous_validation" / safe_id / stamp
+
+
+def _finalize_validation_artifacts(
+    *,
+    proposal: AutonomousTestProposal,
+    artifact_dir: Path,
+    metadata_path: Path,
+    result: dict[str, Any],
+    started_at: datetime,
+    completed_at: datetime,
+) -> dict[str, Any]:
+    metadata = {
+        "proposal_id": proposal.id,
+        "mission_id": proposal.mission_id,
+        "project_id": proposal.project_id,
+        "status": result.get("status"),
+        "command": result.get("command"),
+        "base_url": result.get("base_url"),
+        "server": result.get("server"),
+        "started_at": started_at.isoformat(),
+        "completed_at": completed_at.isoformat(),
+    }
+    metadata_path.write_text(json.dumps(metadata, default=str, indent=2), encoding="utf-8")
+    artifacts = _collect_validation_artifacts(artifact_dir)
+    log_path = _artifact_url_for_file(artifact_dir / "stdout.log")
+    trace = next((artifact for artifact in artifacts if artifact["path"].endswith(".zip") or "trace" in artifact["path"]), None)
+    result.update(
+        {
+            "artifacts": artifacts,
+            "log_path": log_path,
+            "trace_path": trace["path"] if trace else None,
+            "artifact_dir": _artifact_url_for_file(artifact_dir),
+            "started_at": started_at.isoformat(),
+            "completed_at": completed_at.isoformat(),
+        }
+    )
+    return result
+
+
+def _collect_validation_artifacts(artifact_dir: Path) -> list[dict[str, Any]]:
+    if not artifact_dir.exists():
+        return []
+    artifacts: list[dict[str, Any]] = []
+    for path in sorted(item for item in artifact_dir.rglob("*") if item.is_file()):
+        label = path.name
+        suffix = path.suffix.lower()
+        artifact_type = "log" if suffix in {".log", ".txt", ".json"} else "artifact"
+        if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+            artifact_type = "image"
+        elif suffix in {".webm", ".mp4"}:
+            artifact_type = "video"
+        elif suffix == ".zip" or "trace" in path.name.lower():
+            artifact_type = "trace"
+        artifacts.append(
+            {
+                "label": label,
+                "type": artifact_type,
+                "path": _artifact_url_for_file(path),
+                "size_bytes": path.stat().st_size,
+                "created_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+            }
+        )
+    return artifacts[:100]
+
+
+def _artifact_url_for_file(path: Path) -> str:
+    try:
+        relative = path.relative_to(RUNS_DIR)
+    except ValueError:
+        return str(path)
+    return f"/artifacts/{relative.as_posix()}"
+
+
+def _validation_base_url(proposal: AutonomousTestProposal) -> str | None:
+    configured = os.environ.get("AUTONOMOUS_VALIDATION_BASE_URL")
+    if configured:
+        return configured.rstrip("/")
+    target_url = str(proposal.target_url or "").strip()
+    if target_url:
+        return target_url.rstrip("/")
+    if (REPOSITORY_ROOT / "web" / "package.json").exists():
+        return "http://127.0.0.1:3000"
+    return None
+
+
+def _ensure_validation_server(base_url: str | None) -> tuple[subprocess.Popen[str] | None, dict[str, Any]]:
+    if not base_url:
+        return None, {"status": "not_needed", "reason": "no_base_url"}
+    parsed = urlparse(base_url)
+    if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        return None, {"status": "not_started", "reason": "non_local_base_url", "base_url": base_url}
+    if _url_is_reachable(base_url):
+        return None, {"status": "already_running", "base_url": base_url}
+    command = _validation_server_command(parsed)
+    if not command:
+        return None, {"status": "not_started", "reason": "no_dev_server_command", "base_url": base_url}
+    process = subprocess.Popen(
+        command,
+        cwd=REPOSITORY_ROOT,
+        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.time() + float(os.environ.get("AUTONOMOUS_VALIDATION_SERVER_READY_SECONDS", "45"))
+    while time.time() < deadline:
+        if process.poll() is not None:
+            return process, {
+                "status": "failed_to_start",
+                "base_url": base_url,
+                "command": command,
+                "returncode": process.returncode,
+            }
+        if _url_is_reachable(base_url):
+            return process, {"status": "started", "base_url": base_url, "command": command, "pid": process.pid}
+        time.sleep(0.5)
+    return process, {"status": "start_timeout", "base_url": base_url, "command": command, "pid": process.pid}
+
+
+def _validation_server_command(parsed_url) -> list[str] | None:
+    configured = os.environ.get("AUTONOMOUS_VALIDATION_DEV_SERVER_COMMAND")
+    if configured:
+        return shlex.split(configured)
+    web_package_json = REPOSITORY_ROOT / "web" / "package.json"
+    if not web_package_json.exists():
+        return None
+    hostname = parsed_url.hostname or "127.0.0.1"
+    port = parsed_url.port or 3000
+    return ["npm", "--prefix", "web", "run", "dev", "--", "--hostname", hostname, "--port", str(port)]
+
+
+def _url_is_reachable(url: str) -> bool:
+    try:
+        request = Request(url, headers={"User-Agent": "quorvex-autonomous-validator"})
+        with urlopen(request, timeout=2) as response:
+            return 200 <= int(response.status) < 500
+    except Exception:
+        return False
+
+
+def _stop_validation_server(process: subprocess.Popen[str] | None) -> None:
+    if not process or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
+def _create_validation_failure_work_item(
+    session: Session,
+    mission: AutonomousMission,
+    run: AutonomousMissionRun,
+    proposal: AutonomousTestProposal,
+    validation: dict[str, Any],
+) -> AutonomousAgentWorkItem | None:
+    planner_key = f"proposal_validation_failure:{proposal.id}"
+    if _planner_work_item_exists(session, mission.id, planner_key):
+        return None
+    return _create_planned_work_item(
+        session,
+        mission,
+        run,
+        planner_key=planner_key,
+        role="spec_writer",
+        objective=(
+            f"Repair generated test proposal {proposal.id} at {proposal.materialized_file_path}. "
+            "Use the validation output to propose a corrected spec; do not write repository files."
+        ),
+        priority=12,
+        surfaces=[proposal.target_url or ""],
+        metadata={"proposal_id": proposal.id, "validation": validation},
+    )
+
+
+def autonomous_health_diagnostics(session: Session, project_id: str | None = None) -> dict[str, Any]:
+    requirement_statement = select(Requirement)
+    rtm_statement = select(RtmEntry)
+    work_item_statement = select(AutonomousAgentWorkItem)
+    proposal_statement = select(AutonomousTestProposal)
+    if project_id:
+        requirement_statement = requirement_statement.where(Requirement.project_id == project_id)
+        rtm_statement = rtm_statement.where(RtmEntry.project_id == project_id)
+        work_item_statement = work_item_statement.where(AutonomousAgentWorkItem.project_id == project_id)
+        proposal_statement = proposal_statement.where(AutonomousTestProposal.project_id == project_id)
+
+    requirements = session.exec(requirement_statement).all()
+    entries = session.exec(rtm_statement).all()
+    work_items = session.exec(work_item_statement).all()
+    proposals = session.exec(proposal_statement).all()
+
+    entries_by_requirement: dict[int, list[RtmEntry]] = {}
+    for entry in entries:
+        entries_by_requirement.setdefault(entry.requirement_id, []).append(entry)
+
+    canonical_counts: dict[str, int] = {}
+    for requirement in requirements:
+        if requirement.canonical_key:
+            canonical_counts[requirement.canonical_key] = canonical_counts.get(requirement.canonical_key, 0) + 1
+    now = _utcnow()
+    stale_after = now - timedelta(minutes=DEFAULT_WORK_ITEM_STALE_MINUTES)
+    stale_work_items = [
+        item.id
+        for item in work_items
+        if item.status == "running" and _work_item_is_stale(item, now=now, stale_after=stale_after)
+    ]
+    unmapped_requirements = [
+        requirement.id
+        for requirement in requirements
+        if requirement.id is not None and not any(entry.mapping_type == "full" for entry in entries_by_requirement.get(requirement.id, []))
+    ]
+    diagnostics = {
+        "project_id": project_id,
+        "requirements": {
+            "total": len(requirements),
+            "missing_canonical_key": sum(1 for requirement in requirements if not requirement.canonical_key),
+            "duplicate_canonical_keys": sum(1 for count in canonical_counts.values() if count > 1),
+            "unmapped_full_coverage": len(unmapped_requirements),
+            "unmapped_requirement_ids": unmapped_requirements[:100],
+        },
+        "rtm": {
+            "total_entries": len(entries),
+            "missing_dedupe_key": sum(1 for entry in entries if not entry.dedupe_key),
+        },
+        "work_items": {
+            "total": len(work_items),
+            "stale_running": len(stale_work_items),
+            "stale_work_item_ids": stale_work_items[:100],
+            "recovered": sum(1 for item in work_items if item.recovery_count or (item.progress or {}).get("recovered_from_work_item_id")),
+        },
+        "proposals": {
+            "total": len(proposals),
+            "materialized": sum(1 for proposal in proposals if proposal.approval_status == "materialized"),
+            "auto_materialized": sum(1 for proposal in proposals if proposal.materialized_by == "autonomous_policy"),
+            "validation_failed": sum(1 for proposal in proposals if proposal.validation_status == "failed"),
+            "validation_blocked": sum(1 for proposal in proposals if proposal.validation_status == "blocked"),
+            "validation_not_run": sum(1 for proposal in proposals if proposal.validation_status in {"", "not_run", None}),
+        },
+    }
+    diagnostics["status"] = _diagnostics_status(diagnostics)
+    return diagnostics
+
+
+def recover_autonomous_project_stale_work(session: Session, project_id: str) -> dict[str, int]:
+    summary = {"missions_checked": 0, "stale_recovered_count": 0}
+    missions = session.exec(
+        select(AutonomousMission).where(
+            AutonomousMission.project_id == project_id,
+            col(AutonomousMission.status).in_(("running", "error", "paused")),
+        )
+    ).all()
+    for mission in missions:
+        run = _latest_mission_run(session, mission)
+        if not run:
+            continue
+        summary["missions_checked"] += 1
+        recovered = _recover_stale_work_items(session, mission, run)
+        summary["stale_recovered_count"] += recovered
+    return summary
+
+
+def monitor_autonomous_project(session: Session, project_id: str) -> dict[str, Any]:
+    before = autonomous_health_diagnostics(session, project_id=project_id)
+    recovery = recover_autonomous_project_stale_work(session, project_id)
+    after = autonomous_health_diagnostics(session, project_id=project_id)
+    now = _utcnow()
+    status = _diagnostics_status(after)
+    missions = session.exec(select(AutonomousMission).where(AutonomousMission.project_id == project_id)).all()
+    for mission in missions:
+        config = mission.config
+        config["autonomous_monitor"] = {
+            "last_monitor_at": now.isoformat(),
+            "diagnostics_status": status,
+            "stale_running_count": after["work_items"]["stale_running"],
+            "failed_validation_count": after["proposals"]["validation_failed"],
+            "duplicate_canonical_count": after["requirements"]["duplicate_canonical_keys"],
+            "unmapped_confirmed_requirement_count": after["requirements"]["unmapped_full_coverage"],
+            "validation_artifact_count": _validation_artifact_count(session, mission.id),
+        }
+        mission.config = config
+        mission.health_status = "degraded" if status != "healthy" else "healthy"
+        mission.last_heartbeat_at = now
+        mission.updated_at = now
+        session.add(mission)
+        if status != "healthy" or recovery["stale_recovered_count"]:
+            emit_mission_event(
+                mission,
+                "Autonomous health monitor completed with attention items.",
+                event_type="monitor",
+                payload={"status": status, "recovery": recovery, "diagnostics": after},
+            )
+    session.commit()
+    return {
+        "project_id": project_id,
+        "status": status,
+        "recovery": recovery,
+        "before": before,
+        "diagnostics": after,
+        "monitored_at": now.isoformat(),
+    }
+
+
+def _latest_mission_run(session: Session, mission: AutonomousMission) -> AutonomousMissionRun | None:
+    if mission.latest_run_id:
+        run = session.get(AutonomousMissionRun, mission.latest_run_id)
+        if run:
+            return run
+    return session.exec(
+        select(AutonomousMissionRun)
+        .where(AutonomousMissionRun.mission_id == mission.id)
+        .order_by(col(AutonomousMissionRun.created_at).desc())
+        .limit(1)
+    ).first()
+
+
+def _diagnostics_status(diagnostics: dict[str, Any]) -> str:
+    if diagnostics["work_items"]["stale_running"] or diagnostics["proposals"]["validation_failed"]:
+        return "critical"
+    if (
+        diagnostics["requirements"]["duplicate_canonical_keys"]
+        or diagnostics["requirements"]["missing_canonical_key"]
+        or diagnostics["rtm"]["missing_dedupe_key"]
+        or diagnostics["proposals"]["validation_blocked"]
+    ):
+        return "attention"
+    return "healthy"
+
+
+def _validation_artifact_count(session: Session, mission_id: str) -> int:
+    proposals = session.exec(select(AutonomousTestProposal).where(AutonomousTestProposal.mission_id == mission_id)).all()
+    return sum(len(proposal.validation_artifacts) for proposal in proposals)
+
+
+def backfill_autonomous_canonical_state(
+    session: Session,
+    project_id: str | None = None,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    summary = {
+        "dry_run": dry_run,
+        "requirements_backfilled": 0,
+        "rtm_entries_backfilled": 0,
+        "app_map_backfilled": 0,
+        "app_map_ambiguous": 0,
+        "requirements_duplicate_skipped": 0,
+        "rtm_entries_duplicate_skipped": 0,
+    }
+    requirement_statement = select(Requirement)
+    rtm_statement = select(RtmEntry)
+    app_map_statement = select(ApplicationMap)
+    if project_id:
+        requirement_statement = requirement_statement.where(Requirement.project_id == project_id)
+        rtm_statement = rtm_statement.where(RtmEntry.project_id == project_id)
+        app_map_statement = app_map_statement.where(ApplicationMap.project_id == project_id)
+
+    requirement_keys = {
+        (requirement.project_id, requirement.canonical_key)
+        for requirement in session.exec(requirement_statement).all()
+        if requirement.canonical_key
+    }
+    requirements = session.exec(requirement_statement).all()
+    for requirement in requirements:
+        if requirement.canonical_key:
+            continue
+        canonical_key = _requirement_fingerprint(
+            {
+                "title": requirement.title,
+                "category": requirement.category,
+                "acceptance_criteria": requirement.acceptance_criteria,
+            }
+        )
+        key_tuple = (requirement.project_id, canonical_key)
+        if key_tuple in requirement_keys:
+            summary["requirements_duplicate_skipped"] += 1
+            continue
+        requirement_keys.add(key_tuple)
+        if dry_run:
+            summary["requirements_backfilled"] += 1
+            continue
+        requirement.canonical_key = canonical_key
+        requirement.updated_at = _utcnow()
+        session.add(requirement)
+        summary["requirements_backfilled"] += 1
+
+    rtm_entries = session.exec(rtm_statement).all()
+    rtm_keys = {(entry.project_id, entry.dedupe_key) for entry in rtm_entries if entry.dedupe_key}
+    for entry in rtm_entries:
+        if entry.dedupe_key:
+            continue
+        dedupe_key = _stable_dedupe_hash(
+            entry.project_id or project_id or "default",
+            "rtm",
+            entry.requirement_id,
+            entry.test_spec_name,
+            entry.test_spec_path,
+        )
+        key_tuple = (entry.project_id, dedupe_key)
+        if key_tuple in rtm_keys:
+            summary["rtm_entries_duplicate_skipped"] += 1
+            continue
+        rtm_keys.add(key_tuple)
+        if dry_run:
+            summary["rtm_entries_backfilled"] += 1
+            continue
+        entry.dedupe_key = dedupe_key
+        entry.updated_at = _utcnow()
+        session.add(entry)
+        summary["rtm_entries_backfilled"] += 1
+
+    projects = session.exec(select(Project)).all()
+    inferred_project_id = project_id or (projects[0].id if len(projects) == 1 else None)
+    for app_map in session.exec(app_map_statement).all():
+        if not app_map.project_id and inferred_project_id:
+            if dry_run:
+                summary["app_map_backfilled"] += 1
+                continue
+            app_map.project_id = inferred_project_id
+        if not app_map.project_id:
+            summary["app_map_ambiguous"] += 1
+            continue
+        if not app_map.app_surface_key:
+            if dry_run:
+                summary["app_map_backfilled"] += 1
+                continue
+            app_map.app_surface_key = _stable_dedupe_hash(
+                "surface",
+                app_map.project_id or "default",
+                _route_from_url(app_map.url) or app_map.url,
+            )
+            session.add(app_map)
+            summary["app_map_backfilled"] += 1
+
+    if not dry_run:
+        session.commit()
+    return summary
 
 
 def _create_test_proposal(
@@ -1589,10 +3706,12 @@ def _as_int(value: Any) -> int | None:
 def complete_mission_run(payload: dict[str, Any]) -> None:
     run_id = payload["run_id"]
     summary = payload.get("summary") or {}
+    project_id = None
     with Session(engine) as session:
         run = session.get(AutonomousMissionRun, run_id)
         if not run:
             return
+        project_id = run.project_id
         now = _utcnow()
         run.status = "completed"
         run.current_stage = "completed"
@@ -1613,12 +3732,42 @@ def complete_mission_run(payload: dict[str, Any]) -> None:
             session.add(mission)
         session.add(run)
         session.commit()
+    _attribute_autonomous_memory_outcome(
+        project_id=project_id,
+        run_id=run_id,
+        success=True,
+        outcome_status="autonomous_mission_completed",
+    )
+
+
+def _attribute_autonomous_memory_outcome(
+    *,
+    project_id: str | None,
+    run_id: str | None,
+    success: bool,
+    outcome_status: str,
+) -> None:
+    if os.environ.get("MEMORY_ENABLED", "true").lower() != "true" or not run_id:
+        return
+    try:
+        from orchestrator.memory.effectiveness import get_memory_effectiveness_service
+
+        get_memory_effectiveness_service().attribute_outcome(
+            project_id=project_id,
+            success=success,
+            outcome_status=outcome_status,
+            stage="agent_runner",
+            run_id=run_id,
+        )
+    except Exception:
+        logger.debug("Autonomous memory outcome attribution skipped", exc_info=True)
 
 
 def fail_mission_run(payload: dict[str, Any]) -> None:
     run_id = payload.get("run_id")
     mission_id = payload.get("mission_id")
     error = payload.get("error") or "Autonomous mission failed"
+    project_id = None
     with Session(engine) as session:
         now = _utcnow()
         if run_id:
@@ -1631,6 +3780,7 @@ def fail_mission_run(payload: dict[str, Any]) -> None:
                 run.error_message = error
                 run.completed_at = now
                 run.updated_at = now
+                project_id = run.project_id
                 session.add(run)
         if mission_id:
             mission = session.get(AutonomousMission, mission_id)
@@ -1653,6 +3803,12 @@ def fail_mission_run(payload: dict[str, Any]) -> None:
                 mission.updated_at = now
                 session.add(mission)
         session.commit()
+    _attribute_autonomous_memory_outcome(
+        project_id=project_id,
+        run_id=run_id,
+        success=False,
+        outcome_status="autonomous_mission_failed",
+    )
 
 
 def update_mission_status(payload: dict[str, Any]) -> None:

@@ -90,6 +90,33 @@ def test_agent_memory_capture_redacts_and_deduplicates(monkeypatch):
     assert memories[0].scope == "project"
 
 
+def test_agent_memory_capture_extracts_routes_and_selectors(monkeypatch):
+    from orchestrator.memory import agent_memory as agent_memory_module
+    from orchestrator.memory.agent_memory import AgentMemoryService
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(agent_memory_module, "engine", engine)
+    monkeypatch.setattr(AgentMemoryService, "_index_memory", lambda self, memory: None)
+    monkeypatch.setenv("MEMORY_ENABLED", "true")
+
+    service = AgentMemoryService()
+    stored = service.capture_candidates(
+        "Login flow starts at https://example.test/login.\n"
+        "Selector fix: use getByRole('button', { name: 'Sign in' }) for the submit action.",
+        project_id="project-a",
+        source_type="agent_run",
+        agent_type="NativeHealer",
+    )
+
+    memories = service.search(project_id="project-a", limit=10, min_confidence=0.0)
+
+    assert len(stored) == 2
+    assert {memory.kind for memory in memories} == {"project_fact", "agent_lesson"}
+    assert any("route" in (memory.tags or []) for memory in memories)
+    assert any("selector" in (memory.tags or []) for memory in memories)
+
+
 def test_agent_memory_context_groups_by_memory_type(monkeypatch):
     from orchestrator.memory import agent_memory as agent_memory_module
     from orchestrator.memory.agent_memory import AgentMemoryService
@@ -133,6 +160,10 @@ def test_agent_memory_context_groups_by_memory_type(monkeypatch):
     assert "### Episodic Memory" in prompt
     assert "### Procedural Memory" in prompt
     assert "live browser" in prompt
+    semantic = bundle.unified["agent_memories"]["semantic"][0]
+    assert semantic["score"] is not None
+    assert semantic["score_breakdown"]
+    assert semantic["retrieval_reason"]
 
 
 def test_memory_knowledge_graph_links_related_memories(monkeypatch):
@@ -957,6 +988,326 @@ def test_memory_injection_api_filters_events(monkeypatch):
         assert filtered[0]["memory_ids"] == ["mem-1"]
         assert filtered[0]["source_id"] == "specs/login.md"
         assert filtered[0]["feedback"]["total"] == 0
+
+
+def test_memory_diagnostics_reports_gaps(monkeypatch):
+    _stub_slowapi(monkeypatch)
+    from orchestrator.api import db as db_module
+    from orchestrator.api import memory as memory_api
+    from orchestrator.api.models_db import BrowserPageState, MemoryInjectionEvent
+    from orchestrator.memory import agent_memory as agent_memory_module
+    from orchestrator.memory.agent_memory import AgentMemoryService
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(db_module, "engine", engine)
+    monkeypatch.setattr(agent_memory_module, "engine", engine)
+    monkeypatch.setattr(AgentMemoryService, "_index_memory", lambda self, memory: None)
+    monkeypatch.setenv("MEMORY_ENABLED", "true")
+
+    app = FastAPI()
+    app.include_router(memory_api.router)
+
+    with Session(engine) as session:
+        session.add(
+            BrowserPageState(
+                id="state-a",
+                project_id="project-a",
+                page_key="example.test|/login|-|unknown|default",
+                state_key="state-key",
+                url="https://example.test/login",
+                url_template="https://example.test/login",
+                exact_hash="hash-a",
+            )
+        )
+        session.add(
+            MemoryInjectionEvent(
+                project_id="project-a",
+                actor_type="agent",
+                stage="native_generator",
+                query="login",
+                memory_ids_json='["missing-memory"]',
+                context_preview="context",
+                outcome="injected",
+            )
+        )
+        session.commit()
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/memory/diagnostics?project_id=project-a")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["overall_status"] == "warning"
+        assert payload["agent_memory"]["total"] == 0
+        assert payload["browser_memory"]["states"] == 1
+        assert payload["injections"]["missing_memory_count"] == 1
+        assert "missing-memory" in payload["injections"]["missing_memory_ids"]
+        assert payload["recommended_actions"]
+
+
+def test_memory_effectiveness_api_summarizes_outcomes(monkeypatch):
+    _stub_slowapi(monkeypatch)
+    from orchestrator.api import db as db_module
+    from orchestrator.api import memory as memory_api
+    from orchestrator.api.models_db import MemoryInjectionEvent
+    from orchestrator.memory import agent_memory as agent_memory_module
+    from orchestrator.memory.agent_memory import AgentMemoryService
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(db_module, "engine", engine)
+    monkeypatch.setattr(agent_memory_module, "engine", engine)
+    monkeypatch.setattr(AgentMemoryService, "_index_memory", lambda self, memory: None)
+    monkeypatch.setenv("MEMORY_ENABLED", "true")
+
+    app = FastAPI()
+    app.include_router(memory_api.router)
+
+    memory = AgentMemoryService().create_memory(
+        kind="project_fact",
+        content="Login starts on /login.",
+        project_id="project-a",
+        importance=0.9,
+    )
+    with Session(engine) as session:
+        session.add(
+            MemoryInjectionEvent(
+                project_id="project-a",
+                actor_type="agent",
+                stage="native_generator",
+                query="login",
+                memory_ids_json=f'["{memory.id}"]',
+                context_preview="context",
+                outcome="injected",
+                extra_data={"outcome_success": True, "outcome_status": "first_run_passed"},
+            )
+        )
+        session.add(
+            MemoryInjectionEvent(
+                project_id="project-a",
+                actor_type="agent",
+                stage="native_healer",
+                query="empty",
+                memory_ids_json="[]",
+                context_preview="",
+                outcome="injected",
+                extra_data={"empty_recall": True},
+            )
+        )
+        session.commit()
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/memory/effectiveness?project_id=project-a")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total_injections"] == 2
+        assert payload["stage_stats"][0]["stage"] in {"native_generator", "native_healer"}
+        assert payload["top_helpful_memories"][0]["memory_id"] == memory.id
+        assert "native_healer" in payload["empty_recall_stages"]
+
+
+def test_memory_outcome_attribution_records_system_feedback(monkeypatch):
+    from orchestrator.api import db as db_module
+    from orchestrator.api.models_db import MemoryFeedbackEvent, MemoryInjectionEvent
+    from orchestrator.memory import agent_memory as agent_memory_module
+    from orchestrator.memory.agent_memory import AgentMemoryService
+    from orchestrator.memory.effectiveness import MemoryEffectivenessService
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(db_module, "engine", engine)
+    monkeypatch.setattr(agent_memory_module, "engine", engine)
+    monkeypatch.setattr(AgentMemoryService, "_index_memory", lambda self, memory: None)
+    monkeypatch.setenv("MEMORY_ENABLED", "true")
+
+    memory = AgentMemoryService().create_memory(
+        kind="project_fact",
+        content="Checkout starts on /cart.",
+        project_id="project-a",
+    )
+    with Session(engine) as session:
+        event = MemoryInjectionEvent(
+            project_id="project-a",
+            actor_type="agent",
+            stage="native_generator",
+            source_type="spec",
+            source_id="specs/checkout.md",
+            query="checkout",
+            memory_ids_json=f'["{memory.id}"]',
+            context_preview="context",
+            outcome="injected",
+        )
+        session.add(event)
+        session.commit()
+        event_id = event.id
+
+    result = MemoryEffectivenessService().attribute_outcome(
+        project_id="project-a",
+        success=False,
+        outcome_status="first_run_failed",
+        stage="native_generator",
+        source_type="spec",
+        source_id="specs/checkout.md",
+    )
+
+    with Session(engine) as session:
+        feedback = session.exec(select(MemoryFeedbackEvent)).all()
+        event = session.get(MemoryInjectionEvent, event_id)
+
+    assert result["matched_injections"] == 1
+    assert result["feedback_count"] == 1
+    assert feedback[0].rating == "down"
+    assert event.extra_data["outcome_status"] == "first_run_failed"
+
+
+def test_memory_repair_dry_run_does_not_mutate(monkeypatch):
+    _stub_slowapi(monkeypatch)
+    from orchestrator.api import db as db_module
+    from orchestrator.api import memory as memory_api
+    from orchestrator.api.models_db import MemoryInjectionEvent
+    from orchestrator.memory import agent_memory as agent_memory_module
+    from orchestrator.memory.agent_memory import AgentMemoryService
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(db_module, "engine", engine)
+    monkeypatch.setattr(agent_memory_module, "engine", engine)
+    monkeypatch.setattr(AgentMemoryService, "_index_memory", lambda self, memory: None)
+
+    app = FastAPI()
+    app.include_router(memory_api.router)
+
+    with Session(engine) as session:
+        session.add(
+            MemoryInjectionEvent(
+                project_id="project-a",
+                actor_type="agent",
+                stage="native_generator",
+                query="login",
+                memory_ids_json='["missing-memory"]',
+                context_preview="context",
+                outcome="injected",
+            )
+        )
+        session.commit()
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        dry_run = client.post(
+            "/api/memory/repair",
+            json={"project_id": "project-a", "action": "mark_missing_injection_refs", "dry_run": True},
+        )
+        assert dry_run.status_code == 200
+        assert dry_run.json()["changed_count"] == 1
+
+    with Session(engine) as session:
+        event = session.exec(select(MemoryInjectionEvent)).first()
+
+    assert event.extra_data is None
+
+
+def test_memory_repair_actions_mutate_conservatively(monkeypatch):
+    _stub_slowapi(monkeypatch)
+    from orchestrator.api import db as db_module
+    from orchestrator.api import memory as memory_api
+    from orchestrator.api.models_db import MemoryFeedbackAggregate, MemoryInjectionEvent
+    from orchestrator.memory import agent_memory as agent_memory_module
+    from orchestrator.memory.agent_memory import AgentMemoryService
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    monkeypatch.setattr(db_module, "engine", engine)
+    monkeypatch.setattr(agent_memory_module, "engine", engine)
+    monkeypatch.setattr(AgentMemoryService, "_index_memory", lambda self, memory: None)
+
+    app = FastAPI()
+    app.include_router(memory_api.router)
+
+    service = AgentMemoryService()
+    stale = service.create_memory(
+        kind="project_fact",
+        content="Checkout starts at /checkout.",
+        project_id="project-a",
+        confidence=0.9,
+        importance=0.9,
+    )
+    low_trust = service.create_memory(
+        kind="agent_lesson",
+        content="Use old selector text Submit.",
+        project_id="project-a",
+        confidence=0.4,
+        importance=0.4,
+    )
+    keep = service.create_memory(
+        kind="project_fact",
+        content="Login starts at /login.",
+        project_id="project-a",
+        confidence=0.9,
+        importance=0.6,
+    )
+    with Session(engine) as session:
+        session.add(
+            MemoryInjectionEvent(
+                project_id="project-a",
+                actor_type="agent",
+                stage="native_generator",
+                query="login",
+                memory_ids_json='["missing-memory"]',
+                context_preview="context",
+                outcome="injected",
+            )
+        )
+        session.add(
+            MemoryFeedbackAggregate(
+                project_id="project-a",
+                project_key="project-a",
+                memory_id=low_trust.id,
+                negative_feedback_count=2,
+                feedback_score=-2.0,
+            )
+        )
+        session.add(
+            MemoryFeedbackAggregate(
+                project_id="project-a",
+                project_key="project-a",
+                memory_id=keep.id,
+                positive_feedback_count=2,
+                feedback_score=2.0,
+            )
+        )
+        session.commit()
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        missing_refs = client.post(
+            "/api/memory/repair",
+            json={"project_id": "project-a", "action": "mark_missing_injection_refs", "dry_run": False},
+        )
+        stale_verify = client.post(
+            "/api/memory/repair",
+            json={"project_id": "project-a", "action": "verify_stale", "dry_run": False},
+        )
+        archive = client.post(
+            "/api/memory/repair",
+            json={"project_id": "project-a", "action": "archive_low_trust", "dry_run": False},
+        )
+
+    assert missing_refs.status_code == 200
+    assert missing_refs.json()["changed_count"] == 1
+    assert stale_verify.status_code == 200
+    assert stale_verify.json()["changed_count"] >= 1
+    assert archive.status_code == 200
+    assert archive.json()["changed_count"] == 1
+
+    with Session(engine) as session:
+        injection = session.exec(select(MemoryInjectionEvent)).first()
+        stale_after = session.get(type(stale), stale.id)
+        low_trust_after = session.get(type(low_trust), low_trust.id)
+        keep_after = session.get(type(keep), keep.id)
+
+    assert injection.extra_data["memory_reference_status"] == "missing_refs"
+    assert injection.extra_data["missing_memory_ids"] == ["missing-memory"]
+    assert stale_after.review_required is True
+    assert low_trust_after.status == "archived"
+    assert keep_after.status == "active"
 
 
 def test_memory_injection_feedback_api_records_summary(monkeypatch):

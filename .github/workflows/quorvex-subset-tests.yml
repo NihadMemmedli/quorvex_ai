@@ -19,6 +19,7 @@ on:
           - frontend-lint
           - playwright-generated
           - playwright-e2e
+          - agent-temporal-smoke
           - all-safe
       browser:
         description: Playwright browser
@@ -89,7 +90,7 @@ jobs:
           base_url="${INPUT_BASE_URL:-}"
 
           case "$suite" in
-            auto|python-unit|python-integration|frontend-typecheck|frontend-lint|playwright-generated|playwright-e2e|all-safe) ;;
+            auto|python-unit|python-integration|frontend-typecheck|frontend-lint|playwright-generated|playwright-e2e|agent-temporal-smoke|all-safe) ;;
             *) echo "Unsupported suite: $suite" >&2; exit 64 ;;
           esac
           case "$browser" in chromium|firefox|webkit) ;; *) echo "Unsupported browser: $browser" >&2; exit 64 ;; esac
@@ -228,10 +229,17 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - name: Install web dependencies for E2E
+        if: contains(fromJSON('["playwright-e2e","all-safe"]'), needs.select-suite.outputs.suite) || startsWith(needs.select-suite.outputs.test_path, 'tests/e2e/')
+        run: npm --prefix web ci
       - run: npx playwright install --with-deps "$BROWSER"
       - name: Run Playwright subset
         run: |
           set -euo pipefail
+          if [ -z "${BASE_URL:-}" ] && { [ "$SELECTED_SUITE" = "playwright-e2e" ] || [ "$SELECTED_SUITE" = "all-safe" ] || [[ "$TEST_PATH" == tests/e2e/* ]]; }; then
+            export BASE_URL="http://localhost:3000"
+            export PLAYWRIGHT_START_WEB_SERVER="true"
+          fi
           cmd=(npx playwright test --project="$BROWSER")
           if [[ "$TEST_PATH" == tests/generated/* || "$TEST_PATH" == tests/e2e/* ]]; then
             cmd+=("$TEST_PATH")
@@ -252,3 +260,30 @@ jobs:
             playwright-report/
             test-results/
           retention-days: 14
+
+  agent-temporal-smoke:
+    needs: select-suite
+    if: needs.select-suite.outputs.suite == 'agent-temporal-smoke'
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5434/playwright_agent
+      TEMPORAL_ADDRESS: localhost:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_WORKFLOW_TASK_QUEUE: quorvex-custom-workflows
+      ANTHROPIC_AUTH_TOKEN: ""
+      JWT_SECRET_KEY: test-secret-key-for-ci
+      REQUIRE_AUTH: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: python -m pip install --upgrade pip
+      - run: if [ -f orchestrator/requirements.txt ]; then pip install -r orchestrator/requirements.txt; fi
+      - name: Start Temporal smoke services
+        run: docker compose up -d --build db temporal custom-workflow-worker
+      - name: Run agent Temporal smoke
+        run: python scripts/agent_temporal_smoke.py --timeout 120
+      - name: Show worker logs
+        if: always()
+        run: docker compose logs temporal custom-workflow-worker

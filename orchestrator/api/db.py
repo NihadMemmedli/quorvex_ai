@@ -19,8 +19,8 @@ from .models_auth import ProjectMember, RefreshToken, User  # noqa: F401
 from .models_db import (  # noqa: F401
     AgentDefinition,
     AgentMemory,
-    MemoryInjectionEvent,
     AgentRun,
+    AgentRunEvent,
     AgentToolDefinition,
     ApplicationMap,
     ArchiveJob,
@@ -56,6 +56,7 @@ from .models_db import (  # noqa: F401
     DiscoveredElement,
     DiscoveredFlow,
     DiscoveredTransition,
+    DomainJob,
     ExecutionSettings,
     ExplorationSession,
     FlowStep,
@@ -72,6 +73,7 @@ from .models_db import (  # noqa: F401
     LlmTestRun,
     # Load testing models
     LoadTestRun,
+    MemoryInjectionEvent,
     # OpenAPI import history
     OpenApiImportHistory,
     PrChangedFile,
@@ -1110,6 +1112,9 @@ def _run_migrations():
             if "title_embedding_json" not in req_columns:
                 conn.execute(text("ALTER TABLE requirements ADD COLUMN title_embedding_json TEXT"))
                 logger.info("Added column: requirements.title_embedding_json")
+            if "canonical_key" not in req_columns:
+                conn.execute(text("ALTER TABLE requirements ADD COLUMN canonical_key VARCHAR"))
+                logger.info("Added column: requirements.canonical_key")
             requirement_timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
             requirement_truth_columns = {
                 "truth_state": "VARCHAR NOT NULL DEFAULT 'candidate_requirement'",
@@ -1153,8 +1158,111 @@ def _run_migrations():
                 )
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_requirements_truth_state ON requirements (truth_state)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_requirements_source_type ON requirements (source_type)"))
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_requirements_project_canonical "
+                        "ON requirements (project_id, canonical_key)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_requirements_project_canonical "
+                        "ON requirements (project_id, canonical_key)"
+                    )
+                )
             except Exception as e:
                 logger.debug(f"Requirement truth-state migration note: {e}")
+
+        if "rtm_entries" in inspector.get_table_names():
+            rtm_columns = {col["name"] for col in inspector.get_columns("rtm_entries")}
+            if "dedupe_key" not in rtm_columns:
+                conn.execute(text("ALTER TABLE rtm_entries ADD COLUMN dedupe_key VARCHAR"))
+                logger.info("Added column: rtm_entries.dedupe_key")
+            try:
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_rtm_entries_project_dedupe ON rtm_entries (project_id, dedupe_key)")
+                )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_rtm_entries_project_dedupe "
+                        "ON rtm_entries (project_id, dedupe_key)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"RTM dedupe migration note: {e}")
+
+        if "application_map" in inspector.get_table_names():
+            app_map_columns = {col["name"] for col in inspector.get_columns("application_map")}
+            if "project_id" not in app_map_columns:
+                conn.execute(text("ALTER TABLE application_map ADD COLUMN project_id VARCHAR"))
+                logger.info("Added column: application_map.project_id")
+            if "app_surface_key" not in app_map_columns:
+                conn.execute(text("ALTER TABLE application_map ADD COLUMN app_surface_key VARCHAR"))
+                logger.info("Added column: application_map.app_surface_key")
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_application_map_project_surface "
+                        "ON application_map (project_id, app_surface_key)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Application map index migration note: {e}")
+
+        if "autonomous_agent_work_items" in inspector.get_table_names():
+            work_item_columns = {col["name"] for col in inspector.get_columns("autonomous_agent_work_items")}
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            work_item_columns_to_add = {
+                "planner_key": "VARCHAR",
+                "lease_until": timestamp_type,
+                "last_heartbeat_at": timestamp_type,
+                "recovery_count": "INTEGER NOT NULL DEFAULT 0",
+                "recovery_reason": "TEXT",
+            }
+            for column_name, column_type in work_item_columns_to_add.items():
+                if column_name not in work_item_columns:
+                    conn.execute(text(f"ALTER TABLE autonomous_agent_work_items ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: autonomous_agent_work_items.%s", column_name)
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_autonomous_work_items_mission_planner "
+                        "ON autonomous_agent_work_items (mission_id, planner_key)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_autonomous_work_items_mission_lease "
+                        "ON autonomous_agent_work_items (mission_id, lease_until)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Autonomous work item planner migration note: {e}")
+
+        if "autonomous_test_proposals" in inspector.get_table_names():
+            proposal_columns = {col["name"] for col in inspector.get_columns("autonomous_test_proposals")}
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            proposal_columns_to_add = {
+                "validation_status": "VARCHAR NOT NULL DEFAULT 'not_run'",
+                "validation_result_json": "TEXT",
+                "validation_artifacts_json": "TEXT NOT NULL DEFAULT '[]'",
+                "validation_log_path": "VARCHAR",
+                "validation_trace_path": "VARCHAR",
+                "validated_at": timestamp_type,
+            }
+            for column_name, column_type in proposal_columns_to_add.items():
+                if column_name not in proposal_columns:
+                    conn.execute(text(f"ALTER TABLE autonomous_test_proposals ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: autonomous_test_proposals.%s", column_name)
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_autonomous_test_proposals_validation_status "
+                        "ON autonomous_test_proposals (validation_status)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Autonomous proposal validation migration note: {e}")
 
         # Add log_path to prd_generation_results table for real-time log streaming
         if "prd_generation_results" in inspector.get_table_names():
@@ -1205,6 +1313,63 @@ def _run_migrations():
                 logger.debug(f"Index creation note: {e}")
 
         timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+
+        if "agentrun" in inspector.get_table_names():
+            agentrun_columns = {col["name"] for col in inspector.get_columns("agentrun")}
+            agentrun_columns_to_add = {
+                "temporal_workflow_id": "VARCHAR",
+                "temporal_run_id": "VARCHAR",
+                "started_at": timestamp_type,
+                "completed_at": timestamp_type,
+            }
+            for column_name, column_type in agentrun_columns_to_add.items():
+                if column_name not in agentrun_columns:
+                    conn.execute(text(f"ALTER TABLE agentrun ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: agentrun.%s", column_name)
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_agentrun_temporal_workflow_id "
+                        "ON agentrun (temporal_workflow_id)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Index may already exist on agentrun temporal workflow id: {e}")
+
+        if "agentrun" in inspector.get_table_names() and "agent_run_events" not in inspector.get_table_names():
+            conn.execute(
+                text(
+                    f"""
+                    CREATE TABLE agent_run_events (
+                        id VARCHAR PRIMARY KEY,
+                        project_id VARCHAR,
+                        run_id VARCHAR NOT NULL,
+                        agent_task_id VARCHAR,
+                        temporal_workflow_id VARCHAR,
+                        temporal_run_id VARCHAR,
+                        sequence INTEGER NOT NULL,
+                        event_type VARCHAR NOT NULL,
+                        level VARCHAR NOT NULL DEFAULT 'info',
+                        message TEXT NOT NULL,
+                        payload_json TEXT NOT NULL DEFAULT '{{}}',
+                        created_at {timestamp_type} NOT NULL
+                    )
+                    """
+                )
+            )
+            logger.info("Created table: agent_run_events")
+
+        if "agent_run_events" in inspector.get_table_names():
+            for index_sql in (
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_events_run_sequence ON agent_run_events (run_id, sequence)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_events_project_created ON agent_run_events (project_id, created_at)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_events_agent_task ON agent_run_events (agent_task_id)",
+                "CREATE INDEX IF NOT EXISTS ix_agent_run_events_temporal_workflow ON agent_run_events (temporal_workflow_id)",
+            ):
+                try:
+                    conn.execute(text(index_sql))
+                except Exception as e:
+                    logger.debug(f"Index may already exist on agent_run_events: {e}")
 
         if "autonomous_missions" in inspector.get_table_names():
             mission_columns = {col["name"] for col in inspector.get_columns("autonomous_missions")}

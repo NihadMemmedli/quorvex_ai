@@ -295,9 +295,18 @@ class MemoryContextBuilder:
                 graph_reason = ""
                 if item.get("graph_reason"):
                     graph_reason = f", graph={_clip_line(str(item['graph_reason']), 90)}"
+                score = ""
+                if item.get("score") is not None:
+                    score = f", score={float(item['score']):.2f}"
+                reason = ""
+                if item.get("retrieval_reason"):
+                    reason = f", reason={_clip_line(str(item['retrieval_reason']), 90)}"
+                stale = ""
+                if item.get("staleness_warning"):
+                    stale = f", warning={_clip_line(str(item['staleness_warning']), 90)}"
                 lines.append(
                     "- "
-                    f"[{item['kind']}, confidence={item['confidence']:.2f}, importance={item['importance']:.2f}{source}{graph_reason}] "
+                    f"[{item['kind']}, confidence={item['confidence']:.2f}, importance={item['importance']:.2f}{score}{source}{graph_reason}{reason}{stale}] "
                     f"{_clip_line(item.get('summary') or '')}"
                 )
 

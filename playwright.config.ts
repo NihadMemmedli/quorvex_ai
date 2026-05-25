@@ -1,5 +1,11 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const startWebServer = process.env.PLAYWRIGHT_START_WEB_SERVER === 'true';
+const baseURL = process.env.BASE_URL || 'http://localhost:3000';
+const parsedBaseURL = new URL(baseURL);
+const webServerPort = process.env.PLAYWRIGHT_WEB_PORT || parsedBaseURL.port || '3000';
+const webServerHost = process.env.PLAYWRIGHT_WEB_HOST || '0.0.0.0';
+
 /**
  * Playwright Test Configuration
  */
@@ -35,10 +41,12 @@ export default defineConfig({
     },
   ],
 
-  // Run your local dev server before starting the tests (not needed for our tests)
-  // webServer: {
-  //   command: 'npm run start',
-  //   url: 'http://localhost:3000',
-  //   reuseExistingServer: !process.env.CI,
-  // },
+  webServer: startWebServer
+    ? {
+        command: `npm --prefix web run dev -- -H ${webServerHost} -p ${webServerPort}`,
+        url: baseURL,
+        reuseExistingServer: !process.env.CI,
+        timeout: 120_000,
+      }
+    : undefined,
 });

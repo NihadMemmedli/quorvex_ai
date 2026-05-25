@@ -381,6 +381,69 @@ BUILTIN_STEP_TYPES: dict[str, dict[str, Any]] = {
         "handler_config": {},
         "output_schema": _output_schema(["question", "suggested_answers"]),
     },
+    "materialize_agent_report": {
+        "type": "materialize_agent_report",
+        "version": 1,
+        "label": "Materialize Agent Report",
+        "description": "Create candidate requirements and/or markdown specs from a completed custom agent report.",
+        "category": "Generation",
+        "risk_level": "medium",
+        "is_async": False,
+        "required": ["source_step"],
+        "default_input": {
+            "source_step": "wait_agent",
+            "mode": "both",
+            "max_items": 10,
+            "priority_threshold": "medium",
+        },
+        "input_schema": _object_schema(
+            ["source_step"],
+            {
+                "source_step": {"type": "string", "minLength": 1},
+                "mode": {"type": "string", "enum": ["requirements", "specs", "both"]},
+                "max_items": {"type": "integer", "minimum": 1, "maximum": 50},
+                "priority_threshold": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+            },
+        ),
+        "ui_schema": {
+            "fields": [
+                {"key": "source_step", "label": "Agent report step", "control": "source_step"},
+                {
+                    "key": "mode",
+                    "label": "Create",
+                    "control": "select",
+                    "options": [
+                        {"label": "Requirements and specs", "value": "both"},
+                        {"label": "Requirements only", "value": "requirements"},
+                        {"label": "Specs only", "value": "specs"},
+                    ],
+                },
+                {"key": "max_items", "label": "Max items", "control": "number", "min": 1, "max": 50},
+                {
+                    "key": "priority_threshold",
+                    "label": "Minimum priority",
+                    "control": "select",
+                    "options": [
+                        {"label": "Critical", "value": "critical"},
+                        {"label": "High", "value": "high"},
+                        {"label": "Medium", "value": "medium"},
+                        {"label": "Low", "value": "low"},
+                        {"label": "Info", "value": "info"},
+                    ],
+                },
+            ]
+        },
+        "handler_kind": "materialize_agent_report",
+        "handler_config": {"action": "materialize_agent_report"},
+        "output_schema": _output_schema(
+            ["created_requirements", "created_specs", "skipped_items"],
+            [
+                _token("created_requirements", "Created Requirements", "array", "Candidate requirements created from the agent report."),
+                _token("created_specs", "Created Specs", "array", "Markdown specs created from the agent report."),
+                _token("skipped_items", "Skipped Items", "array", "Report items skipped because of duplicates or validation issues."),
+            ],
+        ),
+    },
 }
 
 
@@ -405,6 +468,32 @@ WORKFLOW_TEMPLATES: list[dict[str, Any]] = [
             {"key": "agent", "type": "start_custom_agent", "label": "Run Custom Agent", "input": BUILTIN_STEP_TYPES["start_custom_agent"]["default_input"]},
             {"key": "wait_agent", "type": "wait_for_status", "label": "Wait for Agent", "input": {"source_step": "agent", "timeout_seconds": 3600, "poll_seconds": 10}},
             {"key": "review", "type": "review_gate", "label": "Review Agent Report", "input": {"question": "Review the custom agent report before continuing.", "suggested_answers": ["Accept", "Revise agent prompt"]}},
+        ],
+    },
+    {
+        "id": "agent-to-requirements-specs",
+        "name": "Agent To Requirements And Specs",
+        "description": "Run a saved custom agent, review its report, then create candidate requirements and markdown specs.",
+        "useCase": "Chat-created QA workflow",
+        "steps": [
+            {
+                "key": "agent",
+                "type": "start_custom_agent",
+                "label": "Run Custom Agent",
+                "input": {
+                    "definition_id": "{{inputs.agent_definition_id}}",
+                    "url": "{{inputs.target_url}}",
+                    "prompt": "Inspect the target app area, capture observed requirements, findings, evidence, and test ideas.",
+                },
+            },
+            {"key": "wait_agent", "type": "wait_for_status", "label": "Wait for Agent", "input": {"source_step": "agent", "timeout_seconds": 3600, "poll_seconds": 10}},
+            {"key": "review_agent", "type": "review_gate", "label": "Review Agent Report", "input": {"question": "Review the custom agent report before creating requirements and specs.", "suggested_answers": ["Create requirements and specs", "Revise agent prompt"]}},
+            {"key": "materialize", "type": "materialize_agent_report", "label": "Create Requirements And Specs", "input": {"source_step": "wait_agent", "mode": "both", "max_items": 10, "priority_threshold": "medium"}},
+            {"key": "review_output", "type": "review_gate", "label": "Review Created Artifacts", "input": {"question": "Review the created requirements and specs before running tests.", "suggested_answers": ["Accept", "Edit artifacts first"]}},
+        ],
+        "variables": [
+            {"key": "agent_definition_id", "label": "Custom agent definition ID", "required": True},
+            {"key": "target_url", "label": "Target URL", "required": False},
         ],
     },
     {

@@ -77,7 +77,7 @@ export const ASSISTANT_WORKFLOW_CAPABILITIES: AssistantWorkflowCapability[] = [
     page: '/workflow',
     status: 'supported',
     read: ['workflow definitions', 'workflow catalog', 'recent workflow runs', 'workflow run steps'],
-    actions: ['create workflow', 'update workflow', 'duplicate workflow', 'archive workflow', 'start workflow', 'start workflow from a specific step', 'retry failed workflow step', 'pause/resume/cancel workflow run'],
+    actions: ['create workflow from chat', 'create agent-to-requirements/specs workflow', 'update workflow', 'duplicate workflow', 'archive workflow', 'start workflow', 'start workflow from a specific step', 'retry failed workflow step', 'pause/resume/cancel workflow run'],
   },
   {
     section: 'CI/CD and PR Advisor',

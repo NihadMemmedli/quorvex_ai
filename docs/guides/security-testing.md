@@ -30,10 +30,14 @@ Additionally, **passive mode** lets functional Playwright tests proxy through ZA
 ### Start ZAP Daemon (for ZAP and Full scans)
 
 ```bash
-docker compose --profile security up -d zap
+make zap-up
 ```
 
-This starts ZAP as a daemon on port 8090.
+This starts ZAP from the production Compose profile as a daemon on port 8090. If you need the raw command, use:
+
+```bash
+docker compose --env-file .env.prod -f docker-compose.prod.yml --profile security up -d zap
+```
 
 ## Step-by-Step Usage
 

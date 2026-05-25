@@ -18,6 +18,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlmodel import Session, col, select
 
+from orchestrator.services.autonomous_activities import (
+    autonomous_health_diagnostics,
+    backfill_autonomous_canonical_state,
+    monitor_autonomous_project,
+    recover_autonomous_project_stale_work,
+)
 from orchestrator.services.autonomous_events import (
     create_autonomous_agent_event,
     emit_mission_event,
@@ -51,7 +57,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 MISSION_TYPES = {"coverage", "exploration", "regression", "flake_triage", "mixed"}
 AUTONOMY_LEVELS = {"draft_validate"}
-APPROVAL_POLICIES = {"approval_required"}
+APPROVAL_POLICIES = {"approval_required", "auto_materialize_low_risk"}
 TEST_PROPOSAL_STATUSES = {"pending", "approved", "rejected", "materialized"}
 TEST_PROPOSAL_TYPES = {"e2e", "api", "regression", "security", "accessibility", "unit"}
 WORK_ITEM_REVIEW_DECISIONS = {"accepted", "rejected", "needs_revision"}
@@ -133,7 +139,10 @@ def _validate_mission_input(req: AutonomousMissionCreateRequest) -> None:
     if req.autonomy_level not in AUTONOMY_LEVELS:
         raise HTTPException(status_code=400, detail="Only draft_validate autonomy is supported in v1")
     if req.approval_policy not in APPROVAL_POLICIES:
-        raise HTTPException(status_code=400, detail="Only approval_required policy is supported in v1")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported approval_policy: {req.approval_policy}. Supported policies: {sorted(APPROVAL_POLICIES)}",
+        )
     _validate_mission_safety_config(req.target_urls, req.config)
     if req.schedule_cron:
         try:
@@ -161,6 +170,7 @@ def _validate_mission_update(req: AutonomousMissionUpdateRequest, mission: Auton
 
 def _mission_to_response(mission: AutonomousMission, session: Session | None = None) -> dict[str, Any]:
     team_summary = _team_summary_for_mission(mission, session)
+    monitor_summary = (mission.config or {}).get("autonomous_monitor") or {}
     pending_revision_count = int(team_summary.get("pending_revision_count") or 0)
     return {
         "id": mission.id,
@@ -197,6 +207,14 @@ def _mission_to_response(mission: AutonomousMission, session: Session | None = N
         "total_runs": mission.total_runs,
         "total_findings": mission.total_findings,
         "team_summary": team_summary,
+        "monitor_summary": monitor_summary,
+        "last_monitor_at": monitor_summary.get("last_monitor_at"),
+        "diagnostics_status": monitor_summary.get("diagnostics_status"),
+        "stale_running_count": monitor_summary.get("stale_running_count"),
+        "failed_validation_count": monitor_summary.get("failed_validation_count"),
+        "duplicate_canonical_count": monitor_summary.get("duplicate_canonical_count"),
+        "unmapped_confirmed_requirement_count": monitor_summary.get("unmapped_confirmed_requirement_count"),
+        "validation_artifact_count": monitor_summary.get("validation_artifact_count"),
         "active_work_items": _recent_work_items_for_mission(mission.id, {"queued", "running"}, session, limit=8),
         "blocked_work_items": _recent_work_items_for_mission(mission.id, {"failed", "blocked"}, session, limit=8),
         "coverage_summary": _coverage_summary_for_project(mission.project_id, session),
@@ -350,6 +368,12 @@ def _proposal_to_response(proposal: AutonomousTestProposal, session: Session | N
         "review_context": _proposal_review_context(proposal, session),
         "materialized_file_path": proposal.materialized_file_path,
         "materialization_result": proposal.materialization_result,
+        "validation_status": proposal.validation_status,
+        "validation_result": proposal.validation_result,
+        "validation_artifacts": proposal.validation_artifacts,
+        "validation_log_path": proposal.validation_log_path,
+        "validation_trace_path": proposal.validation_trace_path,
+        "validated_at": proposal.validated_at.isoformat() if proposal.validated_at else None,
         "approved_by": proposal.approved_by,
         "approved_at": proposal.approved_at.isoformat() if proposal.approved_at else None,
         "rejected_by": proposal.rejected_by,
@@ -675,6 +699,7 @@ def _work_item_to_response(item: AutonomousAgentWorkItem) -> dict[str, Any]:
         "priority": item.priority,
         "owner_agent": item.role,
         "agent_task_id": item.agent_task_id,
+        "planner_key": item.planner_key or progress.get("planner_key"),
         "progress": item.progress,
         "artifacts": item.artifacts,
         "result": result,
@@ -691,6 +716,10 @@ def _work_item_to_response(item: AutonomousAgentWorkItem) -> dict[str, Any]:
         "blocked_reason": item.error_message,
         "error_message": item.error_message,
         "attempt_count": item.attempt_count,
+        "lease_until": item.lease_until.isoformat() if item.lease_until else None,
+        "last_heartbeat_at": item.last_heartbeat_at.isoformat() if item.last_heartbeat_at else None,
+        "recovery_count": item.recovery_count,
+        "recovery_reason": item.recovery_reason or progress.get("recovery_reason"),
         "budget_used_usd": item.budget_used_usd,
         "started_at": item.started_at.isoformat() if item.started_at else None,
         "completed_at": item.completed_at.isoformat() if item.completed_at else None,
@@ -755,6 +784,7 @@ def _team_summary_for_mission(mission: AutonomousMission, session: Session | Non
     db, should_close = _with_session(session)
     try:
         items = db.exec(select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission.id)).all()
+        proposals = db.exec(select(AutonomousTestProposal).where(AutonomousTestProposal.mission_id == mission.id)).all()
     finally:
         if should_close:
             db.close()
@@ -764,8 +794,12 @@ def _team_summary_for_mission(mission: AutonomousMission, session: Session | Non
     pending_revision_count = 0
     accepted_revision_count = 0
     needs_revision_work_item_ids: set[str] = set()
+    stale_recovered_count = 0
     for item in items:
         result = item.result or {}
+        progress = item.progress or {}
+        if item.recovery_count or progress.get("recovered_from_work_item_id"):
+            stale_recovered_count += 1
         is_revision = bool(_work_item_revision_parent_id(item))
         if is_revision:
             revision_count += 1
@@ -786,6 +820,8 @@ def _team_summary_for_mission(mission: AutonomousMission, session: Session | Non
             role["blocked"] += 1
     config = mission.config
     configured_roles = config.get("roles") if isinstance(config.get("roles"), list) else []
+    validation_failed_count = sum(1 for proposal in proposals if proposal.validation_status == "failed")
+    auto_materialized_count = sum(1 for proposal in proposals if proposal.materialized_by == "autonomous_policy")
     return {
         "enabled": bool(config.get("whole_app_team") or config.get("team_mode") == "whole_app" or items),
         "roles": configured_roles or [role["role"] for role in by_role.values()],
@@ -799,6 +835,10 @@ def _team_summary_for_mission(mission: AutonomousMission, session: Session | Non
         "accepted_revision_count": accepted_revision_count,
         "needs_revision_count": len(needs_revision_work_item_ids),
         "revision_attention": pending_revision_count > 0,
+        "stale_recovered_count": stale_recovered_count,
+        "validation_failed_count": validation_failed_count,
+        "auto_materialized_count": auto_materialized_count,
+        "planner_created_count": sum(1 for item in items if item.planner_key),
         "by_status": by_status,
         "lanes": list(by_role.values()),
     }
@@ -1158,6 +1198,49 @@ def list_mission_runs(
         .limit(limit)
     ).all()
     return [_run_to_response(run) for run in runs]
+
+
+@router.get("/{project_id}/diagnostics")
+def get_autonomous_diagnostics(
+    project_id: str,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    _require_project(project_id, session)
+    return autonomous_health_diagnostics(session, project_id=project_id)
+
+
+@router.post("/{project_id}/diagnostics/backfill")
+async def backfill_autonomous_diagnostics(
+    project_id: str,
+    dry_run: bool = Query(default=True),
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user),
+):
+    await _require_project_edit(project_id, current_user, session)
+    summary = backfill_autonomous_canonical_state(session, project_id=project_id, dry_run=dry_run)
+    return {"project_id": project_id, "summary": summary, "diagnostics": autonomous_health_diagnostics(session, project_id=project_id)}
+
+
+@router.post("/{project_id}/diagnostics/recover")
+async def recover_autonomous_diagnostics(
+    project_id: str,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user),
+):
+    await _require_project_edit(project_id, current_user, session)
+    recovery = recover_autonomous_project_stale_work(session, project_id)
+    return {"project_id": project_id, "recovery": recovery, "diagnostics": autonomous_health_diagnostics(session, project_id=project_id)}
+
+
+@router.post("/{project_id}/diagnostics/monitor")
+async def monitor_autonomous_diagnostics(
+    project_id: str,
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user),
+):
+    await _require_project_edit(project_id, current_user, session)
+    return monitor_autonomous_project(session, project_id)
 
 
 @router.get("/{project_id}/missions/{mission_id}/findings")

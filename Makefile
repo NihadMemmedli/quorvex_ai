@@ -8,11 +8,12 @@
         k8s-deploy k8s-delete k8s-status k8s-scale k8s-logs \
         db-migrate db-upgrade db-downgrade db-history db-stamp db-demo-seed \
         docker-prune volume-sizes db-vacuum health-check upgrade deps-lock \
-        load-test \
+        load-test agent-runtime-ready agent-temporal-smoke-up agent-temporal-smoke agent-temporal-smoke-logs \
         k6-workers-up k6-workers-down k6-workers-scale k6-workers-logs k6-workers-status \
         zap-up zap-down zap-status zap-logs \
-        lint format test \
-        docs-check docs-serve docs-build docs-deploy
+        lint format test autonomous-soak \
+        docs-check docs-visual-check docs-visual-capture docs-serve docs-build docs-deploy \
+        youtube-pack youtube-voice youtube-avatar youtube-assemble
 
 # Default target
 help:
@@ -120,12 +121,24 @@ help:
 	@echo ""
 	@echo "  Load Testing:"
 	@echo "    make load-test SPEC=... - Generate and run K6 load test from spec"
+	@echo "    make autonomous-soak    - Run bounded autonomous product-UI soak"
+	@echo "    make agent-runtime-ready - Verify API and Temporal agent workers are ready"
+	@echo "    make agent-temporal-smoke-up - Start Docker services for agent Temporal smoke"
+	@echo "    make agent-temporal-smoke    - Run deterministic Temporal-backed agent smoke"
 	@echo ""
 	@echo "  Documentation:"
 	@echo "    make docs-check     - Run docs drift checks and strict MkDocs build"
+	@echo "    make docs-visual-check - Verify local UI screenshots/GIFs are present"
+	@echo "    make docs-visual-capture - Capture dashboard UI screenshots for docs"
 	@echo "    make docs-serve     - Start MkDocs development server"
 	@echo "    make docs-build     - Build MkDocs documentation in strict mode"
 	@echo "    make docs-deploy    - Deploy docs to GitHub Pages"
+	@echo ""
+	@echo "  YouTube Production:"
+	@echo "    make youtube-pack EP=001  - Generate episode script, captions, metadata, and checklist"
+	@echo "    make youtube-voice EP=001 - Generate ElevenLabs voiceover for an episode pack"
+	@echo "    make youtube-avatar EP=001 - Generate HeyGen avatar payloads for presenter clips"
+	@echo "    make youtube-assemble EP=001 RECORDING=path.mp4 - Export a 1080p YouTube MP4"
 	@echo ""
 	@echo "  Utilities:"
 	@echo "    make stop           - Stop all running services"
@@ -201,6 +214,27 @@ load-test:
 	fi
 	@source venv/bin/activate && python orchestrator/workflows/load_test_runner.py --spec "$(SPEC)"
 
+agent-temporal-smoke-up:
+	@echo "Starting services required for agent Temporal smoke..."
+	@$(DOCKER_COMPOSE) up -d db temporal temporal-ui custom-workflow-worker
+	@echo "Run smoke with: make agent-temporal-smoke"
+
+agent-temporal-smoke:
+	@echo "Running deterministic agent Temporal smoke..."
+	@DATABASE_URL="$${DATABASE_URL:-postgresql://postgres:postgres@localhost:5434/playwright_agent}" \
+	TEMPORAL_ADDRESS="$${TEMPORAL_ADDRESS:-localhost:7233}" \
+	TEMPORAL_NAMESPACE="$${TEMPORAL_NAMESPACE:-default}" \
+	TEMPORAL_WORKFLOW_TASK_QUEUE="$${TEMPORAL_WORKFLOW_TASK_QUEUE:-quorvex-custom-workflows}" \
+	python scripts/agent_temporal_smoke.py --timeout "$${AGENT_TEMPORAL_SMOKE_TIMEOUT:-90}"
+
+agent-temporal-smoke-logs:
+	@$(DOCKER_COMPOSE) logs -f temporal custom-workflow-worker
+
+agent-runtime-ready:
+	@python scripts/check_agent_runtime_ready.py \
+		--api-base "$${QUORVEX_PUBLIC_API_URL:-http://localhost:8001}" \
+		--timeout "$${STARTUP_TIMEOUT_SECONDS:-180}"
+
 # ==========================================
 # DOCKER
 # ==========================================
@@ -275,7 +309,8 @@ prod-dev:
 	@echo "This mounts your local ./orchestrator and ./web/src directories."
 	@echo "Code changes will be reflected automatically (uvicorn --reload)."
 	@echo ""
-	@$(APP_COMPOSE) --profile standard --profile security up -d --build
+	@BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) --profile standard --profile security up -d --build
+	@$(MAKE) agent-runtime-ready
 	@echo ""
 	@echo "Development mode started:"
 	@echo "  Dashboard:     http://localhost:3000"
@@ -310,7 +345,7 @@ prod-restart:
 	@echo "App services restarted."
 
 prod-logs:
-	@$(PROD_COMPOSE) logs -f backend frontend
+	@$(PROD_COMPOSE) logs -f backend frontend autonomous-mission-worker custom-workflow-worker
 
 prod-build:
 	@if [ ! -f ".env.prod" ]; then \
@@ -607,7 +642,7 @@ WORKERS ?= 4
 
 workers-build:
 	@echo "Building browser worker images..."
-	@$(PROD_COMPOSE) --profile workers build browser-workers agent-worker backend-slim
+	@$(PROD_COMPOSE) --profile workers build browser-workers agent-worker custom-workflow-worker backend-slim
 	@echo ""
 	@echo "Images built:"
 	@docker images | grep -E "quorvex-(worker|backend-slim)" || echo "  (images not tagged yet)"
@@ -625,6 +660,7 @@ workers-up:
 	@echo ""
 	@echo "Browser workers: $(WORKERS) containers"
 	@echo "Agent workers:   2 containers (default)"
+	@echo "Temporal worker: custom-workflow-worker (custom workflows + agent runs)"
 	@echo ""
 	@echo "View logs:   make workers-logs"
 	@echo "Scale:       make workers-scale N=8"
@@ -664,7 +700,7 @@ workers-status:
 
 workers-logs:
 	@echo "Tailing worker logs (Ctrl+C to stop)..."
-	@$(PROD_COMPOSE) --profile workers logs -f browser-workers agent-worker backend-slim
+	@$(PROD_COMPOSE) --profile workers logs -f browser-workers agent-worker custom-workflow-worker backend-slim
 
 # ==========================================
 # K6 LOAD TEST WORKERS (Distributed Execution)
@@ -953,6 +989,16 @@ test:
 	@echo ""
 	@echo "All tests passed!"
 
+autonomous-soak:
+	@echo "Running autonomous product-UI soak..."
+	@python scripts/autonomous_soak.py \
+		--api-base "$${SOAK_API_BASE:-http://127.0.0.1:8000}" \
+		--project-id "$${SOAK_PROJECT_ID:-default}" \
+		--target-url "$${SOAK_TARGET_URL:-http://127.0.0.1:3000}" \
+		--iterations "$${SOAK_ITERATIONS:-10}" \
+		--minutes "$${SOAK_MINUTES:-120}" \
+		--poll-seconds "$${SOAK_POLL_SECONDS:-60}"
+
 # ==========================================
 # DOCUMENTATION
 # ==========================================
@@ -979,6 +1025,34 @@ docs-build:
 
 docs-deploy:
 	pip install -r requirements-docs.txt && mkdocs gh-deploy --force
+
+# ==========================================
+# YOUTUBE PRODUCTION
+# ==========================================
+
+youtube-pack:
+	@EPISODE="$(if $(EP),$(EP),001)"; \
+	python scripts/youtube/generate-episode-pack.py --episode "$$EPISODE" --force
+
+youtube-voice:
+	@EPISODE="$(if $(EP),$(EP),001)"; \
+	python scripts/demo-video/generate-voice.py \
+		--lang en \
+		--input "content/youtube/episodes/$$EPISODE/script.md" \
+		--output-dir "content/youtube/episodes/$$EPISODE/build"
+
+youtube-avatar:
+	@EPISODE="$(if $(EP),$(EP),001)"; \
+	python scripts/youtube/generate-avatar-payloads.py --episode "$$EPISODE" $(if $(SUBMIT),--submit,)
+
+youtube-assemble:
+	@if [ -z "$(RECORDING)" ]; then \
+		echo "Error: RECORDING argument is required."; \
+		echo "Usage: make youtube-assemble EP=001 RECORDING=path/to/recording.mp4"; \
+		exit 1; \
+	fi
+	@EPISODE="$(if $(EP),$(EP),001)"; \
+	bash scripts/youtube/assemble-episode.sh --episode "$$EPISODE" --recording "$(RECORDING)"
 
 # ==========================================
 # MAINTENANCE & OPERATIONS

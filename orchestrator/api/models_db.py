@@ -107,8 +107,12 @@ class AgentRun(SQLModel, table=True):
     result_json: str | None = None
     progress_json: str | None = None
     agent_task_id: str | None = None
+    temporal_workflow_id: str | None = None
+    temporal_run_id: str | None = None
     status: str = "running"  # running, completed, failed
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
     # Project isolation
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
@@ -149,6 +153,111 @@ class AgentRun(SQLModel, table=True):
     @progress.setter
     def progress(self, value: dict):
         self.progress_json = json.dumps(value)
+
+
+class AgentRunEvent(SQLModel, table=True):
+    """Durable observable event emitted by agent runs."""
+
+    __tablename__ = "agent_run_events"
+    __table_args__ = (
+        Index("ix_agent_run_events_run_sequence", "run_id", "sequence"),
+        Index("ix_agent_run_events_project_created", "project_id", "created_at"),
+        Index("ix_agent_run_events_agent_task", "agent_task_id"),
+        Index("ix_agent_run_events_temporal_workflow", "temporal_workflow_id"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    run_id: str = Field(foreign_key="agentrun.id", index=True)
+    agent_task_id: str | None = Field(default=None, index=True)
+    temporal_workflow_id: str | None = Field(default=None, index=True)
+    temporal_run_id: str | None = None
+    sequence: int = Field(index=True)
+    event_type: str = Field(index=True)
+    level: str = Field(default="info", index=True)
+    message: str = Field(sa_column=Column(Text))
+    payload_json: str = Field(default="{}", sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.payload_json or "{}")
+            return value if isinstance(value, dict) else {"value": value}
+        except json.JSONDecodeError:
+            return {}
+
+    @payload.setter
+    def payload(self, value: dict[str, Any]):
+        self.payload_json = json.dumps(value)
+
+
+class DomainJob(SQLModel, table=True):
+    """Durable status record for Temporal-managed domain background jobs."""
+
+    __tablename__ = "domain_jobs"
+    __table_args__ = (
+        Index("ix_domain_jobs_type_status", "job_type", "status"),
+        Index("ix_domain_jobs_project_created", "project_id", "created_at"),
+        Index("ix_domain_jobs_temporal_workflow", "temporal_workflow_id"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(primary_key=True)
+    job_type: str = Field(index=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    status: str = Field(default="queued", index=True)
+    payload_json: str = Field(default="{}", sa_column=Column(Text))
+    progress_json: str | None = Field(default=None, sa_column=Column(Text))
+    result_json: str | None = Field(default=None, sa_column=Column(Text))
+    error: str | None = Field(default=None, sa_column=Column(Text))
+    temporal_workflow_id: str | None = Field(default=None, index=True)
+    temporal_run_id: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.payload_json or "{}")
+            return value if isinstance(value, dict) else {"value": value}
+        except json.JSONDecodeError:
+            return {}
+
+    @payload.setter
+    def payload(self, value: dict[str, Any]):
+        self.payload_json = json.dumps(value)
+
+    @property
+    def progress(self) -> dict[str, Any]:
+        if not self.progress_json:
+            return {}
+        try:
+            value = json.loads(self.progress_json)
+            return value if isinstance(value, dict) else {"value": value}
+        except json.JSONDecodeError:
+            return {}
+
+    @progress.setter
+    def progress(self, value: dict[str, Any] | None):
+        self.progress_json = json.dumps(value or {})
+
+    @property
+    def result(self) -> dict[str, Any] | None:
+        if not self.result_json:
+            return None
+        try:
+            value = json.loads(self.result_json)
+            return value if isinstance(value, dict) else {"value": value}
+        except json.JSONDecodeError:
+            return None
+
+    @result.setter
+    def result(self, value: dict[str, Any] | None):
+        self.result_json = json.dumps(value) if value is not None else None
 
 
 class AgentToolDefinition(SQLModel, table=True):
@@ -821,9 +930,14 @@ class ApplicationMap(SQLModel, table=True):
     """Discovered application structure (pages, links, forms)"""
 
     __tablename__ = "application_map"
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        Index("ix_application_map_project_surface", "project_id", "app_surface_key"),
+        {"extend_existing": True},
+    )
 
     id: int | None = Field(default=None, primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    app_surface_key: str | None = Field(default=None, index=True)
     url: str = Field(unique=True, index=True)
     page_title: str | None = None
     linked_urls: list[str] | None = Field(default=None, sa_column=Column(JSON))
@@ -1359,7 +1473,11 @@ class Requirement(SQLModel, table=True):
     """Requirements inferred from exploration"""
 
     __tablename__ = "requirements"
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        Index("ix_requirements_project_canonical", "project_id", "canonical_key"),
+        UniqueConstraint("project_id", "canonical_key", name="uq_requirements_project_canonical"),
+        {"extend_existing": True},
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
@@ -1369,6 +1487,7 @@ class Requirement(SQLModel, table=True):
     category: str  # authentication, navigation, crud, validation, etc.
     priority: str = "medium"  # low, medium, high, critical
     status: str = "draft"  # draft, approved, implemented, tested
+    canonical_key: str | None = Field(default=None, index=True)
     truth_state: str = Field(default="candidate_requirement", index=True)
     source_type: str = Field(default="manual", index=True)
     confidence: float = Field(default=0.9)
@@ -1425,7 +1544,11 @@ class RtmEntry(SQLModel, table=True):
     """Requirements Traceability Matrix entries"""
 
     __tablename__ = "rtm_entries"
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        Index("ix_rtm_entries_project_dedupe", "project_id", "dedupe_key"),
+        UniqueConstraint("project_id", "dedupe_key", name="uq_rtm_entries_project_dedupe"),
+        {"extend_existing": True},
+    )
 
     id: int | None = Field(default=None, primary_key=True)
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
@@ -1433,6 +1556,7 @@ class RtmEntry(SQLModel, table=True):
     test_spec_name: str  # Name/path of the test spec
     test_spec_path: str | None = None  # Full path to spec file
     mapping_type: str  # full, partial, suggested
+    dedupe_key: str | None = Field(default=None, index=True)
     confidence: float = 1.0  # Confidence of the mapping (0.0 - 1.0)
     coverage_notes: str | None = None  # Notes about what's covered
     gap_notes: str | None = None  # Notes about gaps
@@ -2862,6 +2986,8 @@ class AutonomousAgentWorkItem(SQLModel, table=True):
         Index("ix_autonomous_work_items_project_status", "project_id", "status"),
         Index("ix_autonomous_work_items_agent_task", "agent_task_id"),
         Index("ix_autonomous_work_items_role_status", "role", "status"),
+        Index("ix_autonomous_work_items_mission_planner", "mission_id", "planner_key"),
+        Index("ix_autonomous_work_items_mission_lease", "mission_id", "lease_until"),
         {"extend_existing": True},
     )
 
@@ -2870,6 +2996,7 @@ class AutonomousAgentWorkItem(SQLModel, table=True):
     run_id: str | None = Field(default=None, foreign_key="autonomous_mission_runs.id", index=True)
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
     role: str = Field(index=True)
+    planner_key: str | None = Field(default=None, index=True)
     objective: str = Field(sa_column=Column(Text))
     assigned_surface_json: str = "[]"
     status: str = Field(default="queued", index=True)  # queued, running, completed, failed, blocked, cancelled
@@ -2882,6 +3009,10 @@ class AutonomousAgentWorkItem(SQLModel, table=True):
     attempt_count: int = 0
     budget_used_usd: float = 0.0
     started_at: datetime | None = None
+    lease_until: datetime | None = None
+    last_heartbeat_at: datetime | None = None
+    recovery_count: int = 0
+    recovery_reason: str | None = None
     completed_at: datetime | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -3052,6 +3183,12 @@ class AutonomousTestProposal(SQLModel, table=True):
     source_metadata_json: str = "{}"
     materialized_file_path: str | None = None
     materialization_result_json: str | None = None
+    validation_status: str = Field(default="not_run", index=True)
+    validation_result_json: str | None = None
+    validation_artifacts_json: str = "[]"
+    validation_log_path: str | None = None
+    validation_trace_path: str | None = None
+    validated_at: datetime | None = None
     approved_by: str | None = None
     approved_at: datetime | None = None
     rejected_by: str | None = None
@@ -3086,6 +3223,32 @@ class AutonomousTestProposal(SQLModel, table=True):
     @materialization_result.setter
     def materialization_result(self, value: dict[str, Any] | None):
         self.materialization_result_json = json.dumps(value) if value is not None else None
+
+    @property
+    def validation_result(self) -> dict[str, Any] | None:
+        if not self.validation_result_json:
+            return None
+        try:
+            value = json.loads(self.validation_result_json)
+            return value if isinstance(value, dict) else {"value": value}
+        except json.JSONDecodeError:
+            return None
+
+    @validation_result.setter
+    def validation_result(self, value: dict[str, Any] | None):
+        self.validation_result_json = json.dumps(value) if value is not None else None
+
+    @property
+    def validation_artifacts(self) -> list[dict[str, Any]]:
+        try:
+            value = json.loads(self.validation_artifacts_json or "[]")
+            return value if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @validation_artifacts.setter
+    def validation_artifacts(self, value: list[dict[str, Any]]):
+        self.validation_artifacts_json = json.dumps(value)
 
 
 class AutonomousApproval(SQLModel, table=True):
