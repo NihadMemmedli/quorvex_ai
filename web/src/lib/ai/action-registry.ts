@@ -96,6 +96,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       system_prompt: customAgentSystemPrompt(args),
       timeout_seconds: clampTimeoutSeconds(args.timeoutSeconds),
       tool_ids: customAgentToolIds(args),
+      runtime: typeof args.runtime === 'string' ? args.runtime : undefined,
       model: typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined,
       project_id: pid || 'default',
     }),
@@ -113,6 +114,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       system_prompt: customAgentDefinitionSystemPrompt(args),
       timeout_seconds: clampTimeoutSeconds(args.timeoutSeconds),
       tool_ids: customAgentToolIds(args),
+      runtime: typeof args.runtime === 'string' ? args.runtime : undefined,
       model: typeof args.model === 'string' && args.model.trim() ? args.model.trim() : undefined,
       project_id: pid || 'default',
     }),
@@ -127,6 +129,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     getBody: (args, pid) => ({
       prompt: args.prompt,
       url: args.url || undefined,
+      runtime: typeof args.runtime === 'string' ? args.runtime : undefined,
       project_id: pid || 'default',
       config: {
         source_run_id: args.sourceRunId,
@@ -1242,6 +1245,19 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       api_key: args.apiKey || undefined,
       base_url: args.baseUrl || undefined,
       model_name: args.modelName || undefined,
+      light_model: args.lightModel || undefined,
+      standard_model: args.standardModel || undefined,
+      deep_model: args.deepModel || undefined,
+      tool_deep_model: args.toolDeepModel || undefined,
+      chat_model: args.chatModel || undefined,
+      embedding_model: args.embeddingModel || undefined,
+      agent_runtime: args.agentRuntime || undefined,
+      assistant_runtime: args.assistantRuntime || undefined,
+      hermes_enabled: typeof args.hermesEnabled === 'boolean' ? args.hermesEnabled : undefined,
+      hermes_api_url: args.hermesApiUrl || undefined,
+      hermes_api_key: args.hermesApiKey || undefined,
+      hermes_model: args.hermesModel || undefined,
+      hermes_sync_provider: typeof args.hermesSyncProvider === 'boolean' ? args.hermesSyncProvider : undefined,
     }),
   },
   generatePrdPlan: {
@@ -1914,7 +1930,6 @@ function getSecret() {
     process.env.ASSISTANT_ACTION_SECRET ||
     process.env.NEXTAUTH_SECRET ||
     process.env.AUTH_SECRET ||
-    process.env.ANTHROPIC_AUTH_TOKEN ||
     'quorvex-assistant-action-dev-secret'
   );
 }

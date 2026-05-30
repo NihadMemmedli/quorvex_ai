@@ -498,13 +498,32 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       execute: async (): Promise<ToolResult> => fetchTool('/settings/test-connection', 'POST'),
     }),
 
+    testAssistantHermesConnection: tool({
+      description: 'Test the configured Hermes gateway connection.',
+      inputSchema: z.object({}),
+      execute: async (): Promise<ToolResult> => fetchTool('/settings/test-hermes', 'POST'),
+    }),
+
     updateAssistantSettings: tool({
       description: 'Update AI assistant provider settings. Requires approval.',
       inputSchema: z.object({
-        llmProvider: z.string().describe('Provider label, e.g. anthropic, openrouter, custom'),
+        llmProvider: z.string().describe('Provider label, e.g. anthropic, openai, openrouter, zai, custom'),
         apiKey: z.string().optional().describe('New API key/token. Omit to keep current key.'),
         baseUrl: z.string().optional().describe('Optional provider base URL'),
         modelName: z.string().optional().describe('Model name to use'),
+        lightModel: z.string().optional().describe('Optional light model tier'),
+        standardModel: z.string().optional().describe('Optional standard model tier'),
+        deepModel: z.string().optional().describe('Optional deep model tier'),
+        toolDeepModel: z.string().optional().describe('Optional tool-deep model tier'),
+        chatModel: z.string().optional().describe('Optional assistant chat model tier'),
+        embeddingModel: z.string().optional().describe('Optional embedding model'),
+        agentRuntime: z.enum(['claude_sdk', 'hermes']).optional().describe('Default runtime for autonomous missions and custom agents'),
+        assistantRuntime: z.enum(['claude_sdk', 'openai', 'hermes']).optional().describe('Runtime used by dashboard assistant chat'),
+        hermesEnabled: z.boolean().optional().describe('Whether Hermes backend support is enabled'),
+        hermesApiUrl: z.string().optional().describe('Hermes gateway API URL'),
+        hermesApiKey: z.string().optional().describe('Hermes gateway API key. Omit to keep current key.'),
+        hermesModel: z.string().optional().describe('Hermes OpenAI-compatible model ID'),
+        hermesSyncProvider: z.boolean().optional().describe('Whether to mirror the selected LLM provider into Hermes config'),
       }),
     }),
 
@@ -1486,6 +1505,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         url: z.string().describe('The website URL for the custom agent to inspect'),
         prompt: z.string().describe('The task prompt for the custom agent run'),
         focusAreas: z.array(z.string()).optional().describe('Specific features, pages, or behaviors to focus on'),
+        runtime: z.enum(['claude_sdk', 'hermes']).optional().describe('Optional agent runtime. Use hermes when the user explicitly wants Hermes.'),
         timeoutSeconds: z.number().optional().default(1800).describe('Maximum custom agent runtime in seconds'),
       }),
     }),
@@ -1500,6 +1520,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         prompt: z.string().optional().describe('Default operating brief to append to the saved agent prompt'),
         toolIds: z.array(z.string()).optional().describe('Allowed custom-agent tool IDs'),
         focusAreas: z.array(z.string()).optional().describe('Specific features, pages, or behaviors to focus on'),
+        runtime: z.enum(['claude_sdk', 'hermes']).optional().describe('Optional agent runtime. Use hermes when the user explicitly wants Hermes.'),
         timeoutSeconds: z.number().optional().default(1800).describe('Default custom agent runtime in seconds'),
       }),
     }),
@@ -1512,6 +1533,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         url: z.string().optional().describe('Optional target URL'),
         sourceRunId: z.string().optional().describe('Source custom agent run ID'),
         sourceItemId: z.string().optional().describe('Finding/test idea ID that triggered this follow-up'),
+        runtime: z.enum(['claude_sdk', 'hermes']).optional().describe('Optional runtime override for this run'),
       }),
     }),
 

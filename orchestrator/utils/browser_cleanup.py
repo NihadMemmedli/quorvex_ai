@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 # Process name fragments that indicate browser/MCP processes we should clean up
 _BROWSER_PROCESS_NAMES = {"chromium", "chrome", "node", "npx"}
 _AUTOPILOT_PROCESS_NAMES = {"claude", "chromium", "chrome", "node", "npx"}
+_TEST_RUN_PROCESS_NAMES = {
+    "claude",
+    "chromium",
+    "chrome",
+    "node",
+    "npx",
+    "ffmpeg",
+}
 
 
 @dataclass(frozen=True)
@@ -161,6 +169,27 @@ def _is_autopilot_process_root(proc: ProcessInfo, marker: str) -> bool:
     return False
 
 
+def _is_test_run_cleanup_process(proc: ProcessInfo) -> bool:
+    comm = proc.comm.lower()
+    return any(name in comm for name in _TEST_RUN_PROCESS_NAMES)
+
+
+def _is_test_run_process_root(proc: ProcessInfo, run_id: str) -> bool:
+    if not run_id or run_id not in proc.args:
+        return False
+    comm = proc.comm.lower()
+    args = proc.args.lower()
+    if "claude" in comm:
+        return True
+    if "node" in comm or "npx" in comm:
+        return "playwright" in args or "mcp" in args
+    if "chrome" in comm or "chromium" in comm:
+        return "playwright" in args or "user-data-dir" in args
+    if "python" in comm:
+        return "orchestrator/cli.py" in args or "/app/runs/" in args
+    return False
+
+
 def find_autopilot_process_tree(session_id: str | None = None) -> set[int]:
     """Find AutoPilot-owned Claude/MCP/browser process trees by session marker.
 
@@ -192,6 +221,35 @@ def find_autopilot_process_tree(session_id: str | None = None) -> set[int]:
     }
 
 
+def find_test_run_process_tree(run_id: str | None = None) -> set[int]:
+    """Find Claude/MCP/browser process trees tied to a test run id.
+
+    Browser child processes do not always carry the run id in argv, so this
+    matches run-scoped root processes first and then includes cleanup-eligible
+    descendants.
+    """
+    if not run_id:
+        return set()
+
+    processes = _process_table()
+    roots = {
+        pid
+        for pid, proc in processes.items()
+        if _is_test_run_process_root(proc, run_id)
+    }
+    targets = set(roots)
+    for pid in roots:
+        targets.update(_descendants_from_table(processes, pid))
+
+    return {
+        pid
+        for pid in targets
+        if pid != os.getpid()
+        and pid in processes
+        and _is_test_run_cleanup_process(processes[pid])
+    }
+
+
 def find_autopilot_session_ids_in_processes() -> set[str]:
     """Return AutoPilot session ids visible in process command lines."""
     pattern = re.compile(r"autopilot_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
@@ -200,6 +258,55 @@ def find_autopilot_session_ids_in_processes() -> set[str]:
         if _is_autopilot_cleanup_process(proc):
             session_ids.update(pattern.findall(proc.args))
     return session_ids
+
+
+def find_test_run_ids_in_processes() -> set[str]:
+    """Return test run ids visible in cleanup-eligible process command lines."""
+    pattern = re.compile(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}")
+    run_ids: set[str] = set()
+    for proc in _process_table().values():
+        comm = proc.comm.lower()
+        args = proc.args.lower()
+        if _is_test_run_cleanup_process(proc) or (
+            "python" in comm and ("orchestrator/cli.py" in args or "/app/runs/" in args)
+        ):
+            run_ids.update(pattern.findall(proc.args))
+    return run_ids
+
+
+def kill_test_run_process_tree(run_id: str, grace_seconds: float = 2.0) -> dict[str, object]:
+    """Kill Claude/MCP/browser process trees tied to one test run id."""
+    targets = find_test_run_process_tree(run_id)
+    if not targets:
+        return {"run_id": run_id, "matched": 0, "terminated": 0, "killed": 0, "pids": []}
+
+    logger.info("Killing %d test-run process(es) for %s: %s", len(targets), run_id, sorted(targets))
+    terminated = 0
+    for pid in sorted(targets, reverse=True):
+        try:
+            os.kill(pid, signal.SIGTERM)
+            terminated += 1
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    time.sleep(grace_seconds)
+
+    killed = 0
+    for pid in sorted(targets, reverse=True):
+        try:
+            os.kill(pid, 0)
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    return {
+        "run_id": run_id,
+        "matched": len(targets),
+        "terminated": terminated,
+        "killed": killed,
+        "pids": sorted(targets),
+    }
 
 
 def kill_autopilot_process_tree(session_id: str, grace_seconds: float = 2.0) -> dict[str, object]:

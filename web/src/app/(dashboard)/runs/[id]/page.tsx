@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
     ArrowLeft, CheckCircle, Copy, Check, Image as ImageIcon, Video as VideoIcon,
     ExternalLink, Code, Layout, FileText, Eye, Globe, Chrome, Compass, Clock, XCircle, Square, Monitor,
@@ -19,6 +19,7 @@ interface Artifact {
     name: string;
     path: string;
     type: 'image' | 'video';
+    modified_at?: string | null;
 }
 
 interface VisualDiff {
@@ -26,6 +27,21 @@ interface VisualDiff {
     diff?: Artifact;
     expected?: Artifact;
     actual?: Artifact;
+}
+
+const ACTIVE_RUN_STATUSES = new Set(['queued', 'pending', 'running', 'in_progress']);
+const STREAMING_RUN_STATUSES = new Set(['running', 'in_progress']);
+
+function getRunStatus(runData: any): string {
+    return runData?.effective_status || runData?.run?.status || runData?.status || 'unknown';
+}
+
+function isActiveRunData(runData: any): boolean {
+    return ACTIVE_RUN_STATUSES.has(getRunStatus(runData));
+}
+
+function isStreamingRunData(runData: any): boolean {
+    return STREAMING_RUN_STATUSES.has(getRunStatus(runData));
 }
 
 export default function RunDetailPage() {
@@ -38,6 +54,7 @@ export default function RunDetailPage() {
     const [streamingLog, setStreamingLog] = useState<string>('');
     const [isStreaming, setIsStreaming] = useState(false);
     const [viewMode, setViewMode] = useState<'browser' | 'log'>('log'); // Default to log (VNC may not be available)
+    const [autoSelectedBrowser, setAutoSelectedBrowser] = useState(false);
 
     // Jira bug report state
     const [jiraIssue, setJiraIssue] = useState<{ exists: boolean; jira_issue_key?: string; jira_url?: string; summary?: string } | null>(null);
@@ -53,24 +70,52 @@ export default function RunDetailPage() {
 
     // Build project query param for API calls
     const projectParam = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
+    const currentRunStatus = getRunStatus(data);
+    const currentRunIsActive = isActiveRunData(data);
+    const currentRunIsStreaming = isStreamingRunData(data);
 
-    const fetchRunData = () => {
-        fetch(`${API_BASE}/runs/${id}${projectParam}`)
+    const fetchRunData = useCallback(() => {
+        return fetch(`${API_BASE}/runs/${id}${projectParam}`)
             .then(res => res.json())
             .then(d => {
                 setData(d);
                 setLoading(false);
+                return d;
             })
             .catch(err => {
                 console.error(err);
                 setLoading(false);
+                return null;
             });
-    };
+    }, [id, projectParam]);
 
     useEffect(() => {
         if (!id) return;
+        setViewMode('log');
+        setAutoSelectedBrowser(false);
         fetchRunData();
-    }, [id, projectParam]);
+    }, [id, fetchRunData]);
+
+    useEffect(() => {
+        if (!data || autoSelectedBrowser) return;
+        if (currentRunIsActive && data.live_view_available) {
+            setViewMode('browser');
+            setAutoSelectedBrowser(true);
+        }
+    }, [data, currentRunIsActive, autoSelectedBrowser]);
+
+    useEffect(() => {
+        if (!id || !currentRunIsActive) return;
+
+        const interval = window.setInterval(async () => {
+            const latest = await fetchRunData();
+            if (!latest || !isActiveRunData(latest)) {
+                window.clearInterval(interval);
+            }
+        }, 3000);
+
+        return () => window.clearInterval(interval);
+    }, [id, currentRunIsActive, fetchRunData]);
 
     // Check if Jira issue exists for this run + load Jira config
     useEffect(() => {
@@ -90,14 +135,9 @@ export default function RunDetailPage() {
 
     // Set up live log streaming for running tests
     useEffect(() => {
-        if (!data || !id) return;
+        if (!id) return;
 
-        const isRunning = data.effective_status === 'running' ||
-            data.effective_status === 'in_progress' ||
-            data.run?.status === 'running' ||
-            data.run?.status === 'in_progress';
-
-        if (!isRunning) {
+        if (!currentRunIsStreaming) {
             setIsStreaming(false);
             return;
         }
@@ -140,7 +180,7 @@ export default function RunDetailPage() {
         return () => {
             eventSource.close();
         };
-    }, [data?.effective_status, data?.run?.status, id]);
+    }, [currentRunIsStreaming, id, fetchRunData]);
 
     if (loading) return (
         <PageLayout tier="standard">
@@ -192,6 +232,13 @@ export default function RunDetailPage() {
 
     const videoArtifacts = standardArtifacts.filter(art => art.type === 'video');
     const imageArtifacts = standardArtifacts.filter(art => art.type === 'image');
+    const latestImageArtifact = imageArtifacts.some(art => art.modified_at)
+        ? [...imageArtifacts].sort((a, b) => {
+            const bTime = b.modified_at ? new Date(b.modified_at).getTime() : 0;
+            const aTime = a.modified_at ? new Date(a.modified_at).getTime() : 0;
+            return bTime - aTime;
+        })[0] || null
+        : imageArtifacts[imageArtifacts.length - 1] || null;
 
     const formatRunId = (id: string) => {
         try {
@@ -215,17 +262,21 @@ export default function RunDetailPage() {
         return date.toLocaleString();
     };
 
-    const runStatus = data.effective_status || data.run?.status || data.status || 'unknown';
-    const isRunActive = isStreaming || runStatus === 'running' || runStatus === 'in_progress';
+    const runStatus = currentRunStatus;
+    const isRunActive = currentRunIsActive;
     const isRunFinished = !isRunActive && ['passed', 'failed', 'success', 'error', 'stopped', 'completed'].includes(runStatus);
     const statusDetails = [
         data.current_stage ? ['Stage', data.current_stage] : null,
         data.stage_message ? ['Message', data.stage_message] : null,
+        data.blocker_message ? ['Blocker', data.blocker_message] : null,
         data.healing_attempt ? ['Healing attempt', String(data.healing_attempt)] : null,
         data.queue_position ? ['Queue', `#${data.queue_position}`] : null,
+        data.temporal_workflow_id ? ['Temporal', data.temporal_workflow_id] : null,
         formatTimestamp(data.started_at || data.run?.started_at) ? ['Started', formatTimestamp(data.started_at || data.run?.started_at)] : null,
         formatTimestamp(data.completed_at || data.run?.completed_at) ? ['Completed', formatTimestamp(data.completed_at || data.run?.completed_at)] : null,
     ].filter(Boolean) as [string, string][];
+    const logSections = Array.isArray(data.log_sections) ? data.log_sections : [];
+    const shouldShowStructuredLogs = logSections.length > 0 && (!isStreaming || !streamingLog);
 
     const handleStop = async () => {
         if (!confirm('Are you sure you want to stop this run?')) return;
@@ -527,7 +578,7 @@ export default function RunDetailPage() {
                                                 <div>
                                                     <div style={{ marginBottom: '0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Expected</div>
                                                     <a href={`${API_BASE}${diff.expected.path}`} target="_blank" rel="noreferrer">
-                                                        <img src={`${API_BASE}${diff.expected.path}`} style={{ width: '100%', borderRadius: '4px', border: '1px solid var(--border)' }} />
+                                                        <img src={`${API_BASE}${diff.expected.path}`} alt={`${diff.name} expected screenshot`} style={{ width: '100%', borderRadius: '4px', border: '1px solid var(--border)' }} />
                                                     </a>
                                                 </div>
                                             )}
@@ -535,7 +586,7 @@ export default function RunDetailPage() {
                                                 <div>
                                                     <div style={{ marginBottom: '0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Actual</div>
                                                     <a href={`${API_BASE}${diff.actual.path}`} target="_blank" rel="noreferrer">
-                                                        <img src={`${API_BASE}${diff.actual.path}`} style={{ width: '100%', borderRadius: '4px', border: '1px solid var(--border)' }} />
+                                                        <img src={`${API_BASE}${diff.actual.path}`} alt={`${diff.name} actual screenshot`} style={{ width: '100%', borderRadius: '4px', border: '1px solid var(--border)' }} />
                                                     </a>
                                                 </div>
                                             )}
@@ -543,7 +594,7 @@ export default function RunDetailPage() {
                                                 <div>
                                                     <div style={{ marginBottom: '0.5rem', fontSize: '0.8rem', color: 'var(--danger)' }}>Diff</div>
                                                     <a href={`${API_BASE}${diff.diff.path}`} target="_blank" rel="noreferrer">
-                                                        <img src={`${API_BASE}${diff.diff.path}`} style={{ width: '100%', borderRadius: '4px', border: '1px solid var(--danger)' }} />
+                                                        <img src={`${API_BASE}${diff.diff.path}`} alt={`${diff.name} visual diff`} style={{ width: '100%', borderRadius: '4px', border: '1px solid var(--danger)' }} />
                                                     </a>
                                                 </div>
                                             )}
@@ -752,6 +803,13 @@ export default function RunDetailPage() {
                                 runId={id}
                                 isActive={isRunActive}
                                 onShowLog={() => setViewMode('log')}
+                                artifacts={standardArtifacts}
+                                latestImage={latestImageArtifact}
+                                statusMessage={data.stage_message}
+                                liveViewAvailable={Boolean(data.live_view_available)}
+                                runtimeMessage={data.runtime_message}
+                                vncUrl={data.vnc_url}
+                                displayDiagnostics={data.display_diagnostics}
                             />
                         )}
 
@@ -760,13 +818,10 @@ export default function RunDetailPage() {
                             <div
                                 style={{
                                     background: 'var(--background)',
-                                    padding: '1rem',
+                                    padding: shouldShowStructuredLogs ? '0.75rem' : '1rem',
                                     borderRadius: 'var(--radius)',
                                     maxHeight: '500px',
                                     overflow: 'auto',
-                                    fontFamily: 'monospace',
-                                    fontSize: '0.85rem',
-                                    whiteSpace: 'pre-wrap',
                                     color: 'var(--text)',
                                     border: `1px solid ${isStreaming ? 'var(--primary)' : 'var(--border)'}`,
                                     transition: 'border-color 0.3s'
@@ -778,7 +833,68 @@ export default function RunDetailPage() {
                                     }
                                 }}
                             >
-                                {isStreaming ? (streamingLog || 'Waiting for output...') : (data.log || 'No logs available.')}
+                                {shouldShowStructuredLogs ? (
+                                    <div style={{ display: 'grid', gap: '0.75rem' }}>
+                                        {data.blocker_message && (
+                                            <div style={{
+                                                padding: '0.75rem',
+                                                border: '1px solid rgba(245, 158, 11, 0.45)',
+                                                background: 'rgba(245, 158, 11, 0.10)',
+                                                borderRadius: 'var(--radius)',
+                                                fontSize: '0.86rem',
+                                                fontWeight: 650,
+                                                color: 'var(--text)'
+                                            }}>
+                                                {data.blocker_message}
+                                            </div>
+                                        )}
+                                        {logSections.map((section: any, index: number) => (
+                                            <section key={`${section.source || 'log'}-${index}`} style={{
+                                                border: '1px solid var(--border)',
+                                                borderRadius: 'var(--radius)',
+                                                overflow: 'hidden',
+                                                background: 'var(--surface)'
+                                            }}>
+                                                <div style={{
+                                                    display: 'flex',
+                                                    justifyContent: 'space-between',
+                                                    gap: '0.75rem',
+                                                    padding: '0.55rem 0.75rem',
+                                                    borderBottom: '1px solid var(--border)',
+                                                    background: 'var(--surface-hover)',
+                                                    fontSize: '0.78rem',
+                                                    fontWeight: 700
+                                                }}>
+                                                    <span>{section.title || 'Log'}</span>
+                                                    <span style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>{section.source}</span>
+                                                </div>
+                                                <pre style={{
+                                                    margin: 0,
+                                                    padding: '0.75rem',
+                                                    whiteSpace: 'pre-wrap',
+                                                    overflowWrap: 'anywhere',
+                                                    fontFamily: 'monospace',
+                                                    fontSize: '0.82rem',
+                                                    lineHeight: 1.45,
+                                                    color: 'var(--text)'
+                                                }}>
+                                                    {section.content || 'No entries yet.'}
+                                                </pre>
+                                            </section>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <pre style={{
+                                        margin: 0,
+                                        fontFamily: 'monospace',
+                                        fontSize: '0.85rem',
+                                        whiteSpace: 'pre-wrap',
+                                        overflowWrap: 'anywhere',
+                                        color: 'var(--text)'
+                                    }}>
+                                        {isStreaming ? (streamingLog || data.log || 'Waiting for output...') : (data.log || 'No logs available.')}
+                                    </pre>
+                                )}
                             </div>
                         )}
 

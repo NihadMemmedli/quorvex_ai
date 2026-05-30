@@ -10,15 +10,30 @@ interface LiveBrowserViewProps {
     isActive: boolean;
     showHeader?: boolean; // Whether to show internal header (default: false for embedded use)
     onShowLog?: () => void;
+    artifacts?: AgentArtifact[];
+    latestImage?: AgentArtifact | null;
+    preferArtifactPreview?: boolean;
+    statusMessage?: string | null;
+    liveViewAvailable?: boolean;
+    runtimeMessage?: string | null;
+    vncUrl?: string | null;
+    displayDiagnostics?: BrowserDisplayDiagnostics | null;
 }
 
 const VNC_CONNECT_TIMEOUT_MS = 8000;
+const VNC_FRAME_PROBE_MS = 500;
+const VNC_FRAME_PROBE_ATTEMPTS = 16;
 
 interface AgentArtifact {
     name: string;
     path: string;
     type: 'image' | 'video' | string;
-    modified_at?: string;
+    modified_at?: string | null;
+}
+
+interface BrowserDisplayDiagnostics {
+    browser_process_count?: number | null;
+    browser_window_count?: number | null;
 }
 
 function latestImageArtifact(artifacts: AgentArtifact[]): AgentArtifact | null {
@@ -31,7 +46,53 @@ function latestImageArtifact(artifacts: AgentArtifact[]): AgentArtifact | null {
         })[0] || null;
 }
 
-export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog }: LiveBrowserViewProps) {
+function canvasHasVisibleFrame(container: HTMLDivElement | null): boolean {
+    const canvas = container?.querySelector('canvas');
+    if (!canvas || canvas.width === 0 || canvas.height === 0) {
+        return false;
+    }
+
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) {
+        return true;
+    }
+
+    try {
+        const sampleWidth = Math.min(canvas.width, 64);
+        const sampleHeight = Math.min(canvas.height, 64);
+        const xPositions = [0, Math.max(0, Math.floor((canvas.width - sampleWidth) / 2)), Math.max(0, canvas.width - sampleWidth)];
+        const yPositions = [0, Math.max(0, Math.floor((canvas.height - sampleHeight) / 2)), Math.max(0, canvas.height - sampleHeight)];
+
+        for (const x of xPositions) {
+            for (const y of yPositions) {
+                const image = context.getImageData(x, y, sampleWidth, sampleHeight).data;
+                for (let index = 0; index < image.length; index += 4) {
+                    if (image[index + 3] > 0 && (image[index] > 8 || image[index + 1] > 8 || image[index + 2] > 8)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    } catch {
+        return true;
+    }
+}
+
+export function LiveBrowserView({
+    runId,
+    isActive,
+    showHeader = false,
+    onShowLog,
+    artifacts: providedArtifacts,
+    latestImage: providedLatestImage,
+    preferArtifactPreview: preferProvidedArtifactPreview = false,
+    statusMessage,
+    liveViewAvailable = true,
+    runtimeMessage,
+    vncUrl,
+    displayDiagnostics,
+}: LiveBrowserViewProps) {
     const { user } = useAuth();
     const [isConnected, setIsConnected] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
@@ -39,28 +100,49 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
     const [isLoading, setIsLoading] = useState(true);
     const [vncAvailable, setVncAvailable] = useState<boolean | null>(null);
     const [artifacts, setArtifacts] = useState<AgentArtifact[]>([]);
+    const [liveReady, setLiveReady] = useState(false);
 
     const containerRef = useRef<HTMLDivElement>(null);
     const rfbRef = useRef<any>(null);
     const canvasContainerRef = useRef<HTMLDivElement>(null);
     const connectionTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const frameProbeRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
     // Only admins can see VNC
     const isAdmin = user?.is_superuser === true;
 
-    // Build WebSocket URL for VNC
-    const vncHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-    const vncPort = 6080;
-    const vncUrl = `ws://${vncHost}:${vncPort}/websockify`;
-    const fallbackImage = latestImageArtifact(artifacts);
-    const preferArtifactPreview = typeof window !== 'undefined'
+    const resolvedVncUrl = (() => {
+        if (typeof window === 'undefined') return vncUrl || 'ws://localhost:6080/websockify';
+        if (vncUrl?.startsWith('/')) {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            return `${protocol}//${window.location.host}${vncUrl}`;
+        }
+        if (vncUrl) return vncUrl;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return `${protocol}//${window.location.hostname}:6080/websockify`;
+    })();
+    const effectiveArtifacts = providedArtifacts ?? artifacts;
+    const fallbackImage = providedLatestImage ?? latestImageArtifact(effectiveArtifacts);
+    const preferQueryArtifactPreview = typeof window !== 'undefined'
         && new URLSearchParams(window.location.search).get('demoCapture') === '1';
-    const showingFallbackCapture = Boolean(fallbackImage && (preferArtifactPreview || (!isConnected && !isLoading)));
-    const liveStreamVisible = isConnected && !preferArtifactPreview;
+    const forceArtifactPreview = preferProvidedArtifactPreview || preferQueryArtifactPreview || !liveViewAvailable;
+    const pendingMessage = runtimeMessage?.trim() || statusMessage?.trim();
+    const hasNoBrowserWindow = displayDiagnostics?.browser_window_count === 0;
+    const hasNoUsableVncFrame = !liveReady;
+    const waitingForBrowserWindow = Boolean(
+        hasNoUsableVncFrame && hasNoBrowserWindow
+    );
+    const liveCanvasMounted = isConnected && !forceArtifactPreview;
+    const liveStreamVisible = liveCanvasMounted && liveReady && !waitingForBrowserWindow;
+    const showingFallbackCapture = forceArtifactPreview
+        || Boolean(fallbackImage && !liveStreamVisible)
+        || (isConnected && !liveReady && !isLoading)
+        || waitingForBrowserWindow;
+    const isProviderRetry = Boolean(pendingMessage && /rate limit|rate-limited|retry/i.test(pendingMessage));
     const statusColor = liveStreamVisible
         ? 'var(--success)'
         : showingFallbackCapture
-            ? 'var(--primary)'
+            ? fallbackImage ? 'var(--primary)' : 'var(--text-secondary)'
             : 'var(--danger)';
     const statusBackground = liveStreamVisible
         ? 'rgba(16, 185, 129, 0.1)'
@@ -76,6 +158,9 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
     useEffect(() => {
         let cancelled = false;
         async function loadArtifacts() {
+            if (providedArtifacts) {
+                return;
+            }
             if (!runId) {
                 setArtifacts([]);
                 return;
@@ -92,7 +177,7 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
             }
         }
         loadArtifacts();
-        if (!isActive) {
+        if (!isActive || providedArtifacts) {
             return () => {
                 cancelled = true;
             };
@@ -102,13 +187,13 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
             cancelled = true;
             window.clearInterval(interval);
         };
-    }, [runId, isActive]);
+    }, [runId, isActive, providedArtifacts]);
 
     // Check if VNC server is available
     const checkVncAvailability = useCallback(async () => {
         try {
             // Try to establish a WebSocket connection to check if VNC is running
-            const ws = new WebSocket(vncUrl);
+            const ws = new WebSocket(resolvedVncUrl);
 
             return new Promise<boolean>((resolve) => {
                 const timeout = setTimeout(() => {
@@ -130,11 +215,11 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
         } catch {
             return false;
         }
-    }, [vncUrl]);
+    }, [resolvedVncUrl]);
 
     // Initialize noVNC connection
     const initVNC = useCallback(async () => {
-        if (!isAdmin || !isActive || !canvasContainerRef.current) {
+        if (!isAdmin || !isActive || !liveViewAvailable || !canvasContainerRef.current) {
             return;
         }
 
@@ -145,9 +230,10 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
 
         setIsLoading(true);
         setIsConnected(false);
+        setLiveReady(false);
         setError(null);
 
-        if (preferArtifactPreview) {
+        if (forceArtifactPreview) {
             setVncAvailable(false);
             setIsLoading(false);
             return;
@@ -179,7 +265,7 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
             }
 
             // Create new RFB connection
-            const rfb = new RFB(canvasContainerRef.current, vncUrl, {
+            const rfb = new RFB(canvasContainerRef.current, resolvedVncUrl, {
                 shared: true,
                 credentials: { password: '' },
             });
@@ -199,6 +285,27 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
                 setIsConnected(true);
                 setIsLoading(false);
                 setError(null);
+                setLiveReady(false);
+
+                if (frameProbeRef.current) {
+                    clearInterval(frameProbeRef.current);
+                }
+                let attempts = 0;
+                frameProbeRef.current = setInterval(() => {
+                    attempts += 1;
+                    if (canvasHasVisibleFrame(canvasContainerRef.current)) {
+                        setLiveReady(true);
+                        if (frameProbeRef.current) {
+                            clearInterval(frameProbeRef.current);
+                            frameProbeRef.current = null;
+                        }
+                    } else if (attempts >= VNC_FRAME_PROBE_ATTEMPTS) {
+                        if (frameProbeRef.current) {
+                            clearInterval(frameProbeRef.current);
+                            frameProbeRef.current = null;
+                        }
+                    }
+                }, VNC_FRAME_PROBE_MS);
             });
 
             rfb.addEventListener('disconnect', (e: any) => {
@@ -206,7 +313,12 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
                     clearTimeout(connectionTimeoutRef.current);
                     connectionTimeoutRef.current = null;
                 }
+                if (frameProbeRef.current) {
+                    clearInterval(frameProbeRef.current);
+                    frameProbeRef.current = null;
+                }
                 setIsConnected(false);
+                setLiveReady(false);
                 setIsLoading(false);
                 if (e.detail.clean) {
                     // Clean disconnect
@@ -220,6 +332,10 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
                     clearTimeout(connectionTimeoutRef.current);
                     connectionTimeoutRef.current = null;
                 }
+                if (frameProbeRef.current) {
+                    clearInterval(frameProbeRef.current);
+                    frameProbeRef.current = null;
+                }
                 setError(`Security error: ${e.detail.reason}`);
                 setIsLoading(false);
             });
@@ -230,6 +346,7 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
                     rfb.disconnect();
                     rfbRef.current = null;
                     setIsConnected(false);
+                    setLiveReady(false);
                     setIsLoading(false);
                     setError('Browser view did not become available. Use progress or screenshots to follow this work.');
                 }
@@ -239,11 +356,11 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
             setError('Failed to connect to browser view');
             setIsLoading(false);
         }
-    }, [isAdmin, isActive, vncUrl, checkVncAvailability, preferArtifactPreview]);
+    }, [isAdmin, isActive, liveViewAvailable, resolvedVncUrl, checkVncAvailability, forceArtifactPreview]);
 
     // Connect when component mounts and isActive changes
     useEffect(() => {
-        if (isAdmin && isActive) {
+        if (isAdmin && isActive && liveViewAvailable) {
             initVNC();
         }
 
@@ -252,12 +369,17 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
                 clearTimeout(connectionTimeoutRef.current);
                 connectionTimeoutRef.current = null;
             }
+            if (frameProbeRef.current) {
+                clearInterval(frameProbeRef.current);
+                frameProbeRef.current = null;
+            }
             if (rfbRef.current) {
                 rfbRef.current.disconnect();
                 rfbRef.current = null;
             }
+            setLiveReady(false);
         };
-    }, [isAdmin, isActive, initVNC]);
+    }, [isAdmin, isActive, liveViewAvailable, initVNC]);
 
     // Handle fullscreen toggle
     const toggleFullscreen = () => {
@@ -286,6 +408,41 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
 
     // Non-admin message
     if (!isAdmin) {
+        if (fallbackImage) {
+            return (
+                <div
+                    style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        minHeight: '400px',
+                        background: '#0d1117',
+                        borderRadius: 'var(--radius)',
+                        border: '1px solid var(--border)',
+                        gap: '1rem',
+                        padding: '1.25rem',
+                    }}
+                >
+                    <img
+                        src={`${API_BASE}${fallbackImage.path}`}
+                        alt="Latest browser capture"
+                        style={{
+                            width: '100%',
+                            maxWidth: '920px',
+                            maxHeight: '390px',
+                            objectFit: 'contain',
+                            borderRadius: '10px',
+                            border: '1px solid var(--border)',
+                            background: '#020617',
+                        }}
+                    />
+                    <p style={{ color: 'var(--text-secondary)', textAlign: 'center', maxWidth: '520px', margin: 0 }}>
+                        Live browser controls are available for administrators only. Showing the latest browser capture.
+                    </p>
+                </div>
+            );
+        }
         return (
             <div
                 style={{
@@ -376,7 +533,17 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
                             }}
                         >
                             {liveStreamVisible ? <Wifi size={12} /> : showingFallbackCapture ? <Monitor size={12} /> : <WifiOff size={12} />}
-                            {liveStreamVisible ? 'Connected' : showingFallbackCapture ? 'Latest capture' : isLoading ? 'Connecting...' : 'Disconnected'}
+                            {liveStreamVisible
+                                ? 'Connected'
+                                : showingFallbackCapture
+                                    ? fallbackImage
+                                        ? 'Latest capture'
+                                        : isProviderRetry
+                                            ? 'Provider retry'
+                                            : 'Waiting for capture'
+                                    : isLoading
+                                        ? 'Connecting...'
+                                        : 'Disconnected'}
                         </div>
                     </div>
 
@@ -430,7 +597,12 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
                         width: '100%',
                         height: '100%',
                         minHeight: isFullscreen ? 'calc(100vh - 76px)' : '484px',
-                        display: liveStreamVisible ? 'flex' : 'none',
+                        display: liveCanvasMounted ? 'flex' : 'none',
+                        opacity: liveStreamVisible ? 1 : 0,
+                        position: 'absolute',
+                        inset: '0.5rem',
+                        pointerEvents: liveStreamVisible ? 'auto' : 'none',
+                        zIndex: liveStreamVisible ? 1 : 0,
                         alignItems: 'center',
                         justifyContent: 'center',
                     }}
@@ -451,6 +623,8 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
                             padding: '2rem',
                             minHeight: isFullscreen ? 'calc(100vh - 76px)' : '484px',
                             margin: '0 auto',
+                            position: 'relative',
+                            zIndex: 2,
                         }}
                     >
                         {fallbackImage ? (
@@ -481,11 +655,17 @@ export function LiveBrowserView({ runId, isActive, showHeader = false, onShowLog
                         )}
                         <div>
                             <h3 style={{ color: 'var(--text-primary)', marginBottom: '0.5rem', fontSize: '1.1rem' }}>
-                                {fallbackImage ? 'Browser Evidence Available' : 'Live Browser Standby'}
+                                {fallbackImage
+                                    ? 'Browser Evidence Available'
+                                    : waitingForBrowserWindow
+                                        ? 'Waiting for Browser Window'
+                                        : isProviderRetry
+                                            ? 'Waiting on Provider'
+                                            : 'Live Browser Standby'}
                             </h3>
                             {!fallbackImage && (
                                 <p style={{ fontSize: '0.9rem', lineHeight: 1.6 }}>
-                                    The agent can continue to publish screenshots and recordings while the live stream initializes.
+                                    {pendingMessage || 'The agent can continue to publish screenshots and recordings while the live stream initializes.'}
                                 </p>
                             )}
                         </div>

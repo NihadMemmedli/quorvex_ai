@@ -41,6 +41,8 @@ class TestRun(BaseModel):
     started_at: str | None = None  # When execution started (ISO format)
     completed_at: str | None = None  # When execution completed (ISO format)
     batch_id: str | None = None  # Regression batch ID if part of a batch
+    temporal_workflow_id: str | None = None  # Temporal workflow ID when durably managed
+    temporal_run_id: str | None = None  # Temporal run ID when durably managed
     error_message: str | None = None  # Error message if failed
 
     # Stage tracking for real-time UI feedback
@@ -95,6 +97,7 @@ class BulkRunRequest(BaseModel):
     hybrid: bool | None = False
     max_iterations: int | None = 20
     project_id: str | None = None  # Project to associate runs with
+    model_tier: str | None = None
 
     # Legacy fields - kept for backward compatibility
     ralph: bool | None = False

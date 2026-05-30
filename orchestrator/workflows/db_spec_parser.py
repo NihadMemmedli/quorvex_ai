@@ -138,6 +138,7 @@ Return a JSON array:
         timeout_seconds=90,
         allowed_tools=[],  # No tools needed for spec parsing
         log_tools=False,
+        model_tier="standard",
     )
     result = await runner.run(prompt)
 

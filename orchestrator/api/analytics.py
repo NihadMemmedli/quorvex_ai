@@ -20,6 +20,7 @@ from .dashboard import categorize_error
 from .db import get_database_type, get_session
 from .models_db import SpecMetadata as DBSpecMetadata
 from .models_db import TestRun as DBTestRun
+from .project_filters import apply_project_filter
 from .projects import _count_all_specs_for_project
 
 try:
@@ -79,8 +80,7 @@ def get_pass_rate_trends(
         func.sum(case((DBTestRun.status == "failed", 1), else_=0)).label("failed"),
     ).where(DBTestRun.created_at >= cutoff)
 
-    if project_id:
-        stmt = stmt.where(DBTestRun.project_id == project_id)
+    stmt = apply_project_filter(stmt, DBTestRun, project_id)
     if test_type != "all":
         stmt = stmt.where(DBTestRun.test_type == test_type)
 
@@ -146,8 +146,7 @@ def get_flake_detection(
     session: Session = Depends(get_session),
 ):
     stmt = select(DBTestRun).order_by(DBTestRun.created_at)
-    if project_id:
-        stmt = stmt.where(DBTestRun.project_id == project_id)
+    stmt = apply_project_filter(stmt, DBTestRun, project_id)
     runs = session.exec(stmt).all()
 
     # Group by spec_name
@@ -273,8 +272,7 @@ def get_failure_classification(
         .where(DBTestRun.created_at >= cutoff)
         .order_by(DBTestRun.created_at.desc())
     )
-    if project_id:
-        stmt = stmt.where(DBTestRun.project_id == project_id)
+    stmt = apply_project_filter(stmt, DBTestRun, project_id)
 
     failed_runs = session.exec(stmt).all()
 
@@ -317,8 +315,7 @@ def get_spec_performance(
 ):
     cutoff = _period_to_cutoff(period)
     stmt = select(DBTestRun).where(DBTestRun.created_at >= cutoff)
-    if project_id:
-        stmt = stmt.where(DBTestRun.project_id == project_id)
+    stmt = apply_project_filter(stmt, DBTestRun, project_id)
 
     runs = session.exec(stmt).all()
 
@@ -416,16 +413,14 @@ def get_coverage_overview(
 
     # Specs run at least once
     stmt = select(func.count(distinct(DBTestRun.spec_name)))
-    if project_id:
-        stmt = stmt.where(DBTestRun.project_id == project_id)
+    stmt = apply_project_filter(stmt, DBTestRun, project_id)
     specs_run_at_least_once = session.exec(stmt).one() or 0
 
     run_coverage_percent = round((specs_run_at_least_once / total_specs) * 100, 1) if total_specs > 0 else 0.0
 
     # Tags distribution
     meta_stmt = select(DBSpecMetadata)
-    if project_id:
-        meta_stmt = meta_stmt.where(DBSpecMetadata.project_id == project_id)
+    meta_stmt = apply_project_filter(meta_stmt, DBSpecMetadata, project_id)
     metas = session.exec(meta_stmt).all()
 
     tag_counter: Counter = Counter()

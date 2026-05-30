@@ -796,9 +796,10 @@ class MemoryKnowledgeGraphService:
 
     def _extract_with_llm(self, memory: AgentMemory) -> list[ExtractedEntity]:
         from openai import OpenAI
+        from orchestrator.services.ai_runtime_config import resolve_openai_chat_model
 
         client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        model = os.environ.get("MEMORY_GRAPH_LLM_MODEL", os.environ.get("OPENAI_MODEL_ID", "gpt-4o-mini"))
+        model = os.environ.get("MEMORY_GRAPH_LLM_MODEL") or resolve_openai_chat_model()
         text = f"{memory.summary or ''}\n{memory.content or ''}"
         prompt = f"""Extract typed knowledge graph entities and relationships from this memory.
 

@@ -23,8 +23,11 @@ services:
     # Enable auto-reload on code changes
     command: ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
     environment:
-      # Inherit all from prod, but enable reload
-      UVICORN_RELOAD: "true"
+      # Keep local code mounted, but avoid uvicorn --reload multiprocessing on
+      # Docker Desktop bind mounts. The reloader can raise Errno 35 while
+      # importing from the mounted /app/orchestrator tree during startup.
+      UVICORN_RELOAD: "false"
+      PYTHONDONTWRITEBYTECODE: "1"
       HOME: /home/agent
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-glm-5.1}
       ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-glm-5.1}
@@ -33,6 +36,21 @@ services:
       ANTHROPIC_CHAT_MODEL: ${ANTHROPIC_CHAT_MODEL:-glm-5-turbo}
       ANTHROPIC_ENABLE_CHAT_THINKING: ${ANTHROPIC_ENABLE_CHAT_THINKING:-false}
       API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
+
+  custom-workflow-worker:
+    volumes:
+      - ./orchestrator:/app/orchestrator:ro
+      - ./.claude:/app/.claude:ro
+      - ./scripts:/app/scripts:ro
+      - runs_data:/app/runs
+      - logs_data:/app/logs
+      - data_dir:/app/data
+      - test_results:/app/test-results
+      - ${SPECS_DIR:-./specs}:/app/specs
+      - ${PRDS_DIR:-./prds}:/app/prds
+      - ${TESTS_DIR:-./tests}:/app/tests
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
 
   frontend:
     volumes:

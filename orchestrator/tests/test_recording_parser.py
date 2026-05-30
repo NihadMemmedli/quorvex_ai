@@ -23,6 +23,22 @@ test('test', async ({ page }) => {
     assert parsed.unsupported_lines == []
 
 
+def test_parse_codegen_preserves_utf8_and_redacts_azerbaijani_password():
+    code = """
+  await page.getByRole('button', { name: 'Bağla' }).click();
+  await page.getByRole('button', { name: 'Dig\\u0259r \\u00fcsullar' }).click();
+  await page.getByRole('textbox', { name: 'Şifrə' }).fill('Jj3630882!!!');
+"""
+
+    parsed = parse_playwright_codegen(code, title="Azerbaijani login flow")
+
+    assert "button named `Bağla`" in parsed.steps[0].description
+    assert "button named `Digər üsullar`" in parsed.steps[1].description
+    assert "textbox named `Şifrə`" in parsed.steps[2].description
+    assert "{{PASSWORD}}" in parsed.steps[2].description
+    assert "Jj3630882!!!" not in parsed.steps[2].description
+
+
 def test_build_markdown_preserves_unsupported_lines():
     code = """
   await page.goto('https://example.com');

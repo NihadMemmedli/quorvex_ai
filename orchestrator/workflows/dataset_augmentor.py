@@ -104,7 +104,7 @@ Return ONLY the JSON array, no other text.
     result_text = ""
 
     try:
-        runner = AgentRunner(timeout_seconds=300)
+        runner = AgentRunner(timeout_seconds=300, allowed_tools=[], log_tools=False, model_tier="standard")
         result = await runner.run(prompt=prompt)
         if result.success:
             result_text = result.output

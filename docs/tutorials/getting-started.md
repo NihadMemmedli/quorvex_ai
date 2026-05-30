@@ -119,13 +119,14 @@ Quorvex AI uses an AI model to generate tests. Open the environment file for you
 
     ```bash title=".env.prod"
     # Required: AI/LLM configuration
-    ANTHROPIC_AUTH_TOKEN=your-api-token-here
-    ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
-    ANTHROPIC_MODEL=glm-5.1
-    ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1
-    ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5-turbo
-    ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.5-air
-    ANTHROPIC_CHAT_MODEL=glm-5-turbo
+    QUORVEX_LLM_PROVIDER=anthropic_compatible
+    QUORVEX_LLM_API_KEY=your-api-token-here
+    QUORVEX_LLM_BASE_URL=https://api.z.ai/api/anthropic
+    QUORVEX_LLM_LIGHT_MODEL=glm-4.5-air
+    QUORVEX_LLM_STANDARD_MODEL=glm-5-turbo
+    QUORVEX_LLM_DEEP_MODEL=glm-5.1
+    QUORVEX_LLM_TOOL_DEEP_MODEL=glm-5.1
+    QUORVEX_LLM_CHAT_MODEL=glm-5-turbo
     API_TIMEOUT_MS=3000000
     ```
 
@@ -139,13 +140,14 @@ Quorvex AI uses an AI model to generate tests. Open the environment file for you
 
     ```bash title=".env"
     # Required: AI/LLM configuration
-    ANTHROPIC_AUTH_TOKEN=your-api-token-here
-    ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
-    ANTHROPIC_MODEL=glm-5.1
-    ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1
-    ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5-turbo
-    ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.5-air
-    ANTHROPIC_CHAT_MODEL=glm-5-turbo
+    QUORVEX_LLM_PROVIDER=anthropic_compatible
+    QUORVEX_LLM_API_KEY=your-api-token-here
+    QUORVEX_LLM_BASE_URL=https://api.z.ai/api/anthropic
+    QUORVEX_LLM_LIGHT_MODEL=glm-4.5-air
+    QUORVEX_LLM_STANDARD_MODEL=glm-5-turbo
+    QUORVEX_LLM_DEEP_MODEL=glm-5.1
+    QUORVEX_LLM_TOOL_DEEP_MODEL=glm-5.1
+    QUORVEX_LLM_CHAT_MODEL=glm-5-turbo
     API_TIMEOUT_MS=3000000
     ```
 
@@ -163,8 +165,8 @@ Expected output:
 Checking environment configuration...
 
   + .env file exists
-  + ANTHROPIC_AUTH_TOKEN is configured
-  + ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
+  + QUORVEX_LLM_API_KEY is configured
+  + QUORVEX_LLM_BASE_URL: https://api.z.ai/api/anthropic
   + Model: glm-5.1
   - OPENAI_API_KEY not set (memory system limited)
 

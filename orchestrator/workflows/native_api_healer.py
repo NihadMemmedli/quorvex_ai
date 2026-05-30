@@ -215,6 +215,7 @@ Return the COMPLETE fixed TypeScript code inside a ```typescript code block.
             timeout_seconds=timeout,
             allowed_tools=["Glob", "Grep", "Read", "LS", "Write", "Edit"],
             log_tools=True,
+            model_tier="deep",
         )
 
         result = await runner.run(prompt)

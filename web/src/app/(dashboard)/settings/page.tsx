@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Save, AlertCircle, CheckCircle, Key, Globe, Box, Eye, EyeOff, Server, Layers, Monitor, Database, Zap, HardDrive, Lock, Link2, Mail, Loader2, ChevronDown, Bug, GitBranch, GitMerge, Shield, Settings, Smartphone, Copy } from 'lucide-react';
+import { Save, AlertCircle, CheckCircle, Key, Globe, Box, Eye, EyeOff, Server, Layers, Monitor, Database, Zap, HardDrive, Lock, Link2, Mail, Loader2, ChevronDown, Bug, GitBranch, GitMerge, Shield, Settings, Smartphone, Copy, Bot } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { CredentialsManager } from '@/components/CredentialsManager';
@@ -19,6 +19,14 @@ interface ExecutionSettings {
     memory_enabled: boolean;
     database_type: string;
     parallel_mode_available: boolean;
+}
+
+interface BrowserPoolStatus {
+    max_browsers: number;
+    running: number;
+    queued: number;
+    available: number;
+    by_type: Record<string, number>;
 }
 
 interface TestrailConfig {
@@ -47,6 +55,34 @@ interface MobileHealth {
     warnings: string[];
     udid?: string | null;
     device_name?: string | null;
+}
+
+interface AssistantSettings {
+    llm_provider: string;
+    api_key: string;
+    base_url: string;
+    model_name: string;
+    light_model: string;
+    standard_model: string;
+    deep_model: string;
+    tool_deep_model: string;
+    chat_model: string;
+    embedding_model: string;
+    agent_runtime: string;
+    assistant_runtime: string;
+    hermes_enabled: boolean;
+    hermes_api_url: string;
+    hermes_api_key: string;
+    hermes_model: string;
+    hermes_sync_provider: boolean;
+    hermes_upstream_provider: string;
+    hermes_upstream_model: string;
+    hermes_home: string;
+    hermes_config_path: string;
+    hermes_env_path: string;
+    hermes_reachable?: boolean;
+    hermes_status?: string;
+    hermes_status_message?: string;
 }
 
 function githubActionsQualityGateYaml(owner: string, repo: string): string {
@@ -89,11 +125,29 @@ jobs:
 export default function SettingsPage() {
     const { currentProject } = useProject();
     const { user } = useAuth();
-    const [settings, setSettings] = useState({
+    const [settings, setSettings] = useState<AssistantSettings>({
         llm_provider: 'zai',
         api_key: '',
         base_url: 'https://api.z.ai/api/anthropic',
-        model_name: 'glm-5.1'
+        model_name: 'glm-5.1',
+        light_model: 'glm-4.5-air',
+        standard_model: 'glm-5-turbo',
+        deep_model: 'glm-5.1',
+        tool_deep_model: 'glm-5.1',
+        chat_model: 'glm-5-turbo',
+        embedding_model: 'text-embedding-3-small',
+        agent_runtime: 'claude_sdk',
+        assistant_runtime: 'claude_sdk',
+        hermes_enabled: false,
+        hermes_api_url: 'http://127.0.0.1:8642',
+        hermes_api_key: '',
+        hermes_model: 'hermes-agent',
+        hermes_sync_provider: true,
+        hermes_upstream_provider: '',
+        hermes_upstream_model: '',
+        hermes_home: '',
+        hermes_config_path: '',
+        hermes_env_path: ''
     });
     const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>({
         parallelism: 2,
@@ -106,7 +160,9 @@ export default function SettingsPage() {
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [testingConnection, setTestingConnection] = useState(false);
+    const [testingHermes, setTestingHermes] = useState(false);
     const [savingExecution, setSavingExecution] = useState(false);
+    const [browserPoolStatus, setBrowserPoolStatus] = useState<BrowserPoolStatus | null>(null);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
     const [showApiKey, setShowApiKey] = useState(false);
 
@@ -194,7 +250,11 @@ export default function SettingsPage() {
             fetch(`${API_BASE}/execution-settings`).then(res => res.json())
         ])
             .then(([settingsData, execData]) => {
-                setSettings(prev => ({ ...prev, ...settingsData }));
+                setSettings(prev => ({
+                    ...prev,
+                    ...settingsData,
+                    assistant_runtime: settingsData.assistant_runtime || prev.assistant_runtime,
+                }));
                 setExecutionSettings(execData);
                 setLoading(false);
             })
@@ -202,6 +262,30 @@ export default function SettingsPage() {
                 console.error(err);
                 setLoading(false);
             });
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        const loadBrowserPoolStatus = async () => {
+            try {
+                const res = await fetch(`${API_BASE}/api/browser-pool/status`);
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!cancelled) {
+                    setBrowserPoolStatus(data);
+                }
+            } catch {
+                // Status is advisory; settings should remain usable if this endpoint is unavailable.
+            }
+        };
+
+        loadBrowserPoolStatus();
+        const interval = window.setInterval(loadBrowserPoolStatus, 5000);
+        return () => {
+            cancelled = true;
+            window.clearInterval(interval);
+        };
     }, []);
 
     // Load TestRail config when project changes — auto-restore full state
@@ -427,18 +511,45 @@ export default function SettingsPage() {
             if (value === 'openrouter') {
                 updates.base_url = 'https://openrouter.ai/api';
                 updates.model_name = 'meta-llama/llama-3.2-3b-instruct:free';
+                updates.light_model = 'meta-llama/llama-3.2-3b-instruct:free';
+                updates.standard_model = 'anthropic/claude-sonnet-4.6';
+                updates.deep_model = 'anthropic/claude-opus-4.1';
+                updates.tool_deep_model = 'anthropic/claude-opus-4.1';
+                updates.chat_model = 'anthropic/claude-sonnet-4.6';
             } else if (value === 'zai') {
                 updates.base_url = 'https://api.z.ai/api/anthropic';
                 updates.model_name = 'glm-5.1';
+                updates.light_model = 'glm-4.5-air';
+                updates.standard_model = 'glm-5-turbo';
+                updates.deep_model = 'glm-5.1';
+                updates.tool_deep_model = 'glm-5.1';
+                updates.chat_model = 'glm-5-turbo';
             } else if (value === 'anthropic') {
                 updates.base_url = 'https://api.anthropic.com';
                 updates.model_name = 'claude-3-5-sonnet-20240620';
+                updates.light_model = 'claude-3-5-haiku-20241022';
+                updates.standard_model = 'claude-3-5-sonnet-20240620';
+                updates.deep_model = 'claude-3-opus-20240229';
+                updates.tool_deep_model = 'claude-3-opus-20240229';
+                updates.chat_model = 'claude-3-5-sonnet-20240620';
+            } else if (value === 'openai') {
+                updates.base_url = 'https://api.openai.com/v1';
+                updates.model_name = 'gpt-4o-mini';
+                updates.light_model = 'gpt-4o-mini';
+                updates.standard_model = 'gpt-4o-mini';
+                updates.deep_model = 'gpt-4o';
+                updates.tool_deep_model = 'gpt-4o';
+                updates.chat_model = 'gpt-4o-mini';
             }
 
             setSettings(prev => ({ ...prev, ...updates }));
         } else {
             setSettings(prev => ({ ...prev, [name]: value }));
         }
+    };
+
+    const handleSettingsToggle = (name: 'hermes_enabled' | 'hermes_sync_provider', checked: boolean) => {
+        setSettings(prev => ({ ...prev, [name]: checked }));
     };
 
 
@@ -457,7 +568,11 @@ export default function SettingsPage() {
 
             if (res.ok) {
                 if (data.settings) {
-                    setSettings(prev => ({ ...prev, ...data.settings }));
+                    setSettings(prev => ({
+                        ...prev,
+                        ...data.settings,
+                        assistant_runtime: data.settings.assistant_runtime || prev.assistant_runtime,
+                    }));
                 }
                 setMessage({ type: 'success', text: data.message || 'Settings saved and applied.' });
                 setTimeout(() => setMessage(null), 3000);
@@ -486,7 +601,11 @@ export default function SettingsPage() {
                 throw new Error(saveData.detail || 'Failed to apply settings before testing');
             }
             if (saveData.settings) {
-                setSettings(prev => ({ ...prev, ...saveData.settings }));
+                setSettings(prev => ({
+                    ...prev,
+                    ...saveData.settings,
+                    assistant_runtime: saveData.settings.assistant_runtime || prev.assistant_runtime,
+                }));
             }
 
             const testRes = await fetch(`${API_BASE}/settings/test-connection`, {
@@ -517,6 +636,49 @@ export default function SettingsPage() {
         }
     };
 
+    const handleTestHermes = async () => {
+        setTestingHermes(true);
+        setMessage(null);
+
+        try {
+            const saveRes = await fetch(`${API_BASE}/settings`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(settings)
+            });
+            const saveData = await saveRes.json();
+            if (!saveRes.ok) {
+                throw new Error(saveData.detail || 'Failed to apply settings before testing Hermes');
+            }
+            if (saveData.settings) {
+                setSettings(prev => ({
+                    ...prev,
+                    ...saveData.settings,
+                    assistant_runtime: saveData.settings.assistant_runtime || prev.assistant_runtime,
+                }));
+            }
+
+            const testRes = await fetch(`${API_BASE}/settings/test-hermes`, {
+                method: 'POST',
+            });
+            const testData = await testRes.json();
+            if (!testRes.ok) {
+                throw new Error(testData.detail || 'Hermes test failed');
+            }
+
+            const suffix = typeof testData.latency_ms === 'number' ? ` (${testData.latency_ms}ms)` : '';
+            setMessage({
+                type: testData.ok ? 'success' : 'error',
+                text: testData.message || (testData.ok ? `Hermes connection verified.${suffix}` : 'Hermes test failed'),
+            });
+        } catch (err: any) {
+            setMessage({ type: 'error', text: err.message || 'Hermes test failed' });
+        } finally {
+            setTestingHermes(false);
+            setTimeout(() => setMessage(null), 6000);
+        }
+    };
+
     const handleExecutionChange = (field: keyof ExecutionSettings, value: any) => {
         setExecutionSettings(prev => ({ ...prev, [field]: value }));
     };
@@ -541,6 +703,14 @@ export default function SettingsPage() {
 
             if (res.ok) {
                 setExecutionSettings(data);
+                try {
+                    const statusRes = await fetch(`${API_BASE}/api/browser-pool/status`);
+                    if (statusRes.ok) {
+                        setBrowserPoolStatus(await statusRes.json());
+                    }
+                } catch {
+                    // Ignore advisory status refresh failures.
+                }
                 setMessage({ type: 'success', text: 'Execution settings saved!' });
                 setTimeout(() => setMessage(null), 3000);
             } else {
@@ -1161,6 +1331,7 @@ export default function SettingsPage() {
                         >
                             <option value="zai">Z.ai GLM Coding Plan</option>
                             <option value="anthropic">Anthropic (Claude)</option>
+                            <option value="openai">OpenAI</option>
                             <option value="openrouter">OpenRouter (Free Models Available)</option>
                             <option value="custom">Custom</option>
                         </select>
@@ -1183,7 +1354,9 @@ export default function SettingsPage() {
                                     ? 'sk-or-v1-...'
                                     : settings.llm_provider === 'zai'
                                         ? 'your_zai_api_key'
-                                        : 'sk-...'
+                                        : settings.llm_provider === 'openai'
+                                            ? 'sk-proj-...'
+                                            : 'sk-...'
                             }
                             className="input has-icon"
                             style={{ paddingRight: '2.5rem' }}
@@ -1218,7 +1391,9 @@ export default function SettingsPage() {
                                     ? 'https://openrouter.ai/api'
                                     : settings.llm_provider === 'zai'
                                         ? 'https://api.z.ai/api/anthropic'
-                                        : 'https://api.anthropic.com'
+                                        : settings.llm_provider === 'openai'
+                                            ? 'https://api.openai.com/v1'
+                                            : 'https://api.anthropic.com'
                             }
                             className="input has-icon"
                         />
@@ -1250,7 +1425,9 @@ export default function SettingsPage() {
                                     ? 'meta-llama/llama-3.2-3b-instruct:free'
                                     : settings.llm_provider === 'zai'
                                         ? 'glm-5.1'
-                                        : 'claude-3-5-sonnet-20240620'
+                                        : settings.llm_provider === 'openai'
+                                            ? 'gpt-4o-mini'
+                                            : 'claude-3-5-sonnet-20240620'
                             }
                             className="input has-icon"
                         />
@@ -1269,16 +1446,226 @@ export default function SettingsPage() {
                     )}
                 </div>
 
+                <div style={{ paddingTop: '1.5rem', borderTop: '1px solid var(--border)', display: 'grid', gap: '1rem' }}>
+                    <div>
+                        <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Model Routing</h3>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '1rem' }}>
+                        {[
+                            ['light_model', 'Light'],
+                            ['standard_model', 'Standard'],
+                            ['deep_model', 'Deep'],
+                            ['tool_deep_model', 'Tool Deep'],
+                            ['chat_model', 'Chat'],
+                            ['embedding_model', 'Embeddings'],
+                        ].map(([name, label]) => (
+                            <div className="form-group" key={name}>
+                                <label className="label">{label}</label>
+                                <input
+                                    type="text"
+                                    name={name}
+                                    value={(settings as any)[name] || ''}
+                                    onChange={handleChange}
+                                    className="input"
+                                />
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                <div style={{ paddingTop: '1.5rem', borderTop: '1px solid var(--border)', display: 'grid', gap: '1rem' }}>
+                    <div>
+                        <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Assistant Runtime</h3>
+                        <p className="helper-text" style={{ marginTop: '0.35rem' }}>
+                            Controls the dashboard assistant chat runtime separately from autonomous mission execution.
+                        </p>
+                    </div>
+
+                    <div className="form-group">
+                        <label className="label">Assistant Chat Runtime</label>
+                        <div className="input-group">
+                            <div className="input-icon">
+                                <Bot size={18} />
+                            </div>
+                            <select
+                                name="assistant_runtime"
+                                value={settings.assistant_runtime}
+                                onChange={handleChange}
+                                className="input has-icon"
+                            >
+                                <option value="claude_sdk">Claude Agent SDK</option>
+                                <option value="openai">OpenAI SDK</option>
+                                <option value="hermes">Hermes Agent</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div style={{ paddingTop: '1.5rem', borderTop: '1px solid var(--border)', display: 'grid', gap: '1rem' }}>
+                    <div>
+                        <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Autonomous Agent Runtime</h3>
+                        <p className="helper-text" style={{ marginTop: '0.35rem' }}>
+                            Default runtime for new autonomous missions and custom agent runs.
+                        </p>
+                    </div>
+
+                    <div className="form-group">
+                        <label className="label">Mission Default Runtime</label>
+                        <div className="input-group">
+                            <div className="input-icon">
+                                <Bot size={18} />
+                            </div>
+                            <select
+                                name="agent_runtime"
+                                value={settings.agent_runtime}
+                                onChange={handleChange}
+                                className="input has-icon"
+                            >
+                                <option value="claude_sdk">Claude Agent SDK</option>
+                                <option value="hermes">Hermes Agent</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div style={{ paddingTop: '1.5rem', borderTop: '1px solid var(--border)', display: 'grid', gap: '1rem' }}>
+                    <div>
+                        <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Hermes Gateway</h3>
+                        <p className="helper-text" style={{ marginTop: '0.35rem' }}>
+                            Configure Hermes as a local OpenAI-compatible gateway for assistant chat or agent execution.
+                        </p>
+                    </div>
+
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', fontWeight: 600 }}>
+                        <input
+                            type="checkbox"
+                            checked={settings.hermes_enabled}
+                            onChange={event => handleSettingsToggle('hermes_enabled', event.target.checked)}
+                        />
+                        Enable Hermes backend
+                    </label>
+
+                    <div className="form-group">
+                        <label className="label">Hermes API URL</label>
+                        <div className="input-group">
+                            <div className="input-icon">
+                                <Link2 size={18} />
+                            </div>
+                            <input
+                                type="text"
+                                name="hermes_api_url"
+                                value={settings.hermes_api_url}
+                                onChange={handleChange}
+                                placeholder="http://127.0.0.1:8642"
+                                className="input has-icon"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="form-group">
+                        <label className="label">Hermes API Key</label>
+                        <div className="input-group">
+                            <div className="input-icon">
+                                <Key size={18} />
+                            </div>
+                            <input
+                                type={showApiKey ? "text" : "password"}
+                                name="hermes_api_key"
+                                value={settings.hermes_api_key}
+                                onChange={handleChange}
+                                placeholder="local Hermes bearer token"
+                                className="input has-icon"
+                            />
+                        </div>
+                    </div>
+
+                    <div className="form-group">
+                        <label className="label">Hermes API Model ID</label>
+                        <div className="input-group">
+                            <div className="input-icon">
+                                <Box size={18} />
+                            </div>
+                            <input
+                                type="text"
+                                name="hermes_model"
+                                value={settings.hermes_model}
+                                onChange={handleChange}
+                                placeholder="hermes-agent"
+                                className="input has-icon"
+                            />
+                        </div>
+                        <p className="helper-text" style={{ marginTop: '0.5rem' }}>
+                            The real Hermes LLM provider is configured in the generated Hermes home below.
+                        </p>
+                    </div>
+
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', fontWeight: 600 }}>
+                        <input
+                            type="checkbox"
+                            checked={settings.hermes_sync_provider}
+                            onChange={event => handleSettingsToggle('hermes_sync_provider', event.target.checked)}
+                        />
+                        Mirror this LLM provider into Hermes config
+                    </label>
+
+                    {(settings.hermes_config_path || settings.hermes_env_path) && (
+                        <div style={{
+                            display: 'grid',
+                            gap: '0.35rem',
+                            padding: '0.85rem',
+                            border: '1px solid var(--border)',
+                            borderRadius: 'var(--radius)',
+                            background: 'var(--surface-muted)'
+                        }}>
+                            <div style={{ fontWeight: 600 }}>
+                                Hermes provider: {settings.hermes_upstream_provider || 'pending'} {settings.hermes_upstream_model ? `(${settings.hermes_upstream_model})` : ''}
+                            </div>
+                            <code style={{ fontSize: '0.78rem', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                HERMES_HOME={settings.hermes_home || 'data/hermes'}
+                            </code>
+                            <code style={{ fontSize: '0.78rem', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                {settings.hermes_config_path}
+                            </code>
+                        </div>
+                    )}
+
+                    <div>
+                        <button
+                            type="button"
+                            className="btn btn-secondary"
+                            disabled={saving || testingConnection || testingHermes}
+                            onClick={handleTestHermes}
+                            style={{
+                                minWidth: '150px',
+                                justifyContent: 'center',
+                                opacity: saving || testingConnection || testingHermes ? 0.7 : 1
+                            }}
+                        >
+                            {testingHermes ? (
+                                <>
+                                    <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
+                                    Testing Hermes...
+                                </>
+                            ) : (
+                                <>
+                                    <Zap size={18} />
+                                    Test Hermes
+                                </>
+                            )}
+                        </button>
+                    </div>
+                </div>
+
                 <div style={{ paddingTop: '1.5rem', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', flexWrap: 'wrap' }}>
                     <button
                         type="button"
                         className="btn btn-secondary"
-                        disabled={saving || testingConnection}
+                        disabled={saving || testingConnection || testingHermes}
                         onClick={handleTestConnection}
                         style={{
                             minWidth: '150px',
                             justifyContent: 'center',
-                            opacity: saving || testingConnection ? 0.7 : 1
+                            opacity: saving || testingConnection || testingHermes ? 0.7 : 1
                         }}
                     >
                         {testingConnection ? (
@@ -1296,11 +1683,11 @@ export default function SettingsPage() {
                     <button
                         type="submit"
                         className="btn btn-primary"
-                        disabled={saving || testingConnection}
+                        disabled={saving || testingConnection || testingHermes}
                         style={{
                             minWidth: '140px',
                             justifyContent: 'center',
-                            opacity: saving || testingConnection ? 0.7 : 1
+                            opacity: saving || testingConnection || testingHermes ? 0.7 : 1
                         }}
                     >
                         {saving ? (
@@ -1347,11 +1734,52 @@ export default function SettingsPage() {
                         </div>
                     </div>
 
+                    {browserPoolStatus && (
+                        <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+                            gap: '0.75rem'
+                        }}>
+                            <div style={{
+                                padding: '0.875rem 1rem',
+                                borderRadius: 'var(--radius)',
+                                border: '1px solid var(--border)',
+                                background: 'var(--bg-tertiary)'
+                            }}>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)', fontWeight: 600, textTransform: 'uppercase' }}>Running</div>
+                                <div style={{ fontSize: '1.25rem', fontWeight: 700 }}>{browserPoolStatus.running} / {browserPoolStatus.max_browsers}</div>
+                            </div>
+                            <div style={{
+                                padding: '0.875rem 1rem',
+                                borderRadius: 'var(--radius)',
+                                border: '1px solid var(--border)',
+                                background: 'var(--bg-tertiary)'
+                            }}>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)', fontWeight: 600, textTransform: 'uppercase' }}>Queued</div>
+                                <div style={{ fontSize: '1.25rem', fontWeight: 700 }}>{browserPoolStatus.queued}</div>
+                            </div>
+                            <div style={{
+                                padding: '0.875rem 1rem',
+                                borderRadius: 'var(--radius)',
+                                border: '1px solid var(--border)',
+                                background: 'var(--bg-tertiary)'
+                            }}>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)', fontWeight: 600, textTransform: 'uppercase' }}>Active Types</div>
+                                <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', fontWeight: 600, marginTop: '0.25rem' }}>
+                                    {Object.entries(browserPoolStatus.by_type || {})
+                                        .filter(([, count]) => count > 0)
+                                        .map(([type, count]) => `${type.replaceAll('_', ' ')}: ${count}`)
+                                        .join(' · ') || 'None'}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {/* Parallelism Slider */}
                     <div className="form-group">
                         <label className="label" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                             <Zap size={18} />
-                            Parallelism
+                            Global Browser Concurrency
                         </label>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
                             <input
@@ -1373,12 +1801,15 @@ export default function SettingsPage() {
                             </span>
                         </div>
                         <p className="helper-text">
-                            Maximum concurrent test executions (1-5).
+                            Maximum concurrent browser operations across tests, agents, exploration, PRD, and autonomous missions (1-5).
                             {!executionSettings.parallel_mode_available && executionSettings.parallelism > 1 && (
                                 <span style={{ color: 'var(--warning)', display: 'block', marginTop: '0.25rem' }}>
                                     PostgreSQL required for parallelism &gt; 1
                                 </span>
                             )}
+                            <span style={{ display: 'block', marginTop: '0.25rem' }}>
+                                Worker process and container counts are deployment capacity and are not scaled by this control.
+                            </span>
                         </p>
                     </div>
 

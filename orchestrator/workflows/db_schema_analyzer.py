@@ -89,6 +89,7 @@ Generate 5-20 findings, prioritized by impact. Be specific with recommendations 
         timeout_seconds=120,
         allowed_tools=[],  # No tools needed for analysis
         log_tools=False,
+        model_tier="deep",
     )
     result = await runner.run(prompt)
 

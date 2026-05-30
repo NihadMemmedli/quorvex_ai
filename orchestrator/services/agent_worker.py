@@ -46,7 +46,9 @@ from orchestrator.services.api_key_rotator import (
 )
 from orchestrator.services.autonomous_events import create_event_for_work_item
 from orchestrator.services.agent_run_events import create_agent_run_event
-from orchestrator.utils.browser_cleanup import kill_autopilot_process_tree
+from orchestrator.services.browser_pool import OperationType as BrowserOpType
+from orchestrator.services.browser_pool import get_browser_pool
+from orchestrator.utils.browser_cleanup import kill_autopilot_process_tree, kill_test_run_process_tree
 
 # Claude CLI path
 CLAUDE_CLI_PATH = "/usr/local/lib/python3.10/dist-packages/claude_agent_sdk/_bundled/claude"
@@ -95,6 +97,40 @@ def _tool_result_text(content: object) -> str:
     return str(content)
 
 
+def _event_content_items(evt: dict[str, object]) -> list[object]:
+    """Return Claude stream content items across common event shapes."""
+    message = evt.get("message") if isinstance(evt.get("message"), dict) else {}
+    content = message.get("content") if isinstance(message, dict) else None
+    if content is None:
+        content = evt.get("content")
+    if isinstance(content, list):
+        return content
+    if isinstance(content, dict):
+        return [content]
+    return []
+
+
+def _iter_items_by_type(value: object, item_type: str):
+    """Yield nested dict items matching a Claude content block type."""
+    if isinstance(value, dict):
+        if value.get("type") == item_type:
+            yield value
+        for child in value.values():
+            if isinstance(child, (dict, list)):
+                yield from _iter_items_by_type(child, item_type)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_items_by_type(child, item_type)
+
+
+def _event_tool_uses(evt: dict[str, object]) -> list[dict[str, object]]:
+    return [item for content in _event_content_items(evt) for item in _iter_items_by_type(content, "tool_use")]
+
+
+def _event_tool_results(evt: dict[str, object]) -> list[dict[str, object]]:
+    return [item for content in _event_content_items(evt) for item in _iter_items_by_type(content, "tool_result")]
+
+
 @dataclass
 class _BrowserToolCall:
     tool_use_id: str
@@ -140,16 +176,12 @@ class BrowserObservationRecorder:
     def observe_event(self, evt: dict[str, object]) -> None:
         try:
             evt_type = evt.get("type")
-            message = evt.get("message") if isinstance(evt.get("message"), dict) else {}
-            content = message.get("content", []) if isinstance(message, dict) else []
             if evt_type == "assistant":
-                for item in content if isinstance(content, list) else []:
-                    if isinstance(item, dict) and item.get("type") == "tool_use":
-                        self.observe_tool_use(item)
+                for item in _event_tool_uses(evt):
+                    self.observe_tool_use(item)
             elif evt_type == "user":
-                for item in content if isinstance(content, list) else []:
-                    if isinstance(item, dict) and item.get("type") == "tool_result":
-                        self.observe_tool_result(item)
+                for item in _event_tool_results(evt):
+                    self.observe_tool_result(item)
         except Exception as exc:
             self._record_error("observe_event", exc)
 
@@ -407,6 +439,14 @@ class AgentWorker:
         except Exception as e:
             logger.warning("Initial agent queue cleanup failed (non-fatal): %s", e)
 
+        try:
+            browser_pool = await get_browser_pool()
+            stale_slots = await browser_pool.cleanup_stale(max_age_minutes=60)
+            if stale_slots:
+                logger.info("Initial browser slot cleanup cleared %s stale slot(s)", len(stale_slots))
+        except Exception as e:
+            logger.warning("Initial browser slot cleanup failed (non-fatal): %s", e)
+
         worker_heartbeat = asyncio.create_task(self._worker_heartbeat_loop())
         cleanup_loop = asyncio.create_task(self.queue.start_cleanup_loop())
         consecutive_empty = 0
@@ -523,6 +563,33 @@ class AgentWorker:
                                 task_id,
                                 exc,
                             )
+                    test_run_id = None
+                    if task and task.owner_type == "test_run" and task.owner_id:
+                        test_run_id = task.owner_id
+                    elif (
+                        task
+                        and task.browser_slot_parent_owner_type == "test_run"
+                        and task.browser_slot_parent_run_id
+                    ):
+                        test_run_id = task.browser_slot_parent_run_id
+                    if test_run_id:
+                        try:
+                            cleanup = await asyncio.to_thread(
+                                kill_test_run_process_tree,
+                                test_run_id,
+                            )
+                            if cleanup.get("matched"):
+                                logger.info(
+                                    "Test run cleanup for %s after cancellation: %s",
+                                    test_run_id,
+                                    cleanup,
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed test run cleanup for cancelled task %s: %s",
+                                task_id,
+                                exc,
+                            )
                     return
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
@@ -613,6 +680,66 @@ class AgentWorker:
                 paused_duration += max(0.0, now - pause_started)
         return max(0.0, now - start_time - paused_duration)
 
+    def _task_requires_browser_slot(self, task: AgentTask) -> bool:
+        """Return True when a queued agent task can consume browser capacity."""
+        browser_owner_types = {
+            "agent_run",
+            "autonomous_work_item",
+            "autopilot",
+            "exploration_session",
+        }
+        if task.owner_type in browser_owner_types:
+            return True
+
+        if task.tools == []:
+            return False
+
+        tool_sources: list[object] = []
+        if task.allowed_tools is None:
+            # The CLI default grants broad tool access, so treat it as browser-capable.
+            return True
+        tool_sources.extend(task.allowed_tools or [])
+        if isinstance(task.tools, list):
+            tool_sources.extend(task.tools)
+        elif isinstance(task.tools, dict):
+            tool_sources.extend(task.tools.values())
+        tool_sources.extend(task.disallowed_tools or [])
+
+        return any(
+            "browser" in str(tool).lower() or "playwright" in str(tool).lower()
+            for tool in tool_sources
+        )
+
+    def _parent_test_run_slot_id(self, task: AgentTask) -> str | None:
+        """Return the parent test-run slot id for a queued child agent, if any."""
+        parent_owner_type = (
+            task.browser_slot_parent_owner_type
+            or (task.env_vars or {}).get("BROWSER_SLOT_PARENT_OWNER_TYPE")
+            or ("test_run" if (task.env_vars or {}).get("BROWSER_SLOT_PARENT_RUN_ID") else None)
+        )
+        parent_run_id = task.browser_slot_parent_run_id or (task.env_vars or {}).get("BROWSER_SLOT_PARENT_RUN_ID")
+        if parent_owner_type == "test_run" and parent_run_id:
+            return str(parent_run_id)
+        if task.owner_type == "test_run" and task.owner_id:
+            return str(task.owner_id)
+        return None
+
+    async def _can_reuse_parent_browser_slot(self, task: AgentTask, browser_pool) -> bool:
+        """Reuse a parent test-run slot only when the pool confirms it is running."""
+        parent_run_id = self._parent_test_run_slot_id(task)
+        if not parent_run_id:
+            return False
+        try:
+            return bool(await browser_pool.is_running(parent_run_id))
+        except Exception as exc:
+            logger.debug(
+                "Could not validate parent browser slot %s for task %s: %s",
+                parent_run_id,
+                task.id,
+                exc,
+            )
+            return False
+
     async def _execute_task(self, task: AgentTask):
         """Execute an agent task using the Claude CLI with 429 retry and key rotation."""
         # Reset progress tracking for this task
@@ -647,7 +774,126 @@ class AgentWorker:
             rotator.initialize()
 
         _result_submitted = False
+        browser_pool = None
+        browser_slot_request_id = None
+        browser_slot_acquired = False
         try:
+            if self._task_requires_browser_slot(task):
+                browser_pool = await get_browser_pool()
+                parent_slot_id = self._parent_test_run_slot_id(task)
+                if parent_slot_id and await self._can_reuse_parent_browser_slot(task, browser_pool):
+                    with self._progress_lock:
+                        self._current_progress.update(
+                            {
+                                "status": "running",
+                                "phase": "running",
+                                "message": "Using browser slot held by parent test run.",
+                                "browser_slot_parent_run_id": parent_slot_id,
+                            }
+                        )
+                    logger.info(
+                        "Task %s is reusing parent test-run browser slot %s",
+                        task.id,
+                        parent_slot_id,
+                    )
+                    self._emit_agent_run_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="lifecycle",
+                        message="Agent task is reusing the browser slot held by its parent test run.",
+                        payload={"browser_slot_parent_run_id": parent_slot_id},
+                    )
+                else:
+                    browser_slot_request_id = f"agent:{task.id}"
+                    if parent_slot_id:
+                        logger.warning(
+                            "Task %s has parent test-run slot %s, but the slot is not active; acquiring its own slot.",
+                            task.id,
+                            parent_slot_id,
+                        )
+                    with self._progress_lock:
+                        self._current_progress.update(
+                            {
+                                "status": "queued",
+                                "phase": "browser_slot",
+                                "message": "Waiting for global browser concurrency slot.",
+                                **({"browser_slot_parent_run_id": parent_slot_id} if parent_slot_id else {}),
+                            }
+                        )
+                    self._emit_agent_run_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="queued",
+                        message="Agent task is waiting for a global browser concurrency slot.",
+                        payload={
+                            "browser_slot_request_id": browser_slot_request_id,
+                            **({"browser_slot_parent_run_id": parent_slot_id} if parent_slot_id else {}),
+                        },
+                    )
+                    try:
+                        cleaned_slots = await browser_pool.cleanup_stale(max_age_minutes=60)
+                        if cleaned_slots:
+                            logger.info(
+                                "Cleaned %s stale browser slot(s) before agent task %s waited: %s",
+                                len(cleaned_slots),
+                                task.id,
+                                cleaned_slots,
+                            )
+                    except Exception as exc:
+                        logger.debug("Browser slot cleanup before agent wait failed for task %s: %s", task.id, exc)
+                    slot_timeout = float(os.environ.get("AGENT_BROWSER_SLOT_TIMEOUT_SECONDS", task.timeout_seconds))
+                    slot_deadline = time.monotonic() + slot_timeout
+                    while not browser_slot_acquired:
+                        if await self.queue.is_cancelled(task.id):
+                            telemetry = self._build_task_telemetry(task, 0, error_type="cancelled")
+                            await self.queue.submit_result(task.id, "", success=False, error="Task cancelled", telemetry=telemetry)
+                            _result_submitted = True
+                            return
+
+                        remaining = slot_deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+
+                        browser_slot_acquired = await browser_pool.acquire(
+                            request_id=browser_slot_request_id,
+                            operation_type=BrowserOpType.AGENT,
+                            description=task.owner_label or task.agent_type or task.operation_type or "Agent task",
+                            timeout=min(5.0, remaining),
+                            max_operation_duration=task.timeout_seconds + 300,
+                        )
+                    if not browser_slot_acquired:
+                        error = "Timeout waiting for global browser concurrency slot"
+                        telemetry = self._build_task_telemetry(task, 0, error_type="browser_slot_timeout")
+                        self._emit_agent_run_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="error",
+                            level="error",
+                            message=error,
+                            payload={"telemetry": telemetry, "browser_slot_request_id": browser_slot_request_id},
+                        )
+                        await self.queue.submit_result(task.id, "", success=False, error=error, telemetry=telemetry)
+                        _result_submitted = True
+                        return
+                    if await self.queue.is_cancelled(task.id):
+                        await browser_pool.release(browser_slot_request_id, success=False, error="Task cancelled")
+                        browser_slot_acquired = False
+                        telemetry = self._build_task_telemetry(task, 0, error_type="cancelled")
+                        await self.queue.submit_result(task.id, "", success=False, error="Task cancelled", telemetry=telemetry)
+                        _result_submitted = True
+                        return
+                    with self._progress_lock:
+                        self._current_progress.update(
+                            {
+                                "status": "running",
+                                "phase": "running",
+                                "message": "Agent is running.",
+                            }
+                        )
+
             self._emit_autonomous_event(
                 owner_type=task.owner_type,
                 owner_id=task.owner_id,
@@ -963,6 +1209,11 @@ class AgentWorker:
                     await self.queue.submit_result(task.id, "", success=False, error="Worker failed to submit result")
                 except Exception:
                     logger.error(f"Emergency submit failed for {task.id}")
+            if browser_slot_acquired and browser_pool and browser_slot_request_id:
+                try:
+                    await browser_pool.release(browser_slot_request_id, success=_result_submitted)
+                except Exception as exc:
+                    logger.warning("Failed to release browser slot for task %s: %s", task.id, exc)
             # Restore environment variables to pre-task state
             for key, original_value in saved_env.items():
                 if original_value is None:
@@ -998,6 +1249,26 @@ class AgentWorker:
             "tools_count": len(task.tools) if isinstance(task.tools, list) else None,
             **execution,
         }
+        telemetry["tool_calls"] = max(
+            int(progress.get("tool_calls", 0) or 0),
+            int(execution.get("tool_calls", 0) or 0),
+        )
+        telemetry["browser_tool_calls"] = max(
+            int(progress.get("browser_tool_calls", 0) or 0),
+            int(execution.get("browser_tool_calls", 0) or 0),
+        )
+        telemetry["interactions"] = max(
+            int(progress.get("interactions", 0) or 0),
+            int(execution.get("interactions", 0) or 0),
+        )
+        progress_tool_names = progress.get("tool_names", [])
+        execution_tool_names = execution.get("tool_names", [])
+        telemetry["tool_names"] = (
+            execution_tool_names
+            if isinstance(execution_tool_names, list) and execution_tool_names
+            else progress_tool_names
+        )
+        telemetry["last_tool"] = execution.get("last_tool") or progress.get("last_tool", "")
         if error_type:
             telemetry["error_type"] = error_type
         if task.started_at:
@@ -1154,6 +1425,10 @@ class AgentWorker:
             cli_args.extend(["--max-budget-usd", str(max_budget_usd)])
         if task_budget is not None and task_budget.get("total") is not None:
             cli_args.extend(["--task-budget", str(task_budget["total"])])
+        selected_model = env.get("QUORVEX_LLM_ACTIVE_MODEL") or env.get("ANTHROPIC_MODEL")
+        if selected_model:
+            cli_args.extend(["--model", selected_model])
+            logger.info(f"[CLI]   Model: {selected_model}")
 
         mcp_config_path = Path(effective_cwd) / ".mcp.json"
         requested_tool_names = []
@@ -1287,13 +1562,12 @@ class AgentWorker:
                                         browser_recorder.observe_event(evt)
                                     with self._progress_lock:
                                         if evt.get("type") == "assistant":
-                                            for item in evt.get("message", {}).get("content", []):
-                                                if item.get("type") == "text":
+                                            for item in _event_content_items(evt):
+                                                if isinstance(item, dict) and item.get("type") == "text":
                                                     stream_stats["text_blocks"] += 1
                                                     text = str(item.get("text") or "").strip()
                                                     if text:
-                                                        with self._progress_lock:
-                                                            self._current_progress["last_message"] = text[:500]
+                                                        self._current_progress["last_message"] = text[:500]
                                                         self._emit_autonomous_event(
                                                             owner_type=owner_type,
                                                             owner_id=owner_id,
@@ -1310,48 +1584,48 @@ class AgentWorker:
                                                             message=text,
                                                             payload={"chars": len(text)},
                                                         )
-                                                if item.get("type") == "tool_use":
-                                                    tool_name = item.get("name", "")
-                                                    self._current_progress["tool_calls"] += 1
-                                                    self._current_progress["phase"] = "tool_use"
-                                                    self._current_progress["message"] = f"Using {_short_tool_name(tool_name) or tool_name}"
-                                                    self._current_progress["last_tool"] = tool_name
-                                                    tool_names = self._current_progress.setdefault("tool_names", [])
-                                                    if isinstance(tool_names, list) and len(tool_names) < 200:
-                                                        tool_names.append(tool_name)
-                                                    # Strip MCP prefix: mcp__playwright-test__browser_click → browser_click
-                                                    short_name = _short_tool_name(tool_name)
-                                                    if tool_name.startswith("mcp__") and short_name.startswith("browser_"):
-                                                        self._current_progress["browser_tool_calls"] += 1
-                                                        event_type = "browser_action"
-                                                    else:
-                                                        event_type = "tool_call"
-                                                    if short_name in INTERACTION_TOOLS:
-                                                        self._current_progress["interactions"] += 1
-                                                    self._emit_autonomous_event(
-                                                        owner_type=owner_type,
-                                                        owner_id=owner_id,
-                                                        task_id=task_id,
-                                                        event_type=event_type,
-                                                        message=f"Tool call: {short_name or tool_name}",
-                                                        payload={
-                                                            "tool_name": tool_name,
-                                                            "short_name": short_name,
-                                                            "input": item.get("input") or {},
-                                                        },
-                                                    )
-                                                    self._emit_agent_run_event(
-                                                        owner_type=owner_type,
-                                                        owner_id=owner_id,
-                                                        task_id=task_id,
-                                                        event_type=event_type,
-                                                        message=f"Tool call: {short_name or tool_name}",
-                                                        payload={
-                                                            "tool_name": tool_name,
-                                                            "short_name": short_name,
-                                                            "input": item.get("input") or {},
-                                                        },
-                                                    )
+                                            for item in _event_tool_uses(evt):
+                                                tool_name = str(item.get("name") or "")
+                                                self._current_progress["tool_calls"] += 1
+                                                self._current_progress["phase"] = "tool_use"
+                                                self._current_progress["message"] = f"Using {_short_tool_name(tool_name) or tool_name}"
+                                                self._current_progress["last_tool"] = tool_name
+                                                tool_names = self._current_progress.setdefault("tool_names", [])
+                                                if isinstance(tool_names, list) and len(tool_names) < 200:
+                                                    tool_names.append(tool_name)
+                                                # Strip MCP prefix: mcp__playwright-test__browser_click -> browser_click
+                                                short_name = _short_tool_name(tool_name)
+                                                if tool_name.startswith("mcp__") and short_name.startswith("browser_"):
+                                                    self._current_progress["browser_tool_calls"] += 1
+                                                    event_type = "browser_action"
+                                                else:
+                                                    event_type = "tool_call"
+                                                if short_name in INTERACTION_TOOLS:
+                                                    self._current_progress["interactions"] += 1
+                                                self._emit_autonomous_event(
+                                                    owner_type=owner_type,
+                                                    owner_id=owner_id,
+                                                    task_id=task_id,
+                                                    event_type=event_type,
+                                                    message=f"Tool call: {short_name or tool_name}",
+                                                    payload={
+                                                        "tool_name": tool_name,
+                                                        "short_name": short_name,
+                                                        "input": item.get("input") or {},
+                                                    },
+                                                )
+                                                self._emit_agent_run_event(
+                                                    owner_type=owner_type,
+                                                    owner_id=owner_id,
+                                                    task_id=task_id,
+                                                    event_type=event_type,
+                                                    message=f"Tool call: {short_name or tool_name}",
+                                                    payload={
+                                                        "tool_name": tool_name,
+                                                        "short_name": short_name,
+                                                        "input": item.get("input") or {},
+                                                    },
+                                                )
                                         self._current_progress["chars"] = sum(len(c) for c in output_chunks)
                                 except (json.JSONDecodeError, TypeError):
                                     stream_stats["parse_errors"] += 1
@@ -1438,9 +1712,15 @@ class AgentWorker:
         logger.info(f"[CLI] Completed in {elapsed:.1f}s, exit_code={exit_code}, collected {len(raw_output)} chars")
 
         with self._progress_lock:
+            final_progress = dict(self._current_progress)
             self._last_execution_telemetry = {
                 **stream_stats,
                 **(browser_recorder.telemetry() if browser_recorder is not None else {}),
+                "tool_calls": int(final_progress.get("tool_calls", 0) or 0),
+                "browser_tool_calls": int(final_progress.get("browser_tool_calls", 0) or 0),
+                "interactions": int(final_progress.get("interactions", 0) or 0),
+                "last_tool": final_progress.get("last_tool", ""),
+                "tool_names": list(final_progress.get("tool_names") or []),
                 "raw_output_chars": len(raw_output),
                 "cli_elapsed_seconds": elapsed,
             }

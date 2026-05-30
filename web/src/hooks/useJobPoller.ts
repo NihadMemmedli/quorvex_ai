@@ -6,6 +6,8 @@ interface JobStatus {
     status: 'pending' | 'running' | 'completed' | 'failed';
     stage?: string;
     message?: string;
+    agent_run_id?: string;
+    agent_run?: Record<string, unknown>;
     result?: Record<string, unknown>;
 }
 

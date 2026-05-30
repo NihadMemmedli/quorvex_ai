@@ -14,6 +14,9 @@ ENV TZ=UTC
 ENV PYTHONPATH=/app
 ENV BACKEND_MODE=slim
 ENV BROWSER_WORKERS_ENABLED=true
+ENV PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=300000
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV TEMPORAL_BROWSER_WORKFLOW_TASK_QUEUE=quorvex-browser-workflows
 
 # Install system dependencies
 # - Node.js for MCP server communication
@@ -71,6 +74,11 @@ with tempfile.TemporaryDirectory() as tmpdir:
     os.chmod(target, os.stat(target).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 PY
 
+# Create the runtime user with the same UID/GID as the Playwright base image's
+# agent user so shared volumes are writable from every backend container.
+RUN groupadd --gid 1000 agent && \
+    useradd --create-home --uid 1000 --gid 1000 agent
+
 # Copy and install Python dependencies
 COPY orchestrator/requirements.txt /app/orchestrator/
 RUN pip install --no-cache-dir --upgrade pip && \
@@ -80,11 +88,21 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY package.json package-lock.json /app/
 RUN npm ci --omit=dev
 
+# Preinstall the browser revisions required by both top-level Playwright and
+# @playwright/mcp's nested Playwright dependency so agents never download
+# Chromium during a run.
+RUN if [ -f /app/node_modules/playwright/cli.js ]; then \
+      node /app/node_modules/playwright/cli.js install --with-deps chromium; \
+    fi && \
+    if [ -f /app/node_modules/@playwright/mcp/node_modules/playwright/cli.js ]; then \
+      node /app/node_modules/@playwright/mcp/node_modules/playwright/cli.js install --with-deps chromium; \
+    fi
+
 # Copy application code (NO browsers needed)
-COPY orchestrator/ /app/orchestrator/
-COPY .claude/ /app/.claude/
-COPY schemas/ /app/schemas/
-COPY playwright.config.ts /app/
+COPY --chown=agent:agent orchestrator/ /app/orchestrator/
+COPY --chown=agent:agent .claude/ /app/.claude/
+COPY --chown=agent:agent schemas/ /app/schemas/
+COPY --chown=agent:agent playwright.config.ts /app/
 
 # Create required directories
 RUN mkdir -p /app/logs /app/runs /app/data /app/specs /app/prds /app/tests /app/test-results
@@ -94,7 +112,7 @@ COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Create non-root user (entrypoint will drop privileges to this user)
-RUN useradd -m agent && chown -R agent:agent /app
+RUN chown -R agent:agent /app/logs /app/runs /app/data /app/specs /app/prds /app/tests /app/test-results
 # Note: We do NOT switch to agent user here because volumes mount AFTER the image is built.
 # The entrypoint script runs as root to fix volume permissions, then drops to agent user.
 

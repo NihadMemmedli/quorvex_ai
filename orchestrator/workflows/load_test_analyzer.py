@@ -113,6 +113,7 @@ Focus on actionable insights. Use SRE best practices. Grade conservatively.
         timeout_seconds=120,
         allowed_tools=[],  # No tools needed for analysis
         log_tools=False,
+        model_tier="deep",
     )
     result = await runner.run(prompt)
 

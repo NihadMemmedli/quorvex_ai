@@ -21,6 +21,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+def playwright_headed_args() -> str:
+    """Return Playwright CLI flags needed for VNC-visible execution."""
+    playwright_headless = os.environ.get("PLAYWRIGHT_HEADLESS", "").lower()
+    generic_headless = os.environ.get("HEADLESS", "").lower()
+    if playwright_headless == "false" or generic_headless == "false":
+        return " --headed --workers=1"
+    return ""
+
+
 def run_command(
     command: str, stream_output: bool = False, interactive: bool = False, is_python: bool = True, env: dict = None
 ) -> subprocess.CompletedProcess:
@@ -545,6 +554,11 @@ def main():
         "--project-id", help="Project ID for memory system isolation (default: derived from spec folder)"
     )
     parser.add_argument("--no-memory", action="store_true", help="Disable memory system for this run")
+    parser.add_argument(
+        "--model-tier",
+        default=os.environ.get("QUORVEX_RUN_MODEL_TIER"),
+        help="AI model tier to use for this run (light, standard, deep, tool_deep, chat).",
+    )
     parser.add_argument(
         "--hybrid", action="store_true", help="Use hybrid healing (Native 3 attempts → Ralph up to 17 more)"
     )
@@ -1241,7 +1255,7 @@ def main():
         # 2. Native Planner
         from orchestrator.workflows.native_planner import NativePlanner
 
-        planner = NativePlanner(project_id=project_name)
+        planner = NativePlanner(project_id=project_name, model_tier=args.model_tier or "tool_deep")
 
         specs_to_process = []
         try:
@@ -1262,7 +1276,7 @@ def main():
         from orchestrator.workflows.native_generator import NativeGenerator
         from orchestrator.workflows.native_healer import NativeHealer
 
-        generator = NativeGenerator()
+        generator = NativeGenerator(model_tier=args.model_tier or "tool_deep")
         healer = NativeHealer()
 
         success_count = 0
@@ -1275,7 +1289,7 @@ def main():
 
                 # Execute Test
                 print(f"   Running test: {test_path.name}")
-                cmd = f"npx playwright test '{test_path}' --project {args.browser}"
+                cmd = f"npx playwright test '{test_path}' --project {args.browser}{playwright_headed_args()}"
                 result = run_command(cmd, stream_output=True, is_python=False)
 
                 if result.returncode == 0:
@@ -1450,7 +1464,7 @@ def main():
             (run_dir / "plan.json").write_text(json.dumps(plan_data, indent=2))
 
             # Run existing test
-            cmd = f"npx playwright test '{code_path}' --project {args.browser}"
+            cmd = f"npx playwright test '{code_path}' --project {args.browser}{playwright_headed_args()}"
             print(f"   Executing: {cmd}")
             result = run_command(cmd, stream_output=True, is_python=False)
 
@@ -1466,7 +1480,7 @@ def main():
         project_id = os.environ.get("PROJECT_ID") or args.project_id or "default"
 
         # Run the Full Native Pipeline
-        pipeline = FullNativePipeline(project_id=project_id)
+        pipeline = FullNativePipeline(project_id=project_id, model_tier=args.model_tier)
 
         # Determine if we should heal existing code or run full pipeline
         existing_test_path = existing_test_for_healing if "existing_test_for_healing" in dir() else None
@@ -1580,7 +1594,7 @@ def main():
 
             # Run the test
             output_dir = run_dir / "test-results"
-            cmd = f"PLAYWRIGHT_OUTPUT_DIR='{output_dir}' npx playwright test '{code_path}' --project {args.browser}"
+            cmd = f"PLAYWRIGHT_OUTPUT_DIR='{output_dir}' npx playwright test '{code_path}' --project {args.browser}{playwright_headed_args()}"
             print(f"   Executing: {cmd}")
             sys.stdout.flush()
 

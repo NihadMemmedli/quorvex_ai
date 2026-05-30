@@ -147,9 +147,10 @@ All backend code uses `logging.getLogger(__name__)`. Configuration in `orchestra
 ### Environment Variables
 
 **AI/LLM (required)**:
-- `ANTHROPIC_AUTH_TOKEN` - API authentication token
-- `ANTHROPIC_BASE_URL` - API endpoint (anthropic direct, openrouter, or custom proxy)
-- `ANTHROPIC_DEFAULT_SONNET_MODEL` - Model ID (default: `glm-5-turbo` for Z.ai GLM Coding Plan)
+- `QUORVEX_LLM_API_KEY` - Canonical runtime API authentication token
+- `QUORVEX_LLM_BASE_URL` - Canonical provider endpoint (Z.ai, Anthropic direct, OpenRouter, or custom proxy)
+- `QUORVEX_LLM_STANDARD_MODEL` - Default synthesis model (default: `glm-5-turbo` for Z.ai GLM Coding Plan)
+- `ANTHROPIC_*` aliases - SDK compatibility aliases populated from canonical runtime settings
 - `OPENAI_API_KEY` - For memory system embeddings (optional)
 
 **Authentication**:
@@ -705,7 +706,7 @@ Next.js 16 (App Router), React 19, Tailwind CSS v4, Radix UI primitives, Monaco 
 
 | Symptom | Solution |
 |---------|----------|
-| "ANTHROPIC_AUTH_TOKEN not set" | Check `.env` file, run `make check-env` |
+| "QUORVEX_LLM_API_KEY not set" | Check `.env` file, run `make check-env` |
 | "Database connection refused" | `docker-compose up -d db` or use SQLite (default for dev) |
 | SDK cleanup error | Already handled - stages run as subprocesses |
 | Generated test selector fails | Native healer auto-fixes; use `--hybrid` for complex cases |

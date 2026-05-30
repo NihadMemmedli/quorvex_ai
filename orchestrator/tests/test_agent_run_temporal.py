@@ -39,6 +39,7 @@ from orchestrator.api import db as db_module
 from orchestrator.api import main as main_module
 from orchestrator.api.db import engine
 from orchestrator.api.main import (
+    _custom_agent_browser_runs_via_queue,
     _custom_agent_uses_browser_tools,
     _ensure_custom_agent_browser_available,
     _prepare_custom_agent_mcp_config,
@@ -158,8 +159,100 @@ def test_resolve_playwright_chromium_executable_prefers_env_override(tmp_path, m
     assert _resolve_playwright_chromium_executable() == chromium
 
 
+def test_run_seed_spec_is_generated_from_target_url(tmp_path):
+    seed_path = main_module._write_run_seed_spec(tmp_path, "https://example.test/dashboard")
+
+    content = seed_path.read_text(encoding="utf-8")
+    assert seed_path == tmp_path / "tests" / "seed.spec.ts"
+    assert 'const targetUrl = "https://example.test/dashboard";' in content
+    assert "await page.goto(targetUrl || 'about:blank');" in content
+
+
+def test_run_seed_spec_overwrites_blank_default_seed(tmp_path):
+    seed_path = tmp_path / "tests" / "seed.spec.ts"
+    seed_path.parent.mkdir(parents=True)
+    seed_path.write_text("import { test } from '@playwright/test';\n\ntest('blank', async () => {});\n")
+
+    main_module._write_run_seed_spec(tmp_path, "https://example.test/flow")
+
+    content = seed_path.read_text(encoding="utf-8")
+    assert "test('blank'" not in content
+    assert 'const targetUrl = "https://example.test/flow";' in content
+
+
+def test_run_seed_spec_rewrites_localhost_for_docker_browser(tmp_path):
+    seed_path = main_module._write_run_seed_spec(tmp_path, "http://localhost:3000/dashboard?tab=live")
+
+    content = seed_path.read_text(encoding="utf-8")
+    assert 'const targetUrl = "http://host.docker.internal:3000/dashboard?tab=live";' in content
+
+
+def test_extract_run_target_url_reads_spec_content():
+    assert (
+        main_module._extract_run_target_url_from_content(
+            "# Test\n\n- Target URL: https://example.test/path\n\n1. Click Continue"
+        )
+        == "https://example.test/path"
+    )
+
+
+def test_browser_diagnostics_do_not_count_cli_browser_argument(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":99")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "ps":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout="123 python /app/orchestrator/cli.py specs/example.md --browser chromium\n",
+                stderr="",
+            )
+        if cmd[0] == "xwininfo":
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(main_module.subprocess, "run", fake_run)
+
+    diagnostics = main_module._live_browser_display_diagnostics()
+
+    assert diagnostics["browser_process_count"] == 0
+    assert diagnostics["browser_window_count"] == 0
+
+
+def test_browser_diagnostics_count_real_chromium_process(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":99")
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "ps":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=(
+                    "123 python /app/orchestrator/cli.py specs/example.md --browser chromium\n"
+                    "124 chromium /usr/bin/chromium --remote-debugging-port=9222\n"
+                ),
+                stderr="",
+            )
+        if cmd[0] == "xwininfo":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout='     0x400003 "has no name": ()  1280x720+0+0  +0+0\n',
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(main_module.subprocess, "run", fake_run)
+
+    diagnostics = main_module._live_browser_display_diagnostics()
+
+    assert diagnostics["browser_process_count"] == 1
+    assert diagnostics["browser_window_count"] == 1
+
+
 def test_custom_agent_browser_preflight_fails_without_installing(monkeypatch):
     progress: list[dict] = []
+    monkeypatch.setattr(main_module, "_custom_agent_browser_runs_via_queue", lambda: False)
     monkeypatch.setattr(main_module, "_resolve_playwright_chromium_executable", lambda: None)
 
     def fake_run(cmd, **kwargs):
@@ -184,9 +277,76 @@ def test_custom_agent_browser_preflight_fails_without_installing(monkeypatch):
         _ensure_custom_agent_browser_available("custom-agent-browser-missing")
 
     assert progress[0]["phase"] == "browser_setup"
-    assert progress[0]["message"] == "Checking Playwright browser availability"
+    assert progress[0]["message"] == "Checking local Playwright browser availability"
     assert progress[-1]["phase"] == "failed"
     assert "browser_probe_output" in progress[-1]
+
+
+def test_custom_agent_browser_preflight_skips_local_probe_when_queue_enabled(monkeypatch):
+    progress: list[dict] = []
+    monkeypatch.setattr(main_module, "_custom_agent_browser_runs_via_queue", lambda: True)
+    monkeypatch.setattr(
+        main_module,
+        "browser_runtime_status",
+        lambda: {
+            "browser_runtime": "temporal_vnc_worker",
+            "live_view_available": True,
+            "vnc_url": "ws://localhost:6080/websockify",
+            "runtime_message": "Browser execution is delegated to the live browser worker.",
+        },
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_probe_custom_agent_browser",
+        lambda: pytest.fail("queue mode should not probe local Chromium"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_update_agent_run_progress",
+        lambda _run_id, patch: progress.append(patch),
+    )
+
+    _ensure_custom_agent_browser_available("custom-agent-browser-queued")
+
+    assert progress == [
+        {
+            "browser_runtime": "temporal_vnc_worker",
+            "live_view_available": True,
+            "vnc_url": "ws://localhost:6080/websockify",
+            "runtime_message": "Browser execution is delegated to the live browser worker.",
+            "phase": "browser_delegated",
+            "message": "Browser execution delegated to agent worker",
+        }
+    ]
+
+
+def test_custom_agent_browser_preflight_probes_when_direct_vnc_forced(monkeypatch):
+    progress: list[dict] = []
+    monkeypatch.setattr(main_module, "_custom_agent_browser_runs_via_queue", lambda: True)
+    monkeypatch.setattr(main_module, "_probe_custom_agent_browser", lambda: (True, ""))
+    monkeypatch.setattr(
+        main_module,
+        "_update_agent_run_progress",
+        lambda _run_id, patch: progress.append(patch),
+    )
+
+    _ensure_custom_agent_browser_available(
+        "custom-agent-browser-direct",
+        force_direct_execution=True,
+    )
+
+    phases = [patch["phase"] for patch in progress if "phase" in patch]
+    assert "browser_delegated" not in phases
+    assert phases[0] == "browser_setup"
+    assert phases[-1] == "browser_ready"
+
+
+def test_custom_agent_browser_queue_mode_uses_agent_queue_predicate(monkeypatch):
+    monkeypatch.setenv("USE_AGENT_QUEUE", "true")
+    monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.setattr("orchestrator.services.agent_queue.REDIS_AVAILABLE", True)
+
+    assert _custom_agent_browser_runs_via_queue() is True
 
 
 def _latest_event(run_id: str, event_type: str) -> AgentRunEvent | None:
@@ -204,8 +364,9 @@ async def test_start_agent_run_temporal_records_workflow_ids(monkeypatch):
     run_id = "agent-temporal-start"
     _create_run(run_id)
 
-    async def fake_start_agent_run_workflow(value: str):
+    async def fake_start_agent_run_workflow(value: str, *, task_queue: str | None = None):
         assert value == run_id
+        assert task_queue == "quorvex-custom-workflows"
         return TemporalWorkflowStart(
             workflow_id="agent-run-agent-temporal-start", run_id="temporal-run-1"
         )
@@ -234,11 +395,102 @@ async def test_start_agent_run_temporal_records_workflow_ids(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_browser_agent_run_temporal_uses_vnc_task_queue(monkeypatch):
+    run_id = "agent-temporal-browser-queue"
+    _ensure_tables()
+    _cleanup_run(run_id)
+    monkeypatch.setenv("VNC_ENABLED", "true")
+    monkeypatch.setenv("HEADLESS", "false")
+    monkeypatch.setenv("DISPLAY", ":99")
+    captured: dict[str, str | None] = {}
+    with Session(engine) as session:
+        run = AgentRun(
+            id=run_id,
+            agent_type="custom",
+            status="queued",
+            config_json=json.dumps(
+                {"allowed_tools": ["mcp__playwright-test__browser_navigate"]}
+            ),
+        )
+        session.add(run)
+        session.commit()
+
+    async def fake_start_agent_run_workflow(value: str, *, task_queue: str | None = None):
+        assert value == run_id
+        captured["task_queue"] = task_queue
+        return TemporalWorkflowStart(
+            workflow_id="agent-run-agent-temporal-browser-queue",
+            run_id="temporal-run-browser",
+        )
+
+    monkeypatch.setattr(
+        "orchestrator.services.temporal_client.start_agent_run_workflow",
+        fake_start_agent_run_workflow,
+    )
+
+    try:
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            await _start_agent_run_temporal_or_fail(run, session)
+            assert captured["task_queue"] == "quorvex-browser-workflows"
+            event = session.exec(
+                select(AgentRunEvent).where(
+                    AgentRunEvent.run_id == run_id,
+                    AgentRunEvent.event_type == "temporal_scheduled",
+                )
+            ).first()
+            assert event is not None
+            assert event.payload["task_queue"] == "quorvex-browser-workflows"
+    finally:
+        _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_browser_agent_run_temporal_uses_live_worker_task_queue(monkeypatch):
+    run_id = "agent-temporal-browser-live-worker"
+    _ensure_tables()
+    _cleanup_run(run_id)
+    monkeypatch.delenv("VNC_ENABLED", raising=False)
+    monkeypatch.setenv("LIVE_BROWSER_WORKER_ENABLED", "true")
+    captured: dict[str, str | None] = {}
+    with Session(engine) as session:
+        run = AgentRun(
+            id=run_id,
+            agent_type="exploratory",
+            status="queued",
+            config_json=json.dumps({"url": "https://example.com"}),
+        )
+        session.add(run)
+        session.commit()
+
+    async def fake_start_agent_run_workflow(value: str, *, task_queue: str | None = None):
+        assert value == run_id
+        captured["task_queue"] = task_queue
+        return TemporalWorkflowStart(
+            workflow_id="agent-run-agent-temporal-browser-live-worker",
+            run_id="temporal-run-browser-worker",
+        )
+
+    monkeypatch.setattr(
+        "orchestrator.services.temporal_client.start_agent_run_workflow",
+        fake_start_agent_run_workflow,
+    )
+
+    try:
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            await _start_agent_run_temporal_or_fail(run, session)
+            assert captured["task_queue"] == "quorvex-browser-workflows"
+    finally:
+        _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
 async def test_start_agent_run_temporal_failure_marks_run_failed(monkeypatch):
     run_id = "agent-temporal-start-failed"
     _create_run(run_id)
 
-    async def unavailable(_: str):
+    async def unavailable(_: str, *, task_queue: str | None = None):
         raise TemporalUnavailableError("Temporal down")
 
     monkeypatch.setattr(
@@ -357,11 +609,11 @@ async def test_execute_agent_run_completes_temporal_smoke_without_llm():
 
 
 @pytest.mark.asyncio
-async def test_execute_agent_run_disables_redis_queue_for_temporal_activity(monkeypatch):
+async def test_execute_agent_run_defaults_to_direct_execution_for_temporal_activity(monkeypatch):
     run_id = "agent-temporal-direct-execution"
     _ensure_tables()
     _cleanup_run(run_id)
-    monkeypatch.setenv("USE_AGENT_QUEUE", "true")
+    monkeypatch.delenv("USE_AGENT_QUEUE", raising=False)
     with Session(engine) as session:
         run = AgentRun(
             id=run_id,
@@ -391,11 +643,54 @@ async def test_execute_agent_run_disables_redis_queue_for_temporal_activity(monk
         result = await execute_agent_run({"run_id": run_id})
 
         assert result["status"] == "completed"
-        assert main_module.os.environ["USE_AGENT_QUEUE"] == "true"
+        assert "USE_AGENT_QUEUE" not in main_module.os.environ
         with Session(engine) as session:
             run = session.get(AgentRun, run_id)
             assert run.agent_task_id is None
             assert run.result["summary"] == "direct temporal activity"
+    finally:
+        _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_run_overrides_redis_queue_for_temporal_activity(monkeypatch):
+    run_id = "agent-temporal-queued-execution"
+    _ensure_tables()
+    _cleanup_run(run_id)
+    monkeypatch.setenv("USE_AGENT_QUEUE", "true")
+    with Session(engine) as session:
+        run = AgentRun(
+            id=run_id,
+            agent_type="custom",
+            status="running",
+            config_json='{"prompt":"inspect"}',
+        )
+        session.add(run)
+        session.commit()
+
+    async def fake_execute_agent_background(value: str, agent_type: str, config: dict):
+        assert value == run_id
+        assert agent_type == "custom"
+        assert config == {"prompt": "inspect"}
+        assert main_module.os.environ["USE_AGENT_QUEUE"] == "false"
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            run.status = "completed"
+            run.result = {"summary": "queued temporal activity"}
+            run.completed_at = main_module.datetime.utcnow()
+            session.add(run)
+            session.commit()
+
+    monkeypatch.setattr(main_module, "execute_agent_background", fake_execute_agent_background)
+
+    try:
+        result = await execute_agent_run({"run_id": run_id})
+
+        assert result["status"] == "completed"
+        assert main_module.os.environ["USE_AGENT_QUEUE"] == "true"
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            assert run.result["summary"] == "queued temporal activity"
     finally:
         _cleanup_run(run_id)
 
@@ -611,7 +906,7 @@ async def test_legacy_exploratory_endpoint_starts_temporal(monkeypatch):
     _ensure_tables()
     started: list[str] = []
 
-    async def fake_start_agent_run_workflow(run_id: str):
+    async def fake_start_agent_run_workflow(run_id: str, *, task_queue: str | None = None):
         started.append(run_id)
         return TemporalWorkflowStart(workflow_id=f"agent-run-{run_id}", run_id="temporal-run")
 

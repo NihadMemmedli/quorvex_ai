@@ -12,6 +12,7 @@ import { LiveBrowserView } from '@/components/LiveBrowserView';
 interface AgentRun {
     id: string;
     agent_type: string;
+    runtime?: string;
     status: string;
     created_at: string;
     config: any;
@@ -106,6 +107,7 @@ interface AgentDefinition {
     name: string;
     description: string;
     system_prompt: string;
+    runtime?: string;
     model?: string | null;
     timeout_seconds: number;
     tool_ids: string[];
@@ -367,22 +369,29 @@ function agentStatusTone(status?: string) {
 
 function customAgentExecutionStarted(run: AgentRun) {
     const progress = run.progress || {};
-    const executeActivity = (run.temporal?.activities || []).find(activity => activity.activity_type === 'execute_agent_run');
-    if (executeActivity?.status === 'scheduled') return false;
-    if (executeActivity && ['started', 'completed', 'failed', 'timed_out'].includes(String(executeActivity.status))) return true;
-    return Boolean(
+    if (
         run.agent_task_id ||
         progress.agent_task_id ||
         progress.last_tool ||
         Number(progress.tool_calls || 0) > 0 ||
+        Number(progress.browser_tool_calls || 0) > 0 ||
         ['tool_use', 'tool_result', 'running', 'completed', 'failed'].includes(String(progress.phase || '')) ||
         (run.health?.latest_heartbeat_at)
-    );
+    ) {
+        return true;
+    }
+    const executeActivity = (run.temporal?.activities || []).find(activity => activity.activity_type === 'execute_agent_run');
+    if (executeActivity?.status === 'scheduled') return false;
+    if (executeActivity && ['started', 'completed', 'failed', 'timed_out'].includes(String(executeActivity.status))) return true;
+    return false;
 }
 
 function customAgentWorkerMessage(run: AgentRun) {
     const temporalError = run.temporal?.error || run.temporal?.summary?.last_workflow_task_failure;
     if (temporalError) return temporalError;
+    if ((run.progress || {}).browser_runtime === 'headless_worker' || (run.progress || {}).live_view_available === false) {
+        return 'Browser execution is running outside the VNC display. Follow the latest screenshots and activity timeline.';
+    }
     if ((run.progress || {}).phase === 'queued') return 'Agent task is queued for a worker. Browser evidence will appear when the worker starts the task.';
     const executeActivity = (run.temporal?.activities || []).find(activity => activity.activity_type === 'execute_agent_run');
     if (executeActivity?.status === 'scheduled') {
@@ -406,11 +415,13 @@ function CustomAgentReportView({
     activeTab,
     onTabChange,
     onAskAssistant,
+    onCreateSpecFromReport,
 }: {
     run: AgentRun;
     activeTab: CustomResultTab;
     onTabChange: (tab: CustomResultTab) => void;
     onAskAssistant: (prompt: string) => void;
+    onCreateSpecFromReport: (item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test_idea') => void;
 }) {
     const report = getStructuredReport(run);
     const findings = report.findings || [];
@@ -529,7 +540,7 @@ function CustomAgentReportView({
                             {finding.evidence && <p style={{ margin: '0 0 0.7rem', color: 'var(--text)', fontSize: '0.82rem', lineHeight: 1.45 }}><strong>Evidence:</strong> {finding.evidence}</p>}
                             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                                 <ReportActionButton onClick={() => onAskAssistant(itemPrompt(run, finding, 'finding'))} label="Use in Assistant" icon={MessageSquare} />
-                                <ReportActionButton onClick={() => onAskAssistant(`Create a Playwright markdown test spec from custom agent finding ${finding.id} in run ${run.id}. Include concrete steps and expected results. Use an approval action before creating it.`)} label="Create Spec" icon={FileText} />
+                                <ReportActionButton onClick={() => onCreateSpecFromReport(finding, 'finding')} label="Create Spec" icon={FileText} />
                                 <ReportActionButton onClick={() => onAskAssistant(`Start a follow-up custom agent from finding ${finding.id} in run ${run.id}. Verify whether this issue still reproduces and collect evidence. Use approval before starting the agent.`)} label="Follow Up Agent" icon={Bot} />
                             </div>
                         </div>
@@ -556,7 +567,7 @@ function CustomAgentReportView({
                             {idea.expected && <p style={{ margin: '0 0 0.7rem', color: 'var(--text)', fontSize: '0.82rem' }}><strong>Expected:</strong> {idea.expected}</p>}
                             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                                 <ReportActionButton onClick={() => onAskAssistant(itemPrompt(run, idea, 'test idea'))} label="Use in Assistant" icon={MessageSquare} />
-                                <ReportActionButton onClick={() => onAskAssistant(`Create a Playwright markdown test spec from custom agent test idea ${idea.id} in run ${run.id}. Use approval before creating it.`)} label="Create Spec" icon={FileText} />
+                                <ReportActionButton onClick={() => onCreateSpecFromReport(idea, 'test_idea')} label="Create Spec" icon={FileText} />
                             </div>
                         </div>
                     ))}
@@ -792,6 +803,9 @@ export default function AgentsPage() {
     const [selectedFlow, setSelectedFlow] = useState<any | null>(null);
     const [loadingFlowDetails, setLoadingFlowDetails] = useState(false);
     const [generatingSpec, setGeneratingSpec] = useState(false);
+    const [flowSpecAgentRunId, setFlowSpecAgentRunId] = useState<string | null>(null);
+    const [flowSpecAgentRun, setFlowSpecAgentRun] = useState<AgentRun | null>(null);
+    const [flowSpecAgentEvents, setFlowSpecAgentEvents] = useState<AgentRunEvent[]>([]);
     const [generatedSpec, setGeneratedSpec] = useState<any | null>(null);
     const [specModalOpen, setSpecModalOpen] = useState(false);
     const [splittingSpec, setSplittingSpec] = useState(false);
@@ -800,6 +814,9 @@ export default function AgentsPage() {
     const [toolCatalog, setToolCatalog] = useState<AgentTool[]>([]);
     const [selectedDefinitionId, setSelectedDefinitionId] = useState<string>('');
     const [customResultTab, setCustomResultTab] = useState<CustomResultTab>('overview');
+    const [agentRuntime, setAgentRuntime] = useState('claude_sdk');
+    const [hermesReachable, setHermesReachable] = useState(false);
+    const [hermesStatusMessage, setHermesStatusMessage] = useState('');
     const [builderOpen, setBuilderOpen] = useState(false);
     const [savingDefinition, setSavingDefinition] = useState(false);
     const [definitionForm, setDefinitionForm] = useState({
@@ -807,10 +824,26 @@ export default function AgentsPage() {
         name: '',
         description: '',
         system_prompt: 'You are a focused QA automation agent. Use the selected tools to inspect the target, report findings clearly, and avoid actions outside the requested task.',
+        runtime: 'claude_sdk',
         timeout_seconds: 1800,
         tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console'],
     });
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
+
+    const fetchRuntimeSettings = async () => {
+        try {
+            const res = await fetch(`${API_BASE}/settings`);
+            if (!res.ok) return;
+            const data = await res.json();
+            const runtime = data.agent_runtime || 'claude_sdk';
+            setAgentRuntime(runtime);
+            setHermesReachable(Boolean(data.hermes_reachable));
+            setHermesStatusMessage(data.hermes_status_message || '');
+            setDefinitionForm(prev => prev.id ? prev : { ...prev, runtime });
+        } catch (e) {
+            console.error('Failed to fetch runtime settings', e);
+        }
+    };
 
     // Fetch history (filtered by project)
     const fetchHistory = async () => {
@@ -868,6 +901,7 @@ export default function AgentsPage() {
         fetchSessions();
         fetchToolCatalog();
         fetchAgentDefinitions();
+        fetchRuntimeSettings();
         if (typeof window !== 'undefined') {
             const runId = new URLSearchParams(window.location.search).get('runId');
             if (runId) setSelectedRunId(runId);
@@ -934,6 +968,32 @@ export default function AgentsPage() {
         }
     };
 
+    const fetchFlowSpecAgentRun = async (id: string) => {
+        try {
+            const [runRes, eventsRes] = await Promise.all([
+                fetch(`${API_BASE}/api/agents/runs/${id}`),
+                fetch(`${API_BASE}/api/agents/runs/${id}/events?limit=100`),
+            ]);
+            if (runRes.ok) {
+                const data = await runRes.json();
+                setFlowSpecAgentRun(data);
+            }
+            if (eventsRes.ok) {
+                const events = await eventsRes.json();
+                setFlowSpecAgentEvents(Array.isArray(events) ? events : []);
+            }
+        } catch (e) {
+            console.error("Failed to fetch spec generation run", e);
+        }
+    };
+
+    useEffect(() => {
+        if (!flowSpecAgentRunId || !flowModalOpen) return;
+        fetchFlowSpecAgentRun(flowSpecAgentRunId);
+        const interval = window.setInterval(() => fetchFlowSpecAgentRun(flowSpecAgentRunId), 3000);
+        return () => window.clearInterval(interval);
+    }, [flowSpecAgentRunId, flowModalOpen]);
+
     // Fetch specs for exploration run
     const fetchSpecs = async (runId: string) => {
         try {
@@ -954,6 +1014,10 @@ export default function AgentsPage() {
         if (!activeRun?.id) return;
 
         setLoadingFlowDetails(true);
+        flowSpecPoller.clear();
+        setFlowSpecAgentRunId(null);
+        setFlowSpecAgentRun(null);
+        setFlowSpecAgentEvents([]);
         try {
             const res = await fetch(`${API_BASE}/api/agents/exploratory/${activeRun.id}/flows/${flowId}`);
             if (res.ok) {
@@ -994,6 +1058,9 @@ export default function AgentsPage() {
                 });
                 setSpecModalOpen(true);
             }
+            if (flowSpecAgentRunId) {
+                fetchFlowSpecAgentRun(flowSpecAgentRunId);
+            }
             setGeneratingSpec(false);
         },
         onFailed: (message) => {
@@ -1002,12 +1069,27 @@ export default function AgentsPage() {
         },
     });
 
+    useEffect(() => {
+        const agentRunId = flowSpecPoller.status?.agent_run_id;
+        if (agentRunId && agentRunId !== flowSpecAgentRunId) {
+            setFlowSpecAgentRunId(agentRunId);
+        }
+        const agentRun = flowSpecPoller.status?.agent_run as AgentRun | undefined;
+        if (agentRun?.id) {
+            setFlowSpecAgentRun(agentRun);
+        }
+    }, [flowSpecPoller.status, flowSpecAgentRunId]);
+
     // Generate spec for a single flow using Intelligent Pipeline
     const generateFlowSpec = async (flowId: string, forceRegenerate: boolean = false) => {
         if (!activeRun?.id) return;
 
         setGeneratingSpec(true);
         setSplitResult(null);
+        flowSpecPoller.clear();
+        setFlowSpecAgentRunId(null);
+        setFlowSpecAgentRun(null);
+        setFlowSpecAgentEvents([]);
         try {
             const url = forceRegenerate
                 ? `${API_BASE}/api/agents/exploratory/${activeRun.id}/flows/${flowId}/generate?force_regenerate=true`
@@ -1042,10 +1124,60 @@ export default function AgentsPage() {
 
             // Async job → start polling
             if (data.job_id) {
+                if (data.agent_run_id) {
+                    setFlowSpecAgentRunId(data.agent_run_id);
+                    fetchFlowSpecAgentRun(data.agent_run_id);
+                }
                 flowSpecPoller.startPolling(data.job_id);
                 return; // generatingSpec stays true until poll resolves
             }
 
+            throw new Error('Unexpected response from server');
+        } catch (e: unknown) {
+            const message = e instanceof Error ? e.message : 'Please try again.';
+            alert(`Failed to generate spec: ${message}`);
+            setGeneratingSpec(false);
+        }
+    };
+
+    const createSpecFromReportItem = async (item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test_idea') => {
+        if (!activeRun?.id) return;
+        setSelectedFlow({
+            id: item.id,
+            title: item.title || item.id,
+            pages: item.page ? [item.page] : [],
+            happy_path: 'steps' in item && item.steps?.length ? item.steps.join('\n') : ('description' in item ? item.description : undefined),
+            edge_cases: kind === 'finding' && 'evidence' in item && item.evidence ? [item.evidence] : [],
+            test_ideas: kind === 'test_idea' && 'expected' in item && item.expected ? [item.expected] : [],
+            entry_point: item.page || activeRun.config?.url,
+            exit_point: item.page || activeRun.config?.url,
+            source_type: 'custom_report',
+            item_type: kind,
+        });
+        setFlowModalOpen(true);
+        setGeneratingSpec(true);
+        setSplitResult(null);
+        flowSpecPoller.clear();
+        setFlowSpecAgentRunId(null);
+        setFlowSpecAgentRun(null);
+        setFlowSpecAgentEvents([]);
+        try {
+            const params = new URLSearchParams({ item_type: kind });
+            if (currentProject?.id) params.set('project_id', currentProject.id);
+            const res = await fetch(`${API_BASE}/api/agents/runs/${activeRun.id}/report-items/${encodeURIComponent(item.id)}/generate-spec?${params}`, { method: 'POST' });
+            if (!res.ok) {
+                const error = await res.json().catch(() => ({}));
+                throw new Error(error.detail || `HTTP ${res.status}`);
+            }
+            const data = await res.json();
+            if (data.agent_run_id) {
+                setFlowSpecAgentRunId(data.agent_run_id);
+                fetchFlowSpecAgentRun(data.agent_run_id);
+            }
+            if (data.job_id) {
+                flowSpecPoller.startPolling(data.job_id);
+                return;
+            }
             throw new Error('Unexpected response from server');
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : 'Please try again.';
@@ -1146,6 +1278,7 @@ export default function AgentsPage() {
             name: '',
             description: '',
             system_prompt: 'You are a focused QA automation agent. Use the selected tools to inspect the target, report findings clearly, and avoid actions outside the requested task.',
+            runtime: agentRuntime,
             timeout_seconds: 1800,
             tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console', 'browser_screenshot'],
         });
@@ -1158,6 +1291,7 @@ export default function AgentsPage() {
             name: definition.name,
             description: definition.description || '',
             system_prompt: definition.system_prompt,
+            runtime: definition.runtime || 'claude_sdk',
             timeout_seconds: definition.timeout_seconds || 1800,
             tool_ids: definition.tool_ids || [],
         });
@@ -1211,6 +1345,7 @@ export default function AgentsPage() {
                     name: definitionForm.name,
                     description: definitionForm.description,
                     system_prompt: definitionForm.system_prompt,
+                    runtime: definitionForm.runtime,
                     timeout_seconds: definitionForm.timeout_seconds,
                     tool_ids: definitionForm.tool_ids,
                     project_id: currentProject?.id,
@@ -1301,10 +1436,15 @@ export default function AgentsPage() {
                 ? `${API_BASE}/api/agents/exploratory`
                 : `${API_BASE}/api/agents/runs`;
 
+            const selectedRuntime = selectedAgent === 'custom'
+                ? (selectedDefinition?.runtime || agentRuntime)
+                : agentRuntime;
+
             const body = selectedAgent === 'custom'
                 ? {
                     prompt: instructions || `Inspect ${url || 'the current application context'} and report useful QA findings.`,
                     url: url || undefined,
+                    runtime: selectedRuntime,
                     config: {
                         auth: authConfig,
                         test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
@@ -1322,14 +1462,17 @@ export default function AgentsPage() {
                     test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
                     focus_areas: focusAreasList.length > 0 ? focusAreasList : undefined,
                     excluded_patterns: excludedPatternsList.length > 0 ? excludedPatternsList : undefined,
+                    runtime: selectedRuntime,
                     project_id: currentProject?.id  // Associate generated specs with current project
                 }
                 : {
                     agent_type: 'writer',
+                    runtime: selectedRuntime,
                     config: {
                         url,
                         instructions,
-                        max_steps: 10
+                        max_steps: 10,
+                        runtime: selectedRuntime,
                     },
                     project_id: currentProject?.id  // Project isolation for writer agent
                 };
@@ -1610,6 +1753,15 @@ export default function AgentsPage() {
                                     rows={4}
                                     style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.8rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', resize: 'vertical', margin: '0.25rem 0 0.65rem' }}
                                 />
+                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Runtime</label>
+                                <select
+                                    value={definitionForm.runtime}
+                                    onChange={e => setDefinitionForm({ ...definitionForm, runtime: e.target.value })}
+                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', margin: '0.25rem 0 0.65rem' }}
+                                >
+                                    <option value="claude_sdk">Claude SDK</option>
+                                    <option value="hermes">Hermes</option>
+                                </select>
                                 <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Timeout seconds</label>
                                 <input
                                     type="number"
@@ -1694,7 +1846,26 @@ export default function AgentsPage() {
                                 </select>
                                 {selectedDefinition && (
                                     <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', margin: '0.5rem 0 0' }}>
-                                        {selectedDefinition.description || `${selectedDefinition.tool_ids.length} selected tools`}
+                                        {selectedDefinition.description || `${selectedDefinition.tool_ids.length} selected tools`} · Runtime: {selectedDefinition.runtime === 'hermes' ? 'Hermes' : 'Claude SDK'}
+                                    </p>
+                                )}
+                            </div>
+                        )}
+
+                        {selectedAgent !== 'custom' && (
+                            <div style={{ marginBottom: '1rem' }}>
+                                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Agent Runtime</label>
+                                <select
+                                    value={agentRuntime}
+                                    onChange={e => setAgentRuntime(e.target.value)}
+                                    style={{ width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)' }}
+                                >
+                                    <option value="claude_sdk">Claude SDK</option>
+                                    <option value="hermes">Hermes</option>
+                                </select>
+                                {agentRuntime === 'hermes' && (
+                                    <p style={{ fontSize: '0.75rem', color: hermesReachable ? 'var(--success)' : 'var(--warning)', margin: '0.5rem 0 0', lineHeight: 1.4 }}>
+                                        {hermesReachable ? 'Hermes API is reachable.' : hermesStatusMessage || 'Hermes API is not reachable yet.'}
                                     </p>
                                 )}
                             </div>
@@ -1986,6 +2157,12 @@ export default function AgentsPage() {
                                     runId={activeRun.id}
                                     isActive={activeRun.status !== 'paused'}
                                     showHeader
+                                    artifacts={activeRun.artifacts || []}
+                                    latestImage={sortArtifactsByModifiedAt((activeRun.artifacts || []).filter(artifact => artifact.type === 'image'))[0]}
+                                    statusMessage={activeRun.progress?.message}
+                                    liveViewAvailable={Boolean(activeRun.progress?.live_view_available)}
+                                    runtimeMessage={activeRun.progress?.runtime_message}
+                                    vncUrl={activeRun.progress?.vnc_url}
                                 />
                                 <AgentRunCapturePanel activeRun={activeRun} mode="live" />
                                 <AgentRunObservabilityPanel run={activeRun} events={agentEvents} />
@@ -2074,7 +2251,17 @@ export default function AgentsPage() {
                                                 <span>{workerMessage}</span>
                                             </div>
                                         ) : hasBrowserTools ? (
-                                            <LiveBrowserView runId={activeRun.id} isActive={activeRun.status !== 'paused'} showHeader />
+                                            <LiveBrowserView
+                                                runId={activeRun.id}
+                                                isActive={activeRun.status !== 'paused'}
+                                                showHeader
+                                                artifacts={activeRun.artifacts || []}
+                                                latestImage={latestImage}
+                                                statusMessage={progress.message}
+                                                liveViewAvailable={Boolean(progress.live_view_available)}
+                                                runtimeMessage={progress.runtime_message}
+                                                vncUrl={progress.vnc_url}
+                                            />
                                         ) : (
                                             <div style={{ padding: '1.25rem', background: 'var(--surface-hover)', border: '1px solid var(--border)', borderRadius: '10px', color: 'var(--text-secondary)', textAlign: 'center' }}>
                                                 This custom agent does not have browser tools selected. Follow its tool activity below.
@@ -2179,6 +2366,7 @@ export default function AgentsPage() {
                                         activeTab={customResultTab}
                                         onTabChange={setCustomResultTab}
                                         onAskAssistant={openAssistantWithPrompt}
+                                        onCreateSpecFromReport={createSpecFromReportItem}
                                     />
                                 ) : (
                                     // Exploratory Result - User Friendly Display
@@ -2490,7 +2678,8 @@ export default function AgentsPage() {
                         <div style={{
                             background: 'var(--surface)',
                             borderRadius: '12px',
-                            maxWidth: '700px',
+                            width: 'min(980px, calc(100vw - 2rem))',
+                            maxWidth: '980px',
                             maxHeight: '80vh',
                             overflowY: 'auto',
                             padding: '1.5rem',
@@ -2572,9 +2761,40 @@ export default function AgentsPage() {
                                 </div>
                             )}
 
+                            {(generatingSpec || flowSpecAgentRun) && flowSpecAgentRunId && (
+                                <div style={{ display: 'grid', gap: '1rem', margin: '1rem 0', padding: '1rem 0', borderTop: '1px solid var(--border)' }}>
+                                    <LiveBrowserView
+                                        runId={flowSpecAgentRunId}
+                                        isActive={generatingSpec && flowSpecAgentRun?.status !== 'failed'}
+                                        showHeader
+                                        artifacts={flowSpecAgentRun?.artifacts || []}
+                                        latestImage={sortArtifactsByModifiedAt((flowSpecAgentRun?.artifacts || []).filter(artifact => artifact.type === 'image'))[0]}
+                                        statusMessage={flowSpecAgentRun?.progress?.message || flowSpecPoller.status?.message}
+                                        liveViewAvailable={Boolean(flowSpecAgentRun?.progress?.live_view_available ?? true)}
+                                        runtimeMessage={flowSpecAgentRun?.progress?.runtime_message}
+                                        vncUrl={flowSpecAgentRun?.progress?.vnc_url}
+                                    />
+                                    {flowSpecAgentRun && (
+                                        <AgentRunObservabilityPanel run={flowSpecAgentRun} events={flowSpecAgentEvents} />
+                                    )}
+                                </div>
+                            )}
+
                             <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
                                 <button
-                                    onClick={() => generateFlowSpec(selectedFlow.id)}
+                                    onClick={() => {
+                                        if (selectedFlow.source_type === 'custom_report') {
+                                            const item = {
+                                                id: selectedFlow.id,
+                                                title: selectedFlow.title,
+                                                page: selectedFlow.entry_point,
+                                                description: selectedFlow.happy_path,
+                                            } as ReportFinding;
+                                            createSpecFromReportItem(item, selectedFlow.item_type || 'finding');
+                                        } else {
+                                            generateFlowSpec(selectedFlow.id);
+                                        }
+                                    }}
                                     disabled={generatingSpec}
                                     style={{
                                         flex: 1,

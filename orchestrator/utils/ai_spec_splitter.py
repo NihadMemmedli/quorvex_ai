@@ -15,6 +15,7 @@ from typing import Any
 # Add orchestrator to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from load_env import setup_claude_env
+from orchestrator.services.ai_runtime_config import resolve_runtime_ai_selection
 
 setup_claude_env()
 
@@ -88,17 +89,15 @@ class AISpecSplitter:
         Raises:
             RuntimeError: If API credentials are missing or AI call fails
         """
-        api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        base_url = os.environ.get("ANTHROPIC_BASE_URL")
-        model = os.environ.get("ANTHROPIC_MODEL") or os.environ.get(
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "glm-5-turbo",
-        )
+        selection = resolve_runtime_ai_selection("standard")
+        api_key = selection.api_key
+        base_url = selection.base_url
+        model = selection.model
 
         if not api_key:
-            raise RuntimeError("ANTHROPIC_AUTH_TOKEN not set. Configure AI credentials in .env file or settings.")
+            raise RuntimeError("QUORVEX_LLM_API_KEY not set. Configure AI credentials in .env file or settings.")
         if not base_url:
-            raise RuntimeError("ANTHROPIC_BASE_URL not set. Configure AI credentials in .env file or settings.")
+            raise RuntimeError("QUORVEX_LLM_BASE_URL not set. Configure AI credentials in .env file or settings.")
 
         prompt = cls._build_extraction_prompt(content, spec_name)
 
@@ -144,17 +143,15 @@ class AISpecSplitter:
         Raises:
             RuntimeError: If API credentials are missing or AI call fails
         """
-        api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        base_url = os.environ.get("ANTHROPIC_BASE_URL")
-        model = os.environ.get("ANTHROPIC_MODEL") or os.environ.get(
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "glm-5-turbo",
-        )
+        selection = resolve_runtime_ai_selection("standard")
+        api_key = selection.api_key
+        base_url = selection.base_url
+        model = selection.model
 
         if not api_key:
-            raise RuntimeError("ANTHROPIC_AUTH_TOKEN not set. Configure AI credentials in .env file or settings.")
+            raise RuntimeError("QUORVEX_LLM_API_KEY not set. Configure AI credentials in .env file or settings.")
         if not base_url:
-            raise RuntimeError("ANTHROPIC_BASE_URL not set. Configure AI credentials in .env file or settings.")
+            raise RuntimeError("QUORVEX_LLM_BASE_URL not set. Configure AI credentials in .env file or settings.")
 
         prompt = cls._build_grouping_prompt(content, spec_name)
 

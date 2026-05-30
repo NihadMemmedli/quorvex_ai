@@ -128,17 +128,80 @@ async def start_custom_workflow_run(run_id: str) -> TemporalWorkflowStart:
     )
 
 
-async def start_agent_run_workflow(run_id: str) -> TemporalWorkflowStart:
+async def start_agent_run_workflow(
+    run_id: str,
+    *,
+    task_queue: str | None = None,
+) -> TemporalWorkflowStart:
     """Start a durable Temporal workflow for a standalone agent run."""
     client = await _connect_client()
     workflow_id = f"agent-run-{run_id}"
+    selected_task_queue = task_queue or settings.temporal_workflow_task_queue
     handle = await client.start_workflow(
         "AgentRunWorkflow",
         {"run_id": run_id},
         id=workflow_id,
-        task_queue=settings.temporal_workflow_task_queue,
+        task_queue=selected_task_queue,
     )
-    logger.info("Started agent run Temporal workflow %s for %s", workflow_id, run_id)
+    logger.info(
+        "Started agent run Temporal workflow %s for %s task_queue=%s",
+        workflow_id,
+        run_id,
+        selected_task_queue,
+    )
+    return TemporalWorkflowStart(
+        workflow_id=workflow_id, run_id=getattr(handle, "first_execution_run_id", None)
+    )
+
+
+async def start_test_run_workflow(
+    run_id: str,
+    payload: dict[str, Any],
+    *,
+    task_queue: str | None = None,
+) -> TemporalWorkflowStart:
+    """Start a durable Temporal workflow for a classic test run."""
+    client = await _connect_client()
+    workflow_id = f"test-run-{run_id}"
+    selected_task_queue = task_queue or settings.temporal_browser_workflow_task_queue
+    handle = await client.start_workflow(
+        "TestRunWorkflow",
+        {"run_id": run_id, **payload},
+        id=workflow_id,
+        task_queue=selected_task_queue,
+    )
+    logger.info(
+        "Started test run Temporal workflow %s for %s task_queue=%s",
+        workflow_id,
+        run_id,
+        selected_task_queue,
+    )
+    return TemporalWorkflowStart(
+        workflow_id=workflow_id, run_id=getattr(handle, "first_execution_run_id", None)
+    )
+
+
+async def start_autopilot_workflow(
+    session_id: str,
+    *,
+    task_queue: str | None = None,
+) -> TemporalWorkflowStart:
+    """Start a durable Temporal workflow for an AutoPilot session."""
+    client = await _connect_client()
+    workflow_id = f"autopilot-{session_id}"
+    selected_task_queue = task_queue or settings.temporal_browser_workflow_task_queue
+    handle = await client.start_workflow(
+        "AutoPilotWorkflow",
+        {"session_id": session_id},
+        id=workflow_id,
+        task_queue=selected_task_queue,
+    )
+    logger.info(
+        "Started AutoPilot Temporal workflow %s for %s task_queue=%s",
+        workflow_id,
+        session_id,
+        selected_task_queue,
+    )
     return TemporalWorkflowStart(
         workflow_id=workflow_id, run_id=getattr(handle, "first_execution_run_id", None)
     )
@@ -174,6 +237,20 @@ async def signal_agent_run_workflow(workflow_id: str, signal_name: str, *args) -
     await handle.signal(signal_name, *args)
 
 
+async def signal_test_run_workflow(workflow_id: str, signal_name: str, *args) -> None:
+    """Signal a running classic test run Temporal workflow."""
+    client = await _connect_client()
+    handle = client.get_workflow_handle(workflow_id)
+    await handle.signal(signal_name, *args)
+
+
+async def signal_autopilot_workflow(workflow_id: str, signal_name: str, *args) -> None:
+    """Signal a running AutoPilot Temporal workflow."""
+    client = await _connect_client()
+    handle = client.get_workflow_handle(workflow_id)
+    await handle.signal(signal_name, *args)
+
+
 async def signal_autonomous_mission_workflow(
     workflow_id: str, signal_name: str
 ) -> None:
@@ -197,6 +274,50 @@ async def describe_agent_run_workflow(workflow_id: str) -> dict:
     return {
         "available": True,
         "workflow_id": workflow_id,
+        "workflow_status": (
+            getattr(status, "name", str(status)) if status is not None else None
+        ),
+        "error": None,
+    }
+
+
+async def describe_test_run_workflow(workflow_id: str) -> dict:
+    """Return lightweight Temporal workflow status for classic test runs."""
+    client = await _connect_client()
+    handle = client.get_workflow_handle(workflow_id)
+    try:
+        description = await handle.describe()
+    except Exception as exc:  # pragma: no cover - requires live Temporal
+        raise TemporalUnavailableError(
+            f"Workflow {workflow_id} is not reachable: {exc}"
+        ) from exc
+    status = getattr(description, "status", None)
+    return {
+        "available": True,
+        "workflow_id": workflow_id,
+        "workflow_type": "TestRunWorkflow",
+        "workflow_status": (
+            getattr(status, "name", str(status)) if status is not None else None
+        ),
+        "error": None,
+    }
+
+
+async def describe_autopilot_workflow(workflow_id: str) -> dict[str, Any]:
+    """Return lightweight Temporal workflow status for AutoPilot sessions."""
+    client = await _connect_client()
+    handle = client.get_workflow_handle(workflow_id)
+    try:
+        description = await handle.describe()
+    except Exception as exc:  # pragma: no cover - requires live Temporal
+        raise TemporalUnavailableError(
+            f"Workflow {workflow_id} is not reachable: {exc}"
+        ) from exc
+    status = getattr(description, "status", None)
+    return {
+        "available": True,
+        "workflow_id": workflow_id,
+        "workflow_type": "AutoPilotWorkflow",
         "workflow_status": (
             getattr(status, "name", str(status)) if status is not None else None
         ),
@@ -267,6 +388,59 @@ async def check_agent_run_temporal_health() -> dict[str, Any]:
     }
 
 
+async def check_autopilot_temporal_health() -> dict[str, Any]:
+    """Return Temporal readiness for AutoPilot browser workflows."""
+    worker_contract: dict[str, Any] = {}
+    try:
+        from orchestrator.services.custom_workflow_worker import get_worker_contract
+
+        worker_contract = get_worker_contract()
+    except Exception as exc:
+        worker_contract = {"contract_error": str(exc)}
+
+    task_queue = settings.temporal_browser_workflow_task_queue
+    base = {
+        "address": settings.temporal_address,
+        "namespace": settings.temporal_namespace,
+        "task_queue": task_queue,
+        "workflow_type": "AutoPilotWorkflow",
+        "worker_module": "orchestrator.services.custom_workflow_worker",
+        "worker_contract": worker_contract,
+    }
+
+    try:
+        await _connect_client()
+    except TemporalUnavailableError as exc:
+        return {**base, "available": False, "status": "unavailable", "error": str(exc)}
+
+    task_queue_status: dict[str, Any] = {}
+    try:
+        task_queue_status = await describe_temporal_task_queue(task_queue)
+    except TemporalUnavailableError as exc:
+        return {
+            **base,
+            "available": False,
+            "status": "degraded",
+            "task_queue_status": task_queue_status,
+            "error": str(exc),
+        }
+
+    has_workers = bool(task_queue_status.get("has_workflow_pollers")) and bool(
+        task_queue_status.get("has_activity_pollers")
+    )
+    return {
+        **base,
+        "available": has_workers,
+        "status": "healthy" if has_workers else "degraded",
+        "task_queue_status": task_queue_status,
+        "worker_pollers": {
+            "workflow": task_queue_status.get("workflow_pollers", 0),
+            "activity": task_queue_status.get("activity_pollers", 0),
+        },
+        "error": None if has_workers else "No Temporal worker pollers are active for AutoPilot browser workflows.",
+    }
+
+
 async def describe_autonomous_mission_workflow(workflow_id: str) -> dict:
     """Return lightweight Temporal workflow status for mission health checks."""
     client = await _connect_client()
@@ -311,7 +485,7 @@ async def check_custom_workflow_temporal_health() -> dict[str, Any]:
             "address": settings.temporal_address,
             "namespace": settings.temporal_namespace,
             "task_queue": settings.temporal_workflow_task_queue,
-            "workflow_types": ["CustomWorkflowRun", "AgentRunWorkflow", "DomainJobWorkflow"],
+            "workflow_types": ["CustomWorkflowRun", "AgentRunWorkflow", "DomainJobWorkflow", "TestRunWorkflow"],
             "worker_module": "orchestrator.services.custom_workflow_worker",
             "task_queue_status": task_queue_status,
             "error": str(exc),
@@ -323,7 +497,7 @@ async def check_custom_workflow_temporal_health() -> dict[str, Any]:
         "address": settings.temporal_address,
         "namespace": settings.temporal_namespace,
         "task_queue": settings.temporal_workflow_task_queue,
-        "workflow_types": ["CustomWorkflowRun", "AgentRunWorkflow", "DomainJobWorkflow"],
+        "workflow_types": ["CustomWorkflowRun", "AgentRunWorkflow", "DomainJobWorkflow", "TestRunWorkflow"],
         "worker_module": "orchestrator.services.custom_workflow_worker",
         "task_queue_status": task_queue_status,
         "error": None if has_workers else "No Temporal worker pollers are active for custom workflows.",
@@ -344,7 +518,7 @@ async def get_custom_workflow_temporal_diagnostics(
             f"Workflow {workflow_id} history is not reachable: {exc}"
         ) from exc
 
-    activities = _parse_activity_history(events)
+    activities = _merge_pending_activity_history(_parse_activity_history(events), description)
     workflow_meta = _parse_workflow_history(events, description)
     failures = [activity for activity in activities if activity.get("last_failure")]
     retry_count = sum(
@@ -389,7 +563,7 @@ async def get_agent_run_temporal_diagnostics(
             f"Workflow {workflow_id} history is not reachable: {exc}"
         ) from exc
 
-    activities = _parse_activity_history(events)
+    activities = _merge_pending_activity_history(_parse_activity_history(events), description)
     workflow_meta = _parse_workflow_history(events, description)
     workflow_task_failures = _parse_workflow_task_failures(events)
     failures = [activity for activity in activities if activity.get("last_failure")]
@@ -416,6 +590,138 @@ async def get_agent_run_temporal_diagnostics(
         "temporal_namespace": getattr(settings, "temporal_namespace", None),
         "task_queue": getattr(settings, "temporal_workflow_task_queue", None),
         "workflow_type": "AgentRunWorkflow",
+        "task_queue_status": task_queue_status,
+        "workflow_status": (
+            getattr(status, "name", str(status)) if status is not None else None
+        ),
+        "activities": activities,
+        "workflow_task_failures": workflow_task_failures,
+        "summary": {
+            "total_activities": len(activities),
+            "failed_activities": len(
+                [
+                    activity
+                    for activity in activities
+                    if activity.get("status") == "failed"
+                ]
+            ),
+            "retry_count": retry_count,
+            "last_failure": failures[-1]["last_failure"] if failures else None,
+            "last_workflow_task_failure": (
+                workflow_task_failures[-1]["message"]
+                if workflow_task_failures
+                else None
+            ),
+        },
+        **workflow_meta,
+    }
+
+
+async def get_autopilot_temporal_diagnostics(
+    workflow_id: str, run_id: str | None = None
+) -> dict[str, Any]:
+    """Return parsed Temporal activity history for an AutoPilot session."""
+    client = await _connect_client()
+    handle = client.get_workflow_handle(workflow_id, run_id=run_id)
+    try:
+        description = await handle.describe()
+        events = [event async for event in handle.fetch_history_events()]
+    except Exception as exc:  # pragma: no cover - requires live Temporal
+        raise TemporalUnavailableError(
+            f"Workflow {workflow_id} history is not reachable: {exc}"
+        ) from exc
+
+    activities = _merge_pending_activity_history(_parse_activity_history(events), description)
+    workflow_meta = _parse_workflow_history(events, description)
+    workflow_task_failures = _parse_workflow_task_failures(events)
+    failures = [activity for activity in activities if activity.get("last_failure")]
+    retry_count = sum(
+        max(0, int(activity.get("attempt_count") or 0) - 1) for activity in activities
+    )
+    status = getattr(description, "status", None)
+    worker_registration_failure = _autopilot_worker_registration_failure(
+        workflow_task_failures
+    )
+    diagnostic_error = worker_registration_failure if worker_registration_failure and not activities else None
+    task_queue_status: dict[str, Any] = {}
+    try:
+        task_queue_status = await describe_temporal_task_queue(settings.temporal_browser_workflow_task_queue)
+    except TemporalUnavailableError as exc:
+        diagnostic_error = diagnostic_error or str(exc)
+    return {
+        "available": not diagnostic_error,
+        "temporal_available": True,
+        "error": diagnostic_error,
+        "temporal_error": diagnostic_error,
+        "temporal_namespace": getattr(settings, "temporal_namespace", None),
+        "task_queue": getattr(settings, "temporal_browser_workflow_task_queue", None),
+        "workflow_type": "AutoPilotWorkflow",
+        "task_queue_status": task_queue_status,
+        "workflow_status": (
+            getattr(status, "name", str(status)) if status is not None else None
+        ),
+        "activities": activities,
+        "workflow_task_failures": workflow_task_failures,
+        "summary": {
+            "total_activities": len(activities),
+            "failed_activities": len(
+                [
+                    activity
+                    for activity in activities
+                    if activity.get("status") == "failed"
+                ]
+            ),
+            "retry_count": retry_count,
+            "last_failure": failures[-1]["last_failure"] if failures else None,
+            "last_workflow_task_failure": (
+                workflow_task_failures[-1]["message"]
+                if workflow_task_failures
+                else None
+            ),
+        },
+        **workflow_meta,
+    }
+
+
+async def get_test_run_temporal_diagnostics(
+    workflow_id: str, run_id: str | None = None
+) -> dict[str, Any]:
+    """Return parsed Temporal activity history for a classic browser test run."""
+    client = await _connect_client()
+    handle = client.get_workflow_handle(workflow_id, run_id=run_id)
+    try:
+        description = await handle.describe()
+        events = [event async for event in handle.fetch_history_events()]
+    except Exception as exc:  # pragma: no cover - requires live Temporal
+        raise TemporalUnavailableError(
+            f"Workflow {workflow_id} history is not reachable: {exc}"
+        ) from exc
+
+    activities = _merge_pending_activity_history(_parse_activity_history(events), description)
+    workflow_meta = _parse_workflow_history(events, description)
+    workflow_task_failures = _parse_workflow_task_failures(events)
+    failures = [activity for activity in activities if activity.get("last_failure")]
+    retry_count = sum(
+        max(0, int(activity.get("attempt_count") or 0) - 1) for activity in activities
+    )
+    status = getattr(description, "status", None)
+    worker_registration_failure = _test_run_worker_registration_failure(
+        workflow_task_failures
+    )
+    diagnostic_error = worker_registration_failure if worker_registration_failure and not activities else None
+    task_queue_status: dict[str, Any] = {}
+    try:
+        task_queue_status = await describe_temporal_task_queue(settings.temporal_browser_workflow_task_queue)
+    except TemporalUnavailableError as exc:
+        diagnostic_error = diagnostic_error or str(exc)
+    return {
+        "available": not diagnostic_error,
+        "temporal_available": True,
+        "error": diagnostic_error,
+        "temporal_error": diagnostic_error,
+        "temporal_namespace": getattr(settings, "temporal_namespace", None),
+        "task_queue": getattr(settings, "temporal_browser_workflow_task_queue", None),
+        "workflow_type": "TestRunWorkflow",
         "task_queue_status": task_queue_status,
         "workflow_status": (
             getattr(status, "name", str(status)) if status is not None else None
@@ -571,6 +877,104 @@ def _parse_activity_history(events: list[Any]) -> list[dict[str, Any]]:
     return [activities[event_id] for event_id in order if event_id in activities]
 
 
+def _merge_pending_activity_history(
+    activities: list[dict[str, Any]],
+    description: Any | None,
+) -> list[dict[str, Any]]:
+    """Overlay live pending activity state from WorkflowExecutionDescription.
+
+    Temporal history records an activity as scheduled and later completed/failed,
+    but a currently running long activity can remain scheduled in history while
+    its live state is only exposed through DescribeWorkflowExecution.
+    """
+    raw_description = getattr(description, "raw_description", None)
+    pending_activities = list(getattr(raw_description, "pending_activities", []) or [])
+    if not pending_activities:
+        return activities
+
+    by_activity_id = {
+        str(activity.get("activity_id")): activity
+        for activity in activities
+        if activity.get("activity_id") is not None
+    }
+    merged = list(activities)
+    terminal_statuses = {"completed", "failed", "timed_out", "cancelled"}
+
+    for pending in pending_activities:
+        activity_id = str(getattr(pending, "activity_id", "") or "")
+        if not activity_id:
+            continue
+
+        activity = by_activity_id.get(activity_id)
+        if activity is None:
+            activity_type = getattr(getattr(pending, "activity_type", None), "name", None)
+            activity = {
+                **_unknown_activity(0),
+                "activity_id": activity_id,
+                "activity_type": activity_type or "unknown",
+                "scheduled_event_id": None,
+            }
+            by_activity_id[activity_id] = activity
+            merged.append(activity)
+
+        state_name = _pending_activity_state_name(getattr(pending, "state", None))
+        live_status = _pending_activity_status(state_name)
+        if live_status and str(activity.get("status") or "") not in terminal_statuses:
+            activity["status"] = live_status
+            activity["last_event_type"] = state_name
+
+        last_started_at = _time_value_to_iso(getattr(pending, "last_started_time", None))
+        if last_started_at:
+            activity["started_at"] = activity.get("started_at") or last_started_at
+            activity["last_started_at"] = last_started_at
+
+        attempt = int(getattr(pending, "attempt", 0) or 0)
+        if attempt:
+            activity["attempt_count"] = max(int(activity.get("attempt_count") or 0), attempt)
+
+        worker_identity = getattr(pending, "last_worker_identity", None)
+        if worker_identity:
+            activity["last_worker_identity"] = worker_identity
+
+        next_attempt_at = _time_value_to_iso(getattr(pending, "next_attempt_schedule_time", None))
+        if next_attempt_at:
+            activity["next_attempt_schedule_at"] = next_attempt_at
+
+        last_failure = getattr(pending, "last_failure", None)
+        if last_failure:
+            activity.update(_failure_details(last_failure))
+
+    return merged
+
+
+def _pending_activity_status(state_name: str | None) -> str | None:
+    if not state_name:
+        return None
+    normalized = state_name.lower()
+    if normalized.endswith("_started"):
+        return "started"
+    if normalized.endswith("_cancel_requested"):
+        return "cancel_requested"
+    if normalized.endswith("_scheduled"):
+        return "scheduled"
+    return normalized.replace("pending_activity_state_", "")
+
+
+def _pending_activity_state_name(value: Any | None) -> str | None:
+    if value is None or value == 0:
+        return None
+    name = getattr(value, "name", None)
+    if name:
+        return str(name)
+    try:
+        from temporalio.api.enums.v1 import PendingActivityState
+
+        return PendingActivityState.Name(int(value))
+    except Exception:
+        text = str(value)
+        return None if text == "0" else text
+
+
 def _parse_workflow_task_failures(events: list[Any]) -> list[dict[str, Any]]:
     failures: list[dict[str, Any]] = []
     for event in events:
@@ -612,6 +1016,34 @@ def _agent_run_worker_registration_failure(
         message = str(failure.get("message") or "")
         if "AgentRunWorkflow" in message and "not registered" in message:
             return "Temporal worker does not have AgentRunWorkflow registered. Restart the custom workflow worker with the latest code."
+    return None
+
+
+def _autopilot_worker_registration_failure(
+    failures: list[dict[str, Any]],
+) -> str | None:
+    for failure in reversed(failures):
+        message = str(failure.get("message") or "")
+        if "AutoPilotWorkflow" in message and "not registered" in message:
+            return (
+                "Temporal worker does not have AutoPilotWorkflow registered on the "
+                "browser workflow task queue. Restart the custom browser workflow worker "
+                "with the latest code."
+            )
+    return None
+
+
+def _test_run_worker_registration_failure(
+    failures: list[dict[str, Any]],
+) -> str | None:
+    for failure in reversed(failures):
+        message = str(failure.get("message") or "")
+        if "TestRunWorkflow" in message and "not registered" in message:
+            return (
+                "Temporal worker does not have TestRunWorkflow registered on the "
+                "browser workflow task queue. Restart the custom browser workflow worker "
+                "with the latest code."
+            )
     return None
 
 
@@ -674,6 +1106,13 @@ def _time_value_to_iso(value: Any | None) -> str | None:
     if not value:
         return None
     try:
+        if (
+            hasattr(value, "seconds")
+            and hasattr(value, "nanos")
+            and int(getattr(value, "seconds", 0) or 0) == 0
+            and int(getattr(value, "nanos", 0) or 0) == 0
+        ):
+            return None
         if isinstance(value, datetime):
             if value.tzinfo is None:
                 value = value.replace(tzinfo=timezone.utc)

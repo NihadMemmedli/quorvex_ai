@@ -289,7 +289,7 @@ Output format:
         try:
             from utils.agent_runner import AgentRunner
 
-            runner = AgentRunner(timeout_seconds=300, allowed_tools=[], log_tools=False)
+            runner = AgentRunner(timeout_seconds=300, allowed_tools=[], log_tools=False, model_tier="standard")
             result = await runner.run(prompt)
             if not result.success or not result.output.strip():
                 logger.warning(f"AI test idea generation failed: {result.error}")

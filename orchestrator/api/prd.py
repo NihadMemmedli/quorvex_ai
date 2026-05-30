@@ -90,11 +90,6 @@ def capture_output_to_file(log_path: Path):
 # Track running background generation tasks
 _running_generations: dict[int, asyncio.Task] = {}
 
-from orchestrator.workflows.native_generator import NativeGenerator
-from orchestrator.workflows.native_healer import NativeHealer
-from orchestrator.workflows.native_planner import NativePlanner, SpecGenerationError
-from orchestrator.workflows.prd_processor import PRDProcessor
-
 # Base directory (project root, one level up from orchestrator/)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -201,6 +196,8 @@ async def upload_prd(
 
             with open(temp_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
+
+            from orchestrator.workflows.prd_processor import PRDProcessor
 
             processor = PRDProcessor()
             # Use filename stem if project not provided
@@ -453,6 +450,7 @@ async def _run_generation_task(
     # Use generation_id as the resource request ID
     request_id = f"gen_{generation_id}"
     pool = await get_browser_pool()
+    from orchestrator.workflows.native_planner import NativePlanner, SpecGenerationError
 
     try:
         _update_generation_status(generation_id, "queued", "waiting", "Waiting for available browser slot...")
@@ -604,6 +602,8 @@ async def generate_plan(project_id: str, request: GenerateRequest, background_ta
         }
     else:
         # All features: Run synchronously (legacy behavior)
+        from orchestrator.workflows.native_planner import NativePlanner, SpecGenerationError
+
         planner = NativePlanner(project_id=project_id)
         try:
             paths = await planner.generate_all_specs(prd_project=project_id, target_url=request.target_url)
@@ -818,6 +818,8 @@ class GenerateTestRequest(BaseModel):
 @router.post("/generate-test")
 async def generate_test(request: GenerateTestRequest):
     """Generate Playwright test from spec using live browser validation"""
+    from orchestrator.workflows.native_generator import NativeGenerator
+
     generator = NativeGenerator()
     try:
         path = await generator.generate_test(spec_path=request.spec_path, target_url=request.target_url)
@@ -834,6 +836,8 @@ async def generate_test(request: GenerateTestRequest):
 @router.post("/heal-test")
 async def heal_test(request: HealRequest):
     """Heal a failing test"""
+    from orchestrator.workflows.native_healer import NativeHealer
+
     healer = NativeHealer()
     try:
         fixed_code = await healer.heal_test(request.test_path, request.error_log)
@@ -867,6 +871,8 @@ async def run_test(request: RunTestRequest):
 
     if not test_path.exists():
         raise HTTPException(status_code=404, detail=f"Test file not found: {request.test_path}")
+
+    from orchestrator.workflows.native_healer import NativeHealer
 
     healer = NativeHealer()
     attempts = 0

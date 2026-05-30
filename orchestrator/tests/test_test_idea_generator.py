@@ -35,6 +35,7 @@ from orchestrator.workflows.spec_scenario_builder import (
 from orchestrator.workflows.test_idea_generator import (
     TestIdeaGenerator as _TestIdeaGenerator,
 )
+from orchestrator.utils import agent_runner as _agent_runner_module
 from orchestrator.utils.agent_runner import AgentRunner as _AgentRunner
 
 
@@ -939,6 +940,49 @@ async def test_explorer_accepts_verified_browser_output(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_explorer_accepts_artifact_verified_output_when_queue_telemetry_missing(
+    tmp_path, monkeypatch
+):
+    explorer = _AppExplorer(project_id="test")
+    explorer.output_dir = tmp_path
+
+    async def fake_run(_prompt, session_dir, _config):
+        explorer._last_agent_stats = {
+            "tool_calls": 0,
+            "browser_tool_calls": 0,
+            "successful_browser_tool_calls": 0,
+        }
+        artifacts = session_dir / "artifacts"
+        artifacts.mkdir(parents=True, exist_ok=True)
+        (artifacts / "page-2026-05-26T18-54-44-400Z.yml").write_text("url: https://example.com/custom-start\n")
+        (session_dir / "live-step-001.png").write_bytes(b"png")
+        return """
+```json
+{"page": {"url": "https://example.com/custom-start", "title": "Custom Start", "pageType": "content", "purpose": "Shows custom content", "keyElements": ["Custom page"], "actions": ["Open details"], "forms": [], "links": []}}
+```
+```json
+{"flow": {"name": "Custom Start Browse", "category": "navigation", "steps": [{"action": "navigate", "element": "URL", "value": "https://example.com/custom-start"}], "startUrl": "https://example.com/custom-start", "endUrl": "https://example.com/custom-start", "outcome": "Custom page opened", "isSuccessPath": true}}
+```
+```json
+{"summary": {"pagesDiscovered": 1, "flowsDiscovered": 1, "elementsInteracted": 1, "apiEndpointsFound": 0, "issuesFound": 0, "status": "completed"}}
+```
+"""
+
+    monkeypatch.setattr(explorer, "_run_explorer_agent", fake_run)
+
+    result = await explorer.explore(
+        _ExplorationConfig(entry_url="https://example.com/custom-start"),
+        "session_artifact_verified",
+    )
+
+    assert result.status == "completed"
+    assert result.pages_discovered == 1
+    assert [flow.name for flow in result.flows] == ["Custom Start Browse"]
+    assert explorer._last_agent_stats["successful_browser_tool_calls"] >= 2
+    assert explorer._last_agent_stats["artifact_browser_evidence"] >= 2
+
+
+@pytest.mark.asyncio
 async def test_explorer_marks_budget_stopped_output_as_partial_success(
     tmp_path, monkeypatch
 ):
@@ -1127,7 +1171,72 @@ def test_agent_runner_attaches_strict_local_mcp_config(tmp_path, monkeypatch):
 
     kwargs = runner._claude_options_kwargs()
     assert kwargs["mcp_servers"] == tmp_path / ".mcp.json"
-    assert kwargs["strict_mcp_config"] is True
+    if _agent_runner_module.AgentRunner._claude_options_accepts("strict_mcp_config"):
+        assert kwargs["strict_mcp_config"] is True
+    else:
+        assert kwargs["extra_args"]["strict-mcp-config"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_tracks_nested_sdk_tool_events(monkeypatch):
+    events = [
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "mcp__playwright-test__browser_navigate",
+                        "input": {"url": "https://example.com"},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "content": "navigated",
+                    }
+                ]
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "done"}]},
+        },
+    ]
+
+    async def fake_query(*args, **kwargs):
+        for event in events:
+            yield event
+
+    progress = []
+    tools = []
+    monkeypatch.setattr(_agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(_agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(_agent_runner_module, "AGENT_QUEUE_AVAILABLE", False)
+
+    runner = _AgentRunner(
+        allowed_tools=[],
+        log_tools=False,
+        on_tool_use=lambda name, tool_input: tools.append((name, tool_input)),
+        on_progress=progress.append,
+        inject_memory=False,
+        capture_memory=False,
+    )
+
+    result = await runner.run("browse")
+
+    assert result.success is True
+    assert result.output == "done"
+    assert [call.name for call in result.tool_calls] == ["mcp__playwright-test__browser_navigate"]
+    assert tools == [("mcp__playwright-test__browser_navigate", {"url": "https://example.com"})]
+    assert progress[-1]["tool_calls"] == 1
+    assert progress[-1]["browser_tool_calls"] == 1
+    assert progress[-1]["last_tool"] == "mcp__playwright-test__browser_navigate"
 
 
 def test_autopilot_resume_metadata_allows_failed_phase_retry(monkeypatch):

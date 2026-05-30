@@ -40,9 +40,57 @@ interface AutoPilotSession {
     completed_at: string | null;
     instructions: string | null;
     config: Record<string, any>;
+    temporal_workflow_id: string | null;
+    temporal_run_id: string | null;
+    temporal?: AutoPilotTemporal | null;
     can_resume: boolean;
     resume_reason: string | null;
     failed_phase: string | null;
+}
+
+interface AutoPilotTemporalActivity {
+    activity_id?: string | null;
+    activity_type?: string | null;
+    status?: string | null;
+    attempt_count?: number | null;
+    scheduled_at?: string | null;
+    started_at?: string | null;
+    last_started_at?: string | null;
+    completed_at?: string | null;
+    last_event_type?: string | null;
+    last_worker_identity?: string | null;
+    next_attempt_schedule_at?: string | null;
+    failure_type?: string | null;
+    failure_message?: string | null;
+    last_failure?: string | null;
+}
+
+interface AutoPilotTemporal {
+    temporal_workflow_id?: string | null;
+    temporal_run_id?: string | null;
+    temporal_ui_url?: string | null;
+    temporal_ui_workflow_url?: string | null;
+    temporal_namespace?: string | null;
+    task_queue?: string | null;
+    workflow_type?: string | null;
+    available?: boolean;
+    workflow_status?: string | null;
+    activities?: AutoPilotTemporalActivity[];
+    workflow_task_failures?: Array<{ message?: string | null; at?: string | null }>;
+    task_queue_status?: {
+        workflow_pollers?: number;
+        activity_pollers?: number;
+        has_workflow_pollers?: boolean;
+        has_activity_pollers?: boolean;
+    } | Record<string, any>;
+    summary?: {
+        total_activities?: number;
+        failed_activities?: number;
+        retry_count?: number;
+        last_failure?: string | null;
+        last_workflow_task_failure?: string | null;
+    };
+    error?: string | null;
 }
 
 interface Phase {
@@ -152,10 +200,16 @@ interface AutoPilotLiveState {
     tool_calls: number;
     browser_tool_calls: number;
     interactions: number;
-    recent_tools: Array<{ name?: string; label?: string; at?: string }>;
+    capture_count: number;
+    latest_capture_at: string | null;
+    activity_source: string | null;
+    recent_tools: Array<{ name?: string; label?: string; at?: string; source?: string; artifact?: string }>;
     artifacts: AutoPilotLiveArtifact[];
     latest_image: AutoPilotLiveArtifact | null;
     updated_at: string | null;
+    browser_runtime: string | null;
+    live_view_available: boolean;
+    runtime_message: string | null;
 }
 
 // ============ STATUS COLORS ============
@@ -1481,7 +1535,7 @@ export default function AutoPilotPage() {
         if (!session || !activeSessionId) return null;
 
         const browserPhase = liveState?.phase === 'exploration' || liveState?.phase === 'test_generation';
-        const active = Boolean(liveState?.active && browserPhase && session.status === 'running');
+        const active = Boolean(liveState?.active && browserPhase && ['running', 'awaiting_input'].includes(session.status));
         const recentTools = liveState?.recent_tools || [];
         const latestImage = liveState?.latest_image;
         const title = liveState?.activity_label || (
@@ -1533,6 +1587,11 @@ export default function AutoPilotPage() {
                         { label: 'Current Tool', value: liveState?.last_tool_label || liveState?.current_stage || '-' },
                         { label: 'Tool Calls', value: liveState?.tool_calls ?? 0 },
                         { label: 'Browser Actions', value: liveState?.browser_tool_calls ?? liveState?.interactions ?? 0 },
+                        { label: 'Captures', value: liveState?.capture_count ?? liveState?.artifacts?.filter(a => a.type === 'image').length ?? 0 },
+                        { label: 'Runtime', value: liveState?.browser_runtime || '-' },
+                        { label: 'Live View', value: liveState?.live_view_available ? 'Available' : 'Unavailable' },
+                        { label: 'Exploration', value: liveState?.exploration_session_id || '-' },
+                        { label: 'Run / Task', value: liveState?.run_id || (liveState?.test_task_id ? `Test ${liveState.test_task_id}` : '-') },
                     ].map(item => (
                         <div key={item.label}>
                             <div style={{
@@ -1554,7 +1613,16 @@ export default function AutoPilotPage() {
 
                 {browserPhase ? (
                     <div style={{ padding: '1rem 1.25rem', display: 'grid', gap: '1rem' }}>
-                        <LiveBrowserView runId={activeSessionId} isActive={active} showHeader />
+                        <LiveBrowserView
+                            runId={activeSessionId}
+                            isActive={active}
+                            showHeader
+                            artifacts={liveState?.artifacts || []}
+                            latestImage={latestImage}
+                            statusMessage={liveState?.message}
+                            liveViewAvailable={Boolean(liveState?.live_view_available)}
+                            runtimeMessage={liveState?.runtime_message}
+                        />
 
                         <div style={{
                             display: 'grid',
@@ -1590,6 +1658,9 @@ export default function AutoPilotPage() {
                                             >
                                                 <span style={{ color: dark.text, fontWeight: 650, overflowWrap: 'anywhere' }}>
                                                     {tool.label || tool.name || 'Tool'}
+                                                    {tool.source === 'artifact' && (
+                                                        <span style={{ color: dark.textMuted, fontWeight: 600 }}> · artifact</span>
+                                                    )}
                                                 </span>
                                                 <span style={{ color: dark.textMuted, whiteSpace: 'nowrap' }}>
                                                     {formatTime(tool.at)}
@@ -1599,7 +1670,11 @@ export default function AutoPilotPage() {
                                     </div>
                                 ) : (
                                     <div style={{ padding: '1rem', color: dark.textMuted, fontSize: '0.85rem' }}>
-                                        {liveState?.message || 'Waiting for browser activity.'}
+                                        {active
+                                            ? (liveState?.activity_source === 'artifact_fallback'
+                                                ? 'Captures are arriving. Waiting for live tool telemetry.'
+                                                : 'Waiting for worker/tool heartbeat.')
+                                            : (liveState?.message || 'Waiting for browser activity.')}
                                     </div>
                                 )}
                             </div>
@@ -1671,9 +1746,231 @@ export default function AutoPilotPage() {
         );
     };
 
+    const renderTemporalObservabilityPanel = () => {
+        if (!session) return null;
+
+        const temporal = session.temporal || null;
+        const workflowId = temporal?.temporal_workflow_id || session.temporal_workflow_id;
+        const runId = temporal?.temporal_run_id || session.temporal_run_id;
+        const taskQueueStatus = (temporal?.task_queue_status || {}) as NonNullable<AutoPilotTemporal['task_queue_status']>;
+        const summary = (temporal?.summary || {}) as NonNullable<AutoPilotTemporal['summary']>;
+        const activities = temporal?.activities || [];
+        const workflowUrl = temporal?.temporal_ui_workflow_url || temporal?.temporal_ui_url;
+
+        if (!workflowId && !temporal?.error) return null;
+
+        const statItems = [
+            { label: 'Workflow', value: temporal?.workflow_status || (workflowId ? 'Scheduled' : 'Not linked'), color: dark.primary },
+            { label: 'Activities', value: summary.total_activities ?? 0, color: dark.cyan },
+            { label: 'Retries', value: summary.retry_count ?? 0, color: dark.warning },
+            { label: 'Failures', value: summary.failed_activities ?? 0, color: dark.danger },
+            {
+                label: 'Pollers',
+                value: `${taskQueueStatus.workflow_pollers ?? 0}/${taskQueueStatus.activity_pollers ?? 0}`,
+                color: taskQueueStatus.has_workflow_pollers && taskQueueStatus.has_activity_pollers ? dark.success : dark.warning,
+            },
+        ];
+
+        return (
+            <div style={{ ...cardStyle, marginBottom: '1rem', padding: 0, overflow: 'hidden' }}>
+                <div style={{
+                    padding: '1rem 1.25rem',
+                    borderBottom: `1px solid ${dark.border}`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '1rem',
+                    flexWrap: 'wrap',
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0 }}>
+                        <Activity size={18} style={{ color: dark.violet, flexShrink: 0 }} />
+                        <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 700, color: dark.text }}>Temporal Observability</div>
+                            <div style={{ color: dark.textMuted, fontSize: '0.82rem', overflowWrap: 'anywhere' }}>
+                                {workflowId || 'No workflow id'}
+                            </div>
+                        </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+                        {temporal?.workflow_status && <StatusBadge status={temporal.workflow_status.toLowerCase()} />}
+                        {workflowUrl && (
+                            <a
+                                href={workflowUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '0.4rem',
+                                    color: dark.primary,
+                                    fontSize: '0.82rem',
+                                    fontWeight: 700,
+                                    textDecoration: 'none',
+                                }}
+                            >
+                                <ExternalLink size={14} />
+                                Open Temporal UI
+                            </a>
+                        )}
+                    </div>
+                </div>
+
+                <div style={{ padding: '1rem 1.25rem', display: 'grid', gap: '1rem' }}>
+                    <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
+                        gap: '0.75rem',
+                    }}>
+                        {statItems.map(item => (
+                            <div
+                                key={item.label}
+                                style={{
+                                    border: `1px solid ${dark.border}`,
+                                    borderRadius: '8px',
+                                    padding: '0.75rem',
+                                    background: dark.panelAlt,
+                                }}
+                            >
+                                <div style={{
+                                    color: dark.textMuted,
+                                    fontSize: '0.68rem',
+                                    fontWeight: 700,
+                                    textTransform: 'uppercase',
+                                    letterSpacing: '0.04em',
+                                    marginBottom: '0.35rem',
+                                }}>
+                                    {item.label}
+                                </div>
+                                <div style={{ color: item.color, fontSize: '1.1rem', fontWeight: 800, overflowWrap: 'anywhere' }}>
+                                    {item.value}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+                        gap: '0.75rem',
+                        color: dark.textSecondary,
+                        fontSize: '0.82rem',
+                    }}>
+                        {[
+                            ['Run', runId || '-'],
+                            ['Namespace', temporal?.temporal_namespace || '-'],
+                            ['Task Queue', temporal?.task_queue || '-'],
+                            ['Workflow Type', temporal?.workflow_type || '-'],
+                        ].map(([label, value]) => (
+                            <div key={label} style={{ border: `1px solid ${dark.border}`, borderRadius: '8px', padding: '0.75rem' }}>
+                                <div style={{ color: dark.textMuted, fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                                    {label}
+                                </div>
+                                <div style={{ marginTop: '0.3rem', color: dark.text, fontWeight: 650, overflowWrap: 'anywhere' }}>{value}</div>
+                            </div>
+                        ))}
+                    </div>
+
+                    {(temporal?.error || summary.last_failure || summary.last_workflow_task_failure) && (
+                        <div style={{
+                            border: `1px solid ${dark.warningBorder}`,
+                            borderRadius: '8px',
+                            padding: '0.8rem 1rem',
+                            background: dark.warningSoft,
+                            color: dark.warning,
+                            fontSize: '0.82rem',
+                            display: 'grid',
+                            gap: '0.4rem',
+                        }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontWeight: 800 }}>
+                                <AlertTriangle size={15} />
+                                Temporal diagnostics
+                            </div>
+                            {temporal?.error && <div style={{ overflowWrap: 'anywhere' }}>{temporal.error}</div>}
+                            {summary.last_failure && <div style={{ overflowWrap: 'anywhere' }}>{summary.last_failure}</div>}
+                            {summary.last_workflow_task_failure && <div style={{ overflowWrap: 'anywhere' }}>{summary.last_workflow_task_failure}</div>}
+                        </div>
+                    )}
+
+                    <div style={{ border: `1px solid ${dark.border}`, borderRadius: '8px', overflow: 'hidden' }}>
+                        <div style={{
+                            padding: '0.75rem 1rem',
+                            borderBottom: `1px solid ${dark.border}`,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '0.75rem',
+                            fontWeight: 700,
+                            fontSize: '0.88rem',
+                        }}>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <Clock size={15} style={{ color: dark.primary }} />
+                                Temporal Activities
+                            </span>
+                            <span style={{ color: dark.textMuted, fontSize: '0.76rem' }}>
+                                {activities.length} observed
+                            </span>
+                        </div>
+                        {activities.length > 0 ? (
+                            activities.slice(-5).reverse().map((activity, i) => {
+                                const activityTime = activity.completed_at || activity.started_at || activity.last_started_at || activity.scheduled_at;
+                                const worker = activity.last_worker_identity;
+                                return (
+                                    <div
+                                        key={`${activity.activity_id || activity.activity_type || 'activity'}-${i}`}
+                                        style={{
+                                            padding: '0.75rem 1rem',
+                                            borderBottom: i === Math.min(activities.length, 5) - 1 ? 'none' : `1px solid ${dark.border}`,
+                                            display: 'grid',
+                                            gridTemplateColumns: 'minmax(0, 1fr) auto',
+                                            gap: '0.75rem',
+                                            fontSize: '0.82rem',
+                                        }}
+                                    >
+                                        <div style={{ minWidth: 0 }}>
+                                            <div style={{ color: dark.text, fontWeight: 700, overflowWrap: 'anywhere' }}>
+                                                {activity.activity_type || activity.activity_id || 'Activity'}
+                                            </div>
+                                            {worker && (
+                                                <div style={{ color: dark.textMuted, marginTop: '0.25rem', overflowWrap: 'anywhere', fontSize: '0.76rem' }}>
+                                                    worker {worker}
+                                                </div>
+                                            )}
+                                            {(activity.failure_message || activity.last_failure) && (
+                                                <div style={{ color: dark.danger, marginTop: '0.25rem', overflowWrap: 'anywhere' }}>
+                                                    {activity.failure_message || activity.last_failure}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div style={{ textAlign: 'right', color: dark.textMuted, whiteSpace: 'nowrap' }}>
+                                            <div>{activity.status || activity.last_event_type || '-'}</div>
+                                            <div>{activity.attempt_count ? `attempt ${activity.attempt_count}` : formatTime(activityTime)}</div>
+                                            {activity.attempt_count && activityTime && (
+                                                <div>{formatTime(activityTime)}</div>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })
+                        ) : (
+                            <div style={{ padding: '1rem', color: dark.textMuted, fontSize: '0.85rem' }}>
+                                Waiting for activity history from Temporal.
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
     // -- Stats Cards --
     const renderStatsCards = () => {
         if (!session) return null;
+        const captureCount = liveState?.capture_count ?? liveState?.artifacts?.filter(a => a.type === 'image').length ?? 0;
+        const hasExplorationEvidence = session.status === 'failed'
+            && session.current_phase === 'exploration'
+            && captureCount > 0
+            && session.total_pages_discovered === 0
+            && session.total_flows_discovered === 0;
         const stats = [
             { label: 'Pages', value: session.total_pages_discovered, icon: Globe, color: dark.primary },
             { label: 'Flows', value: session.total_flows_discovered, icon: Zap, color: dark.warning },
@@ -1681,44 +1978,64 @@ export default function AutoPilotPage() {
             { label: 'Specs', value: session.total_specs_generated, icon: List, color: dark.cyan },
             { label: 'Passed', value: session.total_tests_passed, icon: CheckCircle2, color: dark.success },
             { label: 'Failed', value: session.total_tests_failed, icon: AlertTriangle, color: dark.danger },
+            ...(captureCount > 0
+                ? [{ label: 'Captures', value: captureCount, icon: ImageIcon, color: hasExplorationEvidence ? dark.warning : dark.primary }]
+                : []),
             { label: 'Coverage', value: `${Math.round(session.coverage_percentage)}%`, icon: Target, color: dark.success },
         ];
 
         return (
-            <div className="autopilot-stats-grid">
-                {stats.map(stat => {
-                    const Icon = stat.icon;
-                    return (
-                        <div key={stat.label} style={{
-                            ...cardStyle,
-                            padding: '1rem',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            gap: '0.5rem',
-                        }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                                <Icon size={14} style={{ color: stat.color }} />
+            <>
+                {hasExplorationEvidence && (
+                    <div style={{
+                        ...cardStyle,
+                        marginBottom: '1rem',
+                        padding: '0.9rem 1rem',
+                        borderColor: dark.warningBorder,
+                        background: dark.warningSoft,
+                        color: dark.warning,
+                        fontSize: '0.85rem',
+                        fontWeight: 700,
+                        overflowWrap: 'anywhere',
+                    }}>
+                        Browser evidence was captured, but no pages or flows were persisted. {session.error_message || liveState?.message || 'Exploration failed before statistics were finalized.'}
+                    </div>
+                )}
+                <div className="autopilot-stats-grid">
+                    {stats.map(stat => {
+                        const Icon = stat.icon;
+                        return (
+                            <div key={stat.label} style={{
+                                ...cardStyle,
+                                padding: '1rem',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '0.5rem',
+                            }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                    <Icon size={14} style={{ color: stat.color }} />
+                                    <span style={{
+                                        fontSize: '0.7rem',
+                                        fontWeight: 700,
+                                        color: dark.textMuted,
+                                        textTransform: 'uppercase',
+                                        letterSpacing: '0.04em',
+                                    }}>
+                                        {stat.label}
+                                    </span>
+                                </div>
                                 <span style={{
-                                    fontSize: '0.7rem',
+                                    fontSize: '1.5rem',
                                     fontWeight: 700,
-                                    color: dark.textMuted,
-                                    textTransform: 'uppercase',
-                                    letterSpacing: '0.04em',
+                                    color: stat.color,
                                 }}>
-                                    {stat.label}
+                                    {stat.value}
                                 </span>
                             </div>
-                            <span style={{
-                                fontSize: '1.5rem',
-                                fontWeight: 700,
-                                color: stat.color,
-                            }}>
-                                {stat.value}
-                            </span>
-                        </div>
-                    );
-                })}
-            </div>
+                        );
+                    })}
+                </div>
+            </>
         );
     };
 
@@ -2640,6 +2957,11 @@ export default function AutoPilotPage() {
                 {/* Live Browser */}
                 <div className="animate-in stagger-3">
                     {renderLiveBrowserPanel()}
+                </div>
+
+                {/* Temporal Observability */}
+                <div className="animate-in stagger-3">
+                    {renderTemporalObservabilityPanel()}
                 </div>
 
                 {/* Stats Cards */}

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 # Add both project root and orchestrator package dir for package and standalone execution.
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -55,6 +56,11 @@ from orchestrator.ai.validation import (
 from utils.agent_runner import AgentRunner, get_default_timeout
 from utils.agent_tool_allowlists import get_agent_allowed_tools
 from utils.json_utils import extract_json_from_markdown
+from utils.playwright_mcp import (
+    build_playwright_mcp_server_config,
+    is_package_version_at_least,
+    write_playwright_mcp_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +79,7 @@ class ExplorationConfig:
     exclude_patterns: list[str] = field(default_factory=list)  # URL patterns to skip
     focus_areas: list[str] = field(default_factory=list)  # Areas to prioritize
     additional_instructions: str | None = None  # Custom instructions for AI
+    model_tier: str = "tool_deep"
 
 
 @dataclass
@@ -302,11 +309,25 @@ class AppExplorer:
             successful_browser_tool_calls = int(
                 self._last_agent_stats.get("successful_browser_tool_calls", 0) or 0
             )
+            artifact_browser_evidence = self._count_browser_artifact_evidence(session_dir)
             if successful_browser_tool_calls <= 0:
-                raise RuntimeError(
-                    "Explorer did not perform successful live browser exploration. "
-                    "Check Playwright MCP startup, allowed tools, and agent configuration."
+                if artifact_browser_evidence <= 0:
+                    raise RuntimeError(
+                        "Explorer did not perform successful live browser exploration. "
+                        "Check Playwright MCP startup, allowed tools, and agent configuration."
+                    )
+                logger.warning(
+                    "Explorer tool telemetry was empty, but %s browser artifact(s) were captured; "
+                    "using artifact evidence for verification.",
+                    artifact_browser_evidence,
                 )
+                successful_browser_tool_calls = artifact_browser_evidence
+                self._last_agent_stats["successful_browser_tool_calls"] = artifact_browser_evidence
+                self._last_agent_stats["browser_tool_calls"] = max(
+                    int(self._last_agent_stats.get("browser_tool_calls", 0) or 0),
+                    artifact_browser_evidence,
+                )
+                self._last_agent_stats["artifact_browser_evidence"] = artifact_browser_evidence
 
             if self._is_unverified_agent_output(raw_output):
                 raise RuntimeError(
@@ -927,22 +948,25 @@ At the END of exploration, output a summary with COUNTS ONLY (do NOT re-output f
 
 ### Step 1: Map the Site (Phase 0 — MANDATORY)
 1. Call `browser_navigate` to go to: {config.entry_url}
-2. Handle any popups (cookie consent, language selector) immediately
-3. Call `browser_snapshot` to see the page structure
-4. Call `browser_evaluate` with `() => Array.from(document.querySelectorAll('a[href]')).map(a => ({{text: a.textContent.trim().slice(0,50), href: a.href}})).filter(a => a.href && !a.href.startsWith('javascript:') && a.text)` to extract ALL links
-5. Hover over only the top-level navigation items that are visible and likely to reveal important app areas
-6. Build a CANDIDATE_QUEUE from discovered links, grouped by page type/path template
-7. Pick representative candidates. Do not attempt to crawl every link.
+2. Call `browser_wait_for` with 5s
+3. Call `browser_take_screenshot` with filename `live-step-001.png` so the dashboard has immediate visual evidence
+4. Handle any popups (cookie consent, language selector) immediately
+5. Call `browser_snapshot` to see the page structure
+6. Call `browser_evaluate` with `() => Array.from(document.querySelectorAll('a[href]')).map(a => ({{text: a.textContent.trim().slice(0,50), href: a.href}})).filter(a => a.href && !a.href.startsWith('javascript:') && a.text)` to extract ALL links
+7. Hover over only the top-level navigation items that are visible and likely to reveal important app areas
+8. Build a CANDIDATE_QUEUE from discovered links, grouped by page type/path template
+9. Pick representative candidates. Do not attempt to crawl every link.
 
 ### Step 2: Explore Representative Pages
 For each selected URL in CANDIDATE_QUEUE:
 1. Navigate to it, wait for load (`browser_wait_for` with 5s)
-2. Take snapshot + extract links (add new ones to queue)
-3. Output one `page` JSON record that captures the page purpose, key elements, available forms/actions, and important links
-4. Interact with important elements (forms, buttons, search)
-5. Call `browser_network_requests` after interactions to find API calls
-6. Record transition for each interaction
-7. **Check: Did this complete a user flow? If yes, output a flow record NOW**
+2. Call `browser_take_screenshot` with the next `live-step-XXX.png` filename before analysis
+3. Take snapshot + extract links (add new ones to queue)
+4. Output one `page` JSON record that captures the page purpose, key elements, available forms/actions, and important links
+5. Interact with important elements (forms, buttons, search)
+6. Call `browser_network_requests` after interactions to find API calls
+7. Record transition for each interaction
+8. **Check: Did this complete a user flow? If yes, output a flow record NOW**
 
 ### Step 3: Budget-Aware Loop
 After each interaction, report your status and check the loop contract:
@@ -994,27 +1018,13 @@ When stopping, output any missing flow records you can infer from observed page 
         # Use a schema-correct Playwright MCP package. Older 0.0.28 builds expose
         # connected MCP servers with invalid/empty tool schemas, which makes
         # Claude silently lose access to browser tools.
-        headless = os.environ.get("HEADLESS", "true").lower() != "false"
-        mcp_server = self._build_playwright_mcp_server_config()
-        mcp_args = list(mcp_server["args"])
-        if headless:
-            mcp_args.append("--headless")
-
-        mcp_config = {
-            "mcpServers": {
-                "playwright-test": {
-                    "command": mcp_server["command"],
-                    "args": mcp_args,
-                }
-            }
-        }
-        mcp_config_path = session_dir / ".mcp.json"
-        mcp_config_path.write_text(json.dumps(mcp_config, indent=2))
+        runtime = write_playwright_mcp_config(run_dir=session_dir, server_name="playwright-test")
         logger.info(
-            "   Created MCP config (headless=%s, command=%s): %s",
-            headless,
-            mcp_server["command"],
-            mcp_config_path,
+            "   Created MCP config (runtime=%s, live=%s, command=%s): %s",
+            runtime["browser_runtime"],
+            runtime["live_view_available"],
+            runtime["mcp_command"],
+            runtime["mcp_config_path"],
         )
 
         # Copy .claude/ agents directory for isolation
@@ -1060,6 +1070,7 @@ When stopping, output any missing flow records you can infer from observed page 
                 owner_type=self.owner_type,
                 owner_id=self.owner_id,
                 owner_label=self.owner_label,
+                model_tier=config.model_tier or "tool_deep",
             )
 
             result = await runner.run(prompt)
@@ -1139,56 +1150,12 @@ When stopping, output any missing flow records you can infer from observed page 
         valid JSON schemas for tools. Environment overrides keep Docker/custom
         installs configurable.
         """
-        override = os.environ.get("PLAYWRIGHT_MCP_COMMAND")
-        if override:
-            args = os.environ.get("PLAYWRIGHT_MCP_ARGS", "--browser chromium").split()
-            return {"command": override, "args": args}
-
-        project_root = Path(__file__).resolve().parent.parent.parent
-        local_bins = [
-            project_root / "node_modules" / ".bin" / "playwright-mcp",
-            project_root / "node_modules" / ".bin" / "mcp-server-playwright",
-        ]
-        local_pkg = (
-            project_root / "node_modules" / "@playwright" / "mcp" / "package.json"
-        )
-        min_version = os.environ.get("PLAYWRIGHT_MCP_MIN_VERSION", "0.0.75")
-        if self._is_package_version_at_least(local_pkg, min_version):
-            for local_bin in local_bins:
-                if local_bin.exists():
-                    return {
-                        "command": str(local_bin),
-                        "args": ["--browser", "chromium"],
-                    }
-
-        package = os.environ.get(
-            "PLAYWRIGHT_MCP_PACKAGE", f"@playwright/mcp@{min_version}"
-        )
-        return {"command": "npx", "args": ["-y", package, "--browser", "chromium"]}
+        return build_playwright_mcp_server_config(Path(__file__).resolve().parent.parent.parent)
 
     @staticmethod
     def _is_package_version_at_least(package_json: Path, minimum: str) -> bool:
         """Return whether package_json declares a semver version >= minimum."""
-        if not package_json.exists():
-            return False
-        try:
-            package = json.loads(package_json.read_text())
-        except (OSError, json.JSONDecodeError):
-            return False
-
-        def parse(version: str) -> tuple[int, int, int]:
-            core = str(version).split("-", 1)[0]
-            parts = []
-            for part in core.split(".")[:3]:
-                try:
-                    parts.append(int(part))
-                except ValueError:
-                    parts.append(0)
-            while len(parts) < 3:
-                parts.append(0)
-            return tuple(parts)  # type: ignore[return-value]
-
-        return parse(str(package.get("version", "0.0.0"))) >= parse(minimum)
+        return is_package_version_at_least(package_json, minimum)
 
     def _is_unverified_agent_output(self, raw_output: str | None) -> bool:
         """Detect agent output that explicitly admits it was not live browser exploration."""
@@ -1208,6 +1175,23 @@ When stopping, output any missing flow records you can infer from observed page 
             "based on stable information",
         ]
         return any(indicator in lowered for indicator in indicators)
+
+    @staticmethod
+    def _count_browser_artifact_evidence(session_dir: Path) -> int:
+        """Count MCP/browser artifacts that prove the explorer interacted with a live page."""
+        artifact_dir = session_dir / "artifacts"
+        evidence = 0
+        if artifact_dir.exists():
+            evidence += len(list(artifact_dir.glob("page-*.yml")))
+            evidence += len(list(artifact_dir.glob("console-*.log")))
+        evidence += len(list(session_dir.glob("live-step-*.png")))
+        memory_artifact = session_dir / "browser-memory-observations.jsonl"
+        if memory_artifact.exists():
+            try:
+                evidence += sum(1 for line in memory_artifact.read_text().splitlines() if line.strip())
+            except OSError:
+                evidence += 1
+        return evidence
 
     @staticmethod
     def _is_budget_stop(error: str | None) -> bool:
@@ -2077,6 +2061,7 @@ Return ONLY a JSON array of flow objects. No other text.
                 allowed_tools=[],  # No tools needed - pure text analysis
                 log_tools=False,
                 session_dir=None,
+                model_tier="standard",
             )
 
             result = await runner.run(prompt)
@@ -2195,6 +2180,7 @@ Return ONLY a JSON array of flow objects. No other text.
                 allowed_tools=[],
                 log_tools=False,
                 session_dir=None,
+                model_tier="standard",
             )
 
             result = await runner.run(prompt)
@@ -2332,6 +2318,7 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
                     allowed_tools=[],  # Pure text analysis
                     log_tools=False,
                     session_dir=None,
+                    model_tier="standard",
                 )
 
                 result = await runner.run(prompt)

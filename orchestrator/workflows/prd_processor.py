@@ -18,6 +18,7 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 import logging
 
 from orchestrator.utils.string_utils import slugify
+from orchestrator.services.ai_runtime_config import resolve_model, resolve_openai_chat_model
 
 logger = logging.getLogger(__name__)
 
@@ -368,7 +369,9 @@ Ignore generic intro text. Focus on functional requirements.
 Return ONLY valid JSON."""
 
         response = client.chat.completions.create(
-            model="gpt-5.2", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"}
+            model=resolve_openai_chat_model(default="gpt-5.2"),
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
         )
 
         try:
@@ -438,7 +441,9 @@ Each feature must have:
         logger.info(f"Merging {len(raw_features)} features with LLM (prompt size: {len(features_json)} chars)...")
 
         response = client.chat.completions.create(
-            model="gpt-5.2", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"}
+            model=resolve_openai_chat_model(default="gpt-5.2"),
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
         )
 
         try:
@@ -465,7 +470,7 @@ Each feature must have:
             # Truncate very long texts to avoid token limits
             batch = [t[:8000] for t in batch]
 
-            response = client.embeddings.create(model="text-embedding-3-small", input=batch)
+            response = client.embeddings.create(model=resolve_model("embedding"), input=batch)
             batch_embeddings = [item.embedding for item in response.data]
             all_embeddings.extend(batch_embeddings)
 

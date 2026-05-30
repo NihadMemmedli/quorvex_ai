@@ -139,6 +139,7 @@ class MyStage:
         runner = AgentRunner(
             agent_name="my-agent",
             timeout_seconds=get_default_timeout("GENERATOR_TIMEOUT_SECONDS"),
+            model_tier="standard",
         )
 
         result_text = ""

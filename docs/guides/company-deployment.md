@@ -87,9 +87,9 @@ Edit `.env.prod` with production values:
 
 ```bash title=".env.prod"
 # Required secrets -- generate secure values
-ANTHROPIC_AUTH_TOKEN=<your-api-key>
-ANTHROPIC_BASE_URL=<your-endpoint>
-ANTHROPIC_DEFAULT_SONNET_MODEL=<model-id>
+QUORVEX_LLM_API_KEY=<your-api-key>
+QUORVEX_LLM_BASE_URL=<your-endpoint>
+QUORVEX_LLM_STANDARD_MODEL=<model-id>
 JWT_SECRET_KEY=$(openssl rand -hex 32)
 POSTGRES_PASSWORD=$(openssl rand -base64 32)
 MINIO_ROOT_PASSWORD=$(openssl rand -base64 32)

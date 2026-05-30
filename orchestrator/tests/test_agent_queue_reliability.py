@@ -11,7 +11,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.services.agent_queue import AgentQueue, AgentTask, AgentTaskStatus
-from orchestrator.services.agent_worker import AgentWorker, BrowserObservationRecorder
+from orchestrator.services.agent_worker import AgentWorker, BrowserObservationRecorder, _event_tool_uses
+from orchestrator.utils.agent_runner import AgentRunner
 from orchestrator.utils import browser_cleanup
 
 
@@ -148,6 +149,8 @@ def test_agent_task_round_trips_execution_telemetry():
         owner_type="autopilot",
         owner_id="autopilot-test",
         owner_label="AutoPilot test",
+        browser_slot_parent_owner_type="test_run",
+        browser_slot_parent_run_id="run-parent",
         telemetry={
             "worker_id": "worker-1",
             "tool_calls": 4,
@@ -170,11 +173,89 @@ def test_agent_task_round_trips_execution_telemetry():
     assert restored.owner_type == "autopilot"
     assert restored.owner_id == "autopilot-test"
     assert restored.owner_label == "AutoPilot test"
+    assert restored.browser_slot_parent_owner_type == "test_run"
+    assert restored.browser_slot_parent_run_id == "run-parent"
     assert restored.telemetry["worker_id"] == "worker-1"
     assert restored.telemetry["tool_calls"] == 4
     assert restored.telemetry["interactions"] == 2
     assert restored.telemetry["assistant_messages"] == 3
     assert restored.telemetry["error_type"] == "timeout"
+
+
+def test_agent_worker_detects_browser_capable_tasks():
+    worker = AgentWorker.__new__(AgentWorker)
+
+    assert worker._task_requires_browser_slot(
+        AgentTask(id="agent-browser-owner", prompt="run", owner_type="autonomous_work_item")
+    )
+    assert worker._task_requires_browser_slot(
+        AgentTask(id="agent-browser-tool", prompt="run", allowed_tools=["browser_navigate"], tools=["browser_click"])
+    )
+    assert not worker._task_requires_browser_slot(
+        AgentTask(id="agent-no-tools", prompt="run", allowed_tools=["Read"], tools=[])
+    )
+
+
+def test_agent_worker_detects_parent_test_run_browser_slot():
+    worker = AgentWorker.__new__(AgentWorker)
+
+    task = AgentTask(
+        id="agent-child",
+        prompt="run",
+        allowed_tools=["mcp__playwright-test__browser_snapshot"],
+        browser_slot_parent_owner_type="test_run",
+        browser_slot_parent_run_id="run-123",
+    )
+
+    assert worker._parent_test_run_slot_id(task) == "run-123"
+
+
+def test_agent_runner_uses_parent_test_run_as_queue_owner(monkeypatch):
+    monkeypatch.setenv("BROWSER_SLOT_PARENT_OWNER_TYPE", "test_run")
+    monkeypatch.setenv("BROWSER_SLOT_PARENT_RUN_ID", "run-123")
+    runner = AgentRunner(owner_type=None, owner_id=None)
+
+    assert runner._queue_owner_metadata() == (
+        "test_run",
+        "run-123",
+        "Test run run-123",
+        "test_run",
+        "run-123",
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_worker_reuses_active_parent_test_run_slot():
+    worker = AgentWorker.__new__(AgentWorker)
+    task = AgentTask(
+        id="agent-child",
+        prompt="run",
+        browser_slot_parent_owner_type="test_run",
+        browser_slot_parent_run_id="run-123",
+    )
+
+    class _Pool:
+        async def is_running(self, request_id):
+            return request_id == "run-123"
+
+    assert await worker._can_reuse_parent_browser_slot(task, _Pool()) is True
+
+
+@pytest.mark.asyncio
+async def test_agent_worker_does_not_reuse_inactive_parent_test_run_slot():
+    worker = AgentWorker.__new__(AgentWorker)
+    task = AgentTask(
+        id="agent-child",
+        prompt="run",
+        browser_slot_parent_owner_type="test_run",
+        browser_slot_parent_run_id="run-123",
+    )
+
+    class _Pool:
+        async def is_running(self, request_id):
+            return False
+
+    assert await worker._can_reuse_parent_browser_slot(task, _Pool()) is False
 
 
 def test_autopilot_process_tree_matches_session_root_and_cleanup_descendants(monkeypatch):
@@ -225,6 +306,90 @@ def test_autopilot_process_tree_matches_session_root_and_cleanup_descendants(mon
         101,
         102,
         103,
+    }
+
+
+def test_test_run_process_tree_matches_run_root_and_cleanup_descendants(monkeypatch):
+    current_pid = 999
+    run_id = "2026-05-30_07-23-08"
+    processes = {
+        current_pid: browser_cleanup.ProcessInfo(
+            pid=current_pid,
+            ppid=1,
+            comm="python",
+            args=f"python unrelated.py {run_id}",
+        ),
+        101: browser_cleanup.ProcessInfo(
+            pid=101,
+            ppid=1,
+            comm="claude",
+            args=f"claude --mcp-config /app/runs/{run_id}/.mcp.json",
+        ),
+        102: browser_cleanup.ProcessInfo(
+            pid=102,
+            ppid=101,
+            comm="node",
+            args="node playwright run-test-mcp-server",
+        ),
+        103: browser_cleanup.ProcessInfo(
+            pid=103,
+            ppid=102,
+            comm="chromium",
+            args="/usr/bin/chromium --type=renderer",
+        ),
+        104: browser_cleanup.ProcessInfo(
+            pid=104,
+            ppid=101,
+            comm="ffmpeg",
+            args="ffmpeg -f x11grab :99",
+        ),
+        105: browser_cleanup.ProcessInfo(
+            pid=105,
+            ppid=101,
+            comm="python",
+            args="python unrelated-child.py",
+        ),
+        201: browser_cleanup.ProcessInfo(
+            pid=201,
+            ppid=1,
+            comm="claude",
+            args="claude --mcp-config /app/runs/2026-05-30_07-32-00/.mcp.json",
+        ),
+    }
+
+    monkeypatch.setattr(browser_cleanup, "_process_table", lambda: processes)
+    monkeypatch.setattr(browser_cleanup.os, "getpid", lambda: current_pid)
+
+    assert browser_cleanup.find_test_run_process_tree(run_id) == {101, 102, 103, 104}
+
+
+def test_test_run_ids_are_extracted_from_cleanup_processes(monkeypatch):
+    processes = {
+        101: browser_cleanup.ProcessInfo(
+            pid=101,
+            ppid=1,
+            comm="claude",
+            args="claude --mcp-config /app/runs/2026-05-30_07-23-08/.mcp.json",
+        ),
+        102: browser_cleanup.ProcessInfo(
+            pid=102,
+            ppid=1,
+            comm="python",
+            args="python /app/orchestrator/cli.py /app/runs/2026-05-30_07-32-00/spec.md",
+        ),
+        103: browser_cleanup.ProcessInfo(
+            pid=103,
+            ppid=1,
+            comm="python",
+            args="python unrelated.py 2026-05-30_07-40-00",
+        ),
+    }
+
+    monkeypatch.setattr(browser_cleanup, "_process_table", lambda: processes)
+
+    assert browser_cleanup.find_test_run_ids_in_processes() == {
+        "2026-05-30_07-23-08",
+        "2026-05-30_07-32-00",
     }
 
 
@@ -389,6 +554,51 @@ async def test_cancel_running_task_sets_cancel_requested_and_keeps_worker_member
     assert cancelled.status == AgentTaskStatus.CANCEL_REQUESTED
     assert await redis.sismember(queue.RUNNING_KEY, task.id) is True
     assert await queue.is_cancelled(task.id) is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_tasks_for_test_run_cancels_owner_and_parent_tasks():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    owned = AgentTask(
+        id="agent-owned",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        owner_type="test_run",
+        owner_id="run-123",
+    )
+    parented = AgentTask(
+        id="agent-parented",
+        prompt="inspect",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-1",
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+        browser_slot_parent_owner_type="test_run",
+        browser_slot_parent_run_id="run-123",
+    )
+    unrelated = AgentTask(
+        id="agent-unrelated",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        owner_type="test_run",
+        owner_id="run-456",
+    )
+    for task in (owned, parented, unrelated):
+        await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, owned.id)
+    await redis.rpush(queue.QUEUE_KEY, unrelated.id)
+    await redis.sadd(queue.RUNNING_KEY, parented.id)
+
+    summary = await queue.cancel_tasks_for_test_run("run-123")
+
+    assert summary["matched"] == 2
+    assert summary["cancelled"] == 2
+    assert set(summary["task_ids"]) == {"agent-owned", "agent-parented"}
+    assert (await queue.get_task(owned.id)).status == AgentTaskStatus.CANCELLED
+    assert (await queue.get_task(parented.id)).status == AgentTaskStatus.CANCEL_REQUESTED
+    assert (await queue.get_task(unrelated.id)).status == AgentTaskStatus.QUEUED
+    assert redis.lists[queue.QUEUE_KEY] == [unrelated.id]
+    assert await redis.sismember(queue.RUNNING_KEY, parented.id) is True
 
 
 @pytest.mark.asyncio
@@ -634,6 +844,76 @@ def test_worker_effective_elapsed_excludes_paused_duration():
     elapsed = worker._effective_elapsed_seconds("agent-running", start)
 
     assert 14.0 <= elapsed <= 16.0
+
+
+def test_worker_extracts_nested_tool_use_stream_items():
+    event = {
+        "type": "assistant",
+        "message": {
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Inspecting the page",
+                },
+                {
+                    "type": "tool_result",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_nested",
+                            "name": "mcp__playwright-test__browser_snapshot",
+                            "input": {},
+                        }
+                    ],
+                },
+            ],
+        },
+    }
+
+    assert [item["name"] for item in _event_tool_uses(event)] == [
+        "mcp__playwright-test__browser_snapshot"
+    ]
+
+
+def test_worker_telemetry_preserves_execution_tool_counts():
+    worker = AgentWorker.__new__(AgentWorker)
+    worker.worker_id = "worker-1"
+    worker._progress_lock = threading.RLock()
+    worker._current_progress = {
+        "tool_calls": 0,
+        "browser_tool_calls": 0,
+        "interactions": 0,
+        "last_tool": "",
+        "tool_names": [],
+        "chars": 120,
+    }
+    worker._last_execution_telemetry = {
+        "tool_calls": 3,
+        "browser_tool_calls": 2,
+        "interactions": 1,
+        "last_tool": "mcp__playwright-test__browser_click",
+        "tool_names": [
+            "mcp__playwright-test__browser_navigate",
+            "mcp__playwright-test__browser_snapshot",
+            "mcp__playwright-test__browser_click",
+        ],
+    }
+    task = AgentTask(
+        id="task-1",
+        prompt="prompt",
+        agent_type="AgentRunner",
+        operation_type="run",
+        allowed_tools=["mcp__playwright-test__browser_click"],
+        tools=["mcp__playwright-test__browser_click"],
+    )
+
+    telemetry = worker._build_task_telemetry(task, attempt=1)
+
+    assert telemetry["tool_calls"] == 3
+    assert telemetry["browser_tool_calls"] == 2
+    assert telemetry["interactions"] == 1
+    assert telemetry["last_tool"] == "mcp__playwright-test__browser_click"
+    assert telemetry["tool_names"][-1] == "mcp__playwright-test__browser_click"
 
 
 def test_browser_observation_recorder_persists_snapshot_result(tmp_path):

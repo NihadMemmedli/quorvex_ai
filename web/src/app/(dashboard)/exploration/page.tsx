@@ -149,12 +149,14 @@ type DetailTabType = 'live' | 'pages' | 'flows' | 'elements' | 'apis' | 'issues'
 interface AgentRun {
     id: string;
     agent_type: string;
+    runtime?: string;
     status: string;
     created_at: string;
     config: any;
     summary?: string;
     result?: any;
     project_id?: string;
+    progress?: any;
     artifacts?: ExplorationArtifact[];
 }
 
@@ -365,8 +367,24 @@ export default function DiscoveryPage() {
     const [isSavingFlow, setIsSavingFlow] = useState(false);
     const [deleteFlowModalOpen, setDeleteFlowModalOpen] = useState(false);
     const [isDeletingFlow, setIsDeletingFlow] = useState(false);
+    const [agentRuntime, setAgentRuntime] = useState('claude_sdk');
+    const [hermesReachable, setHermesReachable] = useState(false);
+    const [hermesStatusMessage, setHermesStatusMessage] = useState('');
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
     const hasRunningRef = useRef(false);
+
+    const fetchRuntimeSettings = async () => {
+        try {
+            const res = await fetch(`${API_BASE}/settings`);
+            if (!res.ok) return;
+            const data = await res.json();
+            setAgentRuntime(data.agent_runtime || 'claude_sdk');
+            setHermesReachable(Boolean(data.hermes_reachable));
+            setHermesStatusMessage(data.hermes_status_message || '');
+        } catch (e) {
+            console.error('Failed to fetch runtime settings', e);
+        }
+    };
 
     // ============ SPEC GEN JOB POLLING ============
     const startJobPolling = useCallback((jobId: string) => {
@@ -1108,6 +1126,10 @@ export default function DiscoveryPage() {
     };
 
     useEffect(() => {
+        fetchRuntimeSettings();
+    }, []);
+
+    useEffect(() => {
         if (activeTab === 'explorer') {
             fetchHistory();
             fetchAgentSessions();
@@ -1478,6 +1500,7 @@ export default function DiscoveryPage() {
                     test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
                     focus_areas: focusAreasList.length > 0 ? focusAreasList : undefined,
                     excluded_patterns: excludedPatternsList.length > 0 ? excludedPatternsList : undefined,
+                    runtime: agentRuntime,
                     project_id: currentProject?.id
                 };
 
@@ -2120,6 +2143,26 @@ export default function DiscoveryPage() {
                             <h3 style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '1rem' }}>Explorer Agent Configuration</h3>
 
                             <div style={{ marginBottom: '1rem' }}>
+                                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Agent Runtime</label>
+                                <select
+                                    value={agentRuntime}
+                                    onChange={e => setAgentRuntime(e.target.value)}
+                                    style={{
+                                        width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem',
+                                        border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
+                                    }}
+                                >
+                                    <option value="claude_sdk">Claude SDK</option>
+                                    <option value="hermes">Hermes</option>
+                                </select>
+                                {agentRuntime === 'hermes' && (
+                                    <p style={{ fontSize: '0.75rem', color: hermesReachable ? 'var(--success)' : 'var(--warning)', margin: '0.5rem 0 0', lineHeight: 1.4 }}>
+                                        {hermesReachable ? 'Hermes API is reachable.' : hermesStatusMessage || 'Hermes API is not reachable yet.'}
+                                    </p>
+                                )}
+                            </div>
+
+                            <div style={{ marginBottom: '1rem' }}>
                                 <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Target URL</label>
                                 <input
                                     type="text"
@@ -2360,6 +2403,10 @@ export default function DiscoveryPage() {
                                         runId={activeRun.id}
                                         isActive={true}
                                         showHeader
+                                        statusMessage={activeRun.progress?.message}
+                                        liveViewAvailable={Boolean(activeRun.progress?.live_view_available)}
+                                        runtimeMessage={activeRun.progress?.runtime_message}
+                                        vncUrl={activeRun.progress?.vnc_url}
                                     />
                                     <ExplorerAgentCapturePanel activeRun={activeRun} mode="live" />
                                     <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', textAlign: 'center' }}>

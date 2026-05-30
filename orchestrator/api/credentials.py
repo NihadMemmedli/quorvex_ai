@@ -172,7 +172,15 @@ def get_env_credentials() -> dict[str, str]:
             pattern in key for pattern in ["_USERNAME", "_PASSWORD", "_EMAIL", "_TOKEN", "_API_KEY", "_SECRET"]
         ):
             # Skip internal API keys
-            if key in ["ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "JWT_SECRET_KEY"]:
+            if key in [
+                "QUORVEX_LLM_API_KEY",
+                "QUORVEX_LLM_API_KEYS",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_AUTH_TOKENS",
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "JWT_SECRET_KEY",
+            ]:
                 continue
             credentials[key] = value
 

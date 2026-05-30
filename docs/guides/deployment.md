@@ -86,7 +86,7 @@ Edit `.env.prod` with production values:
 
 ```bash
 # Required secrets
-ANTHROPIC_AUTH_TOKEN=your-production-token
+QUORVEX_LLM_API_KEY=your-production-token
 JWT_SECRET_KEY=$(openssl rand -hex 32)
 POSTGRES_PASSWORD=$(openssl rand -hex 16)
 MINIO_ROOT_PASSWORD=$(openssl rand -hex 16)

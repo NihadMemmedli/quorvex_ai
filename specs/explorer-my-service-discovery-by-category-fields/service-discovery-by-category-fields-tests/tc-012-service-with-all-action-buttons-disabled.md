@@ -1,0 +1,42 @@
+# Test: Service with All Action Buttons Disabled
+
+## Source
+Generated from: `service-discovery-by-category-fields.md`
+Test ID: TC-012
+Category: Categories Observed (15 total)
+
+## Scope
+This test plan covers the "Sahələr" (Fields) tab on the Services page of my.gov.az. It validates browsing 15 service categories, navigating into category detail pages with service listings, viewing individual service detail pages, and interacting with regulation documents, e-gov links, and apply buttons. It includes happy path, navigation, edge case, accessibility, responsive, and API-backed scenarios.
+
+## Observed Selectors
+**Category listing page** (`/serviceCategories`):
+- Tab: `getByRole('tab', { name: 'Sahələr' })` (selected by default)
+- Category cards: `getByRole('link', { name: /Təhsil/ })` pattern for each category
+- Service count badge: number inside the card next to category name
+
+**Category detail page** (`/serviceCategories/{uuid}`):
+- Page heading: `getByRole('heading', { name: 'Təhsil' })` (h6)
+- Breadcrumb: navigation list with "Ana səhifə", "Xidmətlər", category name
+- Service links: `getByRole('link', { name: 'Təhsil sənədlərinin hə...' })` pattern
+- Action buttons per service: regulation doc, e-gov link, apply button (some disabled)
+- "Yeni" badge on some new services
+
+**Service detail page** (`/services/{slug}?serviceLabel={code}`):
+- Page heading: `getByRole('heading', { name: /Təhsil sənədləri/ })` (h6)
+- Tabs: `getByRole('tab', { name: 'Xidmətin təsviri' })`, `getByRole('tab', { name: 'Tez-tez verilən suallar' })`
+- Apply button: `getByRole('button', { name: 'MÜRACİƏT ET' })`
+- Breadcrumb: "Ana səhifə" > "Xidmətlər" > [Institution] > [Service name]
+
+## Description
+Verify that some services have all three action buttons (regulation document, e-gov link, apply) disabled on the category listing page, but the detail page still shows an active apply button.
+
+## Preconditions
+- Browser on the Bank insurance category detail page.
+
+## Steps
+
+1. Navigate to https://my.gov.az/serviceCategories/dd3e62ee-fed3-4367-867a-8f3485405ac1
+2. Find the service "Elektron kredit və zəmanət informasiya sistemi"
+3. Verify all three action buttons are disabled buttons (not links)
+4. Click the service name link to navigate to the service detail page
+5. Verify the service detail page still shows the "MÜRACİƏT ET" button (not disabled on detail page)

@@ -16,12 +16,15 @@ if str(orchestrator_dir) not in sys.path:
 import asyncio
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -38,13 +41,23 @@ from logging_config import get_logger, request_id_var, setup_logging
 from services.browser_pool import AbstractBrowserPool, get_browser_pool
 from services.browser_pool import OperationType as BrowserOpType
 from services.resource_manager import ResourceManager, ResourceType, get_resource_manager
+from orchestrator.services.agent_runtimes import normalize_agent_runtime
 from utils.agent_report import (
     CUSTOM_AGENT_REPORT_INSTRUCTIONS,
     _as_report_list,
     _build_custom_agent_structured_report,
     _clean_text,
 )
+from utils.agent_tool_allowlists import get_agent_allowed_tools
 from utils.project_utils import derive_project_id_from_url
+from utils.playwright_mcp import (
+    browser_live_worker_enabled,
+    browser_runtime_status,
+    prepare_run_playwright_config_content,
+    resolve_playwright_chromium_executable,
+    write_playwright_test_mcp_config,
+    write_playwright_mcp_config,
+)
 
 from . import (
     analytics,
@@ -119,6 +132,28 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SPECS_DIR = BASE_DIR / "specs"
 RUNS_DIR = BASE_DIR / "runs"
 METADATA_FILE = SPECS_DIR / "spec-metadata.json"
+RUN_BROWSER_METADATA_FILE = "browser-runtime.json"
+RUN_SEED_SPEC_RELATIVE_PATH = Path("tests") / "seed.spec.ts"
+RUN_TARGET_URL_PATTERNS = [
+    r"Navigate to\s+(https?://[^\s'\"`]+)",
+    r"Go to\s+(https?://[^\s'\"`]+)",
+    r"Open\s+(https?://[^\s'\"`]+)",
+    r"##\s+Base\s+URL:\s*(https?://[^\s'\"`]+)",
+    r"Base\s+URL:\s*(https?://[^\s'\"`]+)",
+    r"Target URL:\s*(https?://[^\s'\"`]+)",
+    r"URL:\s*(https?://[^\s'\"`]+)",
+    r"(https?://[^\s'\"`]+)",
+]
+REAL_BROWSER_EXECUTABLE_NAMES = {
+    "chrome",
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "google-chrome-stable",
+    "msedge",
+    "microsoft-edge",
+    "firefox",
+}
 
 # Spec info cache: path -> (mtime, spec_info_dict)
 _spec_info_cache: dict[str, tuple] = {}
@@ -657,6 +692,134 @@ def _build_fallback_run_log(run_dir: Path) -> str | None:
     return "\n\n".join(sections).strip() or None
 
 
+def _read_text_if_exists(path: Path, *, max_chars: int | None = None) -> str | None:
+    if not path.exists():
+        return None
+    text = path.read_text(errors="replace")
+    if max_chars is not None and len(text) > max_chars:
+        return text[-max_chars:]
+    return text
+
+
+def _format_browser_pool_status(status: dict[str, Any], run_id: str) -> tuple[str, str | None]:
+    lines = [
+        f"max_browsers={status.get('max_browsers')} running={status.get('running')} queued={status.get('queued')} available={status.get('available')}",
+    ]
+    running = [str(item) for item in status.get("running_requests") or []]
+    queued = [str(item) for item in status.get("queued_requests") or []]
+    if running:
+        lines.append("running_requests=" + ", ".join(running))
+    if queued:
+        lines.append("queued_requests=" + ", ".join(queued))
+
+    for detail in status.get("running_details") or []:
+        if not isinstance(detail, dict):
+            continue
+        lines.append(
+            "running_detail "
+            f"{detail.get('request_id')} type={detail.get('operation_type')} "
+            f"started_at={detail.get('started_at')} desc={detail.get('description')}"
+        )
+
+    blocker = None
+    if run_id in running and any(item.startswith("agent:") for item in queued):
+        blocker = "Planner agent is waiting for browser slot held by parent run."
+        lines.insert(0, blocker)
+    elif run_id not in running and any(item == run_id for item in queued):
+        blocker = "Test run is waiting for a browser slot; no browser process has started yet."
+        lines.insert(0, blocker)
+    elif status.get("running", 0) == 0:
+        blocker = "No browser process has started yet."
+
+    return "\n".join(lines), blocker
+
+
+async def _compose_test_run_log_payload(run_db: DBTestRun, run_dir: Path) -> dict[str, Any]:
+    """Build source-aware run log sections for active and completed browser runs."""
+    sections: list[dict[str, Any]] = []
+    diagnostics: dict[str, Any] = {}
+    blocker_message: str | None = None
+
+    lifecycle_lines = [
+        f"run_id={run_db.id}",
+        f"status={run_db.status}",
+        f"stage={run_db.current_stage or '-'}",
+        f"stage_message={run_db.stage_message or '-'}",
+        f"queue_position={run_db.queue_position if run_db.queue_position is not None else '-'}",
+        f"temporal_workflow_id={run_db.temporal_workflow_id or '-'}",
+        f"temporal_run_id={run_db.temporal_run_id or '-'}",
+    ]
+    sections.append({"source": "db", "title": "Run Lifecycle", "content": "\n".join(lifecycle_lines)})
+
+    execution_log = _read_text_if_exists(run_dir / "execution.log") if run_dir.exists() else None
+    if execution_log:
+        sections.append({"source": "execution.log", "title": "Run Log", "content": execution_log})
+    else:
+        fallback_log = _build_fallback_run_log(run_dir) if run_dir.exists() else None
+        sections.append(
+            {
+                "source": "execution.log",
+                "title": "Run Log",
+                "content": fallback_log or "No execution.log has been written yet.",
+            }
+        )
+
+    workflow_log = _read_text_if_exists(run_dir / "workflow.log") if run_dir.exists() else None
+    if workflow_log:
+        sections.append({"source": "workflow.log", "title": "Workflow Log", "content": workflow_log})
+
+    try:
+        pool = BROWSER_POOL or await get_browser_pool()
+        browser_status = await pool.get_status()
+        browser_text, browser_blocker = _format_browser_pool_status(browser_status, run_db.id)
+        diagnostics["browser_pool"] = browser_status
+        if browser_blocker:
+            blocker_message = browser_blocker
+        sections.append({"source": "browser_pool", "title": "Browser Pool", "content": browser_text})
+    except Exception as exc:
+        sections.append({"source": "browser_pool", "title": "Browser Pool", "content": f"Browser pool diagnostics unavailable: {exc}"})
+
+    if run_db.temporal_workflow_id:
+        try:
+            from orchestrator.services.temporal_client import get_test_run_temporal_diagnostics
+
+            temporal = await get_test_run_temporal_diagnostics(run_db.temporal_workflow_id, run_db.temporal_run_id)
+            diagnostics["temporal"] = temporal
+            temporal_lines = [
+                f"workflow_type={temporal.get('workflow_type')}",
+                f"workflow_status={temporal.get('workflow_status')}",
+                f"task_queue={temporal.get('task_queue')}",
+                f"history_event_count={temporal.get('history_event_count')}",
+                f"activities={len(temporal.get('activities') or [])}",
+            ]
+            if temporal.get("error"):
+                temporal_lines.append(f"error={temporal.get('error')}")
+            for activity in temporal.get("activities") or []:
+                if not isinstance(activity, dict):
+                    continue
+                temporal_lines.append(
+                    f"activity {activity.get('activity_type')} status={activity.get('status')} "
+                    f"attempts={activity.get('attempt_count')} worker={activity.get('last_worker_identity') or '-'}"
+                )
+            sections.append({"source": "temporal", "title": "Temporal Workflow", "content": "\n".join(temporal_lines)})
+        except Exception as exc:
+            sections.append({"source": "temporal", "title": "Temporal Workflow", "content": f"Temporal diagnostics unavailable: {exc}"})
+    else:
+        sections.append({"source": "temporal", "title": "Temporal Workflow", "content": "No Temporal workflow id has been recorded for this run."})
+
+    combined_log = "\n\n".join(
+        f"## {section['title']}\n{section['content']}"
+        for section in sections
+        if section.get("content")
+    ).strip()
+    return {
+        "log": combined_log,
+        "log_sections": sections,
+        "diagnostics": diagnostics,
+        "blocker_message": blocker_message,
+    }
+
+
 # Process manager for persistent tracking and graceful termination
 PROCESS_MANAGER: ProcessManager | None = None
 
@@ -755,7 +918,7 @@ class QueueManager:
             queued = session.exec(select(DBTestRun).where(DBTestRun.status == "queued")).all()
 
             # Detect orphaned runs: in DB as running but no active process
-            orphaned_running = [r for r in running if not is_process_active(r.id)]
+            orphaned_running = [r for r in running if not r.temporal_workflow_id and not is_process_active(r.id)]
 
             # Auto-clean orphans that have been orphaned for >120 seconds
             auto_cleaned_count = 0
@@ -792,9 +955,12 @@ class QueueManager:
                 r
                 for r in queued
                 if not (
+                    r.temporal_workflow_id
+                    or (
                     PROCESS_MANAGER
                     and r.id in PROCESS_MANAGER._asyncio_tasks
                     and not PROCESS_MANAGER._asyncio_tasks[r.id].done()
+                    )
                 )
                 and r.queued_at
                 and (datetime.utcnow() - r.queued_at).total_seconds() > 60
@@ -842,6 +1008,8 @@ def cleanup_orphaned_runs():
         ).all()
 
         for run in stuck_runs:
+            if run.temporal_workflow_id:
+                continue
             run_dir = RUNS_DIR / run.id
 
             # Check if status.txt already has a terminal status
@@ -877,6 +1045,70 @@ def cleanup_orphaned_runs():
         logger.info(f"Preserved {preserved_count} runs with terminal status from files")
     if cleaned_count == 0 and preserved_count == 0:
         logger.info("No orphaned runs found")
+
+
+async def _cleanup_test_run_runtime(run_id: str, reason: str = "cleanup requested") -> dict[str, object]:
+    """Cancel agent tasks and browser process trees owned by one test run."""
+    cleanup: dict[str, object] = {
+        "run_id": run_id,
+        "reason": reason,
+        "agent_tasks": None,
+        "processes": None,
+    }
+
+    try:
+        from orchestrator.services.agent_queue import get_agent_queue
+
+        queue = get_agent_queue()
+        await queue.connect()
+        cleanup["agent_tasks"] = await queue.cancel_tasks_for_test_run(run_id)
+    except Exception as exc:
+        logger.warning("Failed to cancel agent tasks for test run %s: %s", run_id, exc)
+        cleanup["agent_tasks"] = {"error": str(exc)}
+
+    try:
+        from orchestrator.utils.browser_cleanup import kill_test_run_process_tree
+
+        cleanup["processes"] = await asyncio.to_thread(kill_test_run_process_tree, run_id)
+    except Exception as exc:
+        logger.warning("Failed to clean browser processes for test run %s: %s", run_id, exc)
+        cleanup["processes"] = {"error": str(exc)}
+
+    return cleanup
+
+
+def cleanup_terminal_test_run_processes() -> int:
+    """Kill browser process trees for test runs already marked terminal."""
+    try:
+        from orchestrator.utils.browser_cleanup import (
+            find_test_run_ids_in_processes,
+            kill_test_run_process_tree,
+        )
+    except Exception as exc:
+        logger.debug("Terminal test-run process cleanup unavailable: %s", exc)
+        return 0
+
+    terminal_statuses = {"passed", "failed", "error", "stopped", "cancelled", "completed"}
+    cleaned = 0
+    run_ids = find_test_run_ids_in_processes()
+    if not run_ids:
+        return 0
+
+    with Session(engine) as session:
+        for run_id in sorted(run_ids):
+            run = session.get(DBTestRun, run_id)
+            status = str(getattr(run, "status", "") or "")
+            if status not in terminal_statuses:
+                status_file = RUNS_DIR / run_id / "status.txt"
+                if status_file.exists():
+                    status = status_file.read_text(errors="replace").strip()
+            if status not in terminal_statuses:
+                continue
+            cleanup = kill_test_run_process_tree(run_id, grace_seconds=0.5)
+            if cleanup.get("matched"):
+                cleaned += int(cleanup.get("matched") or 0)
+                logger.info("Cleaned terminal test-run browser process tree for %s: %s", run_id, cleanup)
+    return cleaned
 
 
 def sync_data_from_files():
@@ -1026,6 +1258,12 @@ async def startup_event():
 
     # Clean up orphaned runs in database before initializing queue (important for accurate queue status)
     cleanup_orphaned_runs()
+    terminal_run_processes_cleaned = cleanup_terminal_test_run_processes()
+    if terminal_run_processes_cleaned:
+        logger.info(
+            "Cleaned up %d browser process(es) from terminal test runs",
+            terminal_run_processes_cleaned,
+        )
 
     # Read parallelism from database settings (or use env default)
     db_max_browsers = int(os.environ.get("MAX_BROWSER_INSTANCES", "5"))
@@ -1753,6 +1991,8 @@ def clear_queue(request: ClearQueueRequest, session: Session = Depends(get_sessi
     if request.include_queued:
         queued = session.exec(select(DBTestRun).where(DBTestRun.status == "queued")).all()
         for run in queued:
+            if run.temporal_workflow_id:
+                continue
             # Cancel the backing asyncio task (waiting for browser slot)
             if PROCESS_MANAGER:
                 PROCESS_MANAGER.stop(run.id)
@@ -1770,6 +2010,8 @@ def clear_queue(request: ClearQueueRequest, session: Session = Depends(get_sessi
     if request.include_running:
         running = session.exec(select(DBTestRun).where(DBTestRun.status.in_(["running", "in_progress"]))).all()
         for run in running:
+            if run.temporal_workflow_id:
+                continue
             # Only clear if not actively tracked (orphaned)
             if not is_process_active(run.id):
                 # Cancel the backing asyncio task if it exists
@@ -1850,6 +2092,7 @@ async def stop_all_jobs():
 
     # 4. Mark ALL active DB entries as stopped/cancelled
     batch_ids_to_update = set()
+    active_test_run_ids: list[str] = []
     with Session(engine) as session:
         active_runs = session.exec(
             select(DBTestRun).where(DBTestRun.status.in_(["running", "in_progress", "queued"]))
@@ -1857,6 +2100,12 @@ async def stop_all_jobs():
 
         now = datetime.utcnow()
         for run in active_runs:
+            active_test_run_ids.append(run.id)
+            if run.temporal_workflow_id:
+                try:
+                    await _signal_test_run_temporal(run, "stop", "stop_all")
+                except Exception as exc:
+                    logger.warning("stop-all: Failed to signal Temporal test run %s: %s", run.id, exc)
             run.status = "stopped" if run.status in ("running", "in_progress") else "cancelled"
             run.completed_at = now
             run.queue_position = None
@@ -1873,6 +2122,16 @@ async def stop_all_jobs():
 
         session.commit()
 
+    cleaned_runtime_entries = 0
+    for run_id in active_test_run_ids:
+        cleanup = await _cleanup_test_run_runtime(run_id, "stop all")
+        agent_tasks = cleanup.get("agent_tasks")
+        processes = cleanup.get("processes")
+        if isinstance(agent_tasks, dict):
+            cleaned_runtime_entries += int(agent_tasks.get("cancelled") or 0)
+        if isinstance(processes, dict):
+            cleaned_runtime_entries += int(processes.get("matched") or 0)
+
     # 5. Update batch stats for affected batches
     for batch_id in batch_ids_to_update:
         try:
@@ -1884,7 +2143,8 @@ async def stop_all_jobs():
         f"stop-all: stopped_processes={stopped_processes}, "
         f"cancelled_autopilot={cancelled_autopilot}, "
         f"cancelled_explorations={cancelled_explorations}, "
-        f"cleaned_db_entries={cleaned_db_entries}"
+        f"cleaned_db_entries={cleaned_db_entries}, "
+        f"cleaned_runtime_entries={cleaned_runtime_entries}"
     )
 
     return {
@@ -1892,6 +2152,7 @@ async def stop_all_jobs():
         "cancelled_autopilot": cancelled_autopilot,
         "cancelled_explorations": cancelled_explorations,
         "cleaned_db_entries": cleaned_db_entries,
+        "cleaned_runtime_entries": cleaned_runtime_entries,
     }
 
 
@@ -1931,6 +2192,7 @@ def list_specs_lightweight(
     search: str | None = None,
     tags: str | None = None,
     automated_only: bool = False,
+    templates_only: bool = False,
     session: Session = Depends(get_session),
 ):
     """Lightweight spec listing with server-side pagination and filtering.
@@ -1948,6 +2210,7 @@ def list_specs_lightweight(
     - search: Case-insensitive name search
     - tags: Comma-separated tag filter (matches specs with any of the given tags)
     - automated_only: Only return specs with generated code
+    - templates_only: Return only specs stored under templates/
     """
     # Get spec names for this project if filtering
     project_spec_names = None
@@ -1993,16 +2256,17 @@ def list_specs_lightweight(
 
     # Collect all matching specs with early filtering
     matching_specs = []
-    total_all = 0  # Total non-template specs (unfiltered)
-    automated_count = 0  # Automated count across all non-template specs
+    total_all = 0  # Total specs in the requested listing mode (unfiltered)
+    automated_count = 0  # Automated count across all specs in the requested listing mode
     all_tags_set: set = set()
 
     if SPECS_DIR.exists():
         for f in SPECS_DIR.glob("**/*.md"):
             name = str(f.relative_to(SPECS_DIR))
+            is_template = name.startswith("templates/")
 
-            # Skip templates — they're loaded separately for the Templates tab
-            if name.startswith("templates/"):
+            # Default listing excludes templates. Template consumers opt in with templates_only.
+            if templates_only != is_template:
                 continue
 
             # Apply project filter if specified
@@ -2059,6 +2323,10 @@ def list_specs_lightweight(
 
     # Collect all unique tags for summary (single DB query)
     all_tags_query = select(DBSpecMetadata.tags_json)
+    if templates_only:
+        all_tags_query = all_tags_query.where(DBSpecMetadata.spec_name.like("templates/%"))
+    else:
+        all_tags_query = all_tags_query.where(~DBSpecMetadata.spec_name.like("templates/%"))
     if project_id:
         if project_id == "default":
             all_tags_query = all_tags_query.where(
@@ -3435,7 +3703,9 @@ def list_runs(
         timestamp = r.created_at.strftime("%Y-%m-%d_%H-%M-%S")
 
         # Check if this run actually has an active process
-        canStop = is_process_active(r.id)
+        canStop = is_process_active(r.id) or (
+            bool(r.temporal_workflow_id) and r.status in ("queued", "running", "in_progress")
+        )
 
         # Format timestamps
         queued_at = r.queued_at.isoformat() if r.queued_at else None
@@ -3459,6 +3729,8 @@ def list_runs(
                 started_at=started_at,
                 completed_at=completed_at,
                 batch_id=r.batch_id,
+                temporal_workflow_id=r.temporal_workflow_id,
+                temporal_run_id=r.temporal_run_id,
                 error_message=r.error_message,
                 current_stage=r.current_stage,
                 stage_started_at=stage_started_at,
@@ -3473,8 +3745,250 @@ def list_runs(
     )
 
 
+def _build_run_browser_metadata(headless: bool, phase: str, task_queue: str | None = None) -> dict[str, Any]:
+    """Describe whether this specific run should be visible in live browser view."""
+    metadata = dict(browser_runtime_status())
+    runtime_live = bool(metadata.get("live_view_available"))
+    live_view_available = runtime_live and not headless
+    runtime_message = metadata.get("runtime_message")
+    if headless:
+        runtime_message = "Browser execution is running headless; live view is unavailable."
+    elif not runtime_live:
+        runtime_message = runtime_message or "No live browser runtime is available for this run."
+
+    metadata.update(
+        {
+            "phase": phase,
+            "headless": headless,
+            "headed": not headless,
+            "live_view_available": live_view_available,
+            "runtime_message": runtime_message,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+    )
+    if task_queue:
+        metadata["task_queue"] = task_queue
+    return metadata
+
+
+def _merge_run_browser_metadata(
+    base_metadata: dict[str, Any],
+    extra_metadata: dict[str, Any],
+    *,
+    headless: bool,
+    phase: str,
+    task_queue: str | None = None,
+) -> dict[str, Any]:
+    metadata = {**base_metadata, **extra_metadata}
+    metadata.update(
+        {
+            "phase": phase,
+            "headless": headless,
+            "headed": not headless,
+            "live_view_available": bool(metadata.get("live_view_available")) and not headless,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+    )
+    if headless:
+        metadata["runtime_message"] = "Browser execution is running headless; live view is unavailable."
+    elif not metadata.get("runtime_message"):
+        metadata["runtime_message"] = "Browser will run on the VNC display."
+    if task_queue:
+        metadata["task_queue"] = task_queue
+    return metadata
+
+
+def _write_run_browser_metadata(run_dir: Path, metadata: dict[str, Any]) -> None:
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / RUN_BROWSER_METADATA_FILE).write_text(json.dumps(metadata, indent=2))
+    except Exception as exc:
+        logger.warning(f"Failed to write browser runtime metadata for {run_dir}: {exc}")
+
+
+def _load_run_browser_metadata(run_dir: Path) -> dict[str, Any]:
+    metadata = dict(browser_runtime_status())
+    metadata_path = run_dir / RUN_BROWSER_METADATA_FILE
+    if metadata_path.exists():
+        try:
+            saved = json.loads(metadata_path.read_text())
+            if isinstance(saved, dict):
+                metadata.update(saved)
+        except Exception as exc:
+            logger.warning(f"Failed to read browser runtime metadata from {metadata_path}: {exc}")
+    metadata["live_view_available"] = bool(metadata.get("live_view_available"))
+    return metadata
+
+
+def _extract_run_target_url_from_content(spec_content: str) -> str | None:
+    for pattern in RUN_TARGET_URL_PATTERNS:
+        match = re.search(pattern, spec_content, re.IGNORECASE)
+        if match:
+            return match.group(1).rstrip(".,);]")
+    return None
+
+
+def _extract_run_target_url(spec_path: str) -> str | None:
+    path = Path(spec_path)
+    candidates = [path]
+    if not path.is_absolute():
+        candidates.extend([BASE_DIR / path, SPECS_DIR / path])
+
+    for candidate in candidates:
+        if not candidate.exists() or not candidate.is_file():
+            continue
+        try:
+            return _extract_run_target_url_from_content(candidate.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning(f"Failed to extract target URL from {candidate}: {exc}")
+            return None
+    return None
+
+
+def _browser_reachable_url(target_url: str | None) -> str | None:
+    """Rewrite host-local URLs to an address reachable from Docker browsers."""
+    if not target_url:
+        return target_url
+    try:
+        parsed = urlsplit(target_url)
+    except Exception:
+        return target_url
+    if parsed.scheme not in {"http", "https"}:
+        return target_url
+    if parsed.hostname not in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+        return target_url
+
+    replacement_host = os.environ.get("BROWSER_HOST_INTERNAL") or "host.docker.internal"
+    netloc = replacement_host
+    if parsed.port:
+        netloc = f"{replacement_host}:{parsed.port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def _write_run_seed_spec(run_dir: Path, target_url: str | None) -> Path:
+    seed_dst = run_dir / RUN_SEED_SPEC_RELATIVE_PATH
+    seed_dst.parent.mkdir(parents=True, exist_ok=True)
+    browser_url = _browser_reachable_url(target_url)
+    seed_content = "\n".join(
+        [
+            "import { test } from '@playwright/test';",
+            "",
+            f"const targetUrl = {json.dumps(browser_url or '')};",
+            "",
+            "test('seed target page', async ({ page }) => {",
+            "  await page.goto(targetUrl || 'about:blank');",
+            "});",
+            "",
+        ]
+    )
+    seed_dst.write_text(seed_content, encoding="utf-8")
+    return seed_dst
+
+
+def _is_real_browser_process_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+
+    parts = stripped.split(None, 2)
+    command = ""
+    args = stripped
+    if len(parts) >= 3 and parts[0].isdigit():
+        command = Path(parts[1]).name.lower()
+        args = parts[2]
+    elif len(parts) >= 2 and parts[0].isdigit():
+        args = parts[1]
+
+    if command in REAL_BROWSER_EXECUTABLE_NAMES:
+        return True
+
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        tokens = args.split()
+    if not tokens:
+        return False
+
+    executable_name = Path(tokens[0]).name.lower()
+    return executable_name in REAL_BROWSER_EXECUTABLE_NAMES
+
+
+def _browser_window_lines(xwininfo_output: str, browser_process_count: int) -> list[str]:
+    browser_named_windows: list[str] = []
+    unnamed_visible_windows: list[str] = []
+    for line in xwininfo_output.splitlines():
+        if re.search(r"\b(chrome|chromium|firefox|webkit)\b", line, re.IGNORECASE):
+            browser_named_windows.append(line)
+            continue
+        if browser_process_count > 0 and re.search(
+            r'0x[0-9a-f]+\s+(?:"(?:has no name|)"|\(has no name\):)',
+            line,
+            re.IGNORECASE,
+        ):
+            if re.search(r"\s[1-9]\d{2,}x[1-9]\d{2,}\+", line):
+                unnamed_visible_windows.append(line)
+
+    return browser_named_windows or unnamed_visible_windows
+
+
+def _live_browser_display_diagnostics() -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "display": os.environ.get("DISPLAY"),
+        "browser_process_count": 0,
+        "browser_window_count": None,
+    }
+    try:
+        process_result = subprocess.run(
+            ["ps", "-eo", "pid=,comm=,args="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        lines = [
+            line
+            for line in process_result.stdout.splitlines()
+            if _is_real_browser_process_line(line)
+        ]
+        diagnostics["browser_process_count"] = len(lines)
+    except Exception as exc:
+        diagnostics["process_probe_error"] = str(exc)
+
+    if os.environ.get("DISPLAY"):
+        try:
+            env = os.environ.copy()
+            window_result = subprocess.run(
+                ["xwininfo", "-root", "-tree"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                env=env,
+            )
+            browser_windows = _browser_window_lines(
+                window_result.stdout,
+                int(diagnostics.get("browser_process_count") or 0),
+            )
+            diagnostics["browser_window_count"] = len(browser_windows)
+        except Exception as exc:
+            diagnostics["window_probe_error"] = str(exc)
+    return diagnostics
+
+
+def _augment_active_browser_metadata(metadata: dict[str, Any], status: str | None) -> dict[str, Any]:
+    if status not in {"queued", "pending", "running", "in_progress"}:
+        return metadata
+    if not metadata.get("live_view_available") or metadata.get("headless") is True:
+        return metadata
+
+    diagnostics = _live_browser_display_diagnostics()
+    metadata = dict(metadata)
+    metadata["display_diagnostics"] = diagnostics
+    if diagnostics.get("browser_window_count") in (0, None):
+        metadata["runtime_message"] = "VNC is connected; waiting for Playwright to launch a visible browser window."
+    return metadata
+
+
 @app.get("/runs/{id}")
-def get_run(
+async def get_run(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
     session: Session = Depends(get_session),
@@ -3495,9 +4009,11 @@ def get_run(
                 raise HTTPException(status_code=404, detail="Run not found")
 
     run_dir = RUNS_DIR / id
+    browser_metadata = _load_run_browser_metadata(run_dir)
     # If directory is missing, we only have DB info
     if not run_dir.exists():
-        return {
+        browser_metadata = _augment_active_browser_metadata(browser_metadata, run_db.status)
+        payload = {
             "id": id,
             "status": run_db.status,
             "spec_name": run_db.spec_name,
@@ -3510,8 +4026,16 @@ def get_run(
             "queued_at": run_db.queued_at.isoformat() if run_db.queued_at else None,
             "started_at": run_db.started_at.isoformat() if run_db.started_at else None,
             "completed_at": run_db.completed_at.isoformat() if run_db.completed_at else None,
+            "temporal_workflow_id": run_db.temporal_workflow_id,
+            "temporal_run_id": run_db.temporal_run_id,
+            "browser_runtime": browser_metadata.get("browser_runtime"),
+            "live_view_available": bool(browser_metadata.get("live_view_available")),
+            "runtime_message": browser_metadata.get("runtime_message"),
+            "vnc_url": browser_metadata.get("vnc_url"),
             "note": "Files missing",
         }
+        payload.update(await _compose_test_run_log_payload(run_db, run_dir))
+        return payload
 
     # Load file details
     plan_file = run_dir / "plan.json"
@@ -3532,6 +4056,12 @@ def get_run(
         "queued_at": run_db.queued_at.isoformat() if run_db.queued_at else None,
         "started_at": run_db.started_at.isoformat() if run_db.started_at else None,
         "completed_at": run_db.completed_at.isoformat() if run_db.completed_at else None,
+        "temporal_workflow_id": run_db.temporal_workflow_id,
+        "temporal_run_id": run_db.temporal_run_id,
+        "browser_runtime": browser_metadata.get("browser_runtime"),
+        "live_view_available": bool(browser_metadata.get("live_view_available")),
+        "runtime_message": browser_metadata.get("runtime_message"),
+        "vnc_url": browser_metadata.get("vnc_url"),
     }
 
     # Check runtime status if not completed
@@ -3571,14 +4101,18 @@ def get_run(
     elif run_db and run_db.status:
         effective_status = run_db.status
     data["effective_status"] = effective_status
+    browser_metadata = _augment_active_browser_metadata(browser_metadata, effective_status)
+    data.update(
+        {
+            "browser_runtime": browser_metadata.get("browser_runtime"),
+            "live_view_available": bool(browser_metadata.get("live_view_available")),
+            "runtime_message": browser_metadata.get("runtime_message"),
+            "vnc_url": browser_metadata.get("vnc_url"),
+            "display_diagnostics": browser_metadata.get("display_diagnostics"),
+        }
+    )
 
-    execution_log = run_dir / "execution.log"
-    if execution_log.exists():
-        data["log"] = execution_log.read_text()
-    else:
-        fallback_log = _build_fallback_run_log(run_dir)
-        if fallback_log:
-            data["log"] = fallback_log
+    data.update(await _compose_test_run_log_payload(run_db, run_dir))
 
     artifacts = []
     for f in run_dir.glob("**/*"):
@@ -3590,6 +4124,7 @@ def get_run(
                         "name": f.name,
                         "path": f"/artifacts/{rel_path}",
                         "type": "image" if f.suffix.lower() in [".png", ".jpg", ".jpeg"] else "video",
+                        "modified_at": datetime.utcfromtimestamp(f.stat().st_mtime).isoformat(),
                     }
                 )
             except ValueError:
@@ -3917,6 +4452,8 @@ async def _batch_watchdog():
                 orphan_batch_ids = set()
                 orphan_cleaned = 0
                 for r in running_runs:
+                    if r.temporal_workflow_id:
+                        continue
                     if is_process_active(r.id):
                         continue
                     age_ref = r.started_at or r.queued_at
@@ -3964,7 +4501,10 @@ async def _batch_watchdog():
                 ).all()
                 # For runs with no started_at, only include if queued_at is also old
                 stuck_runs = [
-                    r for r in stuck_runs if r.started_at is not None or (r.queued_at and r.queued_at < cutoff)
+                    r
+                    for r in stuck_runs
+                    if not r.temporal_workflow_id
+                    and (r.started_at is not None or (r.queued_at and r.queued_at < cutoff))
                 ]
 
                 if not stuck_runs:
@@ -4059,6 +4599,8 @@ async def _queue_watchdog():
                 cleaned = 0
 
                 for run in queued_runs:
+                    if run.temporal_workflow_id:
+                        continue
                     # Grace period: skip recently queued entries
                     if run.queued_at and run.queued_at > cutoff:
                         continue
@@ -4496,6 +5038,79 @@ async def _log_startup_diagnostics():
     logger.info("=== Startup Diagnostics ===\n  " + "\n  ".join(diagnostics))
 
 
+_STARTUP_IMPORT_FAILURE_MESSAGE = (
+    "Transient Docker bind-mount import failure while starting the test runner (Errno 35)."
+)
+
+
+def _record_startup_import_failure(run_id: str, run_dir_path: Path, *, retrying: bool) -> None:
+    message = (
+        f"{_STARTUP_IMPORT_FAILURE_MESSAGE} Retrying test runner."
+        if retrying
+        else f"{_STARTUP_IMPORT_FAILURE_MESSAGE} Retry attempts exhausted."
+    )
+    try:
+        with Session(engine) as session:
+            run = session.get(DBTestRun, run_id)
+            if run:
+                if not retrying:
+                    run.status = "error"
+                    run.error_message = message
+                    run.completed_at = datetime.utcnow()
+                run.current_stage = "startup"
+                run.stage_message = message
+                session.add(run)
+                session.commit()
+    except Exception as exc:
+        logger.debug(
+            "Could not record startup import failure status for %s: %s",
+            run_id,
+            exc,
+        )
+
+    if not retrying:
+        try:
+            (run_dir_path / "status.txt").write_text("error")
+            (run_dir_path / "pipeline_error.json").write_text(
+                json.dumps({"stage": "startup", "error": message}, indent=2)
+            )
+        except OSError:
+            pass
+
+
+def _run_test_cli_subprocess_with_retry(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    run_id: str,
+    run_dir_path: Path,
+    spec_name: str,
+    batch_id: str | None,
+    append_workflow_log,
+    timeout_seconds: int = 3600,
+) -> int | None:
+    """Run the CLI subprocess, retrying only early Errno 35 import failures."""
+    from orchestrator.services.test_run_subprocess_retry import run_test_cli_subprocess_with_retry
+
+    return run_test_cli_subprocess_with_retry(
+        cmd=cmd,
+        cwd=cwd,
+        env=env,
+        run_id=run_id,
+        run_dir_path=run_dir_path,
+        spec_name=spec_name,
+        batch_id=batch_id,
+        append_workflow_log=append_workflow_log,
+        register_process=register_process,
+        unregister_process=unregister_process,
+        process_manager=PROCESS_MANAGER,
+        logger=logger,
+        record_startup_import_failure=_record_startup_import_failure,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def execute_run_task(
     spec_path: str,
     run_dir: str,
@@ -4509,6 +5124,7 @@ def execute_run_task(
     spec_name: str = "",
     batch_id: str = None,
     project_id: str = None,
+    model_tier: str | None = None,
 ):
     """Execute the native pipeline (default) with optional hybrid healing mode.
 
@@ -4520,10 +5136,27 @@ def execute_run_task(
     """
     global PROCESS_MANAGER
 
+    def _append_workflow_log(message: str, **payload: Any) -> None:
+        try:
+            run_dir_path = Path(run_dir)
+            run_dir_path.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "message": message,
+                **payload,
+            }
+            with (run_dir_path / "workflow.log").open("a", encoding="utf-8") as log:
+                log.write(json.dumps(entry, default=str) + "\n")
+        except Exception:
+            pass
+
+    _append_workflow_log("Subprocess preparing.", run_id=run_id, spec_path=spec_path)
+
     with Session(engine) as session:
         run = session.get(DBTestRun, run_id)
         if run and run.status in ("stopped", "cancelled"):
             logger.info(f"Run {run_id} was {run.status} before subprocess start. Aborting.")
+            _append_workflow_log("Subprocess aborted before start.", status=run.status)
             return
 
     cmd = [sys.executable, "orchestrator/cli.py", spec_path, "--run-dir", run_dir, "--browser", browser]
@@ -4533,23 +5166,7 @@ def execute_run_task(
         cmd.extend(["--hybrid", "--max-iterations", str(max_iterations)])
 
     run_dir_path = Path(run_dir)
-
-    # Write run-specific .mcp.json BEFORE subprocess starts
-    # This ensures each parallel run has its own isolated MCP config
-    mcp_output_dir = run_dir_path / "mcp-output"
-    mcp_output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Create MCP config for the test runner
-    mcp_args = ["playwright", "run-test-mcp-server"]
-    if headless:
-        mcp_args.append("--headless")
-
-    mcp_config = {"mcpServers": {"playwright-test": {"command": "npx", "args": mcp_args}}}
-    run_mcp_config_path = run_dir_path / ".mcp.json"
-    with open(run_mcp_config_path, "w") as f:
-        json.dump(mcp_config, f, indent=2)
-
-    logger.info(f"Created MCP config for run {run_id} (headless={headless})")
+    _write_run_browser_metadata(run_dir_path, _build_run_browser_metadata(headless=headless, phase="executing"))
 
     # Copy .claude/ agents directory to run directory for isolation
     # This ensures agent configs are local to each run
@@ -4564,39 +5181,54 @@ def execute_run_task(
     playwright_config_src = BASE_DIR / "playwright.config.ts"
     playwright_config_dst = run_dir_path / "playwright.config.ts"
     if playwright_config_src.exists() and not playwright_config_dst.exists():
-        config_content = playwright_config_src.read_text()
-        # Convert relative paths to absolute paths so Playwright finds tests from run directory
-        config_content = config_content.replace(
-            "testDir: './tests/generated'", f"testDir: '{BASE_DIR}/tests/generated'"
+        config_content = prepare_run_playwright_config_content(
+            playwright_config_src.read_text(),
+            base_dir=BASE_DIR,
+            run_dir=run_dir_path,
+            headless=headless,
         )
-        config_content = config_content.replace(
-            'testDir: "./tests/generated"', f'testDir: "{BASE_DIR}/tests/generated"'
-        )
-        # Also fix outputDir to use run directory for test results
-        config_content = config_content.replace(
-            "outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || './test-results'",
-            f"outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || '{run_dir_path}/test-results'",
-        )
-        # Dashboard run details are expected to replay successful runs too.
-        config_content = config_content.replace("video: 'retain-on-failure'", "video: 'on'")
-        config_content = config_content.replace('video: "retain-on-failure"', 'video: "on"')
         playwright_config_dst.write_text(config_content)
 
-    # Copy seed file to run directory for generator_setup_page
-    # The MCP server runs from the run directory, so it needs the seed file locally
-    # This is required because generator_setup_page looks for seed files relative to cwd
-    seed_src = BASE_DIR / "tests" / "seed.spec.ts"
-    seed_dst = run_dir_path / "tests" / "seed.spec.ts"
-    if seed_src.exists():
-        seed_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(seed_src, seed_dst)
-        logger.debug(f"Copied seed file to run directory: {seed_dst}")
+    runtime_metadata = write_playwright_test_mcp_config(
+        run_dir=run_dir_path,
+        server_name="playwright-test",
+        config_path=playwright_config_dst,
+        headless=headless,
+    )
+    _write_run_browser_metadata(
+        run_dir_path,
+        _merge_run_browser_metadata(
+            _build_run_browser_metadata(headless=headless, phase="executing"),
+            runtime_metadata,
+            headless=headless,
+            phase="executing",
+        ),
+    )
+    logger.info(
+        "Created Playwright Test MCP config for run %s (headless=%s, args=%s)",
+        run_id,
+        headless,
+        runtime_metadata.get("mcp_args"),
+    )
+
+    # The Playwright Test MCP setup tools resolve seed files relative to cwd.
+    # Generate a run-local seed from this spec so setup opens the target app
+    # instead of falling back to the MCP package's blank default seed.
+    target_url = _extract_run_target_url(spec_path)
+    seed_dst = _write_run_seed_spec(run_dir_path, target_url)
+    logger.debug(f"Wrote run seed file: {seed_dst} (target_url={target_url or 'about:blank'})")
 
     # Set up environment with headless, memory, and config directory settings
     env = os.environ.copy()
     env["HEADLESS"] = "true" if headless else "false"
     env["PLAYWRIGHT_HEADLESS"] = "true" if headless else "false"
+    if not headless:
+        env["CI"] = ""
+        env["PLAYWRIGHT_WORKERS"] = "1"
     env["MEMORY_ENABLED"] = "true" if memory_enabled else "false"
+    env["QUORVEX_RUN_MODEL_TIER"] = model_tier or "tool_deep"
+    env["BROWSER_SLOT_PARENT_OWNER_TYPE"] = "test_run"
+    env["BROWSER_SLOT_PARENT_RUN_ID"] = run_id
     # Tell workflows to use run-specific config directory
     env["CLAUDE_CONFIG_DIR"] = str(run_dir_path)
     # Pass project_id for credentials and memory isolation
@@ -4608,61 +5240,20 @@ def execute_run_task(
         run = session.get(DBTestRun, run_id)
         if run and run.status in ("stopped", "cancelled"):
             logger.info(f"Run {run_id} was {run.status} before process spawn. Aborting.")
+            _append_workflow_log("Subprocess aborted before process spawn.", status=run.status)
             return
 
-    log_file = Path(run_dir) / "execution.log"
-    with open(log_file, "w") as f:
-        # Use Popen with start_new_session=True to create a new process group
-        # This allows terminating all child processes (browser, node, etc.) together
-        process = subprocess.Popen(
-            cmd,
-            cwd=BASE_DIR,
-            stdout=f,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,  # Creates new process group for clean termination
-        )
-
-        # Get process group ID for termination
-        try:
-            pgid = os.getpgid(process.pid)
-        except (ProcessLookupError, OSError):
-            pgid = process.pid  # Fallback to PID if pgid fails
-
-        # Store process handle in memory (thread-safe)
-        register_process(run_id, process)
-
-        # Register with ProcessManager for persistent tracking
-        if PROCESS_MANAGER:
-            PROCESS_MANAGER.register(run_id=run_id, pid=process.pid, pgid=pgid, spec_name=spec_name, batch_id=batch_id)
-
-        logger.info(f"Started process for {run_id}: pid={process.pid}, pgid={pgid}")
-
-        try:
-            # Wait with timeout to prevent indefinite hangs
-            # 1 hour max per run (planning + generation + healing)
-            process.wait(timeout=3600)
-        except subprocess.TimeoutExpired:
-            logger.warning(f"Process for {run_id} timed out after 3600s, killing process group")
-            import signal as _signal
-
-            try:
-                os.killpg(os.getpgid(process.pid), _signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                try:
-                    process.kill()
-                except (ProcessLookupError, OSError):
-                    pass
-            process.wait(timeout=10)  # Wait for kill to take effect
-        finally:
-            # Cleanup from memory (thread-safe)
-            unregister_process(run_id)
-
-            # Cleanup from ProcessManager
-            if PROCESS_MANAGER:
-                PROCESS_MANAGER.unregister(run_id)
-
-            logger.info(f"Process completed for {run_id}: exit_code={process.returncode}")
+    _run_test_cli_subprocess_with_retry(
+        cmd=cmd,
+        cwd=BASE_DIR,
+        env=env,
+        run_id=run_id,
+        run_dir_path=run_dir_path,
+        spec_name=spec_name,
+        batch_id=batch_id,
+        append_workflow_log=_append_workflow_log,
+        timeout_seconds=3600,
+    )
 
 
 def _task_exception_handler(task: asyncio.Task):
@@ -4690,6 +5281,7 @@ async def execute_run_task_wrapper(
     batch_id: str = None,
     spec_name: str = "",
     project_id: str = None,
+    model_tier: str | None = None,
 ):
     """Async wrapper for execute_run_task with unified browser queue management.
 
@@ -4698,6 +5290,22 @@ async def execute_run_task_wrapper(
 
     Note: BROWSER_POOL is initialized at startup in startup_event().
     """
+    def _append_workflow_log(message: str, **payload: Any) -> None:
+        try:
+            run_dir_path = Path(run_dir)
+            run_dir_path.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "message": message,
+                **payload,
+            }
+            with (run_dir_path / "workflow.log").open("a", encoding="utf-8") as log:
+                log.write(json.dumps(entry, default=str) + "\n")
+        except Exception:
+            pass
+
+    _append_workflow_log("Test run wrapper started.", run_id=run_id, spec_path=spec_path)
+
     # Get execution settings for this run
     headless = False
     memory_enabled = True
@@ -4707,9 +5315,17 @@ async def execute_run_task_wrapper(
             # Always respect headless setting (user can force headless for any run)
             headless = settings.headless_in_parallel
             memory_enabled = settings.memory_enabled
+    if os.environ.get("VNC_ENABLED", "").lower() == "true":
+        headless = False
 
     # Use unified browser pool for slot management
     pool = BROWSER_POOL or await get_browser_pool()
+    try:
+        stale_cleaned = await pool.cleanup_stale(max_age_minutes=60)
+        if stale_cleaned:
+            _append_workflow_log("Cleaned stale browser slots before acquisition.", cleaned_slots=stale_cleaned)
+    except Exception as exc:
+        _append_workflow_log("Browser slot cleanup before acquisition failed.", error=str(exc))
 
     # Block if a load test is running
     from orchestrator.services.load_test_lock import check_system_available
@@ -4717,6 +5333,7 @@ async def execute_run_task_wrapper(
     await check_system_available("test run")
 
     try:
+        _append_workflow_log("Waiting for browser slot.", browser_slot_request_id=run_id)
         async with pool.browser_slot(
             request_id=run_id,
             operation_type=BrowserOpType.TEST_RUN,
@@ -4741,6 +5358,8 @@ async def execute_run_task_wrapper(
                     update_batch_stats(batch_id)
                 return
 
+            _append_workflow_log("Browser slot acquired.", browser_slot_request_id=run_id)
+
             # Update status to 'running' and set started_at
             # Guard: check if the run was stopped/cancelled while waiting in queue
             with Session(engine) as session:
@@ -4748,6 +5367,7 @@ async def execute_run_task_wrapper(
                 if run:
                     if run.status in ("stopped", "cancelled"):
                         logger.info(f"Run {run_id} was {run.status} while queued. Aborting.")
+                        _append_workflow_log("Run aborted after browser slot acquisition.", status=run.status)
                         if batch_id:
                             update_batch_stats(batch_id)
                         return  # Browser slot released by context manager
@@ -4778,7 +5398,9 @@ async def execute_run_task_wrapper(
                 spec_name,
                 batch_id,
                 project_id,
+                model_tier,
             )
+            _append_workflow_log("Native run executor returned.", run_id=run_id)
 
             # Update DB Status after completion
             with Session(engine) as session:
@@ -4868,6 +5490,7 @@ async def execute_run_task_wrapper(
                     session.add(run)
                     session.commit()
                     logger.info(f"[{run_id}] Final DB status: {run.status}")
+                    _append_workflow_log("Final DB status recorded.", status=run.status)
 
             # Update batch stats after run completion
             if batch_id:
@@ -4876,6 +5499,7 @@ async def execute_run_task_wrapper(
     except asyncio.CancelledError:
         # Task was cancelled while waiting or running
         logger.info(f"Run {run_id} cancelled")
+        _append_workflow_log("Run wrapper cancelled.")
         with Session(engine) as session:
             run = session.get(DBTestRun, run_id)
             if run and run.status not in ("stopped", "cancelled", "passed", "failed", "error", "completed"):
@@ -4895,6 +5519,7 @@ async def execute_run_task_wrapper(
     except Exception as e:
         # Handle all other exceptions - prevents silent failures
         logger.error(f"Run {run_id} failed with exception: {e}", exc_info=True)
+        _append_workflow_log("Run wrapper failed.", error=str(e))
         with Session(engine) as session:
             run = session.get(DBTestRun, run_id)
             if run:
@@ -5137,6 +5762,53 @@ async def execute_mobile_run_task_wrapper(
             update_batch_stats(batch_id)
 
 
+async def _start_test_run_temporal_or_fail(
+    run: DBTestRun,
+    payload: dict[str, Any],
+    session: Session,
+    *,
+    task_queue: str | None = None,
+) -> None:
+    from orchestrator.config import settings as app_settings
+    from orchestrator.services.temporal_client import TemporalUnavailableError, start_test_run_workflow
+
+    selected_task_queue = task_queue or app_settings.temporal_browser_workflow_task_queue
+    try:
+        temporal = await start_test_run_workflow(run.id, payload, task_queue=selected_task_queue)
+    except TemporalUnavailableError as exc:
+        run.status = "error"
+        run.queue_position = None
+        run.completed_at = datetime.utcnow()
+        run.error_message = f"Failed to start Temporal workflow: {exc}"
+        run.stage_message = str(exc)
+        session.add(run)
+        session.commit()
+        run_dir = RUNS_DIR / run.id
+        if run_dir.exists():
+            (run_dir / "status.txt").write_text("error")
+        if run.batch_id:
+            update_batch_stats(run.batch_id)
+        raise HTTPException(status_code=503, detail=f"Temporal is required for test runs: {exc}") from exc
+
+    run.temporal_workflow_id = temporal.workflow_id
+    run.temporal_run_id = temporal.run_id
+    session.add(run)
+    session.commit()
+
+
+async def _signal_test_run_temporal(run: DBTestRun, signal_name: str, *args) -> None:
+    if not run.temporal_workflow_id:
+        return
+    from orchestrator.services.temporal_client import TemporalUnavailableError, signal_test_run_workflow
+
+    try:
+        await signal_test_run_workflow(run.temporal_workflow_id, signal_name, *args)
+    except TemporalUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=f"Temporal is unavailable for test run control: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Failed to signal test run workflow: {exc}") from exc
+
+
 class RunRequest(BaseModel):
     """Request model for creating a test run.
 
@@ -5157,6 +5829,7 @@ class RunRequest(BaseModel):
     hybrid: bool | None = False  # Default: Native Healer only
     max_iterations: int | None = 20  # Only used with hybrid=True
     project_id: str | None = None  # Project to associate run with
+    model_tier: str | None = None
 
     # Legacy fields - kept for backward compatibility
     ralph: bool | None = False
@@ -5362,22 +6035,25 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
     session.commit()
 
     if target == "mobile":
-        task = asyncio.create_task(
-            execute_mobile_run_task_wrapper(
-                spec_path=str(spec_path),
-                run_dir=str(run_dir),
-                run_id=run_id,
-                platform=platform,
-                appium_server_url=request.appium_server_url,
-                capabilities_file=request.capabilities_file,
-                batch_id=None,
-                spec_name=request.spec_name,
-                project_id=request.project_id,
-            )
+        from orchestrator.config import settings as app_settings
+
+        payload = {
+            "target": "mobile",
+            "spec_path": str(spec_path),
+            "run_dir": str(run_dir),
+            "platform": platform,
+            "appium_server_url": request.appium_server_url,
+            "capabilities_file": request.capabilities_file,
+            "batch_id": None,
+            "spec_name": request.spec_name,
+            "project_id": request.project_id,
+        }
+        await _start_test_run_temporal_or_fail(
+            run,
+            payload,
+            session,
+            task_queue=app_settings.temporal_workflow_task_queue,
         )
-        task.add_done_callback(_task_exception_handler)
-        if PROCESS_MANAGER:
-            PROCESS_MANAGER.register_task(run_id, task)
 
         return {
             "id": run_id,
@@ -5385,6 +6061,8 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
             "queue_position": queue_position,
             "mode": "mobile",
             "platform": platform,
+            "temporal_workflow_id": run.temporal_workflow_id,
+            "temporal_run_id": run.temporal_run_id,
         }
 
     # Map legacy flags to new behavior
@@ -5393,26 +6071,32 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
     hybrid_mode = request.hybrid or request.ralph or False
     max_iterations = request.max_iterations or 20
 
-    # Create asyncio task for parallel execution
-    task = asyncio.create_task(
-        execute_run_task_wrapper(
-            str(spec_path),
-            str(run_dir),
-            run_id,
-            try_code_path,
-            request.browser,
-            hybrid_mode,
-            max_iterations,
-            batch_id=None,
-            spec_name=request.spec_name,
-            project_id=request.project_id,
-        )
-    )
-    task.add_done_callback(_task_exception_handler)
+    payload = {
+        "target": "browser",
+        "spec_path": str(spec_path),
+        "run_dir": str(run_dir),
+        "try_code_path": try_code_path,
+        "browser": request.browser,
+        "hybrid": hybrid_mode,
+        "max_iterations": max_iterations,
+        "batch_id": None,
+        "spec_name": request.spec_name,
+        "project_id": request.project_id,
+        "model_tier": request.model_tier,
+    }
+    from orchestrator.config import settings as app_settings
 
-    # Register task with ProcessManager for cancellation support
-    if PROCESS_MANAGER:
-        PROCESS_MANAGER.register_task(run_id, task)
+    planned_runtime = dict(browser_runtime_status())
+    planned_headless = not bool(planned_runtime.get("live_view_available"))
+    _write_run_browser_metadata(
+        run_dir,
+        _build_run_browser_metadata(
+            headless=planned_headless,
+            phase="scheduled",
+            task_queue=app_settings.temporal_browser_workflow_task_queue,
+        ),
+    )
+    await _start_test_run_temporal_or_fail(run, payload, session)
 
     return {
         "id": run_id,
@@ -5421,6 +6105,8 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
         "mode": "hybrid" if hybrid_mode else "native",  # Always native pipeline
         "hybrid_mode": hybrid_mode,
         "max_iterations": max_iterations if hybrid_mode else None,
+        "temporal_workflow_id": run.temporal_workflow_id,
+        "temporal_run_id": run.temporal_run_id,
     }
 
 
@@ -5444,7 +6130,7 @@ def mobile_testing_health(
 
 
 @app.post("/runs/{id}/stop")
-def stop_run(
+async def stop_run(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for verification"),
     session: Session = Depends(get_session),
@@ -5470,6 +6156,29 @@ def stop_run(
             elif run.project_id != project_id:
                 raise HTTPException(status_code=404, detail="Run not found")
 
+    if run and run.temporal_workflow_id and run.status not in ["passed", "failed", "stopped", "cancelled", "error", "completed"]:
+        await _signal_test_run_temporal(run, "stop", "manual_stop")
+        cleanup = await _cleanup_test_run_runtime(id, "manual temporal stop")
+        run.status = "stopped"
+        run.queue_position = None
+        run.completed_at = datetime.utcnow()
+        run.stage_message = "Stop requested"
+        session.add(run)
+        session.commit()
+        run_dir = RUNS_DIR / id
+        if run_dir.exists():
+            (run_dir / "status.txt").write_text("stopped")
+        if run.batch_id:
+            update_batch_stats(run.batch_id)
+        return {
+            "status": "stopped",
+            "id": id,
+            "temporal_workflow_id": run.temporal_workflow_id,
+            "temporal_run_id": run.temporal_run_id,
+            "message": "Temporal stop requested",
+            "cleanup": cleanup,
+        }
+
     # Check if run is queued (waiting in semaphore)
     if run and run.status == "queued":
         # Try to cancel via ProcessManager (handles asyncio task cancellation)
@@ -5492,7 +6201,9 @@ def stop_run(
         if run.batch_id:
             update_batch_stats(run.batch_id)
 
-        return {"status": "cancelled", "id": id, "message": "Run was cancelled from queue"}
+        cleanup = await _cleanup_test_run_runtime(id, "queued run cancelled")
+
+        return {"status": "cancelled", "id": id, "message": "Run was cancelled from queue", "cleanup": cleanup}
 
     # Check if run is actively running
     process = get_process(id)
@@ -5527,7 +6238,9 @@ def stop_run(
             if run.batch_id:
                 update_batch_stats(run.batch_id)
 
-        return {"status": "stopped", "id": id}
+        cleanup = await _cleanup_test_run_runtime(id, "running run stopped")
+
+        return {"status": "stopped", "id": id, "cleanup": cleanup}
 
     # Check if run exists but is not active (maybe completed or failed)
     if run:
@@ -5573,25 +6286,36 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Start all tasks in parallel using asyncio.create_task
+    from orchestrator.config import settings as app_settings
+
     for task_args in result.tasks_to_start:
-        task = asyncio.create_task(
-            execute_run_task_wrapper(
-                spec_path=task_args["spec_path"],
-                run_dir=task_args["run_dir"],
-                run_id=task_args["run_id"],
-                try_code_path=task_args["try_code_path"],
-                browser=task_args["browser"],
-                hybrid=task_args["hybrid"],
-                max_iterations=task_args["max_iterations"],
-                batch_id=task_args["batch_id"],
-                spec_name=task_args["spec_name"],
-                project_id=task_args["project_id"],
-            )
+        run = session.get(DBTestRun, task_args["run_id"])
+        if not run:
+            continue
+        payload = {
+            "target": "browser",
+            "spec_path": task_args["spec_path"],
+            "run_dir": task_args["run_dir"],
+            "try_code_path": task_args["try_code_path"],
+            "browser": task_args["browser"],
+            "hybrid": task_args["hybrid"],
+            "max_iterations": task_args["max_iterations"],
+            "batch_id": task_args["batch_id"],
+            "spec_name": task_args["spec_name"],
+            "project_id": task_args["project_id"],
+            "model_tier": request.model_tier,
+        }
+        planned_runtime = dict(browser_runtime_status())
+        planned_headless = not bool(planned_runtime.get("live_view_available"))
+        _write_run_browser_metadata(
+            Path(task_args["run_dir"]),
+            _build_run_browser_metadata(
+                headless=planned_headless,
+                phase="scheduled",
+                task_queue=app_settings.temporal_browser_workflow_task_queue,
+            ),
         )
-        task.add_done_callback(_task_exception_handler)
-        if PROCESS_MANAGER:
-            PROCESS_MANAGER.register_task(task_args["run_id"], task)
+        await _start_test_run_temporal_or_fail(run, payload, session)
 
     return CreateBatchResponse(
         batch_id=result.batch_id,
@@ -5701,13 +6425,17 @@ class AgentRunRequest(BaseModel):
     agent_type: str  # "exploratory", "writer", or "spec-synthesis"
     config: dict[str, Any]
     project_id: str | None = None  # Project isolation
+    runtime: str | None = None
+    model_tier: str | None = None
 
 
 class AgentDefinitionRequest(BaseModel):
     name: str
     description: str = ""
     system_prompt: str
+    runtime: str | None = None
     model: str | None = None
+    model_tier: str | None = None
     timeout_seconds: int = 1800
     tool_ids: list[str] = []
     project_id: str | None = None
@@ -5717,7 +6445,9 @@ class AgentDefinitionUpdateRequest(BaseModel):
     name: str | None = None
     description: str | None = None
     system_prompt: str | None = None
+    runtime: str | None = None
     model: str | None = None
+    model_tier: str | None = None
     timeout_seconds: int | None = None
     tool_ids: list[str] | None = None
     status: str | None = None
@@ -5728,6 +6458,8 @@ class CustomAgentRunRequest(BaseModel):
     url: str | None = None
     config: dict[str, Any] | None = None
     project_id: str | None = None
+    runtime: str | None = None
+    model_tier: str | None = None
 
 
 def _agent_tool(
@@ -6051,6 +6783,8 @@ class ExploratoryRunRequest(BaseModel):
     focus_areas: list[str] | None = None
     excluded_patterns: list[str] | None = None
     project_id: str | None = None  # Project to associate generated specs with
+    runtime: str | None = None
+    model_tier: str | None = "tool_deep"
 
 
 class SpecSynthesisRequest(BaseModel):
@@ -6131,10 +6865,15 @@ def _record_agent_run_event(
 
 
 async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session) -> None:
+    from orchestrator.config import settings as app_settings
     from orchestrator.services.temporal_client import TemporalUnavailableError, start_agent_run_workflow
 
+    task_queue = app_settings.temporal_workflow_task_queue
+    if _agent_run_has_browser_tools(run.agent_type, run.config) and browser_live_worker_enabled():
+        task_queue = app_settings.temporal_browser_workflow_task_queue
+
     try:
-        temporal = await start_agent_run_workflow(run.id)
+        temporal = await start_agent_run_workflow(run.id, task_queue=task_queue)
     except TemporalUnavailableError as exc:
         run.status = "failed"
         run.completed_at = datetime.utcnow()
@@ -6166,7 +6905,11 @@ async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session) -> 
         run.id,
         event_type="temporal_scheduled",
         message="Agent Temporal workflow scheduled.",
-        payload={"workflow_id": temporal.workflow_id, "temporal_run_id": temporal.run_id},
+        payload={
+            "workflow_id": temporal.workflow_id,
+            "temporal_run_id": temporal.run_id,
+            "task_queue": task_queue,
+        },
         session=session,
     )
 
@@ -6218,6 +6961,48 @@ async def _signal_agent_run_temporal(run: AgentRun, signal_name: str, *args) -> 
         raise HTTPException(status_code=503, detail=f"Temporal is unavailable for agent control: {exc}") from exc
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Failed to signal agent workflow: {exc}") from exc
+
+
+async def _cancel_agent_run_queue_task(run: AgentRun) -> dict[str, Any] | None:
+    """Cancel and finalize the Redis task linked to an already-cancelled agent run."""
+    if not run.agent_task_id:
+        return None
+
+    if normalize_agent_runtime(getattr(run, "runtime", None) or run.config.get("runtime")) == "hermes":
+        result: dict[str, Any] = {"agent_task_id": run.agent_task_id, "runtime": "hermes"}
+        try:
+            from orchestrator.services.agent_runtimes.hermes import HermesClient
+
+            result.update(await HermesClient().stop_run(str(run.agent_task_id)))
+        except Exception as exc:
+            logger.warning("Failed to stop Hermes run %s for agent run %s: %s", run.agent_task_id, run.id, exc)
+            result.update({"status": "error", "error": str(exc)})
+        return result
+
+    result: dict[str, Any] = {"agent_task_id": run.agent_task_id, "status": "not_active"}
+    try:
+        from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
+
+        if not REDIS_AVAILABLE or not should_use_agent_queue():
+            return result
+
+        queue = get_agent_queue()
+        await queue.connect()
+        before = await queue.get_task(str(run.agent_task_id))
+        cancelled = await queue.cancel_task(str(run.agent_task_id))
+        after = await queue.get_task(str(run.agent_task_id))
+        result.update(
+            {
+                "status": after.status.value if after else "missing",
+                "cancel_requested": bool(cancelled),
+                "previous_status": before.status.value if before else None,
+                "cleanup": await queue.cleanup_orphaned_and_stale_tasks(),
+            }
+        )
+    except Exception as exc:
+        logger.warning("Failed to cancel agent queue task %s for run %s: %s", run.agent_task_id, run.id, exc)
+        result.update({"status": "error", "error": str(exc)})
+    return result
 
 
 async def _wait_if_agent_run_paused(run_id: str, poll_interval: float = 0.5) -> bool:
@@ -6303,21 +7088,25 @@ def _agent_run_health(run: AgentRun, session: Session | None = None) -> dict[str
 
 
 def _serialize_agent_run(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
+    progress = run.progress or {}
+    if _agent_run_has_browser_tools(run.agent_type, run.config):
+        progress = {**browser_runtime_status(), **progress}
     payload = {
         "id": run.id,
         "agent_type": run.agent_type,
+        "runtime": getattr(run, "runtime", "claude_sdk") or "claude_sdk",
         "status": run.status,
         "created_at": run.created_at.isoformat(),
         "config": run.config,
         "result": run.result,
         "project_id": run.project_id,
-        "progress": run.progress,
+        "progress": progress,
         "agent_task_id": run.agent_task_id,
         "temporal_workflow_id": run.temporal_workflow_id,
         "temporal_run_id": run.temporal_run_id,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
-        "artifacts": _collect_agent_run_artifacts(run.id) if run.agent_type in ("exploratory", "custom") else [],
+        "artifacts": _collect_agent_run_artifacts(run.id) if run.agent_type in ("exploratory", "custom", "spec_generation") else [],
     }
     payload["health"] = _agent_run_health(run, session)
     return payload
@@ -6535,7 +7324,9 @@ def _serialize_agent_definition(
         "name": definition.name,
         "description": definition.description,
         "system_prompt": definition.system_prompt,
+        "runtime": getattr(definition, "runtime", "claude_sdk") or "claude_sdk",
         "model": definition.model,
+        "model_tier": getattr(definition, "model_tier", None),
         "timeout_seconds": definition.timeout_seconds,
         "tool_ids": definition.tool_ids,
         "tools": selected_tools,
@@ -6587,53 +7378,14 @@ def _resolve_agent_tools(tool_ids: list[str], session: Session) -> tuple[list[st
 def _prepare_custom_agent_mcp_config(run_id: str) -> Path:
     """Create run-local Playwright MCP config for UI-created custom agents."""
     run_dir = RUNS_DIR / run_id
-    artifacts_dir = run_dir / "artifacts"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-
-    mcp_server = exploration._build_playwright_mcp_server_config()
-    mcp_args = list(mcp_server["args"])
-    chromium_executable = _resolve_playwright_chromium_executable()
-    if chromium_executable:
-        mcp_args.extend(["--executable-path", str(chromium_executable)])
-    mcp_args.extend(["--output-dir", str(artifacts_dir), "--isolated"])
-    if os.environ.get("HEADLESS", "true").lower() != "false":
-        mcp_args.append("--headless")
-
-    mcp_config = {
-        "mcpServers": {
-            "playwright-test": {
-                "command": mcp_server["command"],
-                "args": mcp_args,
-            }
-        }
-    }
-    (run_dir / ".mcp.json").write_text(json.dumps(mcp_config, indent=2))
+    runtime = write_playwright_mcp_config(run_dir=run_dir, server_name="playwright-test", project_root=BASE_DIR)
+    _update_agent_run_progress(run_id, runtime)
     return run_dir
 
 
 def _resolve_playwright_chromium_executable() -> Path | None:
     """Find a Chromium executable already installed in the backend image."""
-    override = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH") or os.environ.get(
-        "PLAYWRIGHT_MCP_EXECUTABLE_PATH"
-    )
-    if override:
-        path = Path(override)
-        return path if path.exists() else None
-
-    search_roots = [
-        Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")) if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") else None,
-        Path("/ms-playwright"),
-        Path.home() / ".cache" / "ms-playwright",
-    ]
-    candidates: list[Path] = []
-    for root in search_roots:
-        if not root or not root.exists():
-            continue
-        candidates.extend(root.glob("chromium-*/chrome-linux/chrome"))
-    existing = [candidate for candidate in candidates if candidate.exists()]
-    if not existing:
-        return None
-    return sorted(existing, key=lambda path: path.parent.parent.name, reverse=True)[0]
+    return resolve_playwright_chromium_executable()
 
 
 def _playwright_chromium_probe_script(executable_path: str | None = None) -> str:
@@ -6687,15 +7439,47 @@ def _custom_agent_uses_browser_tools(allowed_tools: list[Any]) -> bool:
     return any(str(tool).startswith("mcp__playwright") for tool in allowed_tools)
 
 
-def _ensure_custom_agent_browser_available(run_id: str) -> None:
+def _custom_agent_browser_runs_via_queue() -> bool:
+    """Return whether browser execution will be delegated to an agent worker."""
+    if browser_live_worker_enabled():
+        return True
+    try:
+        from orchestrator.services.agent_queue import should_use_agent_queue
+
+        return should_use_agent_queue()
+    except Exception as exc:
+        logger.debug("Could not determine custom agent queue mode: %s", exc)
+        return False
+
+
+def _agent_run_has_browser_tools(agent_type: str, config: dict[str, Any]) -> bool:
+    """Return whether this agent run will need a Playwright browser."""
+    if agent_type == "custom":
+        return _custom_agent_uses_browser_tools(config.get("allowed_tools") or [])
+    return agent_type in ("exploratory", "spec_generation")
+
+
+def _ensure_custom_agent_browser_available(run_id: str, *, force_direct_execution: bool = False) -> None:
     """Fail fast if the Playwright browser required by @playwright/mcp is unavailable."""
+    if _custom_agent_browser_runs_via_queue() and not force_direct_execution:
+        _update_agent_run_progress(
+            run_id,
+            {
+                **browser_runtime_status(),
+                "phase": "browser_delegated",
+                "message": "Browser execution delegated to agent worker",
+            },
+        )
+        return
+
     _update_agent_run_progress(
         run_id,
         {
             "phase": "browser_setup",
-            "message": "Checking Playwright browser availability",
+            "message": "Checking local Playwright browser availability",
         },
     )
+    _update_agent_run_progress(run_id, browser_runtime_status())
 
     available, output = _probe_custom_agent_browser()
     if not available:
@@ -6703,15 +7487,16 @@ def _ensure_custom_agent_browser_available(run_id: str) -> None:
             run_id,
             {
                 "phase": "failed",
-                "message": "Playwright Chromium is not installed or cannot launch in the backend container",
+                "message": "Playwright Chromium is not installed or cannot launch in the local execution container",
                 "browser_probe_output": output[-2000:],
             },
         )
         raise RuntimeError(
-            "Playwright Chromium is not installed or cannot launch in the backend container. "
-            "Custom agent browser tools require Chromium to be present before the run starts. "
+            "Playwright Chromium is not installed or cannot launch in the local execution container. "
+            "Custom agent browser tools require Chromium to be present before a direct run starts. "
             "For `make start`, rebuild/recreate the backend image so Dockerfile's "
-            "`npx playwright install chromium` step runs, then retry. "
+            "`npx playwright install chromium` step runs, or enable USE_AGENT_QUEUE=true "
+            "to delegate browser execution to an agent worker. "
             f"Browser probe output: {output[-1000:]}"
         )
 
@@ -6719,9 +7504,15 @@ def _ensure_custom_agent_browser_available(run_id: str) -> None:
         run_id,
         {
             "phase": "browser_ready",
-            "message": "Playwright browser is ready",
+            "message": "Local Playwright browser is ready",
         },
     )
+
+
+@asynccontextmanager
+async def _worker_managed_agent_browser_slot():
+    """No-op slot context for queued agents that acquire browser slots in workers."""
+    yield True
 
 
 def _short_tool_name(tool_name: str | None) -> str:
@@ -6766,6 +7557,36 @@ def _update_agent_run_progress(run_id: str, patch: dict[str, Any]) -> None:
         logger.debug("Failed to update custom agent progress for %s: %s", run_id, exc)
 
 
+def _generic_agent_runtime_prompt(agent_type: str, config: dict[str, Any]) -> str:
+    """Build a Quorvex-owned prompt for non-Claude runtime adapters."""
+
+    if agent_type == "exploratory":
+        return "\n".join(
+            [
+                "You are a Quorvex exploratory QA agent.",
+                "Inspect the target application and return a concise JSON report with summary, pages, findings, test_ideas, and blockers.",
+                "Do not modify repository files. Browser/file/terminal actions are allowed only to complete the requested QA investigation.",
+                f"Config JSON:\n{json.dumps(config, indent=2, default=str)}",
+            ]
+        )
+    if agent_type == "spec-synthesis":
+        return "\n".join(
+            [
+                "You are a Quorvex test-spec synthesis agent.",
+                "Use the supplied exploration result to draft production-ready test scenarios. Return JSON with summary and specs.",
+                "Do not write repository files; propose content only.",
+                f"Config JSON:\n{json.dumps(config, indent=2, default=str)}",
+            ]
+        )
+    return "\n".join(
+        [
+            "You are a Quorvex QA automation agent.",
+            "Complete the requested task and return a concise factual report.",
+            f"Config JSON:\n{json.dumps(config, indent=2, default=str)}",
+        ]
+    )
+
+
 async def execute_agent_background(run_id: str, agent_type: str, config: dict):
     """Execute an agent in the background with unified browser pool management.
 
@@ -6777,21 +7598,32 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
     from .db import engine
     from .models_db import AgentRun
 
-    # Use unified browser pool for slot management
-    pool = BROWSER_POOL or await get_browser_pool()
-
     # Block if a load test is running
     from orchestrator.services.load_test_lock import check_system_available
 
     await check_system_available("agent run")
 
     try:
+        runtime_name = normalize_agent_runtime(config.get("runtime"))
         if not await _wait_if_agent_run_paused(run_id):
             return
 
-        async with pool.browser_slot(
-            request_id=run_id, operation_type=BrowserOpType.AGENT, description=f"Agent: {agent_type}"
-        ) as acquired:
+        uses_worker_browser_slot = (
+            _agent_run_has_browser_tools(agent_type, config)
+            and not bool(config.get("_force_direct_agent_execution"))
+            and _custom_agent_browser_runs_via_queue()
+        )
+        if uses_worker_browser_slot:
+            slot_context = _worker_managed_agent_browser_slot()
+        else:
+            pool = BROWSER_POOL or await get_browser_pool()
+            slot_context = pool.browser_slot(
+                request_id=run_id,
+                operation_type=BrowserOpType.AGENT,
+                description=f"Agent: {agent_type}",
+            )
+
+        async with slot_context as acquired:
             if not acquired:
                 # Timeout waiting for slot
                 logger.warning(f"Agent {run_id} failed to acquire browser slot (timeout)")
@@ -6811,6 +7643,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             with Session(engine) as session:
                 run = session.get(AgentRun, run_id)
                 if run and run.status == "queued":
+                    runtime_name = normalize_agent_runtime(getattr(run, "runtime", None) or config.get("runtime"))
                     run.status = "running"
                     run.started_at = run.started_at or datetime.utcnow()
                     session.add(run)
@@ -6824,7 +7657,93 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             from agents.spec_writer_agent import SpecWriterAgent
 
             result = {}
-            if agent_type == "exploratory":
+            if runtime_name == "hermes" and agent_type in {"exploratory", "writer", "spec-synthesis"}:
+                from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
+
+                prompt = _generic_agent_runtime_prompt(agent_type, config)
+
+                def _on_runtime_task_enqueued(task_id: str) -> None:
+                    _update_agent_run_progress(
+                        run_id,
+                        {
+                            "phase": "queued",
+                            "runtime": runtime_name,
+                            "message": "Hermes run started",
+                            "agent_task_id": task_id,
+                            "hermes_run_id": task_id,
+                        },
+                    )
+
+                def _on_runtime_progress(progress: dict[str, Any]) -> None:
+                    _update_agent_run_progress(
+                        run_id,
+                        {
+                            **progress,
+                            "runtime": runtime_name,
+                            "phase": progress.get("phase") or "running",
+                            "message": progress.get("message") or "Hermes agent is running",
+                        },
+                    )
+
+                def _on_runtime_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
+                    _record_agent_run_event(
+                        run_id,
+                        event_type="tool_call",
+                        message=f"Using {_short_tool_name(tool_name)}.",
+                        payload={
+                            "runtime": runtime_name,
+                            "tool_name": tool_name,
+                            "tool_label": _short_tool_name(tool_name),
+                            "tool_input": tool_input,
+                        },
+                    )
+
+                agent_result = await get_agent_runtime(runtime_name).run(
+                    prompt,
+                    AgentRuntimeContext(
+                        timeout_seconds=int(config.get("timeout_seconds") or 1800),
+                        allowed_tools=config.get("allowed_tools") or ["*"],
+                        owner_type="agent_run",
+                        owner_id=run_id,
+                        owner_label=f"Agent run {run_id}",
+                        memory_project_id=config.get("project_id"),
+                        memory_agent_type=agent_type,
+                        memory_source_type="agent_run",
+                        memory_source_id=run_id,
+                        memory_stage="agent_run",
+                        model=config.get("model"),
+                        model_tier=config.get("model_tier"),
+                        agent_name=agent_type,
+                        hermes_conversation=run_id,
+                        metadata={"agent_type": agent_type, "run_id": run_id},
+                        on_task_enqueued=_on_runtime_task_enqueued,
+                        on_tool_use=_on_runtime_tool_use,
+                        on_progress=_on_runtime_progress,
+                    ),
+                )
+                result = {
+                    "summary": (agent_result.output or agent_result.error or "")[:500],
+                    "output": agent_result.output,
+                    "error": agent_result.error,
+                    "duration_seconds": agent_result.duration_seconds,
+                    "runtime": runtime_name,
+                    "session_id": agent_result.session_id,
+                    "total_cost_usd": agent_result.total_cost_usd,
+                    "tool_calls": [
+                        {
+                            "name": call.name,
+                            "timestamp": call.timestamp.isoformat(),
+                            "duration_ms": call.duration_ms,
+                            "success": call.success,
+                            "error": call.error,
+                            "input": call.input,
+                        }
+                        for call in agent_result.tool_calls
+                    ],
+                }
+                if not agent_result.success:
+                    raise RuntimeError(agent_result.error or "Hermes agent failed")
+            elif agent_type == "exploratory":
                 agent = ExploratoryAgent()
                 agent.owner_type = "agent_run"
                 agent.owner_id = run_id
@@ -6924,16 +7843,22 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 agent.owner_label = f"Agent run {run_id}"
                 result = await agent.run(config)
             elif agent_type == "custom":
-                from utils.agent_runner import AgentRunner
+                from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
 
                 allowed_tools = config.get("allowed_tools") or []
                 run_dir = None
                 has_browser_tools = _custom_agent_uses_browser_tools(allowed_tools)
                 has_screenshot_tool = any(str(tool).endswith("__browser_take_screenshot") for tool in allowed_tools)
+                force_direct_execution = bool(config.get("_force_direct_agent_execution"))
+                runtime = browser_runtime_status() if has_browser_tools else {}
                 if any(str(tool).startswith("mcp__") for tool in allowed_tools):
                     if has_browser_tools:
-                        _ensure_custom_agent_browser_available(run_id)
+                        _ensure_custom_agent_browser_available(
+                            run_id,
+                            force_direct_execution=force_direct_execution,
+                        )
                     run_dir = _prepare_custom_agent_mcp_config(run_id)
+                    runtime = browser_runtime_status()
 
                 _update_agent_run_progress(
                     run_id,
@@ -6942,10 +7867,12 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         "message": "Starting custom agent",
                         "tool_calls": 0,
                         "browser_tool_calls": 0,
-                        "interactions": 0,
-                        "has_browser_tools": has_browser_tools,
-                    },
-                )
+                            "interactions": 0,
+                            "has_browser_tools": has_browser_tools,
+                            "force_direct_execution": force_direct_execution,
+                            **runtime,
+                        },
+                    )
 
                 task_prompt = config.get("prompt", "")
                 target_url = config.get("url")
@@ -6971,12 +7898,27 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     custom_project_id = custom_run.project_id if custom_run else None
 
                 def _on_custom_task_enqueued(task_id: str) -> None:
+                    queued_message = "Hermes run started" if runtime_name == "hermes" else "Agent task queued for worker"
+                    runtime_metadata = runtime if has_browser_tools else {}
+                    runtime_message = runtime_metadata.get(
+                        "runtime_message",
+                        "Browser execution is running in an agent worker. Screenshots are shown as fallback.",
+                    )
+                    if runtime_name == "hermes":
+                        runtime_message = (
+                            "Custom agent execution is running through Hermes. "
+                            f"{runtime_message}" if has_browser_tools else "Custom agent execution is running through Hermes."
+                        )
                     _update_agent_run_progress(
                         run_id,
                         {
+                            **runtime_metadata,
                             "phase": "queued",
-                            "message": "Agent task queued for worker",
+                            "runtime": runtime_name,
+                            "message": queued_message,
                             "agent_task_id": task_id,
+                            "hermes_run_id": task_id if runtime_name == "hermes" else None,
+                            "runtime_message": runtime_message,
                         },
                     )
 
@@ -6986,9 +7928,11 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         {
                             "phase": "tool_use",
                             "message": f"Using {_short_tool_name(tool_name)}",
+                            "runtime": runtime_name,
                             "last_tool": tool_name,
                             "last_tool_input": tool_input,
                             "has_browser_tools": has_browser_tools,
+                            **runtime,
                         },
                     )
                     _record_agent_run_event(
@@ -7008,13 +7952,16 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         run_id,
                         {
                             **progress,
+                            "runtime": runtime_name,
                             "phase": progress.get("phase") or "running",
                             "message": f"Using {_short_tool_name(str(last_tool))}" if last_tool else "Agent is running",
                             "has_browser_tools": has_browser_tools,
+                            **runtime,
                         },
                     )
 
-                runner = AgentRunner(
+                runtime_adapter = get_agent_runtime(runtime_name)
+                runtime_context = AgentRuntimeContext(
                     timeout_seconds=int(config.get("timeout_seconds") or 1800),
                     allowed_tools=allowed_tools,
                     tools=allowed_tools,
@@ -7033,10 +7980,20 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     memory_stage="custom_agent",
                     inject_memory=True,
                     capture_memory=False,
+                    force_direct_execution=force_direct_execution,
+                    model=config.get("model"),
+                    model_tier=config.get("model_tier"),
+                    agent_name=config.get("agent_name") or "CustomAgent",
+                    hermes_conversation=run_id,
+                    metadata={
+                        "agent_type": "custom",
+                        "agent_definition_id": config.get("agent_definition_id"),
+                        "run_id": run_id,
+                    },
                 )
                 if not await _wait_if_agent_run_paused(run_id):
                     return
-                agent_result = await runner.run("\n".join(prompt_parts))
+                agent_result = await runtime_adapter.run("\n".join(prompt_parts), runtime_context)
                 artifacts = _collect_agent_run_artifacts(run_id)
                 structured_report = _build_custom_agent_structured_report(
                     agent_result.output or "",
@@ -7057,6 +8014,9 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     "captured_memory_ids": captured_memory_ids,
                     "error": agent_result.error,
                     "duration_seconds": agent_result.duration_seconds,
+                    "runtime": runtime_name,
+                    "session_id": agent_result.session_id,
+                    "total_cost_usd": agent_result.total_cost_usd,
                     "tool_calls": [
                         {
                             "name": call.name,
@@ -7080,6 +8040,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         "phase": "completed",
                         "status": "completed",
                         "message": "Custom agent completed",
+                        "runtime": runtime_name,
                         "tool_calls": len(agent_result.tool_calls),
                         "browser_tool_calls": len(
                             [call for call in agent_result.tool_calls if call.name.startswith("mcp__playwright")]
@@ -7170,20 +8131,39 @@ async def run_agent(request: AgentRunRequest, session: Session = Depends(get_ses
 
     # Create DB Record
     run_id = str(uuid.uuid4())
+    runtime = normalize_agent_runtime(request.runtime or request.config.get("runtime"))
+    run_config = {**request.config, "runtime": runtime}
+    if request.model_tier:
+        run_config["model_tier"] = request.model_tier
+    browser_metadata = browser_runtime_status() if _agent_run_has_browser_tools(request.agent_type, run_config) else {}
     run = AgentRun(
         id=run_id,
         agent_type=request.agent_type,
-        config_json=json.dumps(request.config),
+        runtime=runtime,
+        config_json=json.dumps(run_config),
         status=initial_status,
         project_id=request.project_id,  # Project isolation
     )
+    run.progress = {
+        **browser_metadata,
+        "phase": "queued",
+        "status": initial_status,
+        "runtime": runtime,
+        "message": "Agent run is queued for Temporal.",
+        "updated_at": datetime.utcnow().isoformat(),
+    }
     session.add(run)
     session.commit()
     _record_agent_run_event(
         run_id,
         event_type="created",
         message=f"Agent run created with status {initial_status}.",
-        payload={"agent_type": request.agent_type, "status": initial_status, "queue_position": queue_position},
+        payload={
+            "agent_type": request.agent_type,
+            "runtime": runtime,
+            "status": initial_status,
+            "queue_position": queue_position,
+        },
         session=session,
     )
 
@@ -7195,6 +8175,10 @@ async def run_agent(request: AgentRunRequest, session: Session = Depends(get_ses
         "run_id": run_id,
         "temporal_workflow_id": run.temporal_workflow_id,
         "temporal_run_id": run.temporal_run_id,
+        "browser_runtime": browser_metadata.get("browser_runtime", "temporal_worker"),
+        "live_view_available": bool(browser_metadata.get("live_view_available")),
+        "vnc_url": browser_metadata.get("vnc_url"),
+        "agent_runtime": runtime,
         "agent_slots": {
             "active": agent_status.active,
             "max": agent_status.max_slots,
@@ -7256,7 +8240,9 @@ async def create_agent_definition(
         name=request.name.strip(),
         description=request.description.strip(),
         system_prompt=request.system_prompt.strip(),
+        runtime=normalize_agent_runtime(request.runtime),
         model=request.model,
+        model_tier=request.model_tier,
         timeout_seconds=max(60, min(int(request.timeout_seconds or 1800), 7200)),
         status="active",
     )
@@ -7302,8 +8288,12 @@ async def update_agent_definition(
         if not request.system_prompt.strip():
             raise HTTPException(status_code=400, detail="System prompt is required")
         definition.system_prompt = request.system_prompt.strip()
+    if request.runtime is not None:
+        definition.runtime = normalize_agent_runtime(request.runtime)
     if request.model is not None:
         definition.model = request.model
+    if request.model_tier is not None:
+        definition.model_tier = request.model_tier
     if request.timeout_seconds is not None:
         definition.timeout_seconds = max(60, min(int(request.timeout_seconds), 7200))
     if request.status is not None:
@@ -7363,18 +8353,34 @@ async def run_agent_definition(
         "custom_config": request.config or {},
         "system_prompt": definition.system_prompt,
         "timeout_seconds": definition.timeout_seconds,
+        "runtime": normalize_agent_runtime(request.runtime or definition.runtime),
         "model": definition.model,
+        "model_tier": request.model_tier
+        or ((request.config or {}).get("model_tier") if isinstance(request.config, dict) else None)
+        or getattr(definition, "model_tier", None),
         "tool_ids": definition.tool_ids,
         "allowed_tools": allowed_tools,
         "selected_tools": selected_tools,
     }
+    runtime = normalize_agent_runtime(run_config.get("runtime"))
+    browser_metadata = browser_runtime_status() if _agent_run_has_browser_tools("custom", run_config) else {}
     run = AgentRun(
         id=run_id,
         agent_type="custom",
+        runtime=runtime,
         config_json=json.dumps(run_config),
         status=initial_status,
         project_id=run_project_id,
     )
+    run.progress = {
+        **browser_metadata,
+        "phase": "queued",
+        "status": initial_status,
+        "runtime": runtime,
+        "has_browser_tools": _agent_run_has_browser_tools("custom", run_config),
+        "message": "Custom agent run is queued for Temporal.",
+        "updated_at": datetime.utcnow().isoformat(),
+    }
     session.add(run)
     session.commit()
     _record_agent_run_event(
@@ -7384,6 +8390,7 @@ async def run_agent_definition(
         payload={
             "agent_type": "custom",
             "agent_definition_id": definition.id,
+            "runtime": runtime,
             "status": initial_status,
             "queue_position": queue_position,
         },
@@ -7399,6 +8406,10 @@ async def run_agent_definition(
         "agent_definition_id": definition.id,
         "temporal_workflow_id": run.temporal_workflow_id,
         "temporal_run_id": run.temporal_run_id,
+        "agent_runtime": runtime,
+        "browser_runtime": browser_metadata.get("browser_runtime", "temporal_worker"),
+        "live_view_available": bool(browser_metadata.get("live_view_available")),
+        "vnc_url": browser_metadata.get("vnc_url"),
         "agent_slots": {
             "active": agent_status.active,
             "max": agent_status.max_slots,
@@ -7429,21 +8440,10 @@ def list_agent_runs(
 
     # Safety cap: apply limit/offset to prevent unbounded result sets
     runs = session.exec(statement.offset(offset).limit(limit)).all()
-    # Manually serialize to handle properties
     return [
         {
-            "id": r.id,
-            "agent_type": r.agent_type,
-            "status": r.status,
-            "created_at": r.created_at.isoformat(),
-            "config": r.config,
-            "project_id": r.project_id,
-            "progress": r.progress,
-            "agent_task_id": r.agent_task_id,
-            "temporal_workflow_id": r.temporal_workflow_id,
-            "temporal_run_id": r.temporal_run_id,
-            "artifacts": _collect_agent_run_artifacts(r.id) if r.agent_type in ("exploratory", "custom") else [],
-            # Don't send full result in list view if it's huge
+            **_serialize_agent_run(r, session),
+            "result": None,
             "summary": _agent_run_summary(r),
         }
         for r in runs
@@ -7633,11 +8633,16 @@ async def cancel_agent_run(
     session.add(run)
     session.commit()
     session.refresh(run)
+    queue_cancel_result = await _cancel_agent_run_queue_task(run)
     _record_agent_run_event(
         run.id,
         event_type="cancel",
         message="Agent run cancelled.",
-        payload={"status": run.status, "agent_task_id": run.agent_task_id},
+        payload={
+            "status": run.status,
+            "agent_task_id": run.agent_task_id,
+            "queue_cancel": queue_cancel_result,
+        },
         agent_task_id=run.agent_task_id,
         session=session,
     )
@@ -7756,6 +8761,8 @@ async def run_exploratory_agent(
 
     # Build config for agent
     config = request.dict()
+    runtime = normalize_agent_runtime(request.runtime or config.get("runtime"))
+    config["runtime"] = runtime
 
     # Process auth configuration
     auth_result = {"success": True, "type": "none"}
@@ -7777,10 +8784,20 @@ async def run_exploratory_agent(
     run = AgentRun(
         id=run_id,
         agent_type="exploratory",
+        runtime=runtime,
         config_json=json.dumps(config),
         status="queued",
         project_id=request.project_id,  # Project isolation in DB field
     )
+    browser_metadata = browser_runtime_status()
+    run.progress = {
+        **browser_metadata,
+        "phase": "queued",
+        "status": "queued",
+        "runtime": runtime,
+        "message": "Exploratory agent run is queued for Temporal.",
+        "updated_at": datetime.utcnow().isoformat(),
+    }
     session.add(run)
     session.commit()
 
@@ -7788,7 +8805,7 @@ async def run_exploratory_agent(
         run_id,
         event_type="created",
         message="Exploratory agent run created with status queued.",
-        payload={"agent_type": "exploratory", "status": "queued"},
+        payload={"agent_type": "exploratory", "runtime": runtime, "status": "queued"},
         session=session,
     )
 
@@ -7802,6 +8819,10 @@ async def run_exploratory_agent(
         "project_id": request.project_id,
         "temporal_workflow_id": run.temporal_workflow_id,
         "temporal_run_id": run.temporal_run_id,
+        "agent_runtime": runtime,
+        "browser_runtime": browser_metadata.get("browser_runtime"),
+        "live_view_available": bool(browser_metadata.get("live_view_available")),
+        "vnc_url": browser_metadata.get("vnc_url"),
     }
 
 
@@ -7849,11 +8870,14 @@ async def synthesize_specs(run_id: str, session: Session = Depends(get_session))
         "output_dir": output_dir,
         "run_id": run_id,  # Pass run_id so agent can read flows.json
         "project_id": exploration_project_id,  # Propagate project association
+        "runtime": getattr(exploration_run, "runtime", "claude_sdk") or exploration_run.config.get("runtime") or "claude_sdk",
     }
+    synthesis_runtime = normalize_agent_runtime(synthesis_config.get("runtime"))
 
     synthesis_run = AgentRun(
         id=synthesis_run_id,
         agent_type="spec-synthesis",
+        runtime=synthesis_runtime,
         config_json=json.dumps(synthesis_config),
         status="queued",
         project_id=exploration_project_id,  # Project isolation in DB field
@@ -7865,7 +8889,12 @@ async def synthesize_specs(run_id: str, session: Session = Depends(get_session))
         synthesis_run_id,
         event_type="created",
         message="Spec synthesis agent run created with status queued.",
-        payload={"agent_type": "spec-synthesis", "status": "queued", "exploration_run_id": run_id},
+        payload={
+            "agent_type": "spec-synthesis",
+            "runtime": synthesis_runtime,
+            "status": "queued",
+            "exploration_run_id": run_id,
+        },
         session=session,
     )
 
@@ -8808,6 +9837,7 @@ async def _run_flow_spec_generation(
     flows_file_path: str,
     run_project_id: str | None,
     run_config: dict,
+    spec_agent_run_id: str | None = None,
 ):
     """Background task: run Native Planner to generate spec for a flow."""
     import os
@@ -8823,8 +9853,21 @@ async def _run_flow_spec_generation(
         setup_claude_env()
         project_root = Path(__file__).parent.parent.parent
         flows_file = Path(flows_file_path)
+        spec_run_dir = project_root / "runs" / spec_agent_run_id if spec_agent_run_id else None
+        if spec_run_dir:
+            await asyncio.to_thread(spec_run_dir.mkdir, parents=True, exist_ok=True)
 
         _flow_spec_jobs[job_id]["message"] = "Preparing flow context..."
+        if spec_agent_run_id:
+            _update_agent_run_progress(
+                spec_agent_run_id,
+                {
+                    "phase": "preparing",
+                    "message": "Preparing flow context...",
+                    "has_browser_tools": True,
+                    **browser_runtime_status(),
+                },
+            )
 
         # Extract flow context
         flow_title = flow.get("title", "Unnamed Flow")
@@ -8889,7 +9932,67 @@ async def _run_flow_spec_generation(
 
         effective_project_id = run_project_id if run_project_id else folder_name
 
-        planner = NativePlanner(project_id=effective_project_id)
+        def _on_planner_task_enqueued(agent_task_id: str) -> None:
+            _flow_spec_jobs[job_id]["agent_task_id"] = agent_task_id
+            if spec_agent_run_id:
+                _update_agent_run_progress(spec_agent_run_id, {"agent_task_id": agent_task_id})
+
+        def _on_planner_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
+            _flow_spec_jobs[job_id]["message"] = f"Using {_short_tool_name(tool_name)}..."
+            if not spec_agent_run_id:
+                return
+            runtime = browser_runtime_status()
+            is_browser_action = str(tool_name).startswith("mcp__playwright")
+            _update_agent_run_progress(
+                spec_agent_run_id,
+                {
+                    "phase": "tool_use",
+                    "message": f"Using {_short_tool_name(tool_name)}",
+                    "last_tool": tool_name,
+                    "last_tool_input": tool_input,
+                    "has_browser_tools": True,
+                    **runtime,
+                },
+            )
+            _record_agent_run_event(
+                spec_agent_run_id,
+                event_type="browser_action" if is_browser_action else "tool_call",
+                message=f"Using {_short_tool_name(tool_name)}.",
+                payload={
+                    "tool_name": tool_name,
+                    "tool_label": _short_tool_name(tool_name),
+                    "tool_input": tool_input,
+                    "source_run_id": run_id,
+                    "source_flow_id": flow_id,
+                },
+            )
+
+        def _on_planner_progress(progress: dict[str, Any]) -> None:
+            if not spec_agent_run_id:
+                return
+            last_tool = progress.get("last_tool")
+            _update_agent_run_progress(
+                spec_agent_run_id,
+                {
+                    **progress,
+                    "phase": progress.get("phase") or "running",
+                    "message": f"Using {_short_tool_name(str(last_tool))}" if last_tool else "Native Planner is exploring the browser",
+                    "has_browser_tools": True,
+                    **browser_runtime_status(),
+                },
+            )
+
+        planner = NativePlanner(
+            project_id=effective_project_id,
+            on_tool_use=_on_planner_tool_use,
+            on_progress=_on_planner_progress,
+            on_task_enqueued=_on_planner_task_enqueued,
+            owner_type="agent_run" if spec_agent_run_id else None,
+            owner_id=spec_agent_run_id,
+            owner_label=f"Spec generation {flow_title}" if spec_agent_run_id else None,
+            session_dir=spec_run_dir,
+            cwd=spec_run_dir,
+        )
         output_dir = project_root / "specs" / folder_name
 
         spec_path = await planner.generate_spec_from_flow_context(
@@ -8911,6 +10014,16 @@ async def _run_flow_spec_generation(
 
         # Register spec in database
         _flow_spec_jobs[job_id]["message"] = "Registering spec..."
+        if spec_agent_run_id:
+            _update_agent_run_progress(
+                spec_agent_run_id,
+                {
+                    "phase": "registering",
+                    "message": "Registering generated spec...",
+                    "has_browser_tools": True,
+                    **browser_runtime_status(),
+                },
+            )
         try:
             from sqlmodel import Session as SyncSession
 
@@ -8974,6 +10087,36 @@ async def _run_flow_spec_generation(
                 },
             }
         )
+        if spec_agent_run_id:
+            with Session(engine) as db_session:
+                spec_run = db_session.get(AgentRun, spec_agent_run_id)
+                if spec_run:
+                    spec_run.status = "completed"
+                    spec_run.completed_at = datetime.utcnow()
+                    spec_run.result = {
+                        "summary": f"Generated spec for {flow_title}",
+                        "spec_file": str(spec_path),
+                        "spec_content": spec_content,
+                        "source_run_id": run_id,
+                        "source_flow_id": flow_id,
+                        "pipeline": "native_planner_generator",
+                    }
+                    spec_run.progress = {
+                        **(spec_run.progress or {}),
+                        "phase": "completed",
+                        "status": "completed",
+                        "message": "Spec generation complete",
+                        "has_browser_tools": True,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                    db_session.add(spec_run)
+                    db_session.commit()
+            _record_agent_run_event(
+                spec_agent_run_id,
+                event_type="completed",
+                message="Spec generation complete.",
+                payload={"spec_file": str(spec_path), "source_run_id": run_id, "source_flow_id": flow_id},
+            )
 
     except Exception as e:
         import time as _time
@@ -8986,6 +10129,30 @@ async def _run_flow_spec_generation(
                 "completed_at": _time.time(),
             }
         )
+        if spec_agent_run_id:
+            with Session(engine) as db_session:
+                spec_run = db_session.get(AgentRun, spec_agent_run_id)
+                if spec_run:
+                    spec_run.status = "failed"
+                    spec_run.completed_at = datetime.utcnow()
+                    spec_run.result = {"error": str(e), "source_run_id": run_id, "source_flow_id": flow_id}
+                    spec_run.progress = {
+                        **(spec_run.progress or {}),
+                        "phase": "failed",
+                        "status": "failed",
+                        "message": str(e),
+                        "has_browser_tools": True,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                    db_session.add(spec_run)
+                    db_session.commit()
+            _record_agent_run_event(
+                spec_agent_run_id,
+                event_type="failed",
+                level="error",
+                message=str(e),
+                payload={"source_run_id": run_id, "source_flow_id": flow_id},
+            )
 
 
 # NOTE: Status endpoint must be defined BEFORE /{run_id} routes to avoid path conflicts
@@ -8995,11 +10162,149 @@ async def get_flow_spec_job_status(job_id: str):
     job = _flow_spec_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
-    return {
+    response = {
         "job_id": job_id,
         "status": job["status"],
         "message": job.get("message"),
+        "agent_run_id": job.get("agent_run_id"),
+        "agent_task_id": job.get("agent_task_id"),
         "result": job.get("result"),
+    }
+    agent_run_id = job.get("agent_run_id")
+    if agent_run_id:
+        with Session(engine) as db_session:
+            spec_run = db_session.get(AgentRun, agent_run_id)
+            if spec_run:
+                response["agent_run"] = _serialize_agent_run(spec_run, db_session)
+    return response
+
+
+@app.post("/api/agents/runs/{run_id}/report-items/{item_id}/generate-spec")
+async def generate_report_item_spec(
+    run_id: str,
+    item_id: str,
+    item_type: str | None = Query(default=None, description="finding or test_idea"),
+    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    session: Session = Depends(get_session),
+):
+    """Generate a browser-backed spec from a custom agent finding or test idea."""
+    import time as _time
+
+    source_run = session.get(AgentRun, run_id)
+    if not source_run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(source_run, project_id)
+
+    result = source_run.result or {}
+    report = result.get("structured_report") if isinstance(result, dict) else None
+    if not isinstance(report, dict):
+        raise HTTPException(status_code=400, detail="This run does not have a structured report")
+
+    normalized_type = (item_type or "").strip().lower()
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    if normalized_type in ("", "finding", "findings"):
+        candidates.extend(("finding", item) for item in report.get("findings") or [] if isinstance(item, dict))
+    if normalized_type in ("", "test_idea", "test_ideas", "test idea"):
+        candidates.extend(("test_idea", item) for item in report.get("test_ideas") or [] if isinstance(item, dict))
+
+    matched = next(((kind, item) for kind, item in candidates if str(item.get("id")) == item_id), None)
+    if not matched:
+        raise HTTPException(status_code=404, detail=f"Report item {item_id} not found")
+
+    kind, item = matched
+    base_url = str(source_run.config.get("url") or "").strip()
+    target_url = str(item.get("page") or base_url or "").strip()
+    if not target_url:
+        raise HTTPException(status_code=400, detail="This report item has no page URL to explore")
+
+    title = str(item.get("title") or item_id)
+    steps = item.get("steps") if isinstance(item.get("steps"), list) else []
+    happy_path = "\n".join(str(step) for step in steps) if steps else str(item.get("description") or title)
+    evidence = str(item.get("evidence") or item.get("expected") or "").strip()
+
+    flow = {
+        "id": item_id,
+        "title": title,
+        "entry_point": target_url,
+        "exit_point": target_url,
+        "pages": [target_url],
+        "happy_path": happy_path,
+        "edge_cases": [evidence] if evidence and kind == "finding" else [],
+        "test_ideas": [evidence] if evidence and kind == "test_idea" else [f"Create a regression spec for {item_id}"],
+    }
+
+    _cleanup_flow_spec_jobs()
+    job_id = f"reportspec-{run_id}-{item_id}-{uuid.uuid4().hex[:8]}"
+    spec_agent_run_id = job_id
+    project_root = Path(__file__).parent.parent.parent
+    spec_run_dir = project_root / "runs" / spec_agent_run_id
+    await asyncio.to_thread(spec_run_dir.mkdir, parents=True, exist_ok=True)
+    flows_file = spec_run_dir / "source-flow.json"
+
+    run_project_id = source_run.project_id or source_run.config.get("project_id") or project_id
+    spec_agent_run = AgentRun(
+        id=spec_agent_run_id,
+        agent_type="spec_generation",
+        runtime="claude_sdk",
+        status="running",
+        started_at=datetime.utcnow(),
+        project_id=run_project_id,
+    )
+    spec_agent_run.config = {
+        "source": "custom_agent_report",
+        "source_run_id": run_id,
+        "source_item_id": item_id,
+        "source_item_type": kind,
+        "flow_title": title,
+        "url": target_url,
+        "allowed_tools": get_agent_allowed_tools("playwright-test-planner"),
+    }
+    spec_agent_run.progress = {
+        "phase": "queued",
+        "status": "running",
+        "message": "Starting Native Planner spec generation...",
+        "has_browser_tools": True,
+        **browser_runtime_status(),
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    session.add(spec_agent_run)
+    session.commit()
+    _record_agent_run_event(
+        spec_agent_run_id,
+        event_type="started",
+        message="Started Native Planner spec generation.",
+        payload={"source_run_id": run_id, "source_item_id": item_id, "source_item_type": kind},
+        session=session,
+    )
+
+    _flow_spec_jobs[job_id] = {
+        "status": "running",
+        "message": "Starting spec generation...",
+        "started_at": _time.time(),
+        "run_id": run_id,
+        "flow_id": item_id,
+        "agent_run_id": spec_agent_run_id,
+    }
+
+    background_tasks.add_task(
+        _run_flow_spec_generation,
+        job_id=job_id,
+        run_id=run_id,
+        flow_id=item_id,
+        flow=flow,
+        flows=[flow],
+        flows_file_path=str(flows_file),
+        run_project_id=run_project_id,
+        run_config={"url": base_url or target_url, "project_id": run_project_id},
+        spec_agent_run_id=spec_agent_run_id,
+    )
+
+    return {
+        "status": "running",
+        "job_id": job_id,
+        "agent_run_id": spec_agent_run_id,
+        "message": "Spec generation started. Poll for status.",
     }
 
 
@@ -9077,6 +10382,43 @@ async def generate_flow_test(
         # Fire-and-return: launch background generation
         _cleanup_flow_spec_jobs()
         job_id = f"flowspec-{run_id}-{flow_id}-{uuid.uuid4().hex[:8]}"
+        spec_agent_run_id = job_id
+
+        spec_run_dir = project_root / "runs" / spec_agent_run_id
+        await asyncio.to_thread(spec_run_dir.mkdir, parents=True, exist_ok=True)
+        spec_agent_run = AgentRun(
+            id=spec_agent_run_id,
+            agent_type="spec_generation",
+            runtime="claude_sdk",
+            status="running",
+            started_at=datetime.utcnow(),
+            project_id=run_project_id,
+        )
+        spec_agent_run.config = {
+            "source": "exploratory_flow",
+            "source_run_id": run_id,
+            "source_flow_id": flow_id,
+            "flow_title": flow.get("title", "Unnamed Flow"),
+            "url": run_config.get("url") or flow.get("entry_point"),
+            "allowed_tools": get_agent_allowed_tools("playwright-test-planner"),
+        }
+        spec_agent_run.progress = {
+            "phase": "queued",
+            "status": "running",
+            "message": "Starting Native Planner spec generation...",
+            "has_browser_tools": True,
+            **browser_runtime_status(),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        session.add(spec_agent_run)
+        session.commit()
+        _record_agent_run_event(
+            spec_agent_run_id,
+            event_type="started",
+            message="Started Native Planner spec generation.",
+            payload={"source_run_id": run_id, "source_flow_id": flow_id, "flow_title": flow.get("title")},
+            session=session,
+        )
 
         _flow_spec_jobs[job_id] = {
             "status": "running",
@@ -9084,6 +10426,7 @@ async def generate_flow_test(
             "started_at": _time.time(),
             "run_id": run_id,
             "flow_id": flow_id,
+            "agent_run_id": spec_agent_run_id,
         }
 
         background_tasks.add_task(
@@ -9096,11 +10439,13 @@ async def generate_flow_test(
             flows_file_path=str(flows_file),
             run_project_id=run_project_id,
             run_config=run_config,
+            spec_agent_run_id=spec_agent_run_id,
         )
 
         return {
             "status": "running",
             "job_id": job_id,
+            "agent_run_id": spec_agent_run_id,
             "message": "Spec generation started. Poll for status.",
         }
 

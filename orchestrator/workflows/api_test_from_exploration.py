@@ -217,6 +217,7 @@ Write the file to: {output_path}
             timeout_seconds=timeout,
             allowed_tools=["Glob", "Grep", "Read", "LS", "Write"],
             log_tools=True,
+            model_tier="deep",
         )
 
         result = await runner.run(prompt)

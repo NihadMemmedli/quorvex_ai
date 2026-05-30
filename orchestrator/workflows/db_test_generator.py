@@ -163,6 +163,7 @@ REMINDER: Your ENTIRE response must be a single JSON array inside a ```json code
         timeout_seconds=120,
         allowed_tools=[],  # No tools needed for generation
         log_tools=False,
+        model_tier="deep",
     )
     result = await runner.run(prompt)
 

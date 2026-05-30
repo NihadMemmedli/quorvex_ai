@@ -81,6 +81,8 @@ class AgentTask:
     owner_type: str | None = None  # Logical owner, e.g. autopilot or agent_run
     owner_id: str | None = None
     owner_label: str | None = None
+    browser_slot_parent_owner_type: str | None = None
+    browser_slot_parent_run_id: str | None = None
     telemetry: dict[str, Any] = field(
         default_factory=dict
     )  # Structured execution diagnostics
@@ -116,6 +118,8 @@ class AgentTask:
             "owner_type": self.owner_type,
             "owner_id": self.owner_id,
             "owner_label": self.owner_label,
+            "browser_slot_parent_owner_type": self.browser_slot_parent_owner_type,
+            "browser_slot_parent_run_id": self.browser_slot_parent_run_id,
             "telemetry": self.telemetry,
         }
 
@@ -161,6 +165,8 @@ class AgentTask:
             owner_type=data.get("owner_type"),
             owner_id=data.get("owner_id"),
             owner_label=data.get("owner_label"),
+            browser_slot_parent_owner_type=data.get("browser_slot_parent_owner_type"),
+            browser_slot_parent_run_id=data.get("browser_slot_parent_run_id"),
             telemetry=data.get("telemetry") or {},
         )
 
@@ -311,6 +317,8 @@ class AgentQueue:
         owner_type: str | None = None,
         owner_id: str | None = None,
         owner_label: str | None = None,
+        browser_slot_parent_owner_type: str | None = None,
+        browser_slot_parent_run_id: str | None = None,
     ) -> str:
         """
         Add an agent task to the queue.
@@ -357,6 +365,8 @@ class AgentQueue:
             owner_type=owner_type,
             owner_id=owner_id,
             owner_label=owner_label,
+            browser_slot_parent_owner_type=browser_slot_parent_owner_type,
+            browser_slot_parent_run_id=browser_slot_parent_run_id,
         )
 
         # Atomic store + enqueue
@@ -373,6 +383,8 @@ class AgentQueue:
                 "agent_type": agent_type,
                 "operation_type": operation_type,
                 "timeout_seconds": timeout_seconds,
+                "browser_slot_parent_owner_type": browser_slot_parent_owner_type,
+                "browser_slot_parent_run_id": browser_slot_parent_run_id,
             },
         )
         logger.info(
@@ -432,6 +444,14 @@ class AgentQueue:
             return age < max_stale_seconds
         except (ValueError, TypeError):
             return False
+
+    async def check_worker_heartbeat(self, worker_id: str) -> bool:
+        """Return whether a worker-level heartbeat key is still present."""
+        if not worker_id:
+            return False
+        redis = await self._ensure_connected()
+        heartbeat = await redis.get(f"{self.WORKER_HEARTBEAT_PREFIX}{worker_id}")
+        return bool(heartbeat)
 
     async def get_task_progress(self, task_id: str) -> dict[str, Any] | None:
         """Get live progress data from a task's heartbeat.
@@ -1106,7 +1126,7 @@ class AgentQueue:
         if not task.owner_type or not task.owner_id:
             return None
 
-        terminal_statuses = {"completed", "failed", "cancelled", "error", "stopped"}
+        terminal_statuses = {"passed", "completed", "failed", "cancelled", "error", "stopped"}
         try:
             from sqlmodel import Session
 
@@ -1116,6 +1136,7 @@ class AgentQueue:
                 AutoPilotSession,
                 AutonomousAgentWorkItem,
                 AutonomousMission,
+                TestRun,
             )
 
             with Session(engine) as session:
@@ -1123,6 +1144,8 @@ class AgentQueue:
                     owner = session.get(AutoPilotSession, task.owner_id)
                 elif task.owner_type == "agent_run":
                     owner = session.get(AgentRun, task.owner_id)
+                elif task.owner_type == "test_run":
+                    owner = session.get(TestRun, task.owner_id)
                 elif task.owner_type == "autonomous_work_item":
                     owner = session.get(AutonomousAgentWorkItem, task.owner_id)
                     if owner and owner.mission_id:
@@ -1159,6 +1182,48 @@ class AgentQueue:
             logger.debug("Failed to resolve owner for agent task %s: %s", task.id, exc)
             return None
 
+    def _task_belongs_to_test_run(self, task: AgentTask, run_id: str) -> bool:
+        return (
+            (task.owner_type == "test_run" and task.owner_id == run_id)
+            or (
+                task.browser_slot_parent_owner_type == "test_run"
+                and task.browser_slot_parent_run_id == run_id
+            )
+        )
+
+    async def cancel_tasks_for_test_run(self, run_id: str) -> dict[str, Any]:
+        """Cancel queued/running/paused agent tasks associated with a test run."""
+        redis = await self._ensure_connected()
+        all_tasks = await redis.hgetall(self.TASKS_KEY)
+        summary: dict[str, Any] = {
+            "run_id": run_id,
+            "matched": 0,
+            "cancelled": 0,
+            "task_ids": [],
+        }
+        cancellable = {
+            AgentTaskStatus.QUEUED,
+            AgentTaskStatus.RUNNING,
+            AgentTaskStatus.PAUSED,
+            AgentTaskStatus.CANCEL_REQUESTED,
+        }
+
+        for task_id, task_data_str in all_tasks.items():
+            try:
+                task = AgentTask.from_dict(json.loads(task_data_str))
+            except Exception:
+                continue
+            if not self._task_belongs_to_test_run(task, run_id):
+                continue
+            summary["matched"] += 1
+            if task.status not in cancellable:
+                continue
+            if await self.cancel_task(task_id):
+                summary["cancelled"] += 1
+                summary["task_ids"].append(task_id)
+
+        return summary
+
     async def _finish_task_for_cleanup(
         self,
         redis,
@@ -1184,6 +1249,21 @@ class AgentQueue:
             message=error,
             payload={"status": status.value},
         )
+
+    async def fail_stale_running_task(self, task_id: str, error: str) -> bool:
+        """Move a stale running task to FAILED and signal any worker to stop."""
+        redis = await self._ensure_connected()
+        task = await self.get_task(task_id)
+        if not task:
+            await redis.srem(self.RUNNING_KEY, task_id)
+            return False
+        if task.status not in (
+            AgentTaskStatus.RUNNING,
+            AgentTaskStatus.CANCEL_REQUESTED,
+        ):
+            return False
+        await self._finish_task_for_cleanup(redis, task, AgentTaskStatus.FAILED, error)
+        return True
 
     def _stale_ownerless_queue_minutes(self) -> int:
         raw = os.environ.get("AGENT_QUEUE_STALE_OWNERLESS_MINUTES", "")

@@ -45,14 +45,13 @@ export default function SpecBuilder({ content, onChange }: SpecBuilderProps) {
 
     const fetchTemplates = async () => {
         try {
-            const projectParam = currentProject?.id
-                ? `?project_id=${encodeURIComponent(currentProject.id)}`
-                : '';
-            const res = await fetch(`${API_BASE}/specs/list${projectParam}`);
+            const params = new URLSearchParams({ templates_only: 'true', limit: '200' });
+            if (currentProject?.id) params.set('project_id', currentProject.id);
+            const res = await fetch(`${API_BASE}/specs/list?${params.toString()}`);
             const data = await res.json();
-            // Filter only templates — handle both paginated and legacy response shapes
+            // Handle both paginated and legacy response shapes.
             const specsList = data.items || data;
-            setTemplates(specsList.filter((s: any) => s.name.startsWith('templates/')));
+            setTemplates(specsList);
         } catch (e) {
             console.error("Failed to fetch templates", e);
         }

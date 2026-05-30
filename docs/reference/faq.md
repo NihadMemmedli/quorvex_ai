@@ -81,7 +81,7 @@ Use credential placeholders in specs (`{{VARIABLE_NAME}}`), define values in `.e
 
 | Symptom | Solution |
 |---------|----------|
-| "ANTHROPIC_AUTH_TOKEN not set" | Check `.env` file, run `make check-env` |
+| "QUORVEX_LLM_API_KEY not set" | Check `.env` file, run `make check-env` |
 | Generated tests keep timing out | Increase `AGENT_TIMEOUT_SECONDS` or `GENERATOR_TIMEOUT_SECONDS` in `.env` |
 | Dashboard won't start | Check ports 8001 (backend) and 3000 (frontend) are available. Run `make logs` for errors. |
 | "Account locked" on login | Wait 30 minutes or clear lockout in database |

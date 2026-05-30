@@ -1,7 +1,7 @@
 # ============================================
 # Stage 1: Base image with Python + Node + Playwright
 # ============================================
-FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy AS base
+FROM mcr.microsoft.com/playwright/python:v1.57.0-jammy AS base
 
 # Set working directory
 WORKDIR /app
@@ -93,10 +93,15 @@ COPY orchestrator/requirements.txt /app/orchestrator/requirements.txt
 COPY package.json package-lock.json /app/
 RUN npm ci
 
-# Install Playwright browsers for Node.js (must match @playwright/test version in package.json)
-# Increase timeout to 5 minutes (300000ms) to handle slow networks
+# Ensure the Node Playwright browser cache matches package.json.
+# The base image has browsers, but this keeps the debug image aligned with npm deps.
 ENV PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=300000
-RUN npx playwright install chromium
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV TEMPORAL_BROWSER_WORKFLOW_TASK_QUEUE=quorvex-browser-workflows
+RUN npx playwright install chromium && \
+    if [ -f /app/node_modules/@playwright/mcp/node_modules/playwright/cli.js ]; then \
+      node /app/node_modules/@playwright/mcp/node_modules/playwright/cli.js install chromium; \
+    fi
 
 # Install Python dependencies
 # Upgrade pip first
@@ -110,8 +115,26 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Clone noVNC for websockify --web option (HTML5 VNC client)
 RUN git clone --depth 1 https://github.com/novnc/noVNC.git /opt/noVNC
 
-# Copy the entire project
-COPY . /app
+# Reuse the Playwright image's UID/GID 1000 user so shared volumes have the
+# same numeric owner in both full and slim backend images.
+RUN if id -u pwuser >/dev/null 2>&1; then \
+      usermod --login agent --home /home/agent --move-home pwuser && \
+      groupmod --new-name agent pwuser; \
+    else \
+      groupadd --gid 1000 agent && \
+      useradd --create-home --uid 1000 --gid 1000 agent; \
+    fi
+
+# Copy only runtime application inputs. Large generated/demo/frontend artifacts
+# stay out of the backend debug image.
+COPY --chown=agent:agent orchestrator/ /app/orchestrator/
+COPY --chown=agent:agent schemas/ /app/schemas/
+COPY --chown=agent:agent .claude/ /app/.claude/
+COPY --chown=agent:agent specs/ /app/specs/
+COPY --chown=agent:agent tests/ /app/tests/
+COPY --chown=agent:agent prds/ /app/prds/
+COPY --chown=agent:agent playwright.config.ts pyproject.toml README.md CLAUDE.md /app/
+COPY --chown=agent:agent scripts/load/ /app/scripts/load/
 
 # Copy supervisor configuration for VNC mode
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
@@ -125,12 +148,11 @@ RUN if [ -d "/app/.claude/skills/playwright" ]; then \
 COPY scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Create required directories and non-root user
+# Create required writable directories
 # Note: logs, runs, data, specs, prds, tests directories need to be writable by agent user
 # Also grant agent user access to X11 and VNC directories for non-root VNC operation
-RUN useradd -m agent && \
-    mkdir -p /app/logs /app/runs /app/data /app/specs /app/prds /app/tests /app/scripts/load && \
-    chown -R agent:agent /app && \
+RUN mkdir -p /app/logs /app/runs /app/data /app/specs /app/prds /app/tests /app/test-results /app/scripts/load && \
+    chown -R agent:agent /app/logs /app/runs /app/data /app/specs /app/prds /app/tests /app/test-results /app/scripts && \
     # Grant agent user access to X11 and VNC (for non-root VNC operation)
     mkdir -p /tmp/.X11-unix && \
     chown -R agent:agent /tmp/.X11-unix && \

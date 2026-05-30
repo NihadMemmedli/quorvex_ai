@@ -1024,146 +1024,22 @@ def _selected_spec_names_for_analysis(
 
 def _batch_payload(batch: RegressionBatch | None, session: Session) -> dict[str, Any] | None:
     return batch_payload(batch, session)
-    if not batch:
-        return None
-    runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch.id)).all()
-    failed_runs = [r for r in runs if r.status in FAILURE_RUN_STATUSES]
-    return {
-        "id": batch.id,
-        "name": batch.name,
-        "status": batch.status,
-        "total_tests": batch.actual_total_tests if batch.actual_total_tests is not None else batch.total_tests,
-        "passed": batch.actual_passed if batch.actual_passed is not None else batch.passed,
-        "failed": batch.actual_failed if batch.actual_failed is not None else batch.failed,
-        "stopped": batch.stopped,
-        "running": batch.running,
-        "queued": batch.queued,
-        "success_rate": batch.success_rate,
-        "created_at": batch.created_at.isoformat() if batch.created_at else None,
-        "started_at": batch.started_at.isoformat() if batch.started_at else None,
-        "completed_at": batch.completed_at.isoformat() if batch.completed_at else None,
-        "failed_tests": [
-            {
-                "run_id": r.id,
-                "spec_name": r.spec_name,
-                "status": r.status,
-                "error_message": r.error_message,
-            }
-            for r in failed_runs[:20]
-        ],
-    }
 
 
 def _quality_gate_status(analysis: PrImpactAnalysis, batch: RegressionBatch | None, session: Session) -> dict[str, Any]:
     return quality_gate_status(analysis, batch, session)
-    if not analysis.selected_tests_count:
-        return {
-            "state": "blocked",
-            "github_state": "error",
-            "description": "No runnable Quorvex tests were selected",
-        }
-    if not batch:
-        if analysis.fallback_reason:
-            return {
-                "state": "needs-full-suite",
-                "github_state": "error",
-                "description": "Full suite recommended before merge",
-            }
-        return {
-            "state": "analyzed",
-            "github_state": "pending",
-            "description": "Quorvex selected PR tests; run is pending",
-        }
-
-    runs = session.exec(select(DBTestRun.status).where(DBTestRun.batch_id == batch.id)).all()
-    has_active = any(status in ACTIVE_RUN_STATUSES for status in runs)
-    has_failure = any(status in FAILURE_RUN_STATUSES for status in runs)
-    all_terminal = bool(runs) and all(status in TERMINAL_RUN_STATUSES for status in runs)
-
-    if has_active or batch.status in {"pending", "running"}:
-        return {
-            "state": "running",
-            "github_state": "pending",
-            "description": "Quorvex PR tests are running",
-        }
-    if has_failure or batch.failed > 0 or batch.stopped > 0:
-        return {
-            "state": "failed",
-            "github_state": "failure",
-            "description": "Quorvex PR tests failed",
-        }
-    if all_terminal and (batch.passed > 0 or (batch.actual_passed or 0) > 0):
-        return {
-            "state": "passed",
-            "github_state": "success",
-            "description": "Quorvex PR tests passed",
-        }
-    return {
-        "state": "blocked",
-        "github_state": "error",
-        "description": "Quorvex could not determine a passing gate result",
-    }
 
 
 def _app_url(path: str) -> str | None:
     return quality_gate_app_url(path)
-    base = os.getenv("WEB_BASE_URL") or os.getenv("FRONTEND_URL") or os.getenv("APP_BASE_URL")
-    if not base:
-        return None
-    return f"{base.rstrip('/')}/{path.lstrip('/')}"
 
 
 def _serialize_quality_gate(analysis: PrImpactAnalysis, session: Session, include_details: bool = True) -> dict[str, Any]:
     return serialize_quality_gate(analysis, session, include_details=include_details)
-    from orchestrator.services.pr_test_advisor import serialize_analysis
-
-    batch = session.get(RegressionBatch, analysis.batch_id) if analysis.batch_id else None
-    gate = _quality_gate_status(analysis, batch, session)
-    payload = serialize_analysis(analysis, session, include_details=include_details)
-    payload["quality_gate"] = {
-        **gate,
-        "batch": _batch_payload(batch, session),
-        "analysis_url": _app_url(f"pr-advisor"),
-        "batch_url": _app_url(f"regression/batches/{analysis.batch_id}") if analysis.batch_id else None,
-    }
-    return payload
 
 
 def _quality_gate_comment(payload: dict[str, Any]) -> str:
     return quality_gate_comment(payload)
-    gate = payload["quality_gate"]
-    selected = payload.get("selected_tests") or []
-    failed = ((gate.get("batch") or {}).get("failed_tests") or [])
-    selected_lines = "\n".join(
-        f"- `{item['spec_name']}`: {item.get('reason', 'Selected by impact analysis')}" for item in selected[:12]
-    )
-    if len(selected) > 12:
-        selected_lines += f"\n- ...and {len(selected) - 12} more"
-    failed_lines = "\n".join(
-        f"- `{item['spec_name']}`: {item.get('status')}" for item in failed[:10]
-    )
-    links = []
-    if gate.get("batch_url"):
-        links.append(f"[View regression batch]({gate['batch_url']})")
-    if gate.get("analysis_url"):
-        links.append(f"[Open PR Advisor]({gate['analysis_url']})")
-    links_line = " | ".join(links)
-    fallback = f"\n\n**Fallback:** {payload['fallback_reason']}" if payload.get("fallback_reason") else ""
-    failures = f"\n\n**Failed tests**\n{failed_lines}" if failed_lines else ""
-    return (
-        f"{QUALITY_GATE_COMMENT_MARKER}\n"
-        "## Quorvex Quality Gate\n\n"
-        f"**Status:** `{gate['state']}`  \n"
-        f"**Risk:** `{payload['risk_level']}`  \n"
-        f"**Confidence:** `{payload['confidence']}`  \n"
-        f"**Changed files:** {payload['changed_files_count']}  \n"
-        f"**Selected tests:** {payload['selected_tests_count']} of {payload['total_candidate_tests']}  \n"
-        f"**Estimated time saved:** {payload.get('saved_tests_count') or 0} tests skipped"
-        f"{fallback}\n\n"
-        f"**Recommended tests**\n{selected_lines or '- No tests selected'}"
-        f"{failures}\n\n"
-        f"{links_line}"
-    )
 
 
 async def _publish_quality_gate_feedback(
@@ -1181,48 +1057,6 @@ async def _publish_quality_gate_feedback(
         post_feedback=post_feedback,
         create_commit_status=create_commit_status,
     )
-    config = _get_github_config(project) or {}
-    owner = config.get("owner", "")
-    repo = config.get("repo", "")
-    errors: list[str] = []
-    result: dict[str, Any] = {"comment": None, "commit_status": None, "errors": errors}
-    if not owner or not repo:
-        return result
-
-    client = await _build_client(project)
-    try:
-        if post_feedback:
-            try:
-                comments = await client.list_issue_comments(owner, repo, analysis.pr_number)
-                existing = next((c for c in comments if QUALITY_GATE_COMMENT_MARKER in (c.get("body") or "")), None)
-                body = _quality_gate_comment(payload)
-                if existing and existing.get("id"):
-                    updated = await client.update_issue_comment(owner, repo, int(existing["id"]), body)
-                    result["comment"] = {"action": "updated", "url": updated.get("html_url")}
-                else:
-                    created = await client.create_issue_comment(owner, repo, analysis.pr_number, body)
-                    result["comment"] = {"action": "created", "url": created.get("html_url")}
-            except Exception as e:
-                errors.append(f"PR comment failed: {e}")
-
-        if create_commit_status and analysis.head_sha:
-            try:
-                gate = payload["quality_gate"]
-                status = await client.create_commit_status(
-                    owner,
-                    repo,
-                    analysis.head_sha,
-                    state=gate["github_state"],
-                    context=QUALITY_GATE_CONTEXT,
-                    description=gate["description"],
-                    target_url=gate.get("batch_url") or gate.get("analysis_url"),
-                )
-                result["commit_status"] = {"state": status.get("state"), "url": status.get("target_url")}
-            except Exception as e:
-                errors.append(f"Commit status failed: {e}")
-    finally:
-        await client.close()
-    return result
 
 
 _quality_gate_status = quality_gate_status

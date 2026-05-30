@@ -39,14 +39,14 @@ function initKeys() {
   if (_keysInitialized) return;
   _keysInitialized = true;
 
-  const tokensStr = process.env.ANTHROPIC_AUTH_TOKENS || '';
+  const tokensStr = process.env.QUORVEX_LLM_API_KEYS || process.env.ANTHROPIC_AUTH_TOKENS || '';
   const tokens = tokensStr
     ? tokensStr.split(',').map(t => t.trim()).filter(Boolean)
     : [];
 
   // Fall back to single key
   if (tokens.length === 0) {
-    const single = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
+    const single = process.env.QUORVEX_LLM_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
     if (single) tokens.push(single);
   }
 
@@ -92,20 +92,26 @@ export function reportRateLimit(slot?: KeySlot) {
  */
 export function getActiveProvider() {
   const slot = getAvailableSlot();
-  const apiKey = slot?.token || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
+  const apiKey = slot?.token || process.env.QUORVEX_LLM_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
   const authToken = apiKey ? '' : process.env.CLAUDE_CODE_OAUTH_TOKEN || '';
 
   const provider = createAnthropic({
     ...(apiKey ? { apiKey } : { authToken }),
-    baseURL: normalizeBaseURL(process.env.ANTHROPIC_BASE_URL),
+    baseURL: normalizeBaseURL(process.env.QUORVEX_LLM_BASE_URL || process.env.ANTHROPIC_BASE_URL),
   });
 
   return { provider, slot };
 }
 
 export function hasDirectAnthropicChatCredential() {
+  const explicitAssistantRuntime = getExplicitAssistantRuntime();
+  const assistantRuntime = getAssistantRuntime();
+  if (assistantRuntime === 'hermes' || explicitAssistantRuntime === 'openai') return false;
+
   return Boolean(
     (
+      process.env.QUORVEX_LLM_API_KEYS ||
+      process.env.QUORVEX_LLM_API_KEY ||
       process.env.ANTHROPIC_AUTH_TOKENS ||
       process.env.ANTHROPIC_API_KEY ||
       process.env.ANTHROPIC_AUTH_TOKEN ||
@@ -115,14 +121,46 @@ export function hasDirectAnthropicChatCredential() {
 }
 
 export function hasOpenAIChatCredential() {
-  return Boolean((process.env.OPENAI_API_KEY || '').trim());
+  const explicitAssistantRuntime = getExplicitAssistantRuntime();
+  const assistantRuntime = getAssistantRuntime();
+  if (assistantRuntime === 'hermes' || explicitAssistantRuntime === 'claude_sdk') return false;
+  return Boolean((process.env.OPENAI_API_KEY || process.env.QUORVEX_LLM_API_KEY || '').trim());
+}
+
+function getExplicitAssistantRuntime() {
+  return (process.env.QUORVEX_ASSISTANT_RUNTIME || '').trim().toLowerCase();
+}
+
+export function getAssistantRuntime() {
+  return (
+    process.env.QUORVEX_ASSISTANT_RUNTIME ||
+    process.env.QUORVEX_AGENT_RUNTIME ||
+    ''
+  ).trim().toLowerCase();
+}
+
+export function hasHermesChatRuntime() {
+  return (process.env.HERMES_ENABLED || '').toLowerCase() === 'true'
+    && getAssistantRuntime() === 'hermes';
 }
 
 export function getActiveOpenAIProvider() {
-  const apiKey = (process.env.OPENAI_API_KEY || '').trim();
+  const apiKey = (process.env.OPENAI_API_KEY || process.env.QUORVEX_LLM_API_KEY || '').trim();
   const provider = createOpenAI({
     apiKey,
-    baseURL: normalizeOpenAIBaseURL(process.env.OPENAI_BASE_URL),
+    baseURL: normalizeOpenAIBaseURL(process.env.OPENAI_BASE_URL || process.env.QUORVEX_LLM_BASE_URL),
+  });
+
+  return { provider };
+}
+
+export function getActiveHermesProvider() {
+  const apiKey = (process.env.HERMES_API_KEY || 'local-hermes').trim();
+  const rawBaseURL = normalizeOpenAIBaseURL(process.env.HERMES_API_URL || 'http://127.0.0.1:8642') || 'http://127.0.0.1:8642';
+  const baseURL = rawBaseURL.endsWith('/v1') ? rawBaseURL : `${rawBaseURL}/v1`;
+  const provider = createOpenAI({
+    apiKey,
+    baseURL,
   });
 
   return { provider };
@@ -134,20 +172,28 @@ export function getActiveOpenAIProvider() {
  */
 export const anthropicProvider = createAnthropic({
   ...(
-    process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN
-      ? { apiKey: process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '' }
+    process.env.QUORVEX_LLM_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN
+      ? { apiKey: process.env.QUORVEX_LLM_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '' }
       : { authToken: process.env.CLAUDE_CODE_OAUTH_TOKEN || '' }
   ),
-  baseURL: normalizeBaseURL(process.env.ANTHROPIC_BASE_URL),
+  baseURL: normalizeBaseURL(process.env.QUORVEX_LLM_BASE_URL || process.env.ANTHROPIC_BASE_URL),
 });
 
 export const MODEL_ID =
+  process.env.QUORVEX_LLM_CHAT_MODEL ||
+  process.env.QUORVEX_LLM_STANDARD_MODEL ||
   process.env.ANTHROPIC_CHAT_MODEL ||
   process.env.ANTHROPIC_MODEL ||
   process.env.ANTHROPIC_DEFAULT_SONNET_MODEL ||
   'glm-5-turbo';
 
 export const OPENAI_MODEL_ID =
+  process.env.QUORVEX_LLM_CHAT_MODEL ||
+  process.env.QUORVEX_OPENAI_MODEL ||
   process.env.OPENAI_CHAT_MODEL ||
   process.env.OPENAI_MODEL ||
   'gpt-4o-mini';
+
+export const HERMES_MODEL_ID =
+  process.env.HERMES_MODEL ||
+  'hermes-agent';

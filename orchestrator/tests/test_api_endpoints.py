@@ -12,6 +12,7 @@ Run with: JWT_SECRET_KEY=test pytest orchestrator/tests/test_api_endpoints.py -v
 """
 
 import os
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -117,6 +118,124 @@ class TestRunEndpoints:
         """POST /runs/{id}/stop with non-existent ID should return 404."""
         response = client.post("/runs/nonexistent-run-id/stop")
         assert response.status_code == 404
+
+    def test_get_run_includes_live_browser_metadata(self, client, monkeypatch):
+        """GET /runs/{id} should expose runtime metadata for live browser view."""
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import TestRun as DBTestRun
+
+        run_id = f"live-browser-metadata-{uuid4()}"
+        monkeypatch.setattr(
+            main_module,
+            "browser_runtime_status",
+            lambda: {
+                "browser_runtime": "temporal_vnc_worker",
+                "live_view_available": True,
+                "runtime_message": "Browser execution is delegated to the live browser worker.",
+                "vnc_url": "ws://localhost:6080/websockify",
+            },
+        )
+
+        with Session(engine) as session:
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="live-browser-metadata.md",
+                    status="running",
+                    created_at=datetime.utcnow(),
+                    test_name="Live Browser Metadata",
+                )
+            )
+            session.commit()
+
+        try:
+            response = client.get(f"/runs/{run_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["browser_runtime"] == "temporal_vnc_worker"
+            assert data["live_view_available"] is True
+            assert data["runtime_message"] == "Browser execution is delegated to the live browser worker."
+            assert data["vnc_url"] == "ws://localhost:6080/websockify"
+
+            run_dir = main_module.RUNS_DIR / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "execution.log").write_text("started")
+            detail_response = client.get(f"/runs/{run_id}")
+            assert detail_response.status_code == 200
+            detail_data = detail_response.json()
+            assert detail_data["browser_runtime"] == "temporal_vnc_worker"
+            assert detail_data["live_view_available"] is True
+            assert detail_data["runtime_message"] == "Browser execution is delegated to the live browser worker."
+            assert detail_data["vnc_url"] == "ws://localhost:6080/websockify"
+        finally:
+            shutil.rmtree(main_module.RUNS_DIR / run_id, ignore_errors=True)
+            with Session(engine) as session:
+                run = session.get(DBTestRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
+
+    def test_get_run_includes_log_diagnostics_without_execution_log(self, client, monkeypatch):
+        """GET /runs/{id} should expose DB and browser-pool diagnostics before execution.log exists."""
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import TestRun as DBTestRun
+
+        class _Pool:
+            async def get_status(self):
+                return {
+                    "max_browsers": 1,
+                    "running": 1,
+                    "queued": 1,
+                    "available": 0,
+                    "running_requests": [run_id],
+                    "queued_requests": ["agent:agent-child"],
+                    "running_details": [
+                        {
+                            "request_id": run_id,
+                            "operation_type": "test_run",
+                            "description": "Test run",
+                            "started_at": "2026-05-30T00:00:00+00:00",
+                        }
+                    ],
+                    "by_type": {"test_run": 1},
+                }
+
+        run_id = f"log-diagnostics-{uuid4()}"
+        monkeypatch.setattr(main_module, "BROWSER_POOL", _Pool())
+
+        with Session(engine) as session:
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="log-diagnostics.md",
+                    status="running",
+                    created_at=datetime.utcnow(),
+                    current_stage="planning",
+                    stage_message="Planning test steps",
+                )
+            )
+            session.commit()
+
+        try:
+            run_dir = main_module.RUNS_DIR / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            response = client.get(f"/runs/{run_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert "Run Lifecycle" in data["log"]
+            assert "status=running" in data["log"]
+            assert "Browser Pool" in data["log"]
+            assert data["blocker_message"] == "Planner agent is waiting for browser slot held by parent run."
+            assert any(section["title"] == "Browser Pool" for section in data["log_sections"])
+        finally:
+            shutil.rmtree(main_module.RUNS_DIR / run_id, ignore_errors=True)
+            with Session(engine) as session:
+                run = session.get(DBTestRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
 
     def test_update_agentic_summary_and_get_run(self, client):
         """POST /runs/{id}/agentic-summary should persist compact summary."""
@@ -307,6 +426,63 @@ class TestSpecEndpoints:
         response = client.get("/specs/list?project_id=default")
         assert response.status_code == 200
 
+    def test_list_specs_excludes_templates_by_default_and_can_return_templates(self, client, tmp_path, monkeypatch):
+        """GET /specs/list should keep templates separate unless templates_only=true."""
+        from orchestrator.api import main as main_module
+
+        specs_dir = tmp_path / "specs"
+        (specs_dir / "templates").mkdir(parents=True)
+        (specs_dir / "regular.md").write_text("# Regular\n", encoding="utf-8")
+        (specs_dir / "templates" / "example.md").write_text("# Template\n", encoding="utf-8")
+        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+
+        response = client.get("/specs/list")
+        assert response.status_code == 200
+        names = {item["name"] for item in response.json()["items"]}
+        assert "regular.md" in names
+        assert "templates/example.md" not in names
+
+        response = client.get("/specs/list?templates_only=true")
+        assert response.status_code == 200
+        names = {item["name"] for item in response.json()["items"]}
+        assert "templates/example.md" in names
+        assert "regular.md" not in names
+
+    def test_list_templates_respects_project_filter(self, client, tmp_path, monkeypatch):
+        """GET /specs/list?templates_only=true should preserve project filtering."""
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
+
+        project_id = f"template-project-{uuid4()}"
+        included_name = f"templates/{uuid4()}.md"
+        excluded_name = f"templates/{uuid4()}.md"
+
+        specs_dir = tmp_path / "specs"
+        (specs_dir / "templates").mkdir(parents=True)
+        (specs_dir / included_name).write_text("# Project Template\n", encoding="utf-8")
+        (specs_dir / excluded_name).write_text("# Other Template\n", encoding="utf-8")
+        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+
+        with Session(engine) as session:
+            session.add(DBSpecMetadata(spec_name=included_name, project_id=project_id, tags_json='["template"]'))
+            session.add(DBSpecMetadata(spec_name=excluded_name, project_id=f"other-{project_id}", tags_json='["template"]'))
+            session.commit()
+
+        try:
+            response = client.get(f"/specs/list?templates_only=true&project_id={project_id}")
+            assert response.status_code == 200
+            names = {item["name"] for item in response.json()["items"]}
+            assert included_name in names
+            assert excluded_name not in names
+        finally:
+            with Session(engine) as session:
+                for spec_name in (included_name, excluded_name):
+                    meta = session.get(DBSpecMetadata, spec_name)
+                    if meta:
+                        session.delete(meta)
+                session.commit()
+
     def test_create_spec_missing_name(self, client):
         """POST /specs with missing name should return 422."""
         response = client.post("/specs", json={"content": "# Test"})
@@ -448,9 +624,12 @@ class TestAISettings:
         assert os.environ["ANTHROPIC_API_KEY"] == "new-key-123456"
         assert "ANTHROPIC_AUTH_TOKENS" not in os.environ
         assert os.environ["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-test-model"
-        assert os.environ["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "claude-test-model"
-        assert os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-test-model"
+        assert os.environ["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "old-model"
+        assert os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "old-model"
         assert os.environ["ANTHROPIC_MODEL"] == "claude-test-model"
+        assert os.environ["ANTHROPIC_CHAT_MODEL"] == "claude-test-model"
+        assert os.environ["QUORVEX_LLM_STANDARD_MODEL"] == "claude-test-model"
+        assert os.environ["QUORVEX_LLM_CHAT_MODEL"] == "claude-test-model"
         assert fake_rotator.initialized is True
 
         env_vars = settings_api._read_env_file()
@@ -458,9 +637,197 @@ class TestAISettings:
         assert env_vars["ANTHROPIC_API_KEY"] == "new-key-123456"
         assert env_vars["ANTHROPIC_AUTH_TOKENS"] == ""
         assert env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "claude-test-model"
-        assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "claude-test-model"
-        assert env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "claude-test-model"
+        assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "old-model"
+        assert env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "old-model"
         assert env_vars["ANTHROPIC_MODEL"] == "claude-test-model"
+        assert env_vars["ANTHROPIC_CHAT_MODEL"] == "claude-test-model"
+        assert env_vars["QUORVEX_LLM_STANDARD_MODEL"] == "claude-test-model"
+        assert env_vars["QUORVEX_LLM_CHAT_MODEL"] == "claude-test-model"
+        assert env_vars["QUORVEX_AGENT_RUNTIME"] == "claude_sdk"
+        assert env_vars["HERMES_SYNC_PROVIDER"] == "true"
+        assert env_vars["HERMES_UPSTREAM_PROVIDER"] == "anthropic"
+        assert env_vars["HERMES_UPSTREAM_MODEL"] == "claude-test-model"
+
+        hermes_dir = tmp_path / "data" / "hermes"
+        assert (hermes_dir / ".env").read_text()
+        hermes_config = (hermes_dir / "config.yaml").read_text()
+        assert 'provider: "anthropic"' in hermes_config
+        assert 'default: "claude-test-model"' in hermes_config
+
+    def test_update_settings_can_configure_hermes_runtime_and_openrouter_provider(self, client, tmp_path, monkeypatch):
+        """Settings should produce a Hermes home bundle that mirrors Quorvex's selected provider."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("ANTHROPIC_AUTH_TOKEN=old-key\nANTHROPIC_BASE_URL=https://api.anthropic.com\n")
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+        monkeypatch.delenv("HERMES_ENABLED", raising=False)
+        monkeypatch.delenv("HERMES_API_URL", raising=False)
+        monkeypatch.delenv("HERMES_API_KEY", raising=False)
+
+        response = client.post(
+            "/settings",
+            json={
+                "llm_provider": "openrouter",
+                "api_key": "sk-or-v1-test",
+                "base_url": "https://openrouter.ai/api",
+                "model_name": "anthropic/claude-sonnet-4.6",
+                "agent_runtime": "hermes",
+                "hermes_enabled": True,
+                "hermes_api_url": "http://localhost:8642/",
+                "hermes_api_key": "local-hermes-key",
+                "hermes_model": "quorvex-hermes",
+                "hermes_sync_provider": True,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()["settings"]
+        assert data["agent_runtime"] == "hermes"
+        assert data["hermes_enabled"] is True
+        assert data["hermes_upstream_provider"] == "openrouter"
+        assert data["hermes_upstream_model"] == "anthropic/claude-sonnet-4.6"
+
+        env_vars = settings_api._read_env_file()
+        assert env_vars["QUORVEX_AGENT_RUNTIME"] == "hermes"
+        assert env_vars["HERMES_ENABLED"] == "true"
+        assert env_vars["HERMES_API_URL"] == "http://localhost:8642"
+        assert env_vars["HERMES_API_KEY"] == "local-hermes-key"
+        assert env_vars["HERMES_MODEL"] == "quorvex-hermes"
+        assert env_vars["HERMES_UPSTREAM_PROVIDER"] == "openrouter"
+
+        hermes_env = (tmp_path / "data" / "hermes" / ".env").read_text()
+        hermes_config = (tmp_path / "data" / "hermes" / "config.yaml").read_text()
+        assert "API_SERVER_KEY=local-hermes-key" in hermes_env
+        assert "OPENROUTER_API_KEY=sk-or-v1-test" in hermes_env
+        assert 'provider: "openrouter"' in hermes_config
+        assert 'default: "anthropic/claude-sonnet-4.6"' in hermes_config
+
+    def test_update_settings_persists_separate_assistant_runtime_and_openai_provider(self, client, tmp_path, monkeypatch):
+        """Settings should allow assistant chat runtime to differ from backend agent runs."""
+        from orchestrator.api import settings as settings_api
+
+        env_file = tmp_path / ".env"
+        env_file.write_text("QUORVEX_AGENT_RUNTIME=claude_sdk\nQUORVEX_ASSISTANT_RUNTIME=claude_sdk\n")
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+        monkeypatch.delenv("HERMES_ENABLED", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        response = client.post(
+            "/settings",
+            json={
+                "llm_provider": "openai",
+                "api_key": "sk-openai-test",
+                "base_url": "https://api.openai.com/v1",
+                "model_name": "gpt-4o-mini",
+                "agent_runtime": "claude_sdk",
+                "assistant_runtime": "openai",
+                "hermes_enabled": True,
+                "hermes_api_url": "http://hermes:8642",
+                "hermes_api_key": "local-hermes-key",
+                "hermes_model": "hermes-agent",
+                "hermes_sync_provider": True,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()["settings"]
+        assert data["llm_provider"] == "openai"
+        assert data["agent_runtime"] == "claude_sdk"
+        assert data["assistant_runtime"] == "openai"
+        assert data["hermes_upstream_provider"] == "openai"
+        assert data["hermes_upstream_model"] == "gpt-4o-mini"
+
+        env_vars = settings_api._read_env_file()
+        assert env_vars["QUORVEX_AGENT_RUNTIME"] == "claude_sdk"
+        assert env_vars["QUORVEX_ASSISTANT_RUNTIME"] == "openai"
+        assert env_vars["QUORVEX_LLM_PROVIDER"] == "openai"
+        assert env_vars["OPENAI_API_KEY"] == "sk-openai-test"
+        assert env_vars["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
+
+        hermes_env = (tmp_path / "data" / "hermes" / ".env").read_text()
+        hermes_config = (tmp_path / "data" / "hermes" / "config.yaml").read_text()
+        assert "API_SERVER_KEY=local-hermes-key" in hermes_env
+        assert "OPENAI_API_KEY=sk-openai-test" in hermes_env
+        assert 'provider: "openai"' in hermes_config
+
+    def test_settings_test_hermes_reports_gateway_and_generated_config(self, client, tmp_path, monkeypatch):
+        """POST /settings/test-hermes should validate both Hermes API and generated config files."""
+        from orchestrator.api import settings as settings_api
+
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        (hermes_home / "config.yaml").write_text('model:\n  provider: "openai"\n  default: "gpt-4o-mini"\n')
+        (hermes_home / ".env").write_text("API_SERVER_KEY=local-hermes-key\nOPENAI_API_KEY=sk-openai-test\n")
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "HERMES_ENABLED=true",
+                    "HERMES_API_URL=http://hermes:8642",
+                    "HERMES_API_KEY=local-hermes-key",
+                    "HERMES_MODEL=hermes-agent",
+                    f"HERMES_HOME={hermes_home}",
+                    "HERMES_UPSTREAM_PROVIDER=openai",
+                    "HERMES_UPSTREAM_MODEL=gpt-4o-mini",
+                ]
+            )
+            + "\n"
+        )
+        monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+        monkeypatch.setattr(
+            settings_api,
+            "_check_hermes_gateway",
+            lambda active=None: {
+                "reachable": True,
+                "status": "reachable",
+                "message": "Hermes API responded with HTTP 200.",
+            },
+        )
+
+        response = client.post("/settings/test-hermes")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["reachable"] is True
+        assert data["upstream_provider"] == "openai"
+        assert data["upstream_model"] == "gpt-4o-mini"
+        assert data["config_exists"] is True
+        assert data["env_exists"] is True
+
+    def test_update_settings_uses_configured_writable_env_file(self, client, tmp_path, monkeypatch):
+        """Container settings should persist to a writable runtime env file when configured."""
+        from orchestrator.api import settings as settings_api
+
+        runtime_env = tmp_path / "runtime" / "runtime.env"
+        monkeypatch.setenv("QUORVEX_SETTINGS_ENV_FILE", str(runtime_env))
+        monkeypatch.setattr(settings_api, "ENV_FILE", tmp_path / "readonly-root" / ".env")
+        monkeypatch.delenv("HERMES_ENABLED", raising=False)
+
+        response = client.post(
+            "/settings",
+            json={
+                "llm_provider": "zai",
+                "api_key": "zai-key",
+                "base_url": "https://api.z.ai/api/anthropic",
+                "model_name": "glm-5.1",
+                "agent_runtime": "hermes",
+                "hermes_enabled": True,
+                "hermes_api_url": "http://hermes:8642",
+                "hermes_model": "hermes-agent",
+                "hermes_sync_provider": True,
+            },
+        )
+
+        assert response.status_code == 200
+        env_vars = settings_api._read_env_file()
+        assert runtime_env.exists()
+        assert not (tmp_path / "readonly-root" / ".env").exists()
+        assert env_vars["HERMES_ENABLED"] == "true"
+        assert env_vars["QUORVEX_AGENT_RUNTIME"] == "hermes"
+        assert env_vars["HERMES_API_URL"] == "http://hermes:8642"
+        assert (tmp_path / "runtime" / "hermes" / "config.yaml").exists()
 
     def test_agent_runner_refreshes_runtime_ai_settings(self, tmp_path, monkeypatch):
         """Backend agent workflows should use the same active AI settings as chat/settings."""
@@ -530,13 +897,14 @@ class TestAISettings:
         assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "real-existing-key"
         assert env_vars["ANTHROPIC_API_KEY"] == "real-existing-key"
         assert env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "new-model"
-        assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "new-model"
-        assert env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "new-model"
+        assert env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "old-model"
+        assert env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "old-model"
         assert env_vars["ANTHROPIC_MODEL"] == "new-model"
+        assert env_vars["ANTHROPIC_CHAT_MODEL"] == "new-model"
         assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "real-existing-key"
         assert os.environ["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "new-model"
-        assert os.environ["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "new-model"
-        assert os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "new-model"
+        assert os.environ["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "old-model"
+        assert os.environ["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "old-model"
         assert os.environ["ANTHROPIC_MODEL"] == "new-model"
 
     def test_settings_test_connection_uses_active_runtime_settings(self, client, tmp_path, monkeypatch):

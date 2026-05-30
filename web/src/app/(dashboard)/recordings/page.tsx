@@ -88,6 +88,11 @@ function recorderBrowserUrl(session: RecordingSession): string | null {
     }
 }
 
+function optionalInput(value: string): string | undefined {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : undefined;
+}
+
 async function jsonFetch<T>(url: string, options?: RequestInit): Promise<T> {
     const res = await fetch(url, options);
     const data = await res.json().catch(() => null);
@@ -147,12 +152,13 @@ export default function RecordingsPage() {
         setImportResult(null);
         setIsStarting(true);
         try {
+            const selectedDevice = optionalInput(device);
             const body = {
-                target_url: targetUrl,
+                target_url: targetUrl.trim(),
                 project_id: projectId,
-                name: name || undefined,
-                viewport_size: viewportSize || undefined,
-                device: device || undefined,
+                name: optionalInput(name),
+                viewport_size: selectedDevice ? undefined : optionalInput(viewportSize),
+                device: selectedDevice,
                 save_har: saveHar,
                 save_storage: saveStorage,
             };
@@ -192,7 +198,7 @@ export default function RecordingsPage() {
             const data = await jsonFetch<{ session: RecordingSession } & ImportResult>(`${API_BASE}/recordings/${session.id}/import`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: name || session.name || undefined }),
+                body: JSON.stringify({ name: optionalInput(name) || session.name || undefined }),
             });
             setImportResult(data);
             setSessions(prev => prev.map(item => item.id === data.session.id ? data.session : item));
@@ -258,7 +264,7 @@ export default function RecordingsPage() {
                                     className="input"
                                     value={device}
                                     onChange={event => setDevice(event.target.value)}
-                                    placeholder="iPhone 13"
+                                    placeholder="Optional preset"
                                     disabled={isRecording || isStarting}
                                 />
                             </label>

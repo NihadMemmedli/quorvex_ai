@@ -35,6 +35,10 @@ class TestRun(SQLModel, table=True):
     # Regression batch tracking
     batch_id: str | None = Field(default=None, foreign_key="regression_batches.id", index=True)
 
+    # Temporal execution metadata for durable browser test runs.
+    temporal_workflow_id: str | None = Field(default=None, index=True)
+    temporal_run_id: str | None = None
+
     # Project isolation
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
 
@@ -103,6 +107,7 @@ class AgentRun(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     agent_type: str
+    runtime: str = Field(default="claude_sdk", index=True)
     config_json: str = "{}"
     result_json: str | None = None
     progress_json: str | None = None
@@ -291,7 +296,9 @@ class AgentDefinition(SQLModel, table=True):
     name: str
     description: str = ""
     system_prompt: str
+    runtime: str = Field(default="claude_sdk", index=True)
     model: str | None = None
+    model_tier: str | None = None
     timeout_seconds: int = 1800
     tool_ids_json: str = "[]"
     status: str = "active"  # active, archived
@@ -4015,6 +4022,8 @@ class AutoPilotSession(SQLModel, table=True):
     current_phase_progress: float = 0.0
     overall_progress: float = 0.0
     phases_completed_json: str = "[]"
+    temporal_workflow_id: str | None = Field(default=None, index=True)
+    temporal_run_id: str | None = None
 
     # Linked entities (multiple exploration sessions for multi-URL)
     exploration_session_ids_json: str = "[]"

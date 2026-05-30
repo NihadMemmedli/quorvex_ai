@@ -590,6 +590,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         self.redis: redis.Redis | None = None
         self._local_slots: dict[str, BrowserSlot] = {}  # Local cache of own slots
         self._key_prefix = "browser_pool"
+        self._max_key = f"{self._key_prefix}:max_browsers"
         self._last_ping_time: float = 0.0
         self._ping_interval: float = 5.0
 
@@ -614,6 +615,8 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
             try:
                 await self.redis.ping()
                 self._last_ping_time = time.monotonic()
+                await self.redis.set(self._max_key, str(self.max_browsers), nx=True)
+                self.max_browsers = await self._read_max_browsers(self.redis)
                 logger.info(f"RedisBrowserResourcePool connected to {self.redis_url}")
             except Exception as e:
                 logger.error(f"Failed to connect to Redis: {e}")
@@ -642,11 +645,34 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         self._last_ping_time = time.monotonic()
         return self.redis
 
+    async def _read_max_browsers(self, r: redis.Redis | None = None) -> int:
+        """Read the shared browser concurrency limit from Redis."""
+        r = r or await self._ensure_connected()
+        raw_value = await r.get(self._max_key)
+        try:
+            value = int(raw_value) if raw_value is not None else self.max_browsers
+        except (TypeError, ValueError):
+            logger.warning("Invalid Redis browser pool max value %r; resetting to %s", raw_value, self.max_browsers)
+            value = self.max_browsers
+            await r.set(self._max_key, str(value))
+
+        if value < 1:
+            value = 1
+            await r.set(self._max_key, str(value))
+
+        self.max_browsers = value
+        return value
+
     async def update_max_browsers(self, new_max: int):
+        if new_max < 1:
+            logger.warning(f"Invalid Redis max_browsers value: {new_max}, ignoring")
+            return
+
+        r = await self._ensure_connected()
+        old_max = await self._read_max_browsers(r)
+        await r.set(self._max_key, str(new_max))
         self.max_browsers = new_max
-        # In Redis, we just update local config. Actual limit logic checks this value.
-        # Ideally, this should be stored in Redis too for global config, but env var/deployment usually controls it.
-        logger.info(f"RedisBrowserResourcePool updated max_browsers to {new_max}")
+        logger.info(f"RedisBrowserResourcePool updated shared max_browsers {old_max} -> {new_max}")
 
     async def acquire(
         self,
@@ -696,13 +722,20 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
 
                             queue = await pipe.lrange(f"{self._key_prefix}:queue", 0, 0)
                             running_count = await pipe.scard(f"{self._key_prefix}:running")
+                            raw_max = await pipe.get(self._max_key)
+                            try:
+                                current_max = int(raw_max) if raw_max is not None else self.max_browsers
+                            except (TypeError, ValueError):
+                                current_max = self.max_browsers
+                            current_max = max(1, current_max)
+                            self.max_browsers = current_max
 
                             if not queue or queue[0] != request_id:
                                 # Not at head, wait
                                 await pipe.unwatch()
                                 break
 
-                            if running_count >= self.max_browsers:
+                            if running_count >= current_max:
                                 # No capacity, wait
                                 await pipe.unwatch()
                                 break
@@ -790,6 +823,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
 
     async def get_status(self) -> dict:
         r = await self._ensure_connected()
+        max_browsers = await self._read_max_browsers(r)
         running_set = await r.smembers(f"{self._key_prefix}:running")
         queue = await r.lrange(f"{self._key_prefix}:queue", 0, -1)
 
@@ -800,24 +834,114 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         by_type = {}
         # This part is a bit expensive (N lookups). Limit to logging/debug usage.
         # Use pipeline for efficiency.
+        running_details = []
         if running_count > 0:
             async with r.pipeline() as pipe:
                 for req_id in running_set:
-                    pipe.hget(f"{self._key_prefix}:info:{req_id}", "type")
-                types = await pipe.execute()
-                for t in types:
+                    pipe.hgetall(f"{self._key_prefix}:info:{req_id}")
+                infos = await pipe.execute()
+                for req_id, info in zip(running_set, infos):
+                    info = info or {}
+                    t = info.get("type")
                     if t:
                         by_type[t] = by_type.get(t, 0) + 1
+                    running_details.append(
+                        {
+                            "request_id": req_id,
+                            "operation_type": t,
+                            "description": info.get("desc"),
+                            "started_at": info.get("start"),
+                            "max_operation_duration": info.get("max_dur") or None,
+                        }
+                    )
 
         return {
-            "max_browsers": self.max_browsers,
+            "max_browsers": max_browsers,
             "running": running_count,
             "queued": queue_len,
-            "available": max(0, self.max_browsers - running_count),
+            "available": max(0, max_browsers - running_count),
             "running_requests": list(running_set),
             "queued_requests": queue,
+            "running_details": running_details,
             "by_type": by_type,
         }
+
+    async def _slot_owner_is_active(self, request_id: str, info: dict[str, str]) -> bool | None:
+        """Best-effort validation that the logical owner of a Redis slot still exists."""
+        active_statuses = {
+            "queued",
+            "pending",
+            "running",
+            "in_progress",
+            "cancel_request",
+            "cancel_requested",
+            "paused",
+        }
+        if request_id.startswith("agent:"):
+            task_id = request_id.split(":", 1)[1]
+            try:
+                from orchestrator.services.agent_queue import AgentTaskStatus, get_agent_queue
+
+                queue = get_agent_queue()
+                await queue.connect()
+                task = await queue.get_task(task_id)
+                if not task:
+                    return False
+                if task.status == AgentTaskStatus.RUNNING:
+                    task_heartbeat_alive = await queue.check_heartbeat(task_id)
+                    worker_heartbeat_alive = True
+                    if task.worker_id:
+                        worker_heartbeat_alive = await queue.check_worker_heartbeat(
+                            task.worker_id
+                        )
+                    if not task_heartbeat_alive or not worker_heartbeat_alive:
+                        await queue.fail_stale_running_task(
+                            task_id,
+                            "Stale agent task lost worker heartbeat",
+                        )
+                        return False
+                return task.status in {
+                    AgentTaskStatus.QUEUED,
+                    AgentTaskStatus.RUNNING,
+                    AgentTaskStatus.PAUSED,
+                    AgentTaskStatus.CANCEL_REQUESTED,
+                }
+            except Exception as exc:
+                logger.debug("Could not validate agent browser slot owner %s: %s", request_id, exc)
+                return None
+
+        operation_type = info.get("type")
+        if operation_type == OperationType.TEST_RUN.value:
+            try:
+                from sqlmodel import Session
+                from orchestrator.api.db import engine
+                from orchestrator.api.models_db import TestRun
+
+                with Session(engine) as session:
+                    run = session.get(TestRun, request_id)
+                    if not run:
+                        return False
+                    return str(run.status or "").lower() in active_statuses
+            except Exception as exc:
+                logger.debug("Could not validate test-run browser slot owner %s: %s", request_id, exc)
+                return None
+
+        if operation_type == OperationType.AGENT.value:
+            try:
+                from sqlmodel import Session
+                from orchestrator.api.db import engine
+                from orchestrator.api.models_db import AgentRun
+
+                with Session(engine) as session:
+                    run = session.get(AgentRun, request_id)
+                    if not run:
+                        return False
+                    return str(run.status or "").lower() in active_statuses
+            except Exception as exc:
+                logger.debug("Could not validate agent-run browser slot owner %s: %s", request_id, exc)
+                return None
+
+        return None
 
     async def cleanup_stale(self, max_age_minutes: int = 60) -> list[str]:
         """Clean up stale running slots from Redis."""
@@ -829,12 +953,15 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
 
         for request_id in running_set:
             info = await r.hgetall(f"{self._key_prefix}:info:{request_id}")
+            owner_active = await self._slot_owner_is_active(request_id, info or {})
             if not info:
                 # No info hash means the slot is orphaned (info expired or was never set)
-                stale_ids.append(request_id)
+                if owner_active is not True:
+                    stale_ids.append(request_id)
                 continue
 
             start_str = info.get("start")
+            age_stale = False
             if start_str:
                 try:
                     start_time = datetime.fromisoformat(start_str)
@@ -844,11 +971,16 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
                     max_dur_str = info.get("max_dur", "")
                     limit = int(max_dur_str) if max_dur_str else max_age_minutes * 60
                     if elapsed > limit:
-                        stale_ids.append(request_id)
+                        age_stale = True
                 except (ValueError, TypeError):
-                    stale_ids.append(request_id)
+                    age_stale = True
             else:
+                age_stale = True
+
+            if owner_active is False or (owner_active is None and age_stale):
                 stale_ids.append(request_id)
+            elif age_stale and owner_active is True:
+                logger.info("[%s] Preserving old browser slot because owner is still active", request_id)
 
         for request_id in stale_ids:
             await r.srem(f"{self._key_prefix}:running", request_id)
@@ -940,7 +1072,7 @@ async def get_browser_pool(max_browsers: int = None) -> AbstractBrowserPool:
     from orchestrator.config import settings as app_settings
 
     redis_url = app_settings.redis_url
-    pool_type = os.environ.get("BROWSER_POOL_TYPE", "in_memory")
+    pool_type = os.environ.get("BROWSER_POOL_TYPE", "redis" if redis_url else "in_memory")
 
     if pool_type == "redis" and redis_url:
         try:

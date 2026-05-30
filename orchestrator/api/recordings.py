@@ -18,6 +18,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import AnyHttpUrl, BaseModel, Field
 from sqlmodel import Session, select
 
+from services.recording_codegen import build_codegen_command, has_usable_codegen_output, read_codegen_failure
 from services.recording_parser import import_recording_to_spec, slugify
 
 from .db import engine, get_session
@@ -108,7 +109,7 @@ async def start_recording(
     stdout_path = artifact_dir / "codegen.log"
     stderr_path = artifact_dir / "codegen.err.log"
     config = _build_config(request, artifact_dir)
-    command = _build_codegen_command(str(request.target_url), code_path, config)
+    command = build_codegen_command(str(request.target_url), code_path, config)
 
     rec = RecordingSession(
         id=recording_id,
@@ -318,32 +319,8 @@ def _build_config(request: RecordingStartRequest, artifact_dir: Path) -> dict[st
     return config
 
 
-def _build_codegen_command(target_url: str, code_path: Path, config: dict[str, Any]) -> list[str]:
-    command = [
-        "npx",
-        "playwright",
-        "codegen",
-        "--target",
-        "playwright-test",
-        "--output",
-        str(code_path),
-    ]
-    if config.get("viewport_size"):
-        command.extend(["--viewport-size", config["viewport_size"]])
-    if config.get("device"):
-        command.extend(["--device", config["device"]])
-    if config.get("load_storage_path"):
-        command.extend(["--load-storage", config["load_storage_path"]])
-    if config.get("save_storage_path"):
-        command.extend(["--save-storage", config["save_storage_path"]])
-    if config.get("save_har_path"):
-        command.extend(["--save-har", config["save_har_path"]])
-    command.append(target_url)
-    return command
-
-
 def _watch_recording_process(recording_id: str, process: subprocess.Popen, code_path: Path):
-    return_code = process.wait()
+    process.wait()
     with _ACTIVE_LOCK:
         _ACTIVE_PROCESSES.pop(recording_id, None)
 
@@ -352,12 +329,12 @@ def _watch_recording_process(recording_id: str, process: subprocess.Popen, code_
         if not rec or rec.status == "stopped":
             return
         rec.completed_at = datetime.utcnow()
-        if return_code == 0 and code_path.exists() and code_path.stat().st_size > 0:
+        if has_usable_codegen_output(code_path):
             rec.status = "completed"
             rec.error = None
         else:
             rec.status = "failed"
-            rec.error = "Playwright recorder exited before producing code"
+            rec.error = read_codegen_failure(code_path)
         session.add(rec)
         session.commit()
 
@@ -373,8 +350,8 @@ def _refresh_status(rec: RecordingSession, session: Session):
     if process and process.poll() is not None:
         code_path = BASE_DIR / rec.output_code_path if rec.output_code_path else None
         rec.completed_at = rec.completed_at or datetime.utcnow()
-        rec.status = "completed" if code_path and code_path.exists() and code_path.stat().st_size > 0 else "failed"
-        rec.error = None if rec.status == "completed" else "Playwright recorder exited before producing code"
+        rec.status = "completed" if code_path and has_usable_codegen_output(code_path) else "failed"
+        rec.error = None if rec.status == "completed" else read_codegen_failure(code_path)
         session.add(rec)
         session.commit()
         session.refresh(rec)
@@ -385,13 +362,14 @@ def _refresh_status(rec: RecordingSession, session: Session):
 
     code_path = BASE_DIR / rec.output_code_path if rec.output_code_path else None
     rec.completed_at = rec.completed_at or datetime.utcnow()
-    rec.status = "completed" if code_path and code_path.exists() and code_path.stat().st_size > 0 else "failed"
+    rec.status = "completed" if code_path and has_usable_codegen_output(code_path) else "failed"
     if rec.status == "failed":
-        rec.error = "Recorder process is no longer running and no generated code was found"
+        rec.error = read_codegen_failure(
+            code_path, fallback="Recorder process is no longer running and no generated code was found"
+        )
     session.add(rec)
     session.commit()
     session.refresh(rec)
-
 
 def _ensure_local_recorder_available():
     if not shutil.which("npx"):

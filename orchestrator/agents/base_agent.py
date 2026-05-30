@@ -544,8 +544,29 @@ echo "done" > {done_file}
             except Exception as diag_err:
                 logger.debug(f"[QUEUE] Pre-enqueue diagnostics failed (non-fatal): {diag_err}")
 
+            try:
+                from orchestrator.services.ai_runtime_config import apply_runtime_env_aliases
+            except ImportError:
+                from services.ai_runtime_config import apply_runtime_env_aliases
+
+            tier = os.environ.get("QUORVEX_RUN_MODEL_TIER", "standard")
+            if tier not in {"light", "standard", "deep", "tool_deep", "chat", "embedding"}:
+                tier = "standard"
+            apply_runtime_env_aliases(tier=tier)
+
             # Collect API credentials to forward to the worker process
             api_env_keys = [
+                "QUORVEX_LLM_PROVIDER",
+                "QUORVEX_AGENT_RUNTIME",
+                "QUORVEX_LLM_API_KEY",
+                "QUORVEX_LLM_API_KEYS",
+                "QUORVEX_LLM_BASE_URL",
+                "QUORVEX_LLM_LIGHT_MODEL",
+                "QUORVEX_LLM_STANDARD_MODEL",
+                "QUORVEX_LLM_DEEP_MODEL",
+                "QUORVEX_LLM_TOOL_DEEP_MODEL",
+                "QUORVEX_LLM_CHAT_MODEL",
+                "QUORVEX_RUN_MODEL_TIER",
                 "ANTHROPIC_AUTH_TOKEN",
                 "ANTHROPIC_AUTH_TOKENS",
                 "ANTHROPIC_API_KEY",
@@ -664,6 +685,16 @@ echo "done" > {done_file}
 
         async def _do_query():
             try:
+                try:
+                    from orchestrator.services.ai_runtime_config import apply_runtime_env_aliases
+                except ImportError:
+                    from services.ai_runtime_config import apply_runtime_env_aliases
+
+                tier = os.environ.get("QUORVEX_RUN_MODEL_TIER", "standard")
+                if tier not in {"light", "standard", "deep", "tool_deep", "chat", "embedding"}:
+                    tier = "standard"
+                selection = apply_runtime_env_aliases(tier=tier)
+
                 # Pre-flight diagnostics - use logger to ensure visibility in Docker logs
                 cwd = self.agent_cwd or os.getcwd()
                 original_cwd = os.getcwd()
@@ -674,8 +705,10 @@ echo "done" > {done_file}
                 logger.info(f"[SDK DEBUG]   Working directory: {cwd}")
                 logger.info(f"[SDK DEBUG]   DISPLAY: {os.environ.get('DISPLAY', 'not set')}")
                 logger.info(f"[SDK DEBUG]   HEADLESS: {os.environ.get('HEADLESS', 'not set')}")
-                logger.info(f"[SDK DEBUG]   ANTHROPIC_AUTH_TOKEN set: {bool(os.environ.get('ANTHROPIC_AUTH_TOKEN'))}")
-                logger.info(f"[SDK DEBUG]   ANTHROPIC_BASE_URL: {os.environ.get('ANTHROPIC_BASE_URL', 'not set')}")
+                logger.info(f"[SDK DEBUG]   QUORVEX_LLM_API_KEY set: {bool(os.environ.get('QUORVEX_LLM_API_KEY'))}")
+                logger.info(f"[SDK DEBUG]   Runtime model tier: {selection.tier}")
+                logger.info(f"[SDK DEBUG]   Runtime model: {selection.model}")
+                logger.info(f"[SDK DEBUG]   Runtime base URL: {selection.base_url}")
                 logger.info(f"[SDK DEBUG]   MCP config path: {mcp_path}")
                 logger.info(f"[SDK DEBUG]   MCP config exists: {mcp_path.exists()}")
 

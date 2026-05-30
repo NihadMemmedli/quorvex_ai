@@ -6,13 +6,57 @@ to MAX_BROWSER_INSTANCES concurrent browsers.
 """
 
 import asyncio
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 pytestmark = pytest.mark.integration
 
-from services.browser_pool import InMemoryBrowserPool, OperationType, SlotStatus
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from orchestrator.services.browser_pool import InMemoryBrowserPool, OperationType, RedisBrowserResourcePool, SlotStatus
+from orchestrator.services.agent_queue import AgentTask, AgentTaskStatus
+
+
+class _FakeRedis:
+    def __init__(self):
+        self.values = {}
+        self.sets = {}
+        self.lists = {}
+        self.hashes = {}
+
+    async def ping(self):
+        return True
+
+    async def set(self, key, value, nx=False):
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    async def get(self, key):
+        return self.values.get(key)
+
+    async def smembers(self, key):
+        return set(self.sets.get(key, set()))
+
+    async def hgetall(self, key):
+        return dict(self.hashes.get(key, {}))
+
+    async def srem(self, key, value):
+        self.sets.setdefault(key, set()).discard(value)
+
+    async def delete(self, key):
+        self.values.pop(key, None)
+        self.hashes.pop(key, None)
+
+    async def lrange(self, key, start, end):
+        values = self.lists.get(key, [])
+        if end == -1:
+            end = len(values) - 1
+        return values[start : end + 1]
 
 
 @pytest.fixture
@@ -244,6 +288,183 @@ async def test_update_max_browsers_invalid():
 
     await pool.update_max_browsers(-1)
     assert pool.max_browsers == 5
+
+
+@pytest.mark.asyncio
+async def test_redis_pool_uses_shared_max_browsers():
+    """Redis-backed pools should read the same shared concurrency limit."""
+    redis = _FakeRedis()
+    pool_a = RedisBrowserResourcePool("redis://test", max_browsers=2)
+    pool_a.redis = redis
+    pool_b = RedisBrowserResourcePool("redis://test", max_browsers=5)
+    pool_b.redis = redis
+
+    await pool_a.update_max_browsers(3)
+
+    status = await pool_b.get_status()
+    assert status["max_browsers"] == 3
+    assert pool_b.max_browsers == 3
+
+
+@pytest.mark.asyncio
+async def test_redis_cleanup_preserves_stale_active_owner(monkeypatch):
+    """Redis cleanup should not free an old slot while its owner is active."""
+    redis = _FakeRedis()
+    pool = RedisBrowserResourcePool("redis://test", max_browsers=1)
+    pool.redis = redis
+    request_id = "run-active"
+    redis.sets["browser_pool:running"] = {request_id}
+    redis.hashes[f"browser_pool:info:{request_id}"] = {
+        "type": OperationType.TEST_RUN.value,
+        "desc": "active run",
+        "start": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
+        "max_dur": "60",
+    }
+
+    async def _active_owner(_request_id, _info):
+        return True
+
+    monkeypatch.setattr(pool, "_slot_owner_is_active", _active_owner)
+
+    cleaned = await pool.cleanup_stale(max_age_minutes=1)
+
+    assert cleaned == []
+    assert request_id in redis.sets["browser_pool:running"]
+
+
+@pytest.mark.asyncio
+async def test_redis_cleanup_removes_inactive_owner_before_age_limit(monkeypatch):
+    """Redis cleanup should free a slot when its logical owner no longer exists."""
+    redis = _FakeRedis()
+    pool = RedisBrowserResourcePool("redis://test", max_browsers=1)
+    pool.redis = redis
+    request_id = "agent:agent-old"
+    redis.sets["browser_pool:running"] = {request_id}
+    redis.hashes[f"browser_pool:info:{request_id}"] = {
+        "type": OperationType.AGENT.value,
+        "desc": "old agent",
+        "start": datetime.now(timezone.utc).isoformat(),
+        "max_dur": "7200",
+    }
+
+    async def _inactive_owner(_request_id, _info):
+        return False
+
+    monkeypatch.setattr(pool, "_slot_owner_is_active", _inactive_owner)
+
+    cleaned = await pool.cleanup_stale(max_age_minutes=60)
+
+    assert cleaned == [request_id]
+    assert request_id not in redis.sets["browser_pool:running"]
+
+
+@pytest.mark.asyncio
+async def test_redis_cleanup_removes_running_agent_slot_when_worker_heartbeat_lost(monkeypatch):
+    """Redis cleanup should fail a running agent task when its worker heartbeat is gone."""
+    import orchestrator.services.agent_queue as agent_queue_module
+
+    redis = _FakeRedis()
+    pool = RedisBrowserResourcePool("redis://test", max_browsers=1)
+    pool.redis = redis
+    task = AgentTask(
+        id="agent-stale",
+        prompt="inspect",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-dead",
+        started_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=5),
+    )
+    request_id = f"agent:{task.id}"
+    redis.sets["browser_pool:running"] = {request_id}
+    redis.hashes[f"browser_pool:info:{request_id}"] = {
+        "type": OperationType.AGENT.value,
+        "desc": "stale agent",
+        "start": datetime.now(timezone.utc).isoformat(),
+        "max_dur": "7200",
+    }
+
+    class _Queue:
+        failed = False
+
+        async def connect(self):
+            return None
+
+        async def get_task(self, task_id):
+            return task if task_id == task.id else None
+
+        async def check_heartbeat(self, task_id):
+            return True
+
+        async def check_worker_heartbeat(self, worker_id):
+            return False
+
+        async def fail_stale_running_task(self, task_id, error):
+            self.failed = True
+            task.status = AgentTaskStatus.FAILED
+            task.error = error
+            return True
+
+    queue = _Queue()
+    monkeypatch.setattr(agent_queue_module, "get_agent_queue", lambda: queue)
+
+    cleaned = await pool.cleanup_stale(max_age_minutes=60)
+
+    assert cleaned == [request_id]
+    assert request_id not in redis.sets["browser_pool:running"]
+    assert queue.failed is True
+    assert task.error == "Stale agent task lost worker heartbeat"
+
+
+@pytest.mark.asyncio
+async def test_redis_cleanup_preserves_running_agent_slot_with_fresh_heartbeats(monkeypatch):
+    """Redis cleanup should keep running agent slots when task and worker heartbeats are fresh."""
+    import orchestrator.services.agent_queue as agent_queue_module
+
+    redis = _FakeRedis()
+    pool = RedisBrowserResourcePool("redis://test", max_browsers=1)
+    pool.redis = redis
+    task = AgentTask(
+        id="agent-fresh",
+        prompt="inspect",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-alive",
+        started_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=5),
+    )
+    request_id = f"agent:{task.id}"
+    redis.sets["browser_pool:running"] = {request_id}
+    redis.hashes[f"browser_pool:info:{request_id}"] = {
+        "type": OperationType.AGENT.value,
+        "desc": "fresh agent",
+        "start": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
+        "max_dur": "60",
+    }
+
+    class _Queue:
+        failed = False
+
+        async def connect(self):
+            return None
+
+        async def get_task(self, task_id):
+            return task if task_id == task.id else None
+
+        async def check_heartbeat(self, task_id):
+            return True
+
+        async def check_worker_heartbeat(self, worker_id):
+            return True
+
+        async def fail_stale_running_task(self, task_id, error):
+            self.failed = True
+            return True
+
+    queue = _Queue()
+    monkeypatch.setattr(agent_queue_module, "get_agent_queue", lambda: queue)
+
+    cleaned = await pool.cleanup_stale(max_age_minutes=1)
+
+    assert cleaned == []
+    assert request_id in redis.sets["browser_pool:running"]
+    assert queue.failed is False
 
 
 if __name__ == "__main__":

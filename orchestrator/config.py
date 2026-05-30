@@ -70,6 +70,16 @@ class AppSettings(BaseSettings):
     anthropic_default_opus_model: str = "glm-5.1"
     anthropic_default_sonnet_model: str = "glm-5-turbo"
     anthropic_default_haiku_model: str = "glm-4.5-air"
+    quorvex_llm_provider: str = "anthropic_compatible"
+    quorvex_llm_base_url: str = "https://api.z.ai/api/anthropic"
+    quorvex_llm_api_key: str = ""
+    quorvex_llm_api_keys: str = ""
+    quorvex_llm_light_model: str = "glm-4.5-air"
+    quorvex_llm_standard_model: str = "glm-5-turbo"
+    quorvex_llm_deep_model: str = "glm-5.1"
+    quorvex_llm_tool_deep_model: str = "glm-5.1"
+    quorvex_llm_chat_model: str = "glm-5-turbo"
+    quorvex_embedding_model: str = "text-embedding-3-small"
     api_timeout_ms: int = 3000000
     openai_api_key: str | None = None
 
@@ -91,6 +101,14 @@ class AppSettings(BaseSettings):
     planner_timeout_seconds: int | None = None
     generator_timeout_seconds: int | None = None
 
+    # --- Agent Runtimes ---
+    quorvex_agent_runtime: str = "claude_sdk"
+    hermes_enabled: bool = False
+    hermes_api_url: str = "http://127.0.0.1:8642"
+    hermes_api_key: str = ""
+    hermes_model: str = "hermes-agent"
+    hermes_profile_prefix: str = "quorvex"
+
     # --- Exploration ---
     max_explorations_per_user: int = 2
 
@@ -102,6 +120,7 @@ class AppSettings(BaseSettings):
     temporal_namespace: str = "default"
     temporal_task_queue: str = "quorvex-autonomous-missions"
     temporal_workflow_task_queue: str = "quorvex-custom-workflows"
+    temporal_browser_workflow_task_queue: str = "quorvex-browser-workflows"
     temporal_ui_url: str | None = None
 
     # --- MinIO Storage ---

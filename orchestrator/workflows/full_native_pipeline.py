@@ -21,6 +21,15 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
+
+def playwright_headed_args() -> str:
+    playwright_headless = os.environ.get("PLAYWRIGHT_HEADLESS", "").lower()
+    generic_headless = os.environ.get("HEADLESS", "").lower()
+    if playwright_headless == "false" or generic_headless == "false":
+        return " --headed --workers=1"
+    return ""
+
+
 # Add orchestrator to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -85,6 +94,7 @@ class FullNativePipeline:
         owner_type: str | None = None,
         owner_id: str | None = None,
         owner_label: str | None = None,
+        model_tier: str | None = None,
     ):
         self.project_id = project_id
         self.on_tool_use = on_tool_use
@@ -93,6 +103,7 @@ class FullNativePipeline:
         self.owner_type = owner_type
         self.owner_id = owner_id
         self.owner_label = owner_label
+        self.model_tier = model_tier or os.environ.get("QUORVEX_RUN_MODEL_TIER") or "tool_deep"
         self._memory_run_id: str | None = None
         self._load_project_credentials()
         self.native_planner = NativePlanner(
@@ -103,6 +114,7 @@ class FullNativePipeline:
             owner_type=owner_type,
             owner_id=owner_id,
             owner_label=owner_label,
+            model_tier=self.model_tier,
         )
         self.native_generator = NativeGenerator(
             on_tool_use=on_tool_use,
@@ -111,6 +123,7 @@ class FullNativePipeline:
             owner_type=owner_type,
             owner_id=owner_id,
             owner_label=owner_label,
+            model_tier=self.model_tier,
         )
         self.native_healer = NativeHealer()
         self.api_generator = NativeApiGenerator()
@@ -1014,7 +1027,10 @@ class FullNativePipeline:
 
             cmd = f"PLAYWRIGHT_OUTPUT_DIR='{results_dir}' PLAYWRIGHT_HTML_REPORT='{report_dir}' "
             cmd += f"PLAYWRIGHT_JSON_OUTPUT_FILE='{json_results_file}' "
-            cmd += f"npx playwright test '{test_file}' --reporter=list,html,json --project {browser} --timeout=120000"
+            cmd += (
+                f"npx playwright test '{test_file}' --reporter=list,html,json "
+                f"--project {browser} --timeout=120000{playwright_headed_args()}"
+            )
 
             result = subprocess.run(
                 cmd,

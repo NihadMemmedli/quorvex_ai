@@ -11,6 +11,7 @@ all workflows (exploration, planning, generation, etc.) with:
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -20,6 +21,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from orchestrator.services.ai_runtime_config import (
+    RuntimeModelTier,
+    apply_runtime_env_aliases,
+)
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -172,7 +178,7 @@ class AgentRunner:
     Unified runner for Claude agents with comprehensive logging and timeout support.
 
     Usage:
-        runner = AgentRunner(timeout_seconds=1800, log_tools=True)
+        runner = AgentRunner(timeout_seconds=1800, log_tools=True, model_tier="tool_deep")
         result = await runner.run(prompt="Your prompt here")
         if result.success:
             print(result.output)
@@ -208,6 +214,10 @@ class AgentRunner:
         memory_stage: str | None = None,
         inject_memory: bool = True,
         capture_memory: bool = True,
+        force_direct_execution: bool = False,
+        model: str | None = None,
+        model_tier: RuntimeModelTier | None = None,
+        reasoning_budget: int | None = None,
     ):
         """
         Initialize the agent runner.
@@ -241,6 +251,11 @@ class AgentRunner:
             memory_stage: Optional telemetry stage for memory injection
             inject_memory: Whether to inject memory context into prompts
             capture_memory: Whether to extract memory candidates from run output
+            force_direct_execution: Bypass the Redis queue for this run even
+                when global queue mode is enabled.
+            model: Optional model override for this run.
+            model_tier: Optional canonical model tier for this run.
+            reasoning_budget: Optional provider reasoning budget for compatible models.
         """
         self.timeout_seconds = timeout_seconds
         self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
@@ -268,6 +283,10 @@ class AgentRunner:
         self.memory_stage = memory_stage or "agent_runner"
         self.inject_memory = inject_memory
         self.capture_memory = capture_memory
+        self.force_direct_execution = force_direct_execution
+        self.model = model
+        self.model_tier = model_tier if model_tier in {"light", "standard", "deep", "tool_deep", "chat", "embedding"} else self._infer_model_tier()
+        self.reasoning_budget = reasoning_budget
 
     def _effective_tools(self) -> list[str] | dict[str, str] | None:
         """Build the SDK/CLI tool availability set.
@@ -332,15 +351,47 @@ class AgentRunner:
             kwargs["task_budget"] = self.task_budget
         if self.include_hook_events:
             kwargs["include_hook_events"] = True
+        if self.model:
+            kwargs["model"] = self.model
 
         if self._should_attach_mcp_config(self.cwd):
             kwargs["mcp_servers"] = (self.cwd or Path.cwd()) / ".mcp.json"
-            kwargs["strict_mcp_config"] = self.strict_mcp_config
+            if self._claude_options_accepts("strict_mcp_config"):
+                kwargs["strict_mcp_config"] = self.strict_mcp_config
+            elif self.strict_mcp_config:
+                kwargs.setdefault("extra_args", {})["strict-mcp-config"] = None
 
         return kwargs
 
     @staticmethod
-    def _apply_active_ai_settings() -> None:
+    def _claude_options_accepts(option_name: str) -> bool:
+        if ClaudeAgentOptions is None:
+            return False
+        try:
+            signature = inspect.signature(ClaudeAgentOptions)
+        except (TypeError, ValueError):
+            return True
+        if option_name in signature.parameters:
+            return True
+        return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+
+    def _infer_model_tier(self) -> RuntimeModelTier:
+        tools = self._effective_tools()
+        sources: list[Any] = [self.allowed_tools]
+        if isinstance(tools, list):
+            sources.append(tools)
+        requested = [str(tool) for source in sources if isinstance(source, list) for tool in source]
+        if any("playwright" in tool or "browser" in tool for tool in requested):
+            return "tool_deep"
+        if tools == []:
+            return "standard"
+        return "deep" if requested else "standard"
+
+    @staticmethod
+    def _apply_active_ai_settings(
+        model: str | None = None,
+        model_tier: RuntimeModelTier = "standard",
+    ) -> None:
         """Apply the runtime AI settings before invoking the SDK.
 
         The Settings UI persists the selected provider/model/key into .env and
@@ -353,6 +404,7 @@ class AgentRunner:
 
             env_vars = settings_api._read_env_file()
             settings_api._apply_runtime_settings(env_vars)
+            apply_runtime_env_aliases(env_vars, tier=model_tier, model_override=model)
         except Exception as exc:
             logger.debug(
                 f"Unable to refresh active AI settings for agent runner: {exc}"
@@ -427,14 +479,25 @@ class AgentRunner:
         """
         timeout = timeout_override or self.timeout_seconds
         start_time = datetime.now()
-        self._apply_active_ai_settings()
+        selection = apply_runtime_env_aliases(
+            None,
+            tier=self.model_tier,
+            model_override=self.model,
+        )
+        if not self.model:
+            self.model = selection.model
+        self._apply_active_ai_settings(self.model, self.model_tier)
         self._validate_mcp_config_for_allowed_tools(self.cwd)
         original_prompt = prompt
         prompt = self._augment_prompt_with_agent_memory(prompt)
 
         # First, try agent queue if Redis is available
         # This offloads execution to a separate worker process outside uvicorn
-        if AGENT_QUEUE_AVAILABLE and should_use_agent_queue():
+        if (
+            AGENT_QUEUE_AVAILABLE
+            and should_use_agent_queue()
+            and not self.force_direct_execution
+        ):
             logger.info(f"Using agent queue for execution (timeout={timeout}s)")
             queued_result = await self._run_via_queue(prompt, timeout)
             self._capture_agent_memory(original_prompt, queued_result)
@@ -474,9 +537,20 @@ class AgentRunner:
                         return item.get(name, default)
                     return getattr(item, name, default)
 
+                def _message_payload(message: Any) -> Any:
+                    return _field(message, "message", None)
+
                 def _as_content_items(message: Any) -> list[Any]:
-                    content = _field(message, "content", [])
+                    content = _field(message, "content", None)
+                    if content is None:
+                        content = _field(_message_payload(message), "content", [])
                     return content if isinstance(content, list) else []
+
+                def _message_type(message: Any) -> str:
+                    return str(_field(message, "type", "unknown"))
+
+                def _block_text(block: Any) -> str:
+                    return str(_field(block, "text", "") or "")
 
                 def _handle_tool_use(tool_name: str, tool_input: dict[str, Any] | None) -> None:
                     nonlocal current_tool_name, current_tool_start, current_tool_input
@@ -560,11 +634,11 @@ class AgentRunner:
                     messages_received += 1
 
                     # Log message type for debugging
-                    msg_type = getattr(message, "type", "unknown")
+                    msg_type = _message_type(message)
                     logger.debug(
                         f"Message #{messages_received}: type={msg_type}, "
                         f"has_result={hasattr(message, 'result')}, "
-                        f"has_content={hasattr(message, 'content')}"
+                        f"has_content={hasattr(message, 'content') or bool(_message_payload(message))}"
                     )
 
                     # Print periodic progress for long-running agents
@@ -581,27 +655,27 @@ class AgentRunner:
                         )
 
                     # Handle tool use
-                    if hasattr(message, "type"):
-                        if message.type == "hook_event":
+                    if msg_type:
+                        if msg_type == "hook_event":
                             hook_events_received += 1
 
-                        if message.type == "tool_use":
+                        if msg_type == "tool_use":
                             _handle_tool_use(
-                                getattr(message, "name", "unknown"),
-                                getattr(message, "input", None),
+                                str(_field(message, "name", "unknown")),
+                                _field(message, "input", None),
                             )
 
-                        elif message.type == "tool_result":
+                        elif msg_type == "tool_result":
                             # Record completed tool call
                             _handle_tool_result(message)
 
-                        elif message.type == "text":
-                            text_content = getattr(message, "text", "")
+                        elif msg_type == "text":
+                            text_content = _block_text(message)
                             if text_content:
                                 result_parts.append(text_content)
                                 text_blocks_received += 1
 
-                        elif message.type == "assistant":
+                        elif msg_type == "assistant":
                             for item in _as_content_items(message):
                                 item_type = _field(item, "type")
                                 if item_type == "tool_use":
@@ -610,12 +684,12 @@ class AgentRunner:
                                         _field(item, "input", {}) or {},
                                     )
                                 elif item_type == "text":
-                                    text_content = str(_field(item, "text", "") or "")
+                                    text_content = _block_text(item)
                                     if text_content:
                                         result_parts.append(text_content)
                                         text_blocks_received += 1
 
-                        elif message.type == "user":
+                        elif msg_type == "user":
                             for item in _as_content_items(message):
                                 if _field(item, "type") == "tool_result":
                                     _handle_tool_result(item)
@@ -900,8 +974,7 @@ class AgentRunner:
         except Exception as exc:
             logger.debug("Agent memory capture skipped: %s", exc)
 
-    @staticmethod
-    def _collect_api_env_vars() -> dict:
+    def _collect_api_env_vars(self) -> dict:
         """Collect API-related env vars to pass through the queue to the worker.
 
         The pipeline loads credentials from the database into os.environ,
@@ -918,14 +991,69 @@ class AgentRunner:
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
             "ANTHROPIC_DEFAULT_SONNET_MODEL",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_CHAT_MODEL",
+            "QUORVEX_LLM_PROVIDER",
+            "QUORVEX_LLM_BASE_URL",
+            "QUORVEX_LLM_API_KEY",
+            "QUORVEX_LLM_API_KEYS",
+            "QUORVEX_LLM_LIGHT_MODEL",
+            "QUORVEX_LLM_STANDARD_MODEL",
+            "QUORVEX_LLM_DEEP_MODEL",
+            "QUORVEX_LLM_TOOL_DEEP_MODEL",
+            "QUORVEX_LLM_CHAT_MODEL",
+            "QUORVEX_EMBEDDING_MODEL",
             "API_TIMEOUT_MS",
+            "DISPLAY",
+            "VNC_ENABLED",
+            "HEADLESS",
+            "PLAYWRIGHT_HEADLESS",
+            "PLAYWRIGHT_BROWSERS_PATH",
+            "PLAYWRIGHT_WORKERS",
+            "PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT",
+            "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
+            "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
         ]
         env_vars = {}
         for key in keys:
             val = os.environ.get(key)
             if val:
                 env_vars[key] = val
+        try:
+            selection = apply_runtime_env_aliases(
+                env_vars or None,
+                tier=self.model_tier,
+                model_override=self.model,
+            )
+            env_vars["ANTHROPIC_MODEL"] = selection.model
+            env_vars["QUORVEX_LLM_ACTIVE_TIER"] = selection.tier
+            env_vars["QUORVEX_LLM_ACTIVE_MODEL"] = selection.model
+        except Exception as exc:
+            logger.debug("Unable to collect resolved model env vars: %s", exc)
         return env_vars if env_vars else None
+
+    def _queue_owner_metadata(self) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+        """Return explicit queue owner plus parent browser-slot metadata."""
+        browser_slot_parent_owner_type = os.environ.get("BROWSER_SLOT_PARENT_OWNER_TYPE")
+        browser_slot_parent_run_id = os.environ.get("BROWSER_SLOT_PARENT_RUN_ID")
+        owner_type = self.owner_type
+        owner_id = self.owner_id
+        owner_label = self.owner_label
+        if (
+            not owner_type
+            and not owner_id
+            and browser_slot_parent_owner_type == "test_run"
+            and browser_slot_parent_run_id
+        ):
+            owner_type = "test_run"
+            owner_id = browser_slot_parent_run_id
+            owner_label = owner_label or f"Test run {browser_slot_parent_run_id}"
+        return (
+            owner_type,
+            owner_id,
+            owner_label,
+            browser_slot_parent_owner_type,
+            browser_slot_parent_run_id,
+        )
 
     async def _run_via_queue(self, prompt: str, timeout: int) -> AgentResult:
         """
@@ -965,6 +1093,14 @@ class AgentRunner:
             logger.info(f"Enqueueing task via agent queue (timeout={timeout}s)")
             print("   📤 Enqueueing agent task...", flush=True)
 
+            (
+                owner_type,
+                owner_id,
+                owner_label,
+                browser_slot_parent_owner_type,
+                browser_slot_parent_run_id,
+            ) = self._queue_owner_metadata()
+
             task_id = await queue.enqueue_task(
                 prompt=prompt,
                 timeout_seconds=timeout,
@@ -980,9 +1116,11 @@ class AgentRunner:
                 max_budget_usd=self.max_budget_usd,
                 task_budget=self.task_budget,
                 include_hook_events=self.include_hook_events,
-                owner_type=self.owner_type,
-                owner_id=self.owner_id,
-                owner_label=self.owner_label,
+                owner_type=owner_type,
+                owner_id=owner_id,
+                owner_label=owner_label,
+                browser_slot_parent_owner_type=browser_slot_parent_owner_type,
+                browser_slot_parent_run_id=browser_slot_parent_run_id,
             )
 
             logger.info(f"Task enqueued: {task_id}, waiting for result...")
@@ -1264,6 +1402,7 @@ async def run_agent_with_logging(
     allowed_tools: list[str] | None = None,
     on_tool_use: Callable[[str, dict], None] | None = None,
     session_dir: Path | None = None,
+    model_tier: str | None = None,
 ) -> AgentResult:
     """
     Convenience function to run an agent with logging.
@@ -1276,6 +1415,7 @@ async def run_agent_with_logging(
         allowed_tools: List of allowed tool patterns (default ["*"])
         on_tool_use: Optional callback when a tool is used
         session_dir: Optional directory to save debug output
+        model_tier: Optional routing tier from runtime AI settings
 
     Returns:
         AgentResult with success status, output, and diagnostics
@@ -1285,6 +1425,7 @@ async def run_agent_with_logging(
         allowed_tools=allowed_tools,
         on_tool_use=on_tool_use,
         session_dir=session_dir,
+        model_tier=model_tier,
     )
     return await runner.run(prompt)
 

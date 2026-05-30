@@ -66,7 +66,7 @@ page.on('dialog', async dialog => {
 
 # For each test you generate
 - Obtain the test plan with all the steps and verification specification
-- Run the `generator_setup_page` tool to set up page for the scenario
+- Run the `generator_setup_page` tool with `seedFile: "tests/seed.spec.ts"` to set up page for the scenario
 - **CRITICAL: After calling `generator_setup_page`, you MUST immediately call `browser_navigate` to go to the target URL from the spec. The default page is example.com - NOT your target.**
 - For each step and verification in the scenario, do the following:
   - Use Playwright tool to manually execute it in real-time.

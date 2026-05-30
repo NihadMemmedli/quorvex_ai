@@ -309,7 +309,7 @@ prod-dev:
 	@echo "This mounts your local ./orchestrator and ./web/src directories."
 	@echo "Code changes will be reflected automatically (uvicorn --reload)."
 	@echo ""
-	@BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) --profile standard --profile security up -d --build
+	@$(APP_COMPOSE) --profile standard --profile security up -d --no-build
 	@$(MAKE) agent-runtime-ready
 	@echo ""
 	@echo "Development mode started:"
@@ -323,6 +323,10 @@ prod-dev:
 	@echo "Code changes in ./orchestrator will auto-reload the backend."
 	@echo "Security Testing full scans are available after ZAP health is ready."
 	@echo "View logs: make prod-logs"
+
+prod-dev-build:
+	@echo "Rebuilding production development images..."
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) --profile standard --profile security build --progress=plain
 
 prod-down:
 	@echo "Stopping production services gracefully..."
@@ -386,7 +390,7 @@ autopilot-stable-up:
 	@echo "Starting stable local Auto Pilot stack..."
 	@echo ""
 	@echo "Docker Desktop memory: set at least 12GB, recommended 16GB."
-	@echo "This mode disables backend reload, uses headless browser execution, raises frontend memory to 4G, and lowers local agent concurrency."
+	@echo "This mode disables backend reload, uses headed browser execution for live view, raises frontend memory to 4G, and lowers local agent concurrency."
 	@echo ""
 	@mkdir -p $(BUILDX_CONFIG)
 	@BUILDX_CONFIG=$(BUILDX_CONFIG) $(AUTOPILOT_STABLE_COMPOSE) --profile standard up -d --build

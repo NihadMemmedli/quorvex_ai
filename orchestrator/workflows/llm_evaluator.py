@@ -382,7 +382,7 @@ Respond with JSON in a markdown code block:
 }}
 ```"""
 
-    runner = AgentRunner(timeout_seconds=120)
+    runner = AgentRunner(timeout_seconds=120, allowed_tools=[], log_tools=False, model_tier="standard")
     result_text = ""
 
     try:

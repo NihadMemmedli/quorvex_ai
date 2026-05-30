@@ -50,6 +50,11 @@ from services.exploration_policy import (
 
 # Import MCP health checker
 from utils.mcp_health import verify_mcp_environment
+from utils.playwright_mcp import (
+    build_playwright_mcp_server_config,
+    is_package_version_at_least,
+    write_playwright_mcp_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -461,73 +466,19 @@ def _build_exploratory_agent_config(
 
 def _is_package_version_at_least(package_json: Path, minimum: str) -> bool:
     """Return whether package_json declares a semver version >= minimum."""
-    if not package_json.exists():
-        return False
-    try:
-        package = json.loads(package_json.read_text())
-    except (OSError, json.JSONDecodeError):
-        return False
-
-    def parse(version: str) -> tuple[int, int, int]:
-        core = str(version).split("-", 1)[0]
-        parts = []
-        for part in core.split(".")[:3]:
-            try:
-                parts.append(int(part))
-            except ValueError:
-                parts.append(0)
-        while len(parts) < 3:
-            parts.append(0)
-        return tuple(parts)  # type: ignore[return-value]
-
-    return parse(str(package.get("version", "0.0.0"))) >= parse(minimum)
+    return is_package_version_at_least(package_json, minimum)
 
 
 def _build_playwright_mcp_server_config() -> dict[str, Any]:
     """Return a Playwright MCP command compatible with video recording tools."""
-    override = os.environ.get("PLAYWRIGHT_MCP_COMMAND")
-    if override:
-        args = os.environ.get("PLAYWRIGHT_MCP_ARGS", "--browser chromium").split()
-        return {"command": override, "args": args}
-
-    project_root = Path(__file__).resolve().parent.parent.parent
-    local_bins = [
-        project_root / "node_modules" / ".bin" / "playwright-mcp",
-        project_root / "node_modules" / ".bin" / "mcp-server-playwright",
-    ]
-    local_pkg = project_root / "node_modules" / "@playwright" / "mcp" / "package.json"
-    min_version = os.environ.get("PLAYWRIGHT_MCP_MIN_VERSION", "0.0.75")
-    if _is_package_version_at_least(local_pkg, min_version):
-        for local_bin in local_bins:
-            if local_bin.exists():
-                return {"command": str(local_bin), "args": ["--browser", "chromium"]}
-
-    package = os.environ.get("PLAYWRIGHT_MCP_PACKAGE", f"@playwright/mcp@{min_version}")
-    return {"command": "npx", "args": ["-y", package, "--browser", "chromium"]}
+    return build_playwright_mcp_server_config(Path(__file__).resolve().parent.parent.parent)
 
 
 def _prepare_exploration_mcp_config(session_id: str) -> Path:
     """Create run-local MCP config so video output stays with this exploration."""
     project_root = Path(__file__).resolve().parent.parent.parent
     run_dir = project_root / "runs" / session_id
-    artifacts_dir = run_dir / "artifacts"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-
-    mcp_server = _build_playwright_mcp_server_config()
-    mcp_args = list(mcp_server["args"])
-    mcp_args.extend(["--output-dir", str(artifacts_dir), "--isolated"])
-    if os.environ.get("HEADLESS", "true").lower() != "false":
-        mcp_args.append("--headless")
-
-    mcp_config = {
-        "mcpServers": {
-            "playwright": {
-                "command": mcp_server["command"],
-                "args": mcp_args,
-            }
-        }
-    }
-    (run_dir / ".mcp.json").write_text(json.dumps(mcp_config, indent=2))
+    write_playwright_mcp_config(run_dir=run_dir, server_name="playwright", project_root=project_root)
     return run_dir
 
 

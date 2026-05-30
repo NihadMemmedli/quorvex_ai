@@ -34,6 +34,7 @@ from orchestrator.api.models_db import (
     AutonomousMissionRun,
     AutonomousTestProposal,
     CoverageGap,
+    ExecutionSettings,
     ExplorationSession,
     Project,
     Requirement,
@@ -1138,7 +1139,15 @@ def _team_roles(mission: AutonomousMission) -> list[str]:
 
 def _max_parallel_agents(mission: AutonomousMission) -> int:
     configured = _config_int(mission.config, "max_parallel_agents", DEFAULT_MAX_PARALLEL_AGENTS)
-    return max(1, min(configured, 12))
+    global_limit = DEFAULT_MAX_PARALLEL_AGENTS
+    try:
+        with Session(engine) as session:
+            settings = session.get(ExecutionSettings, 1)
+            if settings:
+                global_limit = settings.parallelism
+    except Exception as exc:
+        logger.debug("Failed to read execution settings for autonomous parallelism: %s", exc)
+    return max(1, min(configured, global_limit, 12))
 
 
 def _run_parallel_team_supervisor(
@@ -1613,6 +1622,17 @@ Revision request:
 - revision attempt: {revision_context.get("revision_attempt") or 1}
 Address the reviewer feedback directly and explain what changed from the prior output.
 """
+    hermes_note = ""
+    if str((mission.config or {}).get("runtime") or "").lower() in {"hermes", "hermes-agent", "hermes_agent"}:
+        max_children = _config_int(mission.config, "hermes_max_concurrent_children", 3)
+        max_depth = _config_int(mission.config, "hermes_max_spawn_depth", 1)
+        hermes_note = f"""
+Hermes delegation policy:
+- You may delegate bounded subtasks to subagents when it improves coverage or parallelism.
+- Give each subagent all context it needs; subagents do not inherit this full prompt automatically.
+- Use at most {max_children} concurrent child agents and do not exceed delegation depth {max_depth}.
+- Aggregate subagent findings into the required final JSON shape.
+"""
     return f"""You are the {item.role} agent in a Quorvex autonomous QA team.
 
 Mission: {mission.name}
@@ -1620,6 +1640,7 @@ Objective: {item.objective}
 Target surfaces: {', '.join(surfaces or ['project data and known app artifacts'])}
 {context_note}
 {revision_note}
+{hermes_note}
 
 Work only by inspecting the app/project through available tools. Do not write repository files.
 Return JSON only, preferably in a ```json fenced block, with this exact top-level shape:
@@ -1798,6 +1819,7 @@ def _execute_agent_work_item_direct(
         **item.progress,
         "phase": "running",
         "message": "Agent work item is running in a Temporal activity.",
+        "runtime": str((mission.config or {}).get("runtime") or "claude_sdk"),
     }
     session.add(item)
     session.commit()
@@ -1808,7 +1830,9 @@ def _execute_agent_work_item_direct(
     )
 
     try:
-        from orchestrator.utils.agent_runner import AgentRunner
+        from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime, normalize_agent_runtime
+
+        runtime_name = normalize_agent_runtime((mission.config or {}).get("runtime"))
 
         def _on_progress(progress: dict[str, Any]) -> None:
             try:
@@ -1819,6 +1843,7 @@ def _execute_agent_work_item_direct(
                 current.progress = {
                     **(current.progress or {}),
                     **{key: value for key, value in progress.items() if value is not None},
+                    "runtime": runtime_name,
                     "phase": progress.get("phase") or "running",
                     "message": progress.get("message") or "Agent is running.",
                     "last_event_at": heartbeat_at.isoformat(),
@@ -1831,23 +1856,56 @@ def _execute_agent_work_item_direct(
             except Exception:
                 logger.debug("Failed to persist autonomous work item progress", exc_info=True)
 
+        def _on_task_enqueued(task_id: str) -> None:
+            try:
+                current = session.get(AutonomousAgentWorkItem, item.id)
+                if not current:
+                    return
+                current.agent_task_id = task_id
+                current.progress = {
+                    **(current.progress or {}),
+                    "runtime": runtime_name,
+                    "agent_task_id": task_id,
+                    "hermes_run_id": task_id if runtime_name == "hermes" else None,
+                    "phase": "queued" if runtime_name == "hermes" else "running",
+                    "message": "Hermes run started." if runtime_name == "hermes" else "Agent task started.",
+                }
+                current.updated_at = _utcnow()
+                session.add(current)
+                session.commit()
+            except Exception:
+                logger.debug("Failed to persist autonomous task id", exc_info=True)
+
         async def _run_agent():
-            runner = AgentRunner(
-                timeout_seconds=timeout_seconds,
-                allowed_tools=_allowed_tools_for_work_item(item),
-                max_budget_usd=mission.max_llm_budget_usd,
-                log_tools=True,
-                on_progress=_on_progress,
-                owner_type="autonomous_work_item",
-                owner_id=item.id,
-                owner_label=f"{mission.name}: {item.role}",
-                memory_project_id=mission.project_id,
-                memory_agent_type=item.role,
-                memory_source_type="autonomous_work_item",
-                memory_source_id=item.id,
-                memory_stage="autonomous_mission",
+            runtime = get_agent_runtime(runtime_name)
+            return await runtime.run(
+                _agent_prompt_for_work_item(mission, item),
+                AgentRuntimeContext(
+                    timeout_seconds=timeout_seconds,
+                    allowed_tools=_allowed_tools_for_work_item(item),
+                    max_budget_usd=mission.max_llm_budget_usd,
+                    on_task_enqueued=_on_task_enqueued,
+                    on_progress=_on_progress,
+                    owner_type="autonomous_work_item",
+                    owner_id=item.id,
+                    owner_label=f"{mission.name}: {item.role}",
+                    memory_project_id=mission.project_id,
+                    memory_agent_type=item.role,
+                    memory_source_type="autonomous_work_item",
+                    memory_source_id=item.id,
+                    memory_stage="autonomous_mission",
+                    model=(mission.config or {}).get("model"),
+                    model_tier=(mission.config or {}).get("model_tier"),
+                    agent_name=item.role,
+                    hermes_conversation=item.id,
+                    metadata={
+                        "mission_id": mission.id,
+                        "mission_run_id": item.run_id,
+                        "role": item.role,
+                        "planner_key": item.planner_key,
+                    },
+                ),
             )
-            return await runner.run(_agent_prompt_for_work_item(mission, item))
 
         result = asyncio.run(_run_agent())
     except Exception as exc:
@@ -1868,6 +1926,7 @@ def _execute_agent_work_item_direct(
     now = _utcnow()
     item = session.get(AutonomousAgentWorkItem, item.id) or item
     telemetry = {
+        "runtime": str((mission.config or {}).get("runtime") or "claude_sdk"),
         "tool_calls": len(result.tool_calls),
         "messages_received": result.messages_received,
         "text_blocks_received": result.text_blocks_received,

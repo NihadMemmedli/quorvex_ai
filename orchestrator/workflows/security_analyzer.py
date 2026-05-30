@@ -122,6 +122,7 @@ Focus on actionable, specific remediation steps. Group related fixes together. I
         timeout_seconds=120,
         allowed_tools=[],  # No tools needed for analysis
         log_tools=False,
+        model_tier="deep",
     )
     result = await runner.run(prompt)
 
@@ -213,6 +214,7 @@ Keep it concise and actionable.
         timeout_seconds=90,
         allowed_tools=[],
         log_tools=False,
+        model_tier="standard",
     )
     result = await runner.run(prompt)
 
@@ -289,6 +291,7 @@ Provide a trend analysis in JSON format:
         timeout_seconds=90,
         allowed_tools=[],
         log_tools=False,
+        model_tier="standard",
     )
     result = await runner.run(prompt)
 

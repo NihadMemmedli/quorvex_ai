@@ -126,6 +126,7 @@ Be specific and factual. Use the actual error data provided — do not invent de
         timeout_seconds=120,
         allowed_tools=[],  # No tools needed for analysis
         log_tools=False,
+        model_tier="standard",
     )
     result = await runner.run(prompt)
 

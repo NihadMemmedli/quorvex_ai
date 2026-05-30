@@ -48,19 +48,20 @@ export default function TemplatesPage() {
         if (projectLoading) return;
 
         setLoading(true);
+        const specsParams = new URLSearchParams({ templates_only: 'true', limit: '200' });
+        if (currentProject?.id) specsParams.set('project_id', currentProject.id);
         const projectParam = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
 
         Promise.all([
-            fetch(`${API_BASE}/specs/list${projectParam}`).then(res => res.json()),
+            fetch(`${API_BASE}/specs/list?${specsParams.toString()}`).then(res => res.json()),
             fetch(`${API_BASE}/spec-metadata${projectParam}`).then(res => res.json())
         ])
             .then(([specsData, metadataData]) => {
-                // Filter for templates only (in specs/templates/) — handle paginated response
+                // Handle paginated response
                 const specsList = specsData.items || specsData;
-                const templateSpecs = specsList.filter((s: Spec) => s.name.startsWith('templates/'));
 
                 // Merge metadata into specs
-                const specsWithMetadata = templateSpecs.map((spec: Spec) => ({
+                const specsWithMetadata = specsList.map((spec: Spec) => ({
                     ...spec,
                     metadata: metadataData[spec.name] || { tags: [] }
                 }));
@@ -68,8 +69,9 @@ export default function TemplatesPage() {
                 setMetadata(metadataData);
                 setLoading(false);
                 const topLevelFolders = new Set<string>();
-                templateSpecs.forEach((s: Spec) => {
-                    const parts = s.name.split('/');
+                specsList.forEach((s: Spec) => {
+                    const relativeName = s.name.startsWith('templates/') ? s.name.substring(10) : s.name;
+                    const parts = relativeName.split('/').filter(Boolean);
                     if (parts.length > 1) topLevelFolders.add(parts[0]);
                 });
                 setExpandedFolders(topLevelFolders);

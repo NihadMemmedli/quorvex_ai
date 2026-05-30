@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import {
     AlertCircle,
@@ -127,12 +127,15 @@ interface MissionForm {
     name: string;
     description: string;
     mission_type: string;
+    runtime: string;
     target_urls: string;
     schedule_cron: string;
     timezone: string;
     max_runtime_minutes: number;
     max_iterations: number;
     max_llm_budget_usd: number;
+    hermes_max_concurrent_children: number;
+    hermes_max_spawn_depth: number;
     environment: string;
     allowed_domains: string;
     tool_profile: string;
@@ -393,17 +396,27 @@ const DEFAULT_FORM: MissionForm = {
     name: '',
     description: '',
     mission_type: 'exploration',
+    runtime: 'claude_sdk',
     target_urls: '',
     schedule_cron: '',
     timezone: 'UTC',
     max_runtime_minutes: 30,
     max_iterations: 0,
     max_llm_budget_usd: 5,
+    hermes_max_concurrent_children: 3,
+    hermes_max_spawn_depth: 1,
     environment: 'staging',
     allowed_domains: '',
     tool_profile: 'role_based',
     credential_scope: 'project',
 };
+
+function formWithRuntime(runtime: string): MissionForm {
+    return {
+        ...DEFAULT_FORM,
+        runtime: runtime || DEFAULT_FORM.runtime,
+    };
+}
 
 const PROPOSAL_FILTERS = ['pending', 'approved', 'materialized', 'rejected', 'all', 'duplicate_risk', 'blocking', 'stale', 'needs_review', 'validation_failed', 'blocked'] as const;
 type ProposalFilter = typeof PROPOSAL_FILTERS[number];
@@ -1075,6 +1088,8 @@ export default function AutonomousMissionsPage() {
     const [showCreate, setShowCreate] = useState(false);
     const [createStep, setCreateStep] = useState(1);
     const [form, setForm] = useState<MissionForm>(DEFAULT_FORM);
+    const [defaultMissionRuntime, setDefaultMissionRuntime] = useState(DEFAULT_FORM.runtime);
+    const runtimeSelectionTouched = useRef(false);
     const [formErrors, setFormErrors] = useState<FormErrors>({});
     const [selectedTemplateLabel, setSelectedTemplateLabel] = useState(QUICK_START_TEMPLATES[0]?.label || '');
     const [expandedMissionIds, setExpandedMissionIds] = useState<Set<string>>(new Set());
@@ -1224,6 +1239,31 @@ export default function AutonomousMissionsPage() {
         setLoading(true);
         refreshAll().finally(() => setLoading(false));
     }, [refreshAll]);
+
+    useEffect(() => {
+        let cancelled = false;
+
+        async function loadDefaultMissionRuntime() {
+            try {
+                const response = await fetchWithAuth(`${API_BASE}/settings`);
+                if (!response.ok) return;
+                const data = await response.json();
+                const runtime = data.agent_runtime || DEFAULT_FORM.runtime;
+                if (cancelled) return;
+                setDefaultMissionRuntime(runtime);
+                if (!runtimeSelectionTouched.current) {
+                    setForm(prev => ({ ...prev, runtime }));
+                }
+            } catch (err) {
+                console.error('Failed to load autonomous runtime settings:', err);
+            }
+        }
+
+        void loadDefaultMissionRuntime();
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     useEffect(() => {
         if (!selectedMissionId) {
@@ -1560,6 +1600,11 @@ export default function AutonomousMissionsPage() {
                 approval_policy: 'approval_required',
                 config: {
                     ...safetyConfig,
+                    runtime: form.runtime || defaultMissionRuntime || 'claude_sdk',
+                    ...(form.runtime === 'hermes' ? {
+                        hermes_max_concurrent_children: form.hermes_max_concurrent_children,
+                        hermes_max_spawn_depth: form.hermes_max_spawn_depth,
+                    } : {}),
                     ...(isWholeAppTeam ? {
                         whole_app_team: true,
                         team_mode: 'whole_app',
@@ -1592,7 +1637,8 @@ export default function AutonomousMissionsPage() {
             if (!response.ok) {
                 throw new Error(await response.text() || 'Failed to create mission');
             }
-            setForm(DEFAULT_FORM);
+            runtimeSelectionTouched.current = false;
+            setForm(formWithRuntime(defaultMissionRuntime));
             setFormErrors({});
             setSelectedTemplateLabel(QUICK_START_TEMPLATES[0]?.label || '');
             setCreateStep(1);
@@ -3418,6 +3464,20 @@ export default function AutonomousMissionsPage() {
                                                 <option value="mixed">Mixed Mission</option>
                                             </select>
                                         </label>
+                                        <label className="am-field">
+                                            <span>Runtime</span>
+                                            <select
+                                                name="mission-runtime"
+                                                value={form.runtime}
+                                                onChange={event => {
+                                                    runtimeSelectionTouched.current = true;
+                                                    setForm(prev => ({ ...prev, runtime: event.target.value }));
+                                                }}
+                                            >
+                                                <option value="claude_sdk">Claude SDK</option>
+                                                <option value="hermes">Hermes</option>
+                                            </select>
+                                        </label>
                                     </div>
 
                                     <label className="am-field">
@@ -3541,6 +3601,32 @@ export default function AutonomousMissionsPage() {
                                                     onChange={event => setForm(prev => ({ ...prev, max_llm_budget_usd: Number(event.target.value) }))}
                                                 />
                                             </label>
+                                            {form.runtime === 'hermes' && (
+                                                <>
+                                                    <label className="am-field">
+                                                        <span>Hermes Children</span>
+                                                        <input
+                                                            name="mission-hermes-children"
+                                                            type="number"
+                                                            min={1}
+                                                            max={8}
+                                                            value={form.hermes_max_concurrent_children}
+                                                            onChange={event => setForm(prev => ({ ...prev, hermes_max_concurrent_children: Number(event.target.value) }))}
+                                                        />
+                                                    </label>
+                                                    <label className="am-field">
+                                                        <span>Hermes Depth</span>
+                                                        <input
+                                                            name="mission-hermes-depth"
+                                                            type="number"
+                                                            min={0}
+                                                            max={3}
+                                                            value={form.hermes_max_spawn_depth}
+                                                            onChange={event => setForm(prev => ({ ...prev, hermes_max_spawn_depth: Number(event.target.value) }))}
+                                                        />
+                                                    </label>
+                                                </>
+                                            )}
                                         </div>
                                     </div>
 

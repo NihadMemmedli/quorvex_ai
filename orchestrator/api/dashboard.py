@@ -701,6 +701,7 @@ def get_dashboard_stats(
     # Import here to avoid circular imports
     from .db import get_session
     from .models_db import TestRun as DBTestRun
+    from .project_filters import apply_project_filter
 
     runs_dir = RUNS_DIR
     period_start = get_period_start_timestamp(period)
@@ -711,21 +712,21 @@ def get_dashboard_stats(
     runs_list = []
     all_durations = []
 
-    # Get project-filtered run IDs if project_id is specified
-    project_run_ids = None
-    if project_id:
-        session = next(get_session())
-        try:
-            # Query runs for this project
-            query = select(DBTestRun.id).where(DBTestRun.project_id == project_id)
-            # Include runs with null project_id for "default" project
-            if project_id == "default":
-                query = select(DBTestRun.id).where(
-                    (DBTestRun.project_id == project_id) | (DBTestRun.project_id == None)
-                )
-            project_run_ids = set(session.exec(query).all())
-        finally:
-            session.close()
+    # Build a cache of database runs first. Modern execution paths can write DB
+    # rows without a matching runs/<id>/run.json artifact, so DB is the source
+    # of truth and filesystem artifacts only enrich the row.
+    db_runs_cache = {}
+    session = next(get_session())
+    try:
+        query = select(DBTestRun)
+        query = apply_project_filter(query, DBTestRun, project_id)
+        if period_start:
+            query = query.where(DBTestRun.created_at >= datetime.fromtimestamp(period_start))
+        for db_run in session.exec(query).all():
+            db_runs_cache[db_run.id] = db_run
+    finally:
+        session.close()
+    project_run_ids = set(db_runs_cache.keys()) if project_id else None
 
     total_specs = 0
     # Process Specs - count all specs by project if specified
@@ -741,49 +742,11 @@ def get_dashboard_stats(
         if SPECS_DIR.exists():
             total_specs = len(list(SPECS_DIR.glob("**/*.md")))
 
-    if not runs_dir.exists():
-        return {
-            "total_specs": total_specs,
-            "total_runs": 0,
-            "success_rate": 0,
-            "pass_rate": 0,
-            "avg_duration_seconds": 0,
-            "slowest_test_duration": 0,
-            "flaky_test_count": 0,
-            "last_run": "Never",
-            "trends": [],
-            "errors": [],
-            "slowest_tests": [],
-            "flaky_tests": [],
-            "period": period,
-        }
-
-    # Build a cache of database runs for fallback when run.json doesn't exist
-    # Only query DB for runs that exist on filesystem to avoid loading ALL runs
-    db_runs_cache = {}
-    if project_id:
-        fs_run_ids = [d.name for d in runs_dir.iterdir() if d.is_dir()] if runs_dir.exists() else []
-        if fs_run_ids:
-            session = next(get_session())
-            try:
-                batch_size = 500
-                for i in range(0, len(fs_run_ids), batch_size):
-                    batch = fs_run_ids[i : i + batch_size]
-                    query = select(DBTestRun).where(DBTestRun.id.in_(batch))
-                    if project_id != "default":
-                        query = query.where(DBTestRun.project_id == project_id)
-                    else:
-                        query = query.where((DBTestRun.project_id == project_id) | (DBTestRun.project_id == None))
-                    for db_run in session.exec(query).all():
-                        db_runs_cache[db_run.id] = db_run
-            finally:
-                session.close()
-
     # Track which runs we've processed (from filesystem)
     processed_run_ids = set()
 
     # Iterate through all run directories
-    for run_path in runs_dir.iterdir():
+    for run_path in (runs_dir.iterdir() if runs_dir.exists() else []):
         if not run_path.is_dir():
             continue
 
@@ -969,6 +932,48 @@ def get_dashboard_stats(
         except Exception as e:
             logger.warning(f"Error processing run {run_path}: {e}")
             continue
+
+    # Include DB-only runs that do not have a filesystem run directory. These
+    # are common for queued/native/AutoPilot-backed executions.
+    for run_id, db_run in db_runs_cache.items():
+        if run_id in processed_run_ids:
+            continue
+        if not db_run.created_at:
+            continue
+        timestamp = db_run.created_at.timestamp()
+        if period_start and timestamp < period_start:
+            continue
+        duration = 0
+        if db_run.created_at and db_run.completed_at:
+            duration = (db_run.completed_at - db_run.created_at).total_seconds()
+        status = db_run.status or "unknown"
+        date_str = db_run.created_at.strftime("%Y-%m-%d")
+        spec_name = db_run.spec_name or db_run.test_name or run_id
+
+        if duration and duration > 0:
+            all_durations.append(duration)
+        daily_stats[date_str]["total"] += 1
+        if status in ("passed", "completed", "success"):
+            daily_stats[date_str]["passed"] += 1
+            daily_stats[date_str]["duration_sum"] += duration
+            daily_stats[date_str]["duration_count"] += 1
+        elif status in ("unknown", "pending", "running", "queued"):
+            pass
+        else:
+            daily_stats[date_str]["failed"] += 1
+            if status not in ("stopped", "cancelled", "aborted") and db_run.error_message:
+                error_counts[categorize_error(db_run.error_message)] += 1
+
+        runs_list.append(
+            {
+                "id": run_id,
+                "date": date_str,
+                "status": status,
+                "duration": duration,
+                "timestamp": timestamp,
+                "spec_name": spec_name,
+            }
+        )
 
     # Format Output
     trends = []

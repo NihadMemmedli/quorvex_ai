@@ -12,9 +12,12 @@ from orchestrator.config import settings
 from orchestrator.services import agent_run_activities
 from orchestrator.services import custom_workflow_activities
 from orchestrator.services import domain_job_activities
+from orchestrator.services import test_run_activities
 from orchestrator.workflows.agent_run_workflow import AgentRunWorkflow
+from orchestrator.workflows.autopilot_temporal import AutoPilotWorkflow
 from orchestrator.workflows.custom_workflow_temporal import CustomWorkflowRun
 from orchestrator.workflows.domain_job_workflow import DomainJobWorkflow
+from orchestrator.workflows.test_run_workflow import TestRunWorkflow
 
 logger = logging.getLogger("custom_workflow_worker")
 
@@ -25,13 +28,45 @@ def _activity(fn):
     return activity.defn(name=fn.__name__)(fn)
 
 
-WORKFLOWS = [CustomWorkflowRun, AgentRunWorkflow, DomainJobWorkflow]
+def mark_autopilot_temporal_started(payload):
+    from orchestrator.services.autopilot_activities import mark_autopilot_temporal_started as fn
+
+    return fn(payload)
+
+
+async def execute_autopilot_pipeline(payload):
+    from orchestrator.services.autopilot_activities import execute_autopilot_pipeline as fn
+
+    return await fn(payload)
+
+
+def set_autopilot_control_status(payload):
+    from orchestrator.services.autopilot_activities import set_autopilot_control_status as fn
+
+    return fn(payload)
+
+
+def finalize_autopilot_workflow(payload):
+    from orchestrator.services.autopilot_activities import finalize_autopilot_workflow as fn
+
+    return fn(payload)
+
+
+WORKFLOWS = [CustomWorkflowRun, AgentRunWorkflow, AutoPilotWorkflow, DomainJobWorkflow, TestRunWorkflow]
 ACTIVITIES = [
     _activity(agent_run_activities.mark_agent_run_temporal_started),
     _activity(agent_run_activities.execute_agent_run),
     _activity(agent_run_activities.set_agent_run_control_status),
     _activity(agent_run_activities.finalize_agent_run_workflow),
+    _activity(mark_autopilot_temporal_started),
+    _activity(execute_autopilot_pipeline),
+    _activity(set_autopilot_control_status),
+    _activity(finalize_autopilot_workflow),
     _activity(domain_job_activities.execute_domain_job),
+    _activity(test_run_activities.mark_test_run_temporal_started),
+    _activity(test_run_activities.execute_test_run),
+    _activity(test_run_activities.request_stop_test_run),
+    _activity(test_run_activities.finalize_test_run_workflow),
     _activity(custom_workflow_activities.mark_custom_workflow_started),
     _activity(custom_workflow_activities.prepare_custom_workflow_step),
     _activity(custom_workflow_activities.execute_custom_workflow_step),
@@ -56,14 +91,26 @@ def _validate_worker_contract() -> None:
     missing = []
     if "AgentRunWorkflow" not in contract["workflows"]:
         missing.append("AgentRunWorkflow")
+    if "AutoPilotWorkflow" not in contract["workflows"]:
+        missing.append("AutoPilotWorkflow")
     if "DomainJobWorkflow" not in contract["workflows"]:
         missing.append("DomainJobWorkflow")
+    if "TestRunWorkflow" not in contract["workflows"]:
+        missing.append("TestRunWorkflow")
     required_activities = {
         "mark_agent_run_temporal_started",
         "execute_agent_run",
         "set_agent_run_control_status",
         "finalize_agent_run_workflow",
+        "mark_autopilot_temporal_started",
+        "execute_autopilot_pipeline",
+        "set_autopilot_control_status",
+        "finalize_autopilot_workflow",
         "execute_domain_job",
+        "mark_test_run_temporal_started",
+        "execute_test_run",
+        "request_stop_test_run",
+        "finalize_test_run_workflow",
     }
     missing.extend(sorted(required_activities - set(contract["activities"])))
     if missing:

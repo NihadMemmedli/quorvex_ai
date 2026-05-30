@@ -551,16 +551,17 @@ async def check_requirements_health():
 
     errors = []
 
-    # Check Claude auth. Claude Code subscription auth in Docker uses
-    # CLAUDE_CODE_OAUTH_TOKEN; direct Anthropic API calls still use
-    # ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY.
+    # Check runtime AI auth. Claude Code subscription auth in Docker uses
+    # CLAUDE_CODE_OAUTH_TOKEN; direct provider calls prefer QUORVEX_LLM_*.
     anthropic_token_set = bool(
-        os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        os.environ.get("QUORVEX_LLM_API_KEY")
+        or os.environ.get("QUORVEX_LLM_API_KEYS")
+        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
         or os.environ.get("ANTHROPIC_API_KEY")
         or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
     )
     if not anthropic_token_set:
-        errors.append("Claude auth not set - AI generation will fail")
+        errors.append("Runtime AI auth not set - AI generation will fail")
 
     # Check OpenAI key (for embeddings)
     openai_token_set = bool(os.environ.get("OPENAI_API_KEY"))

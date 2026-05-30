@@ -92,9 +92,10 @@ class MemoryConsolidationService:
 
     async def _extract_with_llm(self, text: str, *, agent_type: str | None = None) -> list[MemoryCandidate]:
         from openai import AsyncOpenAI
+        from orchestrator.services.ai_runtime_config import resolve_openai_chat_model
 
         client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        model = os.environ.get("MEMORY_CONSOLIDATION_MODEL", os.environ.get("OPENAI_MODEL_ID", "gpt-4o-mini"))
+        model = os.environ.get("MEMORY_CONSOLIDATION_MODEL") or resolve_openai_chat_model()
         prompt = f"""Extract durable memories from this Quorvex AI testing context.
 
 Return JSON only with this shape:

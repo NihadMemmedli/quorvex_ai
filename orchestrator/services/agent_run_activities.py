@@ -18,7 +18,7 @@ TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timeout"}
 
 @contextmanager
 def _temporal_agent_execution_env():
-    """Force Temporal activities to execute agents directly, without Redis queueing."""
+    """Run agent work inside the Temporal activity instead of Redis queue workers."""
     previous = os.environ.get("USE_AGENT_QUEUE")
     os.environ["USE_AGENT_QUEUE"] = "false"
     try:

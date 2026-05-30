@@ -23,6 +23,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
+from orchestrator.utils.playwright_mcp import browser_runtime_status
+
 from .db import engine, get_session
 from .middleware.auth import get_current_user_optional
 from .models_db import (
@@ -33,6 +35,7 @@ from .models_db import (
     AutoPilotTestTask,
     TestRun,
 )
+from .project_filters import apply_project_filter
 
 logger = logging.getLogger(__name__)
 
@@ -109,9 +112,37 @@ class AutoPilotSessionResponse(BaseModel):
     completed_at: datetime | None
     instructions: str | None
     config: dict
+    temporal_workflow_id: str | None = None
+    temporal_run_id: str | None = None
+    temporal: dict[str, Any] | None = None
     can_resume: bool = False
     resume_reason: str | None = None
     failed_phase: str | None = None
+
+
+class AutoPilotTemporalSummaryResponse(BaseModel):
+    total_activities: int = 0
+    failed_activities: int = 0
+    retry_count: int = 0
+    last_failure: str | None = None
+    last_workflow_task_failure: str | None = None
+
+
+class AutoPilotTemporalResponse(BaseModel):
+    temporal_workflow_id: str | None = None
+    temporal_run_id: str | None = None
+    temporal_ui_url: str | None = None
+    temporal_ui_workflow_url: str | None = None
+    temporal_namespace: str | None = None
+    task_queue: str | None = None
+    workflow_type: str = "AutoPilotWorkflow"
+    available: bool = False
+    workflow_status: str | None = None
+    activities: list[dict[str, Any]] = Field(default_factory=list)
+    workflow_task_failures: list[dict[str, Any]] = Field(default_factory=list)
+    task_queue_status: dict[str, Any] = Field(default_factory=dict)
+    summary: AutoPilotTemporalSummaryResponse = Field(default_factory=AutoPilotTemporalSummaryResponse)
+    error: str | None = None
 
 
 class AutoPilotPhaseResponse(BaseModel):
@@ -244,16 +275,46 @@ class AutoPilotLiveResponse(BaseModel):
     tool_calls: int = 0
     browser_tool_calls: int = 0
     interactions: int = 0
+    capture_count: int = 0
+    latest_capture_at: str | None = None
+    activity_source: str | None = None
     recent_tools: list[dict[str, Any]] = Field(default_factory=list)
     artifacts: list[AutoPilotLiveArtifactResponse] = Field(default_factory=list)
     latest_image: AutoPilotLiveArtifactResponse | None = None
     updated_at: str | None = None
+    browser_runtime: str | None = None
+    live_view_available: bool = False
+    runtime_message: str | None = None
 
 
 # ========== Helper Functions ==========
 
 
 RUNS_DIR = Path("runs")
+
+
+def _current_autopilot_runtime(live: dict[str, Any]) -> dict[str, Any]:
+    """Describe whether the current AutoPilot browser can be shown through VNC."""
+    if live.get("browser_runtime") or live.get("live_view_available") is not None:
+        runtime = browser_runtime_status()
+        return {
+            **runtime,
+            "browser_runtime": live.get("browser_runtime") or runtime["browser_runtime"],
+            "live_view_available": bool(live.get("live_view_available")),
+            "runtime_message": live.get("runtime_message") or runtime["runtime_message"],
+        }
+    try:
+        from orchestrator.services.agent_queue import should_use_agent_queue
+
+        if should_use_agent_queue() and live.get("agent_task_id"):
+            return {
+                "browser_runtime": "headless_worker",
+                "live_view_available": False,
+                "runtime_message": "AutoPilot browser tools are delegated to an agent worker outside the VNC display.",
+            }
+    except Exception:
+        pass
+    return browser_runtime_status()
 
 
 def _get_user_key(user, request: Request) -> str:
@@ -473,6 +534,113 @@ def _count_user_active_sessions(user_key: str) -> int:
     return sum(1 for _, (task, _, uk) in _running_pipelines.items() if uk == user_key and not task.done())
 
 
+def _count_user_active_sessions_db(user_key: str) -> int:
+    """Count active AutoPilot sessions for a user across Temporal and legacy runtimes."""
+    with Session(engine) as db:
+        stmt = (
+            select(AutoPilotSession)
+            .where(AutoPilotSession.triggered_by == user_key)
+            .where(AutoPilotSession.status.in_(["pending", "running", "awaiting_input", "paused"]))
+        )
+        return len(db.exec(stmt).all())
+
+
+async def _start_autopilot_temporal_or_fail(ap_session: AutoPilotSession, db: Session) -> None:
+    from orchestrator.config import settings as app_settings
+    from orchestrator.services.temporal_client import TemporalUnavailableError, start_autopilot_workflow
+
+    task_queue = app_settings.temporal_browser_workflow_task_queue
+    try:
+        temporal = await start_autopilot_workflow(ap_session.id, task_queue=task_queue)
+    except TemporalUnavailableError as exc:
+        ap_session.status = "failed"
+        ap_session.error_message = f"Failed to start Temporal workflow: {exc}"
+        ap_session.completed_at = datetime.utcnow()
+        config = dict(ap_session.config or {})
+        config["live_browser"] = {
+            **dict(config.get("live_browser") or {}),
+            "active": False,
+            "status": "failed",
+            "message": str(exc),
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        ap_session.config = config
+        db.add(ap_session)
+        db.commit()
+        raise HTTPException(status_code=503, detail=f"Temporal is required for AutoPilot: {exc}") from exc
+
+    ap_session.temporal_workflow_id = temporal.workflow_id
+    ap_session.temporal_run_id = temporal.run_id
+    db.add(ap_session)
+    db.commit()
+
+
+async def _signal_autopilot_temporal(ap_session: AutoPilotSession, signal_name: str, *args) -> bool:
+    """Best-effort signal for Temporal-backed AutoPilot sessions."""
+    if not ap_session.temporal_workflow_id:
+        return False
+    try:
+        from orchestrator.services.temporal_client import signal_autopilot_workflow
+
+        await signal_autopilot_workflow(ap_session.temporal_workflow_id, signal_name, *args)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to signal AutoPilot workflow %s: %s", ap_session.temporal_workflow_id, exc)
+        return False
+
+
+async def _autopilot_temporal_payload(ap_session: AutoPilotSession) -> dict[str, Any]:
+    from orchestrator.config import settings as app_settings
+    from orchestrator.services.temporal_client import TemporalUnavailableError, get_autopilot_temporal_diagnostics
+
+    workflow_url = None
+    if app_settings.temporal_ui_url and ap_session.temporal_workflow_id:
+        workflow_url = (
+            f"{app_settings.temporal_ui_url.rstrip('/')}/namespaces/"
+            f"{app_settings.temporal_namespace}/workflows/{ap_session.temporal_workflow_id}"
+        )
+        if ap_session.temporal_run_id:
+            workflow_url = f"{workflow_url}/{ap_session.temporal_run_id}/history"
+    payload: dict[str, Any] = {
+        "temporal_workflow_id": ap_session.temporal_workflow_id,
+        "temporal_run_id": ap_session.temporal_run_id,
+        "temporal_ui_url": app_settings.temporal_ui_url,
+        "temporal_ui_workflow_url": workflow_url,
+        "temporal_namespace": app_settings.temporal_namespace,
+        "task_queue": app_settings.temporal_browser_workflow_task_queue,
+        "workflow_type": "AutoPilotWorkflow",
+        "available": False,
+        "workflow_status": None,
+        "activities": [],
+        "workflow_task_failures": [],
+        "task_queue_status": {},
+        "summary": {
+            "total_activities": 0,
+            "failed_activities": 0,
+            "retry_count": 0,
+            "last_failure": None,
+            "last_workflow_task_failure": None,
+        },
+        "error": None,
+    }
+    if not ap_session.temporal_workflow_id:
+        payload["error"] = "No Temporal workflow id recorded for this AutoPilot session."
+        return payload
+    try:
+        return {
+            **payload,
+            **await get_autopilot_temporal_diagnostics(
+                ap_session.temporal_workflow_id,
+                ap_session.temporal_run_id,
+            ),
+        }
+    except TemporalUnavailableError as exc:
+        payload["error"] = str(exc)
+    except Exception as exc:
+        payload["error"] = f"Temporal diagnostics unavailable: {exc}"
+    return payload
+
+
 def _safe_read_json(path: Path) -> dict[str, Any] | None:
     """Read a JSON artifact, returning None when it is absent or invalid."""
     if not path.exists():
@@ -605,6 +773,42 @@ def _short_tool_label(tool_name: str | None) -> str:
     return tool_name.replace("_", " ")
 
 
+def _merge_artifact_live_progress(
+    live: dict[str, Any],
+    artifacts: list[AutoPilotLiveArtifactResponse],
+) -> dict[str, Any]:
+    """Attach browser capture evidence without treating captures as tool telemetry."""
+    if not artifacts:
+        return live
+
+    image_artifacts = [artifact for artifact in artifacts if artifact.type == "image"]
+    if not image_artifacts:
+        return live
+
+    merged = dict(live)
+    image_count = len(image_artifacts)
+    latest = image_artifacts[0]
+    latest_at = latest.modified_at.isoformat() if latest.modified_at else None
+
+    merged["capture_count"] = max(_safe_int(merged.get("capture_count")), image_count)
+    if latest_at:
+        merged["latest_capture_at"] = latest_at
+
+    has_real_tool_progress = any(
+        _safe_int(merged.get(key)) > 0 for key in ("tool_calls", "browser_tool_calls", "interactions")
+    ) or bool(merged.get("last_tool"))
+    if not has_real_tool_progress:
+        merged["activity_source"] = "artifact_fallback"
+
+    live_updated_at = _parse_live_timestamp(merged.get("updated_at"))
+    if latest.modified_at and (not live_updated_at or latest.modified_at > live_updated_at):
+        merged["updated_at"] = latest.modified_at.isoformat()
+        if not merged.get("message") or str(merged.get("message")) == "Browser slot acquired":
+            merged["message"] = "Latest browser capture available."
+
+    return merged
+
+
 async def _merge_live_agent_progress(live: dict[str, Any]) -> dict[str, Any]:
     """Fill live state from Redis heartbeat telemetry when DB progress lags."""
     task_id = live.get("agent_task_id")
@@ -631,10 +835,15 @@ async def _merge_live_agent_progress(live: dict[str, Any]) -> dict[str, Any]:
         return live
 
     merged = dict(live)
+    task_status = str(getattr(getattr(task, "status", None), "value", getattr(task, "status", "")) or "")
+    task_is_terminal = task_status in {"completed", "failed", "timeout", "cancelled"}
     for key in ("tool_calls", "browser_tool_calls", "interactions"):
         merged[key] = max(_safe_int(merged.get(key)), _safe_int(source.get(key)))
 
     last_tool = str(source.get("last_tool") or merged.get("last_tool") or "")
+    has_source_progress = any(_safe_int(source.get(key)) > 0 for key in ("tool_calls", "browser_tool_calls", "interactions"))
+    if has_source_progress or source.get("last_tool"):
+        merged["activity_source"] = "agent_queue_progress"
     if last_tool and (
         not merged.get("last_tool")
         or _safe_int(source.get("tool_calls")) >= _safe_int(merged.get("tool_calls"))
@@ -653,12 +862,21 @@ async def _merge_live_agent_progress(live: dict[str, Any]) -> dict[str, Any]:
             )
             merged["recent_tools"] = recent_tools[-12:]
 
-    if source.get("phase") and not source.get("status"):
+    if source.get("phase") and not source.get("status") and not task_is_terminal:
         merged["status"] = source["phase"]
 
     for key in ("status", "message", "current_stage", "activity_label", "updated_at"):
+        if task_is_terminal and key in {"status", "message"}:
+            continue
         if source.get(key):
             merged[key] = source[key]
+
+    if task_is_terminal:
+        merged["status"] = task_status
+        if getattr(task, "error", None):
+            merged["message"] = task.error
+        if getattr(task, "completed_at", None):
+            merged["updated_at"] = task.completed_at.isoformat()
 
     return merged
 
@@ -714,13 +932,84 @@ def _get_resume_metadata(
             db.close()
 
 
+def _summary_int(summary: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        value = summary.get(key)
+        if isinstance(value, (int, float)):
+            return int(value)
+    return 0
+
+
+def _derive_session_stats(ap_session: AutoPilotSession, session: Session | None) -> dict[str, Any]:
+    """Return session stats, deriving fallbacks from detail rows when aggregates are stale."""
+
+    stats: dict[str, Any] = {
+        "total_pages_discovered": ap_session.total_pages_discovered,
+        "total_flows_discovered": ap_session.total_flows_discovered,
+        "total_requirements_generated": ap_session.total_requirements_generated,
+        "total_specs_generated": ap_session.total_specs_generated,
+        "total_tests_generated": ap_session.total_tests_generated,
+        "total_tests_passed": ap_session.total_tests_passed,
+        "total_tests_failed": ap_session.total_tests_failed,
+        "coverage_percentage": ap_session.coverage_percentage,
+    }
+    if session is None:
+        return stats
+
+    phases = session.exec(select(AutoPilotPhase).where(AutoPilotPhase.session_id == ap_session.id)).all()
+    for phase in phases:
+        summary = phase.result_summary
+        if phase.phase_name == "exploration":
+            stats["total_pages_discovered"] = max(
+                stats["total_pages_discovered"],
+                _summary_int(summary, "pages_discovered", "total_pages", "pages"),
+            )
+            stats["total_flows_discovered"] = max(
+                stats["total_flows_discovered"],
+                _summary_int(summary, "flows_discovered", "total_flows", "flows"),
+            )
+        elif phase.phase_name == "requirements":
+            stats["total_requirements_generated"] = max(
+                stats["total_requirements_generated"],
+                _summary_int(summary, "requirements_generated", "total_requirements", "requirements"),
+            )
+
+    spec_tasks = session.exec(select(AutoPilotSpecTask).where(AutoPilotSpecTask.session_id == ap_session.id)).all()
+    test_tasks = session.exec(select(AutoPilotTestTask).where(AutoPilotTestTask.session_id == ap_session.id)).all()
+    completed_specs = [task for task in spec_tasks if task.status == "completed"]
+    generated_tests = [task for task in test_tasks if task.status in {"passed", "failed", "error", "completed"}]
+    passed_tests = [task for task in test_tasks if task.passed is True or task.status == "passed"]
+    failed_tests = [
+        task
+        for task in test_tasks
+        if task.passed is False or task.status in {"failed", "error"}
+    ]
+
+    stats["total_requirements_generated"] = max(
+        stats["total_requirements_generated"],
+        len({task.requirement_id for task in spec_tasks if task.requirement_id is not None}),
+    )
+    stats["total_specs_generated"] = max(stats["total_specs_generated"], len(completed_specs))
+    stats["total_tests_generated"] = max(stats["total_tests_generated"], len(generated_tests))
+    stats["total_tests_passed"] = max(stats["total_tests_passed"], len(passed_tests))
+    stats["total_tests_failed"] = max(stats["total_tests_failed"], len(failed_tests))
+    if stats["coverage_percentage"] <= 0 and stats["total_specs_generated"]:
+        stats["coverage_percentage"] = min(
+            100.0,
+            round((stats["total_tests_passed"] / stats["total_specs_generated"]) * 100, 1),
+        )
+    return stats
+
+
 def _session_to_response(
     ap_session: AutoPilotSession,
     session: Session | None = None,
+    temporal: dict[str, Any] | None = None,
 ) -> AutoPilotSessionResponse:
     """Convert a DB session model to the API response model."""
     if session is not None:
         _reconcile_stale_session(session, ap_session)
+    derived_stats = _derive_session_stats(ap_session, session)
     can_resume, resume_reason, failed_phase = _get_resume_metadata(ap_session, session)
     return AutoPilotSessionResponse(
         id=ap_session.id,
@@ -731,20 +1020,23 @@ def _session_to_response(
         current_phase_progress=ap_session.current_phase_progress,
         overall_progress=ap_session.overall_progress,
         phases_completed=ap_session.phases_completed,
-        total_pages_discovered=ap_session.total_pages_discovered,
-        total_flows_discovered=ap_session.total_flows_discovered,
-        total_requirements_generated=ap_session.total_requirements_generated,
-        total_specs_generated=ap_session.total_specs_generated,
-        total_tests_generated=ap_session.total_tests_generated,
-        total_tests_passed=ap_session.total_tests_passed,
-        total_tests_failed=ap_session.total_tests_failed,
-        coverage_percentage=ap_session.coverage_percentage,
+        total_pages_discovered=derived_stats["total_pages_discovered"],
+        total_flows_discovered=derived_stats["total_flows_discovered"],
+        total_requirements_generated=derived_stats["total_requirements_generated"],
+        total_specs_generated=derived_stats["total_specs_generated"],
+        total_tests_generated=derived_stats["total_tests_generated"],
+        total_tests_passed=derived_stats["total_tests_passed"],
+        total_tests_failed=derived_stats["total_tests_failed"],
+        coverage_percentage=derived_stats["coverage_percentage"],
         error_message=ap_session.error_message,
         created_at=ap_session.created_at,
         started_at=ap_session.started_at,
         completed_at=ap_session.completed_at,
         instructions=ap_session.instructions,
         config=ap_session.config,
+        temporal_workflow_id=ap_session.temporal_workflow_id,
+        temporal_run_id=ap_session.temporal_run_id,
+        temporal=temporal,
         can_resume=can_resume,
         resume_reason=resume_reason,
         failed_phase=failed_phase,
@@ -1060,19 +1352,11 @@ async def start_autopilot(
     user_key = _get_user_key(user, request)
 
     # Per-user concurrency limit
-    active_for_user = _count_user_active_sessions(user_key)
+    active_for_user = max(_count_user_active_sessions(user_key), _count_user_active_sessions_db(user_key))
     if active_for_user >= MAX_ACTIVE_SESSIONS_PER_USER:
         raise HTTPException(
             status_code=429,
             detail=f"You already have {active_for_user} active Auto Pilot sessions. Maximum is {MAX_ACTIVE_SESSIONS_PER_USER}.",
-        )
-
-    # Hard cap on tracked pipelines (memory safety)
-    if len(_running_pipelines) >= MAX_TRACKED_PIPELINES:
-        logger.error(f"Auto Pilot tracking dict at hard cap ({MAX_TRACKED_PIPELINES})")
-        raise HTTPException(
-            status_code=503,
-            detail="System at maximum Auto Pilot capacity. Please try again later.",
         )
 
     # Validate entry URLs
@@ -1124,9 +1408,9 @@ async def start_autopilot(
             db.add(phase)
 
         db.commit()
+        db.refresh(ap_session)
 
-    # Instantiate the pipeline and launch background task
-    _launch_pipeline(session_id, request_body.project_id, user_key)
+        await _start_autopilot_temporal_or_fail(ap_session, db)
 
     logger.info(f"Auto Pilot session {session_id} started for {len(request_body.entry_urls)} URL(s)")
 
@@ -1136,6 +1420,8 @@ async def start_autopilot(
         "message": f"Auto Pilot started. Poll progress at GET /autopilot/{session_id}",
         "entry_urls": request_body.entry_urls,
         "phases": [name for name, _ in PHASE_DEFINITIONS],
+        "temporal_workflow_id": ap_session.temporal_workflow_id,
+        "temporal_run_id": ap_session.temporal_run_id,
     }
 
 
@@ -1148,13 +1434,20 @@ async def list_sessions(
     """List all Auto Pilot sessions, newest first."""
     stmt = select(AutoPilotSession).order_by(AutoPilotSession.created_at.desc())
 
-    if project_id:
-        stmt = stmt.where(AutoPilotSession.project_id == project_id)
+    stmt = apply_project_filter(stmt, AutoPilotSession, project_id)
     if status:
         stmt = stmt.where(AutoPilotSession.status == status)
 
     sessions = session.exec(stmt).all()
     return [_session_to_response(s, session) for s in sessions]
+
+
+@router.get("/temporal/health", response_model=dict)
+async def get_autopilot_temporal_health():
+    """Get Temporal readiness for AutoPilot browser workflows."""
+    from orchestrator.services.temporal_client import check_autopilot_temporal_health
+
+    return await check_autopilot_temporal_health()
 
 
 @router.post("/recover-orphans", response_model=dict)
@@ -1223,7 +1516,20 @@ async def get_session_detail(
     ap_session = session.get(AutoPilotSession, session_id)
     if not ap_session:
         raise HTTPException(status_code=404, detail="Auto Pilot session not found")
-    return _session_to_response(ap_session, session)
+    temporal = await _autopilot_temporal_payload(ap_session)
+    return _session_to_response(ap_session, session, temporal=temporal)
+
+
+@router.get("/{session_id}/temporal", response_model=AutoPilotTemporalResponse)
+async def get_session_temporal(
+    session_id: str,
+    session: Session = Depends(get_session),
+):
+    """Get Temporal workflow diagnostics for an AutoPilot session."""
+    ap_session = session.get(AutoPilotSession, session_id)
+    if not ap_session:
+        raise HTTPException(status_code=404, detail="Auto Pilot session not found")
+    return await _autopilot_temporal_payload(ap_session)
 
 
 @router.get("/{session_id}/live", response_model=AutoPilotLiveResponse)
@@ -1259,7 +1565,9 @@ async def get_live_browser_state(
         run_id=str(run_id) if run_id else None,
     )
     latest_image = next((artifact for artifact in artifacts if artifact.type == "image"), None)
+    live = _merge_artifact_live_progress(live, artifacts)
     session_allows_live = ap_session.status in ("running", "awaiting_input")
+    runtime = _current_autopilot_runtime(live)
 
     return AutoPilotLiveResponse(
         active=bool(live.get("active")) and session_allows_live,
@@ -1278,10 +1586,16 @@ async def get_live_browser_state(
         tool_calls=_safe_int(live.get("tool_calls")),
         browser_tool_calls=_safe_int(live.get("browser_tool_calls")),
         interactions=_safe_int(live.get("interactions")),
+        capture_count=_safe_int(live.get("capture_count")),
+        latest_capture_at=live.get("latest_capture_at"),
+        activity_source=live.get("activity_source"),
         recent_tools=list(live.get("recent_tools") or []),
         artifacts=artifacts,
         latest_image=latest_image,
         updated_at=live.get("updated_at"),
+        browser_runtime=str(runtime["browser_runtime"]),
+        live_view_available=bool(runtime["live_view_available"]),
+        runtime_message=runtime["runtime_message"],
     )
 
 
@@ -1290,7 +1604,11 @@ async def _cancel_live_agent_task(ap_session: AutoPilotSession, reason: str) -> 
     config = dict(ap_session.config or {})
     live = dict(config.get("live_browser") or {})
     task_id = live.get("agent_task_id")
-    result: dict[str, Any] = {"agent_task_cancel": "not_found", "cleanup": None}
+    result: dict[str, Any] = {
+        "agent_task_cancel": "not_found",
+        "agent_task_cleanup": None,
+        "cleanup": None,
+    }
 
     if task_id:
         try:
@@ -1314,6 +1632,7 @@ async def _cancel_live_agent_task(ap_session: AutoPilotSession, reason: str) -> 
                         result["agent_task_cancel"] = status
                 elif before and before.status.value in {"completed", "failed", "timeout", "cancelled"}:
                     result["agent_task_cancel"] = "already_terminal"
+                result["agent_task_cleanup"] = await queue.cleanup_orphaned_and_stale_tasks()
         except Exception as exc:
             logger.warning("Failed to cancel AutoPilot agent task %s for %s: %s", task_id, ap_session.id, exc)
             result["agent_task_cancel"] = "error"
@@ -1424,6 +1743,8 @@ async def answer_question(
             logger.info(f"Forwarded answer to pipeline {session_id} for question {body.question_id}")
         except Exception as e:
             logger.warning(f"Could not forward answer to pipeline: {e}")
+    elif ap_session.temporal_workflow_id:
+        logger.info("Stored answer for Temporal-backed AutoPilot %s question %s", session_id, body.question_id)
     else:
         can_resume, resume_reason, failed_phase = _get_resume_metadata(ap_session, session)
         if can_resume and len(_running_pipelines) < MAX_TRACKED_PIPELINES:
@@ -1574,6 +1895,8 @@ async def pause_session(
 
     session.commit()
 
+    await _signal_autopilot_temporal(ap_session, "pause", "manual_pause")
+
     logger.info(f"Auto Pilot {session_id} paused")
     return {"status": "paused", "session_id": session_id, "paused_test_tasks": len(paused_tasks)}
 
@@ -1604,7 +1927,11 @@ async def resume_session(
     _sweep_done_tasks()
 
     entry = _running_pipelines.get(session_id)
-    if ap_session.status == "paused":
+    if ap_session.temporal_workflow_id:
+        _reset_resumable_state(session, ap_session, failed_phase)
+        await _signal_autopilot_temporal(ap_session, "resume")
+        logger.info("Signalled Temporal AutoPilot resume for %s", session_id)
+    elif ap_session.status == "paused":
         if entry and not entry[0].done():
             entry[0].cancel()
             _running_pipelines.pop(session_id, None)
@@ -1684,8 +2011,6 @@ async def cancel_session(
             pass
         _running_pipelines.pop(session_id, None)
 
-    cancel_result = await _cancel_live_agent_task(ap_session, "cancelled")
-
     # Update session
     now = datetime.utcnow()
     ap_session.status = "cancelled"
@@ -1751,6 +2076,11 @@ async def cancel_session(
         q.status = "skipped"
         session.add(q)
 
+    session.commit()
+
+    cancel_result = await _cancel_live_agent_task(ap_session, "cancelled")
+    await _signal_autopilot_temporal(ap_session, "cancel", "manual_cancel")
+    session.add(ap_session)
     session.commit()
 
     logger.info(f"Auto Pilot {session_id} cancelled")
@@ -1886,6 +2216,13 @@ async def resume_interrupted_sessions() -> int:
         for ap_session in interrupted:
             try:
                 logger.info(f"Resuming interrupted Auto Pilot: {ap_session.id}")
+                if ap_session.temporal_workflow_id:
+                    logger.info(
+                        "AutoPilot %s is managed by Temporal workflow %s; skipping in-memory resume",
+                        ap_session.id,
+                        ap_session.temporal_workflow_id,
+                    )
+                    continue
                 cleanup = await _session_process_cleanup_async(ap_session.id)
                 if await _is_stale_live_browser_async(ap_session):
                     reason = "AutoPilot runtime was stale during backend startup recovery."

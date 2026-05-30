@@ -27,11 +27,13 @@ State Machine:
 """
 
 import asyncio
+import copy
 import json
 import logging
 import os
 import re
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -48,11 +50,34 @@ from orchestrator.ai.validation import (
     should_gate_exploration,
     validate_exploration_result,
 )
+from orchestrator.utils.playwright_mcp import browser_runtime_status
 
 logger = logging.getLogger(__name__)
 
 # Priority ordering for spec generation (highest first)
 PRIORITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+@asynccontextmanager
+async def _worker_managed_browser_slot():
+    """No-op slot context for queued agents that acquire browser slots in workers."""
+    yield True
+
+
+def _autopilot_browser_runtime_status() -> dict[str, Any]:
+    """Describe the browser runtime that will execute AutoPilot agent tools."""
+    try:
+        from orchestrator.services.agent_queue import should_use_agent_queue
+
+        if should_use_agent_queue():
+            return {
+                "browser_runtime": "headless_worker",
+                "live_view_available": False,
+                "runtime_message": "AutoPilot browser tools are delegated to an agent worker outside the VNC display.",
+            }
+    except Exception:
+        pass
+    return browser_runtime_status()
 
 
 @dataclass
@@ -532,6 +557,7 @@ class AutoPilotPipeline:
         strategy: str,
     ):
         """Run one stored exploration attempt for one URL."""
+        from orchestrator.services.agent_queue import should_use_agent_queue
         from orchestrator.services.browser_pool import OperationType, get_browser_pool
         from orchestrator.services.load_test_lock import check_system_available
         from orchestrator.workflows.app_explorer import AppExplorer, ExplorationConfig
@@ -573,17 +599,23 @@ class AutoPilotPipeline:
                 "last_tool": "",
                 "last_tool_label": "",
                 "recent_tools": [],
+                **_autopilot_browser_runtime_status(),
             }
         )
 
         await check_system_available("autopilot_exploration")
 
-        pool = await get_browser_pool()
-        async with pool.browser_slot(
-            request_id=f"autopilot_{explore_session_id}",
-            operation_type=OperationType.AUTOPILOT,
-            description=f"AutoPilot exploration: {url}",
-        ) as acquired:
+        if should_use_agent_queue():
+            slot_context = _worker_managed_browser_slot()
+        else:
+            pool = await get_browser_pool()
+            slot_context = pool.browser_slot(
+                request_id=f"autopilot_{explore_session_id}",
+                operation_type=OperationType.AUTOPILOT,
+                description=f"AutoPilot exploration: {url}",
+            )
+
+        async with slot_context as acquired:
             if not acquired:
                 logger.warning(
                     f"Failed to acquire browser slot for exploration of {url}"
@@ -1105,6 +1137,7 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
         """Generate and validate test code in parallel."""
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import AutoPilotSpecTask
+        from orchestrator.services.agent_queue import should_use_agent_queue
         from orchestrator.services.browser_pool import OperationType, get_browser_pool
         from orchestrator.services.load_test_lock import check_system_available
         from orchestrator.workflows.full_native_pipeline import FullNativePipeline
@@ -1147,14 +1180,18 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                 await check_system_available("autopilot_test_generation")
                 await self._wait_if_paused()
 
-                pool = await get_browser_pool()
                 request_id = f"autopilot_test_{test_task_id}_{uuid.uuid4().hex[:6]}"
+                if should_use_agent_queue():
+                    slot_context = _worker_managed_browser_slot()
+                else:
+                    pool = await get_browser_pool()
+                    slot_context = pool.browser_slot(
+                        request_id=request_id,
+                        operation_type=OperationType.AUTOPILOT,
+                        description=f"AutoPilot test: {spec_name}",
+                    )
 
-                async with pool.browser_slot(
-                    request_id=request_id,
-                    operation_type=OperationType.AUTOPILOT,
-                    description=f"AutoPilot test: {spec_name}",
-                ) as acquired:
+                async with slot_context as acquired:
                     if not acquired:
                         self._update_test_task(
                             test_task_id,
@@ -1193,6 +1230,7 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                             "browser_tool_calls": 0,
                             "interactions": 0,
                             "recent_tools": [],
+                            **_autopilot_browser_runtime_status(),
                         }
                     )
 
@@ -1676,14 +1714,26 @@ test.describe({suite}, () => {{
         logger.info(f"Question asked (id={question.id}): {question_text[:100]}...")
         self._update_session_status("awaiting_input")
 
-        # Wait for answer (or auto-continue timeout)
+        # Wait for answer (or auto-continue timeout). In Temporal execution the
+        # API process cannot poke this in-memory event, so poll persisted state.
         self._question_answered.clear()
-        try:
-            await asyncio.wait_for(
-                self._question_answered.wait(),
-                timeout=self._config.auto_continue_hours * 3600,
-            )
-        except asyncio.TimeoutError:
+        deadline = datetime.utcnow() + timedelta(hours=self._config.auto_continue_hours)
+        while datetime.utcnow() < deadline:
+            await self._sync_control_state()
+            if self._cancelled.is_set():
+                raise asyncio.CancelledError()
+            await self._wait_if_paused()
+            with Session(engine) as db:
+                latest = db.get(AutoPilotQuestion, question.id)
+                if latest and latest.status in {"answered", "auto_continued"}:
+                    break
+            try:
+                await asyncio.wait_for(self._question_answered.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                pass
+            if self._question_answered.is_set():
+                break
+        else:
             self._auto_continue_question(question.id, default_answer)
 
         resolved_answer = default_answer
@@ -1721,12 +1771,30 @@ test.describe({suite}, () => {{
 
     async def _wait_if_paused(self):
         """Block until the pipeline is unpaused or cancelled."""
+        await self._sync_control_state()
         if not self._paused.is_set():
             self._update_session_status("paused")
             logger.info("Pipeline paused, waiting for resume...")
-            await self._paused.wait()
+            while not self._paused.is_set():
+                await asyncio.sleep(2)
+                await self._sync_control_state()
             if not self._cancelled.is_set():
                 self._update_session_status("running")
+
+    async def _sync_control_state(self):
+        """Mirror persisted pause/cancel state into this pipeline instance."""
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSession
+
+        with Session(engine) as db:
+            session = db.get(AutoPilotSession, self.session_id)
+            status = session.status if session else None
+        if status == "cancelled":
+            self.cancel()
+        elif status == "paused":
+            self._paused.clear()
+        elif status == "running" and not self._cancelled.is_set():
+            self._paused.set()
 
     # ------------------------------------------------------------------
     # DB helpers
@@ -1786,13 +1854,16 @@ test.describe({suite}, () => {{
         with Session(engine) as db:
             session = db.get(AutoPilotSession, self.session_id)
             if session:
-                session.config = deep_merge(session.config or {}, patch)
+                base_config = copy.deepcopy(session.config or {})
+                session.config = deep_merge(base_config, copy.deepcopy(patch))
                 db.add(session)
                 db.commit()
 
     def _update_live_browser_state(self, patch: dict[str, Any]) -> None:
         """Persist ephemeral browser/agent progress for the AutoPilot UI."""
         live_patch = {**patch, "updated_at": datetime.utcnow().isoformat()}
+        if self._has_real_tool_progress(live_patch):
+            live_patch.setdefault("activity_source", "real_tool_progress")
         self._merge_session_config({"live_browser": live_patch})
 
     def _record_live_tool_use(
@@ -1809,7 +1880,7 @@ test.describe({suite}, () => {{
             if not session:
                 return
 
-            config = session.config or {}
+            config = copy.deepcopy(session.config or {})
             live = dict(config.get("live_browser") or {})
             recent_tools = list(live.get("recent_tools") or [])
             if not recent_tools or recent_tools[-1].get("name") != tool_name:
@@ -1827,6 +1898,7 @@ test.describe({suite}, () => {{
                 {
                     "last_tool": tool_name,
                     "last_tool_label": label,
+                    "activity_source": "real_tool_progress",
                     "recent_tools": recent_tools,
                     "updated_at": datetime.utcnow().isoformat(),
                 }
@@ -1843,6 +1915,18 @@ test.describe({suite}, () => {{
         if "__" in tool_name:
             return tool_name.rsplit("__", 1)[-1].replace("_", " ")
         return tool_name.replace("_", " ")
+
+    @staticmethod
+    def _has_real_tool_progress(patch: dict[str, Any]) -> bool:
+        if patch.get("last_tool"):
+            return True
+        for key in ("tool_calls", "browser_tool_calls", "interactions"):
+            try:
+                if int(patch.get(key) or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
 
     def _update_overall_progress(self, progress: float):
         from orchestrator.api.db import engine

@@ -46,9 +46,10 @@ class NativeMixedGenerator:
     ```
     """
 
-    def __init__(self):
+    def __init__(self, model_tier: str = "tool_deep"):
         self.tests_dir = BASE_DIR / "tests" / "generated"
         self.tests_dir.mkdir(parents=True, exist_ok=True)
+        self.model_tier = model_tier
 
     async def generate_test(
         self, spec_path: str, target_url: str | None = None, output_name: str | None = None
@@ -198,6 +199,7 @@ Write the file to: {output_path}
             timeout_seconds=timeout,
             allowed_tools=get_agent_allowed_tools("playwright-test-generator"),
             log_tools=True,
+            model_tier=self.model_tier,
         )
         result = await runner.run(prompt)
 

@@ -225,6 +225,14 @@ def _run_migrations():
                 conn.execute(text("ALTER TABLE testrun ADD COLUMN project_id VARCHAR"))
                 logger.info("Added column: testrun.project_id")
 
+            if "temporal_workflow_id" not in existing_columns:
+                conn.execute(text("ALTER TABLE testrun ADD COLUMN temporal_workflow_id VARCHAR"))
+                logger.info("Added column: testrun.temporal_workflow_id")
+
+            if "temporal_run_id" not in existing_columns:
+                conn.execute(text("ALTER TABLE testrun ADD COLUMN temporal_run_id VARCHAR"))
+                logger.info("Added column: testrun.temporal_run_id")
+
             # Stage tracking columns for real-time UI feedback
             if "current_stage" not in existing_columns:
                 conn.execute(text("ALTER TABLE testrun ADD COLUMN current_stage VARCHAR"))
@@ -336,6 +344,9 @@ def _run_migrations():
         # Add project_id to agentrun table
         if "agentrun" in inspector.get_table_names():
             agentrun_columns = {col["name"] for col in inspector.get_columns("agentrun")}
+            if "runtime" not in agentrun_columns:
+                conn.execute(text("ALTER TABLE agentrun ADD COLUMN runtime VARCHAR NOT NULL DEFAULT 'claude_sdk'"))
+                logger.info("Added column: agentrun.runtime")
             if "project_id" not in agentrun_columns:
                 conn.execute(text("ALTER TABLE agentrun ADD COLUMN project_id VARCHAR"))
                 logger.info("Added column: agentrun.project_id")
@@ -689,6 +700,7 @@ def _run_migrations():
                         name VARCHAR NOT NULL,
                         description VARCHAR NOT NULL DEFAULT '',
                         system_prompt TEXT NOT NULL,
+                        runtime VARCHAR NOT NULL DEFAULT 'claude_sdk',
                         model VARCHAR,
                         timeout_seconds INTEGER NOT NULL DEFAULT 1800,
                         tool_ids_json TEXT NOT NULL DEFAULT '[]',
@@ -707,6 +719,7 @@ def _run_migrations():
                         name VARCHAR NOT NULL,
                         description VARCHAR NOT NULL DEFAULT '',
                         system_prompt TEXT NOT NULL,
+                        runtime VARCHAR NOT NULL DEFAULT 'claude_sdk',
                         model VARCHAR,
                         timeout_seconds INTEGER NOT NULL DEFAULT 1800,
                         tool_ids_json TEXT NOT NULL DEFAULT '[]',
@@ -717,6 +730,11 @@ def _run_migrations():
                     """)
                 )
             logger.info("Created table: agent_definitions")
+        else:
+            agent_definition_columns = {col["name"] for col in inspector.get_columns("agent_definitions")}
+            if "runtime" not in agent_definition_columns:
+                conn.execute(text("ALTER TABLE agent_definitions ADD COLUMN runtime VARCHAR NOT NULL DEFAULT 'claude_sdk'"))
+                logger.info("Added column: agent_definitions.runtime")
 
         if "agent_tool_definitions" not in inspector.get_table_names():
             if db_type == "postgresql":
@@ -761,6 +779,7 @@ def _run_migrations():
                         "ON agent_definitions (project_id, status)"
                     )
                 )
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_agent_definitions_runtime ON agent_definitions (runtime)"))
             except Exception as e:
                 logger.debug(f"Index may already exist on agent_definitions: {e}")
 
@@ -1333,8 +1352,25 @@ def _run_migrations():
                         "ON agentrun (temporal_workflow_id)"
                     )
                 )
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_agentrun_runtime ON agentrun (runtime)"))
             except Exception as e:
                 logger.debug(f"Index may already exist on agentrun temporal workflow id: {e}")
+
+        if "autopilot_sessions" in inspector.get_table_names():
+            autopilot_columns = {col["name"] for col in inspector.get_columns("autopilot_sessions")}
+            for column_name in ("temporal_workflow_id", "temporal_run_id"):
+                if column_name not in autopilot_columns:
+                    conn.execute(text(f"ALTER TABLE autopilot_sessions ADD COLUMN {column_name} VARCHAR"))
+                    logger.info("Added column: autopilot_sessions.%s", column_name)
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_autopilot_sessions_temporal_workflow_id "
+                        "ON autopilot_sessions (temporal_workflow_id)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Index may already exist on autopilot temporal workflow id: {e}")
 
         if "agentrun" in inspector.get_table_names() and "agent_run_events" not in inspector.get_table_names():
             conn.execute(

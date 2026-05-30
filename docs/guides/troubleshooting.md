@@ -32,14 +32,14 @@ make prod-logs          # Docker production logs
 
 ## Setup and Configuration Issues
 
-### "ANTHROPIC_AUTH_TOKEN not set"
+### "QUORVEX_LLM_API_KEY not set"
 
 **Symptom**: CLI or API fails with missing token error.
 
 **Fix**:
 ```bash
 make check-env
-# Edit .env and set ANTHROPIC_AUTH_TOKEN=your-actual-token
+# Edit .env and set QUORVEX_LLM_API_KEY=your-actual-token
 ```
 
 If running in Docker, ensure `.env.prod` has the variable and restart:

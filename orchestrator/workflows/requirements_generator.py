@@ -540,6 +540,7 @@ Generate the requirements now:
             timeout_seconds=300,  # 5 min timeout for requirements analysis
             allowed_tools=[],  # No tools needed for analysis
             log_tools=False,
+            model_tier="deep",
         )
         result = await runner.run(prompt)
 

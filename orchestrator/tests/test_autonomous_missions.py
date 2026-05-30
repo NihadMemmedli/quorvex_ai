@@ -53,6 +53,7 @@ from orchestrator.api.models_db import (
     AutonomousTestProposal,
     BrowserPageState,
     CoverageGap,
+    ExecutionSettings,
     ExplorationSession,
     Project,
     Requirement,
@@ -1046,6 +1047,50 @@ def test_execute_mission_iteration_creates_parallel_team_work_items(monkeypatch)
 
     assert {item.role for item in items} == {"surface_mapper", "requirements_analyst", "rtm_mapper"}
     assert len([item for item in items if item.status == "running"]) == 2
+
+
+def test_execute_mission_iteration_clamps_team_parallelism_to_execution_settings(monkeypatch):
+    _ensure_tables()
+
+    def fake_enqueue(session, mission, item):
+        item.agent_task_id = f"agent-task-{item.role}"
+        item.status = "running"
+        item.attempt_count += 1
+        session.add(item)
+        session.commit()
+        return True
+
+    monkeypatch.setattr("orchestrator.services.autonomous_activities._enqueue_agent_work_item", fake_enqueue)
+
+    previous_parallelism = 2
+    with Session(engine) as session:
+        settings = session.get(ExecutionSettings, 1) or ExecutionSettings(id=1)
+        previous_parallelism = settings.parallelism
+        settings.parallelism = 1
+        session.add(settings)
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        mission.config = {
+            "whole_app_team": True,
+            "max_parallel_agents": 3,
+            "roles": ["surface_mapper", "requirements_analyst", "rtm_mapper"],
+        }
+        session.add(mission)
+        session.commit()
+        mission_id = mission.id
+
+    try:
+        run_id = create_mission_run({"mission_id": mission_id, "workflow_id": "wf-team-clamped"})
+        summary = execute_mission_iteration({"mission_id": mission_id, "run_id": run_id, "workflow_id": "wf-team-clamped"})
+    finally:
+        with Session(engine) as session:
+            settings = session.get(ExecutionSettings, 1) or ExecutionSettings(id=1)
+            settings.parallelism = previous_parallelism
+            session.add(settings)
+            session.commit()
+
+    assert summary["team"]["max_parallel_agents"] == 1
+    assert summary["work_items_enqueued"] == 1
+    assert summary["team"]["running_count"] == 1
 
 
 def test_completed_team_work_items_merge_structured_artifacts_without_duplicates():

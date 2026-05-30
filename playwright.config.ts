@@ -5,6 +5,10 @@ const baseURL = process.env.BASE_URL || 'http://localhost:3000';
 const parsedBaseURL = new URL(baseURL);
 const webServerPort = process.env.PLAYWRIGHT_WEB_PORT || parsedBaseURL.port || '3000';
 const webServerHost = process.env.PLAYWRIGHT_WEB_HOST || '0.0.0.0';
+const playwrightHeadless = process.env.PLAYWRIGHT_HEADLESS?.toLowerCase();
+const genericHeadless = process.env.HEADLESS?.toLowerCase();
+const runHeaded = playwrightHeadless === 'false' || genericHeadless === 'false';
+const configuredWorkers = parseInt(process.env.PLAYWRIGHT_WORKERS || '4', 10);
 
 /**
  * Playwright Test Configuration
@@ -16,11 +20,12 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: parseInt(process.env.PLAYWRIGHT_WORKERS || '4', 10),
+  workers: runHeaded ? 1 : configuredWorkers,
   reporter: 'list',
 
   use: {
     baseURL: process.env.BASE_URL || undefined,
+    headless: runHeaded ? false : undefined,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'on',

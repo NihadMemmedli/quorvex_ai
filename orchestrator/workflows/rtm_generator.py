@@ -382,6 +382,7 @@ Generate the mappings now. Include mappings for all requirements that have match
                 timeout_seconds=300,
                 allowed_tools=[],
                 log_tools=False,
+                model_tier="deep",
             )
             result = await runner.run(prompt)
 

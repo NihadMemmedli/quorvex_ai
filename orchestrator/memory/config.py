@@ -9,6 +9,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from orchestrator.services.ai_runtime_config import resolve_model
+
 
 @dataclass
 class MemoryConfig:
@@ -24,7 +26,7 @@ class MemoryConfig:
     )
 
     # Embeddings
-    embedding_model: str = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"))
+    embedding_model: str = field(default_factory=lambda: resolve_model("embedding"))
     embedding_dimension: int = field(default_factory=lambda: int(os.getenv("EMBEDDING_DIMENSION", "1536")))
 
     # OpenAI API for embeddings

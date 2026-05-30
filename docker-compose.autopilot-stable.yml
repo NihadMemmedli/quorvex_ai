@@ -2,15 +2,18 @@
 #
 # Use this when validating Auto Pilot behavior. It disables backend hot reload,
 # raises frontend memory, and lowers local AI/browser concurrency so page loads
-# remain responsive while agents are running.
+# remain responsive while agents are running. Browser execution stays headed so
+# the live browser view can display the active AutoPilot browser.
 
 services:
   backend:
     environment:
       UVICORN_RELOAD: "false"
-      HEADLESS: "true"
-      PLAYWRIGHT_HEADLESS: "true"
-      VNC_ENABLED: "false"
+      HEADLESS: "false"
+      PLAYWRIGHT_HEADLESS: "false"
+      VNC_ENABLED: "true"
+      USE_AGENT_QUEUE: "false"
+      BROWSER_WORKERS_ENABLED: "false"
       DEFAULT_PARALLELISM: ${AUTOPILOT_DEFAULT_PARALLELISM:-2}
       PLAYWRIGHT_WORKERS: ${AUTOPILOT_PLAYWRIGHT_WORKERS:-1}
       MAX_CONCURRENT_AGENTS: ${AUTOPILOT_MAX_CONCURRENT_AGENTS:-2}

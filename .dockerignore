@@ -14,6 +14,9 @@ data/
 runs/
 playwright-report/
 test-results/
+*.db
+*.sqlite
+*.sqlite3
 
 # Version control
 .git/
@@ -52,8 +55,14 @@ yarn-debug.log*
 yarn-error.log*
 
 # Next.js
+web/
 .next/
 out/
+
+# Generated demos/docs artifacts
+site/
+scripts/demo-video/
+scripts/**/__pycache__/
 
 # Temporary files
 tmp/

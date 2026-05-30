@@ -15,6 +15,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 logger = logging.getLogger(__name__)
 
+
+def playwright_headed_args() -> str:
+    playwright_headless = os.environ.get("PLAYWRIGHT_HEADLESS", "").lower()
+    generic_headless = os.environ.get("HEADLESS", "").lower()
+    if playwright_headless == "false" or generic_headless == "false":
+        return " --headed --workers=1"
+    return ""
+
+
 # Load Claude credentials
 from load_env import setup_claude_env
 
@@ -835,7 +844,10 @@ Begin by running: test_run
         import subprocess
 
         try:
-            cmd = f"npx playwright test '{test_file}' --reporter=list,html --project {browser} --timeout=120000"
+            cmd = (
+                f"npx playwright test '{test_file}' --reporter=list,html "
+                f"--project {browser} --timeout=120000{playwright_headed_args()}"
+            )
             if output_dir:
                 results_dir = Path(output_dir) / "test-results"
                 report_dir = Path(output_dir) / "report"

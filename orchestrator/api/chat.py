@@ -116,6 +116,7 @@ async def claude_code_chat(request: ClaudeCodeChatRequest):
         timeout_seconds=min(max(request.timeout_seconds, 10), 180),
         allowed_tools=[],
         log_tools=False,
+        model_tier="chat",
     )
     result = await runner.run(prompt)
 
@@ -468,15 +469,15 @@ async def update_message_content_json(
 
 async def _generate_ai_title(user_message: str, assistant_message: str = "") -> str:
     """Generate a concise conversation title using AI."""
-    base_url = os.environ.get("ANTHROPIC_BASE_URL", "https://api.z.ai/api/anthropic")
-    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-    model = os.environ.get("ANTHROPIC_MODEL") or os.environ.get(
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "glm-5-turbo",
-    )
+    from orchestrator.services.ai_runtime_config import resolve_runtime_ai_selection
+
+    selection = resolve_runtime_ai_selection("light")
+    base_url = selection.base_url
+    auth_token = selection.api_key
+    model = selection.model
 
     if not auth_token:
-        raise ValueError("No ANTHROPIC_AUTH_TOKEN configured")
+        raise ValueError("No QUORVEX_LLM_API_KEY configured")
 
     user_part = user_message[:200].strip()
     assistant_part = assistant_message[:200].strip() if assistant_message else ""

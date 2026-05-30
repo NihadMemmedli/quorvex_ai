@@ -60,6 +60,7 @@ class NativeGenerator:
         owner_type: str | None = None,
         owner_id: str | None = None,
         owner_label: str | None = None,
+        model_tier: str = "tool_deep",
     ):
         self.on_tool_use = on_tool_use
         self.on_progress = on_progress
@@ -67,6 +68,7 @@ class NativeGenerator:
         self.owner_type = owner_type
         self.owner_id = owner_id
         self.owner_label = owner_label
+        self.model_tier = model_tier
         # Use absolute path to project's tests directory (not relative to cwd)
         # This fixes Docker issue where cwd changes to run directory
         self.tests_dir = BASE_DIR / "tests" / "generated"
@@ -116,6 +118,7 @@ class NativeGenerator:
             output_path=str(output_path),
             target_url=target_url,
             design_context=design_context,
+            memory_run_id=memory_run_id,
         )
 
         # Invoke the Generator Agent
@@ -158,6 +161,7 @@ class NativeGenerator:
         output_path: str,
         target_url: str | None,
         design_context: str | None = None,
+        memory_run_id: str | None = None,
     ) -> str:
         """Build prompt matching the playwright-test-generator agent format."""
 
@@ -221,7 +225,7 @@ Context: User wants to generate automated tests from the following test plan.
 ## Instructions
 
 For each test case in the spec:
-1. Call `generator_setup_page` to initialize the browser
+1. Call `generator_setup_page` with `seedFile: "tests/seed.spec.ts"` to initialize the browser
 2. **IMMEDIATELY** call `browser_navigate` to go to the target URL from the spec
    (The default page is example.com - NOT your target. Navigate explicitly!)
 3. Execute each step interactively using `browser_*` tools to validate selectors
@@ -340,6 +344,7 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
             owner_type=self.owner_type,
             owner_id=self.owner_id,
             owner_label=self.owner_label,
+            model_tier=self.model_tier,
         )
 
         result = await runner.run(prompt)

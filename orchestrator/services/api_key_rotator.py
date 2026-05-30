@@ -113,11 +113,18 @@ class ApiKeyRotator:
         single ANTHROPIC_AUTH_TOKEN.
         """
         with self._lock:
-            tokens_str = os.environ.get("ANTHROPIC_AUTH_TOKENS", "").strip()
+            tokens_str = (
+                os.environ.get("QUORVEX_LLM_API_KEYS", "").strip()
+                or os.environ.get("ANTHROPIC_AUTH_TOKENS", "").strip()
+            )
             if tokens_str:
                 tokens = [t.strip() for t in tokens_str.split(",") if t.strip()]
             else:
-                single = os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+                single = (
+                    os.environ.get("QUORVEX_LLM_API_KEY", "").strip()
+                    or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
+                    or os.environ.get("ANTHROPIC_API_KEY", "").strip()
+                )
                 tokens = [single] if single else []
 
             self._slots = [ApiKeySlot(token=token, index=i) for i, token in enumerate(tokens)]
@@ -165,6 +172,7 @@ class ApiKeyRotator:
 
     def activate_key(self, slot: ApiKeySlot):
         """Set os.environ['ANTHROPIC_AUTH_TOKEN'] to the given key."""
+        os.environ["QUORVEX_LLM_API_KEY"] = slot.token
         os.environ["ANTHROPIC_AUTH_TOKEN"] = slot.token
         # Also set ANTHROPIC_API_KEY for frontend SDK compatibility
         os.environ["ANTHROPIC_API_KEY"] = slot.token

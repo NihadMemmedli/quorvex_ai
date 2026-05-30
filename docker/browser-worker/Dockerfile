@@ -2,26 +2,36 @@
 # Browser Worker Container
 # Isolated Playwright browser for parallel test execution
 # ============================================
-# Using official Playwright image which already has browsers installed
-FROM mcr.microsoft.com/playwright:v1.49.0-jammy
+# Use a slim Node runtime and install only Chromium instead of carrying the
+# official all-browser Playwright image.
+FROM node:20-bookworm-slim
 
 WORKDIR /app
 
 # Set environment variables
 ENV PLAYWRIGHT_WORKERS=1
 ENV HEADLESS=true
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=300000
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy package files and install dependencies
-# Note: We need @playwright/test for running tests
-# Install with NODE_ENV=development to include devDependencies (playwright)
+# Install production MCP/runtime packages plus the Playwright test runner only.
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --omit=dev && \
+    mv package.json package.full.json && \
+    mv package-lock.json package-lock.full.json && \
+    npm install --package-lock=false --no-save @playwright/test@1.57.0 && \
+    mv package.full.json package.json && \
+    mv package-lock.full.json package-lock.json && \
+    npx playwright install --with-deps chromium && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/*
 
 # Now set production mode for runtime
 ENV NODE_ENV=production
-
-# Browsers are already installed in the base image
-# No need to run: npx playwright install
 
 # Copy test configuration and tests
 COPY playwright.config.ts ./

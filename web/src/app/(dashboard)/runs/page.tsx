@@ -22,6 +22,8 @@ interface Run {
     queue_position?: number | null;
     queued_at?: string | null;
     started_at?: string | null;
+    temporal_workflow_id?: string | null;
+    temporal_run_id?: string | null;
     // Stage tracking for real-time UI feedback
     current_stage?: string | null;  // "planning", "generating", "testing", "healing"
     stage_started_at?: string | null;

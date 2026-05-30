@@ -64,6 +64,9 @@ class NativePlanner:
         owner_type: str | None = None,
         owner_id: str | None = None,
         owner_label: str | None = None,
+        model_tier: str = "tool_deep",
+        session_dir: Path | None = None,
+        cwd: Path | str | None = None,
     ):
         self.project_id = project_id
         self.on_tool_use = on_tool_use
@@ -72,6 +75,9 @@ class NativePlanner:
         self.owner_type = owner_type
         self.owner_id = owner_id
         self.owner_label = owner_label
+        self.model_tier = model_tier
+        self.session_dir = Path(session_dir) if session_dir else None
+        self.cwd = Path(cwd) if cwd else self.session_dir
         self.memory_manager = get_memory_manager(project_id=project_id)
         # Use absolute path relative to project root (up from orchestrator/workflows/native_planner.py)
         self.specs_dir = Path(__file__).resolve().parent.parent.parent / "specs"
@@ -214,7 +220,7 @@ You MUST open a browser and explore the live application.
 - **Target URL**: {target_url}
 
 Use the Playwright MCP tools to:
-1. Call `planner_setup_page` to initialize the browser
+1. Call `planner_setup_page` with `seedFile: "tests/seed.spec.ts"` to initialize the browser
 2. **IMMEDIATELY** call `browser_navigate` to go to: {target_url}
    (Do NOT rely on any default page - the default is example.com. Navigate explicitly!)
 3. Use `browser_snapshot` to see the current page state
@@ -222,6 +228,8 @@ Use the Playwright MCP tools to:
 5. Identify all interactive elements, buttons, forms, and user flows
 6. Record the EXACT selectors you find (getByRole, getByText, etc.)
 7. Take additional snapshots as you navigate
+8. Periodically call `browser_take_screenshot` with filenames like `live-step-001.png`,
+   `live-step-002.png`, etc. so the dashboard can show live visual evidence while you work
 
 **IMPORTANT**: Include the actual selectors you discover in the test plan.
 
@@ -314,9 +322,12 @@ Start the test plan with:
             on_tool_use=self.on_tool_use,
             on_progress=self.on_progress,
             on_task_enqueued=self.on_task_enqueued,
+            session_dir=self.session_dir,
+            cwd=self.cwd,
             owner_type=self.owner_type,
             owner_id=self.owner_id,
             owner_label=self.owner_label,
+            model_tier=self.model_tier,
         )
 
         result = await runner.run(prompt)

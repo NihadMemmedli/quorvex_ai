@@ -5,7 +5,19 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-SENSITIVE_HINTS = ("password", "passcode", "secret", "token", "api key", "apikey", "access key")
+SENSITIVE_HINTS = (
+    "password",
+    "passcode",
+    "secret",
+    "token",
+    "api key",
+    "apikey",
+    "access key",
+    "şifrə",
+    "sifre",
+    "şifre",
+    "parol",
+)
 
 
 @dataclass
@@ -218,20 +230,51 @@ def _first_string(value: str) -> str | None:
     match = re.search(r"(['\"`])((?:\\.|(?!\1).)*)\1", value)
     if not match:
         return None
-    return bytes(match.group(2), "utf-8").decode("unicode_escape")
+    return _decode_js_string(match.group(2))
 
 
 def _name_option(value: str) -> str | None:
     match = re.search(r"name\s*:\s*(['\"`])((?:\\.|(?!\1).)*)\1", value)
     if not match:
         return None
-    return bytes(match.group(2), "utf-8").decode("unicode_escape")
+    return _decode_js_string(match.group(2))
+
+
+def _decode_js_string(value: str) -> str:
+    if "\\" not in value:
+        return value
+
+    def replace_codepoint(match: re.Match[str]) -> str:
+        try:
+            return chr(int(match.group(1), 16))
+        except ValueError:
+            return match.group(0)
+
+    decoded = re.sub(r"\\u\{([0-9a-fA-F]+)\}", replace_codepoint, value)
+    decoded = re.sub(r"\\u([0-9a-fA-F]{4})", replace_codepoint, decoded)
+    decoded = re.sub(r"\\x([0-9a-fA-F]{2})", replace_codepoint, decoded)
+    escapes = {
+        r"\n": "\n",
+        r"\r": "\r",
+        r"\t": "\t",
+        r"\b": "\b",
+        r"\f": "\f",
+        r"\v": "\v",
+        r"\\": "\\",
+        r"\'": "'",
+        r"\"": '"',
+        r"\`": "`",
+    }
+    for escaped, replacement in escapes.items():
+        decoded = decoded.replace(escaped, replacement)
+    return decoded
 
 
 def _redacted_value(value: str, locator: str) -> str:
     haystack = f"{locator} {value}".lower()
     if any(hint in haystack for hint in SENSITIVE_HINTS):
-        name = "PASSWORD" if "password" in haystack or "passcode" in haystack else "SECRET_VALUE"
+        password_hints = ("password", "passcode", "şifrə", "sifre", "şifre", "parol")
+        name = "PASSWORD" if any(hint in haystack for hint in password_hints) else "SECRET_VALUE"
         return f"`{{{{{name}}}}}`"
     return f"`{_escape_backticks(value)}`"
 

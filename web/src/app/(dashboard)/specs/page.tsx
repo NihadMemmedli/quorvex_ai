@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { FileText, Plus, Play, Folder, FolderOpen, ChevronRight, ChevronDown, Search, FolderClosed, Tag, X, Edit, Check, Split, TestTube, Trash2, CheckCircle, ToggleLeft, ToggleRight, LayoutTemplate, Zap, AlertCircle, GripVertical, ArrowDownToLine, Upload, Link2, Loader2, Pencil, FolderPlus } from 'lucide-react';
+import type { CSSProperties } from 'react';
+import { FileText, Plus, Play, FolderOpen, ChevronRight, ChevronDown, Search, FolderClosed, Tag, X, Edit, Check, Split, TestTube, Trash2, CheckCircle, LayoutTemplate, Zap, AlertCircle, ArrowDownToLine, Upload, Link2, Loader2, Pencil, FolderPlus, MoreHorizontal } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import TagEditor from '@/components/TagEditor';
@@ -10,6 +11,13 @@ import { WorkflowBreadcrumb } from '@/components/workflow/WorkflowBreadcrumb';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { EmptyState } from '@/components/ui/empty-state';
+import { SpecsBulkActionBar, SpecsToolbar } from './components';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 
 interface Spec {
     name: string;
@@ -44,12 +52,46 @@ function formatFolderName(name: string): string {
         .replace(/\b\w/g, c => c.toUpperCase());
 }
 
+const flatMenuContentStyle: CSSProperties = {
+    minWidth: 168,
+    padding: '0.25rem',
+    background: 'var(--surface)',
+    border: 'none',
+    boxShadow: 'none',
+    borderRadius: '8px',
+};
+
+const flatMenuItemStyle: CSSProperties = {
+    minHeight: 30,
+    padding: '0.4rem 0.55rem',
+    gap: '0.5rem',
+    borderRadius: '6px',
+    color: 'var(--text-secondary)',
+    fontSize: '0.8rem',
+    lineHeight: 1.1,
+};
+
+const flatMenuDestructiveItemStyle: CSSProperties = {
+    ...flatMenuItemStyle,
+    color: 'rgba(248, 113, 113, 0.9)',
+};
+
+const flatActionIconStyle: CSSProperties = {
+    width: 32,
+    height: 32,
+    color: 'var(--text-secondary)',
+    background: 'transparent',
+    border: 'none',
+    boxShadow: 'none',
+};
+
 export default function SpecsPage() {
     const router = useRouter();
     const { currentProject, isLoading: projectLoading } = useProject();
 
     const [activeTab, setActiveTab] = useState<TabType>('specs');
     const [specs, setSpecs] = useState<Spec[]>([]);
+    const [templates, setTemplates] = useState<Spec[]>([]);
     const [metadata, setMetadata] = useState<Record<string, any>>({});
     const [loading, setLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
@@ -166,11 +208,59 @@ export default function SpecsPage() {
         }
     }, [currentProject?.id, projectLoading, debouncedSearchTerm, selectedTags, automatedOnly]);
 
+    const fetchTemplates = useCallback(async () => {
+        if (projectLoading) return;
+
+        try {
+            const params = new URLSearchParams({ templates_only: 'true', limit: '200' });
+            if (currentProject?.id) params.set('project_id', currentProject.id);
+
+            const metadataParam = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
+            const [templatesResponse, metadataData] = await Promise.all([
+                fetch(`${API_BASE}/specs/list?${params.toString()}`).then(res => {
+                    if (!res.ok) throw new Error(`Templates fetch failed: ${res.status}`);
+                    return res.json();
+                }),
+                fetch(`${API_BASE}/spec-metadata${metadataParam}`).then(res => {
+                    if (!res.ok) throw new Error(`Metadata fetch failed: ${res.status}`);
+                    return res.json();
+                })
+            ]);
+
+            const templatesList: Spec[] = templatesResponse && !Array.isArray(templatesResponse) && Array.isArray(templatesResponse.items)
+                ? templatesResponse.items
+                : (Array.isArray(templatesResponse) ? templatesResponse : []);
+            const templatesWithMetadata = templatesList.map((template: Spec) => ({
+                ...template,
+                metadata: metadataData[template.name] || { tags: [] }
+            }));
+
+            setTemplates(templatesWithMetadata);
+            setMetadata(prev => ({ ...prev, ...metadataData }));
+
+            const topLevelFolders = new Set<string>();
+            templatesList.forEach((template: Spec) => {
+                const relativeName = template.name.startsWith('templates/') ? template.name.substring(10) : template.name;
+                const parts = relativeName.split('/').filter(Boolean);
+                if (parts.length > 1) topLevelFolders.add(parts[0]);
+            });
+            setTemplatesExpandedFolders(topLevelFolders);
+        } catch (err) {
+            console.error(err);
+        }
+    }, [currentProject?.id, projectLoading]);
+
     // Fetch specs when filters change
     useEffect(() => {
         if (projectLoading) return;
         fetchSpecs(0, false);
     }, [fetchSpecs]);
+
+    // Fetch templates separately because the normal specs list intentionally excludes them.
+    useEffect(() => {
+        if (projectLoading) return;
+        fetchTemplates();
+    }, [fetchTemplates, projectLoading]);
 
     // Check TestRail config and load mappings
     useEffect(() => {
@@ -389,9 +479,9 @@ export default function SpecsPage() {
         await handleDrop(e, '', isTemplate);
     };
 
-    const openRunModal = (specName: string, e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
+    const openRunModal = (specName: string, e?: React.MouseEvent | Event) => {
+        e?.preventDefault();
+        e?.stopPropagation?.();
         setSelectedSpec(specName);
         setRunModalOpen(true);
     };
@@ -426,9 +516,9 @@ export default function SpecsPage() {
         }
     };
 
-    const openSplitModal = (specName: string, e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
+    const openSplitModal = (specName: string, e?: React.MouseEvent | Event) => {
+        e?.preventDefault();
+        e?.stopPropagation?.();
         setSplitSpecName(specName);
         setSplitModalOpen(true);
     };
@@ -481,9 +571,9 @@ export default function SpecsPage() {
         }
     };
 
-    const openDeleteModal = (specName: string, hasCode: boolean, e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
+    const openDeleteModal = (specName: string, hasCode: boolean, e?: React.MouseEvent | Event) => {
+        e?.preventDefault();
+        e?.stopPropagation?.();
         setDeleteSpecName(specName);
         setDeleteSpecHasCode(hasCode);
         setDeleteGeneratedTest(false);
@@ -500,6 +590,7 @@ export default function SpecsPage() {
             );
             if (res.ok) {
                 setSpecs(specs.filter(s => s.name !== deleteSpecName));
+                setTemplates(templates.filter(s => s.name !== deleteSpecName));
                 setDeleteModalOpen(false);
                 setDeleteSpecName(null);
             } else {
@@ -513,9 +604,9 @@ export default function SpecsPage() {
         }
     };
 
-    const openDeleteFolderModal = (folderPath: string, specCount: number, e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
+    const openDeleteFolderModal = (folderPath: string, specCount: number, e?: React.MouseEvent | Event) => {
+        e?.preventDefault();
+        e?.stopPropagation?.();
         setDeleteFolderPath(folderPath);
         setDeleteFolderSpecCount(specCount);
         setDeleteFolderGeneratedTests(false);
@@ -534,6 +625,7 @@ export default function SpecsPage() {
                 const data = await res.json();
                 // Remove all deleted specs from state
                 setSpecs(specs.filter(s => !data.deleted_specs.includes(s.name)));
+                setTemplates(templates.filter(s => !data.deleted_specs.includes(s.name)));
                 setDeleteFolderModalOpen(false);
                 setDeleteFolderPath(null);
             } else {
@@ -547,9 +639,9 @@ export default function SpecsPage() {
         }
     };
 
-    const openTagEditor = (specName: string, currentTags: string[], e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
+    const openTagEditor = (specName: string, currentTags: string[], e?: React.MouseEvent | Event) => {
+        e?.preventDefault();
+        e?.stopPropagation?.();
         setEditingSpecName(specName);
         setEditingTags([...currentTags]);
         setTagEditModalOpen(true);
@@ -571,6 +663,11 @@ export default function SpecsPage() {
                     ? { ...spec, metadata: { ...spec.metadata, tags: editingTags } }
                     : spec
             ));
+            setTemplates(templates.map(template =>
+                template.name === editingSpecName
+                    ? { ...template, metadata: { ...template.metadata, tags: editingTags } }
+                    : template
+            ));
 
             setTagEditModalOpen(false);
             setEditingSpecName(null);
@@ -580,7 +677,7 @@ export default function SpecsPage() {
         }
     };
 
-    const toggleSpecSelection = (specName: string, e?: React.MouseEvent) => {
+    const toggleSpecSelection = (specName: string, e?: React.SyntheticEvent) => {
         if (e) {
             e.preventDefault();
             e.stopPropagation();
@@ -600,9 +697,9 @@ export default function SpecsPage() {
         return Object.values(node.children || {}).flatMap(child => getAllSpecsInNode(child));
     };
 
-    const toggleFolderSelection = (node: TreeNode, e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
+    const toggleFolderSelection = (node: TreeNode, e?: React.SyntheticEvent) => {
+        e?.preventDefault();
+        e?.stopPropagation();
 
         const folderSpecs = getAllSpecsInNode(node);
         const next = new Set(selectedSpecs);
@@ -694,12 +791,12 @@ export default function SpecsPage() {
 
     // Helper to refetch specs + metadata
     const refetchSpecs = async () => {
-        await fetchSpecs(0, false);
+        await Promise.all([fetchSpecs(0, false), fetchTemplates()]);
     };
 
-    const startRename = (path: string, isFolder: boolean, currentName: string, e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
+    const startRename = (path: string, isFolder: boolean, currentName: string, e?: React.MouseEvent | Event) => {
+        e?.preventDefault();
+        e?.stopPropagation();
         setRenamingPath(path);
         setRenameIsFolder(isFolder);
         // For files, strip .md extension for editing
@@ -785,6 +882,20 @@ export default function SpecsPage() {
         } finally {
             setCreatingFolder(false);
         }
+    };
+
+    const openDeleteSpecByName = (specName: string, hasCode: boolean) => {
+        setDeleteSpecName(specName);
+        setDeleteSpecHasCode(hasCode);
+        setDeleteGeneratedTest(false);
+        setDeleteModalOpen(true);
+    };
+
+    const openDeleteFolderByPath = (folderPath: string, specCount: number) => {
+        setDeleteFolderPath(folderPath);
+        setDeleteFolderSpecCount(specCount);
+        setDeleteFolderGeneratedTests(false);
+        setDeleteFolderModalOpen(true);
     };
 
     const handleBulkRun = async () => {
@@ -888,8 +999,7 @@ export default function SpecsPage() {
     const templatesTree = useMemo(() => {
         const root: Record<string, TreeNode> = {};
 
-        specs
-            .filter(s => s.name.startsWith('templates/'))  // Only templates
+        templates
             .filter(s => s.name.toLowerCase().includes(templatesSearchTerm.toLowerCase()))
             .forEach(spec => {
                 // Strip 'templates/' prefix for cleaner display
@@ -919,7 +1029,7 @@ export default function SpecsPage() {
             });
 
         return root;
-    }, [specs, templatesSearchTerm]);
+    }, [templates, templatesSearchTerm]);
 
     const renderNode = (node: TreeNode, depth: number = 0) => {
         const isExpanded = expandedFolders.has(node.path) || debouncedSearchTerm.length > 0;
@@ -928,6 +1038,7 @@ export default function SpecsPage() {
 
         if (node.type === 'file') {
             const isSelected = selectedSpecs.has(node.spec!.name);
+            const isRenaming = renamingPath === node.path;
             return (
                 <div
                     key={node.path}
@@ -944,33 +1055,30 @@ export default function SpecsPage() {
                         cursor: 'grab'
                     }}
                 >
-                    <div
-                        onClick={(e) => toggleSpecSelection(node.spec!.name, e)}
+                    <label
+                        aria-label={`Select ${node.name}`}
+                        onClick={(e) => e.stopPropagation()}
                         style={{ padding: '0 0.5rem 0 1rem', cursor: 'pointer', display: 'flex', alignItems: 'center' }}
                     >
-                        <div style={{
-                            width: '18px',
-                            height: '18px',
-                            borderRadius: '4px',
-                            border: isSelected ? '2px solid var(--primary)' : '2px solid var(--border)',
-                            background: isSelected ? 'var(--primary)' : 'transparent',
+                        <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleSpecSelection(node.spec!.name)}
+                            style={{
+                                width: 18,
+                                height: 18,
+                                accentColor: 'var(--primary)',
+                                cursor: 'pointer'
+                            }}
+                        />
+                    </label>
+                    <div
+                        className="spec-row-shell"
+                        style={{
                             display: 'flex',
                             alignItems: 'center',
-                            justifyContent: 'center',
-                            transition: 'all 0.2s var(--ease-smooth)',
-                            color: 'white'
-                        }}>
-                            {isSelected && <Check size={12} strokeWidth={4} />}
-                        </div>
-                    </div>
-                    <div
-                        className="list-item"
-                        onClick={() => {
-                            if (renamingPath !== node.path) {
-                                router.push(`/specs/${node.spec?.name}`);
-                            }
-                        }}
-                        style={{
+                            justifyContent: 'space-between',
+                            gap: '0.75rem',
                             flex: 1,
                             padding: '0.875rem 1rem',
                             paddingLeft: '0.5rem',
@@ -978,10 +1086,25 @@ export default function SpecsPage() {
                             borderRadius: 0,
                             border: 'none',
                             background: 'transparent',
-                            cursor: renamingPath === node.path ? 'default' : 'pointer'
+                            cursor: isRenaming ? 'default' : 'pointer'
                         }}
                     >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flex: 1 }}>
+                        <div
+                            role={isRenaming ? undefined : 'link'}
+                            tabIndex={isRenaming ? undefined : 0}
+                            aria-label={`Open spec ${node.name}`}
+                            className="focus-ring"
+                            onClick={() => {
+                                if (!isRenaming) router.push(`/specs/${node.spec?.name}`);
+                            }}
+                            onKeyDown={(e) => {
+                                if (!isRenaming && (e.key === 'Enter' || e.key === ' ')) {
+                                    e.preventDefault();
+                                    router.push(`/specs/${node.spec?.name}`);
+                                }
+                            }}
+                            style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flex: 1, minWidth: 0, textDecoration: 'none' }}
+                        >
                             <div style={{
                                 width: 32, height: 32,
                                 background: 'var(--primary-glow)',
@@ -991,12 +1114,15 @@ export default function SpecsPage() {
                             }}>
                                 <FileText size={16} />
                             </div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', flex: 1 }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                    {renamingPath === node.path ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', flex: 1, minWidth: 0 }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', minWidth: 0 }}>
+                                    {isRenaming ? (
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }} onClick={e => { e.preventDefault(); e.stopPropagation(); }}>
                                             <input
                                                 autoFocus
+                                                aria-label={`Rename ${node.name}`}
+                                                name="rename_spec"
+                                                autoComplete="off"
                                                 value={renameValue}
                                                 onChange={e => { setRenameValue(e.target.value); setRenameError(null); }}
                                                 onKeyDown={e => {
@@ -1017,16 +1143,16 @@ export default function SpecsPage() {
                                                 disabled={renameLoading}
                                             />
                                             <span style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>.md</span>
-                                            <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); confirmRename(); }} className="btn-icon" style={{ width: 24, height: 24, color: 'var(--success)' }} disabled={renameLoading}>
+                                            <button aria-label="Confirm Rename" onClick={(e) => { e.preventDefault(); e.stopPropagation(); confirmRename(); }} className="btn-icon focus-ring" style={{ width: 24, height: 24, color: 'var(--success)' }} disabled={renameLoading}>
                                                 <Check size={14} />
                                             </button>
-                                            <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); cancelRename(); }} className="btn-icon" style={{ width: 24, height: 24, color: 'var(--text-secondary)' }} disabled={renameLoading}>
+                                            <button aria-label="Cancel Rename" onClick={(e) => { e.preventDefault(); e.stopPropagation(); cancelRename(); }} className="btn-icon focus-ring" style={{ width: 24, height: 24, color: 'var(--text-secondary)' }} disabled={renameLoading}>
                                                 <X size={14} />
                                             </button>
                                             {renameError && <span style={{ fontSize: '0.75rem', color: 'var(--danger)' }}>{renameError}</span>}
                                         </div>
                                     ) : (
-                                        <span style={{ fontSize: '0.9rem', color: 'var(--text)' }}>{node.name}</span>
+                                        <span title={node.name} style={{ fontSize: '0.9rem', color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>{node.name}</span>
                                     )}
                                     {(node.spec?.spec_type === 'prd' || node.spec?.spec_type === 'native_plan' || node.spec?.spec_type === 'standard_multi') && (
                                         <>
@@ -1095,79 +1221,40 @@ export default function SpecsPage() {
                                 </div>
                                 {node.spec?.metadata?.tags && node.spec.metadata.tags.length > 0 && (
                                     <div style={{ display: 'flex', gap: '0.375rem', flexWrap: 'wrap' }}>
-                                        {node.spec.metadata.tags.map(tag => (
+                                        {node.spec.metadata.tags.slice(0, 3).map(tag => (
                                             <span
                                                 key={tag}
+                                                title={tag}
                                                 style={{
                                                     fontSize: '0.7rem',
                                                     padding: '0.125rem 0.5rem',
                                                     borderRadius: '9999px',
                                                     background: 'var(--primary-glow)',
                                                     color: 'var(--primary)',
-                                                    fontWeight: 500
+                                                    fontWeight: 500,
+                                                    maxWidth: 120,
+                                                    overflow: 'hidden',
+                                                    textOverflow: 'ellipsis',
+                                                    whiteSpace: 'nowrap'
                                                 }}
                                             >
                                                 {tag}
                                             </span>
                                         ))}
+                                        {node.spec.metadata.tags.length > 3 && (
+                                            <span style={{ fontSize: '0.7rem', padding: '0.125rem 0.5rem', borderRadius: '9999px', background: 'var(--surface-hover)', color: 'var(--text-secondary)', fontWeight: 600 }}>
+                                                +{node.spec.metadata.tags.length - 3}
+                                            </span>
+                                        )}
                                     </div>
                                 )}
                             </div>
                         </div>
 
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexShrink: 0 }}>
                             <button
-                                className="btn-icon"
-                                title="Rename Spec"
-                                onClick={(e) => node.spec && startRename(node.path, false, node.name, e)}
-                                style={{
-                                    width: 32, height: 32,
-                                    color: 'var(--text-secondary)',
-                                    background: 'rgba(255, 255, 255, 0.05)'
-                                }}
-                            >
-                                <Pencil size={14} />
-                            </button>
-                            <button
-                                className="btn-icon"
-                                title="Edit Tags"
-                                onClick={(e) => node.spec && openTagEditor(node.spec.name, node.spec.metadata?.tags || [], e)}
-                                style={{
-                                    width: 32, height: 32,
-                                    color: 'var(--text-secondary)',
-                                    background: 'rgba(255, 255, 255, 0.05)'
-                                }}
-                            >
-                                <Edit size={14} />
-                            </button>
-                            {(node.spec?.spec_type === 'prd' || node.spec?.spec_type === 'native_plan' || node.spec?.spec_type === 'standard_multi' || ((node.spec?.test_count ?? 0) > 1 && node.spec?.spec_type === 'standard')) && (
-                                <button
-                                    className="btn-icon"
-                                    title="Split into individual tests"
-                                    onClick={(e) => node.spec && openSplitModal(node.spec.name, e)}
-                                    style={{
-                                        width: 32, height: 32,
-                                        color: node.spec?.spec_type === 'native_plan' ? 'var(--success)' : node.spec?.spec_type === 'standard_multi' ? 'var(--primary)' : 'var(--accent)',
-                                        background: node.spec?.spec_type === 'native_plan' ? 'var(--success-muted)' : node.spec?.spec_type === 'standard_multi' ? 'var(--primary-glow)' : 'rgba(192, 132, 252, 0.12)'
-                                    }}
-                                >
-                                    <Split size={14} />
-                                </button>
-                            )}
-                            <button
-                                className="btn-icon"
-                                title="Delete Spec"
-                                onClick={(e) => node.spec && openDeleteModal(node.spec.name, !!node.spec.is_automated, e)}
-                                style={{
-                                    width: 32, height: 32,
-                                    color: 'var(--danger)',
-                                    background: 'var(--danger-muted)'
-                                }}
-                            >
-                                <Trash2 size={14} />
-                            </button>
-                            <button
-                                className="btn-icon"
+                                className="btn-icon focus-ring"
+                                aria-label={`Run ${node.name}`}
                                 title="Run Spec"
                                 onClick={(e) => node.spec && openRunModal(node.spec.name, e)}
                                 style={{
@@ -1178,7 +1265,47 @@ export default function SpecsPage() {
                             >
                                 <Play size={14} fill="currentColor" />
                             </button>
-                            <ChevronRight size={18} color="var(--text-secondary)" />
+                            <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                    <button
+                                        className="btn-icon focus-ring specs-flat-menu-trigger"
+                                        aria-label={`More actions for ${node.name}`}
+                                        title="More Actions"
+                                        style={flatActionIconStyle}
+                                    >
+                                        <MoreHorizontal size={16} />
+                                    </button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" sideOffset={6} style={flatMenuContentStyle}>
+                                    <DropdownMenuItem
+                                        style={flatMenuItemStyle}
+                                        onSelect={(e) => { e.preventDefault(); startRename(node.path, false, node.name, e); }}
+                                    >
+                                        <Pencil size={13} /> Rename
+                                    </DropdownMenuItem>
+                                    <DropdownMenuItem
+                                        style={flatMenuItemStyle}
+                                        onSelect={(e) => { e.preventDefault(); node.spec && openTagEditor(node.spec.name, node.spec.metadata?.tags || [], e); }}
+                                    >
+                                        <Edit size={13} /> Edit Tags
+                                    </DropdownMenuItem>
+                                    {(node.spec?.spec_type === 'prd' || node.spec?.spec_type === 'native_plan' || node.spec?.spec_type === 'standard_multi' || ((node.spec?.test_count ?? 0) > 1 && node.spec?.spec_type === 'standard')) && (
+                                        <DropdownMenuItem
+                                            style={flatMenuItemStyle}
+                                            onSelect={(e) => { e.preventDefault(); node.spec && openSplitModal(node.spec.name, e); }}
+                                        >
+                                            <Split size={13} /> Split Tests
+                                        </DropdownMenuItem>
+                                    )}
+                                    <DropdownMenuItem
+                                        className="specs-flat-menu-danger"
+                                        style={flatMenuDestructiveItemStyle}
+                                        onSelect={(e) => { e.preventDefault(); node.spec && openDeleteSpecByName(node.spec.name, !!node.spec.is_automated); }}
+                                    >
+                                        <Trash2 size={13} /> Delete
+                                    </DropdownMenuItem>
+                                </DropdownMenuContent>
+                            </DropdownMenu>
                         </div>
                     </div>
                 </div>
@@ -1219,39 +1346,65 @@ export default function SpecsPage() {
                         borderTop: depth === 0 && node.path !== Array.from(expandedFolders)[0] ? '1px solid var(--border)' : 'none',
                         boxShadow: isDropTarget ? 'inset 0 0 0 2px var(--primary)' : 'none'
                     }}
-                    onClick={() => { if (renamingPath !== node.path) toggleFolder(node.path); }}
                 >
-                    <div
-                        onClick={(e) => toggleFolderSelection(node, e)}
-                        style={{ display: 'flex', alignItems: 'center', padding: '0 0.25rem' }}
+                    <label
+                        aria-label={`Select folder ${formatFolderName(node.name)}`}
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ display: 'flex', alignItems: 'center', padding: '0 0.25rem', cursor: 'pointer' }}
                     >
-                        <div style={{
-                            width: '18px',
-                            height: '18px',
-                            borderRadius: '4px',
-                            border: folderIsSelected || folderIsIndeterminate ? '2px solid var(--primary)' : '2px solid var(--border)',
-                            background: folderIsSelected ? 'var(--primary)' : 'transparent',
+                        <input
+                            type="checkbox"
+                            checked={folderIsSelected}
+                            ref={(input) => {
+                                if (input) input.indeterminate = folderIsIndeterminate;
+                            }}
+                            onChange={(e) => toggleFolderSelection(node, e)}
+                            style={{
+                                width: 18,
+                                height: 18,
+                                accentColor: 'var(--primary)',
+                                cursor: 'pointer'
+                            }}
+                        />
+                    </label>
+                    <button
+                        type="button"
+                        className="btn-icon focus-ring"
+                        aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${formatFolderName(node.name)}`}
+                        aria-expanded={isExpanded}
+                        onClick={() => { if (renamingPath !== node.path) toggleFolder(node.path); }}
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 24, height: 24, color: 'var(--text-secondary)' }}
+                    >
+                        {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    </button>
+                    <button
+                        type="button"
+                        className="focus-ring"
+                        aria-label={`${isExpanded ? 'Collapse' : 'Expand'} folder ${formatFolderName(node.name)}`}
+                        aria-expanded={isExpanded}
+                        onClick={() => { if (renamingPath !== node.path) toggleFolder(node.path); }}
+                        style={{
+                            border: 'none',
+                            background: 'transparent',
+                            color: isExpanded ? 'var(--text)' : 'inherit',
                             display: 'flex',
                             alignItems: 'center',
-                            justifyContent: 'center',
-                            transition: 'all 0.2s var(--ease-smooth)',
-                            color: 'white'
-                        }}>
-                            {folderIsSelected && <Check size={12} strokeWidth={4} />}
-                            {folderIsIndeterminate && (
-                                <div style={{ width: '10px', height: '2px', background: 'var(--primary)', borderRadius: '1px' }}></div>
-                            )}
-                        </div>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 20, height: 20 }}>
-                        {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: isExpanded ? 'var(--text)' : 'inherit', flex: 1 }}>
+                            gap: '0.5rem',
+                            flex: 1,
+                            minWidth: 0,
+                            cursor: renamingPath === node.path ? 'default' : 'pointer',
+                            font: 'inherit',
+                            textAlign: 'left'
+                        }}
+                    >
                         {isExpanded ? <FolderOpen size={16} /> : <FolderClosed size={16} />}
                         {renamingPath === node.path ? (
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }} onClick={e => { e.stopPropagation(); }}>
                                 <input
                                     autoFocus
+                                    aria-label={`Rename folder ${node.name}`}
+                                    name="rename_folder"
+                                    autoComplete="off"
                                     value={renameValue}
                                     onChange={e => { setRenameValue(e.target.value); setRenameError(null); }}
                                     onKeyDown={e => {
@@ -1272,20 +1425,24 @@ export default function SpecsPage() {
                                     }}
                                     disabled={renameLoading}
                                 />
-                                <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); confirmRename(); }} className="btn-icon" style={{ width: 24, height: 24, color: 'var(--success)' }} disabled={renameLoading}>
+                                <button aria-label="Confirm Folder Rename" onClick={(e) => { e.preventDefault(); e.stopPropagation(); confirmRename(); }} className="btn-icon focus-ring" style={{ width: 24, height: 24, color: 'var(--success)' }} disabled={renameLoading}>
                                     <Check size={14} />
                                 </button>
-                                <button onClick={(e) => { e.preventDefault(); e.stopPropagation(); cancelRename(); }} className="btn-icon" style={{ width: 24, height: 24, color: 'var(--text-secondary)' }} disabled={renameLoading}>
+                                <button aria-label="Cancel Folder Rename" onClick={(e) => { e.preventDefault(); e.stopPropagation(); cancelRename(); }} className="btn-icon focus-ring" style={{ width: 24, height: 24, color: 'var(--text-secondary)' }} disabled={renameLoading}>
                                     <X size={14} />
                                 </button>
                                 {renameError && <span style={{ fontSize: '0.75rem', color: 'var(--danger)' }}>{renameError}</span>}
                             </div>
                         ) : (
-                            <span>{formatFolderName(node.name)}</span>
+                            <span title={node.path} style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{formatFolderName(node.name)}</span>
                         )}
-                    </div>
+                    </button>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                        {folderSpecs.length} spec{folderSpecs.length === 1 ? '' : 's'}
+                    </span>
                     <button
-                        className="btn btn-secondary btn-sm"
+                        className="btn btn-secondary btn-sm focus-ring specs-flat-action-button"
+                        aria-label={`Run all specs in ${formatFolderName(node.name)}`}
                         onClick={async (e) => {
                             e.stopPropagation();
                             const folderSpecs = getAllSpecsInNode(node);
@@ -1317,34 +1474,45 @@ export default function SpecsPage() {
                                 }
                             }
                         }}
-                        style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                        style={{
+                            padding: '0.32rem 0.68rem',
+                            fontSize: '0.75rem',
+                            border: 'none',
+                            borderRadius: '6px',
+                            background: 'transparent',
+                            color: 'var(--text-secondary)',
+                            boxShadow: 'none',
+                        }}
                     >
                         Run All
                     </button>
-                    <button
-                        className="btn-icon"
-                        title="Rename Folder"
-                        onClick={(e) => startRename(node.path, true, node.name, e)}
-                        style={{
-                            width: 32, height: 32,
-                            color: 'var(--text-secondary)',
-                            background: 'rgba(255, 255, 255, 0.05)'
-                        }}
-                    >
-                        <Pencil size={14} />
-                    </button>
-                    <button
-                        className="btn-icon"
-                        title="Delete Folder"
-                        onClick={(e) => openDeleteFolderModal(node.path, folderSpecs.length, e)}
-                        style={{
-                            width: 32, height: 32,
-                            color: 'var(--danger)',
-                            background: 'var(--danger-muted)'
-                        }}
-                    >
-                        <Trash2 size={14} />
-                    </button>
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <button
+                                className="btn-icon focus-ring specs-flat-menu-trigger"
+                                aria-label={`More actions for folder ${formatFolderName(node.name)}`}
+                                title="More Actions"
+                                style={flatActionIconStyle}
+                            >
+                                <MoreHorizontal size={16} />
+                            </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" sideOffset={6} style={flatMenuContentStyle}>
+                            <DropdownMenuItem
+                                style={flatMenuItemStyle}
+                                onSelect={(e) => { e.preventDefault(); startRename(node.path, true, node.name, e); }}
+                            >
+                                <Pencil size={13} /> Rename
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                                className="specs-flat-menu-danger"
+                                style={flatMenuDestructiveItemStyle}
+                                onSelect={(e) => { e.preventDefault(); openDeleteFolderByPath(node.path, folderSpecs.length); }}
+                            >
+                                <Trash2 size={13} /> Delete
+                            </DropdownMenuItem>
+                        </DropdownMenuContent>
+                    </DropdownMenu>
                 </div>
                 {isExpanded && node.children && (
                     <div style={{ background: 'var(--surface)' }}>
@@ -1677,107 +1845,18 @@ export default function SpecsPage() {
 
                 {/* Specs Tab Filters */}
                 {activeTab === 'specs' && (
-                    <>
-                        {/* Filters Row */}
-                <div style={{ marginBottom: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    {/* Automated Only Toggle */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                        <button
-                            onClick={() => setAutomatedOnly(!automatedOnly)}
-                            style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '0.5rem',
-                                padding: '0.5rem 1rem',
-                                borderRadius: '8px',
-                                border: automatedOnly ? '2px solid var(--success)' : '1px solid var(--border)',
-                                background: automatedOnly ? 'var(--success-muted)' : 'transparent',
-                                color: automatedOnly ? 'var(--success)' : 'var(--text-secondary)',
-                                fontSize: '0.85rem',
-                                fontWeight: 500,
-                                cursor: 'pointer',
-                                transition: 'all 0.2s var(--ease-smooth)'
-                            }}
-                        >
-                            {automatedOnly ? <ToggleRight size={18} /> : <ToggleLeft size={18} />}
-                            <span>Automated Only</span>
-                            <span style={{
-                                padding: '0.125rem 0.5rem',
-                                borderRadius: '9999px',
-                                background: automatedOnly ? 'var(--success)' : 'var(--surface-hover)',
-                                color: automatedOnly ? 'white' : 'var(--text-secondary)',
-                                fontSize: '0.75rem',
-                                fontWeight: 600
-                            }}>
-                                {automatedCount}
-                            </span>
-                        </button>
-                        {automatedOnly && (
-                            <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                                Showing {automatedCount} automated tests
-                            </span>
-                        )}
-                    </div>
-
-                    {/* Tag Filters */}
-                    {allTags.length > 0 && (
-                        <div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
-                                <Tag size={16} color="var(--text-secondary)" />
-                                <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Filter by tags:</span>
-                            </div>
-                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                {allTags.map(tag => {
-                                    const isSelected = selectedTags.includes(tag);
-                                    return (
-                                        <button
-                                            key={tag}
-                                            onClick={() => {
-                                                if (isSelected) {
-                                                    setSelectedTags(selectedTags.filter(t => t !== tag));
-                                                } else {
-                                                    setSelectedTags([...selectedTags, tag]);
-                                                }
-                                            }}
-                                            style={{
-                                                padding: '0.5rem 1rem',
-                                                borderRadius: '9999px',
-                                                border: isSelected ? '2px solid var(--primary)' : '1px solid var(--border)',
-                                                background: isSelected ? 'var(--primary-glow)' : 'transparent',
-                                                color: isSelected ? 'var(--primary)' : 'var(--text-secondary)',
-                                                fontSize: '0.85rem',
-                                                fontWeight: 500,
-                                                cursor: 'pointer',
-                                                transition: 'all 0.2s var(--ease-smooth)',
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                gap: '0.375rem'
-                                            }}
-                                        >
-                                            {tag}
-                                            {isSelected && <X size={14} />}
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    )}
-                </div>
-
-                <div className="input-group">
-                    <div className="input-icon">
-                        <Search size={18} />
-                    </div>
-                    <input
-                        type="text"
-                        placeholder="Search specs..."
-                        value={searchTerm}
-                        onChange={(e) => setSearchTerm(e.target.value)}
-                        className="input has-icon"
-                        style={{ paddingTop: '0.875rem', paddingBottom: '0.875rem' }}
+                    <SpecsToolbar
+                        searchValue={searchTerm}
+                        onSearchChange={setSearchTerm}
+                        searchPlaceholder="Search specs..."
+                        resultLabel={`Showing ${specs.filter(s => !s.name.startsWith('templates/')).length} of ${totalCount} specs`}
+                        automatedOnly={automatedOnly}
+                        automatedCount={automatedCount}
+                        onAutomatedOnlyChange={setAutomatedOnly}
+                        tagOptions={allTags.map(tag => ({ value: tag, label: tag }))}
+                        selectedTagValues={selectedTags}
+                        onSelectedTagValuesChange={setSelectedTags}
                     />
-                </div>
-                    </>
                 )}
 
                 {/* Templates Tab Search */}
@@ -1789,6 +1868,9 @@ export default function SpecsPage() {
                         <input
                             type="text"
                             placeholder="Search templates..."
+                            aria-label="Search templates"
+                            name="template_search"
+                            autoComplete="off"
                             value={templatesSearchTerm}
                             onChange={(e) => setTemplatesSearchTerm(e.target.value)}
                             className="input has-icon"
@@ -2581,139 +2663,73 @@ export default function SpecsPage() {
             )}
 
             {/* Bulk Action Bar - Only show on specs tab */}
-            {activeTab === 'specs' && selectedSpecs.size > 0 && (
-                <div style={{
-                    position: 'fixed',
-                    bottom: '2rem',
-                    left: '50%',
-                    transform: 'translateX(-50%)',
-                    background: 'var(--surface)',
-                    border: '1px solid var(--primary)',
-                    borderRadius: '12px',
-                    padding: '1rem 2rem',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '2rem',
-                    boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3)',
-                    zIndex: 100,
-                    animation: 'slideUp 0.3s ease-out'
-                }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                        <span style={{
-                            background: 'var(--primary)',
-                            color: 'white',
-                            padding: '0.2rem 0.6rem',
-                            borderRadius: '6px',
-                            fontWeight: 700,
-                            fontSize: '0.9rem'
-                        }}>
-                            {selectedSpecs.size}
-                        </span>
-                        <span style={{ fontWeight: 600 }}>
-                            Specs Selected
-                            {selectedAutomatedCount > 0 && (
-                                <span style={{ color: 'var(--success)', marginLeft: '0.5rem' }}>
-                                    ({selectedAutomatedCount} automated)
-                                </span>
-                            )}
-                        </span>
-                    </div>
-
-                    <div style={{ height: '24px', width: '1px', background: 'var(--border)' }}></div>
-
-                    <div style={{ display: 'flex', gap: '1rem' }}>
-                        <button
-                            className="btn btn-secondary"
-                            onClick={clearSelection}
-                            style={{ padding: '0.5rem 1rem' }}
-                        >
-                            Clear
-                        </button>
-                        <button
-                            className="btn"
-                            onClick={() => setExportModalOpen(true)}
-                            style={{
-                                background: 'var(--accent)',
-                                color: 'white',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '0.5rem'
-                            }}
-                        >
-                            <ArrowDownToLine size={16} />
-                            Export ({selectedSpecs.size})
-                        </button>
-                        {trConfigured && trConfig.project_id && trConfig.suite_id && (
-                            <button
-                                className="btn"
-                                onClick={() => { setPushResult(null); setPushModalOpen(true); }}
-                                style={{
-                                    background: 'var(--primary)',
-                                    color: 'white',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.5rem'
-                                }}
-                            >
-                                <Upload size={16} />
-                                Push to TestRail ({selectedSpecs.size})
-                            </button>
-                        )}
-                        {selectedAutomatedCount > 0 && selectedAutomatedCount < selectedSpecs.size && (
-                            <button
-                                className="btn"
-                                onClick={async () => {
-                                    const automatedSpecs = Array.from(selectedSpecs).filter(name => {
-                                        const spec = specs.find(s => s.name === name);
-                                        return spec?.is_automated;
+            {activeTab === 'specs' && (
+                <SpecsBulkActionBar
+                    selectedCount={selectedSpecs.size}
+                    selectedAutomatedCount={selectedAutomatedCount}
+                    onClear={clearSelection}
+                    label="Specs Selected"
+                    actions={[
+                        {
+                            id: 'export',
+                            label: `Export (${selectedSpecs.size})`,
+                            icon: <ArrowDownToLine size={16} />,
+                            variant: 'accent',
+                            onClick: () => setExportModalOpen(true),
+                        },
+                        {
+                            id: 'testrail',
+                            label: `Push to TestRail (${selectedSpecs.size})`,
+                            icon: <Upload size={16} />,
+                            hidden: !(trConfigured && trConfig.project_id && trConfig.suite_id),
+                            onClick: () => { setPushResult(null); setPushModalOpen(true); },
+                        },
+                        {
+                            id: 'automated',
+                            label: `Run ${selectedAutomatedCount} Automated`,
+                            icon: <CheckCircle size={16} />,
+                            variant: 'success',
+                            hidden: !(selectedAutomatedCount > 0 && selectedAutomatedCount < selectedSpecs.size),
+                            onClick: async () => {
+                                const automatedSpecs = Array.from(selectedSpecs).filter(name => {
+                                    const spec = specs.find(s => s.name === name);
+                                    return spec?.is_automated;
+                                });
+                                try {
+                                    const res = await fetch(`${API_BASE}/runs/bulk`, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({
+                                            spec_names: automatedSpecs,
+                                            browser: selectedBrowser,
+                                            hybrid: hybridHealing,
+                                            max_iterations: hybridHealing ? maxIterations : undefined,
+                                            project_id: currentProject?.id
+                                        })
                                     });
-                                    try {
-                                        const res = await fetch(`${API_BASE}/runs/bulk`, {
-                                            method: 'POST',
-                                            headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({
-                                                spec_names: automatedSpecs,
-                                                browser: selectedBrowser,
-                                                hybrid: hybridHealing,
-                                                max_iterations: hybridHealing ? maxIterations : undefined,
-                                                project_id: currentProject?.id
-                                            })
-                                        });
-                                        const data = await res.json();
-                                        if (data.batch_id) {
-                                            alert(`Successfully started ${data.count} automated test runs!`);
-                                            clearSelection();
-                                            router.push(`/regression/batches/${data.batch_id}`);
-                                        } else if (data.run_ids) {
-                                            alert(`Successfully started ${data.count} automated test runs!`);
-                                            clearSelection();
-                                            router.push('/runs');
-                                        }
-                                    } catch (e) {
-                                        alert('Failed to start automated tests');
+                                    const data = await res.json();
+                                    if (data.batch_id) {
+                                        alert(`Successfully started ${data.count} automated test runs!`);
+                                        clearSelection();
+                                        router.push(`/regression/batches/${data.batch_id}`);
+                                    } else if (data.run_ids) {
+                                        alert(`Successfully started ${data.count} automated test runs!`);
+                                        clearSelection();
+                                        router.push('/runs');
                                     }
-                                }}
-                                style={{
-                                    background: 'var(--success)',
-                                    color: 'white',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.5rem'
-                                }}
-                            >
-                                <CheckCircle size={16} />
-                                Run {selectedAutomatedCount} Automated
-                            </button>
-                        )}
-                        <button
-                            className="btn btn-primary"
-                            onClick={handleBulkRun}
-                        >
-                            <Play size={16} fill="currentColor" />
-                            Run All ({selectedSpecs.size})
-                        </button>
-                    </div>
-                </div>
+                                } catch (e) {
+                                    alert('Failed to start automated tests');
+                                }
+                            },
+                        },
+                        {
+                            id: 'run-all',
+                            label: `Run All (${selectedSpecs.size})`,
+                            icon: <Play size={16} fill="currentColor" />,
+                            onClick: handleBulkRun,
+                        },
+                    ]}
+                />
             )}
 
             {/* Export Modal */}
@@ -2908,6 +2924,21 @@ export default function SpecsPage() {
                 @keyframes spin {
                     from { transform: rotate(0deg); }
                     to { transform: rotate(360deg); }
+                }
+                :global(.specs-flat-action-button:hover:not(:disabled)),
+                :global(.specs-flat-menu-trigger:hover:not(:disabled)) {
+                    background: var(--surface-hover) !important;
+                    border-color: transparent !important;
+                }
+                :global(.specs-flat-action-button:focus-visible),
+                :global(.specs-flat-menu-trigger:focus-visible) {
+                    outline: 2px solid var(--primary);
+                    outline-offset: 2px;
+                    box-shadow: none !important;
+                }
+                :global(.specs-flat-menu-danger[data-highlighted]) {
+                    background: rgba(248, 113, 113, 0.08) !important;
+                    color: rgba(248, 113, 113, 0.95) !important;
                 }
                 .modal-overlay {
                     position: fixed;

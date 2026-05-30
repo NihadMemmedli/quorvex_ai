@@ -6,8 +6,8 @@ import os
 def setup_claude_env():
     """Setup environment variables from .env file only.
 
-    All AI-related credentials (ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, etc.)
-    should be defined in the project's .env file.
+    Runtime AI credentials should be defined with the canonical QUORVEX_LLM_*
+    variables. Legacy ANTHROPIC_* aliases are still populated for SDK clients.
     """
     from dotenv import find_dotenv, load_dotenv
 
@@ -65,8 +65,24 @@ def setup_claude_env():
             if slot:
                 rotator.activate_key(slot)
 
-    active_model = (
-        os.environ.get("ANTHROPIC_MODEL")
+    try:
+        from orchestrator.services.ai_runtime_config import apply_runtime_env_aliases
+    except ImportError:
+        try:
+            from services.ai_runtime_config import apply_runtime_env_aliases
+        except ImportError:
+            apply_runtime_env_aliases = None
+
+    selection = None
+    if apply_runtime_env_aliases is not None:
+        tier = os.environ.get("QUORVEX_RUN_MODEL_TIER", "standard")
+        if tier not in {"light", "standard", "deep", "tool_deep", "chat", "embedding"}:
+            tier = "standard"
+        selection = apply_runtime_env_aliases(tier=tier)
+
+    active_model = selection.model if selection else (
+        os.environ.get("QUORVEX_LLM_STANDARD_MODEL")
+        or os.environ.get("ANTHROPIC_MODEL")
         or os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
         or os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
         or os.environ.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "")
@@ -74,12 +90,17 @@ def setup_claude_env():
 
     # Return the key AI-related env vars for logging purposes
     return {
+        "QUORVEX_LLM_PROVIDER": os.environ.get("QUORVEX_LLM_PROVIDER", ""),
+        "QUORVEX_LLM_BASE_URL": os.environ.get("QUORVEX_LLM_BASE_URL", os.environ.get("ANTHROPIC_BASE_URL", "")),
+        "QUORVEX_LLM_MODEL": active_model,
+        "QUORVEX_RUN_MODEL_TIER": os.environ.get("QUORVEX_RUN_MODEL_TIER", ""),
         "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
         "ANTHROPIC_MODEL": active_model,
         "ANTHROPIC_DEFAULT_OPUS_MODEL": os.environ.get("ANTHROPIC_DEFAULT_OPUS_MODEL", ""),
         "ANTHROPIC_DEFAULT_SONNET_MODEL": os.environ.get("ANTHROPIC_DEFAULT_SONNET_MODEL", ""),
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": os.environ.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", ""),
         "API_TIMEOUT_MS": os.environ.get("API_TIMEOUT_MS", ""),
+        "QUORVEX_LLM_API_KEY": "***" if os.environ.get("QUORVEX_LLM_API_KEY") else "",
         "ANTHROPIC_AUTH_TOKEN": "***" if os.environ.get("ANTHROPIC_AUTH_TOKEN") else "",
     }
 

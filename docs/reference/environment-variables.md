@@ -11,16 +11,26 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `ANTHROPIC_AUTH_TOKEN` | -- | Yes | Authentication token for the Anthropic-compatible provider, Z.ai by default |
-| `ANTHROPIC_AUTH_TOKENS` | -- | No | Comma-separated token pool for API key rotation |
-| `ANTHROPIC_API_KEY` | copied from `ANTHROPIC_AUTH_TOKEN` when configured | No | Anthropic SDK-compatible key name used by some runtime paths |
+| `QUORVEX_LLM_PROVIDER` | `anthropic_compatible` | No | Canonical runtime provider kind for app-owned AI calls |
+| `QUORVEX_LLM_BASE_URL` | `https://api.z.ai/api/anthropic` | No | Canonical runtime provider endpoint; mirrored to `ANTHROPIC_BASE_URL` for SDK compatibility |
+| `QUORVEX_LLM_API_KEY` | -- | Yes | Canonical single runtime API key; legacy Anthropic key names remain supported |
+| `QUORVEX_LLM_API_KEYS` | -- | No | Canonical comma-separated runtime key pool for rotation |
+| `QUORVEX_LLM_LIGHT_MODEL` | `glm-4.5-air` | No | Cheap deterministic model for classification, repair, summaries, and memory extraction |
+| `QUORVEX_LLM_STANDARD_MODEL` | `glm-5-turbo` | No | Default model for synthesis and analysis tasks |
+| `QUORVEX_LLM_DEEP_MODEL` | `glm-5.1` | No | Strong model for planning, PRD decomposition, and complex analysis |
+| `QUORVEX_LLM_TOOL_DEEP_MODEL` | `glm-5.1` | No | Strong model for browser/tool loops, generation, and healing |
+| `QUORVEX_LLM_CHAT_MODEL` | `glm-5-turbo` | No | Assistant chat model resolved by the backend settings API |
+| `QUORVEX_EMBEDDING_MODEL` | `text-embedding-3-small` | No | Canonical embedding model for memory and PRD semantic indexing |
+| `ANTHROPIC_AUTH_TOKEN` | copied from `QUORVEX_LLM_API_KEY` when configured | No | Legacy Anthropic-compatible SDK token alias |
+| `ANTHROPIC_AUTH_TOKENS` | copied from `QUORVEX_LLM_API_KEYS` when configured | No | Legacy comma-separated token pool alias |
+| `ANTHROPIC_API_KEY` | copied from `QUORVEX_LLM_API_KEY` when configured | No | Anthropic SDK-compatible key name used by some runtime paths |
 | `CLAUDE_CODE_OAUTH_TOKEN` | -- | No | Claude Code OAuth token for Docker/dev setups that authenticate through Claude Code |
-| `ANTHROPIC_BASE_URL` | `https://api.z.ai/api/anthropic` | Yes | API endpoint URL (Z.ai, Anthropic direct, OpenRouter, or custom proxy) |
-| `ANTHROPIC_MODEL` | `glm-5.1` | Yes | Active model override used by selected agent paths |
+| `ANTHROPIC_BASE_URL` | copied from `QUORVEX_LLM_BASE_URL` | No | Legacy SDK endpoint alias |
+| `ANTHROPIC_MODEL` | selected runtime tier model | No | Legacy active model alias used by SDK clients |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL` | `glm-5.1` | No | Claude Code / Agent SDK Opus alias target |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `glm-5-turbo` | Yes | Claude Code / Agent SDK Sonnet alias target |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `glm-5-turbo` | No | Claude Code / Agent SDK Sonnet alias target |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `glm-4.5-air` | No | Claude Code / Agent SDK Haiku alias target |
-| `ANTHROPIC_CHAT_MODEL` | `glm-5-turbo` | No | Optional chat model override for assistant/chat features |
+| `ANTHROPIC_CHAT_MODEL` | `glm-5-turbo` | No | Legacy chat model alias |
 | `ANTHROPIC_ENABLE_CHAT_THINKING` | `false` | No | Enable provider-specific chat reasoning controls when supported |
 | `API_TIMEOUT_MS` | `3000000` | No | Claude Code API timeout used by the Z.ai GLM Coding Plan |
 | `OPENAI_API_KEY` | -- | No | OpenAI API key for memory system embeddings |
@@ -91,6 +101,26 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | `PRD_TIMEOUT_SECONDS` | `600` | No | Timeout for PRD processing jobs |
 | `PLANNER_TIMEOUT_SECONDS` | `1800` | No | Timeout for the planner agent |
 | `GENERATOR_TIMEOUT_SECONDS` | `1800` | No | Timeout for the generator agent |
+
+## Agent Runtimes
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `QUORVEX_AGENT_RUNTIME` | `claude_sdk` | No | Default runtime for agent runs. Supported values: `claude_sdk`, `hermes` |
+| `QUORVEX_ASSISTANT_RUNTIME` | `QUORVEX_AGENT_RUNTIME` | No | Optional dashboard assistant runtime override. Supported values: `claude_sdk`, `openai`, `hermes` |
+| `HERMES_ENABLED` | `false` | No | Enables dispatching selected Quorvex agent runs to Hermes |
+| `HERMES_API_URL` | `http://127.0.0.1:8642` | No | Hermes API server base URL |
+| `HERMES_API_KEY` | -- | No | Bearer token for the Hermes API server |
+| `HERMES_MODEL` | `hermes-agent` | No | Model name sent to Hermes API requests |
+| `HERMES_PROFILE_PREFIX` | `quorvex` | No | Prefix used when provisioning external Hermes profiles |
+| `HERMES_SYNC_PROVIDER` | `true` | No | When Settings are saved, write a generated Hermes home under `data/hermes` using Quorvex's active LLM provider |
+| `HERMES_HOME` | `data/hermes` when generated | No | Hermes configuration directory to use when launching `hermes gateway` for Quorvex |
+| `HERMES_UPSTREAM_PROVIDER` | derived | No | Provider mirrored into the generated Hermes config, such as `zai`, `anthropic`, `openrouter`, `openai`, or `custom` |
+| `HERMES_UPSTREAM_MODEL` | derived | No | Model mirrored into the generated Hermes config |
+
+Hermes reads its actual LLM provider from its own server-side `config.yaml` and `.env`; the OpenAI-compatible API `model` field is only the public API model id. Saving Quorvex Settings with provider mirroring enabled creates `data/hermes/config.yaml` and `data/hermes/.env`. Launch Hermes with `HERMES_HOME=<project>/data/hermes hermes gateway` so Hermes uses the same provider and API key as Quorvex.
+
+Settings can manage backend agent runtime and dashboard assistant runtime separately. Backend agent runtime controls autonomous missions, custom agents, and subagents. Assistant runtime controls dashboard chat routing; when it is set to `hermes`, the frontend process must also receive `HERMES_ENABLED=true`, `HERMES_API_URL`, `HERMES_API_KEY`, and `HERMES_MODEL`.
 
 ## Autonomous Validation and Queue Recovery
 

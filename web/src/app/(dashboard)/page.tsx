@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { useState } from 'react';
 import {
     AlertTriangle,
     ArrowRight,
@@ -19,7 +20,9 @@ import {
 } from 'lucide-react';
 import { PageHeader } from '@/components/ui/page-header';
 import { PageLayout } from '@/components/ui/page-layout';
+import { fetchWithAuth } from '@/contexts/AuthContext';
 import { useCommandCenterData, type AgentQueueTaskSummary, type AutoPilotSessionSummary } from '@/hooks/useCommandCenterData';
+import { API_BASE } from '@/lib/api';
 import { useWorkflowProgress } from '@/hooks/useWorkflowProgress';
 
 const statusMeta: Record<string, { label: string; color: string; bg: string; icon: typeof Clock }> = {
@@ -292,6 +295,8 @@ function Panel({ title, action, children }: { title: string; action?: React.Reac
 }
 
 export default function Home() {
+    const [isCleaningOrphans, setIsCleaningOrphans] = useState(false);
+    const [cleanupError, setCleanupError] = useState<string | null>(null);
     const {
         dashboard,
         sessions,
@@ -304,6 +309,7 @@ export default function Home() {
         pendingQuestions,
         awaitingInput,
         hasAnySessions,
+        reload,
     } = useCommandCenterData();
     const { progress: workflowProgress } = useWorkflowProgress();
 
@@ -338,6 +344,28 @@ export default function Home() {
     const workersIdle = queue?.workers_idle ?? Math.max(0, workersAlive - (queue?.active ?? 0));
     const oldestQueuedSeconds = queue?.oldest_queued_age_seconds ?? null;
     const queueAgeLabel = oldestQueuedSeconds ? ` Oldest queued ${Math.round(oldestQueuedSeconds)}s.` : '';
+    const cleanOrphanedTasks = async () => {
+        if (isCleaningOrphans) return;
+
+        setIsCleaningOrphans(true);
+        setCleanupError(null);
+        try {
+            const response = await fetchWithAuth(`${API_BASE}/api/agents/queue-clean-orphans`, {
+                method: 'POST',
+            });
+            const result = await response.json().catch(() => ({}));
+
+            if (!response.ok || result.status === 'error') {
+                throw new Error(result.message || 'Failed to clean orphaned tasks');
+            }
+
+            await reload({ silent: true });
+        } catch (err) {
+            setCleanupError(err instanceof Error ? err.message : 'Failed to clean orphaned tasks');
+        } finally {
+            setIsCleaningOrphans(false);
+        }
+    };
     const nextAction = (() => {
         const pendingQuestion = pendingQuestions[0];
         if (pendingQuestion) {
@@ -523,15 +551,51 @@ export default function Home() {
                                     <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{workersIdle}/{workersAlive}</div>
                                 </div>
                             </div>
-                            <div style={{ color: orphanedTaskCount > 0 ? '#ef4444' : backgroundAgentTaskCount > 0 ? '#f59e0b' : 'var(--text-secondary)', fontSize: '0.76rem', marginTop: '0.75rem', lineHeight: 1.35 }}>
-                                {orphanedTaskCount > 0
-                                    ? `${orphanedTaskCount} orphaned task${orphanedTaskCount === 1 ? '' : 's'} need cleanup.`
-                                    : backgroundAgentTaskCount > 0
-                                    ? `${backgroundAgentTaskCount} running task${backgroundAgentTaskCount === 1 ? ' is' : 's are'} not tied to visible AutoPilot work.`
-                                    : queue?.mode === 'temporal' && queue?.workers_alive === 0
-                                    ? 'Temporal agent worker is not polling. Agent runs will wait until the custom workflow worker starts.'
-                                    : `${queueSourceLabel}: ${queue?.active ?? 0} task${(queue?.active ?? 0) === 1 ? '' : 's'}, ${browserSlotsRunning} browser slot${browserSlotsRunning === 1 ? '' : 's'} active${browserSlotsMax ? `, ${browserSlotsAvailable}/${browserSlotsMax} free` : ''}.${queueAgeLabel}`}
-                                {(queue?.stale_running ?? 0) > 0 ? ` ${queue?.stale_running} stale.` : ''}
+                            <div style={{ marginTop: '0.75rem' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+                                    <div style={{ color: orphanedTaskCount > 0 ? '#ef4444' : backgroundAgentTaskCount > 0 ? '#f59e0b' : 'var(--text-secondary)', fontSize: '0.76rem', lineHeight: 1.35 }}>
+                                        {orphanedTaskCount > 0
+                                            ? `${orphanedTaskCount} orphaned task${orphanedTaskCount === 1 ? '' : 's'} need cleanup.`
+                                            : backgroundAgentTaskCount > 0
+                                            ? `${backgroundAgentTaskCount} running task${backgroundAgentTaskCount === 1 ? ' is' : 's are'} not tied to visible AutoPilot work.`
+                                            : queue?.mode === 'temporal' && queue?.workers_alive === 0
+                                            ? 'Temporal agent worker is not polling. Agent runs will wait until the custom workflow worker starts.'
+                                            : `${queueSourceLabel}: ${queue?.active ?? 0} task${(queue?.active ?? 0) === 1 ? '' : 's'}, ${browserSlotsRunning} browser slot${browserSlotsRunning === 1 ? '' : 's'} active${browserSlotsMax ? `, ${browserSlotsAvailable}/${browserSlotsMax} free` : ''}.${queueAgeLabel}`}
+                                        {(queue?.stale_running ?? 0) > 0 ? ` ${queue?.stale_running} stale.` : ''}
+                                    </div>
+                                    {orphanedTaskCount > 0 && (
+                                        <button
+                                            type="button"
+                                            onClick={cleanOrphanedTasks}
+                                            disabled={isCleaningOrphans}
+                                            style={{
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                gap: '0.4rem',
+                                                minHeight: 30,
+                                                padding: '0.35rem 0.65rem',
+                                                borderRadius: '8px',
+                                                border: '1px solid rgba(239, 68, 68, 0.28)',
+                                                background: isCleaningOrphans ? 'rgba(239, 68, 68, 0.08)' : 'rgba(239, 68, 68, 0.13)',
+                                                color: '#f87171',
+                                                fontSize: '0.74rem',
+                                                fontWeight: 750,
+                                                cursor: isCleaningOrphans ? 'wait' : 'pointer',
+                                                whiteSpace: 'nowrap',
+                                                opacity: isCleaningOrphans ? 0.75 : 1,
+                                            }}
+                                        >
+                                            {isCleaningOrphans && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
+                                            {isCleaningOrphans ? 'Cleaning' : 'Clean up'}
+                                        </button>
+                                    )}
+                                </div>
+                                {cleanupError && (
+                                    <div style={{ color: '#f87171', fontSize: '0.72rem', marginTop: '0.45rem', lineHeight: 1.35 }}>
+                                        {cleanupError}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </section>

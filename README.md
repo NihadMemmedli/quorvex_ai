@@ -221,7 +221,7 @@ cd quorvex_ai
 
 # 2. Configure your AI provider credentials
 cp .env.prod.example .env.prod
-# Edit .env.prod and set ANTHROPIC_AUTH_TOKEN (see Configuration below)
+# Edit .env.prod and set QUORVEX_LLM_API_KEY (see Configuration below)
 
 # Optional: confirm local and production env files are readable
 make check-env
@@ -307,26 +307,28 @@ Quorvex AI requires an Anthropic-compatible API provider. Three options are supp
 #### Option 1: Z.ai GLM Coding Plan (Recommended Default)
 
 ```env
-ANTHROPIC_AUTH_TOKEN=your-z-ai-token
-ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
-ANTHROPIC_MODEL=glm-5.1
-ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.1
-ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5-turbo
-ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-4.5-air
-ANTHROPIC_CHAT_MODEL=glm-5-turbo
+QUORVEX_LLM_PROVIDER=anthropic_compatible
+QUORVEX_LLM_API_KEY=your-z-ai-token
+QUORVEX_LLM_BASE_URL=https://api.z.ai/api/anthropic
+QUORVEX_LLM_LIGHT_MODEL=glm-4.5-air
+QUORVEX_LLM_STANDARD_MODEL=glm-5-turbo
+QUORVEX_LLM_DEEP_MODEL=glm-5.1
+QUORVEX_LLM_TOOL_DEEP_MODEL=glm-5.1
+QUORVEX_LLM_CHAT_MODEL=glm-5-turbo
 API_TIMEOUT_MS=3000000
 ```
 
-Create a key in the [Z.ai API Keys](https://docs.z.ai/devpack/tool/claude) flow. Claude Code and the Claude Agent SDK still use Anthropic-compatible environment variable names.
+Create a key in the [Z.ai API Keys](https://docs.z.ai/devpack/tool/claude) flow. Quorvex mirrors canonical `QUORVEX_LLM_*` settings to Anthropic-compatible aliases for Claude Code and SDK clients.
 
 #### Option 2: OpenRouter (Free Models Available)
 
 [OpenRouter](https://openrouter.ai) provides access to free and paid LLM models through an Anthropic-compatible API.
 
 ```env
-ANTHROPIC_AUTH_TOKEN=sk-or-v1-your-openrouter-key
-ANTHROPIC_BASE_URL=https://openrouter.ai/api
-ANTHROPIC_DEFAULT_SONNET_MODEL=meta-llama/llama-3.2-3b-instruct:free
+QUORVEX_LLM_PROVIDER=anthropic_compatible
+QUORVEX_LLM_API_KEY=sk-or-v1-your-openrouter-key
+QUORVEX_LLM_BASE_URL=https://openrouter.ai/api
+QUORVEX_LLM_STANDARD_MODEL=meta-llama/llama-3.2-3b-instruct:free
 ```
 
 Popular free models on OpenRouter:
@@ -342,9 +344,10 @@ Popular free models on OpenRouter:
 #### Option 3: Anthropic Direct
 
 ```env
-ANTHROPIC_AUTH_TOKEN=sk-ant-your-api-key
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-20250514
+QUORVEX_LLM_PROVIDER=anthropic_compatible
+QUORVEX_LLM_API_KEY=sk-ant-your-api-key
+QUORVEX_LLM_BASE_URL=https://api.anthropic.com
+QUORVEX_LLM_STANDARD_MODEL=claude-sonnet-4-20250514
 ```
 
 Sign up at [console.anthropic.com](https://console.anthropic.com) to get an API key.
@@ -605,7 +608,7 @@ mkdocs serve
 
 | Symptom | Solution |
 |---------|----------|
-| "ANTHROPIC_AUTH_TOKEN not set" | Check `.env` file, run `make check-env` |
+| "QUORVEX_LLM_API_KEY not set" | Check `.env` file, run `make check-env` |
 | "Database connection refused" | Run `docker compose up -d db` or use SQLite (default) |
 | Generated test selector fails | Self-healer auto-fixes; use `--hybrid` for complex cases |
 | "No target URL found in spec" | Spec must contain a URL (e.g., "Navigate to https://...") |
