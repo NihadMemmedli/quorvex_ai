@@ -232,6 +232,12 @@ def prepare_run_playwright_config_content(
         'testDir: "./tests/generated"', f'testDir: "{base_dir}/tests/generated"'
     )
     config_content = config_content.replace(
+        "testDir: './tests'", f"testDir: '{base_dir}/tests'"
+    )
+    config_content = config_content.replace(
+        'testDir: "./tests"', f'testDir: "{base_dir}/tests"'
+    )
+    config_content = config_content.replace(
         "outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || './test-results'",
         f"outputDir: process.env.PLAYWRIGHT_OUTPUT_DIR || '{run_dir}/test-results'",
     )

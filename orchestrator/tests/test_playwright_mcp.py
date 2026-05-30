@@ -127,4 +127,15 @@ export default defineConfig({
         headless=False,
     )
 
+    assert "testDir: '/app/tests'" in prepared
     assert "testMatch: ['seed.spec.ts', 'generated/**/*.spec.ts', 'e2e/**/*.spec.ts']" in prepared
+
+    prepared_again = prepare_run_playwright_config_content(
+        prepared,
+        base_dir=Path("/app"),
+        run_dir=tmp_path,
+        headless=False,
+    )
+
+    assert prepared_again.count("testDir: '/app/tests'") == 1
+    assert prepared_again.count("seed.spec.ts") == 1

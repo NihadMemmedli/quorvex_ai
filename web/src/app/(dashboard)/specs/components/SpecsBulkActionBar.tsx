@@ -34,47 +34,68 @@ const variantStyle: Record<SpecsBulkActionVariant, React.CSSProperties> = {
     primary: {
         background: 'var(--primary)',
         color: '#fff',
-        border: 'none',
+        border: '1px solid transparent',
     },
     secondary: {
-        background: 'var(--surface)',
+        background: 'transparent',
         color: 'var(--text)',
         border: '1px solid var(--border)',
     },
     success: {
         background: 'var(--success)',
         color: '#fff',
-        border: 'none',
+        border: '1px solid transparent',
     },
     danger: {
         background: 'var(--danger)',
         color: '#fff',
-        border: 'none',
+        border: '1px solid transparent',
     },
     accent: {
         background: 'var(--accent)',
         color: '#fff',
-        border: 'none',
+        border: '1px solid transparent',
     },
 };
 
 const barStyle: React.CSSProperties = {
     position: 'fixed',
     left: '50%',
-    bottom: 'max(1rem, env(safe-area-inset-bottom))',
+    bottom: '2rem',
     transform: 'translateX(-50%)',
     zIndex: 100,
-    width: 'min(calc(100vw - 2rem), 980px)',
+    width: 'fit-content',
+    maxWidth: 'calc(100vw - 2rem)',
     display: 'flex',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    flexWrap: 'wrap',
-    gap: '0.75rem',
-    padding: '0.75rem',
+    justifyContent: 'center',
+    gap: '1.25rem',
+    padding: '1rem 1.25rem',
     border: '1px solid var(--primary)',
-    borderRadius: '8px',
+    borderRadius: '12px',
     background: 'var(--surface)',
-    boxShadow: '0 20px 35px rgba(0, 0, 0, 0.28)',
+    boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.3)',
+    animation: 'slideUp 0.3s ease-out',
+};
+
+const actionButtonStyle: React.CSSProperties = {
+    minHeight: 40,
+    padding: '0.625rem 1rem',
+    borderRadius: '10px',
+    fontSize: '0.875rem',
+    fontWeight: 650,
+    lineHeight: 1,
+    gap: '0.5rem',
+    boxShadow: '0 8px 18px rgba(0, 0, 0, 0.14)',
+};
+
+const clearButtonStyle: React.CSSProperties = {
+    ...actionButtonStyle,
+    minWidth: 120,
+    color: 'var(--text)',
+    background: 'rgba(148, 163, 184, 0.08)',
+    border: '1px solid var(--border)',
+    boxShadow: 'none',
 };
 
 export function SpecsBulkActionBar({
@@ -92,27 +113,29 @@ export function SpecsBulkActionBar({
     if (selectedCount <= 0) return null;
 
     return (
-        <aside
-            className={className}
-            style={{ ...barStyle, ...style }}
-            aria-label="Bulk spec actions"
-            aria-live="polite"
-        >
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0 }}>
-                <Badge
-                    variant="default"
-                    style={{
-                        minWidth: '2rem',
-                        justifyContent: 'center',
-                        borderRadius: '6px',
-                        padding: '0.3rem 0.55rem',
-                        fontSize: '0.85rem',
-                    }}
-                >
-                    {selectedCount}
-                </Badge>
-                <div style={{ display: 'grid', gap: '0.2rem', minWidth: 0 }}>
-                    <strong style={{ color: 'var(--text)', fontSize: '0.9rem', whiteSpace: 'nowrap' }}>
+        <>
+            <aside
+                className={['specs-bulk-action-bar', className].filter(Boolean).join(' ')}
+                data-testid="specs-bulk-action-bar"
+                style={{ ...barStyle, ...style }}
+                aria-label="Bulk spec actions"
+                aria-live="polite"
+            >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.875rem', minWidth: 0 }}>
+                    <Badge
+                        variant="default"
+                        style={{
+                            minWidth: '2rem',
+                            justifyContent: 'center',
+                            borderRadius: '6px',
+                            padding: '0.2rem 0.6rem',
+                            fontSize: '0.9rem',
+                            fontWeight: 700,
+                        }}
+                    >
+                        {selectedCount}
+                    </Badge>
+                    <strong style={{ color: 'var(--text)', fontSize: '0.9rem', whiteSpace: 'nowrap', fontWeight: 600 }}>
                         {label}
                     </strong>
                     {selectedAutomatedCount > 0 && (
@@ -122,56 +145,80 @@ export function SpecsBulkActionBar({
                                 alignItems: 'center',
                                 gap: '0.35rem',
                                 color: 'var(--success)',
-                                fontSize: '0.78rem',
+                                fontSize: '0.9rem',
+                                fontWeight: 600,
                                 whiteSpace: 'nowrap',
                             }}
                         >
                             <CheckCircle size={13} />
-                            {selectedAutomatedCount} automated
+                            ({selectedAutomatedCount} automated)
                         </span>
                     )}
                 </div>
-            </div>
 
-            <div
-                style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'flex-end',
-                    gap: '0.5rem',
-                    flexWrap: 'wrap',
-                }}
-            >
-                <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={onClear}
-                    disabled={disabled}
-                    title="Clear selection"
+                <div style={{ height: '24px', width: '1px', background: 'var(--border)', flexShrink: 0, margin: '0 0.25rem' }} />
+
+                <div
+                    style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'flex-end',
+                        gap: '0.75rem',
+                        minWidth: 0,
+                    }}
                 >
-                    <X size={15} />
-                    Clear
-                </Button>
+                    <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        onClick={onClear}
+                        disabled={disabled}
+                        title="Clear selection"
+                        style={clearButtonStyle}
+                    >
+                        <X size={15} />
+                        Clear
+                    </Button>
 
-                {visibleActions.map(action => {
-                    const variant = action.variant ?? 'primary';
-                    return (
-                        <Button
-                            key={action.id}
-                            type="button"
-                            size="sm"
-                            onClick={action.onClick}
-                            disabled={disabled || action.disabled}
-                            title={action.title ?? action.label}
-                            style={variantStyle[variant]}
-                        >
-                            {action.icon}
-                            {action.label}
-                        </Button>
-                    );
-                })}
-            </div>
-        </aside>
+                    {visibleActions.map(action => {
+                        const variant = action.variant ?? 'primary';
+                        return (
+                            <Button
+                                key={action.id}
+                                type="button"
+                                size="sm"
+                                onClick={action.onClick}
+                                disabled={disabled || action.disabled}
+                                title={action.title ?? action.label}
+                                style={{
+                                    ...actionButtonStyle,
+                                    ...variantStyle[variant],
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                }}
+                            >
+                                {action.icon}
+                                {action.label}
+                            </Button>
+                        );
+                    })}
+                </div>
+            </aside>
+
+            <style jsx>{`
+                :global(.specs-bulk-action-bar) {
+                    flex-wrap: nowrap;
+                }
+
+                @media (max-width: 760px) {
+                    :global(.specs-bulk-action-bar) {
+                        align-items: flex-start !important;
+                        flex-wrap: wrap;
+                        gap: 0.75rem !important;
+                        padding: 1rem !important;
+                    }
+                }
+            `}</style>
+        </>
     );
 }

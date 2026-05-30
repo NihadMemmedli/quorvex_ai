@@ -14,6 +14,7 @@ Run with: JWT_SECRET_KEY=test pytest orchestrator/tests/test_api_endpoints.py -v
 import os
 import shutil
 import sys
+import types
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -23,6 +24,31 @@ import pytest
 # Ensure test environment
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-api-tests")
 os.environ.setdefault("REQUIRE_AUTH", "false")
+
+if "slowapi" not in sys.modules:
+    slowapi = types.ModuleType("slowapi")
+    slowapi_errors = types.ModuleType("slowapi.errors")
+    slowapi_util = types.ModuleType("slowapi.util")
+
+    class _TestLimiter:
+        def __init__(self, *args, **kwargs):
+            self._storage = types.SimpleNamespace(expirations={})
+
+        def limit(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
+
+    class _TestRateLimitExceeded(Exception):
+        retry_after = 60
+
+    slowapi.Limiter = _TestLimiter
+    slowapi_errors.RateLimitExceeded = _TestRateLimitExceeded
+    slowapi_util.get_remote_address = lambda request: "test-client"
+    sys.modules["slowapi"] = slowapi
+    sys.modules["slowapi.errors"] = slowapi_errors
+    sys.modules["slowapi.util"] = slowapi_util
 
 # Add orchestrator to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -118,6 +144,44 @@ class TestRunEndpoints:
         """POST /runs/{id}/stop with non-existent ID should return 404."""
         response = client.post("/runs/nonexistent-run-id/stop")
         assert response.status_code == 404
+
+
+class TestAgentDefinitionEndpoints:
+    """Test UI-created custom agent definition endpoints."""
+
+    def test_create_list_and_archive_agent_definition(self, client):
+        """POST /api/agents/definitions should persist custom agents without server errors."""
+        name = f"API Save Probe {uuid4().hex}"
+        payload = {
+            "project_id": "default",
+            "name": name,
+            "description": "Created by an API regression test.",
+            "system_prompt": "Inspect the target and report concise QA findings.",
+            "runtime": "claude_sdk",
+            "model_tier": "tool_deep",
+            "timeout_seconds": 900,
+            "tool_ids": ["browser_snapshot", "browser_console", "browser_network"],
+        }
+
+        create_response = client.post("/api/agents/definitions", json=payload)
+        assert create_response.status_code == 200, create_response.text
+        created = create_response.json()
+        definition_id = created["id"]
+
+        try:
+            assert created["name"] == name
+            assert created["runtime"] == "claude_sdk"
+            assert created["model_tier"] == "tool_deep"
+            assert created["timeout_seconds"] == 900
+            assert created["tool_ids"] == payload["tool_ids"]
+
+            list_response = client.get("/api/agents/definitions?project_id=default")
+            assert list_response.status_code == 200, list_response.text
+            definitions = list_response.json()
+            assert any(definition["id"] == definition_id for definition in definitions)
+        finally:
+            archive_response = client.delete(f"/api/agents/definitions/{definition_id}?project_id=default")
+            assert archive_response.status_code == 200, archive_response.text
 
     def test_get_run_includes_live_browser_metadata(self, client, monkeypatch):
         """GET /runs/{id} should expose runtime metadata for live browser view."""

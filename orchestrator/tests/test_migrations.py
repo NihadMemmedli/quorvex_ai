@@ -402,6 +402,84 @@ class TestDatabaseInit:
             db_module.DATABASE_URL = original_url
             db_module.engine = original_engine
 
+    def test_run_migrations_repairs_legacy_agent_definition_columns(self, tmp_path):
+        """Legacy custom agent definition tables should match the current ORM model."""
+        db_path = tmp_path / "test_agent_definitions_legacy.db"
+        db_url = f"sqlite:///{db_path}"
+
+        from sqlalchemy import inspect, text
+        from sqlmodel import Session, create_engine
+
+        import orchestrator.api.db as db_module
+        from orchestrator.api.models_db import AgentDefinition
+
+        original_url = db_module.DATABASE_URL
+        original_engine = db_module.engine
+
+        try:
+            db_module.DATABASE_URL = db_url
+            db_module.engine = create_engine(
+                db_url, echo=False, connect_args={"check_same_thread": False, "timeout": 30}
+            )
+
+            with db_module.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE agent_definitions (
+                            id VARCHAR PRIMARY KEY,
+                            project_id VARCHAR,
+                            name VARCHAR NOT NULL,
+                            description VARCHAR NOT NULL DEFAULT '',
+                            system_prompt TEXT NOT NULL,
+                            model VARCHAR,
+                            timeout_seconds INTEGER NOT NULL DEFAULT 1800,
+                            tool_ids_json TEXT NOT NULL DEFAULT '[]',
+                            status VARCHAR NOT NULL DEFAULT 'active',
+                            created_at DATETIME,
+                            updated_at DATETIME
+                        )
+                        """
+                    )
+                )
+
+            db_module._run_migrations()
+            db_module._run_migrations()
+
+            inspector = inspect(db_module.engine)
+            columns = {col["name"] for col in inspector.get_columns("agent_definitions")}
+            indexes = {idx["name"] for idx in inspector.get_indexes("agent_definitions")}
+
+            assert {"runtime", "model_tier"} <= columns
+            assert "ix_agent_definitions_runtime" in indexes
+
+            definition = AgentDefinition(
+                project_id="default",
+                name="Legacy schema save probe",
+                description="Ensures migrated schemas accept current agent definitions.",
+                system_prompt="Inspect the target and report concise QA findings.",
+                runtime="claude_sdk",
+                model_tier="tool_deep",
+                timeout_seconds=900,
+                status="active",
+            )
+            definition.tool_ids = ["browser_snapshot"]
+
+            with Session(db_module.engine) as session:
+                session.add(definition)
+                session.commit()
+                session.refresh(definition)
+
+                saved = session.get(AgentDefinition, definition.id)
+                assert saved is not None
+                assert saved.runtime == "claude_sdk"
+                assert saved.model_tier == "tool_deep"
+                assert saved.tool_ids == ["browser_snapshot"]
+
+        finally:
+            db_module.DATABASE_URL = original_url
+            db_module.engine = original_engine
+
     def test_detects_legacy_alembic_drift(self, tmp_path):
         """A database stamped at 001 with post-baseline objects should use legacy sync."""
         db_path = tmp_path / "test_alembic_drift.db"

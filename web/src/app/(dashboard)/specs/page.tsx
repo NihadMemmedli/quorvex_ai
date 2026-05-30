@@ -85,6 +85,13 @@ const flatActionIconStyle: CSSProperties = {
     boxShadow: 'none',
 };
 
+const specsSelectionCheckboxStyle: CSSProperties = {
+    width: 18,
+    height: 18,
+    cursor: 'pointer',
+    flexShrink: 0,
+};
+
 export default function SpecsPage() {
     const router = useRouter();
     const { currentProject, isLoading: projectLoading } = useProject();
@@ -183,6 +190,16 @@ export default function SpecsPage() {
                 setSpecs(specsWithMetadata);
                 setMetadata(metadataData);
                 setExpandedFolders(new Set());
+                const visibleSpecNames = new Set(
+                    specsWithMetadata
+                        .filter((spec: Spec) => !spec.name.startsWith('templates/'))
+                        .map((spec: Spec) => spec.name)
+                );
+                setSelectedSpecs(prev => {
+                    if (prev.size === 0) return prev;
+                    const next = new Set(Array.from(prev).filter(name => visibleSpecNames.has(name)));
+                    return next.size === prev.size ? prev : next;
+                });
             }
 
             if (isPaginated) {
@@ -679,7 +696,6 @@ export default function SpecsPage() {
 
     const toggleSpecSelection = (specName: string, e?: React.SyntheticEvent) => {
         if (e) {
-            e.preventDefault();
             e.stopPropagation();
         }
 
@@ -698,7 +714,6 @@ export default function SpecsPage() {
     };
 
     const toggleFolderSelection = (node: TreeNode, e?: React.SyntheticEvent) => {
-        e?.preventDefault();
         e?.stopPropagation();
 
         const folderSpecs = getAllSpecsInNode(node);
@@ -1062,14 +1077,11 @@ export default function SpecsPage() {
                     >
                         <input
                             type="checkbox"
+                            className="specs-selection-checkbox"
+                            data-testid="spec-selection-checkbox"
                             checked={isSelected}
-                            onChange={() => toggleSpecSelection(node.spec!.name)}
-                            style={{
-                                width: 18,
-                                height: 18,
-                                accentColor: 'var(--primary)',
-                                cursor: 'pointer'
-                            }}
+                            onChange={(e) => toggleSpecSelection(node.spec!.name, e)}
+                            style={specsSelectionCheckboxStyle}
                         />
                     </label>
                     <div
@@ -1354,17 +1366,17 @@ export default function SpecsPage() {
                     >
                         <input
                             type="checkbox"
+                            className="specs-selection-checkbox"
+                            data-testid="folder-selection-checkbox"
                             checked={folderIsSelected}
                             ref={(input) => {
-                                if (input) input.indeterminate = folderIsIndeterminate;
+                                if (input) {
+                                    input.indeterminate = folderIsIndeterminate;
+                                    input.setAttribute('aria-checked', folderIsIndeterminate ? 'mixed' : String(folderIsSelected));
+                                }
                             }}
                             onChange={(e) => toggleFolderSelection(node, e)}
-                            style={{
-                                width: 18,
-                                height: 18,
-                                accentColor: 'var(--primary)',
-                                cursor: 'pointer'
-                            }}
+                            style={specsSelectionCheckboxStyle}
                         />
                     </label>
                     <button
@@ -2939,6 +2951,44 @@ export default function SpecsPage() {
                 :global(.specs-flat-menu-danger[data-highlighted]) {
                     background: rgba(248, 113, 113, 0.08) !important;
                     color: rgba(248, 113, 113, 0.95) !important;
+                }
+                :global(.specs-selection-checkbox) {
+                    appearance: none;
+                    -webkit-appearance: none;
+                    border: 2px solid var(--border);
+                    border-radius: 5px;
+                    background: var(--surface);
+                    display: grid;
+                    place-content: center;
+                    transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+                }
+                :global(.specs-selection-checkbox:hover) {
+                    border-color: var(--primary);
+                }
+                :global(.specs-selection-checkbox:focus-visible) {
+                    outline: 2px solid var(--primary);
+                    outline-offset: 2px;
+                }
+                :global(.specs-selection-checkbox:checked),
+                :global(.specs-selection-checkbox:indeterminate) {
+                    border-color: var(--primary);
+                    background: var(--primary);
+                }
+                :global(.specs-selection-checkbox:checked::after) {
+                    content: '';
+                    width: 5px;
+                    height: 9px;
+                    border: solid #fff;
+                    border-width: 0 2px 2px 0;
+                    transform: rotate(45deg);
+                    margin-top: -1px;
+                }
+                :global(.specs-selection-checkbox:indeterminate::after) {
+                    content: '';
+                    width: 9px;
+                    height: 2px;
+                    border-radius: 999px;
+                    background: #fff;
                 }
                 .modal-overlay {
                     position: fixed;

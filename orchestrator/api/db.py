@@ -702,6 +702,7 @@ def _run_migrations():
                         system_prompt TEXT NOT NULL,
                         runtime VARCHAR NOT NULL DEFAULT 'claude_sdk',
                         model VARCHAR,
+                        model_tier VARCHAR,
                         timeout_seconds INTEGER NOT NULL DEFAULT 1800,
                         tool_ids_json TEXT NOT NULL DEFAULT '[]',
                         status VARCHAR NOT NULL DEFAULT 'active',
@@ -721,6 +722,7 @@ def _run_migrations():
                         system_prompt TEXT NOT NULL,
                         runtime VARCHAR NOT NULL DEFAULT 'claude_sdk',
                         model VARCHAR,
+                        model_tier VARCHAR,
                         timeout_seconds INTEGER NOT NULL DEFAULT 1800,
                         tool_ids_json TEXT NOT NULL DEFAULT '[]',
                         status VARCHAR NOT NULL DEFAULT 'active',
@@ -735,6 +737,9 @@ def _run_migrations():
             if "runtime" not in agent_definition_columns:
                 conn.execute(text("ALTER TABLE agent_definitions ADD COLUMN runtime VARCHAR NOT NULL DEFAULT 'claude_sdk'"))
                 logger.info("Added column: agent_definitions.runtime")
+            if "model_tier" not in agent_definition_columns:
+                conn.execute(text("ALTER TABLE agent_definitions ADD COLUMN model_tier VARCHAR"))
+                logger.info("Added column: agent_definitions.model_tier")
 
         if "agent_tool_definitions" not in inspector.get_table_names():
             if db_type == "postgresql":

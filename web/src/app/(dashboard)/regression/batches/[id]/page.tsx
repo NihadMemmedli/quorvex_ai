@@ -635,7 +635,18 @@ export default function BatchDetailPage() {
                                         <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
                                         <XAxis type="number" stroke="var(--text-secondary)" fontSize={12} />
                                         <YAxis type="category" dataKey="name" stroke="var(--text-secondary)" fontSize={12} width={80} />
-                                        <Tooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)' }} />
+                                        <Tooltip
+                                            contentStyle={{
+                                                background: 'var(--surface)',
+                                                border: '1px solid var(--border)',
+                                                borderRadius: '8px',
+                                                color: 'var(--text)',
+                                                boxShadow: 'var(--shadow-lg)',
+                                            }}
+                                            labelStyle={{ color: 'var(--text)', fontWeight: 600, marginBottom: '0.25rem' }}
+                                            itemStyle={{ color: 'var(--text)', fontWeight: 500 }}
+                                            cursor={{ fill: 'rgba(255,255,255,0.04)' }}
+                                        />
                                         <Bar dataKey="count" radius={[0, 4, 4, 0]} />
                                     </BarChart>
                                 </ResponsiveContainer>
