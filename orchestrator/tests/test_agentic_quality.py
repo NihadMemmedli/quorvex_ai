@@ -47,7 +47,7 @@ def test_artifact_normalizers_fallback_to_valid_shapes():
     assert stability["failed_runs"] == 1
 
 
-def test_failure_triage_blocks_high_confidence_non_healable(tmp_path: Path):
+def test_failure_triage_keeps_broad_server_text_advisory(tmp_path: Path):
     diagnosis = FailureTriageAgent().diagnose(
         test_path=tmp_path / "test.spec.ts",
         error_output="Error: 500 Internal Server Error",
@@ -57,8 +57,8 @@ def test_failure_triage_blocks_high_confidence_non_healable(tmp_path: Path):
     )
 
     assert diagnosis["category"] == "product_bug"
-    assert diagnosis["confidence"] >= 0.8
-    assert diagnosis["heal_allowed"] is False
+    assert diagnosis["confidence"] < 0.8
+    assert diagnosis["heal_allowed"] is True
     assert (tmp_path / "failure_diagnosis.json").exists()
 
 
@@ -96,6 +96,29 @@ def test_stability_verifier_aggregates_passes_and_failures(tmp_path: Path):
     assert report["passed_runs"] == 1
     assert report["failed_runs"] == 1
     assert json.loads((tmp_path / "stability_report.json").read_text())["status"] == "flaky"
+
+
+def test_run_test_uses_playwright_json_as_primary_result(monkeypatch, tmp_path: Path):
+    pipeline = object.__new__(FullNativePipeline)
+    test_file = tmp_path / "example.spec.ts"
+    test_file.write_text("import { test } from '@playwright/test';\ntest('x', async () => {});\n")
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = "list reporter did not print passed"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        json_path = tmp_path / "test-results.json"
+        json_path.write_text(json.dumps({"status": "passed", "suites": []}))
+        return FakeCompleted()
+
+    monkeypatch.setattr(full_native_pipeline.subprocess, "run", fake_run)
+
+    result = pipeline._run_test(str(test_file), str(tmp_path), "chromium")
+
+    assert result.passed is True
+    assert result.error_summary == ""
 
 
 class _FakeGenerator:
@@ -171,7 +194,7 @@ async def test_pipeline_passes_and_stability_passes(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_marks_flaky_when_stability_fails(tmp_path: Path):
+async def test_pipeline_hardens_once_when_stability_fails(tmp_path: Path):
     spec = tmp_path / "spec.md"
     spec.write_text("# Test\nNavigate to https://example.com\n1. Verify page is visible")
     run_dir = tmp_path / "run"
@@ -187,10 +210,10 @@ async def test_pipeline_marks_flaky_when_stability_fails(tmp_path: Path):
 
     result = await pipeline.run(str(spec), run_dir, skip_planning=True)
 
-    assert result["success"] is False
-    assert result["stage"] == "stability_failed"
-    assert (run_dir / "status.txt").read_text() == "failed"
-    assert json.loads((run_dir / "agentic_summary.json").read_text())["stability"]["status"] == "flaky"
+    assert result["success"] is True
+    assert result["stage"] == "completed"
+    assert result["stability_hardened"] is True
+    assert (run_dir / "status.txt").read_text() == "passed"
 
 
 @pytest.mark.asyncio
@@ -221,7 +244,7 @@ async def test_pipeline_heals_when_triage_allows(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_skips_healing_for_non_healable_failure(tmp_path: Path):
+async def test_pipeline_heals_broad_server_text_when_unconfirmed(tmp_path: Path):
     spec = tmp_path / "spec.md"
     spec.write_text("# Test\nNavigate to https://example.com\n1. Verify page is visible")
     run_dir = tmp_path / "run"
@@ -240,11 +263,11 @@ async def test_pipeline_skips_healing_for_non_healable_failure(tmp_path: Path):
 
     result = await pipeline.run(str(spec), run_dir, skip_planning=True)
 
-    assert result["success"] is False
-    assert result["stage"] == "triage_blocked_healing"
+    assert result["success"] is True
+    assert result["stage"] == "healed"
     diagnosis = json.loads((run_dir / "failure_diagnosis.json").read_text())
     assert diagnosis["category"] == "product_bug"
-    assert diagnosis["heal_allowed"] is False
+    assert diagnosis["heal_allowed"] is True
 
 
 @pytest.mark.asyncio
@@ -332,6 +355,24 @@ async def test_memory_full_loop_attributes_pipeline_outcomes(monkeypatch, tmp_pa
     failing_spec.write_text("# Login\nNavigate to https://example.test\n1. Log in with old selector")
     failing_pipeline = _pipeline_with_results(
         [
+            PipelineTestResult(
+                passed=False,
+                exit_code=1,
+                output="Error: 500 Internal Server Error",
+                error_summary="500",
+            ),
+            PipelineTestResult(
+                passed=False,
+                exit_code=1,
+                output="Error: 500 Internal Server Error",
+                error_summary="500",
+            ),
+            PipelineTestResult(
+                passed=False,
+                exit_code=1,
+                output="Error: 500 Internal Server Error",
+                error_summary="500",
+            ),
             PipelineTestResult(
                 passed=False,
                 exit_code=1,

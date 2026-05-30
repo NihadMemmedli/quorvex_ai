@@ -50,7 +50,7 @@ from orchestrator.ai.validation import (
     should_gate_exploration,
     validate_exploration_result,
 )
-from orchestrator.utils.playwright_mcp import browser_runtime_status
+from orchestrator.utils.playwright_mcp import browser_runtime_status, live_browser_display_diagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,27 @@ def _autopilot_browser_runtime_status() -> dict[str, Any]:
             }
     except Exception:
         pass
-    return browser_runtime_status()
+    runtime = browser_runtime_status()
+    if runtime.get("browser_runtime") == "vnc" and runtime.get("live_view_available"):
+        diagnostics = live_browser_display_diagnostics()
+        runtime["display_diagnostics"] = diagnostics
+        if diagnostics.get("browser_window_count") in (0, None):
+            runtime["runtime_message"] = (
+                "VNC is connected; waiting for Playwright to launch a visible browser window."
+            )
+    return runtime
+
+
+def _effective_test_generation_parallelism(configured_parallelism: int, runtime: dict[str, Any]) -> int:
+    """Limit VNC-backed generation to one visible browser on the shared display."""
+    try:
+        parallelism = int(configured_parallelism)
+    except (TypeError, ValueError):
+        parallelism = 1
+    parallelism = max(1, parallelism)
+    if runtime.get("browser_runtime") == "vnc" and runtime.get("live_view_available"):
+        return 1
+    return parallelism
 
 
 @dataclass
@@ -1160,7 +1180,12 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
         test_tasks = self._create_test_tasks(spec_tasks)
         total = len(test_tasks)
 
-        semaphore = asyncio.Semaphore(config.parallel_generation)
+        runtime_status = _autopilot_browser_runtime_status()
+        effective_parallelism = _effective_test_generation_parallelism(
+            config.parallel_generation,
+            runtime_status,
+        )
+        semaphore = asyncio.Semaphore(effective_parallelism)
         results: dict[int, dict] = {}
 
         passed_count = 0
@@ -1230,7 +1255,7 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                             "browser_tool_calls": 0,
                             "interactions": 0,
                             "recent_tools": [],
-                            **_autopilot_browser_runtime_status(),
+                            **runtime_status,
                         }
                     )
 

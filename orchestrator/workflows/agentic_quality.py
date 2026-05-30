@@ -269,9 +269,27 @@ class FailureTriageAgent:
         evidence: list[str] = []
         root_cause = "Failure needs healer investigation."
 
+        has_structured_context = "## structured failure context" in lower or "playwright json summary" in lower
+        has_confirmed_environment = has_structured_context and any(
+            token in lower for token in ["econnrefused", "enotfound", "dns", "connection refused"]
+        )
+        has_confirmed_server_error = has_structured_context and any(
+            token in lower for token in ['"status": 500', "http_status: 500", "response_status=500"]
+        )
+
         patterns: list[tuple[str, float, str, list[str]]] = [
-            ("environment", 0.9, "Target environment or network appears unavailable.", ["econnrefused", "enotfound", "dns", "net::err", "connection refused"]),
-            ("product_bug", 0.85, "Application returned a server-side error.", ["500", "internal server error", "bad gateway", "service unavailable"]),
+            (
+                "environment",
+                0.9 if has_confirmed_environment else 0.55,
+                "Target environment or network may be unavailable.",
+                ["econnrefused", "enotfound", "dns", "net::err", "connection refused"],
+            ),
+            (
+                "product_bug",
+                0.85 if has_confirmed_server_error else 0.55,
+                "Application may have returned a server-side error.",
+                ["500", "internal server error", "bad gateway", "service unavailable"],
+            ),
             ("auth", 0.75, "Authentication or authorization failed.", ["401", "403", "unauthorized", "forbidden", "invalid credentials"]),
             ("spec_impossible", 0.85, "Expected behavior or element appears absent from the current app.", ["no such file", "spec impossible", "not implemented"]),
             ("selector_changed", 0.7, "Locator could not resolve to the expected element.", ["locator", "strict mode violation", "element not found", "waiting for locator"]),
@@ -348,6 +366,7 @@ class StabilityVerifier:
                     "passed": bool(getattr(result, "passed", False)),
                     "exit_code": getattr(result, "exit_code", None),
                     "error_summary": getattr(result, "error_summary", "") or "",
+                    "output_tail": (getattr(result, "output", "") or "")[-1200:],
                 }
             )
 

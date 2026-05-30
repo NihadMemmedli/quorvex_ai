@@ -701,6 +701,7 @@ class AgentMemoryService:
             session.add(memory)
             session.commit()
             session.refresh(memory)
+            self._index_memory(memory)
             self._sync_knowledge_graph(memory)
             session.expunge(memory)
             return memory

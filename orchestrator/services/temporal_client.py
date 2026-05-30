@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,6 +40,136 @@ async def _connect_client():
         raise TemporalUnavailableError(
             f"Temporal is unavailable at {settings.temporal_address}: {exc}"
         ) from exc
+
+
+def _temporal_memo(**values: Any) -> dict[str, Any]:
+    """Build a small, safe memo payload visible in Temporal UI."""
+    memo: dict[str, Any] = {}
+    for key, value in values.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            text = value if not isinstance(value, str) else value.strip()
+            if text != "":
+                memo[key] = text
+        elif isinstance(value, (list, tuple)):
+            compact = [item for item in value if isinstance(item, (str, int, float, bool))]
+            if compact:
+                memo[key] = compact[:10]
+    return memo
+
+
+def _custom_workflow_run_memo(run_id: str) -> dict[str, Any]:
+    memo = _temporal_memo(entity_type="custom_workflow", run_id=run_id)
+    try:
+        from sqlmodel import Session
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import WorkflowDefinition, WorkflowRun
+
+        with Session(engine) as session:
+            run = session.get(WorkflowRun, run_id)
+            definition = session.get(WorkflowDefinition, run.definition_id) if run else None
+            return {
+                **memo,
+                **_temporal_memo(
+                    project_id=getattr(run, "project_id", None),
+                    definition_id=getattr(run, "definition_id", None),
+                    definition_name=getattr(definition, "name", None),
+                    trigger_type=getattr(run, "trigger_type", None),
+                ),
+            }
+    except Exception:
+        return memo
+
+
+def _agent_run_memo(run_id: str, *, task_queue: str) -> dict[str, Any]:
+    memo = _temporal_memo(entity_type="agent_run", run_id=run_id, task_queue=task_queue)
+    try:
+        from sqlmodel import Session
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            config = run.config if run else {}
+            return {
+                **memo,
+                **_temporal_memo(
+                    project_id=getattr(run, "project_id", None),
+                    agent_type=getattr(run, "agent_type", None),
+                    runtime=getattr(run, "runtime", None),
+                    name=config.get("name") or config.get("title") or config.get("task"),
+                ),
+            }
+    except Exception:
+        return memo
+
+
+def _test_run_memo(run_id: str, payload: dict[str, Any], *, task_queue: str) -> dict[str, Any]:
+    memo = _temporal_memo(entity_type="test_run", run_id=run_id, task_queue=task_queue)
+    try:
+        from sqlmodel import Session
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import TestRun
+
+        with Session(engine) as session:
+            run = session.get(TestRun, run_id)
+            return {
+                **memo,
+                **_temporal_memo(
+                    project_id=getattr(run, "project_id", None) or payload.get("project_id"),
+                    spec_name=getattr(run, "spec_name", None) or payload.get("spec_name"),
+                    test_name=getattr(run, "test_name", None) or payload.get("test_name"),
+                    browser=getattr(run, "browser", None) or payload.get("browser"),
+                ),
+            }
+    except Exception:
+        return {**memo, **_temporal_memo(project_id=payload.get("project_id"), spec_name=payload.get("spec_name"))}
+
+
+def _autopilot_memo(session_id: str, *, task_queue: str) -> dict[str, Any]:
+    memo = _temporal_memo(entity_type="autopilot", session_id=session_id, task_queue=task_queue)
+    try:
+        from sqlmodel import Session
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AutoPilotSession
+
+        with Session(engine) as session:
+            autopilot = session.get(AutoPilotSession, session_id)
+            return {
+                **memo,
+                **_temporal_memo(
+                    project_id=getattr(autopilot, "project_id", None),
+                    current_phase=getattr(autopilot, "current_phase", None),
+                ),
+            }
+    except Exception:
+        return memo
+
+
+def _domain_job_memo(job_type: str, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    memo = _temporal_memo(entity_type="domain_job", job_type=job_type, job_id=job_id)
+    try:
+        from sqlmodel import Session
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import DomainJob
+
+        with Session(engine) as session:
+            job = session.get(DomainJob, job_id)
+            return {
+                **memo,
+                **_temporal_memo(
+                    project_id=getattr(job, "project_id", None) or payload.get("project_id"),
+                    task_queue=settings.temporal_workflow_task_queue,
+                ),
+            }
+    except Exception:
+        return {**memo, **_temporal_memo(project_id=payload.get("project_id"))}
 
 
 async def describe_temporal_task_queue(task_queue: str) -> dict[str, Any]:
@@ -103,6 +234,7 @@ async def start_autonomous_mission_workflow(mission_id: str) -> TemporalWorkflow
         {"mission_id": mission_id},
         id=workflow_id,
         task_queue=settings.temporal_task_queue,
+        memo=_temporal_memo(entity_type="autonomous_mission", mission_id=mission_id),
     )
     logger.info(
         "Started autonomous mission workflow %s for mission %s", workflow_id, mission_id
@@ -121,6 +253,7 @@ async def start_custom_workflow_run(run_id: str) -> TemporalWorkflowStart:
         {"run_id": run_id},
         id=workflow_id,
         task_queue=settings.temporal_workflow_task_queue,
+        memo=_custom_workflow_run_memo(run_id),
     )
     logger.info("Started custom workflow Temporal run %s for %s", workflow_id, run_id)
     return TemporalWorkflowStart(
@@ -142,6 +275,7 @@ async def start_agent_run_workflow(
         {"run_id": run_id},
         id=workflow_id,
         task_queue=selected_task_queue,
+        memo=_agent_run_memo(run_id, task_queue=selected_task_queue),
     )
     logger.info(
         "Started agent run Temporal workflow %s for %s task_queue=%s",
@@ -169,6 +303,7 @@ async def start_test_run_workflow(
         {"run_id": run_id, **payload},
         id=workflow_id,
         task_queue=selected_task_queue,
+        memo=_test_run_memo(run_id, payload, task_queue=selected_task_queue),
     )
     logger.info(
         "Started test run Temporal workflow %s for %s task_queue=%s",
@@ -195,6 +330,7 @@ async def start_autopilot_workflow(
         {"session_id": session_id},
         id=workflow_id,
         task_queue=selected_task_queue,
+        memo=_autopilot_memo(session_id, task_queue=selected_task_queue),
     )
     logger.info(
         "Started AutoPilot Temporal workflow %s for %s task_queue=%s",
@@ -216,6 +352,7 @@ async def start_domain_job_workflow(job_type: str, job_id: str, payload: dict[st
         {"job_type": job_type, "job_id": job_id, **payload},
         id=workflow_id,
         task_queue=settings.temporal_workflow_task_queue,
+        memo=_domain_job_memo(job_type, job_id, payload),
     )
     logger.info("Started domain job Temporal workflow %s for %s", workflow_id, job_id)
     return TemporalWorkflowStart(
@@ -519,6 +656,12 @@ async def get_custom_workflow_temporal_diagnostics(
         ) from exc
 
     activities = _merge_pending_activity_history(_parse_activity_history(events), description)
+    product_run_id = _custom_workflow_product_run_id(workflow_id)
+    timeline = _build_custom_workflow_temporal_timeline(
+        activities,
+        _custom_workflow_step_context(product_run_id) if product_run_id else {},
+        run_id=product_run_id,
+    )
     workflow_meta = _parse_workflow_history(events, description)
     failures = [activity for activity in activities if activity.get("last_failure")]
     retry_count = sum(
@@ -532,6 +675,7 @@ async def get_custom_workflow_temporal_diagnostics(
         "workflow_status": (
             getattr(status, "name", str(status)) if status is not None else None
         ),
+        "timeline": timeline,
         "activities": activities,
         "summary": {
             "total_activities": len(activities),
@@ -1007,6 +1151,165 @@ def _parse_workflow_task_failures(events: list[Any]) -> list[dict[str, Any]]:
             }
         )
     return failures
+
+
+def _custom_workflow_product_run_id(workflow_id: str) -> str | None:
+    prefix = "custom-workflow-run-"
+    return workflow_id[len(prefix):] if workflow_id.startswith(prefix) else None
+
+
+def _parse_custom_workflow_step_activity_id(
+    activity_id: str | None,
+    *,
+    run_id: str | None = None,
+) -> dict[str, Any] | None:
+    if not activity_id:
+        return None
+    if run_id:
+        prefix = f"custom-workflow-step-{run_id}-"
+        if not activity_id.startswith(prefix):
+            return None
+        rest = activity_id[len(prefix):]
+    else:
+        match = re.match(r"^custom-workflow-step-(.+)$", activity_id)
+        if not match:
+            return None
+        rest = match.group(1)
+    match = re.match(r"^(\d+)-(.+)-(\d+)-attempt-(\d+)$", rest)
+    if not match:
+        return None
+    return {
+        "step_order": int(match.group(1)),
+        "step_key": match.group(2),
+        "step_id": int(match.group(3)),
+        "attempt": int(match.group(4)),
+    }
+
+
+def _custom_workflow_step_context(run_id: str) -> dict[int, dict[str, Any]]:
+    try:
+        from sqlmodel import Session, select
+
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import WorkflowRunStep
+
+        with Session(engine) as session:
+            steps = session.exec(
+                select(WorkflowRunStep)
+                .where(WorkflowRunStep.run_id == run_id)
+                .order_by(WorkflowRunStep.step_order)
+            ).all()
+            return {
+                int(step.id): {
+                    "step_id": step.id,
+                    "step_key": step.step_key,
+                    "step_order": step.step_order,
+                    "step_label": step.label,
+                    "step_type": step.step_type,
+                    "step_status": step.status,
+                    "error_message": step.error_message,
+                }
+                for step in steps
+                if step.id is not None
+            }
+    except Exception:
+        return {}
+
+
+def _build_custom_workflow_temporal_timeline(
+    activities: list[dict[str, Any]],
+    step_context: dict[int, dict[str, Any]],
+    *,
+    run_id: str | None = None,
+) -> list[dict[str, Any]]:
+    timeline: list[dict[str, Any]] = []
+    for activity in activities:
+        activity_type = str(activity.get("activity_type") or "")
+        if activity_type != "execute_custom_workflow_step":
+            timeline.append(_activity_timeline_item(activity, None, None))
+            continue
+        parsed = _parse_custom_workflow_step_activity_id(str(activity.get("activity_id") or ""), run_id=run_id)
+        step = step_context.get(int(parsed["step_id"])) if parsed else None
+        timeline.append(_activity_timeline_item(activity, parsed, step))
+    return timeline
+
+
+def _activity_timeline_item(
+    activity: dict[str, Any],
+    parsed: dict[str, Any] | None,
+    step: dict[str, Any] | None,
+) -> dict[str, Any]:
+    status = str(activity.get("status") or "unknown")
+    step_label = (
+        (step or {}).get("step_label")
+        or (step or {}).get("step_key")
+        or (parsed or {}).get("step_key")
+        or _activity_label(str(activity.get("activity_type") or activity.get("activity_id") or "activity"))
+    )
+    step_order = (step or {}).get("step_order")
+    if step_order is None and parsed:
+        step_order = parsed.get("step_order")
+    display_order = int(step_order) + 1 if step_order is not None else None
+    title = f"Step {display_order}: {step_label}" if display_order is not None else str(step_label)
+    duration_seconds = _duration_seconds(activity.get("started_at") or activity.get("scheduled_at"), activity.get("completed_at"))
+    attempt = (parsed or {}).get("attempt") or activity.get("attempt_count")
+    failure_summary = activity.get("failure_message") or activity.get("last_failure")
+    message = _timeline_message(status, attempt, duration_seconds, failure_summary)
+    return {
+        "title": title,
+        "message": message,
+        "status": status,
+        "step_label": step_label,
+        "step_key": (step or {}).get("step_key") or (parsed or {}).get("step_key"),
+        "step_type": (step or {}).get("step_type") or activity.get("activity_type"),
+        "step_id": (step or {}).get("step_id") or (parsed or {}).get("step_id"),
+        "step_order": step_order,
+        "attempt": attempt,
+        "duration_seconds": duration_seconds,
+        "started_at": activity.get("started_at"),
+        "completed_at": activity.get("completed_at"),
+        "scheduled_at": activity.get("scheduled_at"),
+        "failure_summary": failure_summary,
+        "raw_activity_id": activity.get("activity_id"),
+        "last_event_type": activity.get("last_event_type"),
+        "worker_identity": activity.get("last_worker_identity"),
+    }
+
+
+def _timeline_message(
+    status: str,
+    attempt: Any,
+    duration_seconds: int | None,
+    failure_summary: Any,
+) -> str:
+    attempt_text = f"Attempt {attempt}" if attempt else "Activity"
+    duration_text = f" after {duration_seconds}s" if duration_seconds is not None else ""
+    if status == "completed":
+        return f"{attempt_text} completed{duration_text}."
+    if status in {"failed", "timed_out"}:
+        suffix = f": {failure_summary}" if failure_summary else "."
+        return f"{attempt_text} {status.replace('_', ' ')}{duration_text}{suffix}"
+    if status == "started":
+        return f"{attempt_text} is running."
+    if status == "scheduled":
+        return f"{attempt_text} is scheduled."
+    return f"{attempt_text} status is {status.replace('_', ' ')}."
+
+
+def _duration_seconds(started_at: Any, completed_at: Any) -> int | None:
+    if not started_at or not completed_at:
+        return None
+    try:
+        start = datetime.fromisoformat(str(started_at).replace("Z", "+00:00"))
+        end = datetime.fromisoformat(str(completed_at).replace("Z", "+00:00"))
+        return max(0, int((end - start).total_seconds()))
+    except Exception:
+        return None
+
+
+def _activity_label(value: str) -> str:
+    label = value.replace("_", " ").replace("-", " ").strip()
+    return label[:1].upper() + label[1:] if label else "Temporal activity"
 
 
 def _agent_run_worker_registration_failure(

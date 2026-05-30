@@ -125,7 +125,15 @@ class FullNativePipeline:
             owner_label=owner_label,
             model_tier=self.model_tier,
         )
-        self.native_healer = NativeHealer()
+        self.native_healer = NativeHealer(
+            on_tool_use=on_tool_use,
+            on_progress=on_progress,
+            on_task_enqueued=on_task_enqueued,
+            owner_type=owner_type,
+            owner_id=owner_id,
+            owner_label=owner_label,
+            model_tier=self.model_tier,
+        )
         self.api_generator = NativeApiGenerator()
         self.api_healer = NativeApiHealer()
         self.test_design_agent = TestDesignAgent()
@@ -299,7 +307,13 @@ class FullNativePipeline:
 
                 if result.passed:
                     logger.info("Test PASSED!")
-                    stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+                    stability_result = await self._verify_stability_or_harden(
+                        test_path=test_path,
+                        run_dir=run_dir,
+                        browser=browser,
+                        success_stage="completed",
+                        attempts=0,
+                    )
                     if stability_result:
                         return stability_result
                     (run_dir / "status.txt").write_text("passed")
@@ -483,7 +497,13 @@ class FullNativePipeline:
                     spec_path=str(resolved_spec_path),
                     test_path=str(test_path),
                 )
-                stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+                stability_result = await self._verify_stability_or_harden(
+                    test_path=test_path,
+                    run_dir=run_dir,
+                    browser=browser,
+                    success_stage="completed",
+                    attempts=0,
+                )
                 if stability_result:
                     return stability_result
                 (run_dir / "status.txt").write_text("passed")
@@ -647,9 +667,10 @@ class FullNativePipeline:
     ) -> dict:
         """Create failure_diagnosis.json and publish compact run summary."""
         report_progress("healing", "Classifying failure before healing...")
+        failure_context = self._build_structured_failure_context(test_path=test_path, run_dir=run_dir, result=result)
         diagnosis = self.failure_triage_agent.diagnose(
             test_path=test_path,
-            error_output=result.output,
+            error_output=f"{result.output}\n\n{failure_context}",
             design=design,
             critic=critic,
             run_dir=run_dir,
@@ -682,6 +703,97 @@ class FullNativePipeline:
             self._publish_agentic_summary(run_dir)
             return {"success": False, "test_path": str(test_path), "attempts": 0, "stage": "stability_failed"}
         return None
+
+    async def _verify_stability_or_harden(
+        self,
+        *,
+        test_path: Path,
+        run_dir: Path,
+        browser: str,
+        success_stage: str,
+        attempts: int,
+    ) -> dict | None:
+        """Run stability gate and give the healer one flake-hardening pass before failing."""
+        stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+        if not stability_result:
+            return None
+
+        report_progress("healing", "Hardening flaky healed test before final failure...", healing_attempt=attempts + 1)
+        context = self._build_stability_failure_context(run_dir)
+        try:
+            fixed_code = await self.native_healer.heal_test(
+                str(test_path),
+                error_log=context,
+                timeout_seconds=int(os.environ.get("HEALER_ATTEMPT_TIMEOUT_SECONDS", "600")),
+                diagnosis_context=(
+                    "Stability verification found this test flaky after an initial pass. "
+                    "Make one targeted hardening pass for timing, selector durability, and deterministic assertions."
+                ),
+                memory_run_id=getattr(self, "_memory_run_id", None),
+            )
+        except HealerTimeoutError:
+            logger.error("Flake-hardening healer timed out; keeping stability failure")
+            stability_result["attempts"] = attempts
+            return stability_result
+        except Exception as exc:
+            logger.warning(f"Flake-hardening healer failed: {exc}")
+            stability_result["attempts"] = attempts
+            return stability_result
+
+        if not fixed_code:
+            logger.warning("Flake-hardening healer returned no changes")
+            stability_result["attempts"] = attempts
+            return stability_result
+
+        rerun = self._run_test(str(test_path), str(run_dir), browser)
+        if not rerun.passed:
+            logger.warning("Flake-hardening changes did not pass the immediate rerun")
+            stability_result["attempts"] = attempts + 1
+            return stability_result
+
+        second_stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+        if second_stability_result:
+            second_stability_result["attempts"] = attempts + 1
+            return second_stability_result
+
+        (run_dir / "status.txt").write_text("passed")
+        validation_result = {
+            "status": "success",
+            "mode": "native_healer_stability_hardening",
+            "iterations": attempts + 1,
+            "testFile": str(test_path),
+            "browser": browser,
+            "message": "Test passed after one flake-hardening heal attempt",
+        }
+        (run_dir / "validation.json").write_text(json.dumps(validation_result, indent=2))
+        self._publish_agentic_summary(run_dir)
+        return {
+            "success": True,
+            "test_path": str(test_path),
+            "attempts": attempts + 1,
+            "stage": success_stage,
+            "stability_hardened": True,
+        }
+
+    def _build_stability_failure_context(self, run_dir: Path) -> str:
+        report = self._read_json_file(run_dir / "stability_report.json") or {}
+        failed_attempts = [
+            attempt for attempt in report.get("attempts", []) if not attempt.get("passed")
+        ]
+        lines = [
+            "## Stability Failure Context",
+            f"Status: {report.get('status', 'unknown')}",
+            f"Total reruns: {report.get('total_runs', 0)}",
+            f"Failed reruns: {report.get('failed_runs', 0)}",
+        ]
+        for attempt in failed_attempts[:3]:
+            lines.append(
+                f"- Attempt {attempt.get('attempt')}: exit={attempt.get('exit_code')} "
+                f"summary={attempt.get('error_summary') or 'none'}"
+            )
+            if attempt.get("output_tail"):
+                lines.append(f"  Output tail: {attempt.get('output_tail')}")
+        return "\n".join(lines)
 
     def _publish_agentic_summary(self, run_dir: Path) -> dict:
         """Persist compact agentic summary locally and send it to API when available."""
@@ -745,7 +857,7 @@ class FullNativePipeline:
         report_progress("healing", "Starting native healing...", healing_attempt=1)
 
         max_attempts = 3
-        error_log = result.output
+        error_log = self._build_structured_failure_context(test_path=test_path, run_dir=run_dir, result=result)
         diagnosis_context = self.failure_triage_agent.condensed_context(diagnosis)
 
         for attempt in range(1, max_attempts + 1):
@@ -767,9 +879,14 @@ class FullNativePipeline:
 
                     if result.passed:
                         logger.info(f"Healed Test PASSED (after {attempt} attempt(s))!")
-                        stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+                        stability_result = await self._verify_stability_or_harden(
+                            test_path=test_path,
+                            run_dir=run_dir,
+                            browser=browser,
+                            success_stage="healed",
+                            attempts=attempt,
+                        )
                         if stability_result:
-                            stability_result["attempts"] = attempt
                             return stability_result
                         (run_dir / "status.txt").write_text("passed")
 
@@ -786,7 +903,11 @@ class FullNativePipeline:
 
                         return {"success": True, "test_path": str(test_path), "attempts": attempt, "stage": "healed"}
                     else:
-                        error_log = result.output
+                        error_log = self._build_structured_failure_context(
+                            test_path=test_path,
+                            run_dir=run_dir,
+                            result=result,
+                        )
                         if attempt < max_attempts:
                             logger.warning("Test still failing, trying again...")
                 else:
@@ -897,7 +1018,7 @@ class FullNativePipeline:
             report_progress("healing", "Starting API test healing...", healing_attempt=1)
 
             max_heal_attempts = 3
-            error_log = result.output
+            error_log = self._build_structured_failure_context(test_path=test_path, run_dir=run_dir, result=result)
 
             for attempt in range(1, max_heal_attempts + 1):
                 logger.info(f"Healing attempt {attempt}/{max_heal_attempts}...")
@@ -906,7 +1027,12 @@ class FullNativePipeline:
                 )
 
                 try:
-                    fixed_code = await self.api_healer.heal_test(str(test_path), error_log, spec_content)
+                    fixed_code = await self.api_healer.heal_test(
+                        str(test_path),
+                        error_log,
+                        spec_content,
+                        failure_context=error_log,
+                    )
 
                     if fixed_code:
                         logger.info("Re-running healed API test...")
@@ -935,7 +1061,11 @@ class FullNativePipeline:
                                 "test_type": "api",
                             }
                         else:
-                            error_log = result.output
+                            error_log = self._build_structured_failure_context(
+                                test_path=test_path,
+                                run_dir=run_dir,
+                                result=result,
+                            )
                             if attempt < max_heal_attempts:
                                 logger.warning("API test still failing, trying again...")
                     else:
@@ -995,9 +1125,14 @@ class FullNativePipeline:
         )
 
         if result.get("status") == "success":
-            stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+            stability_result = await self._verify_stability_or_harden(
+                test_path=test_path,
+                run_dir=run_dir,
+                browser=browser,
+                success_stage="healed",
+                attempts=result.get("iterations", 0),
+            )
             if stability_result:
-                stability_result["attempts"] = result.get("iterations", 0)
                 return stability_result
             (run_dir / "status.txt").write_text("passed")
             self._publish_agentic_summary(run_dir)
@@ -1041,13 +1176,20 @@ class FullNativePipeline:
             )
 
             output = result.stdout + result.stderr
-            passed = result.returncode == 0 and "passed" in output
+            json_results = self._read_json_file(json_results_file)
+            json_summary = self._summarize_playwright_json(json_results) if json_results else {}
+            if json_summary:
+                passed = result.returncode == 0 and json_summary.get("failed", 0) == 0
+                error_summary = "" if passed else (json_summary.get("error_summary") or self._summarize_error(output))
+            else:
+                passed = result.returncode == 0 and "passed" in output
+                error_summary = self._summarize_error(output) if not passed else ""
 
             return TestResult(
                 passed=passed,
                 exit_code=result.returncode,
                 output=output,
-                error_summary=self._summarize_error(output) if not passed else "",
+                error_summary=error_summary,
             )
 
         except subprocess.TimeoutExpired:
@@ -1059,6 +1201,157 @@ class FullNativePipeline:
             )
         except Exception as e:
             return TestResult(passed=False, exit_code=-1, output=str(e), error_summary=str(e)[:100])
+
+    def _read_json_file(self, path: Path) -> dict[str, Any] | None:
+        try:
+            if path.exists():
+                data = json.loads(path.read_text())
+                return data if isinstance(data, dict) else None
+        except Exception as exc:
+            logger.debug(f"Could not read JSON artifact {path}: {exc}")
+        return None
+
+    def _summarize_playwright_json(self, data: dict[str, Any] | None) -> dict[str, Any]:
+        """Extract pass/fail/error details from Playwright JSON reporter output."""
+        if not data:
+            return {}
+
+        failed = 0
+        passed = 0
+        skipped = 0
+        errors: list[str] = []
+
+        def visit(node: Any) -> None:
+            nonlocal failed, passed, skipped
+            if isinstance(node, dict):
+                status = str(node.get("status") or "").lower()
+                if status in {"failed", "timedout", "interrupted", "unexpected"}:
+                    failed += 1
+                elif status in {"passed", "expected"}:
+                    passed += 1
+                elif status in {"skipped"}:
+                    skipped += 1
+
+                error = node.get("error")
+                if isinstance(error, dict):
+                    message = error.get("message") or error.get("value")
+                    if message:
+                        errors.append(str(message))
+                for item in node.get("errors") or []:
+                    if isinstance(item, dict):
+                        message = item.get("message") or item.get("value")
+                        if message:
+                            errors.append(str(message))
+                    elif item:
+                        errors.append(str(item))
+                for key in ("suites", "specs", "tests", "results"):
+                    for child in node.get(key) or []:
+                        visit(child)
+            elif isinstance(node, list):
+                for child in node:
+                    visit(child)
+
+        visit(data)
+        top_status = str(data.get("status") or "").lower()
+        if top_status in {"failed", "timedout", "interrupted"} and failed == 0:
+            failed = 1
+        return {
+            "passed": passed,
+            "failed": failed,
+            "skipped": skipped,
+            "status": top_status,
+            "error_summary": (errors[0].splitlines()[0][:200] if errors else ""),
+            "errors": errors[:5],
+        }
+
+    def _build_structured_failure_context(self, *, test_path: Path, run_dir: Path, result: TestResult) -> str:
+        """Build compact healer context from Playwright JSON, output tails, code frame, and attachments."""
+        json_results = self._read_json_file(run_dir / "test-results.json")
+        summary = self._summarize_playwright_json(json_results) if json_results else {}
+        attachments = self._collect_playwright_attachments(run_dir, json_results)
+        code_frame = self._extract_code_frame(test_path, result.output)
+        error_contexts = [
+            f"{path}: {path.read_text(errors='ignore')[:2000]}"
+            for path in sorted((run_dir / "test-results").glob("**/error-context.md"))[:3]
+            if path.exists()
+        ]
+        sections = [
+            "## Structured Failure Context",
+            f"Test file: {test_path}",
+            f"Exit code: {result.exit_code}",
+            f"Error summary: {result.error_summary or 'unknown'}",
+        ]
+        if summary:
+            sections.append(
+                "Playwright JSON summary: "
+                + json.dumps(
+                    {
+                        "status": summary.get("status"),
+                        "passed": summary.get("passed"),
+                        "failed": summary.get("failed"),
+                        "skipped": summary.get("skipped"),
+                        "errors": summary.get("errors"),
+                    },
+                    indent=2,
+                )
+            )
+        if code_frame:
+            sections.append(f"Code frame:\n```typescript\n{code_frame}\n```")
+        if attachments:
+            sections.append("Attachments:\n" + "\n".join(f"- {item}" for item in attachments[:10]))
+        if error_contexts:
+            sections.append("Error context files:\n" + "\n\n".join(error_contexts))
+        stdout_tail = result.output[-6000:] if result.output else ""
+        if stdout_tail:
+            sections.append(f"Stdout/stderr tail:\n```\n{stdout_tail}\n```")
+        return "\n\n".join(sections)
+
+    def _collect_playwright_attachments(self, run_dir: Path, json_results: dict[str, Any] | None) -> list[str]:
+        attachments: list[str] = []
+
+        def visit(node: Any) -> None:
+            if isinstance(node, dict):
+                for attachment in node.get("attachments") or []:
+                    if not isinstance(attachment, dict):
+                        continue
+                    name = attachment.get("name") or "attachment"
+                    path = attachment.get("path")
+                    content_type = attachment.get("contentType") or attachment.get("content_type")
+                    attachments.append(f"{name} ({content_type or 'unknown'}): {path or 'inline'}")
+                for key in ("suites", "specs", "tests", "results"):
+                    for child in node.get(key) or []:
+                        visit(child)
+            elif isinstance(node, list):
+                for child in node:
+                    visit(child)
+
+        visit(json_results or {})
+        for path in sorted((run_dir / "test-results").glob("**/*"))[:50]:
+            if path.is_file() and path.name != "error-context.md":
+                attachments.append(str(path))
+        return attachments
+
+    def _extract_code_frame(self, test_path: Path, output: str) -> str:
+        if not test_path.exists():
+            return ""
+        line_no = None
+        match = re.search(rf"{re.escape(str(test_path))}:(\d+):\d+", output or "")
+        if not match:
+            match = re.search(r":(\d+):\d+\)?", output or "")
+        if match:
+            try:
+                line_no = int(match.group(1))
+            except ValueError:
+                line_no = None
+        try:
+            lines = test_path.read_text().splitlines()
+        except Exception:
+            return ""
+        if line_no is None:
+            return "\n".join(lines[:80])
+        start = max(line_no - 4, 1)
+        end = min(line_no + 4, len(lines))
+        return "\n".join(f"{idx}: {lines[idx - 1]}" for idx in range(start, end + 1))
 
     def _resolve_includes(self, content: str, spec_path: str = None) -> str:
         """

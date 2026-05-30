@@ -46,7 +46,14 @@ from orchestrator.api.models_db import (
 from orchestrator.services import custom_workflow_activities, custom_workflow_worker
 from orchestrator.api.time_utils import utc_iso
 from orchestrator.services.scheduler import execute_workflow_schedule
-from orchestrator.services.temporal_client import TemporalUnavailableError, TemporalWorkflowStart, _parse_activity_history, _parse_workflow_history
+from orchestrator.services.temporal_client import (
+    TemporalUnavailableError,
+    TemporalWorkflowStart,
+    _build_custom_workflow_temporal_timeline,
+    _parse_activity_history,
+    _parse_custom_workflow_step_activity_id,
+    _parse_workflow_history,
+)
 from orchestrator.services.workflow_operations import (
     create_workflow_revision,
     emit_workflow_event,
@@ -1391,6 +1398,72 @@ def test_temporal_activity_history_parser_summarizes_attempts_and_failure():
             "failure_message": "final failure",
             "failure_stack_trace": "",
             "timeout_type": None,
+        }
+    ]
+
+
+def test_temporal_custom_workflow_activity_id_parser_extracts_step_metadata():
+    run_id = "run-123"
+    parsed = _parse_custom_workflow_step_activity_id(
+        "custom-workflow-step-run-123-2-browser-explore-42-attempt-3",
+        run_id=run_id,
+    )
+
+    assert parsed == {
+        "step_order": 2,
+        "step_key": "browser-explore",
+        "step_id": 42,
+        "attempt": 3,
+    }
+
+
+def test_temporal_custom_workflow_timeline_enriches_activity_with_step_context():
+    activities = [
+        {
+            "activity_id": "custom-workflow-step-run-123-1-run-agent-42-attempt-2",
+            "activity_type": "execute_custom_workflow_step",
+            "status": "failed",
+            "scheduled_at": "2026-05-30T10:00:00Z",
+            "started_at": "2026-05-30T10:00:05Z",
+            "completed_at": "2026-05-30T10:00:47Z",
+            "attempt_count": 2,
+            "last_failure": "Agent returned no report",
+            "failure_message": "Agent returned no report",
+            "last_event_type": "EVENT_TYPE_ACTIVITY_TASK_FAILED",
+        }
+    ]
+    steps = {
+        42: {
+            "step_id": 42,
+            "step_key": "run-agent",
+            "step_order": 1,
+            "step_label": "Run browser agent",
+            "step_type": "agent",
+            "step_status": "failed",
+        }
+    }
+
+    timeline = _build_custom_workflow_temporal_timeline(activities, steps, run_id="run-123")
+
+    assert timeline == [
+        {
+            "title": "Step 2: Run browser agent",
+            "message": "Attempt 2 failed after 42s: Agent returned no report",
+            "status": "failed",
+            "step_label": "Run browser agent",
+            "step_key": "run-agent",
+            "step_type": "agent",
+            "step_id": 42,
+            "step_order": 1,
+            "attempt": 2,
+            "duration_seconds": 42,
+            "started_at": "2026-05-30T10:00:05Z",
+            "completed_at": "2026-05-30T10:00:47Z",
+            "scheduled_at": "2026-05-30T10:00:00Z",
+            "failure_summary": "Agent returned no report",
+            "raw_activity_id": "custom-workflow-step-run-123-1-run-agent-42-attempt-2",
+            "last_event_type": "EVENT_TYPE_ACTIVITY_TASK_FAILED",
+            "worker_identity": None,
         }
     ]
 

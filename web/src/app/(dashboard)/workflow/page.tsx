@@ -205,6 +205,27 @@ interface WorkflowTemporalActivity {
   failure_message?: string | null;
   failure_stack_trace?: string | null;
   timeout_type?: string | null;
+  last_worker_identity?: string | null;
+}
+
+interface WorkflowTemporalTimelineItem {
+  title: string;
+  message: string;
+  status: string;
+  step_label?: string | null;
+  step_key?: string | null;
+  step_type?: string | null;
+  step_id?: number | null;
+  step_order?: number | null;
+  attempt?: number | null;
+  duration_seconds?: number | null;
+  scheduled_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  failure_summary?: string | null;
+  raw_activity_id?: string | null;
+  last_event_type?: string | null;
+  worker_identity?: string | null;
 }
 
 interface WorkflowDiagnostics {
@@ -222,6 +243,7 @@ interface WorkflowDiagnostics {
   history_first_event_at?: string | null;
   history_last_event_at?: string | null;
   close_event_type?: string | null;
+  timeline?: WorkflowTemporalTimelineItem[];
   activities: WorkflowTemporalActivity[];
   summary: {
     total_activities: number;
@@ -802,6 +824,14 @@ function parseTemporalStepActivity(activity: WorkflowTemporalActivity, runId?: s
 
 function eventLabel(eventType: string) {
   return pretty(eventType.replace(/^workflow\./, '').replace(/^schedule_/, 'schedule_'));
+}
+
+function durationLabel(seconds?: number | null) {
+  if (seconds === null || seconds === undefined) return '';
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remaining = seconds % 60;
+  return remaining ? `${minutes}m ${remaining}s` : `${minutes}m`;
 }
 
 type RunStepRecovery = {
@@ -3956,12 +3986,15 @@ export default function WorkflowPage() {
   function copySelectedRunDiagnostics() {
     if (!selectedRun) return;
     const schedule = schedules.find(item => item.id === selectedRun.trigger_id) || null;
+    const temporal = runDiagnosticsById[selectedRun.id] || null;
     const payload = {
       generated_at: new Date().toISOString(),
       run: selectedRun,
       steps: selectedRunSteps,
       audit_trail: runEventsById[selectedRun.id] || [],
-      temporal: runDiagnosticsById[selectedRun.id] || null,
+      readable_temporal_timeline: temporal?.timeline || [],
+      temporal_summary: temporal?.summary || null,
+      temporal,
       schedule,
       recovery_policies: selectedRunSteps.map(step => ({
         step_id: step.id,
@@ -4141,54 +4174,94 @@ export default function WorkflowPage() {
         {diagnostics?.summary?.last_failure && (
           <FieldError>{diagnostics.summary.last_failure}</FieldError>
         )}
+        {diagnostics?.timeline?.length ? (
+          <div style={temporalTimelineStyle}>
+            {diagnostics.timeline.map((item, index) => (
+              <div key={`${item.raw_activity_id || item.title}-${index}`} style={temporalTimelineItemStyle}>
+                <div style={temporalTimelineRailStyle}>
+                  <Clock size={13} />
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
+                    <div style={{ fontWeight: 750 }}>{item.title}</div>
+                    <StatusBadge status={item.status} />
+                    {item.attempt ? <span style={workflowMetaPillStyle}>Attempt {item.attempt}</span> : null}
+                    {item.duration_seconds !== null && item.duration_seconds !== undefined ? (
+                      <span style={workflowMetaPillStyle}>{durationLabel(item.duration_seconds)}</span>
+                    ) : null}
+                  </div>
+                  <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45, marginTop: '0.25rem' }}>
+                    {item.message}
+                  </div>
+                  <div className="workflow-meta-row" style={{ marginTop: '0.4rem' }}>
+                    {item.step_key && <span style={workflowMetaPillStyle}>{item.step_key}</span>}
+                    {item.step_type && <span style={workflowMetaPillStyle}>{pretty(item.step_type)}</span>}
+                    {item.started_at && <span style={workflowMetaPillStyle}>Started {timeAgo(item.started_at)}</span>}
+                    {item.completed_at && <span style={workflowMetaPillStyle}>Completed {timeAgo(item.completed_at)}</span>}
+                    {item.worker_identity && <span style={workflowMetaPillStyle}>Worker {item.worker_identity}</span>}
+                  </div>
+                  {item.failure_summary && <FieldError>{item.failure_summary}</FieldError>}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : diagnostics ? (
+          <div style={{ ...emptyDiagnosticStyle, marginTop: '0.75rem' }}>
+            No readable Temporal timeline has been built for this run yet.
+          </div>
+        ) : null}
         {diagnostics?.activities?.length ? (
-          <Table style={{ marginTop: '0.85rem' }}>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Activity</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Attempts</TableHead>
-                <TableHead>Event IDs</TableHead>
-                <TableHead>Started</TableHead>
-                <TableHead>Completed</TableHead>
-                <TableHead>Failure</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {diagnostics.activities.map(activity => (
-                <TableRow key={`${activity.activity_id}-${activity.scheduled_at}`}>
-                  <TableCell>
-                    <div style={{ fontWeight: 650 }}>{activity.activity_type || activity.activity_id}</div>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.72rem' }}>{activity.activity_id}</div>
-                    {activity.last_event_type && <div style={{ color: 'var(--text-secondary)', fontSize: '0.72rem' }}>{eventLabel(activity.last_event_type)}</div>}
-                  </TableCell>
-                  <TableCell><StatusBadge status={activity.status} /></TableCell>
-                  <TableCell>{activity.attempt_count ?? 0}</TableCell>
-                  <TableCell>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
-                      scheduled {activity.scheduled_event_id ?? '-'}
-                    </div>
-                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
-                      started {activity.started_event_id ?? '-'}
-                    </div>
-                  </TableCell>
-                  <TableCell>{activity.started_at ? timeAgo(activity.started_at) : '-'}</TableCell>
-                  <TableCell>{activity.completed_at ? timeAgo(activity.completed_at) : '-'}</TableCell>
-                  <TableCell>
-                    {activity.failure_message || activity.last_failure ? (
-                      <details style={detailDisclosureStyle}>
-                        <summary style={summaryStyle}>{activity.failure_type || activity.timeout_type || 'Failure'}</summary>
-                        <FieldError>{activity.failure_message || activity.last_failure}</FieldError>
-                        {activity.failure_stack_trace && <pre style={preStyle}>{activity.failure_stack_trace}</pre>}
-                      </details>
-                    ) : (
-                      <span style={emptyDiagnosticStyle}>-</span>
-                    )}
-                  </TableCell>
+          <details style={{ ...detailDisclosureStyle, marginTop: '0.85rem' }}>
+            <summary style={summaryStyle}>Raw Temporal details</summary>
+            <Table style={{ marginTop: '0.85rem' }}>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Activity</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Attempts</TableHead>
+                  <TableHead>Event IDs</TableHead>
+                  <TableHead>Started</TableHead>
+                  <TableHead>Completed</TableHead>
+                  <TableHead>Failure</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {diagnostics.activities.map(activity => (
+                  <TableRow key={`${activity.activity_id}-${activity.scheduled_at}`}>
+                    <TableCell>
+                      <div style={{ fontWeight: 650 }}>{activity.activity_type || activity.activity_id}</div>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: '0.72rem' }}>{activity.activity_id}</div>
+                      {activity.last_event_type && <div style={{ color: 'var(--text-secondary)', fontSize: '0.72rem' }}>{eventLabel(activity.last_event_type)}</div>}
+                      {activity.last_worker_identity && <div style={{ color: 'var(--text-secondary)', fontSize: '0.72rem' }}>Worker {activity.last_worker_identity}</div>}
+                    </TableCell>
+                    <TableCell><StatusBadge status={activity.status} /></TableCell>
+                    <TableCell>{activity.attempt_count ?? 0}</TableCell>
+                    <TableCell>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
+                        scheduled {activity.scheduled_event_id ?? '-'}
+                      </div>
+                      <div style={{ color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
+                        started {activity.started_event_id ?? '-'}
+                      </div>
+                    </TableCell>
+                    <TableCell>{activity.started_at ? timeAgo(activity.started_at) : '-'}</TableCell>
+                    <TableCell>{activity.completed_at ? timeAgo(activity.completed_at) : '-'}</TableCell>
+                    <TableCell>
+                      {activity.failure_message || activity.last_failure ? (
+                        <details style={detailDisclosureStyle}>
+                          <summary style={summaryStyle}>{activity.failure_type || activity.timeout_type || 'Failure'}</summary>
+                          <FieldError>{activity.failure_message || activity.last_failure}</FieldError>
+                          {activity.failure_stack_trace && <pre style={preStyle}>{activity.failure_stack_trace}</pre>}
+                        </details>
+                      ) : (
+                        <span style={emptyDiagnosticStyle}>-</span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </details>
         ) : (
           <div style={{ ...emptyDiagnosticStyle, marginTop: '0.75rem' }}>
             {diagnostics ? 'No Temporal activity history returned.' : 'Temporal diagnostics have not loaded yet.'}
@@ -5483,6 +5556,32 @@ const detailDisclosureStyle: React.CSSProperties = {
   padding: '0.65rem 0.75rem',
   background: 'rgba(255,255,255,0.015)',
   minWidth: 0,
+};
+
+const temporalTimelineStyle: React.CSSProperties = {
+  display: 'grid',
+  gap: '0.65rem',
+  marginTop: '0.85rem',
+};
+
+const temporalTimelineItemStyle: React.CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '28px minmax(0, 1fr)',
+  gap: '0.6rem',
+  border: '1px solid var(--border-subtle)',
+  borderRadius: 10,
+  padding: '0.75rem',
+  background: 'rgba(255,255,255,0.018)',
+};
+
+const temporalTimelineRailStyle: React.CSSProperties = {
+  width: 28,
+  height: 28,
+  display: 'grid',
+  placeItems: 'center',
+  borderRadius: 8,
+  background: 'rgba(59,130,246,0.14)',
+  color: 'var(--accent)',
 };
 
 const summaryStyle: React.CSSProperties = {

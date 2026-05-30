@@ -1895,7 +1895,7 @@ def _execute_agent_work_item_direct(
                     memory_source_id=item.id,
                     memory_stage="autonomous_mission",
                     model=(mission.config or {}).get("model"),
-                    model_tier=(mission.config or {}).get("model_tier"),
+                    model_tier=(mission.config or {}).get("model_tier") or "tool_deep",
                     agent_name=item.role,
                     hermes_conversation=item.id,
                     metadata={

@@ -8,14 +8,11 @@ import {
     Bot,
     CheckCircle2,
     Clock,
-    FileText,
     GitBranch,
     Loader2,
     PlayCircle,
-    Rocket,
     ShieldAlert,
     Sparkles,
-    TrendingUp,
     XCircle,
 } from 'lucide-react';
 import { PageHeader } from '@/components/ui/page-header';
@@ -44,8 +41,10 @@ function formatPhase(phase: string | null | undefined): string {
 
 function formatAge(iso: string | null | undefined): string {
     if (!iso) return 'Not started';
-    const normalized = iso.endsWith('Z') ? iso : `${iso}Z`;
-    const seconds = Math.max(0, Math.floor((Date.now() - new Date(normalized).getTime()) / 1000));
+    const rawTimestamp = new Date(iso).getTime();
+    const timestamp = Number.isFinite(rawTimestamp) ? rawTimestamp : new Date(`${iso}Z`).getTime();
+    if (!Number.isFinite(timestamp)) return iso;
+    const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
     if (seconds < 60) return 'just now';
     if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
     if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
@@ -84,6 +83,22 @@ function taskDetail(task: AgentQueueTaskSummary): string {
         task.started_at ? formatAge(task.started_at) : null,
     ].filter(Boolean);
     return parts.join(' · ');
+}
+
+function qualityTeamLabel(task: AgentQueueTaskSummary): string {
+    const text = [
+        task.operation_type,
+        task.agent_type,
+        task.progress?.activity_label,
+        task.progress?.phase,
+        task.progress?.message,
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    if (/coverage|rtm|requirement/.test(text)) return 'Coverage';
+    if (/regression|test|run|browser|playwright/.test(text)) return 'Regression';
+    if (/explor|discover|crawl|flow/.test(text)) return 'Exploration';
+    if (/triage|heal|failure|jira|bug/.test(text)) return 'Triage';
+    return 'QA automation';
 }
 
 function PrimaryButton({ href, children, tone = 'primary' }: { href: string; children: React.ReactNode; tone?: 'primary' | 'warning' | 'danger' }) {
@@ -136,41 +151,93 @@ function StatusBadge({ status }: { status: string }) {
     );
 }
 
-function MetricCard({ label, value, detail, icon, tone }: { label: string; value: string | number; detail: string; icon: React.ReactNode; tone: string }) {
+function CompactMetricItem({ label, value, detail, tone }: { label: string; value: string | number; detail: string; tone?: string }) {
     return (
-        <div className="card-elevated command-metric" style={{
-            padding: '1rem',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.85rem',
-            minHeight: 104,
+        <div style={{
+            minWidth: 0,
+            padding: '0.85rem',
+            borderRadius: '8px',
+            background: 'rgba(255, 255, 255, 0.025)',
+            border: '1px solid var(--border-subtle)',
         }}>
-            <div style={{
-                width: 42,
-                height: 42,
-                borderRadius: '8px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                background: `${tone}18`,
-                color: tone,
-                flexShrink: 0,
-            }}>
-                {icon}
+            <div style={{ color: 'var(--text-tertiary)', fontSize: '0.7rem', fontWeight: 750, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                {label}
             </div>
-            <div style={{ minWidth: 0 }}>
-                <div style={{ color: 'var(--text-tertiary)', fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                    {label}
-                </div>
-                <div style={{ color: 'var(--text)', fontSize: '1.55rem', lineHeight: 1.1, fontWeight: 850, marginTop: '0.2rem' }}>
-                    {value}
-                </div>
-                <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginTop: '0.2rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {detail}
-                </div>
+            <div style={{ color: tone || 'var(--text)', fontSize: '1.25rem', lineHeight: 1.15, fontWeight: 850, marginTop: '0.25rem' }}>
+                {value}
+            </div>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.76rem', marginTop: '0.25rem', lineHeight: 1.35 }}>
+                {detail}
             </div>
         </div>
     );
+}
+
+function EmptyState({ icon, title, detail, links }: { icon: React.ReactNode; title: string; detail: string; links?: React.ReactNode }) {
+    return (
+        <div style={{ padding: '2.25rem 1.25rem', color: 'var(--text-secondary)', textAlign: 'center' }}>
+            <div style={{ color: '#22c55e', marginBottom: '0.65rem' }}>{icon}</div>
+            <div style={{ fontWeight: 750, color: 'var(--text)', marginBottom: '0.25rem' }}>{title}</div>
+            <div style={{ fontSize: '0.85rem', lineHeight: 1.45 }}>{detail}</div>
+            {links && (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.8rem', flexWrap: 'wrap', marginTop: '0.85rem', fontSize: '0.8rem', fontWeight: 700 }}>
+                    {links}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function TopRiskRow({
+    href,
+    icon,
+    title,
+    detail,
+    tone = '#f59e0b',
+    action,
+}: {
+    href?: string;
+    icon: React.ReactNode;
+    title: string;
+    detail: React.ReactNode;
+    tone?: string;
+    action?: React.ReactNode;
+}) {
+    const content = (
+        <>
+            <div style={{ minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: tone, fontSize: '0.82rem', fontWeight: 800 }}>
+                    {icon}
+                    {title}
+                </div>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.3rem', lineHeight: 1.45 }}>
+                    {detail}
+                </div>
+            </div>
+            {action || (href ? <ArrowRight size={16} /> : null)}
+        </>
+    );
+
+    const style = {
+        display: 'grid',
+        gridTemplateColumns: 'minmax(0, 1fr) auto',
+        alignItems: 'center',
+        gap: '0.75rem',
+        padding: '0.95rem 1rem',
+        borderBottom: '1px solid var(--border-subtle)',
+        color: 'inherit',
+        textDecoration: 'none',
+    };
+
+    if (href) {
+        return (
+            <Link href={href} className="command-action-row" style={style}>
+                {content}
+            </Link>
+        );
+    }
+
+    return <div className="command-action-row" style={style}>{content}</div>;
 }
 
 function SessionRow({ session, compact = false }: { session: AutoPilotSessionSummary; compact?: boolean }) {
@@ -231,6 +298,7 @@ function SessionRow({ session, compact = false }: { session: AutoPilotSessionSum
 
 function AgentTaskRow({ task }: { task: AgentQueueTaskSummary }) {
     const isOrphaned = task.orphaned || task.owner_terminal || task.heartbeat_alive === false;
+    const teamLabel = qualityTeamLabel(task);
     return (
         <div
             className="command-agent-row"
@@ -261,7 +329,7 @@ function AgentTaskRow({ task }: { task: AgentQueueTaskSummary }) {
                         fontWeight: 750,
                         whiteSpace: 'nowrap',
                     }}>
-                        {isOrphaned ? 'Orphaned task' : task.owner_label || 'Worker task'}
+                        {isOrphaned ? 'Orphaned task' : teamLabel}
                     </span>
                 </div>
                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginTop: '0.35rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -331,9 +399,6 @@ export default function Home() {
     });
     const unlistedBackgroundTaskCount = Math.max(0, (queue?.active ?? 0) - linkedTaskIds.size - backgroundAgentTasks.length);
     const backgroundAgentTaskCount = backgroundAgentTasks.length + unlistedBackgroundTaskCount;
-    const browserSlotsRunning = queue?.browser_pool?.running ?? 0;
-    const browserSlotsAvailable = queue?.browser_pool?.available ?? queue?.available ?? 0;
-    const browserSlotsMax = queue?.browser_pool?.max_browsers ?? queue?.max ?? 0;
     const orphanedTaskCount = queue?.orphaned_tasks ?? runningTasks.filter(task => task.orphaned).length;
     const queueSourceLabel = queue?.mode === 'redis' ? 'Redis workers' : queue?.mode === 'temporal' ? 'Temporal activities' : queue?.mode === 'browser_pool' ? 'Browser pool' : 'Worker pool';
     const temporalWorkflowPollers = queue?.temporal?.worker_pollers?.workflow ?? queue?.temporal?.task_queue_status?.workflow_pollers ?? 0;
@@ -341,9 +406,12 @@ export default function Home() {
     const workersAlive = queue?.mode === 'temporal'
         ? Math.min(Number(temporalWorkflowPollers), Number(temporalActivityPollers))
         : queue?.workers_alive ?? 0;
-    const workersIdle = queue?.workers_idle ?? Math.max(0, workersAlive - (queue?.active ?? 0));
-    const oldestQueuedSeconds = queue?.oldest_queued_age_seconds ?? null;
-    const queueAgeLabel = oldestQueuedSeconds ? ` Oldest queued ${Math.round(oldestQueuedSeconds)}s.` : '';
+    const staleRunningCount = queue?.stale_running ?? 0;
+    const queueUnavailable = queue?.mode === 'temporal' && ((queue?.active ?? 0) > 0 || (queue?.queued ?? 0) > 0) && workersAlive === 0;
+    const queueDegraded = orphanedTaskCount > 0 || staleRunningCount > 0 || queueUnavailable;
+    const hasCoverageData = rtmCoverage > 0 || (workflowProgress?.requirements ?? 0) > 0;
+    const coverageGap = hasCoverageData && rtmCoverage < 60;
+    const hasRecentQualityData = dashboard.total_runs > 0 || hasAnySessions;
     const cleanOrphanedTasks = async () => {
         if (isCleaningOrphans) return;
 
@@ -366,83 +434,298 @@ export default function Home() {
             setIsCleaningOrphans(false);
         }
     };
-    const nextAction = (() => {
+    const qualityHealth = (() => {
         const pendingQuestion = pendingQuestions[0];
+        if (failedSessions.length > 0 || totalFailures > 0) {
+            return {
+                state: 'At Risk',
+                detail: failedSessions[0]?.error_message || `${totalFailures} generated test failure${totalFailures === 1 ? '' : 's'} need review.`,
+                href: failedSessions[0] ? `/autopilot?sessionId=${encodeURIComponent(failedSessions[0].id)}` : '/runs',
+                actionLabel: 'Review failures',
+                tone: 'danger' as const,
+                icon: <XCircle size={20} />,
+            };
+        }
+        if (dashboard.total_runs > 0 && passRate < 60) {
+            return {
+                state: 'At Risk',
+                detail: `Pass rate is ${passRate}%, below the executive quality threshold.`,
+                href: '/analytics',
+                actionLabel: 'Inspect analytics',
+                tone: 'danger' as const,
+                icon: <ShieldAlert size={20} />,
+            };
+        }
         if (pendingQuestion) {
             return {
-                label: 'Review Pending Gate',
-                href: `/autopilot?sessionId=${encodeURIComponent(pendingQuestion.session_id)}`,
+                state: 'Watch',
                 detail: pendingQuestion.question_text,
+                href: `/autopilot?sessionId=${encodeURIComponent(pendingQuestion.session_id)}`,
+                actionLabel: 'Review gate',
                 tone: 'warning' as const,
-                icon: <AlertTriangle size={18} />,
-            };
-        }
-        if (failedSessions.length > 0) {
-            return {
-                label: 'Investigate AutoPilot Failure',
-                href: `/autopilot?sessionId=${encodeURIComponent(failedSessions[0].id)}`,
-                detail: failedSessions[0].error_message || 'A recent autonomous workflow failed.',
-                tone: 'danger' as const,
-                icon: <XCircle size={18} />,
-            };
-        }
-        if (activeSessions.length > 0) {
-            return {
-                label: 'Monitor Active AutoPilot',
-                href: `/autopilot?sessionId=${encodeURIComponent(activeSessions[0].id)}`,
-                detail: `${formatPhase(activeSessions[0].current_phase)} is ${Math.round(activeSessions[0].overall_progress)}% complete.`,
-                tone: 'primary' as const,
-                icon: <PlayCircle size={18} />,
-            };
-        }
-        if (!hasAnySessions) {
-            return {
-                label: 'Start AutoPilot',
-                href: '/autopilot',
-                detail: 'Discover flows, generate requirements, create specs, run tests, and report from one guided workflow.',
-                tone: 'primary' as const,
-                icon: <Rocket size={18} />,
+                icon: <AlertTriangle size={20} />,
             };
         }
         if (dashboard.flaky_test_count > 0) {
             return {
-                label: 'Review Flaky Tests',
+                state: 'Watch',
+                detail: `${dashboard.flaky_test_count} flaky test${dashboard.flaky_test_count === 1 ? '' : 's'} reduce confidence in the current signal.`,
                 href: '/analytics',
-                detail: `${dashboard.flaky_test_count} flaky test${dashboard.flaky_test_count === 1 ? '' : 's'} need attention.`,
+                actionLabel: 'Inspect analytics',
                 tone: 'warning' as const,
-                icon: <ShieldAlert size={18} />,
+                icon: <ShieldAlert size={20} />,
             };
         }
-        if (rtmCoverage > 0 && rtmCoverage < 60) {
+        if (coverageGap) {
             return {
-                label: 'Close Coverage Gaps',
+                state: 'Watch',
+                detail: `RTM coverage is ${Math.round(rtmCoverage)}%, so important requirements may still be untested.`,
                 href: '/coverage',
-                detail: `RTM coverage is ${Math.round(rtmCoverage)}%.`,
+                actionLabel: 'Close coverage gaps',
                 tone: 'warning' as const,
-                icon: <GitBranch size={18} />,
+                icon: <GitBranch size={20} />,
+            };
+        }
+        if (queueDegraded) {
+            return {
+                state: 'Watch',
+                detail: orphanedTaskCount > 0
+                    ? `${orphanedTaskCount} automation task${orphanedTaskCount === 1 ? '' : 's'} need cleanup before queue data is fully trusted.`
+                    : queueUnavailable
+                    ? 'Automation workers are not polling, so fresh quality data may be delayed.'
+                    : `${staleRunningCount} stale automation task${staleRunningCount === 1 ? '' : 's'} may affect confidence.`,
+                href: '/workflow',
+                actionLabel: 'Check workflow',
+                tone: 'warning' as const,
+                icon: <Bot size={20} />,
+            };
+        }
+        if (!hasRecentQualityData) {
+            return {
+                state: 'Watch',
+                detail: 'No recent run data is available yet. Start a QA run to establish baseline health.',
+                href: '/autopilot',
+                actionLabel: 'Start QA run',
+                tone: 'warning' as const,
+                icon: <PlayCircle size={20} />,
+            };
+        }
+        if (activeSessions.length > 0) {
+            return {
+                state: 'Healthy',
+                detail: `${formatPhase(activeSessions[0].current_phase)} is ${Math.round(activeSessions[0].overall_progress)}% complete, with no blocking quality risks surfaced.`,
+                href: `/autopilot?sessionId=${encodeURIComponent(activeSessions[0].id)}`,
+                actionLabel: 'View active run',
+                tone: 'primary' as const,
+                icon: <PlayCircle size={20} />,
             };
         }
         return {
-            label: 'Start AutoPilot',
-            href: '/autopilot',
-            detail: 'Run another guided pass when you are ready to expand coverage.',
+            state: 'Healthy',
+            detail: 'Recent quality signals are clear across failures, review gates, flakiness, and coverage.',
+            href: '/runs',
+            actionLabel: 'View runs',
             tone: 'primary' as const,
-            icon: <Rocket size={18} />,
+            icon: <CheckCircle2 size={20} />,
         };
+    })();
+    const qualitySignals = [
+        {
+            label: 'Failed generated tests',
+            value: totalFailures,
+            detail: totalFailures > 0 ? `${failedSessions.length} failed workflow${failedSessions.length === 1 ? '' : 's'} in recent automation` : 'No generated-test failures in recent sessions',
+            icon: <XCircle size={16} />,
+            href: failedSessions[0] ? `/autopilot?sessionId=${encodeURIComponent(failedSessions[0].id)}` : '/runs',
+            tone: totalFailures > 0 ? 'danger' : 'healthy',
+        },
+        {
+            label: 'Flaky tests',
+            value: dashboard.flaky_test_count,
+            detail: dashboard.flaky_test_count > 0 ? 'Intermittent outcomes need triage' : 'No flaky tests detected',
+            icon: <ShieldAlert size={16} />,
+            href: '/analytics',
+            tone: dashboard.flaky_test_count > 0 ? 'warning' : 'healthy',
+        },
+        {
+            label: 'Pending review gates',
+            value: pendingQuestions.length,
+            detail: pendingQuestions.length > 0 ? `${awaitingInput.length} blocked run${awaitingInput.length === 1 ? '' : 's'} awaiting decision` : 'No review gates blocking progress',
+            icon: <AlertTriangle size={16} />,
+            href: pendingQuestions[0] ? `/autopilot?sessionId=${encodeURIComponent(pendingQuestions[0].session_id)}` : '/workflow',
+            tone: pendingQuestions.length > 0 ? 'warning' : 'healthy',
+        },
+        {
+            label: 'Coverage gaps',
+            value: hasCoverageData ? (coverageGap ? `${Math.max(0, Math.round(60 - rtmCoverage))} pts` : 'Clear') : '—',
+            detail: hasCoverageData ? `RTM coverage is ${Math.round(rtmCoverage)}%` : 'RTM coverage has not been generated',
+            icon: <GitBranch size={16} />,
+            href: '/coverage',
+            tone: coverageGap ? 'warning' : 'healthy',
+        },
+        {
+            label: 'Automation confidence',
+            value: queueDegraded ? 'Watch' : 'Stable',
+            detail: queueDegraded
+                ? `${orphanedTaskCount} orphaned, ${staleRunningCount} stale, ${queue?.queued ?? 0} queued`
+                : `${queueSourceLabel}: ${queue?.active ?? 0} active, ${queue?.queued ?? 0} queued`,
+            icon: <Bot size={16} />,
+            href: '/workflow',
+            tone: queueDegraded ? 'warning' : 'healthy',
+        },
+    ];
+    const attentionQualitySignals = qualitySignals.filter(signal => signal.tone !== 'healthy');
+    const openQualityRiskCount = attentionQualitySignals.length;
+    const lastRunAge = (() => {
+        if (!dashboard.last_run || dashboard.last_run === 'Never') return null;
+        const age = formatAge(dashboard.last_run);
+        return age === dashboard.last_run ? null : age;
+    })();
+    const activeAutomationCount = activeSessions.length + backgroundAgentTaskCount;
+    const healthMetrics = [
+        {
+            label: 'Pass rate',
+            value: hasRecentQualityData ? `${passRate}%` : '—',
+            detail: dashboard.total_runs > 0 ? `${dashboard.total_runs} run${dashboard.total_runs === 1 ? '' : 's'}` : 'Baseline needed',
+            tone: dashboard.total_runs > 0 && passRate < 60 ? '#ef4444' : dashboard.total_runs > 0 && passRate < 80 ? '#f59e0b' : undefined,
+        },
+        {
+            label: 'RTM coverage',
+            value: hasCoverageData ? `${Math.round(rtmCoverage)}%` : '—',
+            detail: hasCoverageData ? `${workflowProgress?.requirements ?? 0} requirement${(workflowProgress?.requirements ?? 0) === 1 ? '' : 's'}` : 'Not generated',
+            tone: coverageGap ? '#f59e0b' : undefined,
+        },
+        {
+            label: 'Active automation',
+            value: activeAutomationCount,
+            detail: `${queue?.queued ?? 0} queued`,
+            tone: queueDegraded ? '#f59e0b' : undefined,
+        },
+        {
+            label: 'Recent run age',
+            value: lastRunAge || '—',
+            detail: lastRunAge ? 'Latest completed signal' : dashboard.total_runs > 0 ? 'Last run unavailable' : 'No recent runs',
+        },
+    ];
+    const queueRiskItem = queueDegraded ? {
+        key: 'queue-confidence',
+        node: (
+            <TopRiskRow
+                icon={<Bot size={15} />}
+                title="Queue confidence"
+                detail={(
+                    <>
+                        {orphanedTaskCount} orphaned, {staleRunningCount} stale, {queue?.queued ?? 0} queued
+                        {cleanupError && (
+                            <div style={{ color: '#f87171', fontSize: '0.72rem', marginTop: '0.45rem', lineHeight: 1.35 }}>
+                                {cleanupError}
+                            </div>
+                        )}
+                    </>
+                )}
+                action={orphanedTaskCount > 0 ? (
+                    <button
+                        type="button"
+                        onClick={cleanOrphanedTasks}
+                        disabled={isCleaningOrphans}
+                        style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: '0.4rem',
+                            minHeight: 30,
+                            padding: '0.35rem 0.65rem',
+                            borderRadius: '8px',
+                            border: '1px solid rgba(239, 68, 68, 0.28)',
+                            background: isCleaningOrphans ? 'rgba(239, 68, 68, 0.08)' : 'rgba(239, 68, 68, 0.13)',
+                            color: '#f87171',
+                            fontSize: '0.74rem',
+                            fontWeight: 750,
+                            cursor: isCleaningOrphans ? 'wait' : 'pointer',
+                            whiteSpace: 'nowrap',
+                            opacity: isCleaningOrphans ? 0.75 : 1,
+                        }}
+                    >
+                        {isCleaningOrphans && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
+                        {isCleaningOrphans ? 'Cleaning' : 'Clean up'}
+                    </button>
+                ) : (
+                    <Link href="/workflow" style={{ color: 'var(--primary)', fontSize: '0.8rem', fontWeight: 750, textDecoration: 'none', whiteSpace: 'nowrap' }}>
+                        Workflow
+                    </Link>
+                )}
+            />
+        ),
+    } : null;
+    const topQualityRisks = (() => {
+        const items: { key: string; node: React.ReactNode }[] = [
+            ...failedSessions.slice(0, 2).map(session => ({
+                key: `failed-${session.id}`,
+                node: <SessionRow session={session} compact />,
+            })),
+            ...pendingQuestions.slice(0, 2).map(question => ({
+                key: `gate-${question.id}`,
+                node: (
+                    <TopRiskRow
+                        href={`/autopilot?sessionId=${encodeURIComponent(question.session_id)}`}
+                        icon={<AlertTriangle size={15} />}
+                        title="Review gate"
+                        detail={question.question_text}
+                    />
+                ),
+            })),
+            ...(totalFailures > 0 && failedSessions.length === 0 ? [{
+                key: 'generated-failures',
+                node: (
+                    <TopRiskRow
+                        href="/runs"
+                        icon={<XCircle size={15} />}
+                        title="Generated test failures"
+                        detail={`${totalFailures} generated test failure${totalFailures === 1 ? '' : 's'} need review.`}
+                        tone="#ef4444"
+                    />
+                ),
+            }] : []),
+            ...(dashboard.flaky_test_count > 0 ? [{
+                key: 'flaky-tests',
+                node: (
+                    <TopRiskRow
+                        href="/analytics"
+                        icon={<ShieldAlert size={15} />}
+                        title="Flaky test group"
+                        detail={`${dashboard.flaky_test_count} spec${dashboard.flaky_test_count === 1 ? '' : 's'} need triage.`}
+                    />
+                ),
+            }] : []),
+            ...(coverageGap ? [{
+                key: 'coverage-gap',
+                node: (
+                    <TopRiskRow
+                        href="/coverage"
+                        icon={<GitBranch size={15} />}
+                        title="Coverage gap"
+                        detail={`RTM coverage is ${Math.round(rtmCoverage)}%, below the 60% threshold.`}
+                    />
+                ),
+            }] : []),
+            ...(queueRiskItem ? [queueRiskItem] : []),
+        ];
+        const visible = items.slice(0, 5);
+        if (queueRiskItem && orphanedTaskCount > 0 && !visible.some(item => item.key === queueRiskItem.key)) {
+            if (visible.length >= 5) {
+                visible[visible.length - 1] = queueRiskItem;
+            } else {
+                visible.push(queueRiskItem);
+            }
+        }
+        return visible;
     })();
 
     return (
         <PageLayout tier="wide" className="command-center-page">
             <PageHeader
-                title="Command Center"
-                subtitle="AutoPilot-first quality operations for QA leads."
-                icon={<Rocket size={20} />}
-                actions={(
-                    <PrimaryButton href={nextAction.href} tone={nextAction.tone}>
-                        {nextAction.icon}
-                        {nextAction.label}
-                    </PrimaryButton>
-                )}
+                title="Quality Overview"
+                subtitle="Project quality health, coverage, risk, and automation activity."
+                icon={<CheckCircle2 size={20} />}
             />
 
             {error && (
@@ -467,149 +750,71 @@ export default function Home() {
             {loading ? (
                 <div className="card-elevated" style={{ padding: '2rem', display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--text-secondary)' }}>
                     <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
-                    Loading command center...
+                    Loading quality overview...
                 </div>
             ) : (
                 <>
                     <section className="command-hero" style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'minmax(0, 1.45fr) minmax(320px, 0.9fr)',
-                        gap: '1rem',
                         marginBottom: '1rem',
                     }}>
-                        <div className="card-elevated" style={{
-                            padding: '1.25rem',
+                        <div className="card-elevated quality-health-card" style={{
+                            padding: '1.2rem',
                             display: 'grid',
-                            gridTemplateColumns: 'auto minmax(0, 1fr) auto',
-                            gap: '1rem',
-                            alignItems: 'center',
+                            gridTemplateColumns: 'minmax(0, 1.3fr) minmax(320px, 0.9fr)',
+                            gap: '1.1rem',
+                            alignItems: 'stretch',
                             minHeight: 150,
-                            borderColor: nextAction.tone === 'danger'
+                            borderColor: qualityHealth.tone === 'danger'
                                 ? 'rgba(239, 68, 68, 0.32)'
-                                : nextAction.tone === 'warning'
+                                : qualityHealth.tone === 'warning'
                                     ? 'rgba(245, 158, 11, 0.32)'
                                     : 'rgba(59, 130, 246, 0.24)',
                         }}>
-                            <div style={{
-                                width: 54,
-                                height: 54,
-                                borderRadius: '10px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                background: nextAction.tone === 'danger'
-                                    ? 'rgba(239, 68, 68, 0.13)'
-                                    : nextAction.tone === 'warning'
-                                        ? 'rgba(245, 158, 11, 0.13)'
-                                        : 'rgba(59, 130, 246, 0.13)',
-                                color: nextAction.tone === 'danger' ? '#ef4444' : nextAction.tone === 'warning' ? '#f59e0b' : 'var(--primary)',
+                            <div style={{ minWidth: 0, display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', gap: '1rem', alignContent: 'start' }}>
+                                <div style={{
+                                    width: 54,
+                                    height: 54,
+                                    borderRadius: '10px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    background: qualityHealth.tone === 'danger'
+                                        ? 'rgba(239, 68, 68, 0.13)'
+                                        : qualityHealth.tone === 'warning'
+                                            ? 'rgba(245, 158, 11, 0.13)'
+                                            : 'rgba(59, 130, 246, 0.13)',
+                                    color: qualityHealth.tone === 'danger' ? '#ef4444' : qualityHealth.tone === 'warning' ? '#f59e0b' : 'var(--primary)',
+                                }}>
+                                    {qualityHealth.icon}
+                                </div>
+                                <div style={{ minWidth: 0 }}>
+                                    <div style={{ color: 'var(--text-tertiary)', fontSize: '0.72rem', fontWeight: 750, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                                        Quality health
+                                    </div>
+                                    <h2 style={{ fontSize: '1.45rem', lineHeight: 1.15, margin: '0.3rem 0 0.35rem', fontWeight: 850 }}>
+                                        {qualityHealth.state}
+                                    </h2>
+                                    <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: 1.45, margin: 0, maxWidth: 760 }}>
+                                        {qualityHealth.detail}
+                                    </p>
+                                    <div style={{ marginTop: '0.9rem' }}>
+                                        <PrimaryButton href={qualityHealth.href} tone={qualityHealth.tone}>
+                                            {qualityHealth.actionLabel}
+                                            <ArrowRight size={16} />
+                                        </PrimaryButton>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="quality-health-metrics" style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                                gap: '0.75rem',
                             }}>
-                                {nextAction.icon}
-                            </div>
-                            <div style={{ minWidth: 0 }}>
-                                <div style={{ color: 'var(--text-tertiary)', fontSize: '0.72rem', fontWeight: 750, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                                    Next action
-                                </div>
-                                <h2 style={{ fontSize: '1.45rem', lineHeight: 1.15, margin: '0.3rem 0 0.35rem', fontWeight: 850 }}>
-                                    {nextAction.label}
-                                </h2>
-                                <p style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', margin: 0, maxWidth: 720 }}>
-                                    {nextAction.detail}
-                                </p>
-                            </div>
-                            <PrimaryButton href={nextAction.href} tone={nextAction.tone}>
-                                Open
-                                <ArrowRight size={16} />
-                            </PrimaryButton>
-                        </div>
-
-                        <div className="card-elevated" style={{ padding: '1.15rem', minHeight: 150 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.9rem' }}>
-                                <div>
-                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)', fontWeight: 750, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                                        Automation load
-                                    </div>
-                                    <div style={{ fontSize: '1rem', fontWeight: 800, marginTop: '0.2rem' }}>Agent capacity</div>
-                                </div>
-                                <Bot size={22} style={{ color: 'var(--primary)' }} />
-                            </div>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.65rem' }}>
-                                <div>
-                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Agent tasks</div>
-                                    <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{queue?.active ?? 0}</div>
-                                </div>
-                                <div>
-                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Slots active</div>
-                                    <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{browserSlotsRunning}</div>
-                                </div>
-                                <div>
-                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Queued</div>
-                                    <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{queue?.queued ?? 0}</div>
-                                </div>
-                                <div>
-                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>Idle / alive</div>
-                                    <div style={{ fontSize: '1.45rem', fontWeight: 850 }}>{workersIdle}/{workersAlive}</div>
-                                </div>
-                            </div>
-                            <div style={{ marginTop: '0.75rem' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
-                                    <div style={{ color: orphanedTaskCount > 0 ? '#ef4444' : backgroundAgentTaskCount > 0 ? '#f59e0b' : 'var(--text-secondary)', fontSize: '0.76rem', lineHeight: 1.35 }}>
-                                        {orphanedTaskCount > 0
-                                            ? `${orphanedTaskCount} orphaned task${orphanedTaskCount === 1 ? '' : 's'} need cleanup.`
-                                            : backgroundAgentTaskCount > 0
-                                            ? `${backgroundAgentTaskCount} running task${backgroundAgentTaskCount === 1 ? ' is' : 's are'} not tied to visible AutoPilot work.`
-                                            : queue?.mode === 'temporal' && queue?.workers_alive === 0
-                                            ? 'Temporal agent worker is not polling. Agent runs will wait until the custom workflow worker starts.'
-                                            : `${queueSourceLabel}: ${queue?.active ?? 0} task${(queue?.active ?? 0) === 1 ? '' : 's'}, ${browserSlotsRunning} browser slot${browserSlotsRunning === 1 ? '' : 's'} active${browserSlotsMax ? `, ${browserSlotsAvailable}/${browserSlotsMax} free` : ''}.${queueAgeLabel}`}
-                                        {(queue?.stale_running ?? 0) > 0 ? ` ${queue?.stale_running} stale.` : ''}
-                                    </div>
-                                    {orphanedTaskCount > 0 && (
-                                        <button
-                                            type="button"
-                                            onClick={cleanOrphanedTasks}
-                                            disabled={isCleaningOrphans}
-                                            style={{
-                                                display: 'inline-flex',
-                                                alignItems: 'center',
-                                                justifyContent: 'center',
-                                                gap: '0.4rem',
-                                                minHeight: 30,
-                                                padding: '0.35rem 0.65rem',
-                                                borderRadius: '8px',
-                                                border: '1px solid rgba(239, 68, 68, 0.28)',
-                                                background: isCleaningOrphans ? 'rgba(239, 68, 68, 0.08)' : 'rgba(239, 68, 68, 0.13)',
-                                                color: '#f87171',
-                                                fontSize: '0.74rem',
-                                                fontWeight: 750,
-                                                cursor: isCleaningOrphans ? 'wait' : 'pointer',
-                                                whiteSpace: 'nowrap',
-                                                opacity: isCleaningOrphans ? 0.75 : 1,
-                                            }}
-                                        >
-                                            {isCleaningOrphans && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
-                                            {isCleaningOrphans ? 'Cleaning' : 'Clean up'}
-                                        </button>
-                                    )}
-                                </div>
-                                {cleanupError && (
-                                    <div style={{ color: '#f87171', fontSize: '0.72rem', marginTop: '0.45rem', lineHeight: 1.35 }}>
-                                        {cleanupError}
-                                    </div>
-                                )}
+                                {healthMetrics.map(item => (
+                                    <CompactMetricItem key={item.label} {...item} />
+                                ))}
                             </div>
                         </div>
-                    </section>
-
-                    <section className="command-metrics" style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
-                        gap: '1rem',
-                        marginBottom: '1rem',
-                    }}>
-                        <MetricCard label="Pending Reviews" value={pendingQuestions.length} detail={awaitingInput.length ? `${awaitingInput.length} session gate${awaitingInput.length === 1 ? '' : 's'}` : 'No blocked reviews'} icon={<AlertTriangle size={20} />} tone={pendingQuestions.length ? '#f59e0b' : '#22c55e'} />
-                        <MetricCard label="Active AutoPilot" value={activeSessions.length} detail={activeSessions.length ? 'Work in progress' : 'No active sessions'} icon={<Rocket size={20} />} tone="#3b82f6" />
-                        <MetricCard label="Pass Rate" value={`${passRate}%`} detail={`${dashboard.total_runs} total runs`} icon={<TrendingUp size={20} />} tone={passRate >= 80 ? '#22c55e' : passRate >= 60 ? '#f59e0b' : '#ef4444'} />
-                        <MetricCard label="Coverage" value={rtmCoverage ? `${Math.round(rtmCoverage)}%` : '—'} detail={`${workflowProgress?.requirements ?? 0} requirements`} icon={<GitBranch size={20} />} tone={rtmCoverage >= 60 ? '#22c55e' : rtmCoverage > 0 ? '#f59e0b' : '#94a3b8'} />
                     </section>
 
                     <section className="command-grid" style={{
@@ -618,27 +823,94 @@ export default function Home() {
                         gap: '1rem',
                     }}>
                         <Panel
-                            title="Active AutoPilot Work"
-                            action={<Link href="/autopilot" style={{ color: 'var(--primary)', fontSize: '0.84rem', fontWeight: 700, textDecoration: 'none' }}>View all</Link>}
+                            title="Quality Signals"
+                            action={<Link href="/analytics" style={{ color: 'var(--primary)', fontSize: '0.84rem', fontWeight: 700, textDecoration: 'none' }}>Analytics</Link>}
                         >
-                            {activeSessions.length === 0 ? (
-                                <div style={{ padding: '2.25rem 1.25rem', color: 'var(--text-secondary)', textAlign: 'center' }}>
-                                    <Sparkles size={28} style={{ color: 'var(--primary)', marginBottom: '0.65rem' }} />
-                                    <div style={{ fontWeight: 750, color: 'var(--text)', marginBottom: '0.25rem' }}>No autonomous workflow is running</div>
-                                    <div style={{ fontSize: '0.85rem' }}>Start AutoPilot to discover flows, generate tests, run them, and report coverage.</div>
-                                </div>
+                            <div>
+                                {attentionQualitySignals.length === 0 ? (
+                                    <EmptyState
+                                        icon={<CheckCircle2 size={30} />}
+                                        title="Quality signals are clear"
+                                        detail={hasRecentQualityData ? 'Failures, review gates, flakiness, coverage, and queue confidence are all within expected bounds.' : 'Start a QA run to establish the first quality baseline.'}
+                                        links={(
+                                            <>
+                                                <Link href="/analytics" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Analytics</Link>
+                                                <Link href="/coverage" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Coverage</Link>
+                                                <Link href="/workflow" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Workflow</Link>
+                                                <Link href="/autopilot" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Autopilot</Link>
+                                            </>
+                                        )}
+                                    />
+                                ) : (
+                                    attentionQualitySignals.map(signal => {
+                                        const signalColor = signal.tone === 'danger' ? '#ef4444' : '#f59e0b';
+                                        return (
+                                            <Link key={signal.label} href={signal.href} className="command-action-row" style={{
+                                                display: 'grid',
+                                                gridTemplateColumns: 'minmax(0, 1fr) auto',
+                                                gap: '0.9rem',
+                                                alignItems: 'center',
+                                                padding: '0.95rem 1rem',
+                                                borderBottom: '1px solid var(--border-subtle)',
+                                                color: 'inherit',
+                                                textDecoration: 'none',
+                                            }}>
+                                                <div style={{ minWidth: 0 }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: signalColor, fontSize: '0.84rem', fontWeight: 800 }}>
+                                                        {signal.icon}
+                                                        {signal.label}
+                                                    </div>
+                                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '0.25rem', lineHeight: 1.45 }}>
+                                                        {signal.detail}
+                                                    </div>
+                                                </div>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', color: signalColor, fontSize: '0.95rem', fontWeight: 850, whiteSpace: 'nowrap' }}>
+                                                    {signal.value}
+                                                    <ArrowRight size={15} />
+                                                </div>
+                                            </Link>
+                                        );
+                                    })
+                                )}
+                            </div>
+                        </Panel>
+
+                        <Panel title="Top Risks">
+                            {topQualityRisks.length === 0 ? (
+                                <EmptyState
+                                    icon={<CheckCircle2 size={30} />}
+                                    title="No open quality risks"
+                                    detail={hasRecentQualityData ? 'There are no concrete failed sessions, blocked gates, flaky groups, coverage gaps, or queue confidence issues.' : 'Run data has not been collected yet; risks will appear here after the first baseline run.'}
+                                />
                             ) : (
                                 <div>
-                                    {activeSessions.slice(0, 5).map(session => (
-                                        <SessionRow key={session.id} session={session} />
+                                    {topQualityRisks.map(item => (
+                                        <div key={item.key}>
+                                            {item.node}
+                                        </div>
                                     ))}
                                 </div>
                             )}
-                            {backgroundAgentTaskCount > 0 && (
+                        </Panel>
+
+                        <Panel
+                            title="Automation Activity"
+                            action={<Link href="/autopilot" style={{ color: 'var(--primary)', fontSize: '0.84rem', fontWeight: 700, textDecoration: 'none' }}>View runs</Link>}
+                        >
+                            {activeSessions.length === 0 && backgroundAgentTaskCount === 0 ? (
+                                <div style={{ padding: '2.25rem 1.25rem', color: 'var(--text-secondary)', textAlign: 'center' }}>
+                                    <Sparkles size={28} style={{ color: 'var(--primary)', marginBottom: '0.65rem' }} />
+                                    <div style={{ fontWeight: 750, color: 'var(--text)', marginBottom: '0.25rem' }}>No automation runs are active</div>
+                                    <div style={{ fontSize: '0.85rem' }}>Start a QA run to collect fresh quality evidence.</div>
+                                </div>
+                            ) : (
                                 <div>
-                                    <div style={{ padding: '0.85rem 1rem 0.65rem', color: '#f59e0b', fontSize: '0.78rem', fontWeight: 800 }}>
-                                        Background agent work
+                                    <div style={{ padding: '0.85rem 1rem 0.65rem', color: 'var(--text-tertiary)', fontSize: '0.74rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                                        Agent team activity
                                     </div>
+                                    {activeSessions.slice(0, 5).map(session => (
+                                        <SessionRow key={session.id} session={session} />
+                                    ))}
                                     {backgroundAgentTasks.slice(0, 3).map(task => (
                                         <AgentTaskRow key={task.id} task={task} />
                                     ))}
@@ -651,63 +923,13 @@ export default function Home() {
                             )}
                         </Panel>
 
-                        <Panel title="Action Required">
-                            {pendingQuestions.length === 0 && failedSessions.length === 0 && dashboard.flaky_test_count === 0 && totalFailures === 0 ? (
-                                <div style={{ padding: '2.25rem 1.25rem', color: 'var(--text-secondary)', textAlign: 'center' }}>
-                                    <CheckCircle2 size={30} style={{ color: '#22c55e', marginBottom: '0.65rem' }} />
-                                    <div style={{ fontWeight: 750, color: 'var(--text)', marginBottom: '0.25rem' }}>Nothing needs intervention</div>
-                                    <div style={{ fontSize: '0.85rem' }}>Reviews, failures, and flaky tests are clear.</div>
-                                </div>
-                            ) : (
-                                <div>
-                                    {pendingQuestions.slice(0, 3).map(question => (
-                                        <Link key={question.id} href={`/autopilot?sessionId=${encodeURIComponent(question.session_id)}`} className="command-action-row" style={{
-                                            display: 'block',
-                                            padding: '0.95rem 1rem',
-                                            borderBottom: '1px solid var(--border-subtle)',
-                                            color: 'inherit',
-                                            textDecoration: 'none',
-                                        }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#f59e0b', fontSize: '0.82rem', fontWeight: 800 }}>
-                                                <AlertTriangle size={15} />
-                                                Review gate
-                                            </div>
-                                            <div style={{ marginTop: '0.35rem', fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.45 }}>
-                                                {question.question_text}
-                                            </div>
-                                        </Link>
-                                    ))}
-                                    {failedSessions.slice(0, 2).map(session => (
-                                        <SessionRow key={session.id} session={session} compact />
-                                    ))}
-                                    {dashboard.flaky_test_count > 0 && (
-                                        <Link href="/analytics" className="command-action-row" style={{
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'space-between',
-                                            gap: '0.75rem',
-                                            padding: '0.95rem 1rem',
-                                            color: 'inherit',
-                                            textDecoration: 'none',
-                                        }}>
-                                            <div>
-                                                <div style={{ color: '#f59e0b', fontSize: '0.82rem', fontWeight: 800 }}>Flaky tests</div>
-                                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.25rem' }}>{dashboard.flaky_test_count} spec{dashboard.flaky_test_count === 1 ? '' : 's'} need triage</div>
-                                            </div>
-                                            <ArrowRight size={16} />
-                                        </Link>
-                                    )}
-                                </div>
-                            )}
-                        </Panel>
-
                         <Panel
-                            title="Recent AutoPilot Results"
+                            title="Recent Quality Outcomes"
                             action={<Link href="/workflow" style={{ color: 'var(--primary)', fontSize: '0.84rem', fontWeight: 700, textDecoration: 'none' }}>Workflow monitor</Link>}
                         >
                             {completedSessions.length === 0 ? (
                                 <div style={{ padding: '1.5rem 1.25rem', color: 'var(--text-secondary)', fontSize: '0.88rem' }}>
-                                    Completed AutoPilot sessions will appear here with generated specs, passing tests, and coverage outcomes.
+                                    Completed QA runs will appear here with generated specs, passing tests, and coverage outcomes.
                                 </div>
                             ) : (
                                 <div>
@@ -716,36 +938,6 @@ export default function Home() {
                                     ))}
                                 </div>
                             )}
-                        </Panel>
-
-                        <Panel title="Quality Snapshot">
-                            <div style={{ padding: '1rem', display: 'grid', gap: '0.8rem' }}>
-                                {[
-                                    { label: 'Specs', value: dashboard.total_specs, icon: <FileText size={16} />, href: '/specs' },
-                                    { label: 'Runs', value: dashboard.total_runs, icon: <PlayCircle size={16} />, href: '/runs' },
-                                    { label: 'Flaky tests', value: dashboard.flaky_test_count, icon: <AlertTriangle size={16} />, href: '/analytics' },
-                                    { label: 'Failed generated tests', value: totalFailures, icon: <XCircle size={16} />, href: '/autopilot' },
-                                ].map(item => (
-                                    <Link key={item.label} href={item.href} style={{
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        justifyContent: 'space-between',
-                                        gap: '0.85rem',
-                                        minHeight: 44,
-                                        padding: '0.65rem 0.75rem',
-                                        borderRadius: '8px',
-                                        background: 'var(--surface)',
-                                        color: 'inherit',
-                                        textDecoration: 'none',
-                                    }}>
-                                        <span style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', color: 'var(--text-secondary)', fontSize: '0.85rem', fontWeight: 650 }}>
-                                            {item.icon}
-                                            {item.label}
-                                        </span>
-                                        <span style={{ fontSize: '1rem', fontWeight: 850 }}>{item.value}</span>
-                                    </Link>
-                                ))}
-                            </div>
                         </Panel>
                     </section>
                 </>
@@ -758,19 +950,21 @@ export default function Home() {
                     background: var(--surface-hover) !important;
                 }
                 @media (max-width: 1180px) {
-                    .command-hero,
+                    .quality-health-card,
                     .command-grid {
                         grid-template-columns: 1fr !important;
                     }
-                    .command-metrics {
+                }
+                @media (max-width: 720px) {
+                    .quality-health-card > div:first-child {
+                        grid-template-columns: 1fr !important;
+                    }
+                    .quality-health-metrics {
                         grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
                     }
                 }
-                @media (max-width: 720px) {
-                    .command-metrics {
-                        grid-template-columns: 1fr !important;
-                    }
-                    .command-hero > div:first-child {
+                @media (max-width: 360px) {
+                    .quality-health-metrics {
                         grid-template-columns: 1fr !important;
                     }
                 }

@@ -545,6 +545,8 @@ def prepare_next_workflow_step(run_id: str) -> dict[str, Any]:
             "step_id": next_step.id,
             "step_key": next_step.step_key,
             "step_order": next_step.step_order,
+            "step_label": next_step.label,
+            "step_type": next_step.step_type,
             "attempt_count": next_step.attempt_count,
         }
 

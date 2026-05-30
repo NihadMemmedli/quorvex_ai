@@ -34,6 +34,16 @@ def test_model_tiers_prefer_canonical_env(monkeypatch):
 
 
 def test_model_tiers_fall_back_to_legacy_env(monkeypatch):
+    for key in (
+        "QUORVEX_LLM_LIGHT_MODEL",
+        "QUORVEX_LLM_STANDARD_MODEL",
+        "QUORVEX_LLM_DEEP_MODEL",
+        "QUORVEX_LLM_TOOL_DEEP_MODEL",
+        "QUORVEX_LLM_CHAT_MODEL",
+        "QUORVEX_EMBEDDING_MODEL",
+        "ANTHROPIC_MODEL",
+    ):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "legacy-haiku")
     monkeypatch.setenv("ANTHROPIC_DEFAULT_SONNET_MODEL", "legacy-sonnet")
     monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "legacy-opus")
@@ -106,6 +116,27 @@ def test_agent_runner_uses_resolved_model_in_claude_options(monkeypatch):
 
     assert runner.model_tier == "tool_deep"
     assert runner._claude_options_kwargs()["model"] == "tool-model"
+
+
+def test_agent_runner_diagnostics_reports_runtime_and_memory(monkeypatch):
+    from orchestrator.utils.agent_runner import AgentRunner
+
+    monkeypatch.setenv("QUORVEX_LLM_TOOL_DEEP_MODEL", "diagnostic-tool-model")
+    runner = AgentRunner(
+        allowed_tools=["Read", "mcp__playwright__browser_navigate"],
+        memory_agent_type="NativeHealer",
+        memory_stage="native_healer",
+        model_tier="tool_deep",
+    )
+
+    diagnostics = runner.diagnostics(agent_class="NativeHealer", prompt="hello")
+
+    assert diagnostics["agent_class"] == "NativeHealer"
+    assert diagnostics["tier"] == "tool_deep"
+    assert diagnostics["model"] == "diagnostic-tool-model"
+    assert diagnostics["mcp_prefixes"] == ["mcp__playwright"]
+    assert diagnostics["memory"]["inject"] is True
+    assert len(diagnostics["prompt"]["hash"]) == 64
 
 
 def test_agent_runner_forwards_browser_runtime_env(monkeypatch):

@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from orchestrator.utils.playwright_mcp import browser_runtime_status
+from orchestrator.utils.playwright_mcp import browser_runtime_status, live_browser_display_diagnostics
 
 from .db import engine, get_session
 from .middleware.auth import get_current_user_optional
@@ -61,6 +61,8 @@ PHASE_DEFINITIONS = [
     ("test_generation", 4),
     ("reporting", 5),
 ]
+
+ACTIVE_TEST_TASK_STATUSES = {"pending", "running"}
 
 
 # ========== Pydantic Request/Response Models ==========
@@ -285,6 +287,30 @@ class AutoPilotLiveResponse(BaseModel):
     browser_runtime: str | None = None
     live_view_available: bool = False
     runtime_message: str | None = None
+    vnc_url: str | None = None
+    display_diagnostics: dict[str, Any] | None = None
+
+
+class AutoPilotEvidenceArtifactResponse(AutoPilotLiveArtifactResponse):
+    """Artifact metadata with optional inline diagnostic preview."""
+
+    content_excerpt: str | None = None
+
+
+class AutoPilotEvidenceResponse(BaseModel):
+    """Aggregated failure and artifact evidence for an Auto Pilot session."""
+
+    session_id: str
+    status: str
+    current_phase: str | None = None
+    error_message: str | None = None
+    failed_phase: AutoPilotPhaseResponse | None = None
+    temporal: AutoPilotTemporalResponse
+    live: AutoPilotLiveResponse
+    artifacts: list[AutoPilotEvidenceArtifactResponse] = Field(default_factory=list)
+    latest_image: AutoPilotEvidenceArtifactResponse | None = None
+    videos: list[AutoPilotEvidenceArtifactResponse] = Field(default_factory=list)
+    diagnostics: list[AutoPilotEvidenceArtifactResponse] = Field(default_factory=list)
 
 
 # ========== Helper Functions ==========
@@ -297,12 +323,15 @@ def _current_autopilot_runtime(live: dict[str, Any]) -> dict[str, Any]:
     """Describe whether the current AutoPilot browser can be shown through VNC."""
     if live.get("browser_runtime") or live.get("live_view_available") is not None:
         runtime = browser_runtime_status()
-        return {
+        merged = {
             **runtime,
             "browser_runtime": live.get("browser_runtime") or runtime["browser_runtime"],
             "live_view_available": bool(live.get("live_view_available")),
             "runtime_message": live.get("runtime_message") or runtime["runtime_message"],
+            "vnc_url": live.get("vnc_url") or runtime.get("vnc_url"),
+            "display_diagnostics": live.get("display_diagnostics") or runtime.get("display_diagnostics"),
         }
+        return _augment_active_autopilot_runtime(live, merged)
     try:
         from orchestrator.services.agent_queue import should_use_agent_queue
 
@@ -311,10 +340,32 @@ def _current_autopilot_runtime(live: dict[str, Any]) -> dict[str, Any]:
                 "browser_runtime": "headless_worker",
                 "live_view_available": False,
                 "runtime_message": "AutoPilot browser tools are delegated to an agent worker outside the VNC display.",
+                "vnc_url": live.get("vnc_url"),
+                "display_diagnostics": live.get("display_diagnostics"),
             }
     except Exception:
         pass
-    return browser_runtime_status()
+    runtime = browser_runtime_status()
+    return _augment_active_autopilot_runtime(live, {
+        **runtime,
+        "vnc_url": live.get("vnc_url") or runtime.get("vnc_url"),
+        "display_diagnostics": live.get("display_diagnostics") or runtime.get("display_diagnostics"),
+    })
+
+
+def _augment_active_autopilot_runtime(live: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+    active_statuses = {"queued", "pending", "running", "in_progress", "tool_use", "starting"}
+    if str(live.get("status") or "").lower() not in active_statuses and not live.get("active"):
+        return runtime
+    if not runtime.get("live_view_available") or runtime.get("browser_runtime") != "vnc":
+        return runtime
+
+    runtime = dict(runtime)
+    diagnostics = runtime.get("display_diagnostics") or live_browser_display_diagnostics()
+    runtime["display_diagnostics"] = diagnostics
+    if diagnostics.get("browser_window_count") in (0, None):
+        runtime["runtime_message"] = "VNC is connected; waiting for Playwright to launch a visible browser window."
+    return runtime
 
 
 def _get_user_key(user, request: Request) -> str:
@@ -349,6 +400,136 @@ def _active_pipeline_entry(session_id: str):
     return None
 
 
+def _live_browser_pool_request_ids(live: dict[str, Any]) -> tuple[set[str], set[str]]:
+    """Return exact and prefix browser-pool request ids for the persisted live state."""
+    exact: set[str] = set()
+    prefixes: set[str] = set()
+    exploration_session_id = live.get("exploration_session_id")
+    if exploration_session_id:
+        exact.add(f"autopilot_{exploration_session_id}")
+
+    test_task_id = live.get("test_task_id")
+    if test_task_id is not None:
+        prefixes.add(f"autopilot_test_{test_task_id}_")
+
+    return exact, prefixes
+
+
+def _active_test_task_stmt(session_id: str):
+    return (
+        select(AutoPilotTestTask)
+        .where(AutoPilotTestTask.session_id == session_id)
+        .where(AutoPilotTestTask.status.in_(list(ACTIVE_TEST_TASK_STATUSES)))
+    )
+
+
+def _active_test_task_ids(db: Session, session_id: str) -> list[int]:
+    tasks = db.exec(_active_test_task_stmt(session_id)).all()
+    return [int(task.id) for task in tasks if task.id is not None]
+
+
+def _has_active_test_tasks(db: Session, session_id: str) -> bool:
+    return bool(_active_test_task_ids(db, session_id))
+
+
+def _active_test_task_ids_for_session(session_id: str) -> list[int]:
+    try:
+        with Session(engine) as db:
+            return _active_test_task_ids(db, session_id)
+    except Exception as exc:
+        logger.debug("Unable to inspect AutoPilot test-task liveness for %s: %s", session_id, exc)
+        return []
+
+
+async def _has_active_test_task_browser_pool_slot(session_id: str) -> bool:
+    test_task_ids = _active_test_task_ids_for_session(session_id)
+    if not test_task_ids:
+        return False
+
+    prefixes = [f"autopilot_test_{test_task_id}_" for test_task_id in test_task_ids]
+    try:
+        from orchestrator.services.browser_pool import get_browser_pool
+
+        pool = await get_browser_pool()
+        status = await pool.get_status()
+    except Exception as exc:
+        logger.debug("Unable to inspect AutoPilot test-task browser pool liveness: %s", exc)
+        return False
+
+    running_requests = [str(item) for item in status.get("running_requests") or []]
+    return any(request_id.startswith(prefix) for request_id in running_requests for prefix in prefixes)
+
+
+async def _has_active_browser_pool_slot(live: dict[str, Any]) -> bool:
+    exact, prefixes = _live_browser_pool_request_ids(live)
+    if not exact and not prefixes:
+        return False
+
+    try:
+        from orchestrator.services.browser_pool import get_browser_pool
+
+        pool = await get_browser_pool()
+        for request_id in exact:
+            if await pool.is_running(request_id):
+                return True
+
+        status = await pool.get_status()
+    except Exception as exc:
+        logger.debug("Unable to inspect AutoPilot browser pool liveness: %s", exc)
+        return False
+
+    running_requests = [str(item) for item in status.get("running_requests") or []]
+    if exact.intersection(running_requests):
+        return True
+    return any(request_id.startswith(prefix) for request_id in running_requests for prefix in prefixes)
+
+
+def _has_recent_live_artifact_progress(live: dict[str, Any], now: datetime | None = None) -> bool:
+    exploration_session_id = live.get("exploration_session_id")
+    run_id = live.get("run_id")
+    if not exploration_session_id and not run_id:
+        return False
+
+    artifacts = _collect_live_artifacts(
+        exploration_session_id=str(exploration_session_id) if exploration_session_id else None,
+        run_id=str(run_id) if run_id else None,
+    )
+    artifact_times = [artifact.modified_at for artifact in artifacts if artifact.modified_at]
+    if not artifact_times:
+        return False
+
+    latest_artifact_at = max(artifact_times)
+    live_updated_at = _parse_live_timestamp(live.get("updated_at"))
+    if live_updated_at and latest_artifact_at > live_updated_at:
+        return True
+
+    now = now or datetime.utcnow()
+    return (now - latest_artifact_at).total_seconds() < AUTOPILOT_STALE_LIVE_SECONDS
+
+
+async def _temporal_workflow_blocks_stale_reconcile(ap_session: AutoPilotSession) -> bool:
+    """Temporal-owned AutoPilot sessions should not be failed by read-side stale polling."""
+    if not ap_session.temporal_workflow_id:
+        return False
+    try:
+        from orchestrator.services.temporal_client import describe_autopilot_workflow
+
+        payload = await describe_autopilot_workflow(ap_session.temporal_workflow_id)
+        status = str(payload.get("workflow_status") or "").upper()
+        if status in {"RUNNING", "PENDING"}:
+            return True
+        if not status:
+            return True
+    except Exception as exc:
+        logger.debug(
+            "Preserving AutoPilot %s during stale reconcile because Temporal status is unavailable: %s",
+            ap_session.id,
+            exc,
+        )
+        return True
+    return False
+
+
 def _session_process_cleanup(session_id: str) -> dict[str, Any]:
     try:
         from orchestrator.utils.browser_cleanup import kill_autopilot_process_tree
@@ -366,6 +547,10 @@ async def _session_process_cleanup_async(session_id: str) -> dict[str, Any]:
 def _is_stale_live_browser(ap_session: AutoPilotSession, now: datetime | None = None) -> bool:
     if ap_session.status not in {"pending", "running", "awaiting_input", "paused"}:
         return False
+    if ap_session.status == "awaiting_input":
+        return False
+    if ap_session.temporal_workflow_id:
+        return False
     live = dict((ap_session.config or {}).get("live_browser") or {})
     if not live.get("active"):
         return False
@@ -380,6 +565,10 @@ def _is_stale_live_browser(ap_session: AutoPilotSession, now: datetime | None = 
     now = now or datetime.utcnow()
     age_seconds = (now - updated_at).total_seconds()
     if age_seconds < AUTOPILOT_STALE_LIVE_SECONDS:
+        return False
+    if _has_recent_live_artifact_progress(live, now):
+        return False
+    if _active_test_task_ids_for_session(ap_session.id):
         return False
 
     return str(live.get("status") or "").lower() in {"starting", "running", "queued", "tool_use"} or bool(
@@ -418,6 +607,8 @@ async def _is_stale_live_browser_async(
 ) -> bool:
     if ap_session.status not in {"pending", "running", "awaiting_input", "paused"}:
         return False
+    if ap_session.status == "awaiting_input":
+        return False
     live = dict((ap_session.config or {}).get("live_browser") or {})
     if not live.get("active"):
         return False
@@ -429,6 +620,16 @@ async def _is_stale_live_browser_async(
         return False
     now = now or datetime.utcnow()
     if (now - updated_at).total_seconds() < AUTOPILOT_STALE_LIVE_SECONDS:
+        return False
+    if _has_recent_live_artifact_progress(live, now):
+        return False
+    if await _has_active_test_task_browser_pool_slot(ap_session.id):
+        return False
+    if _active_test_task_ids_for_session(ap_session.id):
+        return False
+    if await _has_active_browser_pool_slot(live):
+        return False
+    if await _temporal_workflow_blocks_stale_reconcile(ap_session):
         return False
 
     if live.get("agent_task_id"):
@@ -456,6 +657,12 @@ def _mark_session_interrupted(
     cleanup: dict[str, Any] | None = None,
 ) -> bool:
     if ap_session.status not in {"pending", "running", "awaiting_input", "paused"}:
+        return False
+    if _has_active_test_tasks(db, ap_session.id):
+        logger.info(
+            "Preserving AutoPilot %s during stale interrupt because active test-generation tasks exist.",
+            ap_session.id,
+        )
         return False
 
     entry = _running_pipelines.pop(ap_session.id, None)
@@ -755,6 +962,135 @@ def _collect_live_artifacts(
             -(item.modified_at.timestamp() if item.modified_at else 0),
             item.name,
         ),
+    )
+
+
+def _collect_autopilot_artifacts(
+    *,
+    exploration_session_ids: list[str] | None = None,
+    run_ids: list[str] | None = None,
+    include_diagnostics: bool = False,
+) -> list[AutoPilotEvidenceArtifactResponse]:
+    suffix_types = {
+        ".png": "image",
+        ".jpg": "image",
+        ".jpeg": "image",
+        ".webm": "video",
+        ".mp4": "video",
+        ".json": "json",
+        ".jsonl": "json",
+        ".txt": "text",
+        ".log": "text",
+        ".yaml": "yaml",
+        ".yml": "yaml",
+    }
+    allowed_types = {"image", "video", "json", "text", "yaml"} if include_diagnostics else {"image", "video"}
+    runs_roots = [RUNS_DIR, Path("/app/runs")]
+    session_dirs: list[tuple[Path, Path]] = []
+    for root in runs_roots:
+        for exploration_session_id in exploration_session_ids or []:
+            if exploration_session_id:
+                session_dirs.extend(
+                    [
+                        (root, root / exploration_session_id),
+                        (root, root / "explorations" / exploration_session_id),
+                    ]
+                )
+        for run_id in run_ids or []:
+            if run_id:
+                session_dirs.append((root, root / run_id))
+
+    artifacts: list[AutoPilotEvidenceArtifactResponse] = []
+    seen: set[str] = set()
+    for root, session_dir in session_dirs:
+        if not session_dir.exists():
+            continue
+        for path in session_dir.glob("**/*"):
+            if not path.is_file():
+                continue
+            artifact_type = suffix_types.get(path.suffix.lower())
+            if artifact_type not in allowed_types:
+                continue
+            try:
+                resolved = str(path.resolve())
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                rel_path = path.relative_to(root)
+                modified_at = datetime.utcfromtimestamp(path.stat().st_mtime)
+            except (OSError, ValueError):
+                continue
+            excerpt = None
+            if artifact_type in {"json", "text", "yaml"}:
+                try:
+                    excerpt = path.read_text(errors="replace")[:4000]
+                except OSError:
+                    excerpt = None
+            artifacts.append(
+                AutoPilotEvidenceArtifactResponse(
+                    name=path.name,
+                    path=f"/artifacts/{rel_path}",
+                    type=artifact_type,
+                    modified_at=modified_at,
+                    content_excerpt=excerpt,
+                )
+            )
+
+    return sorted(
+        artifacts,
+        key=lambda item: (
+            item.type not in {"image", "video"},
+            item.type != "image",
+            -(item.modified_at.timestamp() if item.modified_at else 0),
+            item.name,
+        ),
+    )
+
+
+def _live_response_from_state(
+    ap_session: AutoPilotSession,
+    live: dict[str, Any],
+    artifacts: list[AutoPilotLiveArtifactResponse],
+    *,
+    phase: str | None,
+    exploration_session_id: Any = None,
+    run_id: Any = None,
+    numeric_test_task_id: int | None = None,
+) -> AutoPilotLiveResponse:
+    latest_image = next((artifact for artifact in artifacts if artifact.type == "image"), None)
+    live = _merge_artifact_live_progress(live, artifacts)
+    session_allows_live = ap_session.status in ("running", "awaiting_input")
+    runtime = _current_autopilot_runtime(live)
+
+    return AutoPilotLiveResponse(
+        active=bool(live.get("active")) and session_allows_live,
+        phase=str(phase) if phase else None,
+        activity_label=live.get("activity_label"),
+        status=live.get("status"),
+        message=live.get("message") or ap_session.error_message,
+        exploration_session_id=str(exploration_session_id) if exploration_session_id else None,
+        test_task_id=numeric_test_task_id,
+        run_id=str(run_id) if run_id else None,
+        spec_name=live.get("spec_name"),
+        current_stage=live.get("current_stage"),
+        agent_task_id=live.get("agent_task_id"),
+        last_tool=live.get("last_tool"),
+        last_tool_label=live.get("last_tool_label"),
+        tool_calls=_safe_int(live.get("tool_calls")),
+        browser_tool_calls=_safe_int(live.get("browser_tool_calls")),
+        interactions=_safe_int(live.get("interactions")),
+        capture_count=_safe_int(live.get("capture_count")),
+        latest_capture_at=live.get("latest_capture_at"),
+        activity_source=live.get("activity_source"),
+        recent_tools=list(live.get("recent_tools") or []),
+        artifacts=artifacts,
+        latest_image=latest_image,
+        updated_at=live.get("updated_at"),
+        browser_runtime=str(runtime["browser_runtime"]),
+        live_view_available=bool(runtime["live_view_available"]),
+        runtime_message=runtime["runtime_message"],
+        vnc_url=runtime.get("vnc_url"),
+        display_diagnostics=runtime.get("display_diagnostics"),
     )
 
 
@@ -1411,18 +1747,21 @@ async def start_autopilot(
         db.refresh(ap_session)
 
         await _start_autopilot_temporal_or_fail(ap_session, db)
+        db.refresh(ap_session)
+
+        start_response = {
+            "session_id": session_id,
+            "status": "pending",
+            "message": f"Auto Pilot started. Poll progress at GET /autopilot/{session_id}",
+            "entry_urls": list(request_body.entry_urls),
+            "phases": [name for name, _ in PHASE_DEFINITIONS],
+            "temporal_workflow_id": ap_session.temporal_workflow_id,
+            "temporal_run_id": ap_session.temporal_run_id,
+        }
 
     logger.info(f"Auto Pilot session {session_id} started for {len(request_body.entry_urls)} URL(s)")
 
-    return {
-        "session_id": session_id,
-        "status": "pending",
-        "message": f"Auto Pilot started. Poll progress at GET /autopilot/{session_id}",
-        "entry_urls": request_body.entry_urls,
-        "phases": [name for name, _ in PHASE_DEFINITIONS],
-        "temporal_workflow_id": ap_session.temporal_workflow_id,
-        "temporal_run_id": ap_session.temporal_run_id,
-    }
+    return start_response
 
 
 @router.get("/sessions", response_model=list[AutoPilotSessionResponse])
@@ -1564,38 +1903,108 @@ async def get_live_browser_state(
         exploration_session_id=str(exploration_session_id) if exploration_session_id else None,
         run_id=str(run_id) if run_id else None,
     )
-    latest_image = next((artifact for artifact in artifacts if artifact.type == "image"), None)
-    live = _merge_artifact_live_progress(live, artifacts)
-    session_allows_live = ap_session.status in ("running", "awaiting_input")
-    runtime = _current_autopilot_runtime(live)
+    return _live_response_from_state(
+        ap_session,
+        live,
+        artifacts,
+        phase=phase,
+        exploration_session_id=exploration_session_id,
+        run_id=run_id,
+        numeric_test_task_id=numeric_test_task_id,
+    )
 
-    return AutoPilotLiveResponse(
-        active=bool(live.get("active")) and session_allows_live,
-        phase=str(phase) if phase else None,
-        activity_label=live.get("activity_label"),
-        status=live.get("status"),
-        message=live.get("message"),
-        exploration_session_id=str(exploration_session_id) if exploration_session_id else None,
-        test_task_id=numeric_test_task_id,
-        run_id=str(run_id) if run_id else None,
-        spec_name=live.get("spec_name"),
-        current_stage=live.get("current_stage"),
-        agent_task_id=live.get("agent_task_id"),
-        last_tool=live.get("last_tool"),
-        last_tool_label=live.get("last_tool_label"),
-        tool_calls=_safe_int(live.get("tool_calls")),
-        browser_tool_calls=_safe_int(live.get("browser_tool_calls")),
-        interactions=_safe_int(live.get("interactions")),
-        capture_count=_safe_int(live.get("capture_count")),
-        latest_capture_at=live.get("latest_capture_at"),
-        activity_source=live.get("activity_source"),
-        recent_tools=list(live.get("recent_tools") or []),
-        artifacts=artifacts,
+
+@router.get("/{session_id}/evidence", response_model=AutoPilotEvidenceResponse)
+async def get_session_evidence(
+    session_id: str,
+    session: Session = Depends(get_session),
+):
+    """Get failure evidence and captured artifacts for an Auto Pilot session."""
+    ap_session = session.get(AutoPilotSession, session_id)
+    if not ap_session:
+        raise HTTPException(status_code=404, detail="Auto Pilot session not found")
+
+    await _reconcile_stale_session_async(session, ap_session)
+    live = await _merge_live_agent_progress(dict((ap_session.config or {}).get("live_browser") or {}))
+    phase = live.get("phase") or ap_session.current_phase
+
+    failed_phase_row = session.exec(
+        select(AutoPilotPhase)
+        .where(AutoPilotPhase.session_id == session_id)
+        .where(AutoPilotPhase.status == "failed")
+        .order_by(AutoPilotPhase.completed_at.desc(), AutoPilotPhase.phase_order.desc())
+    ).first()
+
+    exploration_ids: list[str] = []
+    for value in [
+        live.get("exploration_session_id"),
+        *list(ap_session.exploration_session_ids or []),
+    ]:
+        if value and str(value) not in exploration_ids:
+            exploration_ids.append(str(value))
+
+    run_ids: list[str] = []
+    live_run_id = live.get("run_id")
+    if live_run_id:
+        run_ids.append(str(live_run_id))
+    test_task_id = live.get("test_task_id")
+    numeric_test_task_id: int | None = None
+    if test_task_id:
+        try:
+            numeric_test_task_id = int(test_task_id)
+        except (TypeError, ValueError):
+            numeric_test_task_id = None
+    if numeric_test_task_id:
+        task = session.get(AutoPilotTestTask, numeric_test_task_id)
+        if task and task.session_id == session_id and task.run_id and task.run_id not in run_ids:
+            run_ids.append(task.run_id)
+
+    tasks = session.exec(select(AutoPilotTestTask).where(AutoPilotTestTask.session_id == session_id)).all()
+    for task in tasks:
+        if task.run_id and task.run_id not in run_ids:
+            run_ids.append(task.run_id)
+
+    evidence_artifacts = _collect_autopilot_artifacts(
+        exploration_session_ids=exploration_ids,
+        run_ids=run_ids,
+        include_diagnostics=True,
+    )
+    live_artifacts = [
+        AutoPilotLiveArtifactResponse(
+            name=artifact.name,
+            path=artifact.path,
+            type=artifact.type,
+            modified_at=artifact.modified_at,
+        )
+        for artifact in evidence_artifacts
+        if artifact.type in {"image", "video"}
+    ]
+    live_response = _live_response_from_state(
+        ap_session,
+        live,
+        live_artifacts,
+        phase=phase,
+        exploration_session_id=exploration_ids[0] if exploration_ids else None,
+        run_id=run_ids[0] if run_ids else None,
+        numeric_test_task_id=numeric_test_task_id,
+    )
+    temporal = await _autopilot_temporal_payload(ap_session)
+    latest_image = next((artifact for artifact in evidence_artifacts if artifact.type == "image"), None)
+    videos = [artifact for artifact in evidence_artifacts if artifact.type == "video"]
+    diagnostics = [artifact for artifact in evidence_artifacts if artifact.type in {"json", "text", "yaml"}]
+
+    return AutoPilotEvidenceResponse(
+        session_id=session_id,
+        status=ap_session.status,
+        current_phase=ap_session.current_phase,
+        error_message=ap_session.error_message,
+        failed_phase=_phase_to_response(failed_phase_row) if failed_phase_row else None,
+        temporal=temporal,
+        live=live_response,
+        artifacts=evidence_artifacts,
         latest_image=latest_image,
-        updated_at=live.get("updated_at"),
-        browser_runtime=str(runtime["browser_runtime"]),
-        live_view_available=bool(runtime["live_view_available"]),
-        runtime_message=runtime["runtime_message"],
+        videos=videos,
+        diagnostics=diagnostics,
     )
 
 

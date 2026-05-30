@@ -39,6 +39,7 @@ def test_agent_allowlist_uses_root_playwright_prefix(tmp_path, monkeypatch):
 
     tools = get_agent_allowed_tools("app-explorer")
 
+    assert {"Glob", "Grep", "Read", "LS"} <= set(tools)
     assert "mcp__playwright__browser_snapshot" in tools
     assert "mcp__playwright__browser_network_requests" in tools
 

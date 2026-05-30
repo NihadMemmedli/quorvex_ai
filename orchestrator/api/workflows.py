@@ -733,6 +733,7 @@ async def _workflow_debug_payload(run: WorkflowRun, session: Session, *, include
             "temporal_ui_url": settings.temporal_ui_url,
             "temporal_available": False,
             "temporal_error": None,
+            "timeline": [],
             "activities": [],
             "summary": {"total_activities": 0, "failed_activities": 0, "retry_count": 0, "last_failure": None},
         }
@@ -1823,6 +1824,7 @@ async def get_workflow_run_diagnostics(run_id: str, session: Session = Depends(g
         "temporal_available": False,
         "temporal_error": None,
         "workflow_status": None,
+        "timeline": [],
         "activities": [],
         "summary": {
             "total_activities": 0,

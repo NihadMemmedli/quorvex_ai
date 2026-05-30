@@ -128,10 +128,7 @@ export function LiveBrowserView({
     const forceArtifactPreview = preferProvidedArtifactPreview || preferQueryArtifactPreview || !liveViewAvailable;
     const pendingMessage = runtimeMessage?.trim() || statusMessage?.trim();
     const hasNoBrowserWindow = displayDiagnostics?.browser_window_count === 0;
-    const hasNoUsableVncFrame = !liveReady;
-    const waitingForBrowserWindow = Boolean(
-        hasNoUsableVncFrame && hasNoBrowserWindow
-    );
+    const waitingForBrowserWindow = hasNoBrowserWindow;
     const liveCanvasMounted = isConnected && !forceArtifactPreview;
     const liveStreamVisible = liveCanvasMounted && liveReady && !waitingForBrowserWindow;
     const showingFallbackCapture = forceArtifactPreview
@@ -467,6 +464,41 @@ export function LiveBrowserView({
 
     // Not active message
     if (!isActive) {
+        if (fallbackImage) {
+            return (
+                <div
+                    style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        minHeight: '400px',
+                        background: '#0d1117',
+                        borderRadius: 'var(--radius)',
+                        border: '1px solid var(--border)',
+                        gap: '1rem',
+                        padding: '1.25rem',
+                    }}
+                >
+                    <img
+                        src={`${API_BASE}${fallbackImage.path}`}
+                        alt="Latest browser capture"
+                        style={{
+                            width: '100%',
+                            maxWidth: '920px',
+                            maxHeight: '390px',
+                            objectFit: 'contain',
+                            borderRadius: '10px',
+                            border: '1px solid var(--border)',
+                            background: '#020617',
+                        }}
+                    />
+                    <p style={{ color: 'var(--text-secondary)', textAlign: 'center', maxWidth: '560px', margin: 0 }}>
+                        Browser work is no longer active. Showing the latest captured browser evidence.
+                    </p>
+                </div>
+            );
+        }
         return (
             <div
                 style={{
@@ -536,7 +568,9 @@ export function LiveBrowserView({
                             {liveStreamVisible
                                 ? 'Connected'
                                 : showingFallbackCapture
-                                    ? fallbackImage
+                                    ? waitingForBrowserWindow
+                                        ? 'Waiting for Browser Window'
+                                        : fallbackImage
                                         ? 'Latest capture'
                                         : isProviderRetry
                                             ? 'Provider retry'

@@ -91,7 +91,15 @@ class CustomWorkflowRun:
 
             step_result = await workflow.execute_activity(
                 "execute_custom_workflow_step",
-                {"run_id": run_id, "step_id": prepared.get("step_id")},
+                {
+                    "run_id": run_id,
+                    "step_id": prepared.get("step_id"),
+                    "step_key": prepared.get("step_key"),
+                    "step_order": prepared.get("step_order"),
+                    "step_label": prepared.get("step_label"),
+                    "step_type": prepared.get("step_type"),
+                    "attempt": int(prepared.get("attempt_count") or 0) + 1,
+                },
                 activity_id=(
                     f"custom-workflow-step-{run_id}-"
                     f"{prepared.get('step_order')}-{prepared.get('step_key')}-"

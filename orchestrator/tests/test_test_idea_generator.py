@@ -832,6 +832,114 @@ def test_explorer_identifies_browser_budget_stop():
     assert not _AppExplorer._is_budget_stop("Agent timed out")
 
 
+def test_explorer_parses_transition_with_string_action_element():
+    explorer = _AppExplorer(project_id="test")
+
+    result = explorer._parse_exploration_output(
+        "agent output",
+        "session_string_element",
+        "https://example.com",
+        pre_extracted_json=[
+            {
+                "transition": {
+                    "sequence": 1,
+                    "action": {"type": "click", "element": "Sign in", "value": None},
+                    "before": {"url": "https://example.com", "pageType": "home", "keyElements": ["Sign in"]},
+                    "after": {"url": "https://example.com/login", "pageType": "login", "keyElements": ["Email"]},
+                    "transitionType": "navigation",
+                    "apiCalls": [],
+                }
+            }
+        ],
+    )
+
+    assert result.transitions[0].action_element == {"name": "Sign in"}
+    assert result.elements_discovered == 2
+
+
+def test_explorer_preserves_dict_action_element_fields():
+    explorer = _AppExplorer(project_id="test")
+    element = {"ref": "e1", "role": "button", "name": "Submit"}
+
+    result = explorer._parse_exploration_output(
+        "agent output",
+        "session_dict_element",
+        "https://example.com",
+        pre_extracted_json=[
+            {
+                "transition": {
+                    "sequence": 1,
+                    "action": {"type": "click", "element": element},
+                    "before": {"url": "https://example.com/form", "pageType": "form", "keyElements": []},
+                    "after": {"url": "https://example.com/done", "pageType": "success", "keyElements": []},
+                    "transitionType": "navigation",
+                    "apiCalls": [],
+                }
+            }
+        ],
+    )
+
+    assert result.transitions[0].action_element is element
+    assert result.transitions[0].action_element["ref"] == "e1"
+
+
+def test_explorer_ignores_or_coerces_malformed_api_call_entries():
+    explorer = _AppExplorer(project_id="test")
+
+    result = explorer._parse_exploration_output(
+        "agent output",
+        "session_malformed_api",
+        "https://example.com",
+        pre_extracted_json=[
+            {
+                "transition": {
+                    "sequence": 1,
+                    "action": {"type": "click", "element": "Load"},
+                    "before": {"url": "https://example.com", "pageType": "home", "keyElements": []},
+                    "after": {"url": "https://example.com", "pageType": "home", "keyElements": []},
+                    "transitionType": "inline_update",
+                    "richApiCalls": [
+                        "https://example.com/api/loose",
+                        {"method": "POST", "url": "/api/search", "status": 200},
+                    ],
+                    "apiCalls": ["not-a-dict", {"method": "GET", "url": "/api/basic", "status": 200}],
+                }
+            }
+        ],
+    )
+
+    assert {endpoint["url"] for endpoint in result.api_endpoints} == {
+        "https://example.com/api/loose",
+        "/api/search",
+    }
+    assert result.transitions[0].api_calls[0]["url"] == "not-a-dict"
+
+
+def test_explorer_error_transition_with_string_element_creates_issue():
+    explorer = _AppExplorer(project_id="test")
+
+    result = explorer._parse_exploration_output(
+        "agent output",
+        "session_error_string_element",
+        "https://example.com",
+        pre_extracted_json=[
+            {
+                "transition": {
+                    "sequence": 1,
+                    "action": {"type": "click", "element": "Delete account"},
+                    "before": {"url": "https://example.com/settings", "pageType": "settings", "keyElements": []},
+                    "after": {"url": "https://example.com/error", "pageType": "error", "keyElements": []},
+                    "transitionType": "error",
+                    "apiCalls": [],
+                }
+            }
+        ],
+    )
+
+    assert result.issues[0].element == "Delete account"
+    assert result.issues[0].issue_type == "error_page"
+
+
 @pytest.mark.asyncio
 async def test_explorer_rejects_unverified_output_without_fallback(
     tmp_path, monkeypatch

@@ -3,6 +3,33 @@ import { expect, Page, Route, test } from '@playwright/test';
 const API_BASE = (process.env.API_BASE || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001').replace(/\/$/, '');
 const API_PREFIXES = Array.from(new Set([API_BASE, '/backend-proxy', '**/backend-proxy']));
 
+type AgentMemoryFixture = {
+  id: string;
+  project_id: string | null;
+  user_id: string | null;
+  kind: string;
+  memory_type: string;
+  scope: string;
+  content: string;
+  summary: string;
+  tags: string[];
+  confidence: number;
+  importance: number;
+  source_type: string;
+  source_id: string | null;
+  agent_type: string | null;
+  status: string;
+  valid_from: string | null;
+  valid_until: string | null;
+  supersedes_id: string | null;
+  review_required: boolean;
+  last_verified_at: string | null;
+  created_at: string;
+  updated_at: string;
+  last_used_at: string | null;
+  use_count: number;
+};
+
 class MemoryDashboardPage {
   constructor(private readonly page: Page) {}
 
@@ -214,5 +241,225 @@ test.describe('Memory dashboard', () => {
     await expect(page.getByText('## Memory Context')).toBeVisible();
     await expect(page.getByText('High-importance memory has not been verified.')).toBeVisible();
     await expect(page.getByText('"retrieval_reason": "project scoped"')).toBeVisible();
+  });
+
+  test('scopes agent memory row mutations by the selected row project', async ({ page }) => {
+    const memory = new MemoryDashboardPage(page);
+    await memory.mockBackend();
+
+    const mutationRequests: Array<{ method: string; pathname: string; search: string; payload?: unknown }> = [];
+    const lastMutation = () => mutationRequests[mutationRequests.length - 1];
+    let agentRows: AgentMemoryFixture[] = [
+      {
+        id: 'project-memory',
+        project_id: 'default',
+        user_id: null,
+        kind: 'project_fact',
+        memory_type: 'semantic',
+        scope: 'project',
+        content: 'Project memory content uses /login.',
+        summary: 'Project memory',
+        tags: ['login'],
+        confidence: 0.82,
+        importance: 0.75,
+        source_type: 'manual_dashboard',
+        source_id: null,
+        agent_type: null,
+        status: 'active',
+        valid_from: null,
+        valid_until: null,
+        supersedes_id: null,
+        review_required: true,
+        last_verified_at: null,
+        created_at: '2026-05-24T10:00:00',
+        updated_at: '2026-05-24T10:00:00',
+        last_used_at: null,
+        use_count: 0,
+      },
+      {
+        id: 'global-memory',
+        project_id: null,
+        user_id: null,
+        kind: 'agent_lesson',
+        memory_type: 'procedural',
+        scope: 'global',
+        content: 'Global memory content prefers stable roles.',
+        summary: 'Global memory',
+        tags: ['roles'],
+        confidence: 0.9,
+        importance: 0.8,
+        source_type: 'manual_dashboard',
+        source_id: null,
+        agent_type: 'assistant',
+        status: 'active',
+        valid_from: null,
+        valid_until: null,
+        supersedes_id: null,
+        review_required: true,
+        last_verified_at: null,
+        created_at: '2026-05-24T10:00:00',
+        updated_at: '2026-05-24T10:00:00',
+        last_used_at: null,
+        use_count: 0,
+      },
+    ];
+
+    await memory.routeApi('/api/memory/agent?*', route => route.fulfill({ status: 200, json: agentRows }));
+    await memory.routeApi('/api/memory/agent/**', async route => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const payload = request.postData() ? request.postDataJSON() : undefined;
+      const pathname = url.pathname.replace(/^\/backend-proxy/, '');
+      mutationRequests.push({
+        method: request.method(),
+        pathname,
+        search: url.search,
+        payload,
+      });
+
+      const pathParts = pathname.split('/');
+      const id = decodeURIComponent(pathParts[pathParts.length - 1] || '');
+      const action = pathParts[pathParts.length - 1];
+      const memoryId = ['approve', 'verify', 'archive'].includes(action || '')
+        ? decodeURIComponent(pathParts[pathParts.length - 2] || '')
+        : id;
+      const row = agentRows.find(item => item.id === memoryId);
+
+      if (request.method() === 'DELETE') {
+        agentRows = agentRows.filter(item => item.id !== memoryId);
+        await route.fulfill({ status: 200, json: { ok: true } });
+        return;
+      }
+
+      if (request.method() === 'PATCH' && action === 'approve' && row) {
+        row.review_required = false;
+      } else if (request.method() === 'PATCH' && action === 'archive' && row) {
+        row.status = 'archived';
+        agentRows = agentRows.filter(item => item.id !== memoryId);
+      } else if (request.method() === 'PATCH' && !['approve', 'verify', 'archive'].includes(action || '') && row && payload && typeof payload === 'object') {
+        Object.assign(row, payload);
+      }
+
+      await route.fulfill({ status: 200, json: row || { ok: true } });
+    });
+
+    await memory.open();
+    await page.getByRole('tab', { name: /Agent Memory/i }).click();
+    await expect(page.getByText('Project memory')).toBeVisible();
+    await expect(page.getByText('Global memory')).toBeVisible();
+
+    await page.locator('article.memory-card').filter({ hasText: 'Project memory' }).getByRole('button', { name: 'Approve' }).click();
+    expect(lastMutation()).toMatchObject({
+      method: 'PATCH',
+      pathname: '/api/memory/agent/project-memory/approve',
+      search: '?project_id=default',
+    });
+
+    await page.locator('article.memory-card').filter({ hasText: 'Global memory' }).getByRole('button', { name: 'Approve' }).click();
+    expect(lastMutation()).toMatchObject({
+      method: 'PATCH',
+      pathname: '/api/memory/agent/global-memory/approve',
+      search: '',
+    });
+
+    await page.locator('article.memory-card').filter({ hasText: 'Global memory' }).getByRole('button', { name: 'Verify' }).click();
+    expect(lastMutation()).toMatchObject({
+      method: 'PATCH',
+      pathname: '/api/memory/agent/global-memory/verify',
+      search: '',
+    });
+
+    await page.locator('article.memory-card').filter({ hasText: 'Project memory' }).getByRole('button', { name: 'Verify' }).click();
+    expect(lastMutation()).toMatchObject({
+      method: 'PATCH',
+      pathname: '/api/memory/agent/project-memory/verify',
+      search: '?project_id=default',
+    });
+
+    await page.locator('article.memory-card').filter({ hasText: 'Global memory' }).getByRole('button', { name: 'Edit' }).click();
+    await page.getByLabel('Summary').fill('Global memory updated');
+    await page.getByRole('button', { name: 'Save memory' }).click();
+    expect(lastMutation()).toMatchObject({
+      method: 'PATCH',
+      pathname: '/api/memory/agent/global-memory',
+      search: '',
+    });
+    expect(lastMutation()?.payload).toMatchObject({
+      summary: 'Global memory updated',
+      kind: 'agent_lesson',
+      memory_type: 'procedural',
+      scope: 'global',
+    });
+
+    await page.locator('article.memory-card').filter({ hasText: 'Global memory updated' }).getByRole('button', { name: 'Archive' }).click();
+    expect(lastMutation()).toMatchObject({
+      method: 'PATCH',
+      pathname: '/api/memory/agent/global-memory/archive',
+      search: '',
+    });
+    await expect(page.getByText('Global memory updated')).toHaveCount(0);
+
+    await page.locator('article.memory-card').filter({ hasText: 'Project memory' }).getByRole('button', { name: 'Edit' }).click();
+    await page.getByLabel('Summary').fill('Project memory updated');
+    await page.getByRole('button', { name: 'Save memory' }).click();
+    expect(lastMutation()).toMatchObject({
+      method: 'PATCH',
+      pathname: '/api/memory/agent/project-memory',
+      search: '?project_id=default',
+    });
+    expect(lastMutation()?.payload).toMatchObject({
+      summary: 'Project memory updated',
+      kind: 'project_fact',
+      memory_type: 'semantic',
+      scope: 'project',
+    });
+
+    await page.locator('article.memory-card').filter({ hasText: 'Project memory updated' }).getByRole('button', { name: 'Archive' }).click();
+    expect(lastMutation()).toMatchObject({
+      method: 'PATCH',
+      pathname: '/api/memory/agent/project-memory/archive',
+      search: '?project_id=default',
+    });
+
+    agentRows = [
+      {
+        id: 'global-delete-memory',
+        project_id: null,
+        user_id: null,
+        kind: 'agent_lesson',
+        memory_type: 'procedural',
+        scope: 'global',
+        content: 'Global delete memory content.',
+        summary: 'Global delete memory',
+        tags: [],
+        confidence: 0.88,
+        importance: 0.7,
+        source_type: 'manual_dashboard',
+        source_id: null,
+        agent_type: null,
+        status: 'active',
+        valid_from: null,
+        valid_until: null,
+        supersedes_id: null,
+        review_required: false,
+        last_verified_at: null,
+        created_at: '2026-05-24T10:00:00',
+        updated_at: '2026-05-24T10:00:00',
+        last_used_at: null,
+        use_count: 0,
+      },
+    ];
+
+    await page.getByRole('button', { name: 'Refresh' }).click();
+    await expect(page.getByText('Global delete memory')).toBeVisible();
+    await page.locator('article.memory-card').filter({ hasText: 'Global delete memory' }).getByRole('button', { name: 'Delete' }).click();
+    await expect(page.getByText('Delete memory?')).toBeVisible();
+    await page.getByRole('button', { name: 'Delete' }).last().click();
+    expect(lastMutation()).toMatchObject({
+      method: 'DELETE',
+      pathname: '/api/memory/agent/global-delete-memory',
+      search: '',
+    });
+    await expect(page.getByText('Global delete memory')).toHaveCount(0);
   });
 });

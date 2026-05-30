@@ -287,6 +287,7 @@ class AgentRunner:
         self.model = model
         self.model_tier = model_tier if model_tier in {"light", "standard", "deep", "tool_deep", "chat", "embedding"} else self._infer_model_tier()
         self.reasoning_budget = reasoning_budget
+        self._last_memory_injected = False
 
     def _effective_tools(self) -> list[str] | dict[str, str] | None:
         """Build the SDK/CLI tool availability set.
@@ -309,6 +310,48 @@ class AgentRunner:
         if self._effective_tools() == []:
             return "dontAsk"
         return "bypassPermissions"
+
+    def diagnostics(self, *, agent_class: str | None = None, prompt: str | None = None) -> dict[str, Any]:
+        """Return resolved runtime/tool/memory diagnostics for observability tests and logs."""
+
+        selection = apply_runtime_env_aliases(None, tier=self.model_tier, model_override=self.model)
+        mcp_prefixes = sorted(
+            {
+                "__".join(str(tool).split("__")[:2])
+                for tool in self._requested_mcp_tools()
+                if len(str(tool).split("__")) >= 3
+            }
+        )
+        prompt_hash = None
+        if prompt is not None:
+            try:
+                import hashlib
+
+                prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            except Exception:
+                prompt_hash = None
+        return {
+            "agent_class": agent_class or self.memory_agent_type,
+            "provider": selection.provider,
+            "runtime": selection.runtime,
+            "tier": selection.tier,
+            "model": selection.model,
+            "allowed_tools": list(self.allowed_tools),
+            "tools": self._effective_tools(),
+            "mcp_prefixes": mcp_prefixes,
+            "memory": {
+                "inject": self.inject_memory,
+                "capture": self.capture_memory,
+                "agent_type": self.memory_agent_type,
+                "stage": self.memory_stage,
+                "source_type": self.memory_source_type,
+                "source_id": self.memory_source_id,
+            },
+            "prompt": {
+                "provided": prompt is not None,
+                "hash": prompt_hash,
+            },
+        }
 
     def _requested_mcp_tools(self) -> list[str]:
         requested: list[str] = []
@@ -489,7 +532,14 @@ class AgentRunner:
         self._apply_active_ai_settings(self.model, self.model_tier)
         self._validate_mcp_config_for_allowed_tools(self.cwd)
         original_prompt = prompt
+        self._last_memory_injected = False
         prompt = self._augment_prompt_with_agent_memory(prompt)
+        try:
+            from orchestrator.ai.prompt_registry import attach_delivered_prompt_metadata
+
+            prompt = attach_delivered_prompt_metadata(prompt, memory_injected=self._last_memory_injected)
+        except Exception as exc:
+            logger.debug("Delivered prompt metadata skipped: %s", exc)
 
         # First, try agent queue if Redis is available
         # This offloads execution to a separate worker process outside uvicorn
@@ -904,6 +954,7 @@ class AgentRunner:
         return self.memory_project_id or os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID")
 
     def _augment_prompt_with_agent_memory(self, prompt: str) -> str:
+        self._last_memory_injected = False
         if not self.inject_memory or os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
             return prompt
         project_id = self._agent_memory_project_id()
@@ -945,6 +996,7 @@ class AgentRunner:
                     "memory_score_summary": ranking.get("score_summary", {}),
                 },
             )
+            self._last_memory_injected = True
             return f"{context}\n\n---\n\n{prompt}"
         except Exception as exc:
             logger.debug("Agent memory retrieval skipped: %s", exc)

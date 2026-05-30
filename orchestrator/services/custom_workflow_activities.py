@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from datetime import datetime
 from typing import Any
 
@@ -14,6 +16,8 @@ from orchestrator.services.workflow_runner import (
     handle_workflow_step_failure,
     prepare_next_workflow_step,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def mark_custom_workflow_started(payload: dict[str, Any]) -> dict[str, Any]:
@@ -39,7 +43,42 @@ def prepare_custom_workflow_step(payload: dict[str, Any]) -> dict[str, Any]:
 
 async def execute_custom_workflow_step(payload: dict[str, Any]) -> dict[str, Any]:
     """Execute one persisted workflow step."""
-    return await execute_workflow_step_once(str(payload["run_id"]), payload.get("step_id"))
+    run_id = str(payload["run_id"])
+    step_id = payload.get("step_id")
+    step_key = payload.get("step_key")
+    step_label = payload.get("step_label") or step_key or step_id
+    activity_id = None
+    try:
+        from temporalio import activity
+
+        activity_id = getattr(activity.info(), "activity_id", None)
+    except Exception:
+        activity_id = None
+    started = time.perf_counter()
+    logger.info(
+        "Custom workflow step activity started run_id=%s step_id=%s step_key=%s step_label=%s step_type=%s attempt=%s activity_id=%s",
+        run_id,
+        step_id,
+        step_key,
+        step_label,
+        payload.get("step_type"),
+        payload.get("attempt"),
+        activity_id,
+    )
+    result = await execute_workflow_step_once(run_id, step_id)
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(
+        "Custom workflow step activity finished run_id=%s step_id=%s step_key=%s step_label=%s status=%s action=%s duration_ms=%s activity_id=%s",
+        run_id,
+        step_id,
+        step_key,
+        step_label,
+        result.get("step_status") or result.get("status"),
+        result.get("action"),
+        duration_ms,
+        activity_id,
+    )
+    return result
 
 
 def handle_custom_workflow_step_failure(payload: dict[str, Any]) -> dict[str, Any]:

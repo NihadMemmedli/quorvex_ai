@@ -216,18 +216,20 @@ Context: User wants to generate automated tests from the following test plan.
 <seed-file>tests/seed.spec.ts</seed-file>
 {url_section}
 {credentials_section}
-{design_section}
-{memory_section}
 <spec-content file="{spec_path}">
 {spec_content}
 </spec-content>
+{design_section}
+{memory_section}
 
 ## Instructions
 
 For each test case in the spec:
 1. Call `generator_setup_page` with `seedFile: "tests/seed.spec.ts"` to initialize the browser
-2. **IMMEDIATELY** call `browser_navigate` to go to the target URL from the spec
-   (The default page is example.com - NOT your target. Navigate explicitly!)
+2. **IMMEDIATELY** call `browser_navigate` to go to the supplied target URL: `{target_url or "read the first explicit http(s) URL in the spec"}`
+   - Navigate only to that supplied target URL at setup time unless a test step explicitly requires another route.
+   - The default page is example.com - NOT your target. Navigate explicitly.
+   - If no usable target URL exists, stop and report the missing URL instead of inventing one.
 3. Execute each step interactively using `browser_*` tools to validate selectors
 4. Retrieve the execution log using `generator_read_log`
 5. Write the final test using `generator_write_test`
@@ -345,6 +347,10 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
             owner_id=self.owner_id,
             owner_label=self.owner_label,
             model_tier=self.model_tier,
+            memory_agent_type="NativeGenerator",
+            memory_source_type="spec",
+            memory_stage="native_generator",
+            inject_memory=False,
         )
 
         result = await runner.run(prompt)

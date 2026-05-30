@@ -53,6 +53,7 @@ from utils.project_utils import derive_project_id_from_url
 from utils.playwright_mcp import (
     browser_live_worker_enabled,
     browser_runtime_status,
+    live_browser_display_diagnostics,
     prepare_run_playwright_config_content,
     resolve_playwright_chromium_executable,
     write_playwright_test_mcp_config,
@@ -3932,45 +3933,7 @@ def _browser_window_lines(xwininfo_output: str, browser_process_count: int) -> l
 
 
 def _live_browser_display_diagnostics() -> dict[str, Any]:
-    diagnostics: dict[str, Any] = {
-        "display": os.environ.get("DISPLAY"),
-        "browser_process_count": 0,
-        "browser_window_count": None,
-    }
-    try:
-        process_result = subprocess.run(
-            ["ps", "-eo", "pid=,comm=,args="],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        lines = [
-            line
-            for line in process_result.stdout.splitlines()
-            if _is_real_browser_process_line(line)
-        ]
-        diagnostics["browser_process_count"] = len(lines)
-    except Exception as exc:
-        diagnostics["process_probe_error"] = str(exc)
-
-    if os.environ.get("DISPLAY"):
-        try:
-            env = os.environ.copy()
-            window_result = subprocess.run(
-                ["xwininfo", "-root", "-tree"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-                env=env,
-            )
-            browser_windows = _browser_window_lines(
-                window_result.stdout,
-                int(diagnostics.get("browser_process_count") or 0),
-            )
-            diagnostics["browser_window_count"] = len(browser_windows)
-        except Exception as exc:
-            diagnostics["window_probe_error"] = str(exc)
-    return diagnostics
+    return live_browser_display_diagnostics()
 
 
 def _augment_active_browser_metadata(metadata: dict[str, Any], status: str | None) -> dict[str, Any]:
@@ -7712,7 +7675,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         memory_source_id=run_id,
                         memory_stage="agent_run",
                         model=config.get("model"),
-                        model_tier=config.get("model_tier"),
+                        model_tier=config.get("model_tier") or "tool_deep",
                         agent_name=agent_type,
                         hermes_conversation=run_id,
                         metadata={"agent_type": agent_type, "run_id": run_id},
@@ -7982,7 +7945,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     capture_memory=False,
                     force_direct_execution=force_direct_execution,
                     model=config.get("model"),
-                    model_tier=config.get("model_tier"),
+                    model_tier=config.get("model_tier") or "tool_deep",
                     agent_name=config.get("agent_name") or "CustomAgent",
                     hermes_conversation=run_id,
                     metadata={

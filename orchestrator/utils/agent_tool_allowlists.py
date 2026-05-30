@@ -118,7 +118,7 @@ TEST_OPERATOR_MCP_TOOLS: tuple[str, ...] = (
 
 
 AGENT_TOOL_PROFILES: dict[str, AgentToolProfile] = {
-    "app-explorer": AgentToolProfile((), EXPLORER_MCP_TOOLS),
+    "app-explorer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_MCP_TOOLS),
     "api-explorer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_MCP_TOOLS),
     "playwright-test-planner": AgentToolProfile(("Glob", "Grep", "Read", "LS"), PLANNER_MCP_TOOLS),
     "playwright-test-generator": AgentToolProfile(("Glob", "Grep", "Read", "LS"), GENERATOR_MCP_TOOLS),

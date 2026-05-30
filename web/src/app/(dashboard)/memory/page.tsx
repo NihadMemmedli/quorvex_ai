@@ -259,6 +259,21 @@ interface AgentFilters {
     scope: string;
 }
 
+interface MemoryForm {
+    id: string;
+    project_id?: string | null;
+    kind: string;
+    memory_type: string;
+    scope: string;
+    content: string;
+    summary: string;
+    tags: string;
+    confidence: number;
+    importance: number;
+    agent_type: string;
+    review_required: boolean;
+}
+
 interface MemoryInjectionEvent {
     id: string;
     project_id?: string | null;
@@ -331,8 +346,9 @@ const knownTelemetryStages = ['planner', 'native_generator', 'native_healer', 'a
 const knownTelemetryOutcomes = ['injected', 'skipped', 'error'];
 const knownTelemetrySources = ['spec', 'test_file', 'chat', 'manual_dashboard'];
 
-const emptyForm = {
+const emptyForm: MemoryForm = {
     id: '',
+    project_id: null,
     kind: 'project_fact',
     memory_type: 'semantic',
     scope: 'project',
@@ -358,8 +374,6 @@ const defaultTelemetryFilters: TelemetryFilters = {
     sourceType: 'all',
 };
 
-type MemoryForm = typeof emptyForm;
-
 function pct(value: number) {
     return `${Math.round(value * 100)}%`;
 }
@@ -383,6 +397,21 @@ function uniqueSorted(values: Array<string | null | undefined>) {
 
 function isFailureMessage(message: string) {
     return /failed|error|unable/i.test(message);
+}
+
+function buildAgentMemoryMutationUrl(
+    memoryId: string,
+    currentProjectId: string,
+    memoryProjectId?: string | null,
+    action?: 'approve' | 'verify' | 'archive'
+) {
+    const params = new URLSearchParams();
+    if (memoryProjectId && memoryProjectId === currentProjectId) {
+        params.set('project_id', currentProjectId);
+    }
+    const suffix = action ? `/${action}` : '';
+    const query = params.toString();
+    return `${API_BASE}/api/memory/agent/${encodeURIComponent(memoryId)}${suffix}${query ? `?${query}` : ''}`;
 }
 
 function telemetryOutcomeTone(outcome: string): 'success' | 'warning' | 'danger' | 'muted' {
@@ -756,7 +785,7 @@ export default function MemoryPage() {
             source_type: form.id ? undefined : 'manual_dashboard',
         };
         const url = form.id
-            ? `${API_BASE}/api/memory/agent/${encodeURIComponent(form.id)}?project_id=${encodeURIComponent(projectId)}`
+            ? buildAgentMemoryMutationUrl(form.id, projectId, form.project_id)
             : `${API_BASE}/api/memory/agent`;
         const res = await fetchWithAuth(url, {
             method: form.id ? 'PATCH' : 'POST',
@@ -771,22 +800,26 @@ export default function MemoryPage() {
         setForm(emptyForm);
         setEditorOpen(false);
         setStatusMessage('Memory saved.');
-        fetchAgentMemory(agentFilters);
+        await fetchAgentMemory(agentFilters);
     }
 
     async function memoryAction(memory: AgentMemory, action: 'approve' | 'verify' | 'archive' | 'delete') {
         setStatusMessage(null);
-        const guard = `project_id=${encodeURIComponent(projectId)}`;
         const method = action === 'delete' ? 'DELETE' : 'PATCH';
-        const suffix = action === 'delete' ? '' : `/${action}`;
-        const res = await fetchWithAuth(`${API_BASE}/api/memory/agent/${encodeURIComponent(memory.id)}${suffix}?${guard}`, { method });
+        const url = buildAgentMemoryMutationUrl(
+            memory.id,
+            projectId,
+            memory.project_id,
+            action === 'delete' ? undefined : action
+        );
+        const res = await fetchWithAuth(url, { method });
         if (!res.ok) {
             const error = await res.json().catch(() => ({}));
             setStatusMessage(error.detail || `Failed to ${action} memory`);
             return;
         }
         setStatusMessage(`Memory ${action === 'delete' ? 'deleted' : `${action}d`}.`);
-        fetchAgentMemory(agentFilters);
+        await fetchAgentMemory(agentFilters);
     }
 
     function startCreateMemory() {
@@ -797,6 +830,7 @@ export default function MemoryPage() {
     function editMemory(memory: AgentMemory) {
         setForm({
             id: memory.id,
+            project_id: memory.project_id,
             kind: memory.kind,
             memory_type: memory.memory_type,
             scope: memory.scope,

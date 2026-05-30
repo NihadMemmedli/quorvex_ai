@@ -54,7 +54,11 @@ class NativeApiHealer:
         pass
 
     async def heal_test(
-        self, test_file: str, error_log: str | None = None, spec_content: str | None = None
+        self,
+        test_file: str,
+        error_log: str | None = None,
+        spec_content: str | None = None,
+        failure_context: str | None = None,
     ) -> str | None:
         """
         Attempt to heal a failing API test.
@@ -77,7 +81,11 @@ class NativeApiHealer:
 
         # Build prompt for the healer agent
         prompt = self._build_healer_prompt(
-            test_file=test_file, test_content=test_content, error_log=error_log, spec_content=spec_content
+            test_file=test_file,
+            test_content=test_content,
+            error_log=error_log,
+            spec_content=spec_content,
+            failure_context=failure_context,
         )
 
         # Invoke the Healer Agent
@@ -102,7 +110,12 @@ class NativeApiHealer:
         return None
 
     def _build_healer_prompt(
-        self, test_file: str, test_content: str, error_log: str | None, spec_content: str | None
+        self,
+        test_file: str,
+        test_content: str,
+        error_log: str | None,
+        spec_content: str | None,
+        failure_context: str | None = None,
     ) -> str:
         """Build prompt for the API test healer agent."""
 
@@ -126,6 +139,15 @@ class NativeApiHealer:
 ```
 """
 
+        failure_context_section = ""
+        if failure_context and failure_context != error_log:
+            failure_context_section = f"""
+## Structured Failure Context
+```
+{failure_context[:6000]}
+```
+"""
+
         prompt = f"""You are the Playwright API Test Healer.
 
 # Task: Fix a Failing API Test
@@ -137,6 +159,7 @@ class NativeApiHealer:
 ```
 
 {error_section}
+{failure_context_section}
 {spec_section}
 
 ## Your Workflow

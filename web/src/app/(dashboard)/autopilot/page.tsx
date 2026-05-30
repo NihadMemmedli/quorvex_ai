@@ -210,6 +210,29 @@ interface AutoPilotLiveState {
     browser_runtime: string | null;
     live_view_available: boolean;
     runtime_message: string | null;
+    vnc_url: string | null;
+    display_diagnostics: {
+        browser_process_count?: number | null;
+        browser_window_count?: number | null;
+    } | null;
+}
+
+interface AutoPilotEvidenceArtifact extends AutoPilotLiveArtifact {
+    content_excerpt?: string | null;
+}
+
+interface AutoPilotEvidence {
+    session_id: string;
+    status: string;
+    current_phase: string | null;
+    error_message: string | null;
+    failed_phase: Phase | null;
+    temporal: AutoPilotTemporal;
+    live: AutoPilotLiveState;
+    artifacts: AutoPilotEvidenceArtifact[];
+    latest_image: AutoPilotEvidenceArtifact | null;
+    videos: AutoPilotEvidenceArtifact[];
+    diagnostics: AutoPilotEvidenceArtifact[];
 }
 
 // ============ STATUS COLORS ============
@@ -884,6 +907,7 @@ export default function AutoPilotPage() {
     const [specTasks, setSpecTasks] = useState<SpecTask[]>([]);
     const [testTasks, setTestTasks] = useState<TestTask[]>([]);
     const [liveState, setLiveState] = useState<AutoPilotLiveState | null>(null);
+    const [evidence, setEvidence] = useState<AutoPilotEvidence | null>(null);
     const [loading, setLoading] = useState(true);
     const [starting, setStarting] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -949,6 +973,12 @@ export default function AutoPilotPage() {
                     return null;
                 }),
             ]);
+            const evidenceData = ['completed', 'failed', 'cancelled'].includes(sessionData.status)
+                ? await fetchJsonWithTimeout<AutoPilotEvidence>(`${API_BASE}/autopilot/${sessionId}/evidence`).catch(err => {
+                    console.debug('Auto Pilot evidence unavailable:', err);
+                    return null;
+                })
+                : null;
 
             setSession(sessionData);
             setPhases(Array.isArray(phasesData) ? phasesData : phasesData.phases || []);
@@ -956,10 +986,12 @@ export default function AutoPilotPage() {
             setSpecTasks(Array.isArray(specTasksData) ? specTasksData : specTasksData.tasks || []);
             setTestTasks(Array.isArray(testTasksData) ? testTasksData : testTasksData.tasks || []);
             setLiveState(liveData);
+            setEvidence(evidenceData);
             setLoadError(null);
         } catch (err) {
             console.error('Failed to fetch session detail:', err);
             setLoadError(err instanceof Error ? err.message : 'Failed to load Auto Pilot session details');
+            setEvidence(null);
         }
     }, []);
 
@@ -1253,6 +1285,7 @@ export default function AutoPilotPage() {
         setSpecTasks([]);
         setTestTasks([]);
         setLiveState(null);
+        setEvidence(null);
         setSelectedTask(null);
         setTaskDetailOpen(false);
         setTaskDetailError(null);
@@ -1266,6 +1299,7 @@ export default function AutoPilotPage() {
         setSpecTasks([]);
         setTestTasks([]);
         setLiveState(null);
+        setEvidence(null);
         fetchSessions();
     };
 
@@ -1622,6 +1656,8 @@ export default function AutoPilotPage() {
                             statusMessage={liveState?.message}
                             liveViewAvailable={Boolean(liveState?.live_view_available)}
                             runtimeMessage={liveState?.runtime_message}
+                            vncUrl={liveState?.vnc_url}
+                            displayDiagnostics={liveState?.display_diagnostics}
                         />
 
                         <div style={{
@@ -1956,6 +1992,172 @@ export default function AutoPilotPage() {
                                 Waiting for activity history from Temporal.
                             </div>
                         )}
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    const renderEvidencePanel = () => {
+        if (!session || !['completed', 'failed', 'cancelled'].includes(session.status)) return null;
+
+        const failedPhase = evidence?.failed_phase;
+        const temporalSummary = evidence?.temporal?.summary || session.temporal?.summary || {};
+        const latestImage = evidence?.latest_image || liveState?.latest_image || null;
+        const artifacts = evidence?.artifacts || liveState?.artifacts || [];
+        const videos = evidence?.videos || artifacts.filter(artifact => artifact.type === 'video');
+        const diagnostics = evidence?.diagnostics || [];
+        const errorMessage = evidence?.error_message || failedPhase?.error_message || session.error_message;
+        const temporalMessage = temporalSummary.last_failure || temporalSummary.last_workflow_task_failure || evidence?.temporal?.error || null;
+
+        return (
+            <div style={{ ...cardStyle, marginBottom: '1rem', padding: 0, overflow: 'hidden' }}>
+                <div style={{
+                    padding: '1rem 1.25rem',
+                    borderBottom: `1px solid ${dark.border}`,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '1rem',
+                    flexWrap: 'wrap',
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                        <AlertTriangle size={18} style={{ color: session.status === 'failed' ? dark.danger : dark.warning }} />
+                        <div>
+                            <div style={{ color: dark.text, fontSize: '0.95rem', fontWeight: 800 }}>Evidence</div>
+                            <div style={{ color: dark.textSecondary, fontSize: '0.8rem' }}>
+                                {failedPhase ? `Failed during ${PHASE_LABELS[failedPhase.phase_name] || failedPhase.phase_name}` : 'Captured artifacts and diagnostics'}
+                            </div>
+                        </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                        <StatusBadge status={session.status} />
+                        <span style={{ color: dark.textMuted, fontSize: '0.78rem' }}>
+                            {artifacts.length} artifact{artifacts.length === 1 ? '' : 's'}
+                        </span>
+                    </div>
+                </div>
+
+                <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                    gap: '1rem',
+                    padding: '1rem 1.25rem',
+                }}>
+                    <div style={{ display: 'grid', gap: '0.85rem' }}>
+                        {latestImage ? (
+                            <a href={`${API_BASE}${latestImage.path}`} target="_blank" rel="noreferrer" style={{ display: 'block' }}>
+                                <img
+                                    src={`${API_BASE}${latestImage.path}`}
+                                    alt="Latest Auto Pilot evidence screenshot"
+                                    style={{
+                                        width: '100%',
+                                        maxHeight: '340px',
+                                        objectFit: 'contain',
+                                        background: '#000',
+                                        border: `1px solid ${dark.border}`,
+                                        borderRadius: '8px',
+                                        display: 'block',
+                                    }}
+                                />
+                            </a>
+                        ) : (
+                            <div style={{
+                                minHeight: '220px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                border: `1px solid ${dark.border}`,
+                                borderRadius: '8px',
+                                color: dark.textMuted,
+                                textAlign: 'center',
+                                padding: '1rem',
+                            }}>
+                                No screenshot evidence was captured.
+                            </div>
+                        )}
+
+                        {artifacts.length > 0 && (
+                            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                {artifacts.slice(0, 12).map(artifact => (
+                                    <a
+                                        key={`${artifact.path}-${artifact.name}`}
+                                        href={`${API_BASE}${artifact.path}`}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '0.35rem',
+                                            padding: '0.35rem 0.55rem',
+                                            border: `1px solid ${dark.border}`,
+                                            borderRadius: '6px',
+                                            color: dark.primary,
+                                            textDecoration: 'none',
+                                            fontSize: '0.78rem',
+                                            maxWidth: '100%',
+                                        }}
+                                    >
+                                        <ExternalLink size={12} />
+                                        <span style={{ overflowWrap: 'anywhere' }}>{artifact.name}</span>
+                                    </a>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+
+                    <div style={{ display: 'grid', gap: '0.85rem', alignContent: 'start' }}>
+                        {(errorMessage || temporalMessage) && (
+                            <div style={{ border: `1px solid ${dark.border}`, borderRadius: '8px', padding: '0.85rem' }}>
+                                {errorMessage && (
+                                    <>
+                                        <div style={{ color: dark.textMuted, fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase', marginBottom: '0.35rem' }}>Failure</div>
+                                        <div style={{ color: dark.text, fontSize: '0.86rem', lineHeight: 1.5, overflowWrap: 'anywhere' }}>{errorMessage}</div>
+                                    </>
+                                )}
+                                {temporalMessage && (
+                                    <>
+                                        <div style={{ color: dark.textMuted, fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase', margin: errorMessage ? '0.75rem 0 0.35rem' : '0 0 0.35rem' }}>Temporal</div>
+                                        <div style={{ color: dark.textSecondary, fontSize: '0.84rem', lineHeight: 1.5, overflowWrap: 'anywhere' }}>{temporalMessage}</div>
+                                    </>
+                                )}
+                            </div>
+                        )}
+
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.6rem' }}>
+                            {[
+                                { label: 'Failures', value: temporalSummary.failed_activities ?? 0 },
+                                { label: 'Retries', value: temporalSummary.retry_count ?? 0 },
+                                { label: 'Videos', value: videos.length },
+                            ].map(item => (
+                                <div key={item.label} style={{ border: `1px solid ${dark.border}`, borderRadius: '8px', padding: '0.75rem' }}>
+                                    <div style={{ color: dark.textMuted, fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase' }}>{item.label}</div>
+                                    <div style={{ color: dark.text, fontSize: '1rem', fontWeight: 800, marginTop: '0.25rem' }}>{item.value}</div>
+                                </div>
+                            ))}
+                        </div>
+
+                        {diagnostics.slice(0, 3).map(item => (
+                            <div key={`${item.path}-excerpt`} style={{ border: `1px solid ${dark.border}`, borderRadius: '8px', overflow: 'hidden' }}>
+                                <div style={{ padding: '0.6rem 0.75rem', borderBottom: `1px solid ${dark.border}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+                                    <span style={{ color: dark.text, fontSize: '0.82rem', fontWeight: 700, overflowWrap: 'anywhere' }}>{item.name}</span>
+                                    <a href={`${API_BASE}${item.path}`} target="_blank" rel="noreferrer" style={{ color: dark.primary, display: 'inline-flex' }}>
+                                        <ExternalLink size={13} />
+                                    </a>
+                                </div>
+                                <pre style={{
+                                    margin: 0,
+                                    padding: '0.75rem',
+                                    maxHeight: '180px',
+                                    overflow: 'auto',
+                                    color: dark.textSecondary,
+                                    background: dark.panelAlt,
+                                    fontSize: '0.75rem',
+                                    lineHeight: 1.45,
+                                    whiteSpace: 'pre-wrap',
+                                }}>{item.content_excerpt || 'No preview available.'}</pre>
+                            </div>
+                        ))}
                     </div>
                 </div>
             </div>
@@ -2962,6 +3164,11 @@ export default function AutoPilotPage() {
                 {/* Temporal Observability */}
                 <div className="animate-in stagger-3">
                     {renderTemporalObservabilityPanel()}
+                </div>
+
+                {/* Evidence */}
+                <div className="animate-in stagger-3">
+                    {renderEvidencePanel()}
                 </div>
 
                 {/* Stats Cards */}

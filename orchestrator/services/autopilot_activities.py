@@ -20,22 +20,26 @@ TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 @contextmanager
 def _temporal_autopilot_execution_env():
     """Run AutoPilot browser work inside the Temporal worker process."""
-    previous_queue = os.environ.get("USE_AGENT_QUEUE")
-    previous_headless = os.environ.get("HEADLESS")
+    managed_names = (
+        "USE_AGENT_QUEUE",
+        "HEADLESS",
+        "PLAYWRIGHT_HEADLESS",
+        "PLAYWRIGHT_WORKERS",
+    )
+    previous_values = {name: os.environ.get(name) for name in managed_names}
     if os.environ.get("VNC_ENABLED", "").lower() == "true" and os.environ.get("DISPLAY"):
         os.environ["USE_AGENT_QUEUE"] = "false"
         os.environ["HEADLESS"] = "false"
+        os.environ["PLAYWRIGHT_HEADLESS"] = "false"
+        os.environ["PLAYWRIGHT_WORKERS"] = "1"
     try:
         yield
     finally:
-        if previous_queue is None:
-            os.environ.pop("USE_AGENT_QUEUE", None)
-        else:
-            os.environ["USE_AGENT_QUEUE"] = previous_queue
-        if previous_headless is None:
-            os.environ.pop("HEADLESS", None)
-        else:
-            os.environ["HEADLESS"] = previous_headless
+        for name, previous_value in previous_values.items():
+            if previous_value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous_value
 
 
 def _session_payload(session: AutoPilotSession | None) -> dict[str, Any]:

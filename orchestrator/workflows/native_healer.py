@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +37,9 @@ config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 if config_dir:
     os.chdir(config_dir)
 
-from claude_agent_sdk import ClaudeAgentOptions, query
-
+from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
+from orchestrator.utils.agent_runner import AgentRunner
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
-from orchestrator.utils.browser_cleanup import kill_new_children, snapshot_child_pids
 
 
 class NativeHealer:
@@ -54,8 +54,24 @@ class NativeHealer:
     5. Re-run to verify the fix
     """
 
-    def __init__(self):
-        pass
+    def __init__(
+        self,
+        on_tool_use: Callable[[str, dict[str, Any]], None] | None = None,
+        on_progress: Callable[[dict[str, Any]], None] | None = None,
+        on_task_enqueued: Callable[[str], None] | None = None,
+        owner_type: str | None = None,
+        owner_id: str | None = None,
+        owner_label: str | None = None,
+        model_tier: str = "tool_deep",
+    ):
+        self.on_tool_use = on_tool_use
+        self.on_progress = on_progress
+        self.on_task_enqueued = on_task_enqueued
+        self.owner_type = owner_type
+        self.owner_id = owner_id
+        self.owner_label = owner_label
+        self.model_tier = model_tier
+        self._last_timed_out = False
 
     async def heal_test(
         self,
@@ -214,7 +230,14 @@ call `browser_close` to close the browser before finishing.
 
 Start by running the test to see the current state.
 """
-        return prompt
+        metadata = build_prompt_metadata(
+            prompt_id="native_healer.playwright",
+            version="2026-05-30.1",
+            stage="test_healing",
+            schema_name="playwright_healing.v1",
+            rendered_prompt=prompt,
+        )
+        return attach_prompt_metadata(prompt, metadata)
 
     def _build_memory_context_section(
         self,
@@ -326,69 +349,56 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
 
     async def _query_healer_agent(self, prompt: str, timeout_seconds: int | None = None) -> str:
         """
-        Query the Playwright Healer agent using the SDK.
-
-        Handles the known cancel scope cleanup error gracefully.
-        Cleans up orphaned browser/MCP processes in a finally block.
+        Query the Playwright Healer agent using the unified AgentRunner.
         """
-        result = ""
         self._last_timed_out = False
-        pre_query_pids = snapshot_child_pids()
 
         effective_timeout = timeout_seconds or int(
             os.environ.get("HEALER_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))
         )
 
         try:
+            runner = AgentRunner(
+                timeout_seconds=effective_timeout,
+                allowed_tools=get_agent_allowed_tools("playwright-test-healer") or [],
+                log_tools=True,
+                on_tool_use=self.on_tool_use,
+                on_progress=self.on_progress,
+                on_task_enqueued=self.on_task_enqueued,
+                owner_type=self.owner_type,
+                owner_id=self.owner_id,
+                owner_label=self.owner_label,
+                model_tier=self.model_tier,
+                memory_agent_type="NativeHealer",
+                memory_source_type="test_file",
+                memory_stage="native_healer",
+                inject_memory=False,
+            )
+            result = await runner.run(prompt)
+            self._last_timed_out = result.timed_out
 
-            async def _run_healer_query():
-                nonlocal result
-                allowed_tools = get_agent_allowed_tools("playwright-test-healer") or []
-                async for message in query(
-                    prompt=prompt,
-                    options=ClaudeAgentOptions(
-                        allowed_tools=allowed_tools,
-                        tools=allowed_tools,
-                        setting_sources=["project"],  # Load .claude/ and .mcp.json
-                        permission_mode="bypassPermissions",  # Auto-approve tools
-                    ),
-                ):
-                    # Log tool uses for real-time feedback
-                    if hasattr(message, "type"):
-                        if message.type == "tool_use":
-                            tool_name = getattr(message, "name", "unknown")
-                            if tool_name.startswith("mcp__playwright"):
-                                action = tool_name.split("__")[-1] if "__" in tool_name else tool_name
-                                logger.info(f"   {action}...")
-                            else:
-                                logger.info(f"   {tool_name}...")
+            logger.info(
+                f"Healer stats: {result.messages_received} messages, "
+                f"{len(result.tool_calls)} tool calls, "
+                f"{result.duration_seconds:.1f}s"
+            )
+            if result.timed_out:
+                logger.warning(f"Healer agent timed out after {effective_timeout}s")
+            if not result.success and result.error:
+                logger.warning(f"Healer agent error: {result.error}")
+            return result.output
 
-                    if hasattr(message, "result"):
-                        result = message.result
-
-            try:
-                await asyncio.wait_for(_run_healer_query(), timeout=effective_timeout)
-            except asyncio.TimeoutError:
-                logger.warning(f"Healer agent timed out after {effective_timeout}s, returning partial result")
-                self._last_timed_out = True
-                return result
-
-            return result
-
-        except Exception as e:
-            error_str = str(e).lower()
+        except asyncio.TimeoutError:
+            logger.warning(f"Healer agent timed out after {effective_timeout}s")
+            self._last_timed_out = True
+            return ""
+        except Exception as exc:
+            error_str = str(exc).lower()
             if "cancel scope" in error_str or "cancelled" in error_str:
-                logger.info(f"SDK cleanup warning (ignored): {type(e).__name__}")
-                return result
-            else:
-                logger.error(f"Healer agent error: {e}")
-                raise
-
-        finally:
-            try:
-                kill_new_children(pre_query_pids, grace_seconds=2.0)
-            except Exception:
-                pass  # Non-fatal
+                logger.info(f"SDK cleanup warning (ignored): {type(exc).__name__}")
+                return ""
+            logger.error(f"Healer agent error: {exc}")
+            raise
 
     def _extract_code(self, text: str) -> str | None:
         """Extract TypeScript code from markdown response."""

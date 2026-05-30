@@ -1198,6 +1198,51 @@ When stopping, output any missing flow records you can infer from observed page 
         """Return whether an agent error is the intentional browser budget stop."""
         return bool(error and "browser tool budget reached" in error.lower())
 
+    @staticmethod
+    def _normalize_action_element(value: Any) -> dict[str, Any]:
+        """Normalize loose agent element output into the dict shape used downstream."""
+        if isinstance(value, dict):
+            return value
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            stripped = value.strip()
+            return {"name": stripped} if stripped else {}
+        try:
+            if isinstance(value, (list, tuple, set)) and not value:
+                return {}
+        except TypeError:
+            pass
+        text = str(value).strip()
+        return {"name": text} if text else {}
+
+    @staticmethod
+    def _normalize_api_call(value: Any) -> dict[str, Any] | None:
+        """Normalize loose API call entries before endpoint extraction."""
+        if isinstance(value, dict):
+            return value
+        if value is None:
+            return None
+        text = str(value).strip()
+        return {"url": text} if text else None
+
+    @classmethod
+    def _normalize_api_calls(cls, value: Any) -> list[dict[str, Any]]:
+        if not value:
+            return []
+        if isinstance(value, dict):
+            candidates = [value]
+        elif isinstance(value, list):
+            candidates = value
+        else:
+            candidates = [value]
+        calls: list[dict[str, Any]] = []
+        for item in candidates:
+            normalized = cls._normalize_api_call(item)
+            if normalized is not None:
+                calls.append(normalized)
+        return calls
+
     def _deduplicate_flows(self, flows: list[FlowRecord]) -> list[FlowRecord]:
         """Deduplicate flows by normalized (name, start_url, end_url) tuple. Keeps first occurrence."""
         seen = set()
@@ -1220,7 +1265,8 @@ When stopping, output any missing flow records you can infer from observed page 
         seen = set()
         unique = []
         for t in transitions:
-            elem_name = (t.action_element or {}).get("name", "")
+            action_element = self._normalize_action_element(t.action_element)
+            elem_name = action_element.get("name", "")
             key = (
                 t.sequence,
                 t.before_url.strip().rstrip("/").lower(),
@@ -1500,11 +1546,13 @@ When stopping, output any missing flow records you can infer from observed page 
                     action = t.get("action") or {}
                     before = t.get("before") or {}
                     after = t.get("after") or {}
+                    action_element = self._normalize_action_element(action.get("element"))
+                    api_calls = self._normalize_api_calls(t.get("apiCalls"))
 
                     transition = TransitionRecord(
                         sequence=t.get("sequence") or len(transitions) + 1,
                         action_type=action.get("type") or "unknown",
-                        action_element=action.get("element") or {},
+                        action_element=action_element,
                         action_value=action.get("value"),
                         before_url=before.get("url") or "",
                         before_page_type=before.get("pageType"),
@@ -1513,7 +1561,7 @@ When stopping, output any missing flow records you can infer from observed page 
                         after_page_type=after.get("pageType"),
                         after_elements=after.get("keyElements") or [],
                         transition_type=t.get("transitionType") or "unknown",
-                        api_calls=t.get("apiCalls") or [],
+                        api_calls=api_calls,
                         changes_description=", ".join(after.get("changes") or []),
                     )
                     transitions.append(transition)
@@ -1525,9 +1573,8 @@ When stopping, output any missing flow records you can infer from observed page 
                         pages_seen.add(after["url"])
 
                     # Extract API endpoints - prefer richApiCalls for detailed data
-                    rich_calls = t.get("richApiCalls") or []
-                    basic_calls = t.get("apiCalls") or []
-                    action_element = action.get("element") or {}
+                    rich_calls = self._normalize_api_calls(t.get("richApiCalls"))
+                    basic_calls = api_calls
                     triggered_by = f"{action.get('type') or 'unknown'} on {action_element.get('name') or 'element'}"
 
                     if rich_calls:
@@ -1652,6 +1699,7 @@ When stopping, output any missing flow records you can infer from observed page 
         # Auto-create issues from error transitions
         for t in transitions:
             if t.transition_type == "error":
+                action_element = self._normalize_action_element(t.action_element)
                 issues.append(
                     IssueRecord(
                         issue_type="error_page",
@@ -1659,7 +1707,7 @@ When stopping, output any missing flow records you can infer from observed page 
                         url=t.after_url or t.before_url,
                         description=t.changes_description
                         or f"Error encountered during {t.action_type}",
-                        element=(t.action_element or {}).get("name"),
+                        element=action_element.get("name"),
                     )
                 )
 
@@ -1686,7 +1734,7 @@ When stopping, output any missing flow records you can infer from observed page 
         # Calculate elements discovered from transitions
         elements_discovered = set()
         for t in transitions:
-            action_elem = t.action_element or {}
+            action_elem = self._normalize_action_element(t.action_element)
             if action_elem.get("name"):
                 elements_discovered.add(action_elem["name"])
             elements_discovered.update(t.before_elements or [])
@@ -1982,14 +2030,14 @@ When stopping, output any missing flow records you can infer from observed page 
         # Build a compact text representation of transitions
         transition_lines = []
         for t in transitions:
-            elem = t.action_element or {}
+            elem = self._normalize_action_element(t.action_element)
             elem_desc = elem.get("name") or elem.get("role") or "element"
             val = f' "{t.action_value}"' if t.action_value else ""
             api_desc = ""
             if t.api_calls:
                 api_desc = " | APIs: " + ", ".join(
                     f"{a.get('method', '?')} {a.get('url', '?')} -> {a.get('status', '?')}"
-                    for a in t.api_calls
+                    for a in self._normalize_api_calls(t.api_calls)
                 )
             transition_lines.append(
                 f"  {t.sequence}. {t.action_type} on '{elem_desc}'{val} | "
@@ -2379,11 +2427,11 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
         urls = [t.before_url.lower() for t in segment] + [segment[-1].after_url.lower()]
         all_elements = []
         for t in segment:
-            elem = t.action_element or {}
+            elem = self._normalize_action_element(t.action_element)
             all_elements.append(elem.get("name", "").lower())
         api_methods = []
         for t in segment:
-            for api in t.api_calls or []:
+            for api in self._normalize_api_calls(t.api_calls):
                 api_methods.append(api.get("method", "").upper())
 
         start_url = segment[0].before_url
@@ -2392,7 +2440,7 @@ Summary: {{"summary": {{"pagesDiscovered": 10, "flowsDiscovered": 5, "elementsIn
         # Build steps from transitions
         steps = []
         for t in segment:
-            elem = t.action_element or {}
+            elem = self._normalize_action_element(t.action_element)
             step = {
                 "action": t.action_type,
                 "element": elem.get("name", "unknown"),

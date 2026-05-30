@@ -5,8 +5,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
+
+
+REAL_BROWSER_EXECUTABLE_NAMES = {
+    "chrome",
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "google-chrome-stable",
+    "msedge",
+    "firefox",
+    "webkit",
+}
 
 
 def _parse_semver(version: str) -> tuple[int, int, int]:
@@ -167,6 +181,95 @@ def browser_runtime_status() -> dict[str, Any]:
         "browser_executable": str(executable),
         "vnc_url": vnc_url,
     }
+
+
+def _is_real_browser_process_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+
+    parts = stripped.split(None, 2)
+    command = ""
+    args = stripped
+    if len(parts) >= 3 and parts[0].isdigit():
+        command = Path(parts[1]).name.lower()
+        args = parts[2]
+    elif len(parts) >= 2 and parts[0].isdigit():
+        args = parts[1]
+
+    if command in REAL_BROWSER_EXECUTABLE_NAMES:
+        return True
+
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        tokens = args.split()
+    if not tokens:
+        return False
+
+    executable_name = Path(tokens[0]).name.lower()
+    return executable_name in REAL_BROWSER_EXECUTABLE_NAMES
+
+
+def _browser_window_lines(xwininfo_output: str, browser_process_count: int) -> list[str]:
+    browser_named_windows: list[str] = []
+    unnamed_visible_windows: list[str] = []
+    for line in xwininfo_output.splitlines():
+        if re.search(r"\b(chrome|chromium|firefox|webkit)\b", line, re.IGNORECASE):
+            browser_named_windows.append(line)
+            continue
+        if browser_process_count > 0 and re.search(
+            r'0x[0-9a-f]+\s+(?:"(?:has no name|)"|\(has no name\):)',
+            line,
+            re.IGNORECASE,
+        ):
+            if re.search(r"\s[1-9]\d{2,}x[1-9]\d{2,}\+", line):
+                unnamed_visible_windows.append(line)
+
+    return browser_named_windows or unnamed_visible_windows
+
+
+def live_browser_display_diagnostics() -> dict[str, Any]:
+    """Report process/window evidence for the currently configured VNC display."""
+    diagnostics: dict[str, Any] = {
+        "display": os.environ.get("DISPLAY"),
+        "browser_process_count": 0,
+        "browser_window_count": None,
+    }
+    try:
+        process_result = subprocess.run(
+            ["ps", "-eo", "pid=,comm=,args="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        lines = [
+            line
+            for line in process_result.stdout.splitlines()
+            if _is_real_browser_process_line(line)
+        ]
+        diagnostics["browser_process_count"] = len(lines)
+    except Exception as exc:
+        diagnostics["process_probe_error"] = str(exc)
+
+    if os.environ.get("DISPLAY"):
+        try:
+            env = os.environ.copy()
+            window_result = subprocess.run(
+                ["xwininfo", "-root", "-tree"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                env=env,
+            )
+            browser_windows = _browser_window_lines(
+                window_result.stdout,
+                int(diagnostics.get("browser_process_count") or 0),
+            )
+            diagnostics["browser_window_count"] = len(browser_windows)
+        except Exception as exc:
+            diagnostics["window_probe_error"] = str(exc)
+    return diagnostics
 
 
 def build_playwright_mcp_args(

@@ -9,7 +9,8 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-autopilot-temporal"
 os.environ.setdefault("REQUIRE_AUTH", "false")
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -49,11 +50,15 @@ from orchestrator.api.models_db import (
     AutoPilotSpecTask,
     AutoPilotTestTask,
 )
-from orchestrator.services.autopilot_activities import mark_autopilot_temporal_started, set_autopilot_control_status
+from orchestrator.services.autopilot_activities import (
+    _temporal_autopilot_execution_env,
+    mark_autopilot_temporal_started,
+    set_autopilot_control_status,
+)
 from orchestrator.services.custom_workflow_worker import get_worker_contract
 from orchestrator.services import temporal_client
 from orchestrator.services.temporal_client import TemporalUnavailableError, TemporalWorkflowStart
-from orchestrator.workflows.autopilot_pipeline import AutoPilotPipeline
+from orchestrator.workflows.autopilot_pipeline import AutoPilotPipeline, _effective_test_generation_parallelism
 
 
 def _ensure_tables() -> None:
@@ -95,6 +100,56 @@ def test_custom_workflow_worker_registers_autopilot_workflow_and_activities():
     assert "finalize_autopilot_workflow" in contract["activities"]
 
 
+def test_start_autopilot_endpoint_returns_success_after_temporal_commit(monkeypatch):
+    _ensure_tables()
+    session_id = "autopilot_2030-01-01_00-00-01"
+    _cleanup_session(session_id)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = cls(2030, 1, 1, 0, 0, 1)
+            return value.replace(tzinfo=tz) if tz else value
+
+        @classmethod
+        def utcnow(cls):
+            return cls(2030, 1, 1, 0, 0, 1)
+
+    async def fake_start(session_id_arg: str, *, task_queue: str | None = None):
+        assert session_id_arg == session_id
+        assert task_queue
+        return TemporalWorkflowStart(workflow_id=f"autopilot-{session_id}", run_id="run-123")
+
+    monkeypatch.setattr(autopilot_api, "datetime", FixedDateTime)
+    monkeypatch.setattr(autopilot_api, "_count_user_active_sessions", lambda user_key: 0)
+    monkeypatch.setattr(autopilot_api, "_count_user_active_sessions_db", lambda user_key: 0)
+    monkeypatch.setattr("orchestrator.services.temporal_client.start_autopilot_workflow", fake_start)
+
+    app = FastAPI()
+    app.include_router(autopilot_api.router)
+
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/autopilot/start",
+                json={"entry_urls": ["https://example.com"], "project_id": "default"},
+            )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["session_id"] == session_id
+        assert data["temporal_workflow_id"] == f"autopilot-{session_id}"
+        assert data["temporal_run_id"] == "run-123"
+
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            assert ap_session.temporal_workflow_id == f"autopilot-{session_id}"
+            assert ap_session.temporal_run_id == "run-123"
+    finally:
+        _cleanup_session(session_id)
+
+
 def test_autopilot_temporal_start_activity_records_workflow_metadata():
     session_id = f"autopilot-test-{uuid4().hex}"
     _create_autopilot_session(session_id)
@@ -116,6 +171,37 @@ def test_autopilot_temporal_start_activity_records_workflow_metadata():
         assert ap_session.temporal_run_id == "temporal-run-1"
 
     _cleanup_session(session_id)
+
+
+def test_temporal_autopilot_execution_env_forces_visible_vnc_env(monkeypatch):
+    monkeypatch.setenv("VNC_ENABLED", "true")
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setenv("USE_AGENT_QUEUE", "true")
+    monkeypatch.delenv("HEADLESS", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_HEADLESS", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_WORKERS", raising=False)
+
+    with _temporal_autopilot_execution_env():
+        assert os.environ["USE_AGENT_QUEUE"] == "false"
+        assert os.environ["HEADLESS"] == "false"
+        assert os.environ["PLAYWRIGHT_HEADLESS"] == "false"
+        assert os.environ["PLAYWRIGHT_WORKERS"] == "1"
+
+    assert os.environ["USE_AGENT_QUEUE"] == "true"
+    assert "HEADLESS" not in os.environ
+    assert "PLAYWRIGHT_HEADLESS" not in os.environ
+    assert "PLAYWRIGHT_WORKERS" not in os.environ
+
+
+def test_test_generation_parallelism_clamps_only_for_vnc_runtime():
+    assert _effective_test_generation_parallelism(
+        4,
+        {"browser_runtime": "vnc", "live_view_available": True},
+    ) == 1
+    assert _effective_test_generation_parallelism(
+        4,
+        {"browser_runtime": "headless_worker", "live_view_available": False},
+    ) == 4
 
 
 def test_autopilot_temporal_control_updates_session_status():
@@ -194,12 +280,492 @@ def test_autopilot_live_runtime_prefers_temporal_vnc_state():
             "browser_runtime": "vnc",
             "live_view_available": True,
             "runtime_message": "Browser will run on the VNC display.",
+            "vnc_url": "ws://localhost:6080/websockify",
+            "display_diagnostics": {"browser_window_count": 1},
         }
     )
 
     assert runtime["browser_runtime"] == "vnc"
     assert runtime["live_view_available"] is True
     assert runtime["runtime_message"] == "Browser will run on the VNC display."
+    assert runtime["vnc_url"] == "ws://localhost:6080/websockify"
+    assert runtime["display_diagnostics"]["browser_window_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_autopilot_stale_check_preserves_active_browser_pool_slot(monkeypatch):
+    class _FakePool:
+        async def is_running(self, request_id: str) -> bool:
+            return request_id == "autopilot_explore-active"
+
+        async def get_status(self) -> dict:
+            return {"running_requests": ["autopilot_explore-active"]}
+
+    async def fake_get_browser_pool():
+        return _FakePool()
+
+    from orchestrator.services import browser_pool
+
+    monkeypatch.setattr(browser_pool, "get_browser_pool", fake_get_browser_pool)
+    monkeypatch.setattr(autopilot_api, "find_session_processes", lambda _session_id: [])
+
+    ap_session = AutoPilotSession(id="autopilot-active-slot", status="running")
+    ap_session.config = {
+        "live_browser": {
+            "active": True,
+            "phase": "exploration",
+            "status": "running",
+            "message": "Browser slot acquired",
+            "exploration_session_id": "explore-active",
+            "updated_at": "2026-05-30T15:54:00",
+        }
+    }
+
+    stale = await autopilot_api._is_stale_live_browser_async(
+        ap_session,
+        now=datetime(2026, 5, 30, 15, 57, 0),
+    )
+
+    assert stale is False
+
+
+@pytest.mark.asyncio
+async def test_autopilot_stale_check_preserves_running_test_task(monkeypatch):
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="running")
+
+    async def no_active_browser_pool_slot(_live: dict) -> bool:
+        return False
+
+    async def no_active_test_task_browser_pool_slot(_session_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(autopilot_api, "find_session_processes", lambda _session_id: [])
+    monkeypatch.setattr(autopilot_api, "_has_active_browser_pool_slot", no_active_browser_pool_slot)
+    monkeypatch.setattr(
+        autopilot_api,
+        "_has_active_test_task_browser_pool_slot",
+        no_active_test_task_browser_pool_slot,
+    )
+
+    try:
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            ap_session.current_phase = "test_generation"
+            ap_session.config = {
+                "live_browser": {
+                    "active": True,
+                    "phase": "test_generation",
+                    "status": "running",
+                    "message": "Generating tests",
+                    "updated_at": "2026-05-30T15:54:00",
+                }
+            }
+            session.add(ap_session)
+            session.add(AutoPilotTestTask(session_id=session_id, spec_name="checkout.md", status="running"))
+            session.commit()
+
+            stale = await autopilot_api._is_stale_live_browser_async(
+                ap_session,
+                now=datetime(2026, 5, 30, 15, 57, 0),
+            )
+
+        assert stale is False
+    finally:
+        _cleanup_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_autopilot_stale_check_preserves_running_test_task_browser_pool_slot(monkeypatch):
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="running")
+
+    class _FakePool:
+        async def get_status(self) -> dict:
+            return {"running_requests": [f"autopilot_test_{test_task_id}_worker-1"]}
+
+    async def fake_get_browser_pool():
+        return _FakePool()
+
+    from orchestrator.services import browser_pool
+
+    monkeypatch.setattr(browser_pool, "get_browser_pool", fake_get_browser_pool)
+
+    try:
+        with Session(engine) as session:
+            task = AutoPilotTestTask(session_id=session_id, spec_name="checkout.md", status="running")
+            session.add(task)
+            session.commit()
+            session.refresh(task)
+            test_task_id = task.id
+
+        assert test_task_id is not None
+        assert await autopilot_api._has_active_test_task_browser_pool_slot(session_id) is True
+    finally:
+        _cleanup_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_autopilot_stale_check_preserves_running_temporal_workflow(monkeypatch):
+    async def no_active_browser_pool_slot(_live: dict) -> bool:
+        return False
+
+    async def fake_describe_autopilot_workflow(workflow_id: str) -> dict:
+        assert workflow_id == "autopilot-autopilot-temporal"
+        return {"workflow_status": "RUNNING"}
+
+    monkeypatch.setattr(autopilot_api, "find_session_processes", lambda _session_id: [])
+    monkeypatch.setattr(autopilot_api, "_has_active_browser_pool_slot", no_active_browser_pool_slot)
+    monkeypatch.setattr(
+        "orchestrator.services.temporal_client.describe_autopilot_workflow",
+        fake_describe_autopilot_workflow,
+    )
+
+    ap_session = AutoPilotSession(id="autopilot-temporal", status="running")
+    ap_session.temporal_workflow_id = "autopilot-autopilot-temporal"
+    ap_session.config = {
+        "live_browser": {
+            "active": True,
+            "phase": "exploration",
+            "status": "running",
+            "message": "Browser slot acquired",
+            "exploration_session_id": "explore-temporal",
+            "updated_at": "2026-05-30T15:54:00",
+        }
+    }
+
+    stale = await autopilot_api._is_stale_live_browser_async(
+        ap_session,
+        now=datetime(2026, 5, 30, 15, 57, 0),
+    )
+
+    assert stale is False
+
+
+@pytest.mark.asyncio
+async def test_autopilot_stale_check_detects_true_orphan(monkeypatch):
+    async def no_active_browser_pool_slot(_live: dict) -> bool:
+        return False
+
+    monkeypatch.setattr(autopilot_api, "find_session_processes", lambda _session_id: [])
+    monkeypatch.setattr(autopilot_api, "_has_active_browser_pool_slot", no_active_browser_pool_slot)
+
+    ap_session = AutoPilotSession(id="autopilot-orphan", status="running")
+    ap_session.config = {
+        "live_browser": {
+            "active": True,
+            "phase": "exploration",
+            "status": "running",
+            "message": "Browser slot acquired",
+            "exploration_session_id": "explore-orphan",
+            "updated_at": "2026-05-30T15:54:00",
+        }
+    }
+
+    stale = await autopilot_api._is_stale_live_browser_async(
+        ap_session,
+        now=datetime(2026, 5, 30, 15, 57, 0),
+    )
+
+    assert stale is True
+
+
+def test_mark_session_interrupted_refuses_active_test_tasks():
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="running")
+
+    try:
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            ap_session.current_phase = "test_generation"
+            ap_session.config = {
+                "live_browser": {
+                    "active": True,
+                    "phase": "test_generation",
+                    "status": "running",
+                    "message": "Generating tests",
+                    "updated_at": "2026-05-30T15:54:00",
+                }
+            }
+            phase = AutoPilotPhase(
+                session_id=session_id,
+                phase_name="test_generation",
+                phase_order=4,
+                status="running",
+            )
+            task = AutoPilotTestTask(session_id=session_id, spec_name="checkout.md", status="running")
+            session.add(ap_session)
+            session.add(phase)
+            session.add(task)
+            session.commit()
+
+            changed = autopilot_api._mark_session_interrupted(session, ap_session, "stale")
+            session.refresh(ap_session)
+            session.refresh(phase)
+            session.refresh(task)
+
+        assert changed is False
+        assert ap_session.status == "running"
+        assert ap_session.error_message is None
+        assert phase.status == "running"
+        assert task.status == "running"
+    finally:
+        _cleanup_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_autopilot_stale_check_preserves_awaiting_input_session(monkeypatch):
+    monkeypatch.setattr(autopilot_api, "find_session_processes", lambda _session_id: [])
+
+    ap_session = AutoPilotSession(id="autopilot-awaiting-input", status="awaiting_input")
+    ap_session.config = {
+        "live_browser": {
+            "active": True,
+            "phase": "exploration",
+            "status": "running",
+            "message": "Browser slot acquired",
+            "exploration_session_id": "explore-awaiting",
+            "updated_at": "2026-05-30T15:54:00",
+        }
+    }
+
+    stale = await autopilot_api._is_stale_live_browser_async(
+        ap_session,
+        now=datetime(2026, 5, 30, 15, 57, 0),
+    )
+
+    assert stale is False
+
+
+@pytest.mark.asyncio
+async def test_autopilot_reconcile_preserves_temporal_running_session(monkeypatch):
+    session_id = f"autopilot-test-{uuid4().hex}"
+    _create_autopilot_session(session_id, status="running")
+
+    async def no_active_browser_pool_slot(_live: dict) -> bool:
+        return False
+
+    async def fake_describe_autopilot_workflow(workflow_id: str) -> dict:
+        assert workflow_id == f"autopilot-{session_id}"
+        return {"workflow_status": "RUNNING"}
+
+    monkeypatch.setattr(autopilot_api, "find_session_processes", lambda _session_id: [])
+    monkeypatch.setattr(autopilot_api, "_has_active_browser_pool_slot", no_active_browser_pool_slot)
+    monkeypatch.setattr(
+        "orchestrator.services.temporal_client.describe_autopilot_workflow",
+        fake_describe_autopilot_workflow,
+    )
+
+    try:
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            ap_session.temporal_workflow_id = f"autopilot-{session_id}"
+            ap_session.config = {
+                "live_browser": {
+                    "active": True,
+                    "phase": "exploration",
+                    "status": "running",
+                    "message": "Browser slot acquired",
+                    "exploration_session_id": "explore-temporal",
+                    "updated_at": "2026-05-30T15:54:00",
+                }
+            }
+            session.add(ap_session)
+            session.commit()
+
+            changed = await autopilot_api._reconcile_stale_session_async(session, ap_session)
+            session.refresh(ap_session)
+
+        assert changed is False
+        assert ap_session.status == "running"
+        assert ap_session.error_message is None
+    finally:
+        _cleanup_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_autopilot_live_returns_artifacts_and_vnc_url_for_failed_session(monkeypatch, tmp_path):
+    session_id = f"autopilot-test-{uuid4().hex}"
+    runs_dir = tmp_path / "runs"
+    artifact_dir = runs_dir / "explorations" / "explore_failed" / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "live-step-001.png").write_bytes(b"png")
+    monkeypatch.setattr(autopilot_api, "RUNS_DIR", runs_dir)
+
+    _create_autopilot_session(session_id, status="failed")
+    with Session(engine) as session:
+        ap_session = session.get(AutoPilotSession, session_id)
+        assert ap_session is not None
+        ap_session.current_phase = "exploration"
+        ap_session.error_message = "exploration crashed"
+        ap_session.exploration_session_ids = ["explore_failed"]
+        ap_session.config = {
+            "live_browser": {
+                "active": False,
+                "phase": "exploration",
+                "status": "failed",
+                "message": "exploration crashed",
+                "exploration_session_id": "explore_failed",
+                "browser_runtime": "vnc",
+                "live_view_available": True,
+                "runtime_message": "Browser will run on the VNC display.",
+                "vnc_url": "ws://localhost:6080/websockify",
+            }
+        }
+        session.add(ap_session)
+        session.commit()
+
+    app = FastAPI()
+    app.include_router(autopilot_api.router)
+    with TestClient(app) as client:
+        response = client.get(f"/autopilot/{session_id}/live")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["active"] is False
+    assert data["vnc_url"] == "ws://localhost:6080/websockify"
+    assert data["latest_image"]["path"] == "/artifacts/explorations/explore_failed/artifacts/live-step-001.png"
+    assert data["capture_count"] == 1
+    assert data["message"] == "exploration crashed"
+
+    _cleanup_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_autopilot_live_reports_waiting_when_vnc_has_no_browser_window(monkeypatch):
+    session_id = f"autopilot-test-{uuid4().hex}"
+    monkeypatch.setattr(
+        autopilot_api,
+        "browser_runtime_status",
+        lambda: {
+            "browser_runtime": "vnc",
+            "live_view_available": True,
+            "runtime_message": "Browser will run on the VNC display.",
+            "vnc_url": "ws://localhost:6080/websockify",
+        },
+    )
+    monkeypatch.setattr(
+        autopilot_api,
+        "live_browser_display_diagnostics",
+        lambda: {"display": ":99", "browser_process_count": 0, "browser_window_count": 0},
+    )
+
+    _create_autopilot_session(session_id, status="running")
+    with Session(engine) as session:
+        ap_session = session.get(AutoPilotSession, session_id)
+        assert ap_session is not None
+        ap_session.current_phase = "test_generation"
+        ap_session.config = {
+            "live_browser": {
+                "active": True,
+                "phase": "test_generation",
+                "status": "running",
+                "message": "Generating tests",
+                "browser_runtime": "vnc",
+                "live_view_available": True,
+                "vnc_url": "ws://localhost:6080/websockify",
+            }
+        }
+        session.add(ap_session)
+        session.commit()
+
+    app = FastAPI()
+    app.include_router(autopilot_api.router)
+    with TestClient(app) as client:
+        response = client.get(f"/autopilot/{session_id}/live")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["live_view_available"] is True
+    assert data["display_diagnostics"]["browser_window_count"] == 0
+    assert data["runtime_message"] == "VNC is connected; waiting for Playwright to launch a visible browser window."
+
+    _cleanup_session(session_id)
+
+
+@pytest.mark.asyncio
+async def test_autopilot_evidence_includes_failed_phase_artifacts_and_temporal_summary(
+    monkeypatch, tmp_path
+):
+    session_id = f"autopilot-test-{uuid4().hex}"
+    runs_dir = tmp_path / "runs"
+    artifact_dir = runs_dir / "explorations" / "explore_failed" / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "live-step-001.png").write_bytes(b"png")
+    (artifact_dir / "browser-memory-observations.jsonl").write_text('{"event":"clicked"}\n')
+    monkeypatch.setattr(autopilot_api, "RUNS_DIR", runs_dir)
+
+    async def fake_temporal_payload(_ap_session):
+        return {
+            "temporal_workflow_id": "autopilot-test-workflow",
+            "temporal_run_id": "temporal-run",
+            "temporal_ui_url": None,
+            "temporal_ui_workflow_url": None,
+            "temporal_namespace": "default",
+            "task_queue": "autopilot",
+            "workflow_type": "AutoPilotWorkflow",
+            "available": True,
+            "workflow_status": "FAILED",
+            "activities": [],
+            "workflow_task_failures": [],
+            "task_queue_status": {},
+            "summary": {
+                "total_activities": 2,
+                "failed_activities": 1,
+                "retry_count": 3,
+                "last_failure": "activity failed",
+                "last_workflow_task_failure": None,
+            },
+            "error": None,
+        }
+
+    monkeypatch.setattr(autopilot_api, "_autopilot_temporal_payload", fake_temporal_payload)
+    _create_autopilot_session(session_id, status="failed")
+    with Session(engine) as session:
+        ap_session = session.get(AutoPilotSession, session_id)
+        assert ap_session is not None
+        ap_session.current_phase = "exploration"
+        ap_session.error_message = "exploration crashed"
+        ap_session.exploration_session_ids = ["explore_failed"]
+        ap_session.config = {
+            "live_browser": {
+                "active": False,
+                "phase": "exploration",
+                "status": "failed",
+                "message": "exploration crashed",
+                "exploration_session_id": "explore_failed",
+            }
+        }
+        session.add(ap_session)
+        session.add(
+            AutoPilotPhase(
+                session_id=session_id,
+                phase_name="exploration",
+                phase_order=0,
+                status="failed",
+                error_message="parser crashed",
+                completed_at=datetime.utcnow(),
+            )
+        )
+        session.commit()
+
+    app = FastAPI()
+    app.include_router(autopilot_api.router)
+    with TestClient(app) as client:
+        response = client.get(f"/autopilot/{session_id}/evidence")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["failed_phase"]["phase_name"] == "exploration"
+    assert data["failed_phase"]["error_message"] == "parser crashed"
+    assert data["latest_image"]["path"] == "/artifacts/explorations/explore_failed/artifacts/live-step-001.png"
+    assert data["temporal"]["summary"]["last_failure"] == "activity failed"
+    assert data["diagnostics"][0]["content_excerpt"].strip() == '{"event":"clicked"}'
+
+    _cleanup_session(session_id)
 
 
 def test_temporal_pending_activity_marks_scheduled_activity_started():

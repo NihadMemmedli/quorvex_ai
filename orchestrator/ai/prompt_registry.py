@@ -65,3 +65,20 @@ def attach_prompt_metadata(prompt: str, metadata: PromptMetadata) -> str:
         " />"
     )
     return f"{header}\n\n{prompt}"
+
+
+def attach_delivered_prompt_metadata(
+    prompt: str,
+    *,
+    memory_injected: bool = False,
+) -> str:
+    """Attach a hash for the prompt body after final runner augmentation."""
+
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    header = (
+        "<delivered_prompt_metadata "
+        f'hash="{digest}" '
+        f'memory_injected="{str(memory_injected).lower()}"'
+        " />"
+    )
+    return f"{header}\n\n{prompt}"

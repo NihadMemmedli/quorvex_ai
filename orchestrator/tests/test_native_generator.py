@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.workflows.native_generator import NativeGenerator
@@ -29,3 +31,36 @@ def test_generator_agent_definition_requires_seed_file():
     content = (Path(__file__).resolve().parents[2] / ".claude" / "agents" / "playwright-test-generator.md").read_text()
 
     assert 'generator_setup_page` tool with `seedFile: "tests/seed.spec.ts"`' in content
+    assert "Include every test case from the provided spec in that single file" in content
+
+
+@pytest.mark.asyncio
+async def test_generator_runner_does_not_inject_memory_twice(monkeypatch):
+    captured = {}
+
+    class FakeResult:
+        output = "done"
+        messages_received = 1
+        tool_calls = []
+        duration_seconds = 0.1
+        timed_out = False
+        success = True
+        error = None
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def run(self, prompt):
+            captured["prompt"] = prompt
+            return FakeResult()
+
+    monkeypatch.setattr("orchestrator.workflows.native_generator.AgentRunner", FakeRunner)
+    generator = NativeGenerator(model_tier="tool_deep")
+
+    result = await generator._query_generator_agent("prompt with native memory section")
+
+    assert result == "done"
+    assert captured["model_tier"] == "tool_deep"
+    assert captured["memory_agent_type"] == "NativeGenerator"
+    assert captured["inject_memory"] is False

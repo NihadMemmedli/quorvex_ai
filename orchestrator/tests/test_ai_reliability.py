@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.ai.context import SOURCE_FALLBACK, SOURCE_OBSERVED, ContextBundle
-from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
+from orchestrator.ai.prompt_registry import attach_delivered_prompt_metadata, attach_prompt_metadata, build_prompt_metadata
 from orchestrator.ai.validation import assess_exploration_quality, is_valid_flow, should_gate_exploration, validate_exploration_result
 
 
@@ -24,6 +24,16 @@ def test_prompt_metadata_is_stable_and_attached():
     assert metadata.prompt_id == "unit.prompt"
     assert len(metadata.rendered_prompt_hash) == 64
     assert '<prompt_metadata id="unit.prompt"' in wrapped
+    assert prompt in wrapped
+
+
+def test_delivered_prompt_metadata_hashes_augmented_prompt():
+    prompt = "memory context\n---\nactual task"
+
+    wrapped = attach_delivered_prompt_metadata(prompt, memory_injected=True)
+
+    assert '<delivered_prompt_metadata hash="' in wrapped
+    assert 'memory_injected="true"' in wrapped
     assert prompt in wrapped
 
 
