@@ -58,36 +58,37 @@ export function ProgressDashboard({ stats }: ProgressDashboardProps) {
     ];
 
     return (
-        <div
-            className="progress-dashboard-grid"
-            style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(4, 1fr)',
-                gap: '0.75rem',
-            }}
-        >
+        <div className="prd-progress-dashboard">
             <style>{`
+                .prd-progress-dashboard {
+                    display: grid;
+                    grid-template-columns: repeat(4, minmax(0, 1fr));
+                    gap: 0.5rem;
+                }
+
                 @media (max-width: 768px) {
-                    .progress-dashboard-grid {
-                        grid-template-columns: repeat(2, 1fr) !important;
+                    .prd-progress-dashboard {
+                        grid-template-columns: repeat(2, minmax(0, 1fr));
                     }
                 }
             `}</style>
             {cards.map((card) => (
                 <div
                     key={card.label}
-                    className="card-elevated"
+                    className="rounded-md border"
                     style={{
-                        padding: '1rem',
+                        borderColor: 'var(--border-subtle)',
+                        background: 'rgba(255,255,255,0.025)',
+                        padding: '0.6rem 0.75rem',
                         display: 'flex',
                         alignItems: 'center',
-                        gap: '0.75rem',
+                        gap: '0.65rem',
                     }}
                 >
                     {/* Icon container */}
                     <div style={{
-                        width: 36,
-                        height: 36,
+                        width: 30,
+                        height: 30,
                         borderRadius: 'var(--radius)',
                         background: card.iconBg,
                         display: 'flex',
@@ -101,7 +102,7 @@ export function ProgressDashboard({ stats }: ProgressDashboardProps) {
                     {/* Text */}
                     <div style={{ display: 'flex', flexDirection: 'column' }}>
                         <span style={{
-                            fontSize: '1.5rem',
+                            fontSize: '1.1rem',
                             fontFamily: 'var(--font-mono)',
                             fontWeight: 800,
                             color: 'var(--text)',

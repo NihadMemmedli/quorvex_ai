@@ -57,7 +57,7 @@ export function WorkingPhase({
         if (testableFeatures.length > 0 && !selectedFeature) {
             setSelectedFeature(testableFeatures[0]);
         }
-    }, [testableFeatures.length]);
+    }, [selectedFeature, testableFeatures]);
 
     // Sync selectedFeature when features array updates (e.g. after CRUD)
     useEffect(() => {
@@ -71,16 +71,74 @@ export function WorkingPhase({
 
     // Check if any feature is generating
     const isGenerating = Object.values(generationResults).some(
-        r => r.status === 'running' || r.status === 'pending'
+        r => r.status === 'running' || r.status === 'pending' || r.status === 'queued'
     );
+    const generationBlockedReason =
+        settings.useLiveValidation && !settings.targetUrl.trim()
+            ? 'Target URL is required for Live Browser Validation.'
+            : null;
 
     return (
-        <div className="animate-in stagger-2 flex flex-col gap-4">
+        <div className="animate-in stagger-2 prd-working-phase">
+            <style>{`
+                .prd-working-phase {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.75rem;
+                    min-width: 0;
+                }
+
+                .prd-workspace-shell {
+                    display: flex;
+                    flex-direction: row;
+                    min-width: 0;
+                    min-height: 0;
+                    height: clamp(600px, calc(100vh - 260px), 920px);
+                    overflow: hidden;
+                    border: 1px solid var(--border-subtle);
+                    border-radius: 10px;
+                    background: var(--surface);
+                    box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+                }
+
+                .prd-feature-sidebar {
+                    width: 290px;
+                    flex: 0 0 290px;
+                    min-height: 0;
+                    overflow: hidden;
+                    border-right: 1px solid var(--border-subtle);
+                }
+
+                .prd-feature-detail {
+                    flex: 1 1 auto;
+                    min-width: 0;
+                    min-height: 0;
+                    overflow: hidden;
+                }
+
+                @media (max-width: 1040px) {
+                    .prd-workspace-shell {
+                        flex-direction: column;
+                        height: auto;
+                        min-height: 720px;
+                    }
+
+                    .prd-feature-sidebar {
+                        width: 100%;
+                        flex: 0 0 auto;
+                        max-height: 360px;
+                        border-right: 0;
+                        border-bottom: 1px solid var(--border-subtle);
+                    }
+
+                    .prd-feature-detail {
+                        min-height: 520px;
+                    }
+                }
+            `}</style>
             {/* Project Info Bar — full width */}
             <ProjectInfoBar
                 projectName={projectName}
-                featureCount={stats.total}
-                completedCount={stats.completed}
                 onReset={onReset}
             />
 
@@ -94,15 +152,7 @@ export function WorkingPhase({
             <ProgressDashboard stats={stats} />
 
             {/* Sidebar + Workspace — two-column layout */}
-            <div
-                className="flex rounded-2xl border animate-in stagger-3"
-                style={{
-                    borderColor: 'var(--border-subtle)',
-                    boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-                    height: 'clamp(400px, calc(100vh - 420px), calc(100vh - 300px))',
-                    overflow: 'hidden',
-                }}
-            >
+            <div className="animate-in stagger-3 prd-workspace-shell">
                 <FeatureSidebar
                     features={features}
                     selectedFeature={selectedFeature}
@@ -110,6 +160,7 @@ export function WorkingPhase({
                     generationResults={generationResults}
                     onBatchGenerate={() => onBatchGenerate(testableFeatures)}
                     isGenerating={isGenerating}
+                    generationBlockedReason={generationBlockedReason}
                 />
                 <FeatureWorkspace
                     feature={selectedFeature}
@@ -117,7 +168,8 @@ export function WorkingPhase({
                     onGenerate={onGenerate}
                     onStop={onStop}
                     isGenerating={isGenerating}
-                    project={projectName}
+                    generationBlockedReason={generationBlockedReason}
+                    currentTargetUrl={settings.targetUrl}
                     onAddRequirement={onAddRequirement}
                     onEditRequirement={onEditRequirement}
                     onDeleteRequirement={onDeleteRequirement}

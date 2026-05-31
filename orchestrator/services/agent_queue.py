@@ -83,6 +83,7 @@ class AgentTask:
     owner_label: str | None = None
     browser_slot_parent_owner_type: str | None = None
     browser_slot_parent_run_id: str | None = None
+    requires_live_browser: bool = False
     telemetry: dict[str, Any] = field(
         default_factory=dict
     )  # Structured execution diagnostics
@@ -120,6 +121,7 @@ class AgentTask:
             "owner_label": self.owner_label,
             "browser_slot_parent_owner_type": self.browser_slot_parent_owner_type,
             "browser_slot_parent_run_id": self.browser_slot_parent_run_id,
+            "requires_live_browser": self.requires_live_browser,
             "telemetry": self.telemetry,
         }
 
@@ -167,6 +169,7 @@ class AgentTask:
             owner_label=data.get("owner_label"),
             browser_slot_parent_owner_type=data.get("browser_slot_parent_owner_type"),
             browser_slot_parent_run_id=data.get("browser_slot_parent_run_id"),
+            requires_live_browser=bool(data.get("requires_live_browser", False)),
             telemetry=data.get("telemetry") or {},
         )
 
@@ -319,6 +322,7 @@ class AgentQueue:
         owner_label: str | None = None,
         browser_slot_parent_owner_type: str | None = None,
         browser_slot_parent_run_id: str | None = None,
+        requires_live_browser: bool = False,
     ) -> str:
         """
         Add an agent task to the queue.
@@ -339,6 +343,7 @@ class AgentQueue:
             max_budget_usd: Optional spend cap
             task_budget: Optional token budget
             include_hook_events: Whether hook events should be emitted
+            requires_live_browser: Whether this task requires a headed/VNC browser worker
 
         Returns:
             Task ID for tracking
@@ -367,6 +372,7 @@ class AgentQueue:
             owner_label=owner_label,
             browser_slot_parent_owner_type=browser_slot_parent_owner_type,
             browser_slot_parent_run_id=browser_slot_parent_run_id,
+            requires_live_browser=requires_live_browser,
         )
 
         # Atomic store + enqueue
@@ -385,6 +391,7 @@ class AgentQueue:
                 "timeout_seconds": timeout_seconds,
                 "browser_slot_parent_owner_type": browser_slot_parent_owner_type,
                 "browser_slot_parent_run_id": browser_slot_parent_run_id,
+                "requires_live_browser": requires_live_browser,
             },
         )
         logger.info(
@@ -468,15 +475,30 @@ class AgentQueue:
         except (json.JSONDecodeError, TypeError):
             return None
 
-    async def update_worker_heartbeat(self, worker_id: str) -> None:
+    @staticmethod
+    def _worker_supports_live_browser() -> bool:
+        """Return whether the current worker process can run headed browser work."""
+        if os.environ.get("AGENT_WORKER_DISABLE_LIVE_BROWSER", "").lower() in {"1", "true", "yes"}:
+            return False
+        if os.environ.get("VNC_ENABLED", "").lower() in {"1", "true", "yes"}:
+            return True
+        return bool(os.environ.get("DISPLAY"))
+
+    async def update_worker_heartbeat(self, worker_id: str, capabilities: dict[str, Any] | None = None) -> None:
         """Update worker-level heartbeat to signal the worker process is alive.
 
         Called periodically by the worker's main loop (not tied to any specific task).
         """
         redis = await self._ensure_connected()
+        payload = {
+            "ts": datetime.utcnow().isoformat(),
+            "capabilities": capabilities
+            if capabilities is not None
+            else {"live_browser": self._worker_supports_live_browser()},
+        }
         await redis.set(
             f"{self.WORKER_HEARTBEAT_PREFIX}{worker_id}",
-            datetime.utcnow().isoformat(),
+            json.dumps(payload),
             ex=self.WORKER_HEARTBEAT_TTL_SECONDS,
         )
 
@@ -487,6 +509,43 @@ class AgentQueue:
         async for _ in redis.scan_iter(f"{self.WORKER_HEARTBEAT_PREFIX}*"):
             count += 1
         return count
+
+    async def worker_capability_summary(self) -> dict[str, Any]:
+        """Return aggregate worker heartbeat capability counts."""
+        redis = await self._ensure_connected()
+        worker_count = 0
+        live_browser_worker_count = 0
+        workers: list[dict[str, Any]] = []
+        async for key in redis.scan_iter(f"{self.WORKER_HEARTBEAT_PREFIX}*"):
+            worker_count += 1
+            raw = await redis.get(key)
+            payload: dict[str, Any] = {}
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                    payload = parsed if isinstance(parsed, dict) else {}
+                except (json.JSONDecodeError, TypeError):
+                    payload = {}
+            capabilities = payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {}
+            live_browser = bool(capabilities.get("live_browser"))
+            if live_browser:
+                live_browser_worker_count += 1
+            worker_id = str(key).removeprefix(self.WORKER_HEARTBEAT_PREFIX)
+            workers.append(
+                {
+                    "worker_id": worker_id,
+                    "live_browser": live_browser,
+                    "capabilities": capabilities,
+                    "last_seen": payload.get("ts"),
+                }
+            )
+
+        return {
+            "worker_count": worker_count,
+            "live_browser_worker_count": live_browser_worker_count,
+            "non_live_browser_worker_count": max(0, worker_count - live_browser_worker_count),
+            "workers": workers,
+        }
 
     async def wait_for_result(
         self,
@@ -571,6 +630,15 @@ class AgentQueue:
                         workers = await self.worker_count()
                         queue_len = await self.queue_length()
                         running = await self.running_count()
+                        capabilities = await self.worker_capability_summary()
+                        live_workers = int(capabilities.get("live_browser_worker_count") or 0)
+                        if task.requires_live_browser and workers > 0 and live_workers == 0:
+                            await self.cancel_task(task_id)
+                            raise RuntimeError(
+                                "No live-browser-capable agent worker is available. "
+                                "Restart the dashboard stack so the supervisor-managed agent_worker runs with DISPLAY=:99, "
+                                "or start a worker profile that advertises live_browser=true."
+                            )
                         health = await self.get_worker_health()
                         alive_running_tasks = int(health.get("alive_tasks") or 0)
                         # Cancel only when there is no evidence of worker capacity
@@ -585,7 +653,7 @@ class AgentQueue:
                             )
                         logger.warning(
                             f"Task {task_id} still QUEUED after {elapsed:.0f}s — "
-                            f"worker_processes={workers}, running={running}, "
+                            f"worker_processes={workers}, live_browser_workers={live_workers}, running={running}, "
                             f"alive_running_tasks={alive_running_tasks}, queue_depth={queue_len}; "
                             "continuing to wait."
                         )
@@ -850,6 +918,16 @@ class AgentQueue:
                         )
                         return None
 
+                    if task.requires_live_browser and not self._worker_supports_live_browser():
+                        await redis.rpush(self.QUEUE_KEY, task_id)
+                        logger.info(
+                            "Worker %s skipped live-browser task %s because this worker has no display/VNC capability",
+                            self._worker_id,
+                            task_id,
+                        )
+                        await asyncio.sleep(1)
+                        return None
+
                     invalid = await self._queued_task_invalid_reason(task)
                     if invalid:
                         status, _, message = invalid
@@ -1018,10 +1096,14 @@ class AgentQueue:
             ) and not await self.check_heartbeat(task_id):
                 stale_running += 1
 
+        capabilities = await self.worker_capability_summary()
+
         return {
             "queue_length": await self.queue_length(),
             "running": await self.running_count(),
-            "workers_alive": await self.worker_count(),
+            "workers_alive": capabilities["worker_count"],
+            "live_browser_workers_alive": capabilities["live_browser_worker_count"],
+            "non_live_browser_workers_alive": capabilities["non_live_browser_worker_count"],
             "by_status": by_status,
             "stale_running": stale_running,
             "oldest_queued_age_seconds": oldest_queued_age_seconds,
@@ -1097,7 +1179,8 @@ class AgentQueue:
             running_ids = await redis.smembers(self.RUNNING_KEY)
 
             # Count worker-level heartbeats (most reliable signal)
-            worker_alive_count = await self.worker_count()
+            capability_summary = await self.worker_capability_summary()
+            worker_alive_count = int(capability_summary.get("worker_count") or 0)
 
             # Also count task-level heartbeats for running tasks
             alive_task_count = 0
@@ -1108,6 +1191,9 @@ class AgentQueue:
             return {
                 "workers_alive": worker_alive_count > 0,
                 "worker_count": worker_alive_count,
+                "live_browser_worker_count": capability_summary.get("live_browser_worker_count", 0),
+                "non_live_browser_worker_count": capability_summary.get("non_live_browser_worker_count", 0),
+                "worker_capabilities": capability_summary.get("workers", []),
                 "running_tasks": len(running_ids),
                 "alive_tasks": alive_task_count,
             }
@@ -1136,6 +1222,7 @@ class AgentQueue:
                 AutoPilotSession,
                 AutonomousAgentWorkItem,
                 AutonomousMission,
+                PrdGenerationResult,
                 TestRun,
             )
 
@@ -1158,6 +1245,11 @@ class AgentQueue:
                                 "status": mission.status,
                                 "terminal": True,
                             }
+                elif task.owner_type == "prd_generation":
+                    try:
+                        owner = session.get(PrdGenerationResult, int(task.owner_id))
+                    except (TypeError, ValueError):
+                        owner = None
                 else:
                     owner = None
 

@@ -58,6 +58,12 @@ class _FakeRedis:
             end = len(values) - 1
         return values[start : end + 1]
 
+    async def lrem(self, key, count, value):
+        values = self.lists.get(key, [])
+        before = len(values)
+        self.lists[key] = [item for item in values if item != value]
+        return before - len(self.lists[key])
+
 
 @pytest.fixture
 def pool():
@@ -412,6 +418,55 @@ async def test_redis_cleanup_removes_running_agent_slot_when_worker_heartbeat_lo
     assert request_id not in redis.sets["browser_pool:running"]
     assert queue.failed is True
     assert task.error == "Stale agent task lost worker heartbeat"
+
+
+@pytest.mark.asyncio
+async def test_redis_cleanup_removes_stale_queued_agent_request(monkeypatch):
+    """Redis cleanup should remove dead queued agent browser requests from the head of the queue."""
+    redis = _FakeRedis()
+    pool = RedisBrowserResourcePool("redis://test", max_browsers=1)
+    pool.redis = redis
+    redis.lists["browser_pool:queue"] = ["agent:agent-missing", "agent:agent-live"]
+
+    async def _owner_state(request_id, _info):
+        if request_id == "agent:agent-missing":
+            return False
+        if request_id == "agent:agent-live":
+            return True
+        return None
+
+    monkeypatch.setattr(pool, "_slot_owner_is_active", _owner_state)
+
+    cleaned = await pool.cleanup_stale(max_age_minutes=60)
+
+    assert cleaned == ["agent:agent-missing"]
+    assert redis.lists["browser_pool:queue"] == ["agent:agent-live"]
+
+
+@pytest.mark.asyncio
+async def test_redis_cleanup_removes_inactive_prd_generation_slot(monkeypatch):
+    """Redis cleanup should free PRD generation browser slots whose generation is terminal or gone."""
+    redis = _FakeRedis()
+    pool = RedisBrowserResourcePool("redis://test", max_browsers=1)
+    pool.redis = redis
+    request_id = "gen_20"
+    redis.sets["browser_pool:running"] = {request_id}
+    redis.hashes[f"browser_pool:info:{request_id}"] = {
+        "type": OperationType.PRD.value,
+        "desc": "old PRD generation",
+        "start": datetime.now(timezone.utc).isoformat(),
+        "max_dur": "7200",
+    }
+
+    async def _inactive_owner(_request_id, _info):
+        return False
+
+    monkeypatch.setattr(pool, "_slot_owner_is_active", _inactive_owner)
+
+    cleaned = await pool.cleanup_stale(max_age_minutes=60)
+
+    assert cleaned == [request_id]
+    assert request_id not in redis.sets["browser_pool:running"]
 
 
 @pytest.mark.asyncio

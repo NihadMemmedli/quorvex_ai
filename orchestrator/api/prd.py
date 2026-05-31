@@ -17,19 +17,27 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from .db import engine
-from .models_db import PrdGenerationResult, SpecMetadata
+from .models_db import PrdGenerationEvent, PrdGenerationResult, SpecMetadata
 
 # Import resource managers - using relative import since we're in orchestrator/api
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from services.browser_pool import OperationType as BrowserOpType
 from services.browser_pool import get_browser_pool
+from orchestrator.utils.playwright_mcp import (
+    browser_runtime_status,
+    live_browser_display_diagnostics,
+    prepare_run_playwright_config_content,
+    write_playwright_test_mcp_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +100,7 @@ _running_generations: dict[int, asyncio.Task] = {}
 
 # Base directory (project root, one level up from orchestrator/)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+RUNS_DIR = BASE_DIR / "runs"
 
 router = APIRouter(prefix="/api/prd", tags=["prd"])
 
@@ -128,6 +137,8 @@ class GenerationStatusResponse(BaseModel):
     prd_project: str
     feature_name: str
     status: str
+    target_url: str | None = None
+    live_browser_requested: bool = False
     current_stage: str | None = None
     stage_message: str | None = None
     spec_path: str | None = None
@@ -135,6 +146,41 @@ class GenerationStatusResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    events_count: int = 0
+    latest_event: dict[str, Any] | None = None
+    artifacts: list[dict[str, Any]] = []
+    latest_image: dict[str, Any] | None = None
+    vnc_url: str | None = None
+    browser_runtime: str | None = None
+    live_view_available: bool | None = None
+    browser_activity_seen: bool = False
+    browser_active: bool = False
+    browser_last_tool: str | None = None
+    runtime_message: str | None = None
+    display_diagnostics: dict[str, Any] | None = None
+    agent_task_id: str | None = None
+    agent_task_status: str | None = None
+    agent_worker_id: str | None = None
+    agent_queue_health: dict[str, Any] | None = None
+
+
+class PrdGenerationEventResponse(BaseModel):
+    id: int
+    generation_id: int
+    sequence: int
+    role: str
+    event_type: str
+    level: str
+    message: str
+    payload: dict[str, Any] = {}
+    created_at: datetime
+
+
+class PrdArtifactResponse(BaseModel):
+    name: str
+    path: str
+    type: str
+    modified_at: datetime | None = None
 
 
 @router.post("/upload", response_model=PRDResponse)
@@ -332,6 +378,386 @@ def import_json(path: Path):
     return json.loads(path.read_text())
 
 
+SENSITIVE_PAYLOAD_KEYS = ("password", "token", "secret", "credential", "api_key", "authorization", "cookie")
+
+
+def _generation_run_id(generation_id: int) -> str:
+    return f"prd-generation-{generation_id}"
+
+
+def _generation_run_dir(generation_id: int) -> Path:
+    return RUNS_DIR / _generation_run_id(generation_id)
+
+
+def _normalize_target_url(target_url: str | None) -> str | None:
+    if not target_url:
+        return None
+    stripped = target_url.strip()
+    return stripped or None
+
+
+def _prepare_prd_generation_mcp_workspace(
+    session_dir: Path,
+    *,
+    headless: bool = True,
+    base_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Create run-local Playwright Test MCP config for PRD planner generation."""
+    base_dir = base_dir or BASE_DIR
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    playwright_config_src = base_dir / "playwright.config.ts"
+    playwright_config_dst = session_dir / "playwright.config.ts"
+    if playwright_config_src.exists():
+        config_content = prepare_run_playwright_config_content(
+            playwright_config_src.read_text(),
+            base_dir=base_dir,
+            run_dir=session_dir,
+            headless=headless,
+        )
+        playwright_config_dst.write_text(config_content)
+
+    return write_playwright_test_mcp_config(
+        run_dir=session_dir,
+        server_name="playwright-test",
+        config_path=playwright_config_dst,
+        headless=headless,
+    )
+
+
+def _redact_payload(value: Any, depth: int = 0) -> Any:
+    """Keep event payloads useful while avoiding secrets and huge blobs."""
+    if depth > 4:
+        return "<truncated>"
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if any(marker in key_text.lower() for marker in SENSITIVE_PAYLOAD_KEYS):
+                redacted[key_text] = "<redacted>"
+            else:
+                redacted[key_text] = _redact_payload(item, depth + 1)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_payload(item, depth + 1) for item in value[:30]]
+    if isinstance(value, str):
+        return value if len(value) <= 1200 else value[:1200] + "...<truncated>"
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _event_to_response(event: PrdGenerationEvent) -> dict[str, Any]:
+    return {
+        "id": event.id,
+        "generation_id": event.generation_id,
+        "sequence": event.sequence,
+        "role": event.role,
+        "event_type": event.event_type,
+        "level": event.level,
+        "message": event.message,
+        "payload": event.payload,
+        "created_at": event.created_at,
+    }
+
+
+def _append_generation_event(
+    generation_id: int,
+    *,
+    role: str,
+    event_type: str,
+    message: str,
+    level: str = "info",
+    payload: dict[str, Any] | None = None,
+) -> PrdGenerationEvent | None:
+    """Append one ordered structured event for a generation."""
+    try:
+        with Session(engine) as session:
+            gen = session.get(PrdGenerationResult, generation_id)
+            if not gen:
+                return None
+            max_sequence = session.exec(
+                select(func.max(PrdGenerationEvent.sequence)).where(PrdGenerationEvent.generation_id == generation_id)
+            ).one()
+            event = PrdGenerationEvent(
+                generation_id=generation_id,
+                sequence=int(max_sequence or 0) + 1,
+                role=role,
+                event_type=event_type,
+                level=level,
+                message=message,
+            )
+            event.payload = _redact_payload(payload or {})
+            session.add(event)
+            session.commit()
+            session.refresh(event)
+            return event
+    except Exception as exc:
+        logger.debug("Failed to append PRD generation event %s: %s", generation_id, exc)
+        return None
+
+
+def _short_tool_name(tool_name: str) -> str:
+    return tool_name.split("__")[-1] if "__" in tool_name else tool_name
+
+
+def _tool_role(tool_name: str) -> str:
+    short_name = _short_tool_name(tool_name)
+    if short_name.startswith("browser_") or short_name in {"planner_setup_page"}:
+        return "browser_agent"
+    if short_name in {"planner_save_plan", "save_plan"}:
+        return "spec_writer"
+    return "playwright_planner"
+
+
+def _collect_generation_artifacts(generation_id: int, log_path: str | None = None) -> list[dict[str, Any]]:
+    suffix_types = {
+        ".png": "image",
+        ".jpg": "image",
+        ".jpeg": "image",
+        ".webm": "video",
+        ".mp4": "video",
+        ".log": "log",
+        ".txt": "log",
+        ".json": "log",
+        ".jsonl": "log",
+    }
+    session_dirs = [(RUNS_DIR, _generation_run_dir(generation_id)), (Path("/app/runs"), Path("/app/runs") / _generation_run_id(generation_id))]
+    artifacts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for root, session_dir in session_dirs:
+        if not session_dir.exists():
+            continue
+        for path in session_dir.glob("**/*"):
+            if not path.is_file():
+                continue
+            if path.name.startswith("."):
+                continue
+            artifact_type = suffix_types.get(path.suffix.lower())
+            if not artifact_type:
+                continue
+            try:
+                resolved = str(path.resolve())
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                rel_path = path.relative_to(root)
+                modified_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+            except (OSError, ValueError):
+                continue
+            artifacts.append(
+                {
+                    "name": path.name,
+                    "path": f"/artifacts/{rel_path.as_posix()}",
+                    "type": artifact_type,
+                    "modified_at": modified_at,
+                }
+            )
+
+    if log_path:
+        path = Path(log_path)
+        try:
+            if path.exists() and str(path.resolve()) not in seen:
+                rel_path = path.relative_to(RUNS_DIR)
+                artifacts.append(
+                    {
+                        "name": path.name,
+                        "path": f"/artifacts/{rel_path.as_posix()}",
+                        "type": "log",
+                        "modified_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc),
+                    }
+                )
+        except (OSError, ValueError):
+            pass
+
+    return sorted(
+        artifacts,
+        key=lambda item: (
+            item["type"] != "image",
+            -(item["modified_at"].timestamp() if item.get("modified_at") else 0),
+            item["name"],
+        ),
+    )
+
+
+def _latest_image_artifact(artifacts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((artifact for artifact in artifacts if artifact.get("type") == "image"), None)
+
+
+LIVE_BROWSER_ACTIVITY_TOOLS = {
+    "planner_setup_page",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_take_screenshot",
+}
+
+LIVE_PLANNER_FORBIDDEN_TOOLS = {"Read", "Glob", "Grep", "LS"}
+
+
+def _derive_browser_activity(events: list[PrdGenerationEvent], latest_image: dict[str, Any] | None) -> tuple[bool, str | None]:
+    browser_last_tool: str | None = None
+    browser_activity_seen = bool(latest_image)
+    for event in events:
+        payload = event.payload or {}
+        tool_name = str(payload.get("tool_label") or payload.get("last_tool") or payload.get("tool_name") or "")
+        short_name = _short_tool_name(tool_name) if tool_name else ""
+        if short_name:
+            browser_last_tool = short_name
+        if short_name in LIVE_BROWSER_ACTIVITY_TOOLS:
+            browser_activity_seen = True
+    return browser_activity_seen, browser_last_tool
+
+
+def _enrich_display_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any] | None:
+    if diagnostics is None:
+        return None
+    enriched = dict(diagnostics)
+    process_count = int(enriched.get("browser_process_count") or 0)
+    raw_window_count = enriched.get("browser_window_count")
+    window_count = int(raw_window_count or 0) if raw_window_count is not None else 0
+    enriched["browser_process_seen"] = bool(enriched.get("browser_process_seen", process_count > 0))
+    enriched["browser_window_seen"] = bool(enriched.get("browser_window_seen", window_count > 0))
+    enriched["browser_process_count"] = process_count
+    if raw_window_count is not None:
+        enriched["browser_window_count"] = window_count
+    enriched.setdefault("probed_at", datetime.now(timezone.utc).isoformat())
+    return enriched
+
+
+def _generation_status_response(gen: PrdGenerationResult) -> GenerationStatusResponse:
+    artifacts = _collect_generation_artifacts(gen.id, gen.log_path) if gen.id else []
+    latest_image = _latest_image_artifact(artifacts)
+    target_url = _normalize_target_url(getattr(gen, "target_url", None))
+    live_browser_requested = bool(target_url)
+    runtime = browser_runtime_status()
+    if not live_browser_requested:
+        runtime = {
+            "browser_runtime": "prd_only",
+            "live_view_available": False,
+            "runtime_message": "PRD-only generation. Live browser validation requires a Target URL.",
+            "display_diagnostics": None,
+        }
+    elif gen.status in {"pending", "queued", "running"}:
+        runtime["display_diagnostics"] = live_browser_display_diagnostics()
+    runtime["display_diagnostics"] = _enrich_display_diagnostics(runtime.get("display_diagnostics"))
+    with Session(engine) as session:
+        events_count = session.exec(
+            select(func.count(PrdGenerationEvent.id)).where(PrdGenerationEvent.generation_id == gen.id)
+        ).one()
+        events = session.exec(
+            select(PrdGenerationEvent)
+            .where(PrdGenerationEvent.generation_id == gen.id)
+            .order_by(PrdGenerationEvent.sequence)
+        ).all()
+        latest = session.exec(
+            select(PrdGenerationEvent)
+            .where(PrdGenerationEvent.generation_id == gen.id)
+            .order_by(PrdGenerationEvent.sequence.desc())
+            .limit(1)
+        ).first()
+    browser_activity_seen, browser_last_tool = _derive_browser_activity(events, latest_image)
+    diagnostics = runtime.get("display_diagnostics") or {}
+    browser_active = bool(
+        live_browser_requested
+        and runtime.get("live_view_available")
+        and browser_activity_seen
+        and diagnostics.get("browser_process_seen")
+        and diagnostics.get("browser_window_seen")
+    )
+    return GenerationStatusResponse(
+        id=gen.id,
+        prd_project=gen.prd_project,
+        feature_name=gen.feature_name,
+        status=gen.status,
+        target_url=target_url,
+        live_browser_requested=live_browser_requested,
+        current_stage=gen.current_stage,
+        stage_message=gen.stage_message,
+        spec_path=gen.spec_path,
+        error_message=gen.error_message,
+        created_at=gen.created_at,
+        started_at=gen.started_at,
+        completed_at=gen.completed_at,
+        events_count=int(events_count or 0),
+        latest_event=_event_to_response(latest) if latest else None,
+        artifacts=artifacts,
+        latest_image=latest_image,
+        vnc_url=runtime.get("vnc_url"),
+        browser_runtime=runtime.get("browser_runtime"),
+        live_view_available=runtime.get("live_view_available"),
+        browser_activity_seen=browser_activity_seen,
+        browser_active=browser_active,
+        browser_last_tool=browser_last_tool,
+        runtime_message=runtime.get("runtime_message"),
+        display_diagnostics=runtime.get("display_diagnostics"),
+    )
+
+
+def _generation_agent_task_id(generation_id: int) -> str | None:
+    with Session(engine) as session:
+        event = session.exec(
+            select(PrdGenerationEvent)
+            .where(PrdGenerationEvent.generation_id == generation_id)
+            .where(PrdGenerationEvent.event_type == "task_enqueued")
+            .order_by(PrdGenerationEvent.sequence.desc())
+            .limit(1)
+        ).first()
+    if not event:
+        return None
+    task_id = (event.payload or {}).get("agent_task_id")
+    return str(task_id) if task_id else None
+
+
+async def _generation_status_response_with_queue(gen: PrdGenerationResult) -> GenerationStatusResponse:
+    response = _generation_status_response(gen)
+    if not response.live_browser_requested or response.status not in {"pending", "queued", "running"}:
+        return response
+
+    task_id = _generation_agent_task_id(response.id)
+    if not task_id:
+        return response
+
+    response.agent_task_id = task_id
+    try:
+        from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
+
+        if not REDIS_AVAILABLE or not should_use_agent_queue():
+            return response
+
+        queue = get_agent_queue()
+        await queue.connect()
+        task = await queue.get_task(task_id)
+        health = await queue.get_worker_health()
+        response.agent_queue_health = health
+        if task:
+            response.agent_task_status = task.status.value
+            response.agent_worker_id = task.worker_id
+            worker_count = int(health.get("worker_count") or 0)
+            live_worker_count = int(health.get("live_browser_worker_count") or 0)
+            if task.requires_live_browser and task.status.value == "queued" and worker_count > 0 and live_worker_count == 0:
+                response.runtime_message = (
+                    "No live-browser-capable agent worker is available. Restart the dashboard stack so "
+                    "agent_worker runs with DISPLAY=:99, or start a worker that advertises live_browser=true."
+                )
+            elif task.requires_live_browser and task.status.value == "queued" and worker_count == 0:
+                response.runtime_message = (
+                    "No agent workers are available to pick up this live browser generation. "
+                    "Check the agent_worker supervisor process."
+                )
+            elif task.requires_live_browser and task.status.value == "running":
+                progress = await queue.get_task_progress(task_id) or {}
+                tool_calls = int(progress.get("tool_calls") or 0)
+                if tool_calls == 0 and not response.browser_activity_seen:
+                    response.runtime_message = (
+                        f"Planner task is running on {task.worker_id or 'an agent worker'}; "
+                        "waiting for the first browser action."
+                    )
+    except Exception as exc:
+        logger.debug("Failed to enrich PRD generation %s with agent queue state: %s", response.id, exc)
+    return response
+
+
 def _update_generation_status(generation_id: int, status: str, stage: str, message: str):
     """Update generation status in database"""
     with Session(engine) as session:
@@ -344,6 +770,28 @@ def _update_generation_status(generation_id: int, status: str, stage: str, messa
                 gen.started_at = datetime.now(timezone.utc)
             session.add(gen)
             session.commit()
+
+
+def _update_generation_progress(
+    generation_id: int,
+    status: str,
+    stage: str,
+    message: str,
+    *,
+    role: str,
+    event_type: str = "stage",
+    level: str = "info",
+    payload: dict[str, Any] | None = None,
+):
+    _update_generation_status(generation_id, status, stage, message)
+    _append_generation_event(
+        generation_id,
+        role=role,
+        event_type=event_type,
+        level=level,
+        message=message,
+        payload={"status": status, "stage": stage, **(payload or {})},
+    )
 
 
 def _complete_generation(generation_id: int, spec_path: str):
@@ -385,9 +833,16 @@ def _complete_generation(generation_id: int, spec_path: str):
 
             session.add(gen)
             session.commit()
+    _append_generation_event(
+        generation_id,
+        role="validator",
+        event_type="completed",
+        message="Generation completed successfully.",
+        payload={"spec_path": spec_path},
+    )
 
 
-def _fail_generation(generation_id: int, error: str):
+def _fail_generation(generation_id: int, error: str, payload: dict[str, Any] | None = None):
     """Mark generation as failed"""
     with Session(engine) as session:
         gen = session.get(PrdGenerationResult, generation_id)
@@ -399,6 +854,14 @@ def _fail_generation(generation_id: int, error: str):
             gen.completed_at = datetime.now(timezone.utc)
             session.add(gen)
             session.commit()
+    _append_generation_event(
+        generation_id,
+        role="validator",
+        event_type="failed",
+        level="error",
+        message=error,
+        payload={"error": error, **(payload or {})},
+    )
 
 
 def _set_generation_log_path(generation_id: int, log_path: str):
@@ -422,6 +885,13 @@ def _cancel_generation(generation_id: int, message: str = "Cancelled by user"):
             gen.completed_at = datetime.now(timezone.utc)
             session.add(gen)
             session.commit()
+    _append_generation_event(
+        generation_id,
+        role="orchestrator",
+        event_type="cancelled",
+        level="warning",
+        message=message,
+    )
 
 
 async def _run_generation_task(
@@ -435,8 +905,8 @@ async def _run_generation_task(
 ):
     """Background task that runs the actual generation.
 
-    This task uses browser automation, so it acquires a browser slot from
-    the unified BrowserResourcePool.
+    Live-browser runs rely on the queued worker to acquire browser capacity.
+    PRD-only runs use no browser slot and no Playwright MCP workspace.
 
     Args:
         generation_id: The database ID for tracking this generation
@@ -449,66 +919,211 @@ async def _run_generation_task(
     """
     # Use generation_id as the resource request ID
     request_id = f"gen_{generation_id}"
-    pool = await get_browser_pool()
+    target_url = _normalize_target_url(target_url)
+    live_browser_requested = bool(target_url)
     from orchestrator.workflows.native_planner import NativePlanner, SpecGenerationError
 
     try:
-        _update_generation_status(generation_id, "queued", "waiting", "Waiting for available browser slot...")
+        _update_generation_progress(
+            generation_id,
+            "queued",
+            "waiting",
+            "Waiting for a live-browser-capable planner worker..."
+            if live_browser_requested
+            else "Waiting for PRD-only planner execution...",
+            role="orchestrator",
+            event_type="queued",
+            payload={"request_id": request_id, "live_browser_requested": live_browser_requested},
+        )
 
         # Block if a load test is running
         from orchestrator.services.load_test_lock import check_system_available
 
+        _append_generation_event(
+            generation_id,
+            role="orchestrator",
+            event_type="resource_check",
+            message="Checking system availability for PRD generation.",
+        )
         await check_system_available("PRD generation")
 
-        async with pool.browser_slot(
-            request_id=request_id, operation_type=BrowserOpType.PRD, description=f"PRD Generate: {feature_name}"
-        ) as acquired:
-            if not acquired:
-                logger.error(f"Timeout waiting for browser slot for generation {generation_id}")
-                _fail_generation(generation_id, "Timeout waiting for browser slot")
-                return
+        session_dir = _generation_run_dir(generation_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        if live_browser_requested:
+            runtime = _prepare_prd_generation_mcp_workspace(session_dir, headless=False)
+        else:
+            runtime = {
+                "browser_runtime": "prd_only",
+                "live_view_available": False,
+                "runtime_message": "PRD-only generation. Live browser validation requires a Target URL.",
+            }
+        runtime["live_browser_requested"] = live_browser_requested
+        _update_generation_progress(
+            generation_id,
+            "running",
+            "workspace_ready",
+            "Preparing headed planner workspace..."
+            if live_browser_requested
+            else "Planner will run from PRD context only.",
+            role="orchestrator",
+            event_type="workspace",
+            payload=runtime,
+        )
 
-            logger.info(f"Browser slot acquired for generation {generation_id}")
+        def _on_planner_task_enqueued(agent_task_id: str) -> None:
+            _append_generation_event(
+                generation_id,
+                role="playwright_planner",
+                event_type="task_enqueued",
+                message="Planner task enqueued.",
+                payload={"agent_task_id": agent_task_id},
+            )
 
-            with capture_output_to_file(log_path):
-                # NOTE: print() calls here are intentional - capture_output_to_file()
-                # redirects stdout to the log file for real-time streaming to the UI.
-                # Do NOT replace with logger.info().
-                print(f"[{datetime.now(timezone.utc).isoformat()}] Starting generation for feature: {feature_name}")
-                print(f"[{datetime.now(timezone.utc).isoformat()}] Project: {project_id}")
-                print("-" * 60)
+        def _on_planner_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
+            short_name = _short_tool_name(tool_name)
+            role = _tool_role(tool_name)
+            is_profile_violation = live_browser_requested and short_name in LIVE_PLANNER_FORBIDDEN_TOOLS
+            _append_generation_event(
+                generation_id,
+                role=role,
+                event_type="planner_profile_violation"
+                if is_profile_violation
+                else "browser_action" if role == "browser_agent" else "tool_call",
+                level="error" if is_profile_violation else "info",
+                message=(
+                    f"Planner profile violation: live PRD planner used {short_name}."
+                    if is_profile_violation
+                    else f"Using {short_name}."
+                ),
+                payload={
+                    "tool_name": tool_name,
+                    "tool_label": short_name,
+                    "tool_input": tool_input,
+                    "live_browser_requested": live_browser_requested,
+                    "forbidden_for_live_prd_planner": is_profile_violation,
+                },
+            )
+            _update_generation_status(
+                generation_id,
+                "running",
+                "invoking_agent",
+                f"Planner profile violation: {short_name}"
+                if is_profile_violation
+                else f"Using {short_name}...",
+            )
 
-                _update_generation_status(
-                    generation_id, "running", "initializing", "Setting up generation environment..."
-                )
-                print(f"[{datetime.now(timezone.utc).isoformat()}] Setting up generation environment...")
+        def _on_planner_progress(progress: dict[str, Any]) -> None:
+            last_tool = progress.get("last_tool")
+            short_last_tool = _short_tool_name(str(last_tool)) if last_tool else None
+            is_profile_violation = bool(
+                live_browser_requested and short_last_tool in LIVE_PLANNER_FORBIDDEN_TOOLS
+            )
+            message = (
+                f"Planner profile violation: {short_last_tool}"
+                if is_profile_violation
+                else f"Using {short_last_tool}..."
+                if last_tool
+                else str(progress.get("message") or "Planner is exploring the application...")
+            )
+            _append_generation_event(
+                generation_id,
+                role="playwright_planner",
+                event_type="planner_profile_violation" if is_profile_violation else "progress",
+                level="error" if is_profile_violation else "info",
+                message=message,
+                payload={
+                    **progress,
+                    "tool_label": short_last_tool,
+                    "live_browser_requested": live_browser_requested,
+                    "forbidden_for_live_prd_planner": is_profile_violation,
+                },
+            )
+            _update_generation_status(
+                generation_id,
+                "running",
+                str(progress.get("phase") or "invoking_agent"),
+                message,
+            )
 
-                planner = NativePlanner(project_id=project_id)
+        with capture_output_to_file(log_path):
+            # NOTE: print() calls here are intentional - capture_output_to_file()
+            # redirects stdout to the log file for real-time streaming to the UI.
+            # Do NOT replace with logger.info().
+            print(f"[{datetime.now(timezone.utc).isoformat()}] Starting generation for feature: {feature_name}")
+            print(f"[{datetime.now(timezone.utc).isoformat()}] Project: {project_id}")
+            print(
+                f"[{datetime.now(timezone.utc).isoformat()}] Live browser validation: "
+                f"{'enabled' if live_browser_requested else 'disabled (PRD-only)'}"
+            )
+            if target_url:
+                print(f"[{datetime.now(timezone.utc).isoformat()}] Target URL: {target_url}")
+            print("-" * 60)
 
-                _update_generation_status(generation_id, "running", "retrieving_context", "Retrieving PRD context...")
-                print(f"[{datetime.now(timezone.utc).isoformat()}] Retrieving PRD context...")
+            _update_generation_progress(
+                generation_id,
+                "running",
+                "initializing",
+                "Setting up generation environment...",
+                role="orchestrator",
+            )
+            print(f"[{datetime.now(timezone.utc).isoformat()}] Setting up generation environment...")
 
-                # Small delay to ensure status update is visible
-                await asyncio.sleep(0.5)
+            planner = NativePlanner(
+                project_id=project_id,
+                on_tool_use=_on_planner_tool_use,
+                on_progress=_on_planner_progress,
+                on_task_enqueued=_on_planner_task_enqueued,
+                owner_type="prd_generation",
+                owner_id=str(generation_id),
+                owner_label=f"PRD generation {feature_name}",
+                session_dir=session_dir,
+                cwd=session_dir,
+            )
 
-                _update_generation_status(generation_id, "running", "invoking_agent", "Invoking Playwright agent...")
-                print(f"[{datetime.now(timezone.utc).isoformat()}] Invoking Playwright agent...")
-                print("-" * 60)
+            _update_generation_progress(
+                generation_id,
+                "running",
+                "retrieving_context",
+                "Retrieving PRD context...",
+                role="context_retriever",
+            )
+            print(f"[{datetime.now(timezone.utc).isoformat()}] Retrieving PRD context...")
 
-                path = await planner.generate_spec_for_feature(
-                    feature_name=feature_name,
-                    prd_project=project_id,
-                    target_url=target_url,
-                    login_url=login_url,
-                    credentials=credentials,
-                )
+            # Small delay to ensure status update is visible
+            await asyncio.sleep(0.5)
 
-                print("-" * 60)
-                _update_generation_status(generation_id, "running", "saving_spec", "Saving generated spec...")
-                print(f"[{datetime.now(timezone.utc).isoformat()}] Saving generated spec to: {path}")
+            _update_generation_progress(
+                generation_id,
+                "running",
+                "invoking_agent",
+                "Invoking Playwright agent...",
+                role="playwright_planner",
+                payload=browser_runtime_status(),
+            )
+            print(f"[{datetime.now(timezone.utc).isoformat()}] Invoking Playwright agent...")
+            print("-" * 60)
 
-                _complete_generation(generation_id, str(path))
-                print(f"[{datetime.now(timezone.utc).isoformat()}] Generation completed successfully!")
+            path = await planner.generate_spec_for_feature(
+                feature_name=feature_name,
+                prd_project=project_id,
+                target_url=target_url,
+                login_url=login_url,
+                credentials=credentials,
+            )
+
+            print("-" * 60)
+            _update_generation_progress(
+                generation_id,
+                "running",
+                "saving_spec",
+                "Saving generated spec...",
+                role="spec_writer",
+                payload={"spec_path": str(path)},
+            )
+            print(f"[{datetime.now(timezone.utc).isoformat()}] Saving generated spec to: {path}")
+
+            _complete_generation(generation_id, str(path))
+            print(f"[{datetime.now(timezone.utc).isoformat()}] Generation completed successfully!")
 
     except asyncio.CancelledError:
         logger.info(f"Generation {generation_id} was cancelled by user")
@@ -519,10 +1134,13 @@ async def _run_generation_task(
         raise  # Re-raise to properly handle task cancellation
     except SpecGenerationError as e:
         logger.warning(f"Spec generation failed for {project_id}/{feature_name}: {e}")
+        diagnostics = getattr(e, "diagnostics", {}) or {}
         # Log error to file as well
         with open(log_path, "a") as f:
             f.write(f"\n[{datetime.now(timezone.utc).isoformat()}] ERROR: {str(e)}\n")
-        _fail_generation(generation_id, str(e))
+            if diagnostics:
+                f.write(f"[{datetime.now(timezone.utc).isoformat()}] DIAGNOSTICS: {json.dumps(diagnostics, sort_keys=True)}\n")
+        _fail_generation(generation_id, str(e), payload=diagnostics)
     except Exception as e:
         logger.error(f"Unexpected error generating plan for {project_id}/{feature_name}: {e}")
         # Log error to file as well
@@ -543,6 +1161,8 @@ async def generate_plan(project_id: str, request: GenerateRequest, background_ta
     For single feature generation, returns immediately with generation_id for polling.
     For all features, still runs synchronously (legacy behavior).
     """
+    request.target_url = _normalize_target_url(request.target_url)
+    live_browser_requested = bool(request.target_url)
     if request.feature:
         # Read tenant_project_id from PRD metadata for project association
         tenant_project_id = None
@@ -561,8 +1181,12 @@ async def generate_plan(project_id: str, request: GenerateRequest, background_ta
                 feature_name=request.feature,
                 status="pending",
                 current_stage="queued",
-                stage_message="Generation queued...",
+                stage_message="Generation queued with live browser validation..."
+                if live_browser_requested
+                else "Generation queued in PRD-only mode...",
                 project_id=tenant_project_id,  # Link to tenant project for proper isolation
+                target_url=request.target_url,
+                live_browser_requested=live_browser_requested,
             )
             session.add(gen_result)
             session.commit()
@@ -570,16 +1194,35 @@ async def generate_plan(project_id: str, request: GenerateRequest, background_ta
             generation_id = gen_result.id
 
         # BEFORE starting task: Set up log file so SSE can connect immediately
-        log_dir = BASE_DIR / "prds" / project_id / "generations" / str(generation_id)
+        log_dir = _generation_run_dir(generation_id)
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "generation.log"
 
         # Write initial message so SSE has something to read immediately
         with open(log_path, "w") as f:
             f.write(f"[{datetime.now(timezone.utc).isoformat()}] Generation queued for: {request.feature}\n")
+            if live_browser_requested:
+                f.write(f"[{datetime.now(timezone.utc).isoformat()}] Target URL: {request.target_url}\n")
+            else:
+                f.write(
+                    f"[{datetime.now(timezone.utc).isoformat()}] PRD-only mode: no live browser view will be opened.\n"
+                )
 
         # Set log_path in DB BEFORE task starts (fixes race condition)
         _set_generation_log_path(generation_id, str(log_path))
+        _append_generation_event(
+            generation_id,
+            role="orchestrator",
+            event_type="created",
+            message=f"Generation queued for {request.feature}.",
+            payload={
+                "prd_project": project_id,
+                "feature_name": request.feature,
+                "target_url": request.target_url,
+                "live_browser_requested": live_browser_requested,
+                "log_path": str(log_path),
+            },
+        )
 
         # NOW start the task, passing log_path
         task = asyncio.create_task(
@@ -595,9 +1238,19 @@ async def generate_plan(project_id: str, request: GenerateRequest, background_ta
         )
         _running_generations[generation_id] = task
 
+        initial_runtime = browser_runtime_status() if live_browser_requested else {}
         return {
             "status": "started",
             "generation_id": generation_id,
+            "target_url": request.target_url,
+            "live_browser_requested": live_browser_requested,
+            "live_view_available": bool(initial_runtime.get("live_view_available")) and live_browser_requested,
+            "browser_activity_seen": False,
+            "browser_active": False,
+            "browser_last_tool": None,
+            "runtime_message": initial_runtime.get("runtime_message")
+            if live_browser_requested
+            else "PRD-only generation. Provide a Target URL to enable live browser validation.",
             "message": "Generation started in background. Poll /api/prd/generation/{generation_id} for status.",
         }
     else:
@@ -623,19 +1276,74 @@ async def get_generation_status(generation_id: int):
         gen = session.get(PrdGenerationResult, generation_id)
         if not gen:
             raise HTTPException(status_code=404, detail="Generation not found")
-        return GenerationStatusResponse(
-            id=gen.id,
-            prd_project=gen.prd_project,
-            feature_name=gen.feature_name,
-            status=gen.status,
-            current_stage=gen.current_stage,
-            stage_message=gen.stage_message,
-            spec_path=gen.spec_path,
-            error_message=gen.error_message,
-            created_at=gen.created_at,
-            started_at=gen.started_at,
-            completed_at=gen.completed_at,
-        )
+        return await _generation_status_response_with_queue(gen)
+
+
+@router.get("/generation/{generation_id}/events", response_model=list[PrdGenerationEventResponse])
+async def list_generation_events(
+    generation_id: int,
+    after_sequence: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """List structured generation events after a sequence number."""
+    with Session(engine) as session:
+        gen = session.get(PrdGenerationResult, generation_id)
+        if not gen:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        events = session.exec(
+            select(PrdGenerationEvent)
+            .where(PrdGenerationEvent.generation_id == generation_id)
+            .where(PrdGenerationEvent.sequence > after_sequence)
+            .order_by(PrdGenerationEvent.sequence)
+            .limit(limit)
+        ).all()
+        return [_event_to_response(event) for event in events]
+
+
+@router.get("/generation/{generation_id}/events/stream")
+async def stream_generation_events(
+    generation_id: int,
+    after_sequence: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """Stream structured generation events via SSE."""
+    with Session(engine) as session:
+        gen = session.get(PrdGenerationResult, generation_id)
+        if not gen:
+            raise HTTPException(status_code=404, detail="Generation not found")
+
+    async def generate():
+        last_sequence = after_sequence
+        try:
+            yield f"data: {json.dumps({'status': 'connected', 'after_sequence': after_sequence})}\n\n"
+            while True:
+                with Session(engine) as check_session:
+                    current_gen = check_session.get(PrdGenerationResult, generation_id)
+                    if not current_gen:
+                        yield f"data: {json.dumps({'status': 'error', 'message': 'Generation not found'})}\n\n"
+                        break
+                    events = check_session.exec(
+                        select(PrdGenerationEvent)
+                        .where(PrdGenerationEvent.generation_id == generation_id)
+                        .where(PrdGenerationEvent.sequence > last_sequence)
+                        .order_by(PrdGenerationEvent.sequence)
+                        .limit(limit)
+                    ).all()
+                    for event in events:
+                        last_sequence = max(last_sequence, event.sequence)
+                        yield f"data: {json.dumps({'event': _event_to_response(event)}, default=str)}\n\n"
+                    if current_gen.status in ["completed", "failed", "cancelled"]:
+                        yield f"data: {json.dumps({'status': 'complete', 'final_status': current_gen.status, 'last_sequence': last_sequence})}\n\n"
+                        break
+                await asyncio.sleep(1)
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/generation/{generation_id}/stop")
@@ -651,7 +1359,7 @@ async def stop_generation(generation_id: int):
             raise HTTPException(status_code=404, detail="Generation not found")
 
         # 2. Check if it's actually running
-        if gen.status not in ["pending", "running"]:
+        if gen.status not in ["pending", "queued", "running"]:
             raise HTTPException(status_code=400, detail=f"Generation is not running (status: {gen.status})")
 
     # 3. Cancel asyncio task if it exists
@@ -792,22 +1500,7 @@ async def list_generations(project_id: str, limit: int = 50):
             .limit(limit)
         )
         results = session.exec(statement).all()
-        return [
-            GenerationStatusResponse(
-                id=gen.id,
-                prd_project=gen.prd_project,
-                feature_name=gen.feature_name,
-                status=gen.status,
-                current_stage=gen.current_stage,
-                stage_message=gen.stage_message,
-                spec_path=gen.spec_path,
-                error_message=gen.error_message,
-                created_at=gen.created_at,
-                started_at=gen.started_at,
-                completed_at=gen.completed_at,
-            )
-            for gen in results
-        ]
+        return [await _generation_status_response_with_queue(gen) for gen in results]
 
 
 class GenerateTestRequest(BaseModel):

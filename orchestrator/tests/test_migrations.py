@@ -46,16 +46,22 @@ class TestDatabaseInit:
         assert len(revisions.get("035", [])) == 1
         assert len(revisions.get("036", [])) == 1
         assert len(revisions.get("037", [])) == 1
+        assert len(revisions.get("038", [])) == 1
+        assert len(revisions.get("039", [])) == 1
+        assert len(revisions.get("040", [])) == 1
         assert down_revisions["032"] == "031"
         assert down_revisions["033"] == "032"
         assert down_revisions["034"] == "033"
         assert down_revisions["035"] == "034"
         assert down_revisions["036"] == "035"
         assert down_revisions["037"] == "036"
+        assert down_revisions["038"] == "037"
+        assert down_revisions["039"] == "038"
+        assert down_revisions["040"] == "039"
 
         referenced = {revision for revision in down_revisions.values() if revision}
         heads = sorted(set(revisions) - referenced)
-        assert heads == ["037"]
+        assert heads == ["040"]
 
     def test_init_db_fresh_sqlite(self, tmp_path):
         """init_db() should run cleanly on a fresh SQLite database."""
@@ -173,6 +179,88 @@ class TestDatabaseInit:
                 assert "project_id" in columns
                 assert "current_stage" in columns
                 assert "test_type" in columns
+
+        finally:
+            db_module.DATABASE_URL = original_url
+            db_module.engine = original_engine
+
+    def test_run_migrations_repairs_legacy_prd_generation_live_browser_intent_columns(self, tmp_path):
+        """Legacy PRD generation result tables should get live-browser intent columns idempotently."""
+        db_path = tmp_path / "test_prd_generation_legacy.db"
+        db_url = f"sqlite:///{db_path}"
+
+        from sqlalchemy import inspect, text
+        from sqlmodel import create_engine
+
+        import orchestrator.api.db as db_module
+
+        original_url = db_module.DATABASE_URL
+        original_engine = db_module.engine
+
+        try:
+            db_module.DATABASE_URL = db_url
+            db_module.engine = create_engine(
+                db_url, echo=False, connect_args={"check_same_thread": False, "timeout": 30}
+            )
+
+            with db_module.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE prd_generation_results (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            prd_project VARCHAR NOT NULL,
+                            feature_name VARCHAR NOT NULL,
+                            status VARCHAR NOT NULL,
+                            current_stage VARCHAR,
+                            stage_message VARCHAR,
+                            spec_path VARCHAR,
+                            error_message VARCHAR,
+                            created_at DATETIME,
+                            started_at DATETIME,
+                            completed_at DATETIME,
+                            log_path VARCHAR,
+                            project_id VARCHAR
+                        )
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO prd_generation_results (
+                            prd_project,
+                            feature_name,
+                            status
+                        ) VALUES (
+                            'legacy-prd',
+                            'Checkout',
+                            'running'
+                        )
+                        """
+                    )
+                )
+
+            db_module._run_migrations()
+            db_module._run_migrations()
+
+            inspector = inspect(db_module.engine)
+            columns = {col["name"] for col in inspector.get_columns("prd_generation_results")}
+            assert {"target_url", "live_browser_requested"} <= columns
+
+            with db_module.engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT target_url, live_browser_requested
+                        FROM prd_generation_results
+                        WHERE feature_name = 'Checkout'
+                        """
+                    )
+                ).mappings().one()
+
+            assert row["target_url"] is None
+            assert row["live_browser_requested"] in (False, 0)
 
         finally:
             db_module.DATABASE_URL = original_url

@@ -42,6 +42,7 @@ from orchestrator.api.models_db import (  # noqa: F401
     ExecutionSettings,
     ExplorationSession,
     FlowStep,
+    PrdGenerationEvent,
     PrdGenerationResult,
     Project,
     RegressionBatch,

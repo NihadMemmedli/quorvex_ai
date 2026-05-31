@@ -356,6 +356,7 @@ class AgentWorker:
             "browser_tool_calls": 0,
             "last_tool": "",
             "tool_names": [],
+            "tool_call_records": [],
             "chars": 0,
             "interactions": 0,
             "phase": "running",
@@ -455,7 +456,10 @@ class AgentWorker:
             while self.running:
                 try:
                     # Refresh once here as well so the first heartbeat is not delayed.
-                    await self.queue.update_worker_heartbeat(self.worker_id)
+                    await self.queue.update_worker_heartbeat(
+                        self.worker_id,
+                        capabilities={"live_browser": self.queue._worker_supports_live_browser()},
+                    )
 
                     # Dequeue task (blocking for up to 10 seconds)
                     task = await self.queue.dequeue_task(timeout=10)
@@ -510,7 +514,10 @@ class AgentWorker:
         """Keep the worker-level heartbeat fresh even while a long task is running."""
         try:
             while True:
-                await self.queue.update_worker_heartbeat(self.worker_id)
+                await self.queue.update_worker_heartbeat(
+                    self.worker_id,
+                    capabilities={"live_browser": self.queue._worker_supports_live_browser()},
+                )
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             pass
@@ -682,6 +689,12 @@ class AgentWorker:
 
     def _task_requires_browser_slot(self, task: AgentTask) -> bool:
         """Return True when a queued agent task can consume browser capacity."""
+        if task.owner_type == "prd_generation":
+            # PRD generations own their live Playwright/VNC workspace separately.
+            # Reserving the shared browser pool here can block the planner before
+            # it has a chance to open the run-local browser.
+            return False
+
         browser_owner_types = {
             "agent_run",
             "autonomous_work_item",
@@ -709,6 +722,11 @@ class AgentWorker:
             "browser" in str(tool).lower() or "playwright" in str(tool).lower()
             for tool in tool_sources
         )
+
+    @staticmethod
+    def _builtin_cli_tools(tools: list[str]) -> list[str]:
+        """Return Claude CLI built-in tools, excluding MCP tool names."""
+        return [str(tool) for tool in tools if not str(tool).startswith("mcp__")]
 
     def _parent_test_run_slot_id(self, task: AgentTask) -> str | None:
         """Return the parent test-run slot id for a queued child agent, if any."""
@@ -1244,6 +1262,7 @@ class AgentWorker:
             "interactions": int(progress.get("interactions", 0) or 0),
             "last_tool": progress.get("last_tool", ""),
             "tool_names": progress.get("tool_names", []),
+            "tool_call_records": progress.get("tool_call_records", []),
             "chars": int(progress.get("chars", 0) or 0),
             "allowed_tools_count": len(task.allowed_tools or []),
             "tools_count": len(task.tools) if isinstance(task.tools, list) else None,
@@ -1269,6 +1288,13 @@ class AgentWorker:
             else progress_tool_names
         )
         telemetry["last_tool"] = execution.get("last_tool") or progress.get("last_tool", "")
+        progress_tool_records = progress.get("tool_call_records", [])
+        execution_tool_records = execution.get("tool_call_records", [])
+        telemetry["tool_call_records"] = (
+            execution_tool_records
+            if isinstance(execution_tool_records, list) and execution_tool_records
+            else progress_tool_records
+        )
         if error_type:
             telemetry["error_type"] = error_type
         if task.started_at:
@@ -1414,7 +1440,9 @@ class AgentWorker:
         ]
         if tools is not None:
             if isinstance(tools, list):
-                cli_args.extend(["--tools", ",".join(tools)])
+                builtin_tools = self._builtin_cli_tools(tools)
+                if builtin_tools or tools == []:
+                    cli_args.extend(["--tools", ",".join(builtin_tools)])
             elif isinstance(tools, dict) and tools.get("preset") == "claude_code":
                 cli_args.extend(["--tools", "default"])
         if effective_allowed_tools:
@@ -1593,6 +1621,14 @@ class AgentWorker:
                                                 tool_names = self._current_progress.setdefault("tool_names", [])
                                                 if isinstance(tool_names, list) and len(tool_names) < 200:
                                                     tool_names.append(tool_name)
+                                                tool_records = self._current_progress.setdefault("tool_call_records", [])
+                                                if isinstance(tool_records, list) and len(tool_records) < 200:
+                                                    tool_records.append(
+                                                        {
+                                                            "name": tool_name,
+                                                            "input": item.get("input") or {},
+                                                        }
+                                                    )
                                                 # Strip MCP prefix: mcp__playwright-test__browser_click -> browser_click
                                                 short_name = _short_tool_name(tool_name)
                                                 if tool_name.startswith("mcp__") and short_name.startswith("browser_"):
@@ -1721,6 +1757,7 @@ class AgentWorker:
                 "interactions": int(final_progress.get("interactions", 0) or 0),
                 "last_tool": final_progress.get("last_tool", ""),
                 "tool_names": list(final_progress.get("tool_names") or []),
+                "tool_call_records": list(final_progress.get("tool_call_records") or []),
                 "raw_output_chars": len(raw_output),
                 "cli_elapsed_seconds": elapsed,
             }

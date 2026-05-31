@@ -14,6 +14,7 @@ interface FeatureSidebarProps {
     generationResults: Record<string, GenerationResult>;
     onBatchGenerate: () => void;
     isGenerating: boolean;
+    generationBlockedReason?: string | null;
 }
 
 type StatusKey = 'completed' | 'running' | 'failed' | 'pending';
@@ -46,6 +47,7 @@ export function FeatureSidebar({
     generationResults,
     onBatchGenerate,
     isGenerating,
+    generationBlockedReason,
 }: FeatureSidebarProps) {
     const [searchTerm, setSearchTerm] = useState('');
 
@@ -64,63 +66,139 @@ export function FeatureSidebar({
         [testableFeatures, searchTerm]
     );
 
-    const completedCount = useMemo(
-        () => testableFeatures.filter(f => getFeatureStatus(generationResults[f.name]) === 'completed').length,
-        [testableFeatures, generationResults]
-    );
-
     const pendingCount = useMemo(
         () => testableFeatures.filter(f => getFeatureStatus(generationResults[f.name]) === 'pending').length,
         [testableFeatures, generationResults]
     );
 
-    const isDisabled = isGenerating || pendingCount === 0;
+    const isDisabled = Boolean(generationBlockedReason) || isGenerating || pendingCount === 0;
 
     return (
-        <div className="card-elevated w-[300px] shrink-0 flex flex-col" style={{ padding: 0, overflow: 'hidden' }}>
+        <div className="prd-feature-sidebar flex flex-col">
+            <style>{`
+                .prd-sidebar-count {
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    height: 18px;
+                    min-width: 18px;
+                    padding: 0 0.375rem;
+                    border-radius: 999px;
+                    font-size: 10px;
+                    font-family: var(--font-mono);
+                    font-weight: 600;
+                }
+
+                .prd-sidebar-batch {
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 0.375rem;
+                    height: 32px;
+                    padding: 0 0.625rem;
+                    border: 1px solid transparent;
+                    border-radius: 7px;
+                    font-size: 0.75rem;
+                    font-weight: 700;
+                    line-height: 1;
+                    white-space: nowrap;
+                }
+
+                .prd-sidebar-batch:disabled {
+                    pointer-events: none;
+                    opacity: 0.45;
+                }
+
+                .prd-sidebar-batch:focus-visible,
+                .prd-feature-row:focus-visible {
+                    outline: none;
+                    box-shadow: 0 0 0 2px rgba(59,130,246,0.45);
+                }
+
+                .prd-feature-row:focus-visible {
+                    outline: 2px solid rgba(59,130,246,0.55);
+                    outline-offset: -2px;
+                }
+
+                .prd-sidebar-search {
+                    position: relative;
+                }
+
+                .prd-sidebar-search-icon {
+                    position: absolute;
+                    left: 0.625rem;
+                    top: 50%;
+                    z-index: 1;
+                    transform: translateY(-50%);
+                    pointer-events: none;
+                }
+
+                .prd-feature-list {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.25rem;
+                    padding: 0.625rem;
+                }
+
+                .prd-feature-row {
+                    position: relative;
+                    width: 100%;
+                    padding: 0.625rem;
+                    border: 0;
+                    border-radius: 7px;
+                    text-align: left;
+                    transition: background-color 0.2s, box-shadow 0.2s;
+                }
+
+                .prd-feature-row:hover {
+                    background: rgba(255,255,255,0.03);
+                }
+
+                .prd-status-dot {
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    width: 24px;
+                    height: 24px;
+                    flex: 0 0 24px;
+                    border-radius: 999px;
+                }
+            `}</style>
             {/* Sticky Header */}
             <div
-                className="p-4 border-b"
-                style={{ borderColor: 'var(--border)' }}
+                className="border-b p-3"
+                style={{ borderColor: 'var(--border-subtle)' }}
             >
                 {/* Title Row */}
-                <div className="flex items-center justify-between mb-1.5">
+                <div className="mb-3 flex items-center justify-between gap-2">
                     <h3
-                        className="font-semibold text-xs flex items-center uppercase tracking-wider"
+                        className="font-semibold text-xs flex min-w-0 items-center uppercase tracking-wider"
                         style={{ color: 'var(--text-secondary)' }}
                     >
                         <Layers size={14} style={{ color: 'var(--primary)', marginRight: '8px' }} className="shrink-0" />
                         <span>Features</span>
                         <span
-                            className="inline-flex items-center justify-center h-[18px] min-w-[18px] px-1.5 rounded-full text-[10px] font-mono font-medium"
+                            className="prd-sidebar-count"
                             style={{
                                 background: 'rgba(59,130,246,0.12)',
                                 color: 'var(--primary)',
                                 marginLeft: '8px',
                             }}
                         >
-                            {filteredFeatures.length}/{testableFeatures.length}
+                            {filteredFeatures.length}
                         </span>
                     </h3>
-                </div>
-
-                {/* Completed Count */}
-                <div className="flex items-center justify-between mb-3">
-                    <span
-                        className="text-[10px] font-mono"
-                        style={{ color: 'var(--text-tertiary)' }}
-                    >
-                        {completedCount}/{testableFeatures.length} completed
-                    </span>
 
                     {/* Batch Generate Button */}
                     <button
+                        type="button"
                         onClick={onBatchGenerate}
                         disabled={isDisabled}
-                        className={`btn btn-primary shrink-0 whitespace-nowrap disabled:opacity-40 disabled:pointer-events-none ${isDisabled ? '!bg-white/[0.06] !text-slate-500' : ''}`}
-                        style={{ padding: '0.4rem 0.85rem', fontSize: '0.8rem' }}
+                        className={`prd-sidebar-batch ${isDisabled ? '' : 'btn-primary'}`}
+                        style={isDisabled ? { background: 'rgba(255,255,255,0.06)', color: 'var(--text-tertiary)' } : undefined}
+                        title={generationBlockedReason || undefined}
                     >
-                        <Play size={14} fill="currentColor" className="shrink-0" />
+                        <Play size={13} fill="currentColor" className="shrink-0" />
                         <span>Generate All</span>
                         <span className="text-[11px] font-mono opacity-70">
                             {pendingCount}
@@ -129,18 +207,19 @@ export function FeatureSidebar({
                 </div>
 
                 {/* Search Input */}
-                <div className="relative">
+                <div className="prd-sidebar-search">
                     <Search
                         size={14}
-                        className="absolute left-2.5 top-1/2 -translate-y-1/2 z-10"
+                        className="prd-sidebar-search-icon"
                         style={{ color: 'var(--text-tertiary)' }}
                     />
                     <Input
                         placeholder="Search features..."
                         value={searchTerm}
                         onChange={e => setSearchTerm(e.target.value)}
-                        className="h-8 text-xs border-white/[0.06] focus:shadow-[0_0_0_2px_rgba(59,130,246,0.1)] backdrop-blur-sm"
+                        className="text-xs border-white/[0.06] focus:shadow-[0_0_0_2px_rgba(59,130,246,0.1)] backdrop-blur-sm"
                         style={{
+                            height: 32,
                             paddingLeft: '2rem',
                             background: 'rgba(255,255,255,0.03)',
                         }}
@@ -151,7 +230,7 @@ export function FeatureSidebar({
             {/* Feature List */}
             <div className="flex-1"
                  style={{ minHeight: 0, overflowY: 'auto', scrollbarWidth: 'thin', scrollbarColor: 'var(--surface-active) transparent' }}>
-                <div className="p-3 flex flex-col gap-1">
+                <div className="prd-feature-list">
                     {filteredFeatures.map(f => {
                         const isSelected = selectedFeature?.slug === f.slug;
                         const status = getFeatureStatus(generationResults[f.name]);
@@ -160,10 +239,7 @@ export function FeatureSidebar({
                             <button
                                 key={f.slug}
                                 onClick={() => onSelect(f)}
-                                className={`
-                                    w-full text-left p-3 rounded-lg transition-all duration-200 relative
-                                    ${isSelected ? '' : 'hover:bg-white/[0.03]'}
-                                `}
+                                className="prd-feature-row"
                                 style={{
                                     borderLeft: `2px solid ${isSelected ? 'var(--primary)' : statusBorderColor[status]}`,
                                     ...(isSelected
@@ -197,7 +273,7 @@ export function FeatureSidebar({
 
                                     {/* Status Icon Circle */}
                                     <div
-                                        className="shrink-0 w-6 h-6 rounded-full flex items-center justify-center"
+                                        className="prd-status-dot"
                                         style={{ background: statusIconBg[status] }}
                                     >
                                         {statusIcon[status]}

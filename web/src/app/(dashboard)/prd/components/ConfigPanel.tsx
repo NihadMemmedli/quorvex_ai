@@ -13,7 +13,9 @@ interface ConfigPanelProps {
 }
 
 export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
-    const [isExpanded, setIsExpanded] = useState(!settings.targetUrl);
+    const [isExpanded, setIsExpanded] = useState(false);
+    const targetUrl = settings.targetUrl.trim();
+    const targetUrlPresent = targetUrl.length > 0;
 
     return (
         <div className="card-elevated overflow-hidden" style={{ padding: 0 }}>
@@ -33,12 +35,11 @@ export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
                     <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>
                         Configuration
                     </span>
-                    {!isExpanded && settings.targetUrl && (
-                        <span
-                            className="text-xs font-mono truncate max-w-[200px]"
-                            style={{ color: 'var(--text-tertiary)' }}
-                        >
-                            {settings.targetUrl}
+                    {!isExpanded && (
+                        <span className="text-xs truncate max-w-[520px]" style={{ color: 'var(--text-tertiary)' }}>
+                            {targetUrlPresent
+                                ? `Live browser: ${targetUrl}`
+                                : `PRD-only generation • ${settings.targetFeatures} target features`}
                         </span>
                     )}
                 </div>
@@ -155,12 +156,14 @@ export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
                                     Live Browser Validation
                                 </span>
                                 <span className="text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
-                                    {settings.useLiveValidation ? 'Agent will browse the target site' : 'PRD-only generation'}
+                                    {targetUrlPresent
+                                        ? 'Agent will browse the target site'
+                                        : 'Enter a Target URL to enable live browser validation'}
                                 </span>
                             </div>
                             <Switch
-                                checked={settings.useLiveValidation}
-                                onCheckedChange={(val) => onUpdate('useLiveValidation', val)}
+                                checked={targetUrlPresent}
+                                disabled
                             />
                         </div>
 

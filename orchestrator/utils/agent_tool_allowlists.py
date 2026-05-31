@@ -8,6 +8,7 @@ server prefix from the current `.mcp.json`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 try:
@@ -47,6 +48,20 @@ EXPLORER_MCP_TOOLS: tuple[str, ...] = (
 PLANNER_MCP_TOOLS: tuple[str, ...] = EXPLORER_MCP_TOOLS + (
     "planner_setup_page",
     "planner_save_plan",
+)
+
+PRD_LIVE_PLANNER_MCP_TOOLS: tuple[str, ...] = (
+    "planner_setup_page",
+    "planner_save_plan",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_wait_for",
+    "browser_handle_dialog",
+    "browser_take_screenshot",
+    "browser_close",
+    "browser_console_messages",
 )
 
 GENERATOR_MCP_TOOLS: tuple[str, ...] = (
@@ -121,6 +136,8 @@ AGENT_TOOL_PROFILES: dict[str, AgentToolProfile] = {
     "app-explorer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_MCP_TOOLS),
     "api-explorer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_MCP_TOOLS),
     "playwright-test-planner": AgentToolProfile(("Glob", "Grep", "Read", "LS"), PLANNER_MCP_TOOLS),
+    "prd-only-planner": AgentToolProfile((), ()),
+    "prd-live-planner": AgentToolProfile((), PRD_LIVE_PLANNER_MCP_TOOLS),
     "playwright-test-generator": AgentToolProfile(("Glob", "Grep", "Read", "LS"), GENERATOR_MCP_TOOLS),
     "playwright-test-healer": AgentToolProfile(
         ("Glob", "Grep", "Read", "LS", "Edit", "MultiEdit", "Write"),
@@ -161,16 +178,31 @@ def normalize_agent_profile_name(agent_name: str | None) -> str | None:
     return normalized if normalized in AGENT_TOOL_PROFILES else None
 
 
-def get_agent_allowed_tools(agent_name: str | None) -> list[str] | None:
+def get_agent_allowed_tools(
+    agent_name: str | None,
+    *,
+    mcp_config_dir: Path | str | None = None,
+    mcp_config_path: Path | str | None = None,
+) -> list[str] | None:
     """Return an explicitly prefixed allowlist for a known agent profile."""
     profile_name = normalize_agent_profile_name(agent_name)
     if profile_name is None:
         return None
     profile = AGENT_TOOL_PROFILES[profile_name]
-    return build_allowed_tools(list(profile.base_tools), list(profile.playwright_mcp_tools))
+    return build_allowed_tools(
+        list(profile.base_tools),
+        list(profile.playwright_mcp_tools),
+        mcp_config_dir=mcp_config_dir,
+        mcp_config_path=mcp_config_path,
+    )
 
 
-def get_agent_tool_config(agent_name: str | None) -> dict[str, Any]:
+def get_agent_tool_config(
+    agent_name: str | None,
+    *,
+    mcp_config_dir: Path | str | None = None,
+    mcp_config_path: Path | str | None = None,
+) -> dict[str, Any]:
     """Return SDK/CLI tool config for a known agent profile.
 
     `allowed_tools` controls approval. `tools` controls availability. Keeping
@@ -178,7 +210,11 @@ def get_agent_tool_config(agent_name: str | None) -> dict[str, Any]:
     Unknown agents return an empty config so legacy fallback behavior is
     preserved by callers that still need it.
     """
-    allowed_tools = get_agent_allowed_tools(agent_name)
+    allowed_tools = get_agent_allowed_tools(
+        agent_name,
+        mcp_config_dir=mcp_config_dir,
+        mcp_config_path=mcp_config_path,
+    )
     if allowed_tools is None:
         return {}
     return {"allowed_tools": allowed_tools, "tools": list(allowed_tools)}

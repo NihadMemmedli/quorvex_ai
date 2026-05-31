@@ -44,6 +44,47 @@ def test_agent_allowlist_uses_root_playwright_prefix(tmp_path, monkeypatch):
     assert "mcp__playwright__browser_network_requests" in tools
 
 
+def test_agent_allowlist_can_use_run_local_mcp_config(tmp_path, monkeypatch):
+    root_dir = tmp_path / "root"
+    run_dir = tmp_path / "run"
+    root_dir.mkdir()
+    run_dir.mkdir()
+    _write_mcp_config(root_dir, "playwright")
+    _write_mcp_config(run_dir, "playwright-test")
+    monkeypatch.chdir(root_dir)
+
+    tools = get_agent_allowed_tools("playwright-test-planner", mcp_config_dir=run_dir)
+
+    assert "mcp__playwright-test__planner_setup_page" in tools
+    assert "mcp__playwright-test__planner_save_plan" in tools
+    assert "mcp__playwright__planner_setup_page" not in tools
+
+
+def test_prd_only_planner_profile_has_no_tools(tmp_path, monkeypatch):
+    _write_mcp_config(tmp_path, "playwright-test")
+    monkeypatch.chdir(tmp_path)
+
+    assert get_agent_allowed_tools("prd-only-planner") == []
+
+
+def test_prd_live_planner_allows_only_prd_browser_tools(tmp_path, monkeypatch):
+    _write_mcp_config(tmp_path, "playwright-test")
+    monkeypatch.chdir(tmp_path)
+
+    tools = set(get_agent_allowed_tools("prd-live-planner"))
+
+    assert "mcp__playwright-test__planner_setup_page" in tools
+    assert "mcp__playwright-test__planner_save_plan" in tools
+    assert "mcp__playwright-test__browser_navigate" in tools
+    assert "mcp__playwright-test__browser_snapshot" in tools
+    assert "Glob" not in tools
+    assert "Grep" not in tools
+    assert "Read" not in tools
+    assert "LS" not in tools
+    assert "mcp__playwright-test__browser_evaluate" not in tools
+    assert "mcp__playwright-test__browser_network_requests" not in tools
+
+
 def test_known_profiles_do_not_grant_wildcards(tmp_path, monkeypatch):
     _write_mcp_config(tmp_path, "playwright-test")
     monkeypatch.chdir(tmp_path)

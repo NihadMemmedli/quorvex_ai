@@ -1618,6 +1618,8 @@ class PrdGenerationResult(SQLModel, table=True):
     # Results
     spec_path: str | None = None
     error_message: str | None = None
+    target_url: str | None = None
+    live_browser_requested: bool = False
 
     # Timestamps
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -1629,6 +1631,38 @@ class PrdGenerationResult(SQLModel, table=True):
 
     # Project isolation
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+
+
+class PrdGenerationEvent(SQLModel, table=True):
+    """Compact structured timeline for a PRD generation run."""
+
+    __tablename__ = "prd_generation_events"
+    __table_args__ = (
+        Index("ix_prd_generation_events_generation_sequence", "generation_id", "sequence"),
+        {"extend_existing": True},
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    generation_id: int = Field(foreign_key="prd_generation_results.id", index=True)
+    sequence: int = Field(index=True)
+    role: str = Field(index=True)
+    event_type: str = Field(index=True)
+    level: str = "info"
+    message: str
+    payload_json: str = "{}"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.payload_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @payload.setter
+    def payload(self, value: dict[str, Any]):
+        self.payload_json = json.dumps(value or {})
 
 
 # ========== Production Data Management Models ==========

@@ -77,6 +77,7 @@ from .models_db import (  # noqa: F401
     # OpenAPI import history
     OpenApiImportHistory,
     PrChangedFile,
+    PrdGenerationEvent,
     PrdGenerationResult,
     PrImpactAnalysis,
     Project,
@@ -1294,6 +1295,18 @@ def _run_migrations():
             if "log_path" not in prd_gen_columns:
                 conn.execute(text("ALTER TABLE prd_generation_results ADD COLUMN log_path VARCHAR"))
                 logger.info("Added column: prd_generation_results.log_path")
+            if "target_url" not in prd_gen_columns:
+                conn.execute(text("ALTER TABLE prd_generation_results ADD COLUMN target_url VARCHAR"))
+                logger.info("Added column: prd_generation_results.target_url")
+            if "live_browser_requested" not in prd_gen_columns:
+                live_browser_default = "false" if db_type == "postgresql" else "0"
+                conn.execute(
+                    text(
+                        "ALTER TABLE prd_generation_results "
+                        f"ADD COLUMN live_browser_requested BOOLEAN NOT NULL DEFAULT {live_browser_default}"
+                    )
+                )
+                logger.info("Added column: prd_generation_results.live_browser_requested")
 
         # ===== User tracking columns (Phase: Multi-User Support) =====
 

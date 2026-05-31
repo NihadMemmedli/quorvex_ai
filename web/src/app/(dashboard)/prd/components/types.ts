@@ -16,6 +16,56 @@ export interface GenerationResult {
     stage?: string;       // current stage name
     message?: string;     // progress message
     generationId?: number;
+    eventsCount?: number;
+    latestEvent?: PrdGenerationEvent | null;
+    artifacts?: PrdArtifact[];
+    latestImage?: PrdArtifact | null;
+    vncUrl?: string | null;
+    browserRuntime?: string | null;
+    liveViewAvailable?: boolean | null;
+    liveBrowserRequested?: boolean;
+    browserActivitySeen?: boolean;
+    browserActive?: boolean;
+    browserLastTool?: string | null;
+    runtimeMessage?: string | null;
+    displayDiagnostics?: BrowserDisplayDiagnostics | null;
+    agentTaskId?: string | null;
+    agentTaskStatus?: string | null;
+    agentWorkerId?: string | null;
+    agentQueueHealth?: Record<string, any> | null;
+    targetUrl?: string | null;
+    specPath?: string | null;
+    createdAt?: Date;
+    startedAt?: Date;
+    completedAt?: Date;
+}
+
+export interface PrdGenerationEvent {
+    id: number;
+    generation_id: number;
+    sequence: number;
+    role: string;
+    event_type: string;
+    level: string;
+    message: string;
+    payload?: Record<string, any>;
+    created_at: string;
+}
+
+export interface PrdArtifact {
+    name: string;
+    path: string;
+    type: 'image' | 'video' | 'log' | string;
+    modified_at?: string | null;
+}
+
+export interface BrowserDisplayDiagnostics {
+    browser_process_count?: number | null;
+    browser_window_count?: number | null;
+    browser_process_seen?: boolean | null;
+    browser_window_seen?: boolean | null;
+    probed_at?: string | null;
+    display?: string | null;
 }
 
 export interface TestResult {
@@ -74,7 +124,7 @@ export function computeStats(
         const r = results[f.name];
         if (!r) { pending++; continue; }
         if (r.status === 'completed' || r.success) completed++;
-        else if (r.status === 'running' || r.status === 'pending') running++;
+        else if (r.status === 'running' || r.status === 'pending' || r.status === 'queued') running++;
         else if (r.status === 'failed' || (r.success === false && r.error)) failed++;
         else pending++;
     }
@@ -84,7 +134,7 @@ export function computeStats(
 
 export function getFeatureStatus(result: GenerationResult | undefined): 'completed' | 'running' | 'failed' | 'pending' {
     if (!result) return 'pending';
-    if (result.status === 'running' || result.status === 'pending') return 'running';
+    if (result.status === 'running' || result.status === 'pending' || result.status === 'queued') return 'running';
     if (result.status === 'failed' || (result.success === false && result.error)) return 'failed';
     if (result.success || result.status === 'completed') return 'completed';
     return 'pending';
@@ -94,6 +144,8 @@ export function getStageDisplay(stage: string | undefined, message: string | und
     if (message) return message;
     switch (stage) {
         case 'queued': return 'Generation queued...';
+        case 'waiting': return 'Waiting for browser slot...';
+        case 'browser_slot_acquired': return 'Browser slot acquired...';
         case 'initializing': return 'Setting up environment...';
         case 'retrieving_context': return 'Retrieving PRD context...';
         case 'invoking_agent': return 'Invoking Playwright agent...';

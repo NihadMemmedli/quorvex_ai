@@ -941,6 +941,22 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
                 logger.debug("Could not validate agent-run browser slot owner %s: %s", request_id, exc)
                 return None
 
+        if operation_type == OperationType.PRD.value and request_id.startswith("gen_"):
+            try:
+                from sqlmodel import Session
+                from orchestrator.api.db import engine
+                from orchestrator.api.models_db import PrdGenerationResult
+
+                generation_id = int(request_id.removeprefix("gen_"))
+                with Session(engine) as session:
+                    generation = session.get(PrdGenerationResult, generation_id)
+                    if not generation:
+                        return False
+                    return str(generation.status or "").lower() in active_statuses
+            except Exception as exc:
+                logger.debug("Could not validate PRD generation browser slot owner %s: %s", request_id, exc)
+                return None
+
         return None
 
     async def cleanup_stale(self, max_age_minutes: int = 60) -> list[str]:
@@ -950,6 +966,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         stale_ids = []
 
         running_set = await r.smembers(f"{self._key_prefix}:running")
+        queued_ids = await r.lrange(f"{self._key_prefix}:queue", 0, -1)
 
         for request_id in running_set:
             info = await r.hgetall(f"{self._key_prefix}:info:{request_id}")
@@ -982,6 +999,17 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
             elif age_stale and owner_active is True:
                 logger.info("[%s] Preserving old browser slot because owner is still active", request_id)
 
+        stale_queued_ids = []
+        for request_id in queued_ids:
+            owner_active = await self._slot_owner_is_active(request_id, {})
+            if owner_active is False:
+                stale_queued_ids.append(request_id)
+
+        for request_id in stale_queued_ids:
+            removed = await r.lrem(f"{self._key_prefix}:queue", 0, request_id)
+            if removed:
+                logger.warning("[%s] Removed stale queued Redis browser request", request_id)
+
         for request_id in stale_ids:
             await r.srem(f"{self._key_prefix}:running", request_id)
             await r.delete(f"{self._key_prefix}:info:{request_id}")
@@ -996,7 +1024,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         if stale_ids:
             logger.info(f"Cleaned up {len(stale_ids)} stale Redis browser slots")
 
-        return stale_ids
+        return stale_ids + stale_queued_ids
 
     async def cleanup_old_completed(self, max_age_hours: int = 24) -> int:
         """Remove old completed local slot records to prevent memory growth."""

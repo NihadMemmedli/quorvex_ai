@@ -17,6 +17,10 @@ function getStorageKey(projectId: string | undefined): string {
     return `prd_settings_${projectId || 'global'}`;
 }
 
+function hasTargetUrl(targetUrl: string): boolean {
+    return targetUrl.trim().length > 0;
+}
+
 export function usePrdSettings(projectId: string | undefined) {
     const [settings, setSettings] = useState<PrdSettings>(DEFAULT_SETTINGS);
 
@@ -33,7 +37,7 @@ export function usePrdSettings(projectId: string | undefined) {
                     loginUrl: parsed.loginUrl || '',
                     username: parsed.username || '',
                     password: '',
-                    useLiveValidation: parsed.useLiveValidation || false,
+                    useLiveValidation: hasTargetUrl(parsed.targetUrl || ''),
                     useNativeAgents: parsed.useNativeAgents ?? true,
                     targetFeatures: parsed.targetFeatures || 15,
                 }));
@@ -51,7 +55,22 @@ export function usePrdSettings(projectId: string | undefined) {
     }, [settings, projectId]);
 
     const updateSetting = useCallback(<K extends keyof PrdSettings>(key: K, value: PrdSettings[K]) => {
-        setSettings(prev => ({ ...prev, [key]: value }));
+        setSettings(prev => {
+            if (key === 'useLiveValidation') {
+                return { ...prev, useLiveValidation: hasTargetUrl(prev.targetUrl) };
+            }
+
+            if (key === 'targetUrl') {
+                const nextTargetUrl = String(value);
+                return {
+                    ...prev,
+                    targetUrl: nextTargetUrl,
+                    useLiveValidation: hasTargetUrl(nextTargetUrl),
+                };
+            }
+
+            return { ...prev, [key]: value };
+        });
     }, []);
 
     const resetSettings = useCallback(() => {

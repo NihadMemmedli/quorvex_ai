@@ -15,9 +15,13 @@ interface LiveBrowserViewProps {
     preferArtifactPreview?: boolean;
     statusMessage?: string | null;
     liveViewAvailable?: boolean;
+    liveBrowserRequested?: boolean;
     runtimeMessage?: string | null;
     vncUrl?: string | null;
     displayDiagnostics?: BrowserDisplayDiagnostics | null;
+    browserActivitySeen?: boolean;
+    browserActive?: boolean;
+    browserLastTool?: string | null;
 }
 
 const VNC_CONNECT_TIMEOUT_MS = 8000;
@@ -34,6 +38,10 @@ interface AgentArtifact {
 interface BrowserDisplayDiagnostics {
     browser_process_count?: number | null;
     browser_window_count?: number | null;
+    browser_process_seen?: boolean | null;
+    browser_window_seen?: boolean | null;
+    display?: string | null;
+    probed_at?: string | null;
 }
 
 function latestImageArtifact(artifacts: AgentArtifact[]): AgentArtifact | null {
@@ -89,9 +97,13 @@ export function LiveBrowserView({
     preferArtifactPreview: preferProvidedArtifactPreview = false,
     statusMessage,
     liveViewAvailable = true,
+    liveBrowserRequested = true,
     runtimeMessage,
     vncUrl,
     displayDiagnostics,
+    browserActivitySeen = false,
+    browserActive = false,
+    browserLastTool,
 }: LiveBrowserViewProps) {
     const { user } = useAuth();
     const [isConnected, setIsConnected] = useState(false);
@@ -125,30 +137,67 @@ export function LiveBrowserView({
     const fallbackImage = providedLatestImage ?? latestImageArtifact(effectiveArtifacts);
     const preferQueryArtifactPreview = typeof window !== 'undefined'
         && new URLSearchParams(window.location.search).get('demoCapture') === '1';
-    const forceArtifactPreview = preferProvidedArtifactPreview || preferQueryArtifactPreview || !liveViewAvailable;
+    const canUseLiveView = liveBrowserRequested && liveViewAvailable;
+    const forceArtifactPreview = preferProvidedArtifactPreview || preferQueryArtifactPreview || !canUseLiveView;
     const pendingMessage = runtimeMessage?.trim() || statusMessage?.trim();
-    const hasNoBrowserWindow = displayDiagnostics?.browser_window_count === 0;
-    const waitingForBrowserWindow = hasNoBrowserWindow;
+    const browserProcessCount = displayDiagnostics?.browser_process_count ?? 0;
+    const browserWindowCount = displayDiagnostics?.browser_window_count ?? null;
+    const browserProcessSeen = displayDiagnostics?.browser_process_seen ?? browserProcessCount > 0;
+    const browserWindowSeen = displayDiagnostics?.browser_window_seen ?? (browserWindowCount ?? 0) > 0;
+    const hasNoBrowserWindow = browserWindowCount === 0;
     const liveCanvasMounted = isConnected && !forceArtifactPreview;
-    const liveStreamVisible = liveCanvasMounted && liveReady && !waitingForBrowserWindow;
-    const showingFallbackCapture = forceArtifactPreview
-        || Boolean(fallbackImage && !liveStreamVisible)
-        || (isConnected && !liveReady && !isLoading)
-        || waitingForBrowserWindow;
+    const liveStreamVisible = liveCanvasMounted && liveReady && browserActive;
+    const desktopConnected = liveCanvasMounted && liveReady && !browserActive;
+    const browserStarting = liveBrowserRequested && browserProcessSeen && !browserWindowSeen;
+    const noBrowserWindow = liveBrowserRequested && browserActivitySeen && !browserProcessSeen && !browserWindowSeen;
     const isProviderRetry = Boolean(pendingMessage && /rate limit|rate-limited|retry/i.test(pendingMessage));
-    const statusColor = liveStreamVisible
+    const showingFallbackCapture = forceArtifactPreview
+        || Boolean(fallbackImage && !isConnected)
+        || (!isConnected && !isLoading);
+    const statusLabel = !liveBrowserRequested
+        ? 'PRD-only'
+        : browserActive && liveStreamVisible
+            ? 'Connected'
+            : fallbackImage && !isConnected
+                ? 'Latest capture'
+                : browserStarting
+                    ? 'Browser starting'
+                    : noBrowserWindow
+                        ? 'No browser window'
+                        : desktopConnected
+                            ? 'Desktop connected'
+                            : isProviderRetry
+                                ? 'Provider retry'
+                                : isLoading
+                                    ? 'Connecting...'
+                                    : isConnected
+                                        ? 'Desktop connected'
+                                        : 'Disconnected';
+    const unavailableTitle = canUseLiveView
+        ? 'Live Browser Standby'
+        : liveBrowserRequested
+            ? 'Live Browser Unavailable'
+            : 'PRD-only Generation';
+    const unavailableMessage = pendingMessage || (
+        canUseLiveView
+            ? 'The agent can continue to publish screenshots and recordings while the live stream initializes.'
+            : liveBrowserRequested
+                ? 'Live browser validation was requested, but a visible browser stream is not available in this runtime.'
+                : 'This run was generated from PRD context only. Add a Target URL before generation to enable live browser validation.'
+    );
+    const statusColor = statusLabel === 'Connected'
         ? 'var(--success)'
-        : showingFallbackCapture
+        : statusLabel === 'Latest capture' || statusLabel === 'PRD-only' || statusLabel === 'Desktop connected'
             ? fallbackImage ? 'var(--primary)' : 'var(--text-secondary)'
             : 'var(--danger)';
-    const statusBackground = liveStreamVisible
+    const statusBackground = statusLabel === 'Connected'
         ? 'rgba(16, 185, 129, 0.1)'
-        : showingFallbackCapture
+        : statusLabel === 'Latest capture' || statusLabel === 'PRD-only' || statusLabel === 'Desktop connected'
             ? 'var(--primary-glow)'
             : 'rgba(239, 68, 68, 0.1)';
-    const statusBorder = liveStreamVisible
+    const statusBorder = statusLabel === 'Connected'
         ? 'rgba(16, 185, 129, 0.3)'
-        : showingFallbackCapture
+        : statusLabel === 'Latest capture' || statusLabel === 'PRD-only' || statusLabel === 'Desktop connected'
             ? 'rgba(59, 130, 246, 0.35)'
             : 'rgba(239, 68, 68, 0.3)';
 
@@ -216,7 +265,7 @@ export function LiveBrowserView({
 
     // Initialize noVNC connection
     const initVNC = useCallback(async () => {
-        if (!isAdmin || !isActive || !liveViewAvailable || !canvasContainerRef.current) {
+        if (!isAdmin || !isActive || !canUseLiveView || !canvasContainerRef.current) {
             return;
         }
 
@@ -353,11 +402,11 @@ export function LiveBrowserView({
             setError('Failed to connect to browser view');
             setIsLoading(false);
         }
-    }, [isAdmin, isActive, liveViewAvailable, resolvedVncUrl, checkVncAvailability, forceArtifactPreview]);
+    }, [isAdmin, isActive, canUseLiveView, resolvedVncUrl, checkVncAvailability, forceArtifactPreview]);
 
     // Connect when component mounts and isActive changes
     useEffect(() => {
-        if (isAdmin && isActive && liveViewAvailable) {
+        if (isAdmin && isActive && canUseLiveView) {
             initVNC();
         }
 
@@ -376,7 +425,7 @@ export function LiveBrowserView({
             }
             setLiveReady(false);
         };
-    }, [isAdmin, isActive, liveViewAvailable, initVNC]);
+    }, [isAdmin, isActive, canUseLiveView, initVNC]);
 
     // Handle fullscreen toggle
     const toggleFullscreen = () => {
@@ -402,6 +451,84 @@ export function LiveBrowserView({
         document.addEventListener('fullscreenchange', handleFullscreenChange);
         return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
     }, []);
+
+    if (!liveBrowserRequested) {
+        return (
+            <div
+                style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    minHeight: '400px',
+                    background: '#0d1117',
+                    borderRadius: 'var(--radius)',
+                    border: '1px solid var(--border)',
+                    gap: '1rem',
+                    padding: '1.5rem',
+                    textAlign: 'center',
+                }}
+            >
+                <Server size={42} color="var(--text-secondary)" />
+                <div>
+                    <h3 style={{ color: 'var(--text-primary)', margin: '0 0 0.5rem', fontSize: '1.05rem' }}>
+                        PRD-only Generation
+                    </h3>
+                    <p style={{ color: 'var(--text-secondary)', maxWidth: '480px', margin: 0, lineHeight: 1.55 }}>
+                        This run was generated from PRD context only. Add a Target URL before generation to enable live browser validation.
+                    </p>
+                </div>
+                {onShowLog && (
+                    <button
+                        onClick={onShowLog}
+                        className="btn btn-secondary"
+                        style={{ fontSize: '0.85rem' }}
+                    >
+                        View Log
+                    </button>
+                )}
+            </div>
+        );
+    }
+
+    if (!canUseLiveView && !fallbackImage) {
+        return (
+            <div
+                style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    minHeight: '400px',
+                    background: '#0d1117',
+                    borderRadius: 'var(--radius)',
+                    border: '1px solid var(--border)',
+                    gap: '1rem',
+                    padding: '1.5rem',
+                    textAlign: 'center',
+                }}
+            >
+                <Server size={42} color="var(--primary)" />
+                <div>
+                    <h3 style={{ color: 'var(--text-primary)', margin: '0 0 0.5rem', fontSize: '1.05rem' }}>
+                        {unavailableTitle}
+                    </h3>
+                    <p style={{ color: 'var(--text-secondary)', maxWidth: '460px', margin: 0, lineHeight: 1.55 }}>
+                        {unavailableMessage}
+                    </p>
+                </div>
+                {onShowLog && (
+                    <button
+                        onClick={onShowLog}
+                        className="btn btn-secondary"
+                        style={{ fontSize: '0.85rem' }}
+                    >
+                        View Log
+                    </button>
+                )}
+            </div>
+        );
+    }
 
     // Non-admin message
     if (!isAdmin) {
@@ -564,20 +691,8 @@ export function LiveBrowserView({
                                 border: `1px solid ${statusBorder}`,
                             }}
                         >
-                            {liveStreamVisible ? <Wifi size={12} /> : showingFallbackCapture ? <Monitor size={12} /> : <WifiOff size={12} />}
-                            {liveStreamVisible
-                                ? 'Connected'
-                                : showingFallbackCapture
-                                    ? waitingForBrowserWindow
-                                        ? 'Waiting for Browser Window'
-                                        : fallbackImage
-                                        ? 'Latest capture'
-                                        : isProviderRetry
-                                            ? 'Provider retry'
-                                            : 'Waiting for capture'
-                                    : isLoading
-                                        ? 'Connecting...'
-                                        : 'Disconnected'}
+                            {statusLabel === 'Connected' ? <Wifi size={12} /> : statusLabel === 'Latest capture' || statusLabel === 'Desktop connected' || statusLabel === 'PRD-only' ? <Monitor size={12} /> : <WifiOff size={12} />}
+                            {statusLabel}
                         </div>
                     </div>
 
@@ -632,15 +747,47 @@ export function LiveBrowserView({
                         height: '100%',
                         minHeight: isFullscreen ? 'calc(100vh - 76px)' : '484px',
                         display: liveCanvasMounted ? 'flex' : 'none',
-                        opacity: liveStreamVisible ? 1 : 0,
+                        opacity: liveCanvasMounted ? 1 : 0,
                         position: 'absolute',
                         inset: '0.5rem',
-                        pointerEvents: liveStreamVisible ? 'auto' : 'none',
-                        zIndex: liveStreamVisible ? 1 : 0,
+                        pointerEvents: 'none',
+                        zIndex: 1,
                         alignItems: 'center',
                         justifyContent: 'center',
                     }}
                 />
+
+                {liveCanvasMounted && statusLabel !== 'Connected' && (
+                    <div
+                        style={{
+                            position: 'absolute',
+                            left: '1rem',
+                            top: '1rem',
+                            zIndex: 3,
+                            maxWidth: '360px',
+                            padding: '0.65rem 0.8rem',
+                            borderRadius: '8px',
+                            border: `1px solid ${statusBorder}`,
+                            background: 'rgba(2, 6, 23, 0.86)',
+                            color: 'var(--text-primary)',
+                            boxShadow: '0 12px 32px rgba(0,0,0,0.35)',
+                        }}
+                    >
+                        <div style={{ fontSize: '0.82rem', fontWeight: 700, marginBottom: '0.25rem' }}>
+                            {statusLabel}
+                        </div>
+                        <div style={{ fontSize: '0.75rem', lineHeight: 1.45, color: 'var(--text-secondary)' }}>
+                            {statusLabel === 'Browser starting'
+                                ? 'A browser process exists, but no browser window has appeared on the display yet.'
+                                : statusLabel === 'No browser window'
+                                    ? 'Browser activity was expected, but no browser process or window was detected.'
+                                    : statusLabel === 'Desktop connected'
+                                        ? pendingMessage || 'The VNC desktop is connected; waiting for an active browser window.'
+                                        : pendingMessage || 'Waiting for live browser activity.'}
+                            {browserLastTool ? ` Last tool: ${browserLastTool}.` : ''}
+                        </div>
+                    </div>
+                )}
 
                 {showingFallbackCapture || vncAvailable === false ? (
                     // Show a captured browser preview when the live stream is not usable.
@@ -691,15 +838,19 @@ export function LiveBrowserView({
                             <h3 style={{ color: 'var(--text-primary)', marginBottom: '0.5rem', fontSize: '1.1rem' }}>
                                 {fallbackImage
                                     ? 'Browser Evidence Available'
-                                    : waitingForBrowserWindow
-                                        ? 'Waiting for Browser Window'
+                                    : !liveViewAvailable
+                                        ? unavailableTitle
+                                        : hasNoBrowserWindow
+                                            ? 'No Browser Window Detected'
                                         : isProviderRetry
                                             ? 'Waiting on Provider'
-                                            : 'Live Browser Standby'}
+                                            : unavailableTitle}
                             </h3>
                             {!fallbackImage && (
                                 <p style={{ fontSize: '0.9rem', lineHeight: 1.6 }}>
-                                    {pendingMessage || 'The agent can continue to publish screenshots and recordings while the live stream initializes.'}
+                                    {hasNoBrowserWindow && canUseLiveView
+                                        ? pendingMessage || 'The VNC display is connected, but no browser window was detected yet.'
+                                        : unavailableMessage}
                                 </p>
                             )}
                         </div>

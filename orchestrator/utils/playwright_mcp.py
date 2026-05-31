@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -235,6 +236,9 @@ def live_browser_display_diagnostics() -> dict[str, Any]:
         "display": os.environ.get("DISPLAY"),
         "browser_process_count": 0,
         "browser_window_count": None,
+        "browser_process_seen": False,
+        "browser_window_seen": False,
+        "probed_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
         process_result = subprocess.run(
@@ -249,6 +253,7 @@ def live_browser_display_diagnostics() -> dict[str, Any]:
             if _is_real_browser_process_line(line)
         ]
         diagnostics["browser_process_count"] = len(lines)
+        diagnostics["browser_process_seen"] = len(lines) > 0
     except Exception as exc:
         diagnostics["process_probe_error"] = str(exc)
 
@@ -267,6 +272,7 @@ def live_browser_display_diagnostics() -> dict[str, Any]:
                 int(diagnostics.get("browser_process_count") or 0),
             )
             diagnostics["browser_window_count"] = len(browser_windows)
+            diagnostics["browser_window_seen"] = len(browser_windows) > 0
         except Exception as exc:
             diagnostics["window_probe_error"] = str(exc)
     return diagnostics

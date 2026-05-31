@@ -7,9 +7,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import orchestrator.api.db as db_module
+from orchestrator.api.models_db import PrdGenerationResult
 from orchestrator.services.agent_queue import AgentQueue, AgentTask, AgentTaskStatus
 from orchestrator.services.agent_worker import AgentWorker, BrowserObservationRecorder, _event_tool_uses
 from orchestrator.utils.agent_runner import AgentRunner
@@ -73,6 +77,9 @@ class _MemoryRedis:
             end = len(values) - 1
         return values[start : end + 1]
 
+    async def llen(self, key):
+        return len(self.lists.get(key, []))
+
     async def lrem(self, key, count, value):
         values = self.lists.get(key, [])
         before = len(values)
@@ -98,6 +105,9 @@ class _MemoryRedis:
 
     async def smembers(self, key):
         return set(self.sets.get(key, set()))
+
+    async def scard(self, key):
+        return len(self.sets.get(key, set()))
 
     async def srem(self, key, value):
         self.sets.setdefault(key, set()).discard(value)
@@ -133,6 +143,30 @@ class _MemoryQueue(AgentQueue):
         return self._redis
 
 
+def _make_prd_generation_engine(monkeypatch):
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine, tables=[PrdGenerationResult.__table__])
+    monkeypatch.setattr(db_module, "engine", engine)
+    return engine
+
+
+def _create_prd_generation(engine, status="running"):
+    with Session(engine) as session:
+        generation = PrdGenerationResult(
+            prd_project="wetravel-manage-rooms",
+            feature_name="Package Management",
+            status=status,
+        )
+        session.add(generation)
+        session.commit()
+        session.refresh(generation)
+        return generation.id
+
+
 def test_agent_task_round_trips_execution_telemetry():
     task = AgentTask(
         id="agent-test",
@@ -151,6 +185,7 @@ def test_agent_task_round_trips_execution_telemetry():
         owner_label="AutoPilot test",
         browser_slot_parent_owner_type="test_run",
         browser_slot_parent_run_id="run-parent",
+        requires_live_browser=True,
         telemetry={
             "worker_id": "worker-1",
             "tool_calls": 4,
@@ -175,6 +210,7 @@ def test_agent_task_round_trips_execution_telemetry():
     assert restored.owner_label == "AutoPilot test"
     assert restored.browser_slot_parent_owner_type == "test_run"
     assert restored.browser_slot_parent_run_id == "run-parent"
+    assert restored.requires_live_browser is True
     assert restored.telemetry["worker_id"] == "worker-1"
     assert restored.telemetry["tool_calls"] == 4
     assert restored.telemetry["interactions"] == 2
@@ -192,8 +228,54 @@ def test_agent_worker_detects_browser_capable_tasks():
         AgentTask(id="agent-browser-tool", prompt="run", allowed_tools=["browser_navigate"], tools=["browser_click"])
     )
     assert not worker._task_requires_browser_slot(
+        AgentTask(
+            id="agent-prd-live",
+            prompt="run",
+            owner_type="prd_generation",
+            requires_live_browser=True,
+            allowed_tools=["mcp__playwright-test__browser_navigate"],
+            tools=["mcp__playwright-test__planner_setup_page"],
+        )
+    )
+    assert not worker._task_requires_browser_slot(
         AgentTask(id="agent-no-tools", prompt="run", allowed_tools=["Read"], tools=[])
     )
+
+
+def test_agent_worker_filters_mcp_tools_from_claude_cli_tools():
+    assert AgentWorker._builtin_cli_tools(
+        [
+            "Read",
+            "mcp__playwright-test__planner_setup_page",
+            "mcp__playwright-test__browser_navigate",
+            "Bash",
+        ]
+    ) == ["Read", "Bash"]
+    assert AgentWorker._builtin_cli_tools(["mcp__playwright-test__planner_setup_page"]) == []
+    assert AgentWorker._builtin_cli_tools([]) == []
+
+
+@pytest.mark.asyncio
+async def test_worker_capability_summary_counts_live_browser_workers():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    await redis.set(
+        f"{queue.WORKER_HEARTBEAT_PREFIX}worker-live",
+        json.dumps({"ts": "2026-05-31T13:00:00", "capabilities": {"live_browser": True}}),
+    )
+    await redis.set(
+        f"{queue.WORKER_HEARTBEAT_PREFIX}worker-headless",
+        json.dumps({"ts": "2026-05-31T13:00:01", "capabilities": {"live_browser": False}}),
+    )
+
+    summary = await queue.worker_capability_summary()
+    health = await queue.get_worker_health()
+
+    assert summary["worker_count"] == 2
+    assert summary["live_browser_worker_count"] == 1
+    assert summary["non_live_browser_worker_count"] == 1
+    assert health["live_browser_worker_count"] == 1
+    assert health["non_live_browser_worker_count"] == 1
 
 
 def test_agent_worker_detects_parent_test_run_browser_slot():
@@ -476,6 +558,32 @@ async def test_wait_for_result_keeps_queued_task_when_workers_are_busy():
 
 
 @pytest.mark.asyncio
+async def test_wait_for_result_fails_live_task_when_workers_have_no_live_browser_capability():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    task = AgentTask(
+        id="agent-live-queued",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        requires_live_browser=True,
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, task.id)
+    await redis.set(
+        f"{queue.WORKER_HEARTBEAT_PREFIX}worker-headless",
+        json.dumps({"ts": "2026-05-31T13:00:00", "capabilities": {"live_browser": False}}),
+    )
+
+    with pytest.raises(RuntimeError, match="No live-browser-capable agent worker"):
+        await queue.wait_for_result(
+            task.id, timeout=1, poll_interval=0.001, queued_timeout=0.001
+        )
+
+    cancelled = await queue.get_task(task.id)
+    assert cancelled.status == AgentTaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
 async def test_pause_and_resume_running_task_keeps_worker_ownership():
     redis = _MemoryRedis()
     queue = _MemoryQueue(redis)
@@ -684,6 +792,170 @@ async def test_cleanup_cancels_task_when_owner_is_terminal():
     assert cleaned.status == AgentTaskStatus.FAILED
     assert await redis.sismember(queue.RUNNING_KEY, task.id) is False
     assert await queue.is_cancelled(task.id) is True
+
+
+@pytest.mark.asyncio
+async def test_get_owner_state_returns_active_prd_generation(monkeypatch):
+    engine = _make_prd_generation_engine(monkeypatch)
+    generation_id = _create_prd_generation(engine, status="running")
+    queue = _MemoryQueue(_MemoryRedis())
+    task = AgentTask(
+        id="agent-prd-owner",
+        prompt="plan",
+        owner_type="prd_generation",
+        owner_id=str(generation_id),
+        owner_label="PRD generation",
+    )
+
+    state = await queue._get_owner_state(task)
+
+    assert state == {
+        "type": "prd_generation",
+        "id": str(generation_id),
+        "label": "PRD generation",
+        "status": "running",
+        "terminal": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_cleanup_preserves_queued_task_with_active_prd_generation_owner(monkeypatch):
+    engine = _make_prd_generation_engine(monkeypatch)
+    generation_id = _create_prd_generation(engine, status="running")
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    task = AgentTask(
+        id="agent-active-prd-owner",
+        prompt="plan",
+        status=AgentTaskStatus.QUEUED,
+        owner_type="prd_generation",
+        owner_id=str(generation_id),
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, task.id)
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks()
+
+    kept = await queue.get_task(task.id)
+    assert counts["terminal_owner"] == 0
+    assert kept.status == AgentTaskStatus.QUEUED
+    assert redis.lists[queue.QUEUE_KEY] == [task.id]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_fails_tasks_with_failed_prd_generation_owner(monkeypatch):
+    engine = _make_prd_generation_engine(monkeypatch)
+    generation_id = _create_prd_generation(engine, status="failed")
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    queued = AgentTask(
+        id="agent-failed-prd-queued",
+        prompt="plan",
+        status=AgentTaskStatus.QUEUED,
+        owner_type="prd_generation",
+        owner_id=str(generation_id),
+    )
+    running = AgentTask(
+        id="agent-failed-prd-running",
+        prompt="plan",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-1",
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+        owner_type="prd_generation",
+        owner_id=str(generation_id),
+    )
+    await redis.hset(queue.TASKS_KEY, queued.id, json.dumps(queued.to_dict()))
+    await redis.hset(queue.TASKS_KEY, running.id, json.dumps(running.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, queued.id)
+    await redis.sadd(queue.RUNNING_KEY, running.id)
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks()
+
+    cleaned_queued = await queue.get_task(queued.id)
+    cleaned_running = await queue.get_task(running.id)
+    assert counts["terminal_owner"] == 2
+    assert cleaned_queued.status == AgentTaskStatus.FAILED
+    assert cleaned_running.status == AgentTaskStatus.FAILED
+    assert redis.lists[queue.QUEUE_KEY] == []
+    assert await redis.sismember(queue.RUNNING_KEY, running.id) is False
+
+
+@pytest.mark.asyncio
+async def test_cleanup_cancels_tasks_with_cancelled_prd_generation_owner(monkeypatch):
+    engine = _make_prd_generation_engine(monkeypatch)
+    generation_id = _create_prd_generation(engine, status="cancelled")
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    queued = AgentTask(
+        id="agent-cancelled-prd-queued",
+        prompt="plan",
+        status=AgentTaskStatus.QUEUED,
+        owner_type="prd_generation",
+        owner_id=str(generation_id),
+    )
+    running = AgentTask(
+        id="agent-cancelled-prd-running",
+        prompt="plan",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-1",
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+        owner_type="prd_generation",
+        owner_id=str(generation_id),
+    )
+    await redis.hset(queue.TASKS_KEY, queued.id, json.dumps(queued.to_dict()))
+    await redis.hset(queue.TASKS_KEY, running.id, json.dumps(running.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, queued.id)
+    await redis.sadd(queue.RUNNING_KEY, running.id)
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks()
+
+    cleaned_queued = await queue.get_task(queued.id)
+    cleaned_running = await queue.get_task(running.id)
+    assert counts["terminal_owner"] == 2
+    assert cleaned_queued.status == AgentTaskStatus.CANCELLED
+    assert cleaned_running.status == AgentTaskStatus.CANCELLED
+    assert redis.lists[queue.QUEUE_KEY] == []
+    assert await redis.sismember(queue.RUNNING_KEY, running.id) is False
+
+
+@pytest.mark.asyncio
+async def test_cleanup_fails_tasks_with_missing_or_invalid_prd_generation_owner(monkeypatch):
+    _make_prd_generation_engine(monkeypatch)
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    missing = AgentTask(
+        id="agent-missing-prd-owner",
+        prompt="plan",
+        status=AgentTaskStatus.QUEUED,
+        owner_type="prd_generation",
+        owner_id="9999",
+    )
+    invalid = AgentTask(
+        id="agent-invalid-prd-owner",
+        prompt="plan",
+        status=AgentTaskStatus.QUEUED,
+        owner_type="prd_generation",
+        owner_id="not-an-int",
+    )
+    await redis.hset(queue.TASKS_KEY, missing.id, json.dumps(missing.to_dict()))
+    await redis.hset(queue.TASKS_KEY, invalid.id, json.dumps(invalid.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, missing.id)
+    await redis.rpush(queue.QUEUE_KEY, invalid.id)
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks()
+
+    cleaned_missing = await queue.get_task(missing.id)
+    cleaned_invalid = await queue.get_task(invalid.id)
+    assert counts["terminal_owner"] == 2
+    assert cleaned_missing.status == AgentTaskStatus.FAILED
+    assert cleaned_missing.error == (
+        "Agent task stopped because owner prd_generation:9999 is missing"
+    )
+    assert cleaned_invalid.status == AgentTaskStatus.FAILED
+    assert cleaned_invalid.error == (
+        "Agent task stopped because owner prd_generation:not-an-int is missing"
+    )
+    assert redis.lists[queue.QUEUE_KEY] == []
 
 
 @pytest.mark.asyncio
@@ -897,6 +1169,11 @@ def test_worker_telemetry_preserves_execution_tool_counts():
             "mcp__playwright-test__browser_snapshot",
             "mcp__playwright-test__browser_click",
         ],
+        "tool_call_records": [
+            {"name": "mcp__playwright-test__browser_navigate", "input": {"url": "https://example.test"}},
+            {"name": "mcp__playwright-test__browser_snapshot", "input": {}},
+            {"name": "mcp__playwright-test__browser_click", "input": {"element": "Submit"}},
+        ],
     }
     task = AgentTask(
         id="task-1",
@@ -914,6 +1191,7 @@ def test_worker_telemetry_preserves_execution_tool_counts():
     assert telemetry["interactions"] == 1
     assert telemetry["last_tool"] == "mcp__playwright-test__browser_click"
     assert telemetry["tool_names"][-1] == "mcp__playwright-test__browser_click"
+    assert telemetry["tool_call_records"][0]["input"]["url"] == "https://example.test"
 
 
 def test_browser_observation_recorder_persists_snapshot_result(tmp_path):

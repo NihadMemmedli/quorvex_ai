@@ -1,9 +1,9 @@
 'use client';
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { Suspense, useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import type { CSSProperties } from 'react';
 import { FileText, Plus, Play, FolderOpen, ChevronRight, ChevronDown, Search, FolderClosed, Tag, X, Edit, Check, Split, TestTube, Trash2, CheckCircle, LayoutTemplate, Zap, AlertCircle, ArrowDownToLine, Upload, Link2, Loader2, Pencil, FolderPlus, MoreHorizontal } from 'lucide-react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import TagEditor from '@/components/TagEditor';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
@@ -11,6 +11,7 @@ import { WorkflowBreadcrumb } from '@/components/workflow/WorkflowBreadcrumb';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { EmptyState } from '@/components/ui/empty-state';
+import { ListPageSkeleton } from '@/components/ui/page-skeleton';
 import { SpecsBulkActionBar, SpecsToolbar } from './components';
 import {
     DropdownMenu,
@@ -92,8 +93,22 @@ const specsSelectionCheckboxStyle: CSSProperties = {
     flexShrink: 0,
 };
 
-export default function SpecsPage() {
+function normalizeSpecFileQueryParam(fileParam: string): string | null {
+    const withoutPrefix = fileParam.trim().replace(/^specs\//, '');
+    const segments = withoutPrefix
+        .split('/')
+        .map(segment => segment.trim())
+        .filter(Boolean);
+
+    if (segments.length === 0) return null;
+
+    return segments.map(segment => encodeURIComponent(segment)).join('/');
+}
+
+function SpecsPageContent() {
     const router = useRouter();
+    const searchParams = useSearchParams();
+    const fileParam = searchParams.get('file');
     const { currentProject, isLoading: projectLoading } = useProject();
 
     const [activeTab, setActiveTab] = useState<TabType>('specs');
@@ -113,6 +128,15 @@ export default function SpecsPage() {
     const [hasMore, setHasMore] = useState(false);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const [specsSummary, setSpecsSummary] = useState<{ total_all: number; automated_count: number; all_tags: string[] } | null>(null);
+
+    useEffect(() => {
+        if (!fileParam) return;
+
+        const normalizedFile = normalizeSpecFileQueryParam(fileParam);
+        if (!normalizedFile) return;
+
+        router.replace(`/specs/${normalizedFile}`);
+    }, [fileParam, router]);
 
     // Debounced search
     const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
@@ -3009,5 +3033,17 @@ export default function SpecsPage() {
                 }
             `}</style>
         </PageLayout>
+    );
+}
+
+export default function SpecsPage() {
+    return (
+        <Suspense fallback={
+            <PageLayout tier="standard">
+                <ListPageSkeleton rows={6} />
+            </PageLayout>
+        }>
+            <SpecsPageContent />
+        </Suspense>
     );
 }

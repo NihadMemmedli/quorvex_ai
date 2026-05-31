@@ -8,12 +8,15 @@ This workflow uses the Playwright Test Planner agent with:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +43,9 @@ from orchestrator.utils.string_utils import slugify
 class SpecGenerationError(Exception):
     """Raised when spec generation fails to produce valid output."""
 
-    pass
+    def __init__(self, message: str, diagnostics: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
 
 
 class NativePlanner:
@@ -138,15 +143,15 @@ class NativePlanner:
         if target_url:
             logger.info(f"   Target URL: {target_url}")
 
-        agent_result = await self._query_planner_agent(prompt)
+        agent_result = await self._query_planner_agent(prompt, target_url=target_url)
+        if target_url:
+            self._validate_live_plan_tool_sequence(agent_result, target_url)
 
-        # 4. Check if spec was saved by the agent directly to disk
-        if output_path.exists():
-            # Verify it's not just a narrative summary
-            existing = output_path.read_text()
-            if "TC-" in existing or "Test Case" in existing or "## Steps" in existing:
-                logger.info(f"Spec saved by agent: {output_path}")
-                return output_path
+        # 4. Check if spec was saved by the agent directly to disk or as a run artifact.
+        saved_plan_path = self._recover_saved_plan(output_path)
+        if saved_plan_path:
+            logger.info(f"Spec saved by agent: {saved_plan_path}")
+            return saved_plan_path
 
         # 5. Extract the actual plan content from agent tool calls or output
         plan_content = self._extract_plan_content(agent_result)
@@ -155,15 +160,22 @@ class NativePlanner:
             output_path.write_text(plan_content)
             return output_path
 
-        # 6. Last resort: save full output
-        if agent_result.output:
-            logger.info(f"Saving agent response as spec (no structured plan found): {output_path}")
-            output_path.write_text(agent_result.output)
-            return output_path
+        repaired_plan_path = await self._attempt_repair_plan(
+            subject_type="feature",
+            subject_name=feature_name,
+            agent_result=agent_result,
+            expected_output_path=output_path,
+        )
+        if repaired_plan_path:
+            return repaired_plan_path
 
-        # Raise error instead of creating placeholder - callers should handle this
-        logger.error(f"Agent produced no output for feature: {feature_name}")
-        raise SpecGenerationError(f"Failed to generate spec for feature '{feature_name}': Agent produced no output")
+        logger.error(f"Agent produced no usable output for feature: {feature_name}")
+        raise self._build_no_output_error(
+            subject_type="feature",
+            subject_name=feature_name,
+            agent_result=agent_result,
+            expected_output_path=output_path,
+        )
 
     def _build_hybrid_prompt(
         self,
@@ -231,6 +243,10 @@ Use the Playwright MCP tools to:
 8. Periodically call `browser_take_screenshot` with filenames like `live-step-001.png`,
    `live-step-002.png`, etc. so the dashboard can show live visual evidence while you work
 
+**MANDATORY ORDER BEFORE WRITING THE PLAN**:
+`planner_setup_page` → `browser_navigate` to the exact Target URL above → `browser_snapshot`.
+Do not call `planner_save_plan` until after those three actions have happened in that order.
+
 **IMPORTANT**: Include the actual selectors you discover in the test plan.
 
 ## Dialog Handling (CRITICAL)
@@ -244,6 +260,23 @@ When navigating between pages or away from forms/editors, "Leave site?" dialogs 
 ## Note: No Target URL Provided
 Generate the test plan based on the PRD requirements below.
 The test steps should be generalized and will need selector updates during code generation.
+Do not use browser tools or repository inspection tools for this PRD-only plan.
+"""
+
+        if target_url:
+            save_section = f"""
+## Save the Plan
+After creating the test plan:
+1. Save it using `planner_save_plan` tool to: **{output_path}**
+2. ALSO output the COMPLETE test plan as text in your response (not just a summary)
+3. Call `browser_close` to close the browser before finishing
+"""
+        else:
+            save_section = f"""
+## Return the Plan
+Return the COMPLETE test plan as markdown in your final response.
+The system will write your final markdown to: **{output_path}**
+Do not call `planner_save_plan` or `browser_close`.
 """
 
         prompt = f"""You are the Playwright Test Planner agent.
@@ -284,11 +317,7 @@ Return a split-ready plan with TC-XXX sections. Every TC must be independently r
 - `**Expected Result:**` concrete assertions or observable outcomes
 - `**Test Data:**` optional placeholders and URLs
 
-## Save the Plan
-After creating the test plan:
-1. Save it using `planner_save_plan` tool to: **{output_path}**
-2. ALSO output the COMPLETE test plan as text in your response (not just a summary)
-3. Call `browser_close` to close the browser before finishing
+{save_section}
 
 **CRITICAL**: Your final text response MUST contain the full test plan with all TC-XXX test cases, steps, and expected results. Do NOT output just a summary like "I created 24 test cases". Do NOT create a single shallow spec with only "Navigate" and "Verify".
 
@@ -304,7 +333,7 @@ Start the test plan with:
         )
         return attach_prompt_metadata(prompt, metadata)
 
-    async def _query_planner_agent(self, prompt: str):
+    async def _query_planner_agent(self, prompt: str, target_url: str | None = None):
         """
         Query the Playwright Planner agent using the unified AgentRunner.
 
@@ -315,9 +344,12 @@ Start the test plan with:
 
         logger.info(f"Timeout: {timeout}s ({timeout // 60} minutes)")
 
+        target_url = self._normalize_url_for_prompt(target_url)
+        profile_name = "prd-live-planner" if target_url else "prd-only-planner"
+
         runner = AgentRunner(
             timeout_seconds=timeout,
-            allowed_tools=get_agent_allowed_tools("playwright-test-planner"),
+            allowed_tools=get_agent_allowed_tools(profile_name, mcp_config_dir=self.cwd),
             log_tools=True,
             on_tool_use=self.on_tool_use,
             on_progress=self.on_progress,
@@ -327,6 +359,7 @@ Start the test plan with:
             owner_type=self.owner_type,
             owner_id=self.owner_id,
             owner_label=self.owner_label,
+            requires_live_browser=bool(target_url),
             model_tier=self.model_tier,
         )
 
@@ -348,6 +381,219 @@ Start the test plan with:
         return result
 
     @staticmethod
+    def _normalize_url_for_prompt(target_url: str | None) -> str | None:
+        if not target_url:
+            return None
+        stripped = target_url.strip()
+        return stripped or None
+
+    @staticmethod
+    def _canonical_url(value: str | None) -> str | None:
+        if not value:
+            return None
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            return value.rstrip("/")
+        scheme = parsed.scheme.lower()
+        netloc = parsed.netloc.lower()
+        path = parsed.path.rstrip("/") or "/"
+        query = parsed.query
+        return urlunsplit((scheme, netloc, path, query, ""))
+
+    @classmethod
+    def _tool_call_short_name(cls, tool_call: Any) -> str:
+        name = str(getattr(tool_call, "name", "") or "")
+        return name.split("__")[-1] if "__" in name else name
+
+    @classmethod
+    def _tool_call_url(cls, tool_call: Any) -> str | None:
+        tool_input = getattr(tool_call, "input", None)
+        if not isinstance(tool_input, dict):
+            return None
+        for key in ("url", "target_url", "targetUrl"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
+
+    @classmethod
+    def _validate_live_plan_tool_sequence(cls, agent_result: Any, target_url: str) -> None:
+        """Reject live PRD plans that were saved without first visiting Target URL."""
+        expected = cls._canonical_url(target_url)
+        tool_calls = list(getattr(agent_result, "tool_calls", []) or [])
+        setup_seen = False
+        navigate_seen = False
+        snapshot_seen = False
+        save_seen = False
+
+        for tool_call in tool_calls:
+            short_name = cls._tool_call_short_name(tool_call)
+            if short_name == "planner_setup_page":
+                setup_seen = True
+            elif short_name == "browser_navigate":
+                actual = cls._canonical_url(cls._tool_call_url(tool_call))
+                if actual == expected:
+                    navigate_seen = True
+            elif short_name == "browser_snapshot" and navigate_seen:
+                snapshot_seen = True
+            elif short_name in {"planner_save_plan", "save_plan"}:
+                save_seen = True
+                if not (setup_seen and navigate_seen and snapshot_seen):
+                    raise SpecGenerationError(
+                        "Live-browser planner saved a plan before navigating to the Target URL and capturing a snapshot.",
+                        diagnostics={
+                            "expected_target_url": target_url,
+                            "planner_setup_page_observed": setup_seen,
+                            "target_navigation_observed": navigate_seen,
+                            "browser_snapshot_after_navigation_observed": snapshot_seen,
+                            "planner_save_plan_observed": True,
+                        },
+                    )
+
+        if not navigate_seen:
+            raise SpecGenerationError(
+                f"Live-browser planner did not navigate to the Target URL before finishing: {target_url}",
+                diagnostics={
+                    "expected_target_url": target_url,
+                    "planner_setup_page_observed": setup_seen,
+                    "target_navigation_observed": False,
+                    "browser_snapshot_after_navigation_observed": snapshot_seen,
+                    "planner_save_plan_observed": save_seen,
+                },
+            )
+
+    @staticmethod
+    def _looks_like_test_plan(content: str) -> bool:
+        """Return true when markdown contains real test-case structure."""
+        return any(marker in content for marker in ("TC-", "Test Case", "## Steps"))
+
+    @staticmethod
+    def _redact_sensitive_text(content: str) -> str:
+        patterns = (
+            r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+",
+            r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization|credential)\b(\s*[:=]\s*)([^\s,;`]+)",
+        )
+        redacted = content
+        for pattern in patterns:
+            redacted = re.sub(
+                pattern,
+                lambda match: f"{match.group(1)}{match.group(2) if len(match.groups()) > 1 else ' '}[REDACTED]",
+                redacted,
+            )
+        return redacted
+
+    @classmethod
+    def _content_preview(cls, content: str, limit: int = 2000) -> str:
+        normalized = cls._redact_sensitive_text(content).replace("\x00", " ").strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[:limit] + f"\n...[truncated {len(normalized) - limit} chars]"
+
+    @staticmethod
+    def _content_hash(content: str) -> str:
+        return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
+
+    @staticmethod
+    def _extract_plan_payload(tool_input: Any) -> str | None:
+        if not isinstance(tool_input, dict):
+            return None
+        for key in ("content", "plan", "markdown"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return None
+
+    @classmethod
+    def _validate_test_plan_schema(cls, content: str) -> tuple[bool, str | None]:
+        """Validate the markdown shape required by the PRD splitter/generator."""
+        if not content or not content.strip():
+            return False, "empty content"
+        if not re.search(r"(?m)^#\s+Test Plan:\s+\S", content):
+            return False, "missing '# Test Plan: <feature>' header"
+
+        tc_matches = list(re.finditer(r"(?m)^###\s+TC-\d{3}:\s+.+", content))
+        if not tc_matches:
+            return False, "missing '### TC-XXX: <scenario>' sections"
+
+        required_fields = (
+            "**Description:**",
+            "**Preconditions:**",
+            "**Steps:**",
+            "**Expected Result:**",
+        )
+        for idx, match in enumerate(tc_matches):
+            end = tc_matches[idx + 1].start() if idx + 1 < len(tc_matches) else len(content)
+            block = content[match.start() : end]
+            missing = [field for field in required_fields if field not in block]
+            if missing:
+                title = match.group(0).strip()
+                return False, f"{title} missing required fields: {', '.join(missing)}"
+            steps_start = block.find("**Steps:**")
+            expected_start = block.find("**Expected Result:**")
+            steps_block = block[steps_start:expected_start] if expected_start > steps_start else block[steps_start:]
+            if not re.search(r"(?m)^\s*\d+\.\s+\S", steps_block):
+                title = match.group(0).strip()
+                return False, f"{title} missing numbered steps"
+
+        return True, None
+
+    @classmethod
+    def _is_valid_test_plan(cls, content: str) -> bool:
+        valid, _reason = cls._validate_test_plan_schema(content)
+        return valid
+
+    def _recover_saved_plan(self, expected_output_path: Path) -> Path | None:
+        """
+        Recover a markdown plan saved by the agent.
+
+        The expected output path wins. If it is absent or invalid, search run/session
+        directories for a valid markdown plan artifact and copy it to the expected
+        specs location so downstream spec registration remains stable.
+        """
+        candidates: list[Path] = [expected_output_path]
+        search_roots = []
+        for root in (self.session_dir, self.cwd):
+            if root:
+                root_path = Path(root)
+                if root_path.exists() and root_path not in search_roots:
+                    search_roots.append(root_path)
+
+        for root in search_roots:
+            try:
+                candidates.extend(sorted(root.rglob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True))
+            except OSError:
+                logger.debug("Failed to search saved plan artifacts under %s", root)
+
+        seen: set[Path] = set()
+        for path in candidates:
+            try:
+                resolved = path.resolve()
+                if resolved in seen or not path.exists() or not path.is_file():
+                    continue
+                seen.add(resolved)
+                content = path.read_text()
+            except OSError:
+                continue
+
+            valid, reason = self._validate_test_plan_schema(content)
+            if not valid:
+                logger.warning("Ignoring invalid saved plan %s: %s", path, reason)
+                continue
+
+            if path.resolve() != expected_output_path.resolve():
+                expected_output_path.parent.mkdir(parents=True, exist_ok=True)
+                expected_output_path.write_text(content)
+                logger.info("Recovered saved plan artifact %s to %s", path, expected_output_path)
+                return expected_output_path
+            return path
+
+        return None
+
+    @staticmethod
     def _extract_plan_content(agent_result) -> str | None:
         """
         Extract the test plan content from an agent result.
@@ -358,17 +604,16 @@ Start the test plan with:
         3. Full output as last resort
         """
         # 1. Check if planner_save_plan was called and extract its content
-        for tc in reversed(agent_result.tool_calls):
-            if "planner_save_plan" in tc.name or "save_plan" in tc.name:
-                if tc.input and isinstance(tc.input, dict):
-                    # The tool takes content/plan as an argument
-                    content = tc.input.get("content") or tc.input.get("plan") or tc.input.get("markdown")
-                    if content and len(content) > 100:
-                        logger.info(f"Extracted plan from planner_save_plan tool call ({len(content)} chars)")
-                        return content
+        for tc in reversed(list(getattr(agent_result, "tool_calls", []) or [])):
+            tool_name = str(getattr(tc, "name", "") or "")
+            if "planner_save_plan" in tool_name or "save_plan" in tool_name:
+                content = NativePlanner._extract_plan_payload(getattr(tc, "input", None))
+                if content and len(content) > 100 and NativePlanner._is_valid_test_plan(content):
+                    logger.info(f"Extracted plan from planner_save_plan tool call ({len(content)} chars)")
+                    return content
 
         # 2. Try to extract structured content from output (skip narrative preamble)
-        output = agent_result.output or ""
+        output = getattr(agent_result, "output", "") or ""
         if output:
             import re
 
@@ -376,7 +621,7 @@ Start the test plan with:
             plan_match = re.search(r"(# Test Plan:.*)", output, re.DOTALL)
             if plan_match:
                 plan_content = plan_match.group(1).strip()
-                if len(plan_content) > 200:
+                if len(plan_content) > 200 and NativePlanner._is_valid_test_plan(plan_content):
                     logger.info(f"Extracted plan from '# Test Plan:' header ({len(plan_content)} chars)")
                     return plan_content
 
@@ -390,11 +635,332 @@ Start the test plan with:
                     header_match = re.search(r"(# .+\n)", output[: first_tc.start()])
                     start = header_match.start() if header_match else first_tc.start()
                     plan_content = output[start:].strip()
-                    if len(plan_content) > 200:
+                    if len(plan_content) > 200 and NativePlanner._is_valid_test_plan(plan_content):
                         logger.info(f"Extracted plan from TC-XXX patterns ({len(plan_content)} chars)")
                         return plan_content
 
         return None
+
+    def _plan_candidate_paths(self, expected_output_path: Path) -> list[Path]:
+        candidates: list[Path] = [expected_output_path]
+        search_roots = []
+        for root in (self.session_dir, self.cwd):
+            if root:
+                root_path = Path(root)
+                if root_path.exists() and root_path not in search_roots:
+                    search_roots.append(root_path)
+
+        for root in search_roots:
+            try:
+                candidates.extend(sorted(root.rglob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True))
+            except OSError:
+                logger.debug("Failed to search saved plan artifacts under %s", root)
+
+        seen: set[Path] = set()
+        unique: list[Path] = []
+        for path in candidates:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            unique.append(path)
+        return unique
+
+    def _collect_repair_evidence(self, agent_result: Any, expected_output_path: Path) -> dict[str, Any]:
+        rejected_artifacts: list[dict[str, Any]] = []
+        artifact_contents: list[tuple[str, str]] = []
+        for path in self._plan_candidate_paths(expected_output_path):
+            try:
+                if not path.exists() or not path.is_file():
+                    continue
+                content = path.read_text()
+            except OSError:
+                continue
+            valid, reason = self._validate_test_plan_schema(content)
+            if valid:
+                continue
+            artifact_contents.append((str(path), self._redact_sensitive_text(content)))
+            rejected_artifacts.append(
+                {
+                    "path": str(path),
+                    "length": len(content),
+                    "content_hash": self._content_hash(content),
+                    "preview": self._content_preview(content),
+                    "validation_failure_reason": reason,
+                }
+            )
+
+        rejected_payloads: list[dict[str, Any]] = []
+        payload_contents: list[tuple[str, str]] = []
+        save_plan_observed = False
+        for tc in list(getattr(agent_result, "tool_calls", []) or []):
+            tool_name = str(getattr(tc, "name", "") or "")
+            if "planner_save_plan" not in tool_name and "save_plan" not in tool_name:
+                continue
+            save_plan_observed = True
+            payload = self._extract_plan_payload(getattr(tc, "input", None))
+            if payload:
+                valid, reason = self._validate_test_plan_schema(payload)
+                if not valid:
+                    payload_contents.append((tool_name, self._redact_sensitive_text(payload)))
+                    rejected_payloads.append(
+                        {
+                            "tool_name": tool_name,
+                            "length": len(payload),
+                            "content_hash": self._content_hash(payload),
+                            "preview": self._content_preview(payload),
+                            "validation_failure_reason": reason,
+                        }
+                    )
+            else:
+                rejected_payloads.append(
+                    {
+                        "tool_name": tool_name,
+                        "length": 0,
+                        "content_hash": None,
+                        "preview": "",
+                        "validation_failure_reason": "planner_save_plan call had no markdown payload",
+                    }
+                )
+
+        raw_output = str(getattr(agent_result, "output", "") or "")
+        raw_output_meta = {
+            "length": len(raw_output),
+            "content_hash": self._content_hash(raw_output) if raw_output else None,
+            "preview": self._content_preview(raw_output) if raw_output else "",
+        }
+
+        useful = bool(save_plan_observed or rejected_artifacts or rejected_payloads or raw_output.strip())
+        return {
+            "useful_evidence": useful,
+            "save_plan_observed": save_plan_observed,
+            "rejected_artifacts": rejected_artifacts,
+            "rejected_save_plan_payloads": rejected_payloads,
+            "raw_output": raw_output_meta,
+            "_artifact_contents": artifact_contents,
+            "_payload_contents": payload_contents,
+            "_raw_output_content": self._redact_sensitive_text(raw_output),
+        }
+
+    def _write_repair_attempt_artifact(self, attempt: dict[str, Any]) -> Path | None:
+        if not self.session_dir:
+            return None
+        artifact = {
+            key: value
+            for key, value in attempt.items()
+            if not key.startswith("_")
+        }
+        try:
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            path = self.session_dir / "planner_repair_attempt.json"
+            path.write_text(json.dumps(artifact, indent=2))
+            return path
+        except Exception as exc:
+            logger.warning("Failed to write planner repair attempt artifact: %s", exc)
+            return None
+
+    @staticmethod
+    def _append_evidence_section(parts: list[str], title: str, source: str, content: str, budget: int) -> int:
+        if budget <= 0 or not content.strip():
+            return budget
+        excerpt = content if len(content) <= budget else content[:budget]
+        parts.append(f"\n## Evidence: {title}\nSource: {source}\n\n```markdown\n{excerpt}\n```")
+        return max(0, budget - len(excerpt))
+
+    def _build_repair_prompt(self, subject_name: str, evidence: dict[str, Any]) -> str:
+        parts = [
+            "You are a bounded PRD planner formatter/repair agent.",
+            "Transform only the evidence below into a valid markdown test plan.",
+            "Do not browse, inspect files, call tools, or add unsupported business behavior.",
+            "If details are thin, keep conservative reachability, navigation, accessibility, responsive, and error-state checks.",
+            "",
+            "Required output schema:",
+            f"# Test Plan: {subject_name}",
+            "### TC-XXX: <scenario>",
+            "**Description:**",
+            "**Preconditions:**",
+            "**Steps:** numbered action steps",
+            "**Expected Result:**",
+            "Optional: **Test Data:**",
+            "",
+            "Return only the markdown plan.",
+        ]
+        budget = 60000
+        for source, content in evidence.get("_payload_contents", []):
+            budget = self._append_evidence_section(parts, "Rejected save-plan payload", source, content, budget)
+        for source, content in evidence.get("_artifact_contents", []):
+            budget = self._append_evidence_section(parts, "Rejected markdown artifact", source, content, budget)
+        raw_output = evidence.get("_raw_output_content", "")
+        self._append_evidence_section(parts, "Raw planner output", "agent final output", raw_output, budget)
+        return "\n".join(parts)
+
+    async def _query_repair_agent(self, prompt: str):
+        timeout = int(os.environ.get("PLANNER_REPAIR_TIMEOUT_SECONDS", "180"))
+        runner = AgentRunner(
+            timeout_seconds=timeout,
+            allowed_tools=[],
+            tools=[],
+            log_tools=False,
+            session_dir=None,
+            cwd=self.cwd,
+            owner_type=self.owner_type,
+            owner_id=self.owner_id,
+            owner_label=self.owner_label,
+            requires_live_browser=False,
+            model_tier=self.model_tier,
+            inject_memory=False,
+            capture_memory=False,
+        )
+        return await runner.run(prompt)
+
+    async def _attempt_repair_plan(
+        self,
+        *,
+        subject_type: str,
+        subject_name: str,
+        agent_result: Any,
+        expected_output_path: Path,
+    ) -> Path | None:
+        evidence = self._collect_repair_evidence(agent_result, expected_output_path)
+        attempt: dict[str, Any] = {
+            **evidence,
+            "attempted": False,
+            "accepted": False,
+            "validation_failure_reason": None,
+            "expected_output_path": str(expected_output_path),
+        }
+        self._write_repair_attempt_artifact(attempt)
+        if not evidence["useful_evidence"]:
+            return None
+
+        attempt["attempted"] = True
+        logger.info("Attempting planner repair for %s '%s'", subject_type, subject_name)
+        prompt = self._build_repair_prompt(subject_name, evidence)
+        repair_result = await self._query_repair_agent(prompt)
+        repaired_content = self._extract_plan_content(repair_result)
+        if repaired_content:
+            expected_output_path.parent.mkdir(parents=True, exist_ok=True)
+            expected_output_path.write_text(repaired_content)
+            attempt["accepted"] = True
+            attempt["repaired_output"] = {
+                "length": len(repaired_content),
+                "content_hash": self._content_hash(repaired_content),
+                "preview": self._content_preview(repaired_content),
+            }
+            self._write_repair_attempt_artifact(attempt)
+            logger.info("Accepted repaired planner output for %s '%s'", subject_type, subject_name)
+            return expected_output_path
+
+        output = str(getattr(repair_result, "output", "") or "")
+        if output.strip():
+            candidate_match = re.search(r"(# Test Plan:.*)", output, re.DOTALL)
+            candidate = candidate_match.group(1).strip() if candidate_match else output.strip()
+            _valid, reason = self._validate_test_plan_schema(candidate)
+            attempt["validation_failure_reason"] = reason or "repair output did not contain a valid test plan"
+            attempt["repaired_output"] = {
+                "length": len(candidate),
+                "content_hash": self._content_hash(candidate),
+                "preview": self._content_preview(candidate),
+            }
+        else:
+            attempt["validation_failure_reason"] = str(getattr(repair_result, "error", None) or "repair produced no output")
+            attempt["repaired_output"] = {
+                "length": 0,
+                "content_hash": None,
+                "preview": "",
+            }
+        artifact_path = self._write_repair_attempt_artifact(attempt)
+        diagnostics = self._agent_diagnostics(agent_result, expected_output_path)
+        diagnostics.update(
+            {
+                "planner_repair_attempted": True,
+                "planner_repair_accepted": False,
+                "planner_repair_validation_failure": attempt["validation_failure_reason"],
+                "planner_repair_artifact_path": str(artifact_path) if artifact_path else None,
+                "rejected_artifact_count": len(evidence["rejected_artifacts"]),
+                "rejected_save_plan_payload_count": len(evidence["rejected_save_plan_payloads"]),
+                "raw_output_length": evidence["raw_output"]["length"],
+            }
+        )
+        raise SpecGenerationError(
+            (
+                f"Failed to generate spec for {subject_type} '{subject_name}': planner evidence was present, "
+                f"but repair did not produce a valid test plan. "
+                f"Validation failure: {attempt['validation_failure_reason']}."
+            ),
+            diagnostics=diagnostics,
+        )
+
+    @staticmethod
+    def _agent_diagnostics(agent_result, expected_output_path: Path) -> dict[str, Any]:
+        tool_calls = list(getattr(agent_result, "tool_calls", []) or [])
+        agent_error = getattr(agent_result, "error", None)
+        timed_out = bool(getattr(agent_result, "timed_out", False))
+        planner_save_plan_observed = any(
+            "planner_save_plan" in getattr(tc, "name", "") or "save_plan" in getattr(tc, "name", "")
+            for tc in tool_calls
+        )
+
+        diagnostics = {
+            "agent_success": bool(getattr(agent_result, "success", False)),
+            "timed_out": timed_out,
+            "agent_error": agent_error,
+            "messages_received": int(getattr(agent_result, "messages_received", 0) or 0),
+            "text_blocks_received": int(getattr(agent_result, "text_blocks_received", 0) or 0),
+            "tool_calls": len(tool_calls),
+            "planner_save_plan_observed": planner_save_plan_observed,
+            "valid_saved_plan_observed": False,
+            "expected_output_path": str(expected_output_path),
+        }
+
+        if timed_out:
+            diagnostics["next_action"] = "Retry with a longer planner timeout or reduce the feature scope."
+        elif agent_error:
+            diagnostics["next_action"] = "Check agent worker logs and SDK/queue runtime errors."
+        elif not tool_calls:
+            diagnostics["next_action"] = "Verify the MCP/browser runtime and planner tool allowlist."
+        elif not planner_save_plan_observed:
+            diagnostics["next_action"] = "Check whether the planner reached the save-plan step."
+        else:
+            diagnostics["next_action"] = "Retry generation and inspect raw_output.txt and tool_calls.json."
+
+        return diagnostics
+
+    @classmethod
+    def _build_no_output_error(
+        cls,
+        *,
+        subject_type: str,
+        subject_name: str,
+        agent_result,
+        expected_output_path: Path,
+    ) -> SpecGenerationError:
+        diagnostics = cls._agent_diagnostics(agent_result, expected_output_path)
+        output = getattr(agent_result, "output", "") or ""
+        if diagnostics["timed_out"]:
+            reason = "planner timed out before producing a valid test plan"
+        elif diagnostics["agent_error"]:
+            reason = f"planner failed: {diagnostics['agent_error']}"
+        elif output.strip():
+            reason = "planner returned text, but no valid test-case structure was found"
+        else:
+            reason = "agent produced no output"
+
+        message = (
+            f"Failed to generate spec for {subject_type} '{subject_name}': {reason}. "
+            "No valid saved plan artifact was found.\n"
+            f"Diagnostics: success={diagnostics['agent_success']}, timed_out={diagnostics['timed_out']}, "
+            f"messages={diagnostics['messages_received']}, text_blocks={diagnostics['text_blocks_received']}, "
+            f"tool_calls={diagnostics['tool_calls']}, "
+            f"planner_save_plan_observed={diagnostics['planner_save_plan_observed']}, "
+            f"valid_saved_plan_observed={diagnostics['valid_saved_plan_observed']}, "
+            f"expected_output_path={diagnostics['expected_output_path']}.\n"
+            f"Next action: {diagnostics['next_action']}"
+        )
+        return SpecGenerationError(message, diagnostics=diagnostics)
 
     def _build_context_text(self, chunks: list[dict]) -> str:
         """Combine RAG chunks into a single context string."""
@@ -474,15 +1040,15 @@ Start the test plan with:
         logger.info(f"Invoking Playwright Planner Agent for flow: {flow_title}")
         logger.info(f"   Target URL: {target_url}")
 
-        agent_result = await self._query_planner_agent(prompt)
+        agent_result = await self._query_planner_agent(prompt, target_url=target_url)
+        if target_url:
+            self._validate_live_plan_tool_sequence(agent_result, target_url)
 
-        # Check if spec was saved by the agent directly to disk
-        if output_path.exists():
-            # Verify it's not just a narrative summary
-            existing = output_path.read_text()
-            if "TC-" in existing or "Test Case" in existing or "## Steps" in existing:
-                logger.info(f"Spec saved by agent: {output_path}")
-                return output_path
+        # Check if spec was saved by the agent directly to disk or as a run artifact.
+        saved_plan_path = self._recover_saved_plan(output_path)
+        if saved_plan_path:
+            logger.info(f"Spec saved by agent: {saved_plan_path}")
+            return saved_plan_path
 
         # Extract the actual plan content from agent tool calls or output
         plan_content = self._extract_plan_content(agent_result)
@@ -491,15 +1057,22 @@ Start the test plan with:
             output_path.write_text(plan_content)
             return output_path
 
-        # Last resort: save full output
-        if agent_result.output:
-            logger.info(f"Saving agent response as spec (no structured plan found): {output_path}")
-            output_path.write_text(agent_result.output)
-            return output_path
+        repaired_plan_path = await self._attempt_repair_plan(
+            subject_type="flow",
+            subject_name=flow_title,
+            agent_result=agent_result,
+            expected_output_path=output_path,
+        )
+        if repaired_plan_path:
+            return repaired_plan_path
 
-        # Raise error instead of creating placeholder - callers should handle this
-        logger.error(f"Agent produced no output for flow: {flow_title}")
-        raise SpecGenerationError(f"Failed to generate spec for flow '{flow_title}': Agent produced no output")
+        logger.error(f"Agent produced no usable output for flow: {flow_title}")
+        raise self._build_no_output_error(
+            subject_type="flow",
+            subject_name=flow_title,
+            agent_result=agent_result,
+            expected_output_path=output_path,
+        )
 
     async def generate_all_specs(self, prd_project: str, target_url: str | None = None) -> list[Path]:
         """

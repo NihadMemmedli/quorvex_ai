@@ -1,34 +1,28 @@
 'use client';
 
-import { FileText, Layers, RefreshCw } from 'lucide-react';
+import { FileText, RefreshCw } from 'lucide-react';
 
 interface ProjectInfoBarProps {
     projectName: string;
-    featureCount: number;
-    completedCount: number;
     onReset: () => void;
 }
 
 export function ProjectInfoBar({
     projectName,
-    featureCount,
-    completedCount,
     onReset,
 }: ProjectInfoBarProps) {
-    const percentage = featureCount > 0
-        ? Math.round((completedCount / featureCount) * 100)
-        : 0;
-
     return (
         <div
             className="card-elevated"
             style={{
-                height: 52,
+                minHeight: 52,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                padding: '0 1.25rem',
+                gap: '0.75rem',
+                padding: '0.6rem 1.25rem',
                 transform: 'none',
+                flexWrap: 'wrap',
             }}
             onMouseEnter={(e) => {
                 e.currentTarget.style.transform = 'none';
@@ -37,8 +31,14 @@ export function ProjectInfoBar({
                 e.currentTarget.style.transform = 'none';
             }}
         >
+            <style>{`
+                .prd-project-reset:focus-visible {
+                    outline: none;
+                    box-shadow: 0 0 0 2px rgba(59,130,246,0.45);
+                }
+            `}</style>
             {/* Left: Status dot + project name */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0, flex: '1 1 220px' }}>
                 {/* Pulsing green dot */}
                 <div style={{ position: 'relative', width: 8, height: 8 }}>
                     <div style={{
@@ -67,57 +67,17 @@ export function ProjectInfoBar({
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap',
-                    maxWidth: 240,
+                    maxWidth: '100%',
                 }}>
                     {projectName}
                 </span>
             </div>
 
-            {/* Center-right: feature count + progress */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem' }}>
-                    <Layers size={13} style={{ color: 'var(--text-tertiary)' }} />
-                    <span style={{
-                        fontSize: '0.75rem',
-                        fontFamily: 'var(--font-mono)',
-                        color: 'var(--text-secondary)',
-                    }}>
-                        {completedCount}/{featureCount}
-                    </span>
-                </div>
-
-                {/* Progress bar */}
-                <div style={{
-                    width: 120,
-                    height: 4,
-                    borderRadius: 9999,
-                    background: 'rgba(255,255,255,0.06)',
-                    overflow: 'hidden',
-                    flexShrink: 0,
-                }}>
-                    <div style={{
-                        width: `${percentage}%`,
-                        height: '100%',
-                        borderRadius: 9999,
-                        background: 'linear-gradient(90deg, var(--primary), var(--accent))',
-                        transition: 'width 0.6s var(--ease-smooth)',
-                    }} />
-                </div>
-
-                <span style={{
-                    fontSize: '0.7rem',
-                    fontFamily: 'var(--font-mono)',
-                    color: 'var(--text-tertiary)',
-                    minWidth: 32,
-                    textAlign: 'right',
-                }}>
-                    {percentage}%
-                </span>
-            </div>
-
             {/* Right: New Project button */}
             <button
+                type="button"
                 onClick={onReset}
+                className="prd-project-reset"
                 style={{
                     display: 'flex',
                     alignItems: 'center',

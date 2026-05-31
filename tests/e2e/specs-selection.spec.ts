@@ -97,6 +97,13 @@ class SpecsSelectionPage {
     await expect(this.folderCheckbox('Api')).toBeVisible();
   }
 
+  async authenticate() {
+    await this.page.addInitScript(() => {
+      window.localStorage.setItem('refresh_token', 'refresh-token');
+      window.localStorage.setItem('we-test-current-project-id', 'default');
+    });
+  }
+
   folderCheckbox(folderName: string) {
     return this.page.getByLabel(`Select folder ${folderName}`);
   }
@@ -180,5 +187,28 @@ test.describe('Specs selection', () => {
     await expect(specs.folderCheckbox('Autopilot')).toBeVisible();
     await expect(specs.folderCheckbox('Autopilot')).not.toBeChecked();
     await expect(specs.bulkBar()).toBeHidden();
+  });
+
+  test('redirects file query links to the spec detail page', async ({ page }) => {
+    const specs = new SpecsSelectionPage(page);
+    await specs.mockBackend();
+    await specs.authenticate();
+
+    await specs.routeApi('/specs/wetravel-manage-rooms/trip-publishing-customer-trip-page.md?*', route =>
+      route.fulfill({
+        status: 200,
+        json: {
+          name: 'wetravel-manage-rooms/trip-publishing-customer-trip-page.md',
+          content: '# Trip Publishing Customer Trip Page\n\n## Steps\n1. Open the customer trip page.',
+          is_automated: false,
+          code_path: null,
+        },
+      }),
+    );
+
+    await page.goto('/specs?file=wetravel-manage-rooms%2Ftrip-publishing-customer-trip-page.md');
+
+    await expect(page).toHaveURL(/\/specs\/wetravel-manage-rooms\/trip-publishing-customer-trip-page\.md$/);
+    await expect(page.getByRole('heading', { name: 'Trip Publishing Customer Trip Page' })).toBeVisible();
   });
 });

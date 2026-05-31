@@ -11,6 +11,7 @@ all workflows (exploration, planning, generation, etc.) with:
 """
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -96,7 +97,25 @@ except ImportError:
             return 0
 
 
-def get_mcp_tool_prefix(server_hint: str = "playwright") -> str:
+def _resolve_mcp_config_path(
+    *,
+    mcp_config_dir: Path | str | None = None,
+    mcp_config_path: Path | str | None = None,
+) -> Path:
+    if mcp_config_path is not None:
+        path = Path(mcp_config_path)
+        return path / ".mcp.json" if path.is_dir() else path
+    if mcp_config_dir is not None:
+        return Path(mcp_config_dir) / ".mcp.json"
+    return Path(".mcp.json")
+
+
+def get_mcp_tool_prefix(
+    server_hint: str = "playwright",
+    *,
+    mcp_config_dir: Path | str | None = None,
+    mcp_config_path: Path | str | None = None,
+) -> str:
     """Detect MCP server name from .mcp.json to build tool names.
 
     The MCP server name varies by context:
@@ -106,7 +125,7 @@ def get_mcp_tool_prefix(server_hint: str = "playwright") -> str:
     """
     import json as _json
 
-    mcp_path = Path(".mcp.json")
+    mcp_path = _resolve_mcp_config_path(mcp_config_dir=mcp_config_dir, mcp_config_path=mcp_config_path)
     if mcp_path.exists():
         try:
             config = _json.loads(mcp_path.read_text())
@@ -120,7 +139,13 @@ def get_mcp_tool_prefix(server_hint: str = "playwright") -> str:
     return "mcp__playwright-test__"  # default (dashboard/production)
 
 
-def build_allowed_tools(base_tools: list, mcp_tools: list) -> list:
+def build_allowed_tools(
+    base_tools: list,
+    mcp_tools: list,
+    *,
+    mcp_config_dir: Path | str | None = None,
+    mcp_config_path: Path | str | None = None,
+) -> list:
     """Build allowed_tools list with correct MCP prefix.
 
     Args:
@@ -130,15 +155,28 @@ def build_allowed_tools(base_tools: list, mcp_tools: list) -> list:
     Returns:
         Combined list with MCP tools properly prefixed.
     """
-    prefix = get_mcp_tool_prefix("playwright")
+    prefix = get_mcp_tool_prefix(
+        "playwright",
+        mcp_config_dir=mcp_config_dir,
+        mcp_config_path=mcp_config_path,
+    )
     return base_tools + [f"{prefix}{t}" for t in mcp_tools]
 
 
 def build_mcp_allowed_tools(
-    server_hint: str, base_tools: list, mcp_tools: list
+    server_hint: str,
+    base_tools: list,
+    mcp_tools: list,
+    *,
+    mcp_config_dir: Path | str | None = None,
+    mcp_config_path: Path | str | None = None,
 ) -> list:
     """Build allowed_tools for a named MCP server family."""
-    prefix = get_mcp_tool_prefix(server_hint)
+    prefix = get_mcp_tool_prefix(
+        server_hint,
+        mcp_config_dir=mcp_config_dir,
+        mcp_config_path=mcp_config_path,
+    )
     return base_tools + [f"{prefix}{t}" for t in mcp_tools]
 
 
@@ -152,6 +190,98 @@ class ToolCall:
     success: bool = True
     error: str | None = None
     input: dict[str, Any] | None = None
+
+
+SENSITIVE_INPUT_KEY_PARTS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "auth",
+    "credential",
+    "private_key",
+)
+
+
+def _is_sensitive_input_key(key: str | None) -> bool:
+    lowered = str(key or "").lower()
+    return any(part in lowered for part in SENSITIVE_INPUT_KEY_PARTS)
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _json_length(value: Any) -> int:
+    try:
+        return len(json.dumps(value, default=str, ensure_ascii=False))
+    except Exception:
+        return len(str(value))
+
+
+def _safe_input_preview(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
+    if _is_sensitive_input_key(key):
+        return "[REDACTED]"
+    if depth > 4:
+        return "[TRUNCATED_DEPTH]"
+    if isinstance(value, str):
+        max_chars = 1000
+        if len(value) <= max_chars:
+            return value
+        return value[:max_chars] + f"...[truncated {len(value) - max_chars} chars]"
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        items = list(value.items())
+        preview = {
+            str(k): _safe_input_preview(v, key=str(k), depth=depth + 1)
+            for k, v in items[:25]
+        }
+        if len(items) > 25:
+            preview["__truncated_keys"] = len(items) - 25
+        return preview
+    if isinstance(value, list):
+        preview = [_safe_input_preview(item, key=key, depth=depth + 1) for item in value[:25]]
+        if len(value) > 25:
+            preview.append(f"[truncated {len(value) - 25} items]")
+        return preview
+    return str(value)[:1000]
+
+
+def _tool_content_value(tool_input: dict[str, Any] | None) -> str | None:
+    if not isinstance(tool_input, dict):
+        return None
+    for key in ("content", "plan", "markdown", "prompt", "text"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and not _is_sensitive_input_key(key):
+            return value
+    return None
+
+
+def build_safe_tool_input_metadata(tool_input: dict[str, Any] | None) -> dict[str, Any]:
+    """Return redacted/truncated metadata for persisted tool-call diagnostics."""
+    if not isinstance(tool_input, dict):
+        return {
+            "input_preview": None,
+            "input_length": 0,
+            "input_content_length": 0,
+            "content_hash": None,
+        }
+    preview = _safe_input_preview(tool_input)
+    content_value = _tool_content_value(tool_input)
+    try:
+        preview_serialized = json.dumps(preview, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        preview_serialized = str(preview)
+    return {
+        "input_preview": preview,
+        "input_length": _json_length(tool_input),
+        "input_content_length": len(content_value) if content_value is not None else 0,
+        "content_hash": _sha256_text(content_value if content_value is not None else preview_serialized),
+    }
 
 
 @dataclass
@@ -207,6 +337,7 @@ class AgentRunner:
         owner_type: str | None = None,
         owner_id: str | None = None,
         owner_label: str | None = None,
+        requires_live_browser: bool = False,
         memory_project_id: str | None = None,
         memory_agent_type: str | None = None,
         memory_source_type: str | None = None,
@@ -244,6 +375,7 @@ class AgentRunner:
             owner_type: Optional logical owner type for queue lifecycle cleanup
             owner_id: Optional logical owner ID for queue lifecycle cleanup
             owner_label: Optional human-readable owner label for queue diagnostics
+            requires_live_browser: Route queued tasks only to workers that can provide a headed/VNC browser.
             memory_project_id: Optional project scope for prompt memory
             memory_agent_type: Optional memory actor label
             memory_source_type: Optional memory source type for capture/telemetry
@@ -276,6 +408,7 @@ class AgentRunner:
         self.owner_type = owner_type
         self.owner_id = owner_id
         self.owner_label = owner_label
+        self.requires_live_browser = requires_live_browser
         self.memory_project_id = memory_project_id
         self.memory_agent_type = memory_agent_type or "AgentRunner"
         self.memory_source_type = memory_source_type or "agent_run"
@@ -347,6 +480,7 @@ class AgentRunner:
                 "source_type": self.memory_source_type,
                 "source_id": self.memory_source_id,
             },
+            "requires_live_browser": self.requires_live_browser,
             "prompt": {
                 "provided": prompt is not None,
                 "hash": prompt_hash,
@@ -574,6 +708,7 @@ class AgentRunner:
         # Snapshot child PIDs before query for orphan cleanup
         pre_query_pids = snapshot_child_pids()
         agent_result: AgentResult | None = None
+        debug_output_saved = False
 
         try:
             # Wrap the query in a timeout
@@ -845,6 +980,7 @@ class AgentRunner:
             # Save debug output if session_dir provided
             if self.session_dir:
                 self._save_debug_output(output, tool_calls, messages_received)
+                debug_output_saved = True
 
             logger.info(
                 f"Agent completed: {messages_received} messages, {len(tool_calls)} tool calls, {duration:.1f}s"
@@ -946,6 +1082,9 @@ class AgentRunner:
                     logger.info(f"Cleaned up {killed} orphaned browser/MCP process(es)")
             except Exception:
                 pass  # Non-fatal - don't let cleanup errors mask real results
+
+        if self.session_dir and agent_result and not debug_output_saved:
+            self._save_debug_output(agent_result.output, agent_result.tool_calls, agent_result.messages_received)
 
         self._capture_agent_memory(original_prompt, agent_result)
         return agent_result
@@ -1126,6 +1265,10 @@ class AgentRunner:
                 workers = metrics.get("workers_alive", 0)
                 queue_depth = metrics.get("queue_length", 0)
                 running = metrics.get("running", 0)
+                live_workers = 0
+                if self.requires_live_browser:
+                    capabilities = await queue.worker_capability_summary()
+                    live_workers = int(capabilities.get("live_browser_worker_count") or 0)
                 if workers == 0:
                     logger.warning(
                         f"No agent workers alive — task will likely get stuck. "
@@ -1133,6 +1276,18 @@ class AgentRunner:
                     )
                     print(
                         "   ⚠️ No agent workers detected — task may wait indefinitely",
+                        flush=True,
+                    )
+                elif self.requires_live_browser and live_workers == 0:
+                    logger.warning(
+                        "No live-browser-capable agent workers alive — live task will not be claimed. "
+                        "workers=%s, queue_depth=%s, running=%s",
+                        workers,
+                        queue_depth,
+                        running,
+                    )
+                    print(
+                        "   ⚠️ No live-browser-capable agent workers detected — check DISPLAY/VNC worker setup",
                         flush=True,
                     )
                 elif queue_depth > 0:
@@ -1173,6 +1328,7 @@ class AgentRunner:
                 owner_label=owner_label,
                 browser_slot_parent_owner_type=browser_slot_parent_owner_type,
                 browser_slot_parent_run_id=browser_slot_parent_run_id,
+                requires_live_browser=self.requires_live_browser,
             )
 
             logger.info(f"Task enqueued: {task_id}, waiting for result...")
@@ -1241,6 +1397,9 @@ class AgentRunner:
             tool_names = telemetry.get("tool_names") or []
             if not isinstance(tool_names, list):
                 tool_names = []
+            tool_call_records = telemetry.get("tool_call_records") or []
+            if not isinstance(tool_call_records, list):
+                tool_call_records = []
             browser_tool_count = int(telemetry.get("browser_tool_calls", 0) or 0)
             if len(tool_names) < tool_call_count:
                 tool_names = [
@@ -1252,14 +1411,29 @@ class AgentRunner:
                 ]
             if not tool_names and browser_tool_count > 0:
                 tool_names = ["mcp__playwright-test__browser_tool"] * browser_tool_count
-            synthetic_tool_calls = [
-                ToolCall(
-                    name=str(name),
-                    timestamp=start_time,
-                    success=True,
-                )
-                for name in tool_names[: tool_call_count or len(tool_names)]
-            ]
+            synthetic_tool_calls: list[ToolCall] = []
+            if tool_call_records:
+                for record in tool_call_records[: tool_call_count or len(tool_call_records)]:
+                    if not isinstance(record, dict):
+                        continue
+                    record_input = record.get("input")
+                    synthetic_tool_calls.append(
+                        ToolCall(
+                            name=str(record.get("name") or "queue_tool_call"),
+                            timestamp=start_time,
+                            success=True,
+                            input=record_input if isinstance(record_input, dict) else None,
+                        )
+                    )
+            if not synthetic_tool_calls:
+                synthetic_tool_calls = [
+                    ToolCall(
+                        name=str(name),
+                        timestamp=start_time,
+                        success=True,
+                    )
+                    for name in tool_names[: tool_call_count or len(tool_names)]
+                ]
             messages_received = int(
                 telemetry.get("assistant_messages")
                 or telemetry.get("stream_events")
@@ -1427,6 +1601,7 @@ class AgentRunner:
                     "duration_ms": tc.duration_ms,
                     "success": tc.success,
                     "error": tc.error,
+                    **build_safe_tool_input_metadata(tc.input),
                 }
                 for tc in tool_calls
             ]
