@@ -3,15 +3,17 @@ import sys
 from pathlib import Path
 
 import pytest
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import orchestrator.api.prd as prd_api
 from orchestrator.services import agent_queue as agent_queue_module
-from orchestrator.api.models_db import PrdGenerationEvent, PrdGenerationResult
+from orchestrator.api.models_db import PrdGenerationEvent, PrdGenerationResult, Project, Requirement
 from orchestrator.api.prd import GenerateRequest, _prepare_prd_generation_mcp_workspace
 from orchestrator.services.agent_queue import AgentTask, AgentTaskStatus
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
@@ -58,6 +60,170 @@ export default defineConfig({
     allowed_tools = get_agent_allowed_tools("playwright-test-planner", mcp_config_dir=run_dir)
     assert "mcp__playwright-test__planner_setup_page" in allowed_tools
     assert "mcp__playwright-test__planner_save_plan" in allowed_tools
+
+
+@pytest.mark.asyncio
+async def test_import_requirements_creates_rows_for_tenant_project(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine, tables=[Project.__table__, Requirement.__table__])
+    monkeypatch.setattr(prd_api, "engine", engine)
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+
+    with Session(engine) as session:
+        session.add(Project(id="tenant-project", name="Tenant Project"))
+        session.commit()
+
+    prd_dir = tmp_path / "prds" / "prd-project"
+    prd_dir.mkdir(parents=True)
+    (prd_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "tenant_project_id": "metadata-project",
+                "features": [
+                    {"name": "Checkout", "slug": "checkout", "requirements": ["Users can pay by card."]},
+                    {"name": "Account", "slug": "account", "requirements": ["Users can reset passwords."]},
+                ],
+            }
+        )
+    )
+
+    response = await prd_api.import_requirements("prd-project", tenant_project_id="tenant-project")
+
+    assert response.created == 2
+    assert response.skipped == 0
+    assert response.total == 2
+    assert [requirement.req_code for requirement in response.requirements] == ["REQ-001", "REQ-002"]
+
+    with Session(engine) as session:
+        requirements = session.exec(
+            select(Requirement).where(Requirement.project_id == "tenant-project").order_by(Requirement.req_code)
+        ).all()
+        assert [requirement.title for requirement in requirements] == [
+            "Users can pay by card.",
+            "Users can reset passwords.",
+        ]
+        assert requirements[0].description == "Imported from PRD project 'prd-project', feature 'Checkout'."
+        assert requirements[0].category == "prd"
+        assert requirements[0].priority == "medium"
+        assert requirements[0].status == "draft"
+        assert requirements[0].truth_state == "candidate_requirement"
+        assert requirements[0].source_type == "prd"
+        assert requirements[0].confidence == 0.85
+
+
+@pytest.mark.asyncio
+async def test_import_requirements_repeated_import_skips_duplicate_titles(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine, tables=[Project.__table__, Requirement.__table__])
+    monkeypatch.setattr(prd_api, "engine", engine)
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+
+    with Session(engine) as session:
+        session.add(Project(id="tenant-project", name="Tenant Project"))
+        session.commit()
+
+    prd_dir = tmp_path / "prds" / "prd-project"
+    prd_dir.mkdir(parents=True)
+    (prd_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "tenant_project_id": "tenant-project",
+                "features": [
+                    {"name": "Checkout", "slug": "checkout", "requirements": ["Users can pay by card."]},
+                    {"name": "Account", "slug": "account", "requirements": ["Users can reset passwords."]},
+                ],
+            }
+        )
+    )
+
+    first = await prd_api.import_requirements("prd-project", tenant_project_id=None)
+    second = await prd_api.import_requirements("prd-project", tenant_project_id=None)
+
+    assert first.created == 2
+    assert second.created == 0
+    assert second.skipped == 2
+    assert second.total == 2
+
+    with Session(engine) as session:
+        requirements = session.exec(select(Requirement).where(Requirement.project_id == "tenant-project")).all()
+        assert len(requirements) == 2
+
+
+@pytest.mark.asyncio
+async def test_import_requirements_rejects_unknown_tenant_project(monkeypatch, tmp_path):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine, tables=[Project.__table__, Requirement.__table__])
+    monkeypatch.setattr(prd_api, "engine", engine)
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+
+    prd_dir = tmp_path / "prds" / "prd-project"
+    prd_dir.mkdir(parents=True)
+    (prd_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "features": [
+                    {"name": "Checkout", "slug": "checkout", "requirements": ["Users can pay by card."]},
+                ],
+            }
+        )
+    )
+
+    with pytest.raises(prd_api.HTTPException) as exc_info:
+        await prd_api.import_requirements("prd-project", tenant_project_id="missing-project")
+
+    assert exc_info.value.status_code == 404
+    assert "Target project 'missing-project' not found" == exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_import_requirements_missing_metadata_returns_404(monkeypatch, tmp_path):
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+
+    with pytest.raises(prd_api.HTTPException) as exc_info:
+        await prd_api.import_requirements("missing-prd", tenant_project_id="tenant-project")
+
+    assert exc_info.value.status_code == 404
+
+
+def test_import_requirements_route_is_registered_and_imports(monkeypatch, tmp_path):
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine, tables=[Project.__table__, Requirement.__table__])
+    monkeypatch.setattr(prd_api, "engine", engine)
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+
+    with Session(engine) as session:
+        session.add(Project(id="tenant-project", name="Tenant Project"))
+        session.commit()
+
+    prd_dir = tmp_path / "prds" / "prd-project"
+    prd_dir.mkdir(parents=True)
+    (prd_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "features": [
+                    {"name": "Checkout", "slug": "checkout", "requirements": ["Users can pay by card."]},
+                ],
+            }
+        )
+    )
+
+    app = FastAPI()
+    app.include_router(prd_api.router)
+    client = TestClient(app)
+
+    response = client.post("/api/prd/prd-project/import-requirements?tenant_project_id=tenant-project")
+
+    assert response.status_code == 200
+    assert response.json()["created"] == 1
+    assert response.json()["total"] == 1
+
+    with Session(engine) as session:
+        requirement = session.exec(select(Requirement).where(Requirement.project_id == "tenant-project")).one()
+        assert requirement.title == "Users can pay by card."
 
 
 def test_prd_generation_workspace_uses_headed_mcp_for_live_browser_runs(tmp_path):

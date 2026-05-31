@@ -9,8 +9,15 @@ import { FeatureSidebar } from './FeatureSidebar';
 import { FeatureWorkspace } from './FeatureWorkspace';
 import { TestGenerationPanel } from './TestGenerationPanel';
 
+interface ImportRequirementsResult {
+    created: number;
+    skipped: number;
+    total: number;
+}
+
 interface WorkingPhaseProps {
     projectName: string;
+    currentProjectId: string | null;
     features: Feature[];
     testableFeatures: Feature[];
     stats: FeatureStats;
@@ -25,6 +32,9 @@ interface WorkingPhaseProps {
     onGenerateTests: () => void;
     testPipelineStatus: 'idle' | 'running' | 'complete';
     onReset: () => void;
+    onImportRequirements: () => Promise<void>;
+    isImportingRequirements: boolean;
+    importRequirementsResult: ImportRequirementsResult | null;
     onAddRequirement: (featureSlug: string, text: string) => Promise<void>;
     onEditRequirement: (featureSlug: string, index: number, text: string) => Promise<void>;
     onDeleteRequirement: (featureSlug: string, index: number) => Promise<void>;
@@ -32,6 +42,7 @@ interface WorkingPhaseProps {
 
 export function WorkingPhase({
     projectName,
+    currentProjectId,
     features,
     testableFeatures,
     stats,
@@ -46,6 +57,9 @@ export function WorkingPhase({
     onGenerateTests,
     testPipelineStatus,
     onReset,
+    onImportRequirements,
+    isImportingRequirements,
+    importRequirementsResult,
     onAddRequirement,
     onEditRequirement,
     onDeleteRequirement,
@@ -139,7 +153,12 @@ export function WorkingPhase({
             {/* Project Info Bar — full width */}
             <ProjectInfoBar
                 projectName={projectName}
+                currentProjectId={currentProjectId}
                 onReset={onReset}
+                onImportRequirements={onImportRequirements}
+                isImportingRequirements={isImportingRequirements}
+                importRequirementsResult={importRequirementsResult}
+                hasRequirements={testableFeatures.length > 0}
             />
 
             {/* Config Panel — full width, collapsible */}

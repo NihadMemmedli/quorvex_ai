@@ -26,7 +26,7 @@ from sqlalchemy import func
 from sqlmodel import Session, select
 
 from .db import engine
-from .models_db import PrdGenerationEvent, PrdGenerationResult, SpecMetadata
+from .models_db import PrdGenerationEvent, PrdGenerationResult, Project, Requirement, SpecMetadata
 
 # Import resource managers - using relative import since we're in orchestrator/api
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -181,6 +181,56 @@ class PrdArtifactResponse(BaseModel):
     path: str
     type: str
     modified_at: datetime | None = None
+
+
+class ImportedRequirementResponse(BaseModel):
+    id: int
+    req_code: str
+    title: str
+    description: str | None
+    category: str
+    priority: str
+    status: str
+    truth_state: str
+    source_type: str
+    confidence: float
+    created_at: datetime
+    updated_at: datetime
+
+
+class ImportRequirementsResponse(BaseModel):
+    created: int
+    skipped: int
+    total: int
+    requirements: list[ImportedRequirementResponse]
+
+
+def _next_requirement_number(requirements: list[Requirement]) -> int:
+    highest = 0
+    for requirement in requirements:
+        try:
+            _, number = requirement.req_code.split("-", 1)
+            highest = max(highest, int(number))
+        except (AttributeError, ValueError):
+            continue
+    return highest + 1
+
+
+def _imported_requirement_to_response(requirement: Requirement) -> ImportedRequirementResponse:
+    return ImportedRequirementResponse(
+        id=requirement.id,
+        req_code=requirement.req_code,
+        title=requirement.title,
+        description=requirement.description,
+        category=requirement.category,
+        priority=requirement.priority,
+        status=requirement.status,
+        truth_state=requirement.truth_state,
+        source_type=requirement.source_type,
+        confidence=requirement.confidence,
+        created_at=requirement.created_at,
+        updated_at=requirement.updated_at,
+    )
 
 
 @router.post("/upload", response_model=PRDResponse)
@@ -370,6 +420,85 @@ async def get_features(project_id: str, include_context: bool = False):
     except Exception as e:
         logger.error(f"Failed to get features for PRD project: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/{prd_project_id}/import-requirements", response_model=ImportRequirementsResponse)
+async def import_requirements(prd_project_id: str, tenant_project_id: str | None = Query(default=None)):
+    """Import extracted PRD feature requirements into the project requirements table."""
+    metadata_path = BASE_DIR / "prds" / prd_project_id / "metadata.json"
+    if not metadata_path.exists():
+        raise HTTPException(status_code=404, detail="PRD project metadata not found")
+
+    try:
+        data = import_json(metadata_path)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="PRD metadata is invalid JSON")
+    except OSError as exc:
+        logger.error("Failed to read PRD metadata for %s: %s", prd_project_id, exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to read PRD metadata")
+
+    target_project_id = tenant_project_id or data.get("tenant_project_id") or "default"
+    extracted: list[tuple[str, str]] = []
+    for feature in data.get("features", []):
+        if not isinstance(feature, dict):
+            continue
+        feature_name = str(feature.get("name") or feature.get("slug") or "Unnamed feature")
+        for requirement_text in feature.get("requirements") or []:
+            title = str(requirement_text or "").strip()
+            if title:
+                extracted.append((feature_name, title))
+
+    if not extracted:
+        return ImportRequirementsResponse(created=0, skipped=0, total=0, requirements=[])
+
+    with Session(engine) as session:
+        if target_project_id and not session.get(Project, target_project_id):
+            raise HTTPException(status_code=404, detail=f"Target project '{target_project_id}' not found")
+
+        existing_requirements = list(
+            session.exec(select(Requirement).where(Requirement.project_id == target_project_id)).all()
+        )
+        existing_titles = {requirement.title for requirement in existing_requirements}
+        next_number = _next_requirement_number(existing_requirements)
+        created_requirements: list[Requirement] = []
+        skipped = 0
+
+        for feature_name, title in extracted:
+            if title in existing_titles:
+                skipped += 1
+                continue
+
+            now = datetime.utcnow()
+            requirement = Requirement(
+                project_id=target_project_id,
+                req_code=f"REQ-{next_number:03d}",
+                title=title,
+                description=f"Imported from PRD project '{prd_project_id}', feature '{feature_name}'.",
+                category="prd",
+                priority="medium",
+                status="draft",
+                truth_state="candidate_requirement",
+                source_type="prd",
+                confidence=0.85,
+                acceptance_criteria_json="[]",
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(requirement)
+            created_requirements.append(requirement)
+            existing_titles.add(title)
+            next_number += 1
+
+        session.commit()
+        for requirement in created_requirements:
+            session.refresh(requirement)
+
+        return ImportRequirementsResponse(
+            created=len(created_requirements),
+            skipped=skipped,
+            total=len(extracted),
+            requirements=[_imported_requirement_to_response(requirement) for requirement in created_requirements],
+        )
 
 
 def import_json(path: Path):

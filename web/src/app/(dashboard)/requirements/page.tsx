@@ -160,6 +160,7 @@ interface CheckDuplicateResponse {
 
 type TabType = 'requirements' | 'traceability';
 type RequirementTruthAction = 'confirm' | 'reject' | 'mark-stale';
+type TruthActionStyle = { bg: string; color: string; border: string };
 
 const priorityColors: Record<string, { bg: string; color: string }> = {
     critical: { bg: 'var(--danger-muted)', color: 'var(--danger)' },
@@ -191,6 +192,60 @@ const truthStateLabels: Record<string, string> = {
     confirmed_requirement: 'Confirmed',
     rejected_requirement: 'Rejected',
     stale_requirement: 'Stale',
+};
+
+const terminalReviewTruthStates = new Set([
+    'confirmed_requirement',
+    'rejected_requirement',
+    'stale_requirement',
+]);
+
+const truthStateMirroredStatuses: Record<string, string> = {
+    confirmed_requirement: 'confirmed',
+    rejected_requirement: 'rejected',
+    stale_requirement: 'stale',
+};
+
+const truthActionStyles: Record<RequirementTruthAction, TruthActionStyle> = {
+    confirm: {
+        bg: 'var(--success-muted)',
+        color: 'var(--success)',
+        border: 'color-mix(in srgb, var(--success) 45%, transparent)',
+    },
+    reject: {
+        bg: 'var(--danger-muted)',
+        color: 'var(--danger)',
+        border: 'color-mix(in srgb, var(--danger) 45%, transparent)',
+    },
+    'mark-stale': {
+        bg: 'var(--warning-muted)',
+        color: 'var(--warning)',
+        border: 'color-mix(in srgb, var(--warning) 45%, transparent)',
+    },
+};
+
+const getTruthActionButtonStyle = (action: RequirementTruthAction, disabled: boolean): React.CSSProperties => {
+    const style = truthActionStyles[action];
+
+    return {
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '0.25rem',
+        height: 32,
+        minHeight: 32,
+        padding: '0 0.625rem',
+        borderRadius: 6,
+        border: `1px solid ${disabled ? 'var(--border)' : style.border}`,
+        background: disabled ? 'var(--surface-hover)' : style.bg,
+        color: disabled ? 'var(--text-secondary)' : style.color,
+        fontSize: '0.75rem',
+        fontWeight: 600,
+        lineHeight: 1,
+        whiteSpace: 'nowrap',
+        opacity: disabled ? 0.72 : 1,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+    };
 };
 
 const coverageColors: Record<string, string> = {
@@ -1584,6 +1639,14 @@ export default function RequirementsPage() {
                                 const truthStyle = truthStateColors[truthState] || truthStateColors.candidate_requirement;
                                 const truthLabel = truthStateLabels[truthState] || truthState.replace(/_/g, ' ');
                                 const confidence = typeof req.confidence === 'number' ? `${Math.round(req.confidence * 100)}%` : null;
+                                const isTerminalReviewState = terminalReviewTruthStates.has(truthState);
+                                const mirroredStatus = truthStateMirroredStatuses[truthState];
+                                const showStatusBadge = !mirroredStatus || req.status.toLowerCase() !== mirroredStatus;
+                                const isAnyTruthActionLoading = truthActionLoading?.startsWith(`${req.id}:`) ?? false;
+                                const truthActionsDisabled = isTerminalReviewState || isAnyTruthActionLoading;
+                                const confirmDisabled = truthActionsDisabled;
+                                const rejectDisabled = truthActionsDisabled;
+                                const staleDisabled = truthActionsDisabled;
                                 return (
                                     <div key={req.id} style={{ borderBottom: '1px solid var(--border)' }}>
                                         <div
@@ -1591,6 +1654,7 @@ export default function RequirementsPage() {
                                                 padding: '1rem 1.25rem',
                                                 display: 'flex',
                                                 alignItems: 'center',
+                                                flexWrap: 'wrap',
                                                 gap: '1rem',
                                                 cursor: 'pointer',
                                                 background: isExpanded ? 'var(--surface-hover)' : 'transparent'
@@ -1601,7 +1665,7 @@ export default function RequirementsPage() {
                                                 {isExpanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
                                             </span>
 
-                                            <div style={{ flex: 1 }}>
+                                            <div style={{ flex: 1, minWidth: 180 }}>
                                                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '0.25rem' }}>
                                                     <span style={{ fontWeight: 600, color: 'var(--primary)', fontSize: '0.85rem' }}>{req.req_code}</span>
                                                     <span style={{ fontWeight: 500 }}>{req.title}</span>
@@ -1633,15 +1697,17 @@ export default function RequirementsPage() {
                                                 {req.priority}
                                             </span>
 
-                                            <span style={{
-                                                padding: '0.25rem 0.625rem',
-                                                borderRadius: '4px',
-                                                fontSize: '0.75rem',
-                                                fontWeight: 500,
-                                                ...statusColors[req.status]
-                                            }}>
-                                                {req.status}
-                                            </span>
+                                            {showStatusBadge && (
+                                                <span style={{
+                                                    padding: '0.25rem 0.625rem',
+                                                    borderRadius: '4px',
+                                                    fontSize: '0.75rem',
+                                                    fontWeight: 500,
+                                                    ...statusColors[req.status]
+                                                }}>
+                                                    {req.status}
+                                                </span>
+                                            )}
 
                                             <span
                                                 title={req.uncertainty_reason || undefined}
@@ -1657,12 +1723,12 @@ export default function RequirementsPage() {
                                                 {truthLabel}
                                             </span>
 
-                                            <div style={{ display: 'flex', gap: '0.375rem', alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+                                            <div style={{ display: 'flex', gap: '0.375rem', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap' }} onClick={e => e.stopPropagation()}>
                                                 <button
                                                     className="btn btn-sm"
                                                     onClick={() => openTruthReview(req, 'confirm')}
-                                                    disabled={truthActionLoading === `${req.id}:confirm` || truthState === 'confirmed_requirement'}
-                                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', padding: '0.375rem 0.625rem' }}
+                                                    disabled={confirmDisabled}
+                                                    style={getTruthActionButtonStyle('confirm', confirmDisabled)}
                                                 >
                                                     {truthActionLoading === `${req.id}:confirm` ? <Loader2 size={13} className="spinning" /> : <CheckCircle size={13} />}
                                                     Confirm
@@ -1670,8 +1736,8 @@ export default function RequirementsPage() {
                                                 <button
                                                     className="btn btn-sm"
                                                     onClick={() => openTruthReview(req, 'reject')}
-                                                    disabled={truthActionLoading === `${req.id}:reject` || truthState === 'rejected_requirement'}
-                                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', padding: '0.375rem 0.625rem' }}
+                                                    disabled={rejectDisabled}
+                                                    style={getTruthActionButtonStyle('reject', rejectDisabled)}
                                                 >
                                                     <X size={13} />
                                                     Reject
@@ -1679,8 +1745,8 @@ export default function RequirementsPage() {
                                                 <button
                                                     className="btn btn-sm"
                                                     onClick={() => openTruthReview(req, 'mark-stale')}
-                                                    disabled={truthActionLoading === `${req.id}:mark-stale` || truthState === 'stale_requirement'}
-                                                    style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem', padding: '0.375rem 0.625rem' }}
+                                                    disabled={staleDisabled}
+                                                    style={getTruthActionButtonStyle('mark-stale', staleDisabled)}
                                                 >
                                                     <AlertTriangle size={13} />
                                                     Stale

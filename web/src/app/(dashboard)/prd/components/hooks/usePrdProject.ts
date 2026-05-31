@@ -124,6 +124,7 @@ export function usePrdProject() {
     );
 
     return {
+        currentProjectId: currentProject?.id || null,
         existingProjects,
         projectData,
         testableFeatures,

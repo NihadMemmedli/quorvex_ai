@@ -1263,28 +1263,114 @@ async def get_job_status(job_id: str):
             await queue.connect()
             task = await queue.get_task(job["_task_id"])
             if task:
+                terminal_statuses = (
+                    K6TaskStatus.COMPLETED,
+                    K6TaskStatus.FAILED,
+                    K6TaskStatus.TIMEOUT,
+                    K6TaskStatus.CANCELLED,
+                )
                 # When task finishes, sync results to DB as a fallback
                 # (in case the worker's DB update failed)
-                if task.status in (K6TaskStatus.COMPLETED, K6TaskStatus.FAILED) and not job.get("_db_synced"):
+                result_data = None
+                if task.status in terminal_statuses:
                     try:
                         result_json = await queue._redis.hget(queue.RESULTS_KEY, task.id)
                         if result_json:
                             import json as _json
 
                             result_data = _json.loads(result_json)
-                            from orchestrator.workflows.load_test_runner import update_db_record
+                    except Exception as result_err:
+                        logger.debug(f"Failed to load distributed result for task {task.id}: {result_err}")
 
-                            update_db_record(task.run_id, result_data)
-                            job["_db_synced"] = True
-                            logger.info(f"Synced distributed task {task.id} results to DB (fallback)")
+                if task.status in terminal_statuses and result_data and not job.get("_db_synced"):
+                    try:
+                        from orchestrator.workflows.load_test_runner import update_db_record
+
+                        update_db_record(task.run_id, result_data)
+                        job["_db_synced"] = True
+                        logger.info(f"Synced distributed task {task.id} results to DB (fallback)")
                     except Exception as db_err:
                         logger.warning(f"Failed to sync distributed results to DB: {db_err}")
+
+                if task.status in terminal_statuses:
+                    summary = result_data.get("summary") if isinstance(result_data, dict) else None
+                    overview = summary.get("overview") if isinstance(summary, dict) else None
+                    if not isinstance(overview, dict):
+                        overview = {}
+
+                    existing_result = job.get("result") if isinstance(job.get("result"), dict) else {}
+                    result = {
+                        "run_id": task.run_id,
+                        "total_requests": overview.get("total_requests", existing_result.get("total_requests", 0)),
+                        "avg_response_time_ms": overview.get(
+                            "avg_response_time_ms",
+                            existing_result.get("avg_response_time_ms", 0),
+                        ),
+                        "requests_per_second": overview.get(
+                            "requests_per_second",
+                            existing_result.get("requests_per_second", 0),
+                        ),
+                    }
+                    if isinstance(result_data, dict):
+                        result.update(
+                            {
+                                "run_dir": result_data.get("run_dir"),
+                                "exit_code": result_data.get("exit_code"),
+                                "thresholds_passed": (
+                                    summary.get("thresholds_passed") if isinstance(summary, dict) else None
+                                ),
+                            }
+                        )
+
+                    if task.status == K6TaskStatus.COMPLETED:
+                        if overview:
+                            message = (
+                                f"{result['total_requests']} requests, "
+                                f"{result['avg_response_time_ms']}ms avg, "
+                                f"{result['requests_per_second']} rps"
+                            )
+                        else:
+                            message = "K6 test completed"
+                        stage = "done"
+                    elif task.status == K6TaskStatus.CANCELLED:
+                        message = task.error or "K6 test cancelled"
+                        stage = "cancelled"
+                    else:
+                        message = task.error or (
+                            result_data.get("error") if isinstance(result_data, dict) else None
+                        ) or f"K6 test {task.status.value}"
+                        stage = "error"
+
+                    job.update(
+                        {
+                            "status": task.status.value,
+                            "stage": stage,
+                            "message": message,
+                            "result": result,
+                            "completed_at": job.get("completed_at") or time.time(),
+                        }
+                    )
+
+                    if not job.get("_lock_released"):
+                        try:
+                            from orchestrator.services.load_test_lock import release
+
+                            released = await release(task.run_id)
+                            job["_lock_released"] = True
+                            if released:
+                                logger.info(f"Released load test lock for distributed run {task.run_id}")
+                            else:
+                                logger.info(
+                                    f"Load test lock for distributed run {task.run_id} was already released"
+                                )
+                        except Exception as release_err:
+                            logger.warning(f"Failed to release load test lock for {task.run_id}: {release_err}")
 
                 return {
                     "job_id": job_id,
                     "status": task.status.value,
-                    "stage": task.status.value,
-                    "message": task.error or f"K6 test {task.status.value}",
+                    "stage": job.get("stage") if task.status in terminal_statuses else task.status.value,
+                    "message": job.get("message") if task.status in terminal_statuses else task.error or f"K6 test {task.status.value}",
                     "result": job.get("result"),
                     "execution_mode": "distributed",
                 }

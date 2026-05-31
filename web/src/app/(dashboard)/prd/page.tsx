@@ -14,6 +14,23 @@ import { usePrdTestRunner } from './components/hooks/usePrdTestRunner';
 import { UploadPhase } from './components/UploadPhase';
 import { WorkingPhase } from './components/WorkingPhase';
 
+interface ImportRequirementsResult {
+    created: number;
+    skipped: number;
+    total: number;
+}
+
+async function readResponseJson(response: Response): Promise<any> {
+    const text = await response.text();
+    if (!text) return null;
+
+    try {
+        return JSON.parse(text);
+    } catch {
+        return null;
+    }
+}
+
 export default function PrdPage() {
     const project = usePrdProject();
     const { settings, updateSetting, resetSettings } = usePrdSettings(project.projectData?.project);
@@ -26,6 +43,8 @@ export default function PrdPage() {
     );
 
     const [file, setFile] = useState<File | null>(null);
+    const [isImportingRequirements, setIsImportingRequirements] = useState(false);
+    const [importRequirementsResult, setImportRequirementsResult] = useState<ImportRequirementsResult | null>(null);
 
     // Computed stats
     const stats = computeStats(
@@ -53,6 +72,42 @@ export default function PrdPage() {
     const handleGenerateTests = useCallback(() => {
         testRunner.runTests(generation.generatedSpecs);
     }, [testRunner, generation.generatedSpecs]);
+
+    const handleImportRequirements = useCallback(async () => {
+        if (!project.projectData) return;
+
+        setIsImportingRequirements(true);
+        setImportRequirementsResult(null);
+        project.setError('');
+
+        try {
+            const params = new URLSearchParams();
+            if (project.currentProjectId) params.set('tenant_project_id', project.currentProjectId);
+            const query = params.toString() ? `?${params.toString()}` : '';
+            const res = await fetch(
+                `${API_BASE}/api/prd/${encodeURIComponent(project.projectData.project)}/import-requirements${query}`,
+                { method: 'POST' }
+            );
+            const data = await readResponseJson(res);
+            if (!res.ok) {
+                const detail = data?.detail || data?.message;
+                const fallback =
+                    res.status === 404
+                        ? 'PRD requirements import endpoint was not found. Restart the backend and try again.'
+                        : 'Failed to import requirements';
+                throw new Error(detail && detail !== 'Not Found' ? detail : fallback);
+            }
+            setImportRequirementsResult({
+                created: data.created || 0,
+                skipped: data.skipped || 0,
+                total: data.total || 0,
+            });
+        } catch (err: any) {
+            project.setError(err.message || 'Failed to import requirements');
+        } finally {
+            setIsImportingRequirements(false);
+        }
+    }, [project]);
 
     // --- Requirements CRUD ---
     const handleAddRequirement = useCallback(async (featureSlug: string, text: string) => {
@@ -126,6 +181,7 @@ export default function PrdPage() {
             ) : (
                 <WorkingPhase
                     projectName={project.projectData!.project}
+                    currentProjectId={project.currentProjectId}
                     features={project.projectData!.features}
                     testableFeatures={project.testableFeatures}
                     stats={stats}
@@ -140,6 +196,9 @@ export default function PrdPage() {
                     onGenerateTests={handleGenerateTests}
                     testPipelineStatus={testRunner.pipelineStatus}
                     onReset={handleReset}
+                    onImportRequirements={handleImportRequirements}
+                    isImportingRequirements={isImportingRequirements}
+                    importRequirementsResult={importRequirementsResult}
                     onAddRequirement={handleAddRequirement}
                     onEditRequirement={handleEditRequirement}
                     onDeleteRequirement={handleDeleteRequirement}

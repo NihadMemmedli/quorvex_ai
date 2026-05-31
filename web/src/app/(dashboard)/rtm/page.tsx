@@ -1475,21 +1475,25 @@ function RequirementRow({
                         <div className="rtm-linked-list">
                             {req.tests.map(test => (
                                 <div key={test.entry_id} className="rtm-linked-test">
-                                    <Link href={specDetailHref(test)}>
-                                        <FileText size={14} color="var(--primary)" aria-hidden="true" />
-                                        <span>{test.spec_name}</span>
-                                        <small>{(test.confidence * 100).toFixed(0)}% match</small>
+                                    <Link className="rtm-linked-test-link" href={specDetailHref(test)}>
+                                        <span className="rtm-linked-test-icon-wrap">
+                                            <FileText size={14} color="var(--primary)" aria-hidden="true" />
+                                        </span>
+                                        <span className="rtm-linked-test-name" title={test.spec_name}>{test.spec_name}</span>
                                     </Link>
-                                    {unlinkingEntryId === test.entry_id ? (
-                                        <div className="rtm-confirm">
-                                            <button onClick={() => onConfirmUnlink(test.entry_id)}>Confirm</button>
-                                            <button onClick={onCancelUnlink}>Cancel</button>
-                                        </div>
-                                    ) : (
-                                        <button className="rtm-icon-button" onClick={() => onRequestUnlink(test.entry_id)} aria-label={`Unlink ${test.spec_name}`}>
-                                            <Unlink size={14} />
-                                        </button>
-                                    )}
+                                    <div className="rtm-linked-test-meta">
+                                        <small className="rtm-linked-test-match">{(test.confidence * 100).toFixed(0)}% match</small>
+                                        {unlinkingEntryId === test.entry_id ? (
+                                            <div className="rtm-confirm">
+                                                <button onClick={() => onConfirmUnlink(test.entry_id)}>Confirm</button>
+                                                <button onClick={onCancelUnlink}>Cancel</button>
+                                            </div>
+                                        ) : (
+                                            <button className="rtm-icon-button" onClick={() => onRequestUnlink(test.entry_id)} aria-label={`Unlink ${test.spec_name}`}>
+                                                <Unlink size={14} />
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
                             ))}
                         </div>
@@ -1653,28 +1657,62 @@ function RequirementRow({
                 }
 
                 .rtm-linked-test {
-                    display: flex;
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) auto;
                     align-items: center;
-                    gap: 0.5rem;
-                    padding: 0.55rem 0.7rem;
+                    gap: 1.25rem;
+                    min-height: 54px;
+                    padding: 0.7rem 0.8rem;
                     background: var(--surface);
                     border: 1px solid var(--border);
                     border-radius: 6px;
                 }
 
-                .rtm-linked-test a {
-                    display: flex;
+                .rtm-linked-test :global(.rtm-linked-test-link) {
+                    display: grid;
+                    grid-template-columns: 22px minmax(0, 1fr);
                     align-items: center;
-                    gap: 0.5rem;
-                    flex: 1;
+                    column-gap: 0.65rem;
                     min-width: 0;
                     color: var(--text);
                     text-decoration: none;
+                    font-size: 0.92rem;
+                    font-weight: 600;
                 }
 
-                .rtm-linked-test a span {
+                .rtm-linked-test :global(.rtm-linked-test-icon-wrap) {
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    width: 22px;
+                    height: 22px;
+                }
+
+                .rtm-linked-test :global(.rtm-linked-test-name) {
+                    display: block;
+                    min-width: 0;
                     overflow: hidden;
                     text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+
+                .rtm-linked-test-meta {
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: flex-end;
+                    gap: 1rem;
+                    min-width: 172px;
+                }
+
+                .rtm-linked-test-match {
+                    flex: 0 0 auto;
+                    display: inline-flex;
+                    align-items: center;
+                    min-height: 22px;
+                    padding: 0 0.5rem;
+                    border-radius: 999px;
+                    background: var(--surface-hover);
+                    line-height: 1;
                     white-space: nowrap;
                 }
 
