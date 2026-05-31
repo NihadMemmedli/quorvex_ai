@@ -272,6 +272,36 @@ interface AgentEvent {
     created_at: string;
 }
 
+interface AutonomousArtifact {
+    name: string;
+    path: string;
+    type: 'image' | 'video' | string;
+    modified_at?: string | null;
+}
+
+interface BrowserDisplayDiagnostics {
+    browser_process_count?: number | null;
+    browser_window_count?: number | null;
+    browser_process_seen?: boolean | null;
+    browser_window_seen?: boolean | null;
+    display?: string | null;
+    probed_at?: string | null;
+}
+
+interface AutonomousArtifactStatus {
+    mission_id?: string | null;
+    run_id?: string | null;
+    artifacts: AutonomousArtifact[];
+    latest_image?: AutonomousArtifact | null;
+    browser_activity_seen?: boolean;
+    browser_active?: boolean;
+    browser_last_tool?: string | null;
+    live_view_available?: boolean;
+    runtime_message?: string | null;
+    vnc_url?: string | null;
+    display_diagnostics?: BrowserDisplayDiagnostics | null;
+}
+
 interface AuditWorkItem {
     id?: string | null;
     role?: string | null;
@@ -950,8 +980,9 @@ function getEventStatusStyle(event: AgentEvent) {
 
 function buildEventOutput(events: AgentEvent[]) {
     return events
-        .filter(event => event.event_type === 'assistant_output')
-        .map(event => event.message)
+        .filter(event => ['assistant_output', 'progress', 'lifecycle', 'tool_call', 'browser_action', 'complete', 'error'].includes(event.event_type))
+        .slice(-80)
+        .map(event => `[${eventLabel(event.event_type)}] ${event.message}`)
         .join('\n\n');
 }
 
@@ -1097,6 +1128,7 @@ export default function AutonomousMissionsPage() {
     const [selectedMissionId, setSelectedMissionId] = useState<string | null>(null);
     const [liveTab, setLiveTab] = useState<LiveTab>('live');
     const [missionEvents, setMissionEvents] = useState<AgentEvent[]>([]);
+    const [browserArtifacts, setBrowserArtifacts] = useState<AutonomousArtifactStatus | null>(null);
     const [streamStatus, setStreamStatus] = useState<'idle' | 'connecting' | 'connected' | 'closed' | 'error'>('idle');
     const [streamError, setStreamError] = useState<string | null>(null);
     const [creating, setCreating] = useState(false);
@@ -1231,6 +1263,38 @@ export default function AutonomousMissionsPage() {
         }
     }, [missionsUrl]);
 
+    const fetchMissionEvents = useCallback(async (missionId: string) => {
+        try {
+            const response = await fetchWithAuth(`${missionsUrl}/${encodeURIComponent(missionId)}/events?limit=500`);
+            if (!response.ok) return;
+            const data = await response.json();
+            const events = Array.isArray(data) ? data as AgentEvent[] : [];
+            setMissionEvents(events.sort((a, b) => a.sequence - b.sequence).slice(-500));
+        } catch (err) {
+            console.error('Failed to load autonomous mission events:', err);
+        }
+    }, [missionsUrl]);
+
+    const fetchBrowserArtifacts = useCallback(async (missionId: string) => {
+        try {
+            const response = await fetchWithAuth(`${missionsUrl}/${encodeURIComponent(missionId)}/artifacts`);
+            if (!response.ok) {
+                setBrowserArtifacts(null);
+                return;
+            }
+            const data = await response.json();
+            setBrowserArtifacts({
+                ...data,
+                artifacts: Array.isArray(data.artifacts) ? data.artifacts : [],
+                latest_image: data.latest_image || null,
+                display_diagnostics: data.display_diagnostics || null,
+            });
+        } catch (err) {
+            console.error('Failed to load autonomous browser artifacts:', err);
+            setBrowserArtifacts(null);
+        }
+    }, [missionsUrl]);
+
     const refreshAll = useCallback(async () => {
         await Promise.all([fetchMissions(), fetchApprovals(), fetchProposals(), fetchWorkItems(), fetchDiagnostics()]);
     }, [fetchApprovals, fetchDiagnostics, fetchMissions, fetchProposals, fetchWorkItems]);
@@ -1268,6 +1332,7 @@ export default function AutonomousMissionsPage() {
     useEffect(() => {
         if (!selectedMissionId) {
             setMissionEvents([]);
+            setBrowserArtifacts(null);
             setStreamStatus('idle');
             setStreamError(null);
             setAppChangeGroups([]);
@@ -1281,9 +1346,12 @@ export default function AutonomousMissionsPage() {
         const controller = new AbortController();
         let cancelled = false;
         const missionId = selectedMissionId;
+        setMissionEvents([]);
+        setBrowserArtifacts(null);
+        void fetchMissionEvents(missionId);
+        void fetchBrowserArtifacts(missionId);
 
         async function connectEventStream() {
-            setMissionEvents([]);
             setStreamStatus('connecting');
             setStreamError(null);
             try {
@@ -1349,7 +1417,7 @@ export default function AutonomousMissionsPage() {
             cancelled = true;
             controller.abort();
         };
-    }, [missionsUrl, selectedMissionId]);
+    }, [fetchBrowserArtifacts, fetchMissionEvents, missionsUrl, selectedMissionId]);
 
     useEffect(() => {
         if (!selectedMissionId) return;
@@ -1361,6 +1429,31 @@ export default function AutonomousMissionsPage() {
         const fallbackWorkItems = workItems.filter(item => item.mission_id === selectedMissionId);
         void fetchTeamTimeline(selectedMissionId, fallbackWorkItems);
     }, [fetchTeamTimeline, selectedMissionId, workItems]);
+
+    useEffect(() => {
+        const activeMissionIds = missions
+            .filter(mission => ['running', 'starting', 'queued', 'active'].includes(getMissionStatusText(mission.status).toLowerCase()))
+            .map(mission => mission.id);
+        if (activeMissionIds.length === 0 && !selectedMissionId) return;
+        const interval = window.setInterval(() => {
+            void refreshAll();
+            if (selectedMissionId) {
+                void fetchMissionEvents(selectedMissionId);
+                void fetchBrowserArtifacts(selectedMissionId);
+                const fallbackWorkItems = workItems.filter(item => item.mission_id === selectedMissionId);
+                void fetchTeamTimeline(selectedMissionId, fallbackWorkItems);
+            }
+        }, 5000);
+        return () => window.clearInterval(interval);
+    }, [
+        fetchBrowserArtifacts,
+        fetchMissionEvents,
+        fetchTeamTimeline,
+        missions,
+        refreshAll,
+        selectedMissionId,
+        workItems,
+    ]);
 
     useEffect(() => {
         if (!showCreate && !materializeProposal && !auditProposal) return;
@@ -1513,6 +1606,8 @@ export default function AutonomousMissionsPage() {
     const latestEvent = missionEvents[missionEvents.length - 1];
     const liveAgentOutput = buildEventOutput(missionEvents);
     const latestBrowserEvent = [...missionEvents].reverse().find(event => event.event_type === 'browser_action');
+    const browserRuntimeMessage = browserArtifacts?.runtime_message
+        || (latestBrowserEvent ? 'Autonomous mission browser activity has been observed.' : 'Waiting for autonomous browser activity or screenshot artifacts.');
     const selectedTemplate = QUICK_START_TEMPLATES.find(template => template.label === selectedTemplateLabel)
         || QUICK_START_TEMPLATES.find(template => template.mission_type === form.mission_type)
         || QUICK_START_TEMPLATES[0];
@@ -1656,6 +1751,11 @@ export default function AutonomousMissionsPage() {
         const label = `${mission.id}:${action}`;
         setActionLoading(label);
         setError(null);
+        if (action === 'start') {
+            setSelectedMissionId(mission.id);
+            setLiveTab('live');
+            setExpandedMissionIds(prev => new Set(prev).add(mission.id));
+        }
         try {
             const response = await fetchWithAuth(`${missionsUrl}/${encodeURIComponent(mission.id)}/${action}`, {
                 method: 'POST',
@@ -1664,6 +1764,12 @@ export default function AutonomousMissionsPage() {
                 throw new Error(await response.text() || `Failed to ${action} mission`);
             }
             await refreshAll();
+            if (action === 'start') {
+                await Promise.all([
+                    fetchMissionEvents(mission.id),
+                    fetchBrowserArtifacts(mission.id),
+                ]);
+            }
         } catch (err) {
             console.error(`Failed to ${action} autonomous mission:`, err);
             setError(err instanceof Error ? err.message : `Failed to ${action} mission`);
@@ -2492,6 +2598,18 @@ export default function AutonomousMissionsPage() {
                                 runId={selectedMission.latest_run_id || selectedMission.id}
                                 isActive={canPause(selectedMission.status)}
                                 showHeader
+                                artifacts={browserArtifacts?.artifacts || []}
+                                latestImage={browserArtifacts?.latest_image || null}
+                                preferArtifactPreview={browserArtifacts?.live_view_available === false}
+                                statusMessage={browserRuntimeMessage}
+                                liveViewAvailable={browserArtifacts?.live_view_available !== false}
+                                liveBrowserRequested
+                                runtimeMessage={browserRuntimeMessage}
+                                vncUrl={browserArtifacts?.vnc_url || null}
+                                displayDiagnostics={browserArtifacts?.display_diagnostics || null}
+                                browserActivitySeen={Boolean(browserArtifacts?.browser_activity_seen || latestBrowserEvent)}
+                                browserActive={Boolean(browserArtifacts?.browser_active || latestBrowserEvent)}
+                                browserLastTool={browserArtifacts?.browser_last_tool || asCompactText(latestBrowserEvent?.payload?.short_name, '') || null}
                             />
                         </div>
                     )}

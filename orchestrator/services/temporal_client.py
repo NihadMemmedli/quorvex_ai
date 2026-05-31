@@ -578,6 +578,64 @@ async def check_autopilot_temporal_health() -> dict[str, Any]:
     }
 
 
+async def check_autonomous_mission_temporal_health() -> dict[str, Any]:
+    """Return Temporal readiness for autonomous mission workflows and activities."""
+    worker_contract: dict[str, Any] = {}
+    try:
+        from orchestrator.services.autonomous_mission_worker import get_worker_contract
+
+        worker_contract = get_worker_contract()
+    except Exception as exc:
+        worker_contract = {"contract_error": str(exc)}
+
+    task_queue = settings.temporal_task_queue
+    base = {
+        "address": settings.temporal_address,
+        "namespace": settings.temporal_namespace,
+        "task_queue": task_queue,
+        "workflow_type": "AutonomousMissionWorkflow",
+        "worker_module": "orchestrator.services.autonomous_mission_worker",
+        "worker_contract": worker_contract,
+    }
+
+    try:
+        await _connect_client()
+    except TemporalUnavailableError as exc:
+        return {**base, "available": False, "status": "unavailable", "error": str(exc)}
+
+    task_queue_status: dict[str, Any] = {}
+    try:
+        task_queue_status = await describe_temporal_task_queue(task_queue)
+    except TemporalUnavailableError as exc:
+        return {
+            **base,
+            "available": False,
+            "status": "degraded",
+            "task_queue_status": task_queue_status,
+            "error": str(exc),
+        }
+
+    has_workers = bool(task_queue_status.get("has_workflow_pollers")) and bool(
+        task_queue_status.get("has_activity_pollers")
+    )
+    return {
+        **base,
+        "available": has_workers,
+        "status": "healthy" if has_workers else "degraded",
+        "task_queue_status": task_queue_status,
+        "worker_pollers": {
+            "workflow": task_queue_status.get("workflow_pollers", 0),
+            "activity": task_queue_status.get("activity_pollers", 0),
+        },
+        "error": None
+        if has_workers
+        else (
+            "No Temporal worker pollers are active for autonomous missions. "
+            f"Start orchestrator.services.autonomous_mission_worker on task queue {task_queue}."
+        ),
+    }
+
+
 async def describe_autonomous_mission_workflow(workflow_id: str) -> dict:
     """Return lightweight Temporal workflow status for mission health checks."""
     client = await _connect_client()

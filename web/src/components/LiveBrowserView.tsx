@@ -583,7 +583,7 @@ export function LiveBrowserView({
             >
                 <Shield size={48} color="var(--text-secondary)" />
                 <p style={{ color: 'var(--text-secondary)', textAlign: 'center', maxWidth: '300px' }}>
-                    Live browser view is available for administrators only.
+                    {pendingMessage || 'Live browser view is available for administrators only. Screenshots will appear here when the agent captures them.'}
                 </p>
             </div>
         );

@@ -246,6 +246,83 @@ def _run_to_response(run: AutonomousMissionRun) -> dict[str, Any]:
     }
 
 
+def _artifact_type_for_path(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg"}:
+        return "image"
+    if suffix in {".webm", ".mp4"}:
+        return "video"
+    if path.name in {"agent-stream.jsonl", "raw_output.txt", "tool_calls.json", "agent_summary.json"}:
+        return "log"
+    if suffix in {".log", ".txt", ".json"}:
+        return "log"
+    return None
+
+
+def _collect_autonomous_filesystem_artifacts(mission_id: str, run_id: str | None, work_item_ids: list[str]) -> list[dict[str, Any]]:
+    runs_root = BASE_DIR / "runs"
+    candidates = [runs_root / "autonomous" / mission_id]
+    if run_id:
+        candidates.append(runs_root / run_id)
+    candidates.extend(runs_root / work_item_id for work_item_id in work_item_ids)
+    artifacts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        for path in sorted(item for item in candidate.rglob("*") if item.is_file()):
+            artifact_type = _artifact_type_for_path(path)
+            if not artifact_type:
+                continue
+            try:
+                resolved = str(path.resolve())
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                relative = path.relative_to(runs_root)
+                modified_at = datetime.utcfromtimestamp(path.stat().st_mtime).isoformat()
+            except (OSError, ValueError):
+                continue
+            artifacts.append(
+                {
+                    "name": path.name,
+                    "path": f"/artifacts/{relative.as_posix()}",
+                    "type": artifact_type,
+                    "modified_at": modified_at,
+                }
+            )
+    return sorted(
+        artifacts,
+        key=lambda item: (
+            item.get("type") != "image",
+            item.get("type") != "video",
+            str(item.get("modified_at") or ""),
+        ),
+        reverse=True,
+    )
+
+
+def _collect_autonomous_embedded_artifacts(items: list[AutonomousAgentWorkItem]) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for item in items:
+        for index, artifact in enumerate(item.artifacts or []):
+            if not isinstance(artifact, dict):
+                continue
+            path = artifact.get("path") or artifact.get("url")
+            if not path:
+                continue
+            artifacts.append(
+                {
+                    "name": str(artifact.get("name") or artifact.get("label") or f"{item.id}-artifact-{index + 1}"),
+                    "path": str(path),
+                    "type": str(artifact.get("type") or "artifact"),
+                    "modified_at": artifact.get("modified_at") or item.updated_at.isoformat(),
+                    "work_item_id": item.id,
+                }
+            )
+    return artifacts
+
+
 def _finding_to_response(finding: AutonomousFinding) -> dict[str, Any]:
     return {
         "id": finding.id,
@@ -980,6 +1057,13 @@ async def get_mission_status(
     latest_run = session.get(AutonomousMissionRun, mission.latest_run_id) if mission.latest_run_id else None
 
     temporal_status: dict[str, Any] = {"available": False, "workflow_status": None, "error": None}
+    temporal_readiness: dict[str, Any] = {"available": False, "status": "unknown", "error": None}
+    try:
+        from orchestrator.services.temporal_client import check_autonomous_mission_temporal_health
+
+        temporal_readiness = await check_autonomous_mission_temporal_health()
+    except Exception as exc:
+        temporal_readiness = {"available": False, "status": "unavailable", "error": str(exc)}
     if mission.latest_workflow_id:
         try:
             from orchestrator.services.temporal_client import (
@@ -997,10 +1081,11 @@ async def get_mission_status(
     return {
         "mission": {**_mission_to_response(mission, session), "health_status": health_status, "team_summary": team_summary},
         "temporal": temporal_status,
+        "temporal_readiness": temporal_readiness,
         "latest_run": _run_to_response(latest_run) if latest_run else None,
         "blocking_approvals": [_approval_to_response(approval) for approval in pending_approvals[:10]],
         "pending_approval_count": len(pending_approvals),
-        "worker_available": temporal_status["available"],
+        "worker_available": bool(temporal_readiness.get("available")) or bool(temporal_status.get("available")),
         "next_action": _derive_next_action(
             mission,
             len(pending_approvals),
@@ -1072,12 +1157,47 @@ async def start_mission(
     session: Session = Depends(get_session),
     current_user: User | None = Depends(get_current_user),
 ):
-    from orchestrator.services.temporal_client import TemporalUnavailableError, start_autonomous_mission_workflow
+    from orchestrator.services.temporal_client import (
+        TemporalUnavailableError,
+        check_autonomous_mission_temporal_health,
+        start_autonomous_mission_workflow,
+    )
 
     mission = _get_project_mission(project_id, mission_id, session)
     await _require_project_edit(project_id, current_user, session)
     if mission.status == "running":
         return _mission_to_response(mission, session)
+
+    readiness = await check_autonomous_mission_temporal_health()
+    if not readiness.get("available"):
+        message = str(
+            readiness.get("error")
+            or "No Temporal worker pollers are active for autonomous missions."
+        )
+        mission.status = "error"
+        mission.health_status = "blocked"
+        mission.last_error = message
+        mission.current_stage = "worker_unavailable"
+        mission.next_action = "Start the autonomous mission worker and retry this mission."
+        mission.updated_at = datetime.utcnow()
+        session.add(mission)
+        session.commit()
+        emit_mission_event(
+            mission,
+            message,
+            event_type="error",
+            payload={"temporal_readiness": readiness},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": message,
+                "task_queue": readiness.get("task_queue"),
+                "worker_pollers": readiness.get("worker_pollers"),
+                "task_queue_status": readiness.get("task_queue_status"),
+                "next_action": mission.next_action,
+            },
+        )
 
     try:
         started = await start_autonomous_mission_workflow(mission.id)
@@ -1421,6 +1541,74 @@ async def list_mission_events(
         session=session,
     )
     return [_event_to_response(event) for event in events]
+
+
+@router.get("/{project_id}/missions/{mission_id}/artifacts")
+async def get_mission_artifacts(
+    project_id: str,
+    mission_id: str,
+    run_id: str | None = Query(default=None),
+    session: Session = Depends(get_session),
+    current_user: User | None = Depends(get_current_user_optional),
+):
+    mission = _get_project_mission(project_id, mission_id, session)
+    await _require_project_view(project_id, current_user, session)
+    effective_run_id = run_id or mission.latest_run_id
+    statement = select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)
+    if effective_run_id:
+        statement = statement.where(AutonomousAgentWorkItem.run_id == effective_run_id)
+    items = session.exec(statement.order_by(col(AutonomousAgentWorkItem.updated_at).desc()).limit(100)).all()
+    artifacts = [
+        *_collect_autonomous_filesystem_artifacts(mission_id, effective_run_id, [item.id for item in items]),
+        *_collect_autonomous_embedded_artifacts(items),
+    ]
+    latest_image = next((artifact for artifact in artifacts if artifact.get("type") == "image"), None)
+
+    browser_events = list_events(project_id=project_id, mission_id=mission_id, limit=200, session=session)
+    latest_browser_event = next(
+        (event for event in reversed(browser_events) if event.event_type == "browser_action"),
+        None,
+    )
+    runtime: dict[str, Any]
+    try:
+        from orchestrator.utils.playwright_mcp import browser_runtime_status, live_browser_display_diagnostics
+
+        runtime = browser_runtime_status()
+        if runtime.get("live_view_available"):
+            runtime["display_diagnostics"] = live_browser_display_diagnostics()
+    except Exception as exc:
+        runtime = {
+            "browser_runtime": "unavailable",
+            "live_view_available": False,
+            "runtime_message": f"Browser runtime diagnostics are unavailable: {exc}",
+        }
+
+    active = mission.status == "running" or any(item.status in {"queued", "running"} for item in items)
+    if not runtime.get("runtime_message"):
+        runtime["runtime_message"] = (
+            "Autonomous browser activity is running in the visible VNC runtime."
+            if runtime.get("live_view_available")
+            else "Autonomous browser execution is headless or no VNC runtime is available."
+        )
+    return {
+        "mission_id": mission_id,
+        "run_id": effective_run_id,
+        "artifacts": artifacts[:200],
+        "latest_image": latest_image,
+        "artifact_count": len(artifacts),
+        "browser_activity_seen": latest_browser_event is not None,
+        "browser_active": active and latest_browser_event is not None,
+        "browser_last_tool": (
+            latest_browser_event.payload.get("short_name")
+            if latest_browser_event and isinstance(latest_browser_event.payload, dict)
+            else None
+        ),
+        "browser_runtime": runtime.get("browser_runtime"),
+        "live_view_available": bool(runtime.get("live_view_available")),
+        "runtime_message": runtime.get("runtime_message"),
+        "vnc_url": runtime.get("vnc_url"),
+        "display_diagnostics": runtime.get("display_diagnostics"),
+    }
 
 
 @router.get("/{project_id}/missions/{mission_id}/events/stream")

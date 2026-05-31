@@ -41,7 +41,11 @@ from orchestrator.api.models_db import (
     RtmEntry,
     RtmSnapshot,
 )
-from orchestrator.services.autonomous_events import emit_mission_event, emit_work_item_status_event
+from orchestrator.services.autonomous_events import (
+    create_autonomous_agent_event,
+    emit_mission_event,
+    emit_work_item_status_event,
+)
 from orchestrator.utils.json_utils import extract_json_from_markdown
 from orchestrator.utils.string_utils import slugify
 
@@ -1780,16 +1784,53 @@ def _compact_json(value: Any, *, max_chars: int) -> str:
     return text[: max_chars - 3] + "..."
 
 
-def _allowed_tools_for_work_item(item: AutonomousAgentWorkItem) -> list[str]:
+def _allowed_tools_for_work_item(
+    item: AutonomousAgentWorkItem,
+    *,
+    mcp_config_dir: Path | str | None = None,
+) -> list[str]:
     try:
         from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
 
-        allowed = get_agent_allowed_tools(item.role)
+        allowed = get_agent_allowed_tools(item.role, mcp_config_dir=mcp_config_dir)
         if allowed:
             return allowed
     except Exception:
         logger.debug("Could not resolve autonomous role tool profile for %s", item.role, exc_info=True)
     return ["Glob", "Grep", "Read", "LS"]
+
+
+def _short_tool_name(tool_name: str | None) -> str:
+    if not tool_name:
+        return "tool"
+    text = str(tool_name)
+    if "__" in text:
+        return text.split("__")[-1]
+    return text
+
+
+def _is_browser_tool(tool_name: str | None) -> bool:
+    short_name = _short_tool_name(tool_name)
+    text = str(tool_name or "")
+    return short_name.startswith("browser_") or "__browser_" in text
+
+
+def _autonomous_work_item_run_dir(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> Path:
+    return RUNS_DIR / "autonomous" / mission.id / item.id
+
+
+def _prepare_autonomous_work_item_runtime(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> tuple[Path, dict[str, Any]]:
+    run_dir = _autonomous_work_item_run_dir(mission, item)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    runtime: dict[str, Any] = {}
+    try:
+        from orchestrator.utils.playwright_mcp import browser_runtime_status, write_playwright_mcp_config
+
+        write_playwright_mcp_config(run_dir=run_dir, server_name="playwright", project_root=REPOSITORY_ROOT)
+        runtime = browser_runtime_status()
+    except Exception:
+        logger.debug("Could not prepare autonomous work item browser runtime", exc_info=True)
+    return run_dir, runtime
 
 
 def _enqueue_agent_work_item(
@@ -1808,6 +1849,9 @@ def _execute_agent_work_item_direct(
     """Execute one autonomous work item inside the Temporal activity worker."""
     now = _utcnow()
     timeout_seconds = max(300, min(mission.max_runtime_minutes * 60, 7200))
+    run_dir, browser_runtime = _prepare_autonomous_work_item_runtime(mission, item)
+    allowed_tools = _allowed_tools_for_work_item(item, mcp_config_dir=run_dir)
+    has_browser_tools = any(_is_browser_tool(tool) for tool in allowed_tools)
     item.agent_task_id = None
     item.status = "running"
     item.attempt_count += 1
@@ -1820,6 +1864,8 @@ def _execute_agent_work_item_direct(
         "phase": "running",
         "message": "Agent work item is running in a Temporal activity.",
         "runtime": str((mission.config or {}).get("runtime") or "claude_sdk"),
+        "has_browser_tools": has_browser_tools,
+        **browser_runtime,
     }
     session.add(item)
     session.commit()
@@ -1833,16 +1879,55 @@ def _execute_agent_work_item_direct(
         from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime, normalize_agent_runtime
 
         runtime_name = normalize_agent_runtime((mission.config or {}).get("runtime"))
+        last_progress_signature: tuple[str, str, str] | None = None
+        last_assistant_message: str | None = None
+
+        def _emit_event(event_type: str, message: str, *, level: str = "info", payload: dict[str, Any] | None = None) -> None:
+            try:
+                create_autonomous_agent_event(
+                    project_id=item.project_id,
+                    mission_id=item.mission_id,
+                    run_id=item.run_id,
+                    work_item_id=item.id,
+                    agent_task_id=item.agent_task_id,
+                    event_type=event_type,
+                    level=level,
+                    message=message,
+                    payload=payload,
+                )
+            except Exception:
+                logger.debug("Failed to persist autonomous work item event", exc_info=True)
+
+        def _on_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
+            short_name = _short_tool_name(tool_name)
+            payload = {
+                "status": "started",
+                "tool_name": tool_name,
+                "short_name": short_name,
+                "tool_input": tool_input,
+                "runtime": runtime_name,
+            }
+            _emit_event("tool_call", f"Tool started: {short_name}", payload=payload)
+            if _is_browser_tool(tool_name):
+                _emit_event("browser_action", f"Browser action: {short_name}", payload=payload)
 
         def _on_progress(progress: dict[str, Any]) -> None:
+            nonlocal last_progress_signature, last_assistant_message
             try:
                 current = session.get(AutonomousAgentWorkItem, item.id)
                 if not current or current.status != "running":
                     return
                 heartbeat_at = _utcnow()
+                last_tool = progress.get("last_tool")
+                progress_payload = {
+                    **progress,
+                    "runtime": runtime_name,
+                    "has_browser_tools": has_browser_tools,
+                    **browser_runtime,
+                }
                 current.progress = {
                     **(current.progress or {}),
-                    **{key: value for key, value in progress.items() if value is not None},
+                    **{key: value for key, value in progress_payload.items() if value is not None},
                     "runtime": runtime_name,
                     "phase": progress.get("phase") or "running",
                     "message": progress.get("message") or "Agent is running.",
@@ -1853,6 +1938,44 @@ def _execute_agent_work_item_direct(
                 current.updated_at = heartbeat_at
                 session.add(current)
                 session.commit()
+                phase = str(progress.get("phase") or "running")
+                message = str(progress.get("message") or "Agent is running.")
+                signature = (phase, message, str(last_tool or ""))
+                if signature != last_progress_signature:
+                    last_progress_signature = signature
+                    _emit_event(
+                        "progress",
+                        message,
+                        payload={
+                            **progress_payload,
+                            "phase": phase,
+                            "status": current.status,
+                            "work_item_progress": current.progress,
+                        },
+                    )
+                if phase == "tool_result" and last_tool:
+                    short_name = _short_tool_name(str(last_tool))
+                    payload = {
+                        **progress_payload,
+                        "status": "completed",
+                        "tool_name": str(last_tool),
+                        "short_name": short_name,
+                    }
+                    _emit_event("tool_call", f"Tool completed: {short_name}", payload=payload)
+                    if _is_browser_tool(str(last_tool)):
+                        _emit_event("browser_action", f"Browser action completed: {short_name}", payload=payload)
+                elif (
+                    message
+                    and message != last_assistant_message
+                    and phase not in {"tool_use", "tool_result"}
+                    and message not in {"Agent is running.", "Agent work item is running in a Temporal activity."}
+                ):
+                    last_assistant_message = message
+                    _emit_event(
+                        "assistant_output",
+                        message,
+                        payload={"preview": message, "phase": phase, "runtime": runtime_name},
+                    )
             except Exception:
                 logger.debug("Failed to persist autonomous work item progress", exc_info=True)
 
@@ -1869,10 +1992,17 @@ def _execute_agent_work_item_direct(
                     "hermes_run_id": task_id if runtime_name == "hermes" else None,
                     "phase": "queued" if runtime_name == "hermes" else "running",
                     "message": "Hermes run started." if runtime_name == "hermes" else "Agent task started.",
+                    "has_browser_tools": has_browser_tools,
+                    **browser_runtime,
                 }
                 current.updated_at = _utcnow()
                 session.add(current)
                 session.commit()
+                _emit_event(
+                    "lifecycle",
+                    current.progress["message"],
+                    payload={"agent_task_id": task_id, "runtime": runtime_name, **browser_runtime},
+                )
             except Exception:
                 logger.debug("Failed to persist autonomous task id", exc_info=True)
 
@@ -1882,10 +2012,14 @@ def _execute_agent_work_item_direct(
                 _agent_prompt_for_work_item(mission, item),
                 AgentRuntimeContext(
                     timeout_seconds=timeout_seconds,
-                    allowed_tools=_allowed_tools_for_work_item(item),
+                    allowed_tools=allowed_tools,
+                    tools=list(allowed_tools),
                     max_budget_usd=mission.max_llm_budget_usd,
                     on_task_enqueued=_on_task_enqueued,
+                    on_tool_use=_on_tool_use,
                     on_progress=_on_progress,
+                    session_dir=run_dir,
+                    cwd=run_dir,
                     owner_type="autonomous_work_item",
                     owner_id=item.id,
                     owner_label=f"{mission.name}: {item.role}",
@@ -1916,7 +2050,7 @@ def _execute_agent_work_item_direct(
         item.completed_at = now
         item.updated_at = now
         item.last_heartbeat_at = now
-        item.progress = {"phase": "failed", "message": item.error_message}
+        item.progress = {"phase": "failed", "message": item.error_message, **browser_runtime}
         session.add(item)
         session.commit()
         emit_work_item_status_event(item, item.error_message, event_type="error")
@@ -1949,7 +2083,7 @@ def _execute_agent_work_item_direct(
                 "content": result.output or "",
             }
         ]
-        item.progress = {"phase": "completed", "message": "Agent completed this assignment."}
+        item.progress = {"phase": "completed", "message": "Agent completed this assignment.", **browser_runtime}
         item.budget_used_usd = float(result.total_cost_usd or 0.0)
         item.updated_at = now
         item.last_heartbeat_at = now
@@ -1958,6 +2092,17 @@ def _execute_agent_work_item_direct(
         session.add(item)
         session.add(mission)
         session.commit()
+        if result.output:
+            create_autonomous_agent_event(
+                project_id=item.project_id,
+                mission_id=item.mission_id,
+                run_id=item.run_id,
+                work_item_id=item.id,
+                agent_task_id=item.agent_task_id,
+                event_type="assistant_output",
+                message=result.output,
+                payload={"preview": result.output[:1000], "runtime": runtime_name},
+            )
         emit_work_item_status_event(item, "Agent completed this assignment.", event_type="complete")
         return True
 
@@ -1965,12 +2110,24 @@ def _execute_agent_work_item_direct(
     item.error_message = result.error or "Agent work item failed"
     item.completed_at = now
     item.result = {"output": result.output or "", "telemetry": telemetry, "error": item.error_message}
-    item.progress = {"phase": "failed", "message": item.error_message}
+    item.progress = {"phase": "failed", "message": item.error_message, **browser_runtime}
     item.updated_at = now
     item.last_heartbeat_at = now
     item.budget_used_usd = float(result.total_cost_usd or 0.0)
     session.add(item)
     session.commit()
+    if result.output:
+        create_autonomous_agent_event(
+            project_id=item.project_id,
+            mission_id=item.mission_id,
+            run_id=item.run_id,
+            work_item_id=item.id,
+            agent_task_id=item.agent_task_id,
+            event_type="assistant_output",
+            message=result.output,
+            level="warning",
+            payload={"preview": result.output[:1000], "runtime": telemetry["runtime"]},
+        )
     emit_work_item_status_event(item, item.error_message, event_type="error")
     return False
 

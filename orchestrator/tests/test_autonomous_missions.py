@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-autonomous-tests")
 os.environ.setdefault("REQUIRE_AUTH", "false")
 
@@ -66,6 +68,7 @@ from orchestrator.services.autonomous_activities import (
     _create_findings_from_completed_work_items,
     _create_proposals_for_approved_findings,
     _generate_pytest_content,
+    _execute_agent_work_item_direct,
     _plan_whole_app_work_items,
     _recover_stale_work_items,
     autonomous_health_diagnostics,
@@ -78,6 +81,7 @@ from orchestrator.services.autonomous_activities import (
     monitor_autonomous_project,
 )
 from orchestrator.services.autonomous_events import create_autonomous_agent_event
+from orchestrator.utils.agent_runner import AgentResult, ToolCall
 
 
 def _ensure_tables() -> None:
@@ -1012,6 +1016,11 @@ def test_accepted_revision_work_item_creates_proposal_with_full_lineage():
 
 def test_execute_mission_iteration_creates_parallel_team_work_items(monkeypatch):
     _ensure_tables()
+    with Session(engine) as session:
+        settings = session.get(ExecutionSettings, 1) or ExecutionSettings(id=1)
+        settings.parallelism = 2
+        session.add(settings)
+        session.commit()
 
     def fake_enqueue(session, mission, item):
         item.agent_task_id = f"agent-task-{item.role}"
@@ -1755,6 +1764,195 @@ def test_autonomous_agent_events_are_ordered_and_redacted():
     assert [event.id for event in events] == [first.id, second.id]
     assert events[0].payload["authorization"] == "[redacted]"
     assert events[0].payload["nested"]["api_key"] == "[redacted]"
+
+
+@pytest.mark.asyncio
+async def test_autonomous_temporal_health_degrades_without_worker_pollers(monkeypatch):
+    from orchestrator.services import temporal_client
+
+    async def connected():
+        return object()
+
+    async def task_queue_status(_task_queue: str):
+        return {
+            "workflow_pollers": 0,
+            "activity_pollers": 0,
+            "has_workflow_pollers": False,
+            "has_activity_pollers": False,
+        }
+
+    monkeypatch.setattr(temporal_client, "_connect_client", connected)
+    monkeypatch.setattr(temporal_client, "describe_temporal_task_queue", task_queue_status)
+
+    health = await temporal_client.check_autonomous_mission_temporal_health()
+
+    assert health["available"] is False
+    assert health["status"] == "degraded"
+    assert health["task_queue"]
+    assert health["worker_pollers"] == {"workflow": 0, "activity": 0}
+    assert "autonomous missions" in health["error"]
+
+
+def test_start_mission_returns_503_when_autonomous_worker_unavailable(monkeypatch):
+    _ensure_tables()
+    app = FastAPI()
+    app.include_router(autonomous_api.router)
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session)
+        project_id = mission.project_id
+        mission_id = mission.id
+
+    async def unavailable():
+        return {
+            "available": False,
+            "status": "degraded",
+            "task_queue": "quorvex-autonomous-missions",
+            "worker_pollers": {"workflow": 0, "activity": 0},
+            "error": "No Temporal worker pollers are active for autonomous missions.",
+        }
+
+    async def should_not_start(_mission_id: str):
+        raise AssertionError("workflow should not start without pollers")
+
+    monkeypatch.setattr("orchestrator.services.temporal_client.check_autonomous_mission_temporal_health", unavailable)
+    monkeypatch.setattr("orchestrator.services.temporal_client.start_autonomous_mission_workflow", should_not_start)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(f"/autonomous/{project_id}/missions/{mission_id}/start")
+
+    assert response.status_code == 503
+    payload = response.json()["detail"]
+    assert payload["task_queue"] == "quorvex-autonomous-missions"
+    assert payload["worker_pollers"] == {"workflow": 0, "activity": 0}
+    with Session(engine) as session:
+        mission_db = session.get(AutonomousMission, mission_id)
+        assert mission_db.status == "error"
+        assert mission_db.current_stage == "worker_unavailable"
+
+
+def test_direct_work_item_execution_emits_progress_tool_browser_and_completion_events(monkeypatch, tmp_path):
+    _ensure_tables()
+
+    class FakeRuntime:
+        async def run(self, _prompt, context):
+            context.on_task_enqueued("agent-task-1")
+            context.on_progress({"phase": "running", "message": "Inspecting target page"})
+            context.on_tool_use("mcp__playwright__browser_navigate", {"url": "https://example.com"})
+            context.on_progress({
+                "phase": "tool_result",
+                "message": "Navigation complete",
+                "last_tool": "mcp__playwright__browser_navigate",
+                "tool_calls": 1,
+                "browser_tool_calls": 1,
+            })
+            return AgentResult(
+                success=True,
+                output="Finished browser-backed exploration.",
+                tool_calls=[
+                    ToolCall(
+                        name="mcp__playwright__browser_navigate",
+                        timestamp=datetime.utcnow(),
+                        success=True,
+                        input={"url": "https://example.com"},
+                    )
+                ],
+                messages_received=3,
+                text_blocks_received=1,
+                duration_seconds=1.2,
+            )
+
+    monkeypatch.setattr("orchestrator.services.autonomous_activities.RUNS_DIR", tmp_path)
+    monkeypatch.setattr("orchestrator.services.agent_runtimes.get_agent_runtime", lambda _runtime: FakeRuntime())
+    monkeypatch.setattr("orchestrator.utils.playwright_mcp.browser_runtime_status", lambda: {
+        "browser_runtime": "vnc",
+        "live_view_available": True,
+        "vnc_url": "ws://localhost:6080/websockify",
+    })
+
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="exploration")
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        item = AutonomousAgentWorkItem(
+            id=f"amwi-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            role="explorer",
+            objective="Explore the homepage",
+            assigned_surface="https://example.com",
+            status="queued",
+        )
+        session.add(run)
+        session.add(item)
+        session.commit()
+
+        assert _execute_agent_work_item_direct(session, mission, item) is True
+
+        events = session.exec(
+            select(AutonomousAgentEvent)
+            .where(AutonomousAgentEvent.work_item_id == item.id)
+            .order_by(AutonomousAgentEvent.sequence)
+        ).all()
+        event_types = [event.event_type for event in events]
+        assert "progress" in event_types
+        assert "tool_call" in event_types
+        assert "browser_action" in event_types
+        assert "assistant_output" in event_types
+        assert "complete" in event_types
+
+
+def test_autonomous_artifacts_endpoint_returns_latest_screenshot(monkeypatch, tmp_path):
+    _ensure_tables()
+    monkeypatch.setattr(autonomous_api, "BASE_DIR", tmp_path)
+    run_root = tmp_path / "runs"
+
+    app = FastAPI()
+    app.include_router(autonomous_api.router)
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="exploration")
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        item = AutonomousAgentWorkItem(
+            id=f"amwi-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            role="explorer",
+            objective="Explore with browser",
+            status="running",
+        )
+        mission.latest_run_id = run.id
+        session.add(mission)
+        session.add(run)
+        session.add(item)
+        session.commit()
+        project_id = mission.project_id
+        mission_id = mission.id
+        item_id = item.id
+
+    screenshot_dir = run_root / "autonomous" / mission_id / item_id
+    screenshot_dir.mkdir(parents=True)
+    (screenshot_dir / "live-step-001.png").write_bytes(b"png")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get(f"/autonomous/{project_id}/missions/{mission_id}/artifacts")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["latest_image"]["name"] == "live-step-001.png"
+    assert payload["latest_image"]["path"].startswith("/artifacts/autonomous/")
+    assert payload["artifact_count"] >= 1
 
 
 def test_mission_status_endpoint_reports_health_and_blocking_approvals():

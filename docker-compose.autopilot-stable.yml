@@ -3,7 +3,7 @@
 # Use this when validating Auto Pilot behavior. It disables backend hot reload,
 # raises frontend memory, and lowers local AI/browser concurrency so page loads
 # remain responsive while agents are running. Browser execution stays headed so
-# the live browser view can display the active AutoPilot browser.
+# the live browser view can display active AutoPilot and autonomous mission browser work.
 
 services:
   backend:
@@ -12,6 +12,10 @@ services:
       HEADLESS: "false"
       PLAYWRIGHT_HEADLESS: "false"
       VNC_ENABLED: "true"
+      VNC_PUBLIC_WS_URL: ${VNC_PUBLIC_WS_URL:-ws://localhost:6080/websockify}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
+      TEMPORAL_WORKFLOW_TASK_QUEUE: ${TEMPORAL_WORKFLOW_TASK_QUEUE:-quorvex-custom-workflows}
+      TEMPORAL_BROWSER_WORKFLOW_TASK_QUEUE: ${TEMPORAL_BROWSER_WORKFLOW_TASK_QUEUE:-quorvex-browser-workflows}
       USE_AGENT_QUEUE: "false"
       BROWSER_WORKERS_ENABLED: "false"
       DEFAULT_PARALLELISM: ${AUTOPILOT_DEFAULT_PARALLELISM:-2}
@@ -27,6 +31,31 @@ services:
         reservations:
           memory: 4G
           cpus: "2"
+
+  autonomous-mission-worker:
+    # In the stable local stack, the VNC browser-runtime owns autonomous mission
+    # polling so browser work is visible instead of split across a headless worker.
+    command: /bin/sh -c 'echo "Autonomous mission worker handled by browser-runtime in autopilot-stable"; exec sleep infinity'
+    environment:
+      HEADLESS: "false"
+      PLAYWRIGHT_HEADLESS: "false"
+      VNC_ENABLED: "true"
+      VNC_PUBLIC_WS_URL: ${VNC_PUBLIC_WS_URL:-ws://localhost:6080/websockify}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/playwright_agent
+
+  browser-runtime:
+    environment:
+      AUTONOMOUS_MISSION_WORKER_ENABLED: "true"
+      CUSTOM_WORKFLOW_WORKER_ENABLED: "true"
+      HEADLESS: "false"
+      PLAYWRIGHT_HEADLESS: "false"
+      VNC_ENABLED: "true"
+      VNC_PUBLIC_WS_URL: ${VNC_PUBLIC_WS_URL:-ws://localhost:6080/websockify}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-quorvex-autonomous-missions}
+      TEMPORAL_WORKFLOW_TASK_QUEUE: ${TEMPORAL_WORKFLOW_TASK_QUEUE:-quorvex-custom-workflows}
+      TEMPORAL_BROWSER_WORKFLOW_TASK_QUEUE: ${TEMPORAL_BROWSER_WORKFLOW_TASK_QUEUE:-quorvex-browser-workflows}
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/playwright_agent
 
   frontend:
     environment:

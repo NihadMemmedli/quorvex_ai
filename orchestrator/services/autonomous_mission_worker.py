@@ -15,6 +15,25 @@ from orchestrator.workflows.autonomous_mission_workflow import AutonomousMission
 logger = logging.getLogger("autonomous_mission_worker")
 
 
+def get_worker_contract() -> dict[str, object]:
+    """Return the workflow/activity contract this worker polls for."""
+    return {
+        "workflows": ["AutonomousMissionWorkflow"],
+        "activities": [
+            "load_mission_policy",
+            "create_mission_run",
+            "execute_mission_iteration",
+            "complete_mission_run",
+            "fail_mission_run",
+            "update_mission_status",
+            "update_mission_heartbeat",
+            "compute_next_delay_seconds",
+            "count_pending_mission_approvals",
+        ],
+        "capabilities": ["direct_agent_execution", "autonomous_mission_events"],
+    }
+
+
 def _activity(fn):
     from temporalio import activity
 
