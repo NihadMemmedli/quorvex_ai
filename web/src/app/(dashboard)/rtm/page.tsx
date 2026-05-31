@@ -686,7 +686,7 @@ export default function RtmPage() {
         <PageLayout tier="wide">
             <PageHeader
                 title="RTM"
-                subtitle="Track requirements coverage across generated and linked test specs."
+                subtitle="Track coverage and traceability."
                 icon={<GitBranch size={22} />}
                 actions={actions}
                 breadcrumb={<WorkflowBreadcrumb />}
