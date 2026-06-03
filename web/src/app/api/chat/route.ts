@@ -154,6 +154,46 @@ function extractUrls(text: string): string[] {
     .map(match => match[0].replace(/[.,;:!?]+$/, ''));
 }
 
+const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'TRACE'];
+
+function inferHttpMethodFilter(text: string): string[] {
+  const found = new Set<string>();
+  for (const method of HTTP_METHODS) {
+    if (!new RegExp(`\\b${method}\\b`, 'i').test(text)) continue;
+    if (method === 'GET' && !/\bGET\b/.test(text)) {
+      const contextualGet = /\bget\s+(commands?|endpoints?|operations?|requests?|methods?)\b/i.test(text)
+        || /\b(commands?|endpoints?|operations?|requests?|methods?)\s+get\b/i.test(text)
+        || /\bonly\s+get\b/i.test(text);
+      if (!contextualGet) continue;
+    }
+    found.add(method);
+  }
+  return Array.from(found);
+}
+
+type OpenApiImportMode = 'evidence_specs' | 'plan_only' | 'tests_only' | 'plan_and_tests';
+
+function inferOpenApiImportMode(text: string): OpenApiImportMode {
+  if (/\bplan\s+only\b/i.test(text)) return 'plan_only';
+  if (/\b(tests?|code)\s+only\b/i.test(text)) return 'tests_only';
+  if (/\bplan\b/i.test(text) && !/\b(tests?|playwright|runnable|code)\b/i.test(text.replace(/\btest\s+plan\b/gi, 'plan'))) return 'plan_only';
+  if (/\b(tests?|playwright|runnable|code)\b/i.test(text)) return 'plan_and_tests';
+  return 'plan_and_tests';
+}
+
+function openApiImportActionText(mode: OpenApiImportMode) {
+  if (mode === 'evidence_specs') {
+    return 'I prepared an OpenAPI import action below. Approve it to execute documented operations and write evidence-backed API specs.';
+  }
+  if (mode === 'plan_only') {
+    return 'I prepared an OpenAPI import action below. Approve it to import the spec and generate a review plan.';
+  }
+  if (mode === 'tests_only') {
+    return 'I prepared an OpenAPI import action below. Approve it to import the spec and generate API tests.';
+  }
+  return 'I prepared an OpenAPI import action below. Approve it to import the spec and generate API specs plus Playwright API tests.';
+}
+
 function buildDiscoveryAgentStartAction(
   messages: any[],
   currentPage?: string,
@@ -658,10 +698,16 @@ function buildApiTestAction(messages: any[]): { text: string; toolName: string; 
   const looksLikeOpenApi = Boolean(targetUrl)
     && /\b(openapi|swagger)\b/i.test(combinedText);
   if (looksLikeOpenApi && targetUrl) {
+    const methodFilter = inferHttpMethodFilter(latestUserText);
+    const mode = inferOpenApiImportMode(latestUserText);
     return {
-      text: 'I prepared an OpenAPI import action below. Approve it to import the spec and generate API tests.',
+      text: openApiImportActionText(mode),
       toolName: 'importOpenApiSpec',
-      input: { url: targetUrl },
+      input: {
+        url: targetUrl,
+        methodFilter: methodFilter.length > 0 ? methodFilter : undefined,
+        mode,
+      },
     };
   }
 

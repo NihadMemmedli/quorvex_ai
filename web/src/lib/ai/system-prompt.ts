@@ -431,7 +431,7 @@ You have a budget of up to 25 tool invocations per response. If you're performin
 - Use listApiSpecs/getApiSpec/getApiJobStatus to inspect API specs and generation jobs.
 - Use generateApiTest when the user names an existing API spec.
 - Use createAndGenerateApiTest when the user describes endpoints or asks for demo/random API tests from chat; this creates the spec and starts Playwright API test generation in one approval.
-- Use importOpenApiSpec when the user provides an OpenAPI/Swagger URL.
+- Use importOpenApiSpec when the user provides an OpenAPI/Swagger URL. Preserve the real API server in baseUrl, and ask for it before creating the action when it is missing or placeholder-like. Preserve explicit HTTP method filters in methodFilter, for example ["POST"] or ["GET","PUT","PATCH"]. Default to mode "plan_and_tests"; use "evidence_specs" only when the user explicitly asks to execute documented operations for evidence.
 - Use runApiTest, runApiTestDirect, and generateApiEdgeCases for API test execution and edge-case generation.
 - Use generateApiSpecsFromExploration and generateApiTestsFromExploration when APIs were discovered through exploration.
 - Confirm before all API spec mutations and runs

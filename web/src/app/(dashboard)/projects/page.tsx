@@ -55,6 +55,7 @@ export default function ProjectsPage() {
 
     const handleOpenDelete = (project: Project) => {
         setSelectedProject(project);
+        setFormError('');
         setShowDeleteModal(true);
     };
 
@@ -106,13 +107,14 @@ export default function ProjectsPage() {
         if (!selectedProject) return;
 
         setIsSubmitting(true);
+        setFormError('');
 
         try {
             await deleteProject(selectedProject.id);
             setShowDeleteModal(false);
             setSelectedProject(null);
         } catch (err) {
-            console.error('Failed to delete project:', err);
+            setFormError(err instanceof Error ? err.message : 'Failed to delete project');
         } finally {
             setIsSubmitting(false);
         }
@@ -663,6 +665,20 @@ export default function ProjectsPage() {
                         }}>
                             All specs, runs, and batches will be reassigned to the Default Project.
                         </p>
+
+                        {formError && (
+                            <div style={{
+                                padding: '0.75rem 1rem',
+                                borderRadius: 'var(--radius)',
+                                background: 'var(--danger-muted)',
+                                border: '1px solid rgba(248, 113, 113, 0.2)',
+                                color: 'var(--danger)',
+                                fontSize: '0.9rem',
+                                marginBottom: '1.5rem'
+                            }}>
+                                {formError}
+                            </div>
+                        )}
 
                         <div style={{ display: 'flex', gap: '1rem', justifyContent: 'flex-end' }}>
                             <button

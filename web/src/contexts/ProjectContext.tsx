@@ -32,6 +32,23 @@ const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
 
 const STORAGE_KEY = 'we-test-current-project-id';
 
+async function readProjectError(response: Response, fallback: string): Promise<string> {
+    const text = (await response.text()).trim();
+    if (!text) return fallback;
+
+    try {
+        const error = JSON.parse(text);
+        if (typeof error.detail === 'string') return error.detail;
+        if (Array.isArray(error.detail)) {
+            return error.detail.map((item: unknown) => String(item)).join(', ');
+        }
+        if (typeof error.error?.message === 'string') return error.error.message;
+        return fallback;
+    } catch {
+        return text;
+    }
+}
+
 export function ProjectProvider({ children }: { children: ReactNode }) {
     const { user, isLoading: authLoading } = useAuth();
     const [projects, setProjects] = useState<Project[]>([]);
@@ -90,7 +107,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         id: string,
         updates: { name?: string; description?: string; base_url?: string }
     ): Promise<Project> => {
-        const response = await fetchWithAuth(`${API_BASE}/projects/${id}`, {
+        const response = await fetchWithAuth(`${API_BASE}/projects/${encodeURIComponent(id)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(updates)
@@ -114,13 +131,12 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
     // Delete a project
     const deleteProject = useCallback(async (id: string): Promise<void> => {
-        const response = await fetchWithAuth(`${API_BASE}/projects/${id}`, {
+        const response = await fetchWithAuth(`${API_BASE}/projects/${encodeURIComponent(id)}`, {
             method: 'DELETE'
         });
 
         if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Failed to delete project');
+            throw new Error(await readProjectError(response, 'Failed to delete project'));
         }
 
         // If deleted project was current, switch to default

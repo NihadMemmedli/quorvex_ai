@@ -136,7 +136,14 @@ export default function ApiTestingPage() {
                 const jobMap: Record<string, JobStatus> = {};
                 const newSpecMap: Record<string, string> = {};
                 for (const j of data) {
-                    jobMap[j.job_id] = { job_id: j.job_id, status: j.status, stage: j.stage, message: j.message, result: j.result };
+                    jobMap[j.job_id] = {
+                        job_id: j.job_id,
+                        status: j.status,
+                        stage: j.stage,
+                        message: j.message,
+                        result: j.result,
+                        type: j.type,
+                    };
                     if (j.spec_path) newSpecMap[j.spec_path] = j.job_id;
                     if (j.status === 'running') pollJobRef.current?.(j.job_id);
                 }

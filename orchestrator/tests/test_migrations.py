@@ -49,6 +49,10 @@ class TestDatabaseInit:
         assert len(revisions.get("038", [])) == 1
         assert len(revisions.get("039", [])) == 1
         assert len(revisions.get("040", [])) == 1
+        assert len(revisions.get("041", [])) == 1
+        assert len(revisions.get("042", [])) == 1
+        assert len(revisions.get("043", [])) == 1
+        assert len(revisions.get("044", [])) == 1
         assert down_revisions["032"] == "031"
         assert down_revisions["033"] == "032"
         assert down_revisions["034"] == "033"
@@ -58,10 +62,14 @@ class TestDatabaseInit:
         assert down_revisions["038"] == "037"
         assert down_revisions["039"] == "038"
         assert down_revisions["040"] == "039"
+        assert down_revisions["041"] == "040"
+        assert down_revisions["042"] == "041"
+        assert down_revisions["043"] == "042"
+        assert down_revisions["044"] == "043"
 
         referenced = {revision for revision in down_revisions.values() if revision}
         heads = sorted(set(revisions) - referenced)
-        assert heads == ["040"]
+        assert heads == ["044"]
 
     def test_init_db_fresh_sqlite(self, tmp_path):
         """init_db() should run cleanly on a fresh SQLite database."""
@@ -261,6 +269,82 @@ class TestDatabaseInit:
 
             assert row["target_url"] is None
             assert row["live_browser_requested"] in (False, 0)
+
+        finally:
+            db_module.DATABASE_URL = original_url
+            db_module.engine = original_engine
+
+    def test_run_migrations_repairs_legacy_openapi_import_history_columns(self, tmp_path):
+        """Legacy OpenAPI import history tables should get latest import workflow columns."""
+        db_path = tmp_path / "test_openapi_import_history_legacy.db"
+        db_url = f"sqlite:///{db_path}"
+
+        from sqlalchemy import inspect, text
+        from sqlmodel import create_engine
+
+        import orchestrator.api.db as db_module
+
+        original_url = db_module.DATABASE_URL
+        original_engine = db_module.engine
+
+        try:
+            db_module.DATABASE_URL = db_url
+            db_module.engine = create_engine(
+                db_url, echo=False, connect_args={"check_same_thread": False, "timeout": 30}
+            )
+
+            with db_module.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE openapi_import_history (
+                            id VARCHAR PRIMARY KEY,
+                            project_id VARCHAR,
+                            source_type VARCHAR NOT NULL,
+                            source_url VARCHAR,
+                            source_filename VARCHAR,
+                            feature_filter VARCHAR,
+                            status VARCHAR NOT NULL DEFAULT 'running',
+                            files_generated INTEGER NOT NULL DEFAULT 0,
+                            generated_paths_json VARCHAR NOT NULL DEFAULT '[]',
+                            error_message TEXT,
+                            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            completed_at DATETIME
+                        )
+                        """
+                    )
+                )
+
+            db_module._run_migrations()
+            db_module._run_migrations()
+
+            inspector = inspect(db_module.engine)
+            columns = {col["name"] for col in inspector.get_columns("openapi_import_history")}
+            assert {
+                "base_url",
+                "job_id",
+                "method_filter_json",
+                "mode",
+                "needs_input",
+                "missing_fields_json",
+                "plan_path",
+                "spec_paths_json",
+                "test_paths_json",
+                "evidence_paths_json",
+                "matched_operations",
+                "executed_operations",
+                "blocked_operations_json",
+                "failed_operations_json",
+                "skipped_operations",
+                "chunk_count",
+                "recommended_mode",
+                "recommended_next_action",
+                "warnings_json",
+                "diagnostics_json",
+            } <= columns
+
+            indexes = {index["name"] for index in inspector.get_indexes("openapi_import_history")}
+            assert "ix_openapi_import_history_job_id" in indexes
 
         finally:
             db_module.DATABASE_URL = original_url

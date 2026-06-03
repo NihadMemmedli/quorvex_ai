@@ -878,7 +878,14 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     requiredRole: 'editor',
     confirmationRequired: true,
     getPath: () => '/api-testing/import-openapi',
-    getBody: (args, pid) => ({ url: args.url, feature_filter: args.featureFilter || undefined, project_id: pid || 'default' }),
+    getBody: (args, pid) => ({
+      url: args.url,
+      base_url: args.baseUrl || args.serverUrl || undefined,
+      feature_filter: args.featureFilter || undefined,
+      method_filter: Array.isArray(args.methodFilter) ? args.methodFilter : undefined,
+      mode: args.mode || 'plan_and_tests',
+      project_id: pid || 'default',
+    }),
   },
   generateApiTest: {
     label: 'Generate API Test',

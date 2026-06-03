@@ -54,7 +54,7 @@ if "slowapi" not in sys.modules:
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 
 @pytest.fixture(scope="module")
@@ -611,6 +611,143 @@ class TestProjectEndpoints:
         response = client.delete("/projects/default")
         # Should reject deletion of default project
         assert response.status_code in (400, 403, 422)
+
+    def test_delete_nonexistent_project_returns_404(self, client):
+        """DELETE /projects/{id} with non-existent ID should return 404."""
+        response = client.delete("/projects/nonexistent-project-xyz")
+        assert response.status_code == 404
+
+    def test_delete_project_reassigns_content_and_removes_ancillary_rows(self, client):
+        """DELETE /projects/{id} should preserve core content and remove scoped ancillary rows."""
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_auth import ProjectMember, User
+        from orchestrator.api.models_db import (
+            DiscoveredFlow,
+            ExplorationSession,
+            FlowStep,
+            Project,
+            RegressionBatch,
+            SpecMetadata,
+            TestRun,
+        )
+        from orchestrator.api.projects import ensure_default_project
+
+        suffix = uuid4().hex
+        project_id = f"delete-project-{suffix}"
+        spec_name = f"delete-project-{suffix}.md"
+        run_id = f"delete-run-{suffix}"
+        batch_id = f"delete-batch-{suffix}"
+        exploration_id = f"delete-exploration-{suffix}"
+        user_id = f"delete-user-{suffix}"
+        flow_id = None
+        step_id = None
+
+        with Session(engine) as session:
+            ensure_default_project(session)
+            session.add(Project(id=project_id, name=f"Delete Project {suffix}"))
+            session.add(SpecMetadata(spec_name=spec_name, project_id=project_id))
+            session.add(RegressionBatch(id=batch_id, name="Delete Batch", project_id=project_id))
+            session.add(
+                TestRun(
+                    id=run_id,
+                    spec_name=spec_name,
+                    status="passed",
+                    batch_id=batch_id,
+                    project_id=project_id,
+                )
+            )
+            session.add(
+                User(
+                    id=user_id,
+                    email=f"delete-project-{suffix}@example.com",
+                    password_hash="test-password-hash",
+                )
+            )
+            session.add(ProjectMember(project_id=project_id, user_id=user_id, role="admin"))
+            session.add(ExplorationSession(id=exploration_id, project_id=project_id, entry_url="https://example.com"))
+            session.commit()
+
+            flow = DiscoveredFlow(
+                session_id=exploration_id,
+                project_id=project_id,
+                flow_name="Delete Flow",
+                flow_category="navigation",
+                start_url="https://example.com",
+                end_url="https://example.com/done",
+                step_count=1,
+            )
+            session.add(flow)
+            session.commit()
+            session.refresh(flow)
+            flow_id = flow.id
+
+            step = FlowStep(
+                flow_id=flow_id,
+                step_number=1,
+                action_type="click",
+                action_description="Click continue",
+            )
+            session.add(step)
+            session.commit()
+            session.refresh(step)
+            step_id = step.id
+
+        try:
+            response = client.delete(f"/projects/{project_id}")
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert data["project_id"] == project_id
+            assert data["reassigned_to"] == "default"
+            assert data["reassigned_specs"] == 1
+            assert data["reassigned_runs"] == 1
+            assert data["reassigned_batches"] == 1
+            assert data["deleted_ancillary_rows"]["project_members"] == 1
+            assert data["deleted_ancillary_rows"]["exploration_sessions"] == 1
+            assert data["deleted_ancillary_rows"]["discovered_flows"] == 1
+            assert data["deleted_ancillary_rows"]["flow_steps"] == 1
+
+            with Session(engine) as session:
+                assert session.get(Project, project_id) is None
+                assert session.get(SpecMetadata, spec_name).project_id == "default"
+                assert session.get(TestRun, run_id).project_id == "default"
+                assert session.get(RegressionBatch, batch_id).project_id == "default"
+                membership = session.exec(
+                    select(ProjectMember).where(
+                        ProjectMember.project_id == project_id,
+                        ProjectMember.user_id == user_id,
+                    )
+                ).first()
+                assert membership is None
+                assert session.get(ExplorationSession, exploration_id) is None
+                assert session.get(DiscoveredFlow, flow_id) is None
+                assert session.get(FlowStep, step_id) is None
+        finally:
+            with Session(engine) as session:
+                membership = session.exec(
+                    select(ProjectMember).where(
+                        ProjectMember.project_id == project_id,
+                        ProjectMember.user_id == user_id,
+                    )
+                ).first()
+                if membership:
+                    session.delete(membership)
+
+                for model, key in (
+                    (FlowStep, step_id),
+                    (DiscoveredFlow, flow_id),
+                    (ExplorationSession, exploration_id),
+                    (TestRun, run_id),
+                    (RegressionBatch, batch_id),
+                    (SpecMetadata, spec_name),
+                    (Project, project_id),
+                    (User, user_id),
+                ):
+                    if key is None:
+                        continue
+                    obj = session.get(model, key)
+                    if obj:
+                        session.delete(obj)
+                session.commit()
 
 
 class TestExecutionSettings:

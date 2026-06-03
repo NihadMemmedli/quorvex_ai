@@ -119,6 +119,7 @@ function JobStatusPanel({ job }: { job: JobStatus }) {
             case 'queued': return 'Queued';
             case 'starting': return 'Starting pipeline...';
             case 'running': return 'Running (generate + test + heal)...';
+            case 'executing': return job.message || 'Running test...';
             case 'done': return passed ? 'Passed' : 'Failed';
             case 'error': return 'Error';
             default: return job.message || 'Processing...';
@@ -344,16 +345,31 @@ export default React.memo(function ApiSpecsTable({
         }
     }, [projectId, setActiveJobs, pollJob, fetchApiSpecs, fetchGeneratedTests, setMessage]);
 
-    const handleRunDirect = useCallback(async (specName: string, testPath: string, specPath: string) => {
+    const handleRunDirect = useCallback(async (
+        specName: string,
+        testPath: string,
+        specPath: string,
+        healOnFailure = false,
+    ) => {
         try {
             const res = await fetch(`${API_BASE}/api-testing/run-direct`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spec_name: specName, test_path: testPath, project_id: projectId }),
+                body: JSON.stringify({
+                    spec_name: specName,
+                    test_path: testPath,
+                    project_id: projectId,
+                    heal_on_failure: healOnFailure,
+                }),
             });
             if (res.ok) {
                 const data = await res.json();
-                const job: JobStatus = { job_id: data.job_id, status: 'running', stage: 'running', message: 'Running test directly...' };
+                const job: JobStatus = {
+                    job_id: data.job_id,
+                    status: 'running',
+                    stage: 'executing',
+                    message: healOnFailure ? 'Running test with healing...' : 'Running test directly...',
+                };
                 setActiveJobs(prev => ({ ...prev, [data.job_id]: job }));
                 setSpecJobMap(prev => ({ ...prev, [specPath]: data.job_id }));
                 pollJob(data.job_id, () => { fetchApiSpecs(); fetchLatestRuns(); fetchGeneratedTests(); });
@@ -614,6 +630,16 @@ export default React.memo(function ApiSpecsTable({
                                                     onMouseLeave={e => (e.currentTarget.style.background = 'none')}
                                                 >
                                                     <Zap size={13} style={{ color: 'var(--success)' }} /> Run
+                                                </button>
+                                            )}
+                                            {spec.has_generated_test && spec.generated_test_path && (
+                                                <button
+                                                    onClick={() => { setMenuOpen(null); handleRunDirect(spec.name, spec.generated_test_path!, spec.path, true); }}
+                                                    style={menuItemStyle}
+                                                    onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                                                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                >
+                                                    <Heart size={13} style={{ color: 'var(--warning)' }} /> Run with healing
                                                 </button>
                                             )}
                                             <button

@@ -13,7 +13,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
@@ -46,6 +46,12 @@ _api_spec_cache: dict[str, tuple] = {}
 # ========== In-Memory Job Tracking ==========
 _api_jobs: dict[str, dict] = {}
 MAX_TRACKED_JOBS = 200
+DEFAULT_OPENAPI_IMPORT_MODE = "plan_and_tests"
+OPENAPI_IMPORT_MODES = ("evidence_specs", "plan_only", "tests_only", "plan_and_tests")
+OPENAPI_IMPORT_MODES_SET = set(OPENAPI_IMPORT_MODES)
+OPENAPI_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE"}
+OPENAPI_IMPORT_RUNNING_TTL_SECONDS = 2 * 60 * 60
+OPENAPI_IMPORT_EXPIRED_MESSAGE = "Import status expired before completion; re-import to retry."
 
 
 def _cleanup_old_jobs():
@@ -53,7 +59,7 @@ def _cleanup_old_jobs():
     now = time.time()
     to_remove = []
     for job_id, job in _api_jobs.items():
-        if job["status"] in ("completed", "failed"):
+        if job["status"] in ("completed", "failed", "needs_input"):
             completed_at = job.get("completed_at", 0)
             if now - completed_at > 3600:
                 to_remove.append(job_id)
@@ -67,6 +73,144 @@ def _cleanup_old_jobs():
         )
         for job_id, _ in evictable[: len(_api_jobs) - MAX_TRACKED_JOBS]:
             del _api_jobs[job_id]
+
+
+def _run_async_background(coro_func, *args):
+    """Run async job work in a worker thread after the HTTP response is sent."""
+    asyncio.run(coro_func(*args))
+
+
+def _normalize_openapi_method_filter(method_filter: list[str] | None) -> list[str] | None:
+    if method_filter is None:
+        return None
+    normalized = []
+    invalid = []
+    for method in method_filter:
+        method_upper = method.strip().upper() if isinstance(method, str) else ""
+        if method_upper in OPENAPI_HTTP_METHODS:
+            if method_upper not in normalized:
+                normalized.append(method_upper)
+        else:
+            invalid.append(str(method))
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Unsupported HTTP method filter: {', '.join(invalid)}")
+    return normalized
+
+
+def _normalize_openapi_import_mode(mode: str | None) -> str:
+    normalized = mode.strip() if isinstance(mode, str) else ""
+    if not normalized:
+        return DEFAULT_OPENAPI_IMPORT_MODE
+    if normalized not in OPENAPI_IMPORT_MODES_SET:
+        allowed = ", ".join(OPENAPI_IMPORT_MODES)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported import mode '{normalized}'. Allowed modes: {allowed}",
+        )
+    return normalized
+
+
+def _openapi_import_success_message(result) -> str:
+    if getattr(result, "needs_input", False):
+        return "API Server URL is required before importing this OpenAPI spec"
+    if result.test_paths:
+        return (
+            f"Matched {result.matched_operations} operation(s), generated "
+            f"{len(result.spec_paths)} spec(s) and {len(result.test_paths)} test file(s)"
+        )
+    return (
+        f"Matched {result.matched_operations} operation(s), generated {len(result.spec_paths)} API spec(s)"
+    )
+
+
+def _is_live_openapi_import_job(record: OpenApiImportHistory) -> bool:
+    if record.job_id:
+        job = _api_jobs.get(record.job_id)
+        return bool(job and job.get("status") == "running")
+
+    return any(
+        job.get("status") == "running" and job.get("history_id") == record.id
+        for job in _api_jobs.values()
+    )
+
+
+def _expire_stale_import_history_record(record: OpenApiImportHistory, now: datetime | None = None) -> bool:
+    if record.status != "running" or not record.created_at:
+        return False
+    now = now or datetime.utcnow()
+    if record.created_at > now - timedelta(seconds=OPENAPI_IMPORT_RUNNING_TTL_SECONDS):
+        return False
+    if _is_live_openapi_import_job(record):
+        return False
+
+    record.status = "failed"
+    record.error_message = OPENAPI_IMPORT_EXPIRED_MESSAGE
+    record.completed_at = now
+    return True
+
+
+def _reconcile_stale_import_history(session: Session, project_id: str) -> None:
+    query = select(OpenApiImportHistory).where(OpenApiImportHistory.status == "running")
+    if project_id == "default":
+        query = query.where(
+            (OpenApiImportHistory.project_id == "default") | (OpenApiImportHistory.project_id == None)
+        )
+    else:
+        query = query.where(OpenApiImportHistory.project_id == project_id)
+
+    now = datetime.utcnow()
+    changed = False
+    for record in session.exec(query).all():
+        changed = _expire_stale_import_history_record(record, now=now) or changed
+    if changed:
+        session.commit()
+
+
+def _import_history_message(record: OpenApiImportHistory) -> str | None:
+    if record.error_message:
+        return record.error_message
+    if record.needs_input:
+        return "API Server URL is required before importing this OpenAPI spec"
+    if record.status == "completed":
+        return (
+            f"Matched {record.matched_operations} operation(s), generated "
+            f"{len(record.spec_paths)} spec(s) and {len(record.test_paths)} test file(s)"
+        )
+    if record.status == "running":
+        return "OpenAPI import is still running"
+    return record.recommended_next_action
+
+
+def _import_history_result(record: OpenApiImportHistory) -> dict:
+    return {
+        "history_id": record.id,
+        "source_type": record.source_type,
+        "source_url": record.source_url,
+        "source_filename": record.source_filename,
+        "base_url": record.base_url,
+        "feature_filter": record.feature_filter,
+        "method_filter": record.method_filter,
+        "mode": record.mode,
+        "needs_input": record.needs_input,
+        "missing_fields": record.missing_fields,
+        "files_generated": record.files_generated,
+        "generated_paths": record.generated_paths,
+        "plan_path": record.plan_path,
+        "evidence_paths": record.evidence_paths,
+        "spec_paths": record.spec_paths,
+        "test_paths": record.test_paths,
+        "matched_operations": record.matched_operations,
+        "executed_operations": record.executed_operations,
+        "blocked_operations": record.blocked_operations,
+        "failed_operations": record.failed_operations,
+        "skipped_operations": record.skipped_operations,
+        "chunk_count": record.chunk_count,
+        "recommended_mode": record.recommended_mode,
+        "recommended_next_action": record.recommended_next_action,
+        "warnings": record.warnings,
+        "diagnostics": record.diagnostics,
+        "error_message": record.error_message,
+    }
 
 
 # ========== Pydantic Models ==========
@@ -95,7 +239,11 @@ class CreateAndGenerateApiSpecRequest(BaseModel):
 
 class ImportOpenApiRequest(BaseModel):
     url: str | None = None
+    base_url: str | None = None
+    server_url: str | None = None
     feature_filter: str | None = None
+    method_filter: list[str] | None = None
+    mode: str | None = DEFAULT_OPENAPI_IMPORT_MODE
     project_id: str | None = "default"
 
 
@@ -113,6 +261,7 @@ class RunDirectRequest(BaseModel):
     test_path: str  # relative path like "tests/generated/my-api.api.spec.ts"
     spec_name: str | None = None
     project_id: str | None = "default"
+    heal_on_failure: bool = False
 
 
 class JobStatusResponse(BaseModel):
@@ -121,6 +270,7 @@ class JobStatusResponse(BaseModel):
     stage: str | None = None
     message: str | None = None
     result: dict | None = None
+    type: str | None = None
 
 
 class UpdateTagsRequest(BaseModel):
@@ -652,7 +802,15 @@ async def _run_generate_test(job_id: str, spec_path: str, project_id: str):
         )
 
 
-async def _run_import_openapi(job_id: str, url: str, feature_filter: str | None, project_id: str):
+async def _run_import_openapi(
+    job_id: str,
+    url: str,
+    base_url: str | None,
+    feature_filter: str | None,
+    method_filter: list[str] | None,
+    mode: str,
+    project_id: str,
+):
     """Background task to import from OpenAPI spec URL."""
     import uuid as _uuid
 
@@ -661,10 +819,12 @@ async def _run_import_openapi(job_id: str, url: str, feature_filter: str | None,
     _api_jobs[job_id] = {
         "status": "running",
         "message": "Importing OpenAPI specification...",
+        "type": "openapi_import",
         "started_at": time.time(),
         "result": None,
         "completed_at": None,
         "project_id": project_id,
+        "history_id": history_id,
     }
 
     # Create DB history record
@@ -672,10 +832,14 @@ async def _run_import_openapi(job_id: str, url: str, feature_filter: str | None,
         with Session(engine) as session:
             history = OpenApiImportHistory(
                 id=history_id,
+                job_id=job_id,
                 project_id=project_id,
                 source_type="url",
                 source_url=url,
+                base_url=base_url,
                 feature_filter=feature_filter,
+                method_filter_json=json.dumps(method_filter or []),
+                mode=mode,
                 status="running",
             )
             session.add(history)
@@ -687,13 +851,20 @@ async def _run_import_openapi(job_id: str, url: str, feature_filter: str | None,
         from workflows.openapi_processor import OpenApiProcessor
 
         processor = OpenApiProcessor(project_id=project_id)
-        result_paths = await processor.process(url, feature_filter=feature_filter)
-        file_paths = [str(p) for p in result_paths]
+        result = await processor.process_import(
+            url,
+            base_url=base_url,
+            feature_filter=feature_filter,
+            method_filter=method_filter,
+            mode=mode,
+        )
+        result_payload = result.as_dict()
+        status = "needs_input" if result.needs_input else "completed"
         _api_jobs[job_id].update(
             {
-                "status": "completed",
-                "message": f"Generated {len(result_paths)} test file(s)",
-                "result": {"files": file_paths},
+                "status": status,
+                "message": _openapi_import_success_message(result),
+                "result": result_payload,
                 "completed_at": time.time(),
             }
         )
@@ -702,9 +873,26 @@ async def _run_import_openapi(job_id: str, url: str, feature_filter: str | None,
             with Session(engine) as session:
                 h = session.get(OpenApiImportHistory, history_id)
                 if h:
-                    h.status = "completed"
-                    h.files_generated = len(result_paths)
-                    h.generated_paths_json = json.dumps(file_paths)
+                    h.status = status
+                    h.base_url = result.base_url or base_url
+                    h.needs_input = result.needs_input
+                    h.missing_fields_json = json.dumps(result.missing_fields)
+                    h.files_generated = len(result.test_paths)
+                    h.generated_paths_json = json.dumps([str(p) for p in result.test_paths])
+                    h.plan_path = str(result.plan_path) if result.plan_path else None
+                    h.evidence_paths_json = json.dumps([str(p) for p in result.evidence_paths])
+                    h.spec_paths_json = json.dumps([str(p) for p in result.spec_paths])
+                    h.test_paths_json = json.dumps([str(p) for p in result.test_paths])
+                    h.matched_operations = result.matched_operations
+                    h.executed_operations = result.executed_operations
+                    h.blocked_operations_json = json.dumps(result.blocked_operations)
+                    h.failed_operations_json = json.dumps(result.failed_operations)
+                    h.skipped_operations = result.skipped_operations
+                    h.chunk_count = result.chunk_count
+                    h.recommended_mode = result.recommended_mode
+                    h.recommended_next_action = result.recommended_next_action
+                    h.warnings_json = json.dumps(result.warnings)
+                    h.diagnostics_json = json.dumps(result.diagnostics)
                     h.completed_at = datetime.utcnow()
                     session.add(h)
                     session.commit()
@@ -734,7 +922,14 @@ async def _run_import_openapi(job_id: str, url: str, feature_filter: str | None,
 
 
 async def _run_import_openapi_file(
-    job_id: str, file_path: str, feature_filter: str | None, project_id: str, original_filename: str | None = None
+    job_id: str,
+    file_path: str,
+    base_url: str | None,
+    feature_filter: str | None,
+    method_filter: list[str] | None,
+    mode: str,
+    project_id: str,
+    original_filename: str | None = None,
 ):
     """Background task to import from uploaded OpenAPI file."""
     import uuid as _uuid
@@ -744,10 +939,12 @@ async def _run_import_openapi_file(
     _api_jobs[job_id] = {
         "status": "running",
         "message": "Processing uploaded OpenAPI file...",
+        "type": "openapi_import",
         "started_at": time.time(),
         "result": None,
         "completed_at": None,
         "project_id": project_id,
+        "history_id": history_id,
     }
 
     # Create DB history record
@@ -755,10 +952,14 @@ async def _run_import_openapi_file(
         with Session(engine) as session:
             history = OpenApiImportHistory(
                 id=history_id,
+                job_id=job_id,
                 project_id=project_id,
                 source_type="file",
                 source_filename=original_filename or Path(file_path).name,
+                base_url=base_url,
                 feature_filter=feature_filter,
+                method_filter_json=json.dumps(method_filter or []),
+                mode=mode,
                 status="running",
             )
             session.add(history)
@@ -770,13 +971,20 @@ async def _run_import_openapi_file(
         from workflows.openapi_processor import OpenApiProcessor
 
         processor = OpenApiProcessor(project_id=project_id)
-        result_paths = await processor.process(file_path, feature_filter=feature_filter)
-        file_paths = [str(p) for p in result_paths]
+        result = await processor.process_import(
+            file_path,
+            base_url=base_url,
+            feature_filter=feature_filter,
+            method_filter=method_filter,
+            mode=mode,
+        )
+        result_payload = result.as_dict()
+        status = "needs_input" if result.needs_input else "completed"
         _api_jobs[job_id].update(
             {
-                "status": "completed",
-                "message": f"Generated {len(result_paths)} test file(s)",
-                "result": {"files": file_paths},
+                "status": status,
+                "message": _openapi_import_success_message(result),
+                "result": result_payload,
                 "completed_at": time.time(),
             }
         )
@@ -785,9 +993,26 @@ async def _run_import_openapi_file(
             with Session(engine) as session:
                 h = session.get(OpenApiImportHistory, history_id)
                 if h:
-                    h.status = "completed"
-                    h.files_generated = len(result_paths)
-                    h.generated_paths_json = json.dumps(file_paths)
+                    h.status = status
+                    h.base_url = result.base_url or base_url
+                    h.needs_input = result.needs_input
+                    h.missing_fields_json = json.dumps(result.missing_fields)
+                    h.files_generated = len(result.test_paths)
+                    h.generated_paths_json = json.dumps([str(p) for p in result.test_paths])
+                    h.plan_path = str(result.plan_path) if result.plan_path else None
+                    h.evidence_paths_json = json.dumps([str(p) for p in result.evidence_paths])
+                    h.spec_paths_json = json.dumps([str(p) for p in result.spec_paths])
+                    h.test_paths_json = json.dumps([str(p) for p in result.test_paths])
+                    h.matched_operations = result.matched_operations
+                    h.executed_operations = result.executed_operations
+                    h.blocked_operations_json = json.dumps(result.blocked_operations)
+                    h.failed_operations_json = json.dumps(result.failed_operations)
+                    h.skipped_operations = result.skipped_operations
+                    h.chunk_count = result.chunk_count
+                    h.recommended_mode = result.recommended_mode
+                    h.recommended_next_action = result.recommended_next_action
+                    h.warnings_json = json.dumps(result.warnings)
+                    h.diagnostics_json = json.dumps(result.diagnostics)
                     h.completed_at = datetime.utcnow()
                     session.add(h)
                     session.commit()
@@ -1070,7 +1295,35 @@ def _run_api_test_sync(job_id: str, spec_path: str, project_id: str):
             logger.warning(f"Failed to update DBTestRun on error for {run_id}: {db_err}")
 
 
-def _run_direct_test_sync(job_id: str, run_id: str, test_path: str, spec_name: str, project_id: str):
+INFRASTRUCTURE_FAILURE_MARKERS = (
+    "eacces",
+    "permission denied",
+    "mkdir",
+    "rmdir",
+    "playwright-report",
+    "test-results",
+)
+
+
+def _is_playwright_infrastructure_failure(output: str) -> bool:
+    output_lower = output.lower()
+    return any(marker in output_lower for marker in INFRASTRUCTURE_FAILURE_MARKERS)
+
+
+def _configure_direct_playwright_env(env: dict[str, str], run_dir_path: Path) -> None:
+    env["PLAYWRIGHT_OUTPUT_DIR"] = str(run_dir_path / "test-results")
+    env["PLAYWRIGHT_HTML_REPORT"] = str(run_dir_path / "playwright-report")
+    env["PLAYWRIGHT_JSON_OUTPUT_FILE"] = str(run_dir_path / "test-results.json")
+
+
+def _run_direct_test_sync(
+    job_id: str,
+    run_id: str,
+    test_path: str,
+    spec_name: str,
+    project_id: str,
+    heal_on_failure: bool = False,
+):
     """Run an already-generated test file directly with npx playwright test."""
     run_dir_path = RUNS_DIR / run_id
     run_dir_path.mkdir(parents=True, exist_ok=True)
@@ -1101,7 +1354,7 @@ def _run_direct_test_sync(job_id: str, run_id: str, test_path: str, spec_name: s
         "playwright",
         "test",
         test_path,
-        "--reporter=list,html,json",
+        "--reporter=list,json",
         "--project",
         "chromium",
         "--timeout=120000",
@@ -1110,7 +1363,7 @@ def _run_direct_test_sync(job_id: str, run_id: str, test_path: str, spec_name: s
     env = os.environ.copy()
     env["HEADLESS"] = "true"
     env["PLAYWRIGHT_HEADLESS"] = "true"
-    env["PLAYWRIGHT_JSON_OUTPUT_FILE"] = str(json_results_file)
+    _configure_direct_playwright_env(env, run_dir_path)
 
     log_file = run_dir_path / "execution.log"
 
@@ -1156,18 +1409,24 @@ def _run_direct_test_sync(job_id: str, run_id: str, test_path: str, spec_name: s
             pass
 
         # === HEALING LOOP ===
-        # If test failed, attempt up to 3 healing iterations
         passed = initial_passed
         healing_attempts = 0
         healing_history = []
+        failure_category = None
+        error_log = ""
 
         if not passed:
-            max_heal = 3
-            error_log = ""
             try:
                 error_log = log_file.read_text(errors="replace")
             except Exception:
                 pass
+
+            if _is_playwright_infrastructure_failure(error_log):
+                failure_category = "infrastructure"
+
+        # If explicitly requested, heal test assertion/code failures only.
+        if not passed and heal_on_failure and failure_category != "infrastructure":
+            max_heal = 3
 
             for attempt in range(1, max_heal + 1):
                 _api_jobs[job_id].update(
@@ -1310,6 +1569,7 @@ def _run_direct_test_sync(job_id: str, run_id: str, test_path: str, spec_name: s
                 "status": "completed",
                 "stage": "done",
                 "message": f"Test {'passed' if passed else 'failed'}"
+                + (" (infrastructure)" if failure_category == "infrastructure" else "")
                 + (f" (healed after {healing_attempts} attempt(s))" if healed else ""),
                 "result": {
                     "run_id": run_id,
@@ -1320,6 +1580,7 @@ def _run_direct_test_sync(job_id: str, run_id: str, test_path: str, spec_name: s
                     "healing_attempts": healing_attempts,
                     "exit_code": 0 if passed else process.returncode,
                     "first_failure": first_failure,
+                    "category": failure_category,
                 },
                 "completed_at": time.time(),
             }
@@ -1333,12 +1594,20 @@ def _run_direct_test_sync(job_id: str, run_id: str, test_path: str, spec_name: s
                     db_run.status = "passed" if passed else "failed"
                     db_run.completed_at = datetime.utcnow()
                     db_run.current_stage = "done"
-                    db_run.stage_message = f"Test {'passed' if passed else 'failed'}" + (
+                    db_run.stage_message = (
+                        f"Test {'passed' if passed else 'failed'}"
+                        + (" (infrastructure)" if failure_category == "infrastructure" else "")
+                    ) + (
                         f" (healed after {healing_attempts} attempt(s))" if healed else ""
                     )
                     db_run.healing_attempt = healing_attempts if healing_attempts > 0 else None
                     if not passed:
-                        db_run.error_message = first_failure or f"Test failed with exit code {process.returncode}"
+                        if failure_category == "infrastructure":
+                            db_run.error_message = first_failure or (
+                                f"Infrastructure failure while running Playwright, exit code {process.returncode}"
+                            )
+                        else:
+                            db_run.error_message = first_failure or f"Test failed with exit code {process.returncode}"
                     session.add(db_run)
                     session.commit()
         except Exception as e:
@@ -1566,11 +1835,32 @@ async def import_openapi(req: ImportOpenApiRequest, background_tasks: Background
 
     if not req.url:
         raise HTTPException(status_code=400, detail="URL is required")
+    mode = _normalize_openapi_import_mode(req.mode)
+    method_filter = _normalize_openapi_method_filter(req.method_filter)
 
     import uuid
 
     job_id = str(uuid.uuid4())[:8]
-    background_tasks.add_task(_run_import_openapi, job_id, req.url, req.feature_filter, req.project_id)
+    _api_jobs[job_id] = {
+        "status": "running",
+        "message": "OpenAPI import queued...",
+        "type": "openapi_import",
+        "started_at": time.time(),
+        "result": None,
+        "completed_at": None,
+        "project_id": req.project_id or "default",
+    }
+    background_tasks.add_task(
+        _run_async_background,
+        _run_import_openapi,
+        job_id,
+        req.url,
+        (req.base_url or req.server_url or None),
+        req.feature_filter,
+        method_filter,
+        mode,
+        req.project_id or "default",
+    )
     return {"job_id": job_id, "status": "running", "message": "OpenAPI import started"}
 
 
@@ -1578,11 +1868,17 @@ async def import_openapi(req: ImportOpenApiRequest, background_tasks: Background
 async def import_openapi_file(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    base_url: str | None = Query(None),
+    server_url: str | None = Query(None),
     feature_filter: str | None = Query(None),
+    method_filter: list[str] | None = Query(None),
+    mode: str | None = Query(DEFAULT_OPENAPI_IMPORT_MODE),
     project_id: str = Query("default"),
 ):
     """Import OpenAPI spec from uploaded file and generate tests."""
     _cleanup_old_jobs()
+    mode = _normalize_openapi_import_mode(mode)
+    method_filter = _normalize_openapi_method_filter(method_filter)
 
     # Save uploaded file to temp location
     import tempfile
@@ -1596,7 +1892,27 @@ async def import_openapi_file(
     import uuid
 
     job_id = str(uuid.uuid4())[:8]
-    background_tasks.add_task(_run_import_openapi_file, job_id, tmp_path, feature_filter, project_id, file.filename)
+    _api_jobs[job_id] = {
+        "status": "running",
+        "message": "OpenAPI file import queued...",
+        "type": "openapi_import",
+        "started_at": time.time(),
+        "result": None,
+        "completed_at": None,
+        "project_id": project_id,
+    }
+    background_tasks.add_task(
+        _run_async_background,
+        _run_import_openapi_file,
+        job_id,
+        tmp_path,
+        (base_url or server_url or None),
+        feature_filter,
+        method_filter,
+        mode,
+        project_id,
+        file.filename,
+    )
     return {"job_id": job_id, "status": "running", "message": "OpenAPI file import started"}
 
 
@@ -1696,14 +2012,28 @@ async def run_direct_test(req: RunDirectRequest):
         "stage": "queued",
         "message": "Queuing direct test run...",
         "started_at": time.time(),
-        "result": {"run_id": run_id, "test_path": req.test_path, "run_dir": str(RUNS_DIR / run_id)},
+        "result": {
+            "run_id": run_id,
+            "test_path": req.test_path,
+            "run_dir": str(RUNS_DIR / run_id),
+            "heal_on_failure": req.heal_on_failure,
+        },
         "completed_at": None,
         "spec_path": req.test_path,
         "project_id": req.project_id,
     }
 
     loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, _run_direct_test_sync, job_id, run_id, req.test_path, spec_name, req.project_id)
+    loop.run_in_executor(
+        None,
+        _run_direct_test_sync,
+        job_id,
+        run_id,
+        req.test_path,
+        spec_name,
+        req.project_id,
+        req.heal_on_failure,
+    )
 
     return {"job_id": job_id, "run_id": run_id, "status": "running", "message": "Direct test run started"}
 
@@ -1725,6 +2055,7 @@ async def list_jobs(status: str | None = Query(None), project_id: str | None = Q
                 "stage": job.get("stage"),
                 "message": job.get("message"),
                 "result": job.get("result"),
+                "type": job.get("type"),
                 "started_at": job.get("started_at"),
                 "completed_at": job.get("completed_at"),
                 "spec_path": job.get("spec_path"),
@@ -1743,6 +2074,22 @@ async def get_job_status(job_id: str):
         # The run_id is typically "api-{job_id}" or "api-direct-{job_id}"
         try:
             with Session(engine) as session:
+                history = session.exec(
+                    select(OpenApiImportHistory).where(OpenApiImportHistory.job_id == job_id)
+                ).first()
+                if history:
+                    if _expire_stale_import_history_record(history):
+                        session.add(history)
+                        session.commit()
+                        session.refresh(history)
+                    return JobStatusResponse(
+                        job_id=job_id,
+                        status=history.status,
+                        message=_import_history_message(history),
+                        result=_import_history_result(history),
+                        type="openapi_import",
+                    )
+
                 for candidate_run_id in [f"api-{job_id}", f"api-direct-{job_id}", job_id]:
                     db_run = session.get(DBTestRun, candidate_run_id)
                     if db_run:
@@ -1765,6 +2112,7 @@ async def get_job_status(job_id: str):
         stage=job.get("stage"),
         message=job.get("message"),
         result=job.get("result"),
+        type=job.get("type"),
     )
 
 
@@ -2314,39 +2662,75 @@ async def list_import_history(
     session: Session = Depends(get_session),
 ):
     """List OpenAPI import history with pagination."""
-    query = select(OpenApiImportHistory)
+    try:
+        _reconcile_stale_import_history(session, project_id)
+        query = select(OpenApiImportHistory)
 
-    if project_id == "default":
-        query = query.where((OpenApiImportHistory.project_id == "default") | (OpenApiImportHistory.project_id == None))
-    else:
-        query = query.where(OpenApiImportHistory.project_id == project_id)
+        if project_id == "default":
+            query = query.where(
+                (OpenApiImportHistory.project_id == "default") | (OpenApiImportHistory.project_id == None)
+            )
+        else:
+            query = query.where(OpenApiImportHistory.project_id == project_id)
 
-    # Count total
-    count_query = select(func.count()).select_from(query.subquery())
-    total = session.exec(count_query).one()
+        count_query = select(func.count()).select_from(query.subquery())
+        total = session.exec(count_query).one()
 
-    # Paginate, newest first
-    query = query.order_by(OpenApiImportHistory.created_at.desc())
-    query = query.offset(offset).limit(limit)
-    records = session.exec(query).all()
+        query = query.order_by(OpenApiImportHistory.created_at.desc())
+        query = query.offset(offset).limit(limit)
+        records = session.exec(query).all()
+    except Exception as e:
+        logger.warning("Failed to fetch OpenAPI import history; returning empty history: %s", e, exc_info=True)
+        return {
+            "items": [],
+            "total": 0,
+            "has_more": False,
+            "error": "OpenAPI import history is temporarily unavailable. The API Testing page can still be used.",
+        }
+
+    items = []
+    for record in records:
+        try:
+            items.append(
+                {
+                    "id": record.id,
+                    "job_id": record.job_id,
+                    "source_type": record.source_type,
+                    "source_url": record.source_url,
+                    "source_filename": record.source_filename,
+                    "base_url": record.base_url,
+                    "feature_filter": record.feature_filter,
+                    "method_filter": record.method_filter,
+                    "mode": record.mode,
+                    "status": record.status,
+                    "needs_input": record.needs_input,
+                    "missing_fields": record.missing_fields,
+                    "files_generated": record.files_generated,
+                    "generated_paths": record.generated_paths,
+                    "plan_path": record.plan_path,
+                    "evidence_paths": record.evidence_paths,
+                    "spec_paths": record.spec_paths,
+                    "test_paths": record.test_paths,
+                    "matched_operations": record.matched_operations,
+                    "executed_operations": record.executed_operations,
+                    "blocked_operations": record.blocked_operations,
+                    "failed_operations": record.failed_operations,
+                    "skipped_operations": record.skipped_operations,
+                    "chunk_count": record.chunk_count,
+                    "recommended_mode": record.recommended_mode,
+                    "recommended_next_action": record.recommended_next_action,
+                    "warnings": record.warnings,
+                    "diagnostics": record.diagnostics,
+                    "error_message": record.error_message,
+                    "created_at": (record.created_at.isoformat() + "Z") if record.created_at else None,
+                    "completed_at": (record.completed_at.isoformat() + "Z") if record.completed_at else None,
+                }
+            )
+        except Exception as e:
+            logger.warning("Skipping corrupt OpenAPI import history row %s: %s", getattr(record, "id", "unknown"), e)
 
     return {
-        "items": [
-            {
-                "id": r.id,
-                "source_type": r.source_type,
-                "source_url": r.source_url,
-                "source_filename": r.source_filename,
-                "feature_filter": r.feature_filter,
-                "status": r.status,
-                "files_generated": r.files_generated,
-                "generated_paths": r.generated_paths,
-                "error_message": r.error_message,
-                "created_at": (r.created_at.isoformat() + "Z") if r.created_at else None,
-                "completed_at": (r.completed_at.isoformat() + "Z") if r.completed_at else None,
-            }
-            for r in records
-        ],
+        "items": items,
         "total": total,
         "has_more": (offset + limit) < total,
     }

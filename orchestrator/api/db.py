@@ -1753,6 +1753,45 @@ def _run_migrations():
                 conn.execute(text("ALTER TABLE chat_messages ADD COLUMN content_json TEXT"))
                 logger.info("Added column: chat_messages.content_json")
 
+        # ===== OpenAPI import history - Missing columns for SQLite/legacy DBs =====
+        if "openapi_import_history" in inspector.get_table_names():
+            history_cols = {c["name"] for c in inspect(conn).get_columns("openapi_import_history")}
+            history_columns = {
+                "job_id": "VARCHAR",
+                "base_url": "VARCHAR",
+                "method_filter_json": "VARCHAR NOT NULL DEFAULT '[]'",
+                "mode": "VARCHAR NOT NULL DEFAULT 'plan_and_tests'",
+                "needs_input": f"BOOLEAN NOT NULL DEFAULT {boolean_false}",
+                "missing_fields_json": "VARCHAR NOT NULL DEFAULT '[]'",
+                "plan_path": "VARCHAR",
+                "spec_paths_json": "VARCHAR NOT NULL DEFAULT '[]'",
+                "test_paths_json": "VARCHAR NOT NULL DEFAULT '[]'",
+                "evidence_paths_json": "VARCHAR NOT NULL DEFAULT '[]'",
+                "matched_operations": "INTEGER NOT NULL DEFAULT 0",
+                "executed_operations": "INTEGER NOT NULL DEFAULT 0",
+                "blocked_operations_json": "VARCHAR NOT NULL DEFAULT '[]'",
+                "failed_operations_json": "VARCHAR NOT NULL DEFAULT '[]'",
+                "skipped_operations": "INTEGER NOT NULL DEFAULT 0",
+                "chunk_count": "INTEGER NOT NULL DEFAULT 0",
+                "recommended_mode": "VARCHAR NOT NULL DEFAULT 'plan_and_tests'",
+                "recommended_next_action": "VARCHAR",
+                "warnings_json": "VARCHAR NOT NULL DEFAULT '[]'",
+                "diagnostics_json": "VARCHAR NOT NULL DEFAULT '{}'",
+            }
+            for column_name, column_type in history_columns.items():
+                if column_name not in history_cols:
+                    conn.execute(text(f"ALTER TABLE openapi_import_history ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: openapi_import_history.%s", column_name)
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_openapi_import_history_job_id "
+                        "ON openapi_import_history (job_id)"
+                    )
+                )
+            except Exception as e:
+                logger.debug("Index may already exist on openapi_import_history.job_id: %s", e)
+
         # ===== Exploration - Discovered Issues =====
         if "discovered_issues" not in inspector.get_table_names():
             if db_type == "postgresql":

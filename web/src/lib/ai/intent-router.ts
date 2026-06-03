@@ -171,10 +171,111 @@ function firstUrlFromInput(input: Record<string, unknown>) {
   return urls.map(validHttpUrl).find(Boolean);
 }
 
+function isPlaceholderUrl(value: string | undefined): boolean {
+  if (!value) return true;
+  try {
+    const host = new URL(value).hostname;
+    return ['api.example.com', 'example.com', 'example.org', 'example.net'].includes(host) || host.endsWith('.example.test');
+  } catch {
+    return true;
+  }
+}
+
+function inferServerUrlFromOpenApiUrl(value: string | undefined): string | undefined {
+  if (!value || isPlaceholderUrl(value)) return undefined;
+  try {
+    const url = new URL(value);
+    const path = url.pathname.replace(/\/+$/, '').toLowerCase();
+    if (
+      path.endsWith('/docs')
+      || path.endsWith('/redoc')
+      || path.endsWith('/openapi.json')
+      || path.endsWith('/swagger.json')
+      || path.endsWith('/api-docs')
+      || path.endsWith('/swagger/v1/swagger.json')
+    ) {
+      return url.origin;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function openApiServerUrlFromInput(input: Record<string, unknown>, latestUserText: string, specUrl: string | undefined): string | undefined {
+  const explicit = validHttpUrl(input.baseUrl)
+    || validHttpUrl(input.base_url)
+    || validHttpUrl(input.serverUrl)
+    || validHttpUrl(input.server_url);
+  if (explicit && !isPlaceholderUrl(explicit)) return explicit.replace(/\/$/, '');
+
+  const urls = [...latestUserText.matchAll(/https?:\/\/[^\s"'<>),]+/g)]
+    .map(match => match[0].replace(/[.,;:!?]+$/, ''))
+    .map(value => validHttpUrl(value))
+    .filter((value): value is string => Boolean(value));
+  const otherUrl = urls.find(value => value !== specUrl && !isPlaceholderUrl(value));
+  if (otherUrl) return otherUrl.replace(/\/$/, '');
+
+  return inferServerUrlFromOpenApiUrl(specUrl);
+}
+
+const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'TRACE'];
+
+function normalizeHttpMethods(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(/[,\s]+/) : [];
+  const methods = raw
+    .map((item) => typeof item === 'string' ? item.trim().toUpperCase() : '')
+    .filter((item) => HTTP_METHODS.includes(item));
+  return Array.from(new Set(methods));
+}
+
+function inferHttpMethodsFromText(text: string): string[] {
+  const found = new Set<string>();
+  for (const method of HTTP_METHODS) {
+    const methodPattern = new RegExp(`\\b${method}\\b`, 'i');
+    if (!methodPattern.test(text)) continue;
+
+    // GET is a common verb, so require API-method context unless it is uppercase.
+    if (method === 'GET' && !/\bGET\b/.test(text)) {
+      const contextualGet = /\b(get)\s+(commands?|endpoints?|operations?|requests?|methods?)\b/i.test(text)
+        || /\b(commands?|endpoints?|operations?|requests?|methods?)\s+(get)\b/i.test(text)
+        || /\bonly\s+get\b/i.test(text);
+      if (!contextualGet) continue;
+    }
+    found.add(method);
+  }
+  return Array.from(found);
+}
+
+type OpenApiImportMode = 'evidence_specs' | 'plan_only' | 'tests_only' | 'plan_and_tests';
+
+function normalizeImportMode(value: unknown, text: string): OpenApiImportMode {
+  if (value === 'evidence_specs' || value === 'plan_only' || value === 'tests_only' || value === 'plan_and_tests') return value;
+  if (/\bplan\s+only\b/i.test(text)) return 'plan_only';
+  if (/\b(tests?|code)\s+only\b/i.test(text)) return 'tests_only';
+  if (/\bplan\b/i.test(text) && !/\b(tests?|playwright|runnable|code)\b/i.test(text.replace(/\btest\s+plan\b/gi, 'plan'))) return 'plan_only';
+  if (/\b(tests?|playwright|runnable|code)\b/i.test(text)) return 'plan_and_tests';
+  return 'plan_and_tests';
+}
+
+function openApiImportActionText(mode: OpenApiImportMode) {
+  if (mode === 'evidence_specs') {
+    return 'I prepared an OpenAPI import action below. Approve it to execute documented operations and write evidence-backed API specs.';
+  }
+  if (mode === 'plan_only') {
+    return 'I prepared an OpenAPI import action below. Approve it to import the spec and generate a review plan.';
+  }
+  if (mode === 'tests_only') {
+    return 'I prepared an OpenAPI import action below. Approve it to import the spec and generate API tests.';
+  }
+  return 'I prepared an OpenAPI import action below. Approve it to import the spec and generate API specs plus Playwright API tests.';
+}
+
 function buildClarification(route: RawIntentRoute, missingFields: string[]) {
   const question = asString(route.clarifyingQuestion);
   if (question) return question;
   if (missingFields.includes('url')) return 'Which target URL should I use?';
+  if (missingFields.includes('base_url')) return 'What is the real API Server URL for this OpenAPI spec?';
   if (missingFields.includes('connectionId')) return 'Which database connection should I use?';
   if (missingFields.includes('specName')) return 'Which spec name should I use?';
   return 'Can you clarify the missing input before I prepare an action card?';
@@ -531,7 +632,25 @@ function normalizeRoute(route: RawIntentRoute, ctx: IntentRouterContext): Promis
   }
 
   if (route.intent === 'importOpenApiSpec') {
-    return action(route, 'importOpenApiSpec', { url }, 'I prepared an OpenAPI import action below. Approve it to import the spec and generate API tests.');
+    const methodFilter = normalizeHttpMethods(input.methodFilter || input.method_filter);
+    const inferredMethodFilter = methodFilter.length > 0 ? methodFilter : inferHttpMethodsFromText(latestUserText);
+    const mode = normalizeImportMode(input.mode, latestUserText);
+    const baseUrl = openApiServerUrlFromInput(input, latestUserText, url);
+    if (!baseUrl) {
+      return clarify(route, Array.from(new Set([...missingFields, 'base_url'])));
+    }
+    return action(
+      route,
+      'importOpenApiSpec',
+      {
+        url,
+        featureFilter: asString(input.featureFilter) || asString(input.feature_filter),
+        methodFilter: inferredMethodFilter.length > 0 ? inferredMethodFilter : undefined,
+        mode,
+        baseUrl,
+      },
+      openApiImportActionText(mode)
+    );
   }
 
   if (route.intent === 'generateApiTest') {
@@ -579,6 +698,9 @@ export async function routeAssistantIntent(ctx: IntentRouterContext): Promise<As
         'For normal questions, status questions, explanations, analysis requests, and vague asks, use intent "unknown" so the main assistant can answer.',
         'Never invent required identifiers. If a required URL, spec name, or database connection is missing, set missingFields and write one concise clarifyingQuestion.',
         'Return tool input using camelCase keys expected by the UI action cards.',
+        'For importOpenApiSpec, preserve url, baseUrl/serverUrl, featureFilter, methodFilter, and mode. Use methodFilter only for explicit HTTP methods like POST, GET, PUT, PATCH, DELETE, HEAD, OPTIONS, or TRACE.',
+        'For importOpenApiSpec, ask for the real API Server URL before creating an action when it is missing or looks like a placeholder such as api.example.com.',
+        'Default OpenAPI/Swagger imports to mode "plan_and_tests" unless the user explicitly requests plan_only, tests_only, or evidence_specs.',
         'For API spec creation, include a complete markdown spec in input.content only when the user provided enough endpoint or demo intent to create one.',
       ].join(' '),
       prompt: [

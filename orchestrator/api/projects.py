@@ -12,8 +12,12 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import or_
-from sqlmodel import Session, func, select
+from sqlalchemy import select as sa_select
+from sqlalchemy.sql.elements import ColumnElement
+from sqlmodel import SQLModel, Session, func, select
 
 from .credentials import delete_project_credential, list_project_credentials, set_project_credential
 from .db import get_session
@@ -118,6 +122,11 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 # Default project ID - used for migration and as fallback
 DEFAULT_PROJECT_ID = "default"
 DEFAULT_PROJECT_NAME = "Default Project"
+PRESERVED_PROJECT_TABLES = {
+    DBSpecMetadata.__table__.name,
+    DBTestRun.__table__.name,
+    RegressionBatch.__table__.name,
+}
 
 
 def _project_to_response(
@@ -150,6 +159,80 @@ def ensure_default_project(session: Session) -> Project:
         session.commit()
         session.refresh(project)
     return project
+
+
+def _delete_ancillary_project_rows(session: Session, project_id: str) -> dict[str, int]:
+    """Delete project-scoped rows except content intentionally reassigned elsewhere."""
+    bind = session.get_bind()
+    inspector = sa_inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+    metadata_tables = [table for table in SQLModel.metadata.sorted_tables if table.name in existing_tables]
+    table_by_name = {table.name: table for table in metadata_tables}
+    project_table_name = Project.__table__.name
+
+    direct_tables = {
+        table.name
+        for table in metadata_tables
+        if table.name not in PRESERVED_PROJECT_TABLES
+        and table.name != project_table_name
+        and "project_id" in table.c
+    }
+
+    affected_tables = set(direct_tables)
+    changed = True
+    while changed:
+        changed = False
+        for table in metadata_tables:
+            if table.name in affected_tables or table.name in PRESERVED_PROJECT_TABLES or table.name == project_table_name:
+                continue
+            if any(fk.column.table.name in affected_tables for column in table.c for fk in column.foreign_keys):
+                affected_tables.add(table.name)
+                changed = True
+
+    condition_cache: dict[str, ColumnElement[bool] | None] = {}
+
+    def deletion_condition(table_name: str, visiting: set[str] | None = None) -> ColumnElement[bool] | None:
+        if table_name in condition_cache:
+            return condition_cache[table_name]
+
+        visiting = visiting or set()
+        if table_name in visiting:
+            return None
+
+        table = table_by_name[table_name]
+        conditions: list[ColumnElement[bool]] = []
+
+        if table_name in direct_tables:
+            conditions.append(table.c.project_id == project_id)
+
+        next_visiting = {*visiting, table_name}
+        for column in table.c:
+            for fk in column.foreign_keys:
+                parent_table = fk.column.table
+                parent_name = parent_table.name
+                if parent_name == table_name or parent_name not in affected_tables:
+                    continue
+                parent_condition = deletion_condition(parent_name, next_visiting)
+                if parent_condition is not None:
+                    conditions.append(column.in_(sa_select(fk.column).where(parent_condition)))
+
+        condition = or_(*conditions) if conditions else None
+        condition_cache[table_name] = condition
+        return condition
+
+    deleted_counts: dict[str, int] = {}
+    for table in reversed(metadata_tables):
+        if table.name not in affected_tables:
+            continue
+        condition = deletion_condition(table.name)
+        if condition is None:
+            continue
+        result = session.exec(sa_delete(table).where(condition))
+        rowcount = result.rowcount if result.rowcount is not None else 0
+        if rowcount:
+            deleted_counts[table.name] = rowcount
+
+    return deleted_counts
 
 
 @router.get("", response_model=ProjectListResponse)
@@ -353,6 +436,8 @@ def delete_project(
         batch.project_id = target_project_id
         session.add(batch)
 
+    deleted_ancillary_rows = _delete_ancillary_project_rows(session, project_id)
+
     # Delete the project
     session.delete(project)
     session.commit()
@@ -364,6 +449,7 @@ def delete_project(
         "reassigned_specs": len(specs),
         "reassigned_runs": len(runs),
         "reassigned_batches": len(batches),
+        "deleted_ancillary_rows": deleted_ancillary_rows,
     }
 
 

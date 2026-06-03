@@ -47,6 +47,23 @@ export interface GeneratedTestsSummary {
 export interface JobResult {
     test_path?: string;
     files?: string[];
+    plan_path?: string | null;
+    evidence_paths?: string[];
+    spec_paths?: string[];
+    test_paths?: string[];
+    base_url?: string | null;
+    needs_input?: boolean;
+    missing_fields?: string[];
+    matched_operations?: number;
+    executed_operations?: number;
+    blocked_operations?: Array<Record<string, unknown>>;
+    failed_operations?: Array<Record<string, unknown>>;
+    skipped_operations?: number;
+    chunk_count?: number;
+    recommended_mode?: 'evidence_specs' | 'plan_only' | 'tests_only' | 'plan_and_tests';
+    recommended_next_action?: string;
+    warnings?: string[];
+    diagnostics?: Record<string, unknown>;
     run_id?: string;
     run_dir?: string;
     passed?: boolean;
@@ -59,10 +76,11 @@ export interface JobResult {
 
 export interface JobStatus {
     job_id: string;
-    status: 'running' | 'completed' | 'failed';
+    status: 'running' | 'completed' | 'failed' | 'needs_input';
     stage?: string;
     message?: string;
     result?: JobResult;
+    type?: string;
 }
 
 export interface ApiTestRun {
@@ -143,13 +161,33 @@ export interface ApiRunDetail {
 
 export interface ImportHistoryRecord {
     id: string;
+    job_id?: string | null;
     source_type: 'url' | 'file';
     source_url?: string;
     source_filename?: string;
     feature_filter?: string;
-    status: 'running' | 'completed' | 'failed';
+    method_filter?: string[];
+    mode?: 'evidence_specs' | 'plan_only' | 'tests_only' | 'plan_and_tests';
+    status: 'running' | 'completed' | 'failed' | 'needs_input';
+    base_url?: string | null;
+    needs_input?: boolean;
+    missing_fields?: string[];
     files_generated: number;
     generated_paths: string[];
+    plan_path?: string | null;
+    evidence_paths?: string[];
+    spec_paths?: string[];
+    test_paths?: string[];
+    matched_operations?: number;
+    executed_operations?: number;
+    blocked_operations?: Array<Record<string, unknown>>;
+    failed_operations?: Array<Record<string, unknown>>;
+    skipped_operations?: number;
+    chunk_count?: number;
+    recommended_mode?: 'evidence_specs' | 'plan_only' | 'tests_only' | 'plan_and_tests';
+    recommended_next_action?: string;
+    warnings?: string[];
+    diagnostics?: Record<string, unknown>;
     error_message?: string;
     created_at: string;
     completed_at?: string;

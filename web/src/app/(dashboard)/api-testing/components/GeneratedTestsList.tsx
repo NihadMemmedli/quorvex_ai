@@ -3,7 +3,7 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import {
     Play, Loader2, ChevronDown, ChevronRight, RefreshCw, Edit2, Save, X, Search,
-    CheckCircle, XCircle, MoreVertical, Trash2, Copy, Circle,
+    CheckCircle, XCircle, MoreVertical, Trash2, Copy, Circle, Heart,
 } from 'lucide-react';
 import { API_BASE } from '@/lib/api';
 import { GeneratedTest, GeneratedTestsSummary, JobStatus } from './types';
@@ -184,7 +184,7 @@ export default React.memo(function GeneratedTestsList({
     };
 
     // Run a single test
-    const handleRunTest = useCallback(async (test: GeneratedTest) => {
+    const handleRunTest = useCallback(async (test: GeneratedTest, healOnFailure = false) => {
         try {
             const res = await fetch(`${API_BASE}/api-testing/run-direct`, {
                 method: 'POST',
@@ -193,12 +193,20 @@ export default React.memo(function GeneratedTestsList({
                     test_path: test.path,
                     spec_name: test.source_spec || test.name,
                     project_id: projectId,
+                    heal_on_failure: healOnFailure,
                 }),
             });
             if (res.ok) {
                 const data = await res.json();
                 setRunningTests(prev => ({ ...prev, [test.path]: data.job_id }));
-                setActiveJobs(prev => ({ ...prev, [data.job_id]: { job_id: data.job_id, status: 'running', message: data.message } }));
+                setActiveJobs(prev => ({
+                    ...prev,
+                    [data.job_id]: {
+                        job_id: data.job_id,
+                        status: 'running',
+                        message: healOnFailure ? 'Running test with healing...' : data.message,
+                    },
+                }));
                 pollJob(data.job_id, () => {
                     setRunningTests(prev => { const next = { ...prev }; delete next[test.path]; return next; });
                     refreshTests(0);
@@ -538,6 +546,15 @@ export default React.memo(function GeneratedTestsList({
                                                     border: '1px solid var(--border)', borderRadius: 'var(--radius)',
                                                     boxShadow: '0 4px 12px rgba(0,0,0,0.3)', overflow: 'hidden',
                                                 }}>
+                                                    <button
+                                                        onClick={() => { setMenuOpen(null); void handleRunTest(test, true); }}
+                                                        style={menuItemStyle}
+                                                        onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
+                                                        onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                                                    >
+                                                        <Heart size={13} style={{ color: 'var(--warning)' }} /> Run with healing
+                                                    </button>
+                                                    <div style={{ height: '1px', background: 'var(--border-subtle)' }} />
                                                     <button
                                                         onClick={() => {
                                                             setExpandedTest(test.name);

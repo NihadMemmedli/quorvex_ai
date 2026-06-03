@@ -27,6 +27,7 @@ interface LiveBrowserViewProps {
 const VNC_CONNECT_TIMEOUT_MS = 8000;
 const VNC_FRAME_PROBE_MS = 500;
 const VNC_FRAME_PROBE_ATTEMPTS = 16;
+const LIVE_STATUS_OVERLAY_VISIBLE_MS = 4000;
 
 interface AgentArtifact {
     name: string;
@@ -113,6 +114,7 @@ export function LiveBrowserView({
     const [vncAvailable, setVncAvailable] = useState<boolean | null>(null);
     const [artifacts, setArtifacts] = useState<AgentArtifact[]>([]);
     const [liveReady, setLiveReady] = useState(false);
+    const [showLiveStatusOverlay, setShowLiveStatusOverlay] = useState(false);
 
     const containerRef = useRef<HTMLDivElement>(null);
     const rfbRef = useRef<any>(null);
@@ -200,6 +202,20 @@ export function LiveBrowserView({
         : statusLabel === 'Latest capture' || statusLabel === 'PRD-only' || statusLabel === 'Desktop connected'
             ? 'rgba(59, 130, 246, 0.35)'
             : 'rgba(239, 68, 68, 0.3)';
+
+    useEffect(() => {
+        if (!liveCanvasMounted || statusLabel === 'Connected') {
+            setShowLiveStatusOverlay(false);
+            return;
+        }
+
+        setShowLiveStatusOverlay(true);
+        const timeout = window.setTimeout(() => {
+            setShowLiveStatusOverlay(false);
+        }, LIVE_STATUS_OVERLAY_VISIBLE_MS);
+
+        return () => window.clearTimeout(timeout);
+    }, [liveCanvasMounted, statusLabel, pendingMessage, browserLastTool]);
 
     useEffect(() => {
         let cancelled = false;
@@ -757,7 +773,7 @@ export function LiveBrowserView({
                     }}
                 />
 
-                {liveCanvasMounted && statusLabel !== 'Connected' && (
+                {liveCanvasMounted && statusLabel !== 'Connected' && showLiveStatusOverlay && (
                     <div
                         style={{
                             position: 'absolute',

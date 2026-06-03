@@ -2533,14 +2533,34 @@ class OpenApiImportHistory(SQLModel, table=True):
     __table_args__ = {"extend_existing": True}
 
     id: str = Field(primary_key=True)  # oai-<uuid8>
+    job_id: str | None = Field(default=None, index=True)
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
     source_type: str  # "url" or "file"
     source_url: str | None = None
     source_filename: str | None = None
+    base_url: str | None = None
     feature_filter: str | None = None
-    status: str = "running"  # running, completed, failed
+    method_filter_json: str = "[]"
+    mode: str = "plan_and_tests"
+    status: str = "running"  # running, completed, failed, needs_input
+    needs_input: bool = False
+    missing_fields_json: str = "[]"
     files_generated: int = 0
     generated_paths_json: str = "[]"
+    plan_path: str | None = None
+    spec_paths_json: str = "[]"
+    test_paths_json: str = "[]"
+    evidence_paths_json: str = "[]"
+    matched_operations: int = 0
+    executed_operations: int = 0
+    blocked_operations_json: str = "[]"
+    failed_operations_json: str = "[]"
+    skipped_operations: int = 0
+    chunk_count: int = 0
+    recommended_mode: str = "plan_and_tests"
+    recommended_next_action: str | None = None
+    warnings_json: str = "[]"
+    diagnostics_json: str = "{}"
     error_message: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     completed_at: datetime | None = None
@@ -2549,12 +2569,112 @@ class OpenApiImportHistory(SQLModel, table=True):
     def generated_paths(self) -> list[str]:
         try:
             return json.loads(self.generated_paths_json)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             return []
 
     @generated_paths.setter
     def generated_paths(self, value: list[str]):
         self.generated_paths_json = json.dumps(value)
+
+    @property
+    def method_filter(self) -> list[str]:
+        try:
+            return json.loads(self.method_filter_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @method_filter.setter
+    def method_filter(self, value: list[str]):
+        self.method_filter_json = json.dumps(value)
+
+    @property
+    def missing_fields(self) -> list[str]:
+        try:
+            return json.loads(self.missing_fields_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @missing_fields.setter
+    def missing_fields(self, value: list[str]):
+        self.missing_fields_json = json.dumps(value)
+
+    @property
+    def spec_paths(self) -> list[str]:
+        try:
+            return json.loads(self.spec_paths_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @spec_paths.setter
+    def spec_paths(self, value: list[str]):
+        self.spec_paths_json = json.dumps(value)
+
+    @property
+    def test_paths(self) -> list[str]:
+        try:
+            return json.loads(self.test_paths_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @test_paths.setter
+    def test_paths(self, value: list[str]):
+        self.test_paths_json = json.dumps(value)
+
+    @property
+    def evidence_paths(self) -> list[str]:
+        try:
+            return json.loads(self.evidence_paths_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @evidence_paths.setter
+    def evidence_paths(self, value: list[str]):
+        self.evidence_paths_json = json.dumps(value)
+
+    @property
+    def blocked_operations(self) -> list[dict[str, Any]]:
+        try:
+            return json.loads(self.blocked_operations_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @blocked_operations.setter
+    def blocked_operations(self, value: list[dict[str, Any]]):
+        self.blocked_operations_json = json.dumps(value)
+
+    @property
+    def failed_operations(self) -> list[dict[str, Any]]:
+        try:
+            return json.loads(self.failed_operations_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @failed_operations.setter
+    def failed_operations(self, value: list[dict[str, Any]]):
+        self.failed_operations_json = json.dumps(value)
+
+    @property
+    def warnings(self) -> list[str]:
+        try:
+            return json.loads(self.warnings_json)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @warnings.setter
+    def warnings(self, value: list[str]):
+        self.warnings_json = json.dumps(value)
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.diagnostics_json)
+            return value if isinstance(value, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    @diagnostics.setter
+    def diagnostics(self, value: dict[str, Any]):
+        self.diagnostics_json = json.dumps(value)
 
 
 # ========== LLM Dataset Models ==========

@@ -3267,10 +3267,13 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
     }),
 
     importOpenApiSpec: tool({
-      description: 'Import an OpenAPI or Swagger specification from a URL and generate API tests.',
+      description: 'Import an OpenAPI or Swagger specification from a URL and generate a review plan and/or API tests. Supports optional HTTP method filtering.',
       inputSchema: z.object({
         url: z.string().url().describe('The OpenAPI/Swagger document URL'),
+        baseUrl: z.string().url().optional().describe('The real API server base URL to use for generated specs and tests'),
         featureFilter: z.string().optional().describe('Optional feature or tag filter'),
+        methodFilter: z.array(z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', 'TRACE'])).optional().describe('Optional HTTP methods to include'),
+        mode: z.enum(['evidence_specs', 'plan_only', 'tests_only', 'plan_and_tests']).optional().describe('Whether to generate evidence specs, a plan, tests, or both'),
       }),
     }),
 
