@@ -5,6 +5,7 @@ import { UploadCloud, AlertCircle } from 'lucide-react';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { API_BASE } from '@/lib/api';
+import { getProjectDefaultUrl } from '@/lib/project-url';
 
 import { computeStats } from './components/types';
 import { usePrdSettings } from './components/hooks/usePrdSettings';
@@ -33,7 +34,10 @@ async function readResponseJson(response: Response): Promise<any> {
 
 export default function PrdPage() {
     const project = usePrdProject();
-    const { settings, updateSetting, resetSettings } = usePrdSettings(project.projectData?.project);
+    const { settings, updateSetting, resetSettings } = usePrdSettings(
+        project.projectData?.project,
+        getProjectDefaultUrl(project.currentProject)
+    );
 
     const generation = usePrdGeneration(project.projectData?.project, settings);
     const testRunner = usePrdTestRunner(

@@ -25,6 +25,7 @@ class ClaudeAgentSdkRuntime(AgentRuntime):
             on_task_enqueued=context.on_task_enqueued,
             on_tool_use=context.on_tool_use,
             on_progress=context.on_progress,
+            is_cancelled=context.is_cancelled,
             cwd=context.cwd,
             owner_type=context.owner_type,
             owner_id=context.owner_id,

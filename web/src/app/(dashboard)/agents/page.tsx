@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { Bot, FileText, Play, Pause, Terminal, ChevronRight, CheckCircle2, AlertTriangle, Loader2, Clock, RotateCcw, Lock, Globe, Settings, Download, List, Sparkles, Zap, ArrowRight, Info, X, RefreshCw, Scissors, ExternalLink, Plus, Save, Trash2, Wrench, MessageSquare, Bug, Lightbulb, Eye, Video as VideoIcon, Monitor, Image as ImageIcon } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { useProject } from '@/contexts/ProjectContext';
@@ -8,6 +8,12 @@ import { useJobPoller } from '@/hooks/useJobPoller';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { LiveBrowserView } from '@/components/LiveBrowserView';
+import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
+import {
+    browserAuthSessionLabel,
+    fetchProjectBrowserAuthSessions,
+    isBrowserAuthSessionSelectable,
+} from '@/lib/browser-auth-sessions';
 
 interface AgentRun {
     id: string;
@@ -128,6 +134,12 @@ interface SpecResult {
 
 type AuthType = 'none' | 'credentials' | 'session';
 type CustomResultTab = 'overview' | 'findings' | 'test_ideas' | 'evidence' | 'raw';
+type ReportSpecBrowserAuthMode = 'session' | 'project_default' | 'none';
+
+interface ReportSpecBrowserAuthSelection {
+    mode: ReportSpecBrowserAuthMode;
+    sessionId: string;
+}
 
 interface ReportPage {
     id?: string;
@@ -202,6 +214,45 @@ function sortArtifactsByModifiedAt(artifacts: AgentArtifact[] = []) {
 
 function getArtifactUrl(artifact: AgentArtifact) {
     return `${API_BASE}${artifact.path}`;
+}
+
+function runBrowserAuthSessionId(config: any): string {
+    const authConfig = config?.browser_auth && typeof config.browser_auth === 'object' ? config.browser_auth : {};
+    const legacyAuth = config?.auth && typeof config.auth === 'object' ? config.auth : {};
+    return String(
+        config?.browser_auth_session_id ||
+        authConfig.session_id ||
+        authConfig.browser_auth_session_id ||
+        legacyAuth.browser_auth_session_id ||
+        legacyAuth.session_id ||
+        ''
+    );
+}
+
+function defaultReportSpecBrowserAuthSelection(
+    sessions: BrowserAuthSession[],
+    selectedSessionId: string
+): ReportSpecBrowserAuthSelection {
+    const activeSessions = sessions.filter(isBrowserAuthSessionSelectable);
+    const selectedSession = activeSessions.find(item => item.id === selectedSessionId);
+    if (selectedSession) {
+        return { mode: 'session', sessionId: selectedSession.id };
+    }
+    const defaultSession = activeSessions.find(item => item.is_default);
+    if (defaultSession) {
+        return { mode: 'project_default', sessionId: '' };
+    }
+    return { mode: 'none', sessionId: '' };
+}
+
+function reportSpecBrowserAuthBody(mode: ReportSpecBrowserAuthMode, sessionId: string) {
+    if (mode === 'session') {
+        return { browser_auth_session_id: sessionId };
+    }
+    if (mode === 'project_default') {
+        return { use_project_default_browser_auth: true };
+    }
+    return { skip_browser_auth: true };
 }
 
 function AgentRunCapturePanel({
@@ -365,6 +416,17 @@ function agentStatusTone(status?: string) {
     if (status === 'failed' || status === 'cancelled' || status === 'timeout') return { bg: 'var(--danger-muted)', color: 'var(--danger)' };
     if (status === 'paused') return { bg: 'rgba(245, 158, 11, 0.12)', color: 'var(--warning)' };
     return { bg: 'var(--primary-glow)', color: 'var(--primary)' };
+}
+
+function agentRunDisplayName(run: AgentRun) {
+    if (run.agent_type === 'spec_generation') return 'Spec Generation';
+    if (run.agent_type === 'custom') return run.config?.agent_name || 'Custom';
+    if (run.agent_type === 'writer') return 'Writer';
+    return 'Explorer';
+}
+
+function agentRunResultTitle(run: AgentRun) {
+    return run.config?.agent_name || run.config?.flow_title || run.config?.url || agentRunDisplayName(run);
 }
 
 function customAgentExecutionStarted(run: AgentRun) {
@@ -769,6 +831,109 @@ function AgentRunObservabilityPanel({ run, events }: { run: AgentRun; events: Ag
     );
 }
 
+function SpecGenerationRunPanel({ run, events }: { run: AgentRun; events: AgentRunEvent[] }) {
+    const progress = run.progress || {};
+    const latestImage = sortArtifactsByModifiedAt((run.artifacts || []).filter(artifact => artifact.type === 'image'))[0];
+    const recentTools = progress.recent_tools || [];
+    const errorMessage = run.result?.error || (run.status === 'failed' ? progress.message : null);
+    const specFile = run.result?.spec_file;
+    const specContent = run.result?.spec_content;
+
+    return (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+            <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+                gap: '0.5rem',
+                padding: '0.75rem',
+                background: 'var(--surface-hover)',
+                border: '1px solid var(--border)',
+                borderRadius: '8px'
+            }}>
+                {[
+                    { label: 'Status', value: run.status },
+                    { label: 'Phase', value: progress.phase || 'queued' },
+                    { label: 'Current Step', value: progress.last_tool_label || progress.message || 'Preparing browser' },
+                    { label: 'Browser Actions', value: progress.browser_tool_calls ?? 0 },
+                ].map(item => (
+                    <div key={item.label} style={{ minWidth: 0, padding: '0.65rem', border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--background)' }}>
+                        <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>{item.label}</div>
+                        <div style={{ fontWeight: 700, overflowWrap: 'anywhere', textTransform: item.label === 'Status' || item.label === 'Phase' ? 'capitalize' : 'none', lineHeight: 1.3, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{item.value}</div>
+                    </div>
+                ))}
+            </div>
+
+            {errorMessage && (
+                <div style={{ padding: '1rem', background: 'var(--danger-muted)', color: 'var(--danger)', borderRadius: '8px', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
+                    <h4 style={{ margin: 0, fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <AlertTriangle size={18} /> Spec Generation Failed
+                    </h4>
+                    <p style={{ margin: '0.5rem 0 0', fontFamily: 'monospace', overflowWrap: 'anywhere' }}>{errorMessage}</p>
+                </div>
+            )}
+
+            <LiveBrowserView
+                runId={run.id}
+                isActive={LIVE_AGENT_STATUSES.has(run.status) && run.status !== 'paused'}
+                showHeader
+                artifacts={run.artifacts || []}
+                latestImage={latestImage}
+                statusMessage={progress.message}
+                liveViewAvailable={Boolean(progress.live_view_available ?? true)}
+                runtimeMessage={progress.runtime_message}
+                vncUrl={progress.vnc_url}
+            />
+
+            <AgentRunCapturePanel activeRun={run} mode={LIVE_AGENT_STATUSES.has(run.status) ? 'live' : 'recording'} />
+            <AgentRunObservabilityPanel run={run} events={events} />
+
+            {latestImage && (
+                <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: 'var(--background)' }}>
+                    <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
+                        <h4 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <ImageIcon size={15} /> Latest Screenshot
+                        </h4>
+                        {latestImage.modified_at && <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{new Date(latestImage.modified_at).toLocaleTimeString()}</span>}
+                    </div>
+                    <a href={getArtifactUrl(latestImage)} target="_blank" rel="noreferrer" style={{ display: 'block' }}>
+                        <img src={getArtifactUrl(latestImage)} alt="Latest spec generation screenshot" style={{ width: '100%', display: 'block', maxHeight: '420px', objectFit: 'contain', background: '#000' }} />
+                    </a>
+                </div>
+            )}
+
+            {recentTools.length > 0 && (
+                <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: 'var(--background)' }}>
+                    <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', fontWeight: 600 }}>Live Activity</div>
+                    {recentTools.slice().reverse().map((tool: any, i: number) => (
+                        <div key={`${tool.name}-${tool.at}-${i}`} style={{ padding: '0.65rem 1rem', borderBottom: i === recentTools.length - 1 ? 'none' : '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', gap: '1rem', fontSize: '0.85rem' }}>
+                            <span style={{ fontWeight: 600 }}>{tool.label || formatToolName(tool.name)}</span>
+                            {tool.at && <span style={{ color: 'var(--text-secondary)' }}>{new Date(tool.at).toLocaleTimeString()}</span>}
+                        </div>
+                    ))}
+                </div>
+            )}
+
+            {run.status === 'completed' && (
+                <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: 'var(--background)' }}>
+                    <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center' }}>
+                        <h4 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                            <FileText size={15} /> Generated Spec
+                        </h4>
+                        {specFile && <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', overflowWrap: 'anywhere' }}>{specFile}</span>}
+                    </div>
+                    {specContent ? (
+                        <pre style={{ margin: 0, padding: '1rem', whiteSpace: 'pre-wrap', fontFamily: 'var(--font-mono)', fontSize: '0.85rem', lineHeight: 1.6, maxHeight: '420px', overflow: 'auto', background: 'var(--code-bg)' }}>{specContent}</pre>
+                    ) : (
+                        <div style={{ padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                            Spec generated. Open the artifact or specs page to inspect the file.
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
 export default function AgentsPage() {
     const { currentProject } = useProject();
     const [selectedAgent, setSelectedAgent] = useState<'exploratory' | 'writer' | 'custom'>('exploratory');
@@ -798,7 +963,7 @@ export default function AgentsPage() {
     const [runControlPending, setRunControlPending] = useState<'pause' | 'resume' | 'cancel' | null>(null);
     const [isSynthesizing, setIsSynthesizing] = useState(false);
     const [showAdvanced, setShowAdvanced] = useState(false);
-    const [sessions, setSessions] = useState<any[]>([]);
+    const [sessions, setSessions] = useState<BrowserAuthSession[]>([]);
     const [flowModalOpen, setFlowModalOpen] = useState(false);
     const [selectedFlow, setSelectedFlow] = useState<any | null>(null);
     const [loadingFlowDetails, setLoadingFlowDetails] = useState(false);
@@ -806,6 +971,9 @@ export default function AgentsPage() {
     const [flowSpecAgentRunId, setFlowSpecAgentRunId] = useState<string | null>(null);
     const [flowSpecAgentRun, setFlowSpecAgentRun] = useState<AgentRun | null>(null);
     const [flowSpecAgentEvents, setFlowSpecAgentEvents] = useState<AgentRunEvent[]>([]);
+    const [flowSpecError, setFlowSpecError] = useState<string | null>(null);
+    const [reportSpecAuthMode, setReportSpecAuthMode] = useState<ReportSpecBrowserAuthMode>('none');
+    const [reportSpecAuthSessionId, setReportSpecAuthSessionId] = useState('');
     const [generatedSpec, setGeneratedSpec] = useState<any | null>(null);
     const [specModalOpen, setSpecModalOpen] = useState(false);
     const [splittingSpec, setSplittingSpec] = useState(false);
@@ -829,6 +997,14 @@ export default function AgentsPage() {
         tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console'],
     });
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
+    const activeBrowserAuthSessions = useMemo(
+        () => sessions.filter(isBrowserAuthSessionSelectable),
+        [sessions]
+    );
+    const projectDefaultBrowserAuthSession = useMemo(
+        () => activeBrowserAuthSessions.find(item => item.is_default),
+        [activeBrowserAuthSessions]
+    );
 
     const fetchRuntimeSettings = async () => {
         try {
@@ -859,15 +1035,15 @@ export default function AgentsPage() {
         } catch (e) { console.error("Failed to fetch history", e); }
     };
 
-    // Fetch sessions
     const fetchSessions = async () => {
+        if (!currentProject?.id) {
+            setSessions([]);
+            setSessionId('');
+            return;
+        }
         try {
-            const res = await fetch(`${API_BASE}/api/agents/sessions`);
-            if (res.ok) {
-                const data = await res.json();
-                setSessions(data.sessions || []);
-            }
-        } catch (e) { console.error("Failed to fetch sessions", e); }
+            setSessions(await fetchProjectBrowserAuthSessions(currentProject.id));
+        } catch (e) { console.error("Failed to fetch browser login sessions", e); }
     };
 
     const fetchToolCatalog = async () => {
@@ -1018,6 +1194,7 @@ export default function AgentsPage() {
         setFlowSpecAgentRunId(null);
         setFlowSpecAgentRun(null);
         setFlowSpecAgentEvents([]);
+        setFlowSpecError(null);
         try {
             const res = await fetch(`${API_BASE}/api/agents/exploratory/${activeRun.id}/flows/${flowId}`);
             if (res.ok) {
@@ -1041,7 +1218,8 @@ export default function AgentsPage() {
         apiBase: API_BASE,
         urlPattern: '/api/agents/exploratory/flow-spec-jobs/{jobId}',
         interval: 3000,
-        onComplete: (result) => {
+        onComplete: (result, status) => {
+            setFlowSpecError(null);
             if (result) {
                 setGeneratedSpec({
                     spec_content: result.spec_content as string,
@@ -1058,14 +1236,21 @@ export default function AgentsPage() {
                 });
                 setSpecModalOpen(true);
             }
-            if (flowSpecAgentRunId) {
-                fetchFlowSpecAgentRun(flowSpecAgentRunId);
+            const agentRunId = status.agent_run_id || flowSpecAgentRunId;
+            if (agentRunId) {
+                setFlowSpecAgentRunId(agentRunId);
+                fetchFlowSpecAgentRun(agentRunId);
             }
             setGeneratingSpec(false);
         },
-        onFailed: (message) => {
+        onFailed: (message, status) => {
             setGeneratingSpec(false);
-            alert(`Failed to generate spec: ${message || 'Unknown error'}`);
+            setFlowSpecError(message || 'Unknown error');
+            const agentRunId = status.agent_run_id || flowSpecAgentRunId;
+            if (agentRunId) {
+                setFlowSpecAgentRunId(agentRunId);
+                fetchFlowSpecAgentRun(agentRunId);
+            }
         },
     });
 
@@ -1090,6 +1275,7 @@ export default function AgentsPage() {
         setFlowSpecAgentRunId(null);
         setFlowSpecAgentRun(null);
         setFlowSpecAgentEvents([]);
+        setFlowSpecError(null);
         try {
             const url = forceRegenerate
                 ? `${API_BASE}/api/agents/exploratory/${activeRun.id}/flows/${flowId}/generate?force_regenerate=true`
@@ -1135,13 +1321,16 @@ export default function AgentsPage() {
             throw new Error('Unexpected response from server');
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : 'Please try again.';
-            alert(`Failed to generate spec: ${message}`);
+            setFlowSpecError(message);
             setGeneratingSpec(false);
         }
     };
 
-    const createSpecFromReportItem = async (item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test_idea') => {
+    const openSpecFromReportItem = (item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test_idea') => {
         if (!activeRun?.id) return;
+        const defaultSelection = defaultReportSpecBrowserAuthSelection(sessions, sessionId);
+        setReportSpecAuthMode(defaultSelection.mode);
+        setReportSpecAuthSessionId(defaultSelection.sessionId);
         setSelectedFlow({
             id: item.id,
             title: item.title || item.id,
@@ -1155,16 +1344,43 @@ export default function AgentsPage() {
             item_type: kind,
         });
         setFlowModalOpen(true);
+        setGeneratingSpec(false);
+        setSplitResult(null);
+        flowSpecPoller.clear();
+        setFlowSpecAgentRunId(null);
+        setFlowSpecAgentRun(null);
+        setFlowSpecAgentEvents([]);
+        setFlowSpecError(null);
+    };
+
+    const createSpecFromReportItem = async (item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test_idea') => {
+        if (!activeRun?.id) return;
+        if (reportSpecAuthMode === 'session') {
+            const selected = activeBrowserAuthSessions.find(session => session.id === reportSpecAuthSessionId);
+            if (!selected) {
+                setFlowSpecError('Select an active browser login session or choose No auth.');
+                return;
+            }
+        }
+        if (reportSpecAuthMode === 'project_default' && !projectDefaultBrowserAuthSession) {
+            setFlowSpecError('Set an active project default browser login session or choose No auth.');
+            return;
+        }
         setGeneratingSpec(true);
         setSplitResult(null);
         flowSpecPoller.clear();
         setFlowSpecAgentRunId(null);
         setFlowSpecAgentRun(null);
         setFlowSpecAgentEvents([]);
+        setFlowSpecError(null);
         try {
             const params = new URLSearchParams({ item_type: kind });
             if (currentProject?.id) params.set('project_id', currentProject.id);
-            const res = await fetch(`${API_BASE}/api/agents/runs/${activeRun.id}/report-items/${encodeURIComponent(item.id)}/generate-spec?${params}`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}/api/agents/runs/${activeRun.id}/report-items/${encodeURIComponent(item.id)}/generate-spec?${params}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(reportSpecBrowserAuthBody(reportSpecAuthMode, reportSpecAuthSessionId)),
+            });
             if (!res.ok) {
                 const error = await res.json().catch(() => ({}));
                 throw new Error(error.detail || `HTTP ${res.status}`);
@@ -1181,7 +1397,7 @@ export default function AgentsPage() {
             throw new Error('Unexpected response from server');
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : 'Please try again.';
-            alert(`Failed to generate spec: ${message}`);
+            setFlowSpecError(message);
             setGeneratingSpec(false);
         }
     };
@@ -1396,9 +1612,24 @@ export default function AgentsPage() {
 
         setIsStarting(true);
         try {
+            const selectedBrowserAuthSessionId = selectedAgent !== 'writer' && authType === 'session' ? sessionId.trim() : '';
+            if (selectedAgent !== 'writer' && authType === 'session' && !selectedBrowserAuthSessionId) {
+                alert("Select a browser login session");
+                setIsStarting(false);
+                return;
+            }
+            const selectedBrowserAuthSession = selectedBrowserAuthSessionId
+                ? sessions.find(session => session.id === selectedBrowserAuthSessionId)
+                : undefined;
+            if (selectedBrowserAuthSessionId && (!selectedBrowserAuthSession || !isBrowserAuthSessionSelectable(selectedBrowserAuthSession))) {
+                alert("Select an active browser login session");
+                setIsStarting(false);
+                return;
+            }
+
             // Build auth config
             let authConfig: any = null;
-            if (authType !== 'none') {
+            if (selectedAgent !== 'custom' && authType !== 'none' && authType !== 'session') {
                 authConfig = { type: authType };
                 if (authType === 'credentials') {
                     authConfig.credentials = {
@@ -1406,8 +1637,6 @@ export default function AgentsPage() {
                         password: authCredentials.password
                     };
                     authConfig.login_url = authCredentials.loginUrl;
-                } else if (authType === 'session') {
-                    authConfig.session_id = sessionId;
                 }
             }
 
@@ -1447,6 +1676,7 @@ export default function AgentsPage() {
                     runtime: selectedRuntime,
                     config: {
                         auth: authConfig,
+                        browser_auth_session_id: selectedBrowserAuthSessionId || undefined,
                         test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
                         focus_areas: focusAreasList,
                         excluded_patterns: excludedPatternsList,
@@ -1459,6 +1689,7 @@ export default function AgentsPage() {
                     time_limit_minutes: timeLimitMinutes,
                     instructions,
                     auth: authConfig,
+                    browser_auth_session_id: selectedBrowserAuthSessionId || undefined,
                     test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
                     focus_areas: focusAreasList.length > 0 ? focusAreasList : undefined,
                     excluded_patterns: excludedPatternsList.length > 0 ? excludedPatternsList : undefined,
@@ -1561,6 +1792,20 @@ export default function AgentsPage() {
         return new Date(iso).toLocaleString('en-US', { hour: 'numeric', minute: 'numeric', day: 'numeric', month: 'short' });
     };
 
+    const flowSpecLatestImage = sortArtifactsByModifiedAt((flowSpecAgentRun?.artifacts || []).filter(artifact => artifact.type === 'image'))[0];
+    const flowSpecRunLive = Boolean(flowSpecAgentRun && LIVE_AGENT_STATUSES.has(flowSpecAgentRun.status));
+    const flowSpecShowBrowser = Boolean(flowSpecAgentRunId && (generatingSpec || flowSpecRunLive || flowSpecLatestImage));
+    const sourceRunBrowserAuthSessionId = runBrowserAuthSessionId(activeRun?.config);
+    const inheritedBrowserAuthUnavailable = Boolean(
+        selectedFlow?.source_type === 'custom_report' &&
+        sourceRunBrowserAuthSessionId &&
+        !activeBrowserAuthSessions.some(item => item.id === sourceRunBrowserAuthSessionId)
+    );
+    const flowSpecBrowserAuthFailure = Boolean(
+        flowSpecAgentRun?.progress?.browser_auth_failure ||
+        flowSpecAgentRun?.result?.browser_auth_failure
+    );
+
     return (
         <PageLayout tier="wide" style={{ paddingBottom: '4rem', height: '100vh', display: 'flex', flexDirection: 'column' }}>
             <PageHeader
@@ -1575,7 +1820,7 @@ export default function AgentsPage() {
                 <div className="card" style={{ padding: '0', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                     <div style={{ padding: '1rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>Run History</h3>
-                        <button onClick={fetchHistory} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)' }}>
+                        <button className="btn-icon" type="button" onClick={fetchHistory} title="Refresh run history" aria-label="Refresh run history">
                             <RotateCcw size={14} />
                         </button>
                     </div>
@@ -1598,8 +1843,8 @@ export default function AgentsPage() {
                                     }}
                                 >
                                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
-                                        <span style={{ fontWeight: 600, fontSize: '0.85rem', color: run.agent_type === 'custom' ? 'var(--success)' : run.agent_type === 'writer' ? 'var(--primary)' : 'var(--warning)' }}>
-                                            {run.agent_type === 'custom' ? (run.config?.agent_name || 'Custom') : run.agent_type === 'writer' ? 'Writer' : 'Explorer'}
+                                        <span style={{ fontWeight: 600, fontSize: '0.85rem', color: run.agent_type === 'custom' ? 'var(--success)' : run.agent_type === 'writer' || run.agent_type === 'spec_generation' ? 'var(--primary)' : 'var(--warning)' }}>
+                                            {agentRunDisplayName(run)}
                                         </span>
                                         <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{formatDate(run.created_at)}</span>
                                     </div>
@@ -1916,7 +2161,7 @@ export default function AgentsPage() {
                                     >
                                         <option value="none">No Authentication</option>
                                         <option value="credentials">Credentials (Login Form)</option>
-                                        <option value="session">Session (Saved)</option>
+                                        <option value="session">Browser Login Session</option>
                                     </select>
                                 </div>
 
@@ -1966,29 +2211,59 @@ export default function AgentsPage() {
 
                                 {authType === 'session' && (
                                     <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '6px' }}>
-                                        <label style={{ fontSize: '0.75rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>Session ID</label>
-                                        <input
-                                            type="text"
-                                            placeholder="my-session"
+                                        <label style={{ fontSize: '0.75rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>Browser Login Session</label>
+                                        <select
                                             value={sessionId}
                                             onChange={e => setSessionId(e.target.value)}
-                                            list="sessions-list"
                                             style={{
                                                 width: '100%', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem',
                                                 border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
                                             }}
-                                        />
-                                        <datalist id="sessions-list">
+                                        >
+                                            <option value="">Select a browser login session</option>
                                             {sessions.map(s => (
-                                                <option key={s.session_id} value={s.session_id} />
+                                                <option key={s.id} value={s.id} disabled={!isBrowserAuthSessionSelectable(s)}>
+                                                    {browserAuthSessionLabel(s)}
+                                                </option>
                                             ))}
-                                        </datalist>
+                                        </select>
                                         <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-                                            {sessions.length} saved session{sessions.length !== 1 ? 's' : ''} available
+                                            {sessions.length === 0
+                                                ? 'No browser login sessions found in Settings.'
+                                                : `${sessions.filter(isBrowserAuthSessionSelectable).length} active browser login session${sessions.filter(isBrowserAuthSessionSelectable).length !== 1 ? 's' : ''} available`}
                                         </p>
                                     </div>
                                 )}
                             </>
+                        )}
+
+                        {selectedAgent === 'custom' && (
+                            <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '6px' }}>
+                                <label style={{ fontSize: '0.75rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>Browser Login Session</label>
+                                <select
+                                    value={authType === 'session' ? sessionId : ''}
+                                    onChange={e => {
+                                        setSessionId(e.target.value);
+                                        setAuthType(e.target.value ? 'session' : 'none');
+                                    }}
+                                    style={{
+                                        width: '100%', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem',
+                                        border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
+                                    }}
+                                >
+                                    <option value="">No browser login session</option>
+                                    {sessions.map(s => (
+                                        <option key={s.id} value={s.id} disabled={!isBrowserAuthSessionSelectable(s)}>
+                                            {browserAuthSessionLabel(s)}
+                                        </option>
+                                    ))}
+                                </select>
+                                <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
+                                    {sessions.length === 0
+                                        ? 'No browser login sessions found in Settings.'
+                                        : `${sessions.filter(isBrowserAuthSessionSelectable).length} active browser login session${sessions.filter(isBrowserAuthSessionSelectable).length !== 1 ? 's' : ''} available`}
+                                </p>
+                            </div>
                         )}
 
                         <div style={{ marginBottom: '1.25rem' }}>
@@ -2091,12 +2366,27 @@ export default function AgentsPage() {
 
                 {/* Right Column: Output */}
                 <div className="card" style={{ padding: '0', display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-                    <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
-                        <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>
-                            {activeRun ? `Result: ${activeRun.config?.agent_name || activeRun.config?.url || 'Unknown'}` : 'Agent Output'}
+                    <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.75rem', minHeight: '4.25rem' }}>
+                        <h3
+                            title={activeRun ? agentRunResultTitle(activeRun) : 'Agent Output'}
+                            style={{
+                                flex: 1,
+                                minWidth: 0,
+                                margin: 0,
+                                fontWeight: 600,
+                                fontSize: '0.9rem',
+                                lineHeight: 1.25,
+                                display: '-webkit-box',
+                                WebkitLineClamp: 2,
+                                WebkitBoxOrient: 'vertical',
+                                overflow: 'hidden',
+                                overflowWrap: 'anywhere'
+                            }}
+                        >
+                            {activeRun ? `Result: ${agentRunResultTitle(activeRun)}` : 'Agent Output'}
                         </h3>
                         {activeRun && (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexShrink: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.5rem', flexShrink: 0, flexWrap: 'wrap', maxWidth: '58%' }}>
                                 {LIVE_AGENT_STATUSES.has(activeRun.status) && activeRun.status !== 'paused' && (
                                     <button
                                         onClick={() => controlAgentRun('pause')}
@@ -2172,6 +2462,8 @@ export default function AgentsPage() {
                                         : `Explorer agent is working. This may take up to ${timeLimitMinutes} minutes.`}
                                 </p>
                             </div>
+                        ) : LIVE_AGENT_STATUSES.has(activeRun.status) && activeRun.agent_type === 'spec_generation' ? (
+                            <SpecGenerationRunPanel run={activeRun} events={agentEvents} />
                         ) : LIVE_AGENT_STATUSES.has(activeRun.status) && activeRun.agent_type === 'custom' ? (
                             (() => {
                                 const progress = activeRun.progress || {};
@@ -2328,6 +2620,8 @@ export default function AgentsPage() {
                                         : `This may take up to ${activeRun.agent_type === 'custom' ? Math.ceil((activeRun.config?.timeout_seconds || 1800) / 60) : timeLimitMinutes} minutes.`}
                                 </p>
                             </div>
+                        ) : activeRun.status === 'failed' && activeRun.agent_type === 'spec_generation' ? (
+                            <SpecGenerationRunPanel run={activeRun} events={agentEvents} />
                         ) : activeRun.status === 'failed' ? (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                                 <div style={{ padding: '1rem', background: 'var(--danger-muted)', color: 'var(--danger)', borderRadius: '8px', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
@@ -2343,8 +2637,12 @@ export default function AgentsPage() {
                         ) : (
                             // Completed successfully
                             <div className="markdown-content">
-                                <AgentRunObservabilityPanel run={activeRun} events={agentEvents} />
-                                {activeRun.agent_type === 'writer' ? (
+                                {activeRun.agent_type !== 'spec_generation' && (
+                                    <AgentRunObservabilityPanel run={activeRun} events={agentEvents} />
+                                )}
+                                {activeRun.agent_type === 'spec_generation' ? (
+                                    <SpecGenerationRunPanel run={activeRun} events={agentEvents} />
+                                ) : activeRun.agent_type === 'writer' ? (
                                     <>
                                         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '1rem' }}>
                                             <button
@@ -2366,7 +2664,7 @@ export default function AgentsPage() {
                                         activeTab={customResultTab}
                                         onTabChange={setCustomResultTab}
                                         onAskAssistant={openAssistantWithPrompt}
-                                        onCreateSpecFromReport={createSpecFromReportItem}
+                                        onCreateSpecFromReport={openSpecFromReportItem}
                                     />
                                 ) : (
                                     // Exploratory Result - User Friendly Display
@@ -2761,21 +3059,82 @@ export default function AgentsPage() {
                                 </div>
                             )}
 
+                            {selectedFlow.source_type === 'custom_report' && (
+                                <div style={{ marginBottom: '1rem', padding: '0.85rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--surface-hover)', display: 'grid', gap: '0.65rem' }}>
+                                    <label style={{ display: 'grid', gap: '0.35rem', fontSize: '0.82rem', fontWeight: 700 }}>
+                                        Browser login for spec generation
+                                        <select
+                                            value={reportSpecAuthMode === 'session' ? `session:${reportSpecAuthSessionId}` : reportSpecAuthMode}
+                                            onChange={(event) => {
+                                                const value = event.target.value;
+                                                if (value.startsWith('session:')) {
+                                                    setReportSpecAuthMode('session');
+                                                    setReportSpecAuthSessionId(value.slice('session:'.length));
+                                                } else {
+                                                    setReportSpecAuthMode(value as ReportSpecBrowserAuthMode);
+                                                    setReportSpecAuthSessionId('');
+                                                }
+                                            }}
+                                            disabled={generatingSpec}
+                                            style={{ minHeight: 38, borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--text)', padding: '0.45rem 0.6rem', fontSize: '0.85rem' }}
+                                        >
+                                            <option value="project_default" disabled={!projectDefaultBrowserAuthSession}>
+                                                {projectDefaultBrowserAuthSession ? `Project default: ${projectDefaultBrowserAuthSession.name || projectDefaultBrowserAuthSession.id}` : 'Project default unavailable'}
+                                            </option>
+                                            <option value="none">No auth</option>
+                                            {activeBrowserAuthSessions.map(item => (
+                                                <option key={item.id} value={`session:${item.id}`}>
+                                                    {browserAuthSessionLabel(item)}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                    {inheritedBrowserAuthUnavailable && (
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', color: 'var(--warning)', fontSize: '0.8rem', fontWeight: 600 }}>
+                                            <AlertTriangle size={15} /> Original browser login session is no longer active.
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             {(generatingSpec || flowSpecAgentRun) && flowSpecAgentRunId && (
                                 <div style={{ display: 'grid', gap: '1rem', margin: '1rem 0', padding: '1rem 0', borderTop: '1px solid var(--border)' }}>
-                                    <LiveBrowserView
-                                        runId={flowSpecAgentRunId}
-                                        isActive={generatingSpec && flowSpecAgentRun?.status !== 'failed'}
-                                        showHeader
-                                        artifacts={flowSpecAgentRun?.artifacts || []}
-                                        latestImage={sortArtifactsByModifiedAt((flowSpecAgentRun?.artifacts || []).filter(artifact => artifact.type === 'image'))[0]}
-                                        statusMessage={flowSpecAgentRun?.progress?.message || flowSpecPoller.status?.message}
-                                        liveViewAvailable={Boolean(flowSpecAgentRun?.progress?.live_view_available ?? true)}
-                                        runtimeMessage={flowSpecAgentRun?.progress?.runtime_message}
-                                        vncUrl={flowSpecAgentRun?.progress?.vnc_url}
-                                    />
+                                    {flowSpecShowBrowser && (
+                                        <LiveBrowserView
+                                            runId={flowSpecAgentRunId}
+                                            isActive={generatingSpec && flowSpecAgentRun?.status !== 'failed'}
+                                            showHeader
+                                            artifacts={flowSpecAgentRun?.artifacts || []}
+                                            latestImage={flowSpecLatestImage}
+                                            statusMessage={flowSpecAgentRun?.progress?.message || flowSpecPoller.status?.message}
+                                            liveViewAvailable={Boolean(flowSpecAgentRun?.progress?.live_view_available ?? true)}
+                                            runtimeMessage={flowSpecAgentRun?.progress?.runtime_message}
+                                            vncUrl={flowSpecAgentRun?.progress?.vnc_url}
+                                        />
+                                    )}
+                                    {flowSpecAgentRun?.status === 'completed' && !flowSpecShowBrowser && (
+                                        <div style={{ padding: '0.85rem 1rem', background: 'var(--success-muted)', color: 'var(--success)', border: '1px solid rgba(52, 211, 153, 0.2)', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 700 }}>
+                                            <CheckCircle2 size={16} /> Spec generation completed.
+                                        </div>
+                                    )}
                                     {flowSpecAgentRun && (
                                         <AgentRunObservabilityPanel run={flowSpecAgentRun} events={flowSpecAgentEvents} />
+                                    )}
+                                </div>
+                            )}
+
+                            {(flowSpecError || flowSpecAgentRun?.status === 'failed') && (
+                                <div style={{ margin: '1rem 0', padding: '1rem', background: 'var(--danger-muted)', color: 'var(--danger)', border: '1px solid rgba(248, 113, 113, 0.2)', borderRadius: '8px' }}>
+                                    <h4 style={{ margin: 0, fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                        <AlertTriangle size={18} /> Spec Generation Failed
+                                    </h4>
+                                    <p style={{ margin: '0.5rem 0 0', fontFamily: 'monospace', overflowWrap: 'anywhere' }}>
+                                        {flowSpecError || flowSpecAgentRun?.result?.error || flowSpecAgentRun?.progress?.message || 'Unknown error'}
+                                    </p>
+                                    {flowSpecBrowserAuthFailure && (
+                                        <div style={{ marginTop: '0.75rem', fontWeight: 700 }}>
+                                            Refresh or choose a browser login session.
+                                        </div>
                                     )}
                                 </div>
                             )}

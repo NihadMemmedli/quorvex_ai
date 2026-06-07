@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Generate a YouTube tutorial production pack from the Quorvex episode catalog."""
+"""Generate deterministic YouTube episode production assets."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import re
-import textwrap
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,18 +13,319 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CATALOG_PATH = PROJECT_ROOT / "content" / "youtube" / "episode-catalog.json"
 EPISODES_DIR = PROJECT_ROOT / "content" / "youtube" / "episodes"
+TIMED_HEADING_RE = re.compile(r"^###\s+(\d+):(\d{2})-(\d+):(\d{2})\s+(.+)$")
 
 
-@dataclass(frozen=True)
-class CaptionBlock:
-    start: str
-    end: str
-    text: str
+EPISODE_001_FILES = {
+    "brief.md": """# Episode Brief: AI-Generated Playwright Tests Failed — Now What?
+
+## Goal
+
+Record the first Quorvex AI YouTube demo as a practical QA triage workflow that starts on a red checkout failure, not a perfect green-path product tour.
+
+## Audience
+
+QA engineers and QA automation leads who use Playwright, review generated Playwright work, and need failures to become organized evidence.
+
+## Promise
+
+Show how Quorvex AI turns failed AI-generated checkout tests into organized QA work: specs, run history, agent findings, evidence, test ideas, database checks, and dashboard quality signals.
+
+## Seeded Demo
+
+Use:
+
+```bash
+make youtube-demo-seed
+```
+
+Then select `Quorvex Demo Shop`.
+
+## Main Story
+
+AI-generated tests and agents can fail. Useful QA systems make those failures explainable, reviewable, and ready for triage.
+
+## Required Screens
+
+- Failed checkout run detail with red status visible in the first 5 seconds.
+- Runs page with failed checkout runs.
+- Run detail with selector drift and payment validation evidence.
+- Project selector with `Quorvex Demo Shop`.
+- Dashboard with pass/fail trend, failure categories, flaky tests, and slowest tests.
+- Agents page with `Checkout Failure Triage`.
+- Specs page with checkout, cart, login, discount, and order confirmation specs.
+- Database Testing page with customer/order/payment quality checks.
+
+## CTA
+
+Star the repo, run the seeded demo, and comment with the next QA workflow to cover.
+""",
+    "avatar-segments.md": """# Avatar Segments
+
+Use avatar footage only for short bookends and section transitions. Keep the main video screen-first.
+
+## Hook
+
+Most AI testing demos show a perfect green run. This one starts on the red checkout failure, where real QA work starts.
+
+## Transition To Agent Findings
+
+Now that the runs tell us what failed, the useful question is what a QA engineer should do next.
+
+## Transition To Specs
+
+The generated Playwright code is not the source of truth. The spec is the source of intent.
+
+## Outro
+
+Seed the demo, inspect the AI-generated Playwright failures, and tell me which QA workflow you want to see next.
+""",
+    "metadata.md": """# Metadata
+
+## Recommended Title
+
+AI-Generated Playwright Tests Failed — Now What?
+
+## Title Options
+
+1. AI-Generated Playwright Tests Failed — Now What?
+2. Your AI Playwright Tests Failed. Here Is the QA Triage Workflow.
+3. Failed Checkout Tests to Agent Findings and QA Evidence
+4. Stop Losing Failed Tests: Organize Playwright QA with Quorvex AI
+5. AI Agents for QA Engineers: Playwright Failures, Specs, and Evidence
+
+## Description
+
+In this first Quorvex AI demo, we start with a red checkout run and show what happens after AI-generated Playwright tests fail.
+
+The walkthrough covers failed checkout runs, selector drift, payment validation regression, cart total mismatch, flaky checkout state, agent findings, evidence, generated test ideas, markdown specs, dashboard quality signals, and database-testing checks. The goal is not a perfect green-path demo. The goal is a practical QA triage workflow.
+
+Try the deterministic demo:
+
+```bash
+make youtube-demo-seed
+```
+
+Chapters:
+
+```text
+0:00 Failed checkout tests are the point
+0:30 Why useful QA systems make failure actionable
+1:15 Quorvex Demo Shop setup
+2:30 Walk through a failed checkout run
+4:00 Agent findings, evidence, and test ideas
+5:45 Specs connected to generated Playwright work
+7:00 Database and dashboard quality signals
+8:15 Recap: organize Playwright QA work
+9:30 Try the seeded demo
+```
+
+## Pinned Comment
+
+The demo is deterministic and starts from a failed checkout run. Seed the same project with:
+
+```bash
+make youtube-demo-seed
+```
+
+Then select `Quorvex Demo Shop`. What should the next workflow cover: API contract testing, PR test selection, database checks, or Playwright maintenance?
+
+## Thumbnail Prompt
+
+Create a clean, professional YouTube thumbnail for a QA automation product demo. Show a modern software dashboard on a laptop screen with a red failed checkout test in the first visual focus and organized QA cards on the right labeled Findings, Evidence, Specs, and DB Checks. Add a subtle commerce checkout context using small cart and payment icons. Use high contrast, crisp UI detail, and a serious engineering tone. Avoid cartoon mascots, busy backgrounds, fake code rain, and exaggerated facial expressions. Leave open space for the text "NOW WHAT?".
+
+## Thumbnail Text Options
+
+1. NOW WHAT?
+2. RED RUN TO QA PLAN
+3. PLAYWRIGHT FAILURES, ORGANIZED
+4. AI QA TRIAGE
+
+## Tags
+
+Playwright, QA automation, AI testing, software testing, test automation, flaky tests, checkout testing, database testing, QA engineering, AI agents
+""",
+    "shot-list.md": """# Shot List
+
+1. Failed checkout run first frame: open `quorvex-demo-shop-checkout-selector-drift` with a red failed status visible before narration begins.
+2. Run logs: show lifecycle, execution log, selector drift message, and validation evidence in the first 5 seconds.
+3. Runs page: briefly show payment validation regression, cart total mismatch, flaky checkout state, and slow checkout rows.
+4. Project selector: choose Quorvex Demo Shop if the recording needs the setup context.
+5. Dashboard trend: highlight pass/fail trend, failure categories, flaky tests, and slowest tests.
+6. Runs page: filter or scan for checkout failures.
+7. Run detail: return to `quorvex-demo-shop-checkout-selector-drift` and explain selector drift versus product defects.
+8. Run details: show payment validation regression evidence and cart total mismatch evidence.
+9. Agents page: open `Checkout Failure Triage`.
+10. Agent overview: show summary, pages checked, finding count, test idea count.
+11. Agent findings tab: show selector drift, payment validation, and cart total findings.
+12. Agent test ideas tab: show API-backed cart total contract and session retry idea.
+13. Specs page: open checkout payment validation markdown spec.
+14. Generated test view or run detail code area: show Playwright test derived from the spec.
+15. Specs page: briefly show cart, login, discount, and order confirmation specs.
+16. Database Testing page: show Quorvex Demo Shop connection, latest run, failed checks.
+17. Database check details: show duplicate email or payments/order total mismatch sample data.
+18. Dashboard final frame: return to quality signals and summarize the workflow.
+""",
+    "production-checklist.md": """# Production Checklist
+
+## Before Recording
+
+- Run `make youtube-demo-seed`.
+- If Postgres is not running, use `make youtube-demo-seed SKIP_DATABASE=1` and skip the database-testing shot.
+- Start the app and open the dashboard.
+- Select `Quorvex Demo Shop` in the project selector.
+- Open the failed checkout run before recording starts so the first frame is a red run, not the dashboard overview.
+- Confirm the first 5 seconds can show the red failed checkout status and the selector drift log evidence.
+- Confirm dashboard shows failed runs, flaky tests, slowest tests, and failure categories.
+- Confirm `/runs` lists seeded checkout runs.
+- Confirm the selector drift run detail opens and shows logs.
+- Confirm `/agents` lists `Checkout Failure Triage`.
+- Confirm agent findings, test ideas, and evidence tabs have content.
+- Confirm `/specs` shows the `quorvex-demo-shop` specs.
+- Confirm `/database-testing` shows `Quorvex Demo Shop` data if database seed was enabled.
+
+## Browser Setup
+
+- Use a clean browser profile.
+- Set zoom to 100 percent.
+- Use a 1440x900 or 1920x1080 capture area.
+- Hide bookmarks and unrelated extensions.
+- Keep the terminal out of frame unless showing the seed command.
+
+## Delivery Notes
+
+- Keep the tone practical and QA-focused.
+- Avoid implying the agent fixes code automatically.
+- Distinguish product defects from automation maintenance.
+- Keep the platform tour narrow: dashboard, runs, agents, specs, database testing.
+- Strongest on-screen moments: red checkout failure, hidden Pay now locator drift, Payment authorized after expired card, cart total mismatch, flaky refresh timeout, agent findings, API-backed cart total test idea, database payment/order mismatch.
+
+## Final Commands
+
+- `make youtube-demo-seed`
+- `make youtube-voice EP=001 VOICE=DODLEQrClDo8wCz460ld`
+- `make youtube-final EP=001 RECORDING=path/to/recording.mp4`
+
+## Final QA
+
+- Rewatch the first 5 seconds and confirm the hook shows a red checkout failure immediately.
+- Confirm the first 30 seconds does not feel like a dashboard overview.
+- Confirm no private environment variables, tokens, or local customer data are visible.
+- Confirm the pinned comment includes the seed command.
+""",
+}
 
 
-def slugify(value: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.lower()).strip("-")
-    return slug or "episode"
+def timestamp_to_seconds(minutes: str, seconds: str) -> float:
+    return int(minutes) * 60 + int(seconds)
+
+
+def format_srt_timestamp(total_seconds: float) -> str:
+    milliseconds = int(round(total_seconds * 1000))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+
+def strip_inline_markdown(text: str) -> str:
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    return text.strip()
+
+
+def chunk_caption_text(text: str, max_length: int = 84) -> list[str]:
+    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", text) if sentence.strip()]
+    chunks: list[str] = []
+    for sentence in sentences:
+        sentence = strip_inline_markdown(sentence)
+        if not sentence:
+            continue
+        if len(sentence) <= max_length:
+            chunks.append(sentence)
+            continue
+
+        current: list[str] = []
+        current_length = 0
+        for word in sentence.split():
+            proposed_length = current_length + len(word) + (1 if current else 0)
+            if current and proposed_length > max_length:
+                chunks.append(" ".join(current))
+                current = [word]
+                current_length = len(word)
+            else:
+                current.append(word)
+                current_length = proposed_length
+        if current:
+            chunks.append(" ".join(current))
+    return chunks
+
+
+def parse_script_sections(script_path: Path) -> list[tuple[float, float, list[str]]]:
+    sections: list[tuple[float, float, list[str]]] = []
+    current_index: int | None = None
+    in_fence = False
+
+    for raw_line in script_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or not line:
+            continue
+
+        match = TIMED_HEADING_RE.match(line)
+        if match:
+            start = timestamp_to_seconds(match.group(1), match.group(2))
+            end = timestamp_to_seconds(match.group(3), match.group(4))
+            sections.append((start, end, []))
+            current_index = len(sections) - 1
+            continue
+
+        if line.startswith("#") or line.startswith("|") or line == "---":
+            continue
+        if line.startswith("- ") or re.match(r"^\d+\.\s+", line):
+            continue
+        if current_index is None:
+            continue
+
+        start, end, lines = sections[current_index]
+        lines.append(strip_inline_markdown(line.lstrip("> ").strip()))
+        sections[current_index] = (start, end, lines)
+
+    return sections
+
+
+def generate_srt_from_script(script_path: Path) -> str:
+    entries: list[str] = []
+    counter = 1
+
+    for start, end, lines in parse_script_sections(script_path):
+        chunks = chunk_caption_text(" ".join(lines))
+        if not chunks:
+            continue
+        total_weight = sum(max(1, len(chunk)) for chunk in chunks)
+        cursor = start
+        duration = max(0.1, end - start)
+
+        for index, chunk in enumerate(chunks):
+            if index == len(chunks) - 1:
+                next_cursor = end
+            else:
+                next_cursor = cursor + duration * (max(1, len(chunk)) / total_weight)
+            entries.append(
+                f"{counter}\n"
+                f"{format_srt_timestamp(cursor)} --> {format_srt_timestamp(next_cursor)}\n"
+                f"{chunk}\n"
+            )
+            counter += 1
+            cursor = next_cursor
+
+    if not entries:
+        raise ValueError(f"No caption entries could be generated from {script_path}")
+    return "\n".join(entries).strip() + "\n"
 
 
 def load_catalog(path: Path) -> dict[str, Any]:
@@ -34,385 +333,20 @@ def load_catalog(path: Path) -> dict[str, Any]:
 
 
 def find_episode(catalog: dict[str, Any], episode_id: str) -> dict[str, Any]:
-    for episode in catalog["episodes"]:
-        if episode["id"] == episode_id:
+    for episode in catalog.get("episodes", []):
+        if episode.get("id") == episode_id:
             return episode
     raise SystemExit(f"Unknown episode id: {episode_id}")
 
 
-def read_doc_excerpt(relative_path: str, max_chars: int = 2600) -> str:
-    path = PROJECT_ROOT / relative_path
-    if not path.exists() or path.is_dir():
-        return f"[Missing or non-text source: {relative_path}]"
-    if path.suffix.lower() in {".png", ".gif", ".webm", ".mp4"}:
-        return f"[Visual source: {relative_path}]"
-    text = path.read_text(encoding="utf-8", errors="replace")
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return text[:max_chars]
-
-
-def clean_speakable_text(markdown: str) -> str:
-    lines: list[str] = []
-    for raw in markdown.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or line.startswith("- ") or line.startswith("|"):
-            continue
-        if line.startswith(">"):
-            line = line.lstrip("> ").strip()
-        if line.startswith("Avatar:"):
-            continue
-        lines.append(line)
-    return re.sub(r"\s+", " ", " ".join(lines)).strip()
-
-
-def split_caption_text(text: str, max_chars: int = 64) -> list[str]:
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    captions: list[str] = []
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        words = sentence.split()
-        current: list[str] = []
-        for word in words:
-            candidate = " ".join([*current, word])
-            if len(candidate) > max_chars and current:
-                captions.append(" ".join(current))
-                current = [word]
-            else:
-                current.append(word)
-        if current:
-            captions.append(" ".join(current))
-    return captions
-
-
-def seconds_to_srt_time(seconds: float) -> str:
-    milliseconds = int(round(seconds * 1000))
-    hours, remainder = divmod(milliseconds, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    secs, millis = divmod(remainder, 1000)
-    return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
-
-
-def create_even_captions(text: str, duration_seconds: int) -> list[CaptionBlock]:
-    chunks = split_caption_text(text)
-    if not chunks:
-        return []
-    usable_duration = max(duration_seconds - 1.0, len(chunks) * 1.8)
-    step = usable_duration / len(chunks)
-    captions: list[CaptionBlock] = []
-    for index, chunk in enumerate(chunks):
-        start = 0.5 + index * step
-        end = min(0.5 + (index + 1) * step, duration_seconds)
-        captions.append(
-            CaptionBlock(
-                start=seconds_to_srt_time(start),
-                end=seconds_to_srt_time(end),
-                text=chunk,
-            )
-        )
-    return captions
-
-
-def render_srt(captions: list[CaptionBlock]) -> str:
-    blocks = [
-        f"{index}\n{caption.start} --> {caption.end}\n{caption.text}"
-        for index, caption in enumerate(captions, start=1)
-    ]
-    return "\n\n".join(blocks) + "\n"
-
-
-def estimate_duration_seconds(markdown: str) -> int:
-    text = clean_speakable_text(markdown)
-    words = re.findall(r"\b[\w'-]+\b", text)
-    return max(60, round(len(words) / 140 * 60))
-
-
-def render_script(catalog: dict[str, Any], episode: dict[str, Any]) -> str:
-    channel = catalog["channel"]
-    title = episode["title"]
-    repo = channel["repo_url"]
-    docs = channel["docs_url"]
-
-    if episode["id"] == "001":
-        body = f"""
-# {title}
-
-> If your team already uses Playwright, the hard part is not believing that automated tests matter. The hard part is writing enough useful coverage without spending every sprint inside selectors, waits, setup code, and flaky failures.
-
-> Quorvex AI is built around one practical idea: let agents help create and validate tests, but keep the final output as normal Playwright code your team can inspect, commit, and run in CI.
-
-> In this tutorial, I will show the first workflow end to end. We will start from the repo, open the dashboard, describe a small test in plain English, run it through the pipeline, and inspect the generated Playwright file.
-
-> The point is not to watch a polished demo and assume everything is automatic. The point is to understand the loop: write a clear spec, let Quorvex plan against the target, generate a test, validate it in a browser, and then review the output like engineering work.
-
-> Start on the GitHub repo. The README gives the product shape: Quorvex is self-hosted, AI-assisted, and code-first. It can work with specs, PRDs, exploration, API checks, load tests, security checks, database checks, CI gates, and autonomous coverage discovery, but the first video should stay narrow.
-
-> The fastest path is the minimal setup. For a local evaluation, it keeps the number of services low while still showing the real dashboard and generation flow. For production or team usage, Quorvex also supports the full stack with queues, storage, browser viewing, credentials, schedules, and integrations.
-
-> If you want the quickest trial, use the minimal README. If you want to evaluate the full platform shape, use the main getting-started tutorial. Either way, the first target is simple: get the backend and dashboard running, then generate one test.
-
-> Before adding credentials, pause on the model configuration. Quorvex uses an Anthropic-compatible setup. That can point to Anthropic, OpenRouter, Z.ai, or another compatible endpoint, depending on how you run it. The exact provider matters less than having a working token and a model that can follow the generation workflow.
-
-> Once the app is running, open the dashboard. The dashboard is not just decoration around a CLI. It is where a team can create specs, inspect runs, review artifacts, track requirements, see regression history, and understand what the agents did.
-
-> For the first video, keep the dashboard tour brief. We only need enough context to create or run a spec. Later videos can go deeper into requirements, API testing, PRDs, autonomous missions, and CI quality gates.
-
-> Now move to the most important object in the first workflow: the spec. A Quorvex spec is just markdown. It names the test, describes the steps, and states the expected outcome. That makes the request reviewable before any code is generated.
-
-> This is an important design choice. If the input is vague, the generated code will probably be vague too. A good spec gives the agent a clear target URL, a small user flow, and an observable outcome.
-
-> For the first run, use a simple public page or one workflow in your own application. Keep it small. A good first test proves the pipeline and gives you generated code that is easy to inspect.
-
-> In the getting-started tutorial, the example checks a dynamic loading page and verifies that the Hello World message appears after the loading step completes. That is not a business-critical workflow, but it is a good first proof because the expected result is easy to see.
-
-> After the spec is ready, run the pipeline. Under the hood, Quorvex is not trying to give you a cute code snippet. The workflow is planning, generation, validation, and repair attempts when failures are concrete enough to address.
-
-> Planning matters because web tests need sequencing. The agent has to understand where to navigate, what to click, what to wait for, and what assertion proves the flow worked.
-
-> Browser context matters because selectors are not reliable when they are guessed from a prompt alone. A real browser gives the system evidence about what is actually on the page.
-
-> Generation matters because the output should be standard Playwright TypeScript. This is the key ownership point. You should be able to open the file, read it, edit it, commit it, and run it without Quorvex sitting in the middle of every future CI job.
-
-> Validation matters because generated code is only useful after it runs. A failing generated test is not worthless, but it is not done. The run artifacts tell you whether the failure is in the target app, the spec, timing, selectors, authentication, or the generated code itself.
-
-> When the run completes, do not just look for a green status. Open the generated file. Check the locators. Check the assertions. Check whether the code reads like something you would accept in a pull request.
-
-> This review habit is what separates useful AI automation from throwaway demos. If the test is readable and the assertion is meaningful, the generated file can become part of the suite. If it is too broad, too brittle, or too clever, edit it or improve the spec and run again.
-
-> If validation fails, the run artifacts still matter. Screenshots, logs, browser evidence, and failure details make the problem concrete. The goal is not magic. The goal is a faster loop with evidence.
-
-> In a real team, this also changes the review conversation. Instead of asking whether AI wrote a perfect test, the better question is whether the system produced a useful candidate with enough evidence for an engineer or QA automation owner to make a decision.
-
-> This workflow is why Quorvex is self-hosted and code-first. AI helps with planning, generation, validation, exploration, and repair, but your team keeps normal tests that can run without an AI dependency during every CI job.
-
-> That also means you can start small. You do not need to migrate a whole test suite. Pick one flow with clear value. Generate one test. Review the output. Run it locally. Then decide whether the next workflow should be another UI test, an API check, a PRD-to-tests flow, or a CI gate.
-
-> If you are evaluating Quorvex for a team, I would measure three things after this first run. First, did it save time compared with writing the same Playwright test by hand? Second, is the generated code readable enough to maintain? Third, did the artifacts explain what happened when the run passed or failed?
-
-> If the answer is no, the feedback is still useful. It tells us whether the spec format needs better guidance, whether the dashboard needs clearer evidence, or whether the generation pipeline needs a stronger constraint.
-
-> To try this yourself, open the repo, follow the minimal setup, and create one spec from a real workflow your team cares about. If that first generated test is useful, the next step is to add PRD coverage, API checks, regression batches, and CI quality gates.
-
-> The repo is {repo}, and the docs are at {docs}. Star Quorvex AI if you want to follow the project, and send feedback from real Playwright workflows. That feedback is the most useful signal for what to improve next.
-"""
-    else:
-        flow_lines = " ".join(episode.get("screen_flow", []))
-        body = f"""
-# {title}
-
-> This tutorial is about a practical testing problem: {episode["audience_problem"]}
-
-> The promise for this video is simple: {episode["promise"]}
-
-> Quorvex AI is a self-hosted AI testing workspace for teams that want agents to help with coverage while still keeping normal Playwright code.
-
-> The walkthrough will follow the actual product, not a slide deck. We will use the dashboard, terminal commands, generated artifacts, and the source docs that explain the workflow.
-
-> The screen flow for this episode is: {flow_lines}
-
-> The key thing to watch is ownership. Quorvex can help plan, generate, validate, and repair, but the final test output should still be reviewable by engineers.
-
-> When you apply this to your own app, start with one workflow that is annoying to maintain by hand. Use the generated output as a pull request candidate, not as something to trust blindly.
-
-> If this workflow fits your team, try the docs at {docs}, star the repo at {repo}, and share where the current flow needs to be more reliable.
-"""
-
-    return body.strip()
-
-
-def render_avatar_segments(episode: dict[str, Any]) -> str:
-    return f"""# Avatar Segments: {episode["title"]}
-
-Use these as short AI-avatar clips. Keep each clip under 20 seconds when possible.
-
-## Hook
-
-Today we are going from a plain-English testing idea to generated Playwright code with Quorvex AI.
-
-## Transition 1
-
-Now that the setup is running, the important part is the spec. It is readable before any code is generated.
-
-## Transition 2
-
-The generated file is the proof point. We are not stopping at a summary. We are checking the actual Playwright output.
-
-## Outro
-
-Try this with one real workflow from your app, then inspect the generated code like you would inspect any pull request.
-
-## Upload Disclosure Note
-
-If the avatar looks or sounds like a realistic person, disclose AI-avatar usage in YouTube Studio when prompted for altered or synthetic content.
-"""
-
-
-def render_metadata(catalog: dict[str, Any], episode: dict[str, Any], duration_seconds: int) -> str:
-    channel = catalog["channel"]
-    title = episode["title"]
-    tags = ", ".join(episode["keywords"])
-    minutes = max(1, duration_seconds // 60)
-    chapters = [
-        ("00:00", "Why this workflow matters"),
-        ("00:45", "Setup and dashboard"),
-        ("02:00", "Write the spec"),
-        ("03:30", "Run the pipeline"),
-        ("05:30", "Inspect generated Playwright"),
-        (f"{max(6, minutes - 1):02}:00", "Next steps"),
-    ]
-    chapter_text = "\n".join(f"{time} {label}" for time, label in chapters)
-    return f"""# Metadata: {title}
-
-## Title
-
-{title}
-
-## Description
-
-{episode["promise"]}
-
-Quorvex AI is a self-hosted AI testing platform that turns specs, PRDs, and app exploration into validated Playwright tests your team can inspect, commit, and run in CI.
-
-GitHub: {channel["repo_url"]}
-Docs: {channel["docs_url"]}
-
-## Chapters
-
-{chapter_text}
-
-## Tags
-
-{tags}
-
-## Thumbnail Text
-
-{episode["thumbnail"]}
-
-## Pinned Comment
-
-Try the workflow from the video and share where it breaks down in your real Playwright setup. Repo: {channel["repo_url"]}
-
-## Disclosure
-
-This video may use an AI avatar for presenter segments and ElevenLabs-generated narration. The product walkthrough, code, and dashboard footage should be captured from the real Quorvex project.
-"""
-
-
-def render_shot_list(episode: dict[str, Any]) -> str:
-    lines = "\n".join(f"- {item}" for item in episode.get("screen_flow", []))
-    return f"""# Shot List: {episode["title"]}
-
-## Required Product Footage
-
-{lines}
-
-## Capture Notes
-
-- Record at 1920x1080.
-- Keep browser zoom between 90% and 110%.
-- Use slow cursor movement and pause briefly before clicks.
-- Show generated code and run artifacts long enough to read.
-- Hide or replace real API keys, credentials, emails, and private project names.
-
-## Suggested Assets
-
-- `docs/assets/ui/product-flow.gif`
-- `docs/assets/ui/dashboard-overview.png`
-- `docs/assets/ui/runs.png`
-- `docs/assets/ui/spec-editor.png`
-- `docs/assets/ui/analytics.png`
-"""
-
-
-def render_checklist(episode: dict[str, Any]) -> str:
-    return f"""# Production Checklist: {episode["title"]}
-
-## Pre-Production
-
-- [ ] Confirm the episode promise is still accurate.
-- [ ] Run the relevant setup path locally.
-- [ ] Prepare a clean demo project or seeded demo data.
-- [ ] Confirm no secrets appear in the browser, terminal, or generated files.
-
-## Production
-
-- [ ] Generate or revise `script.md`.
-- [ ] Generate ElevenLabs narration into `build/voiceover-en.mp3`.
-- [ ] Render avatar clips from `avatar-segments.md`.
-- [ ] Capture product screen recording.
-- [ ] Add captions from `captions.srt`.
-- [ ] Add simple callouts for commands, generated files, and run status.
-
-## Review
-
-- [ ] Audio is clear and evenly mixed.
-- [ ] Screen text is readable on mobile.
-- [ ] Avatar clips do not dominate the tutorial.
-- [ ] Claims match the repo and docs.
-- [ ] YouTube disclosure is set if realistic AI avatar clips are used.
-
-## Publish
-
-- [ ] Upload full 16:9 tutorial.
-- [ ] Add `metadata.md` title, description, tags, chapters, and pinned comment.
-- [ ] Publish one short teaser for LinkedIn/X/YouTube Shorts.
-- [ ] Track comments, retention drop-offs, subscribers, GitHub stars, and docs traffic.
-"""
-
-
-def render_brief(catalog: dict[str, Any], episode: dict[str, Any]) -> str:
-    defaults = catalog["defaults"]
-    sources = "\n".join(
-        f"- `{path}`" for path in [episode["primary_doc"], *episode.get("supporting_docs", [])]
-    )
-    excerpts = "\n\n".join(
-        f"## {path}\n\n{textwrap.indent(read_doc_excerpt(path, 1600), '> ')}"
-        for path in [episode["primary_doc"], *episode.get("supporting_docs", [])[:2]]
-    )
-    return f"""# Brief: {episode["title"]}
-
-## Audience
-
-{defaults["audience"]}
-
-## Problem
-
-{episode["audience_problem"]}
-
-## Promise
-
-{episode["promise"]}
-
-## Call to Action
-
-{episode["cta"]}
-
-## Sources
-
-{sources}
-
-## Source Excerpts
-
-{excerpts}
-"""
-
-
-def write_episode_pack(catalog: dict[str, Any], episode: dict[str, Any], force: bool) -> None:
-    episode_dir = EPISODES_DIR / episode["id"]
+def write_episode_001(force: bool) -> None:
+    episode_dir = EPISODES_DIR / "001"
     episode_dir.mkdir(parents=True, exist_ok=True)
-    script = render_script(catalog, episode)
-    duration = estimate_duration_seconds(script)
-    files = {
-        "brief.md": render_brief(catalog, episode),
-        "script.md": script,
-        "avatar-segments.md": render_avatar_segments(episode),
-        "captions.srt": render_srt(create_even_captions(clean_speakable_text(script), duration)),
-        "metadata.md": render_metadata(catalog, episode, duration),
-        "shot-list.md": render_shot_list(episode),
-        "production-checklist.md": render_checklist(episode),
-    }
-    for filename, content in files.items():
+    script_path = episode_dir / "script.md"
+    if not script_path.exists():
+        raise SystemExit(f"Missing script source: {script_path.relative_to(PROJECT_ROOT)}")
+
+    for filename, content in EPISODE_001_FILES.items():
         path = episode_dir / filename
         if path.exists() and not force:
             print(f"Skipped existing {path.relative_to(PROJECT_ROOT)}")
@@ -420,22 +354,31 @@ def write_episode_pack(catalog: dict[str, Any], episode: dict[str, Any], force: 
         path.write_text(content.strip() + "\n", encoding="utf-8")
         print(f"Saved {path.relative_to(PROJECT_ROOT)}")
 
+    captions_path = episode_dir / "captions.srt"
+    if captions_path.exists() and not force:
+        print(f"Skipped existing {captions_path.relative_to(PROJECT_ROOT)}")
+    else:
+        captions_path.write_text(generate_srt_from_script(script_path), encoding="utf-8")
+        print(f"Saved {captions_path.relative_to(PROJECT_ROOT)}")
+    print(f"Kept {script_path.relative_to(PROJECT_ROOT)}")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate Quorvex YouTube episode production assets")
     parser.add_argument("--episode", "-e", default="001", help="Episode id, or 'all'")
     parser.add_argument("--catalog", type=Path, default=CATALOG_PATH)
-    parser.add_argument("--force", action="store_true", help="Overwrite existing episode files")
+    parser.add_argument("--force", action="store_true", help="Overwrite generated episode files")
     args = parser.parse_args()
 
     catalog = load_catalog(args.catalog)
-    if args.episode == "all":
-        episodes = catalog["episodes"]
-    else:
-        episodes = [find_episode(catalog, args.episode)]
+    episode_ids = [episode.get("id") for episode in catalog.get("episodes", [])] if args.episode == "all" else [args.episode]
 
-    for episode in episodes:
-        write_episode_pack(catalog, episode, args.force)
+    for episode_id in episode_ids:
+        find_episode(catalog, episode_id)
+        if episode_id == "001":
+            write_episode_001(args.force)
+        else:
+            raise SystemExit(f"No generator template is available for episode {episode_id}")
 
     return 0
 

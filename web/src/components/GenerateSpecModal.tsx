@@ -1,8 +1,9 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { X, Sparkles, Loader2, CheckCircle, AlertCircle, ExternalLink, Eye, Edit3, Save, RefreshCw } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
+import { applyProjectDefaultUrl, getProjectDefaultUrl, trimUrlInput } from '@/lib/project-url';
 
 interface Requirement {
     id: number;
@@ -43,9 +44,11 @@ export default function GenerateSpecModal({
     defaultUrl = ''
 }: GenerateSpecModalProps) {
     const { currentProject } = useProject();
+    const projectDefaultUrl = trimUrlInput(defaultUrl) || getProjectDefaultUrl(currentProject);
+    const previousProjectDefaultUrlRef = useRef('');
 
     // Form state
-    const [targetUrl, setTargetUrl] = useState(defaultUrl);
+    const [targetUrl, setTargetUrl] = useState(projectDefaultUrl);
     const [loginUrl, setLoginUrl] = useState('');
     const [useCredentials, setUseCredentials] = useState(false);
     const [usernameVar, setUsernameVar] = useState('LOGIN_USERNAME');
@@ -72,6 +75,11 @@ export default function GenerateSpecModal({
     useEffect(() => {
         checkExistingSpec();
     }, [requirement.id]);
+
+    useEffect(() => {
+        setTargetUrl(prev => applyProjectDefaultUrl(prev, projectDefaultUrl, previousProjectDefaultUrlRef.current));
+        previousProjectDefaultUrlRef.current = projectDefaultUrl;
+    }, [projectDefaultUrl]);
 
     const checkExistingSpec = async () => {
         setCheckingStatus(true);

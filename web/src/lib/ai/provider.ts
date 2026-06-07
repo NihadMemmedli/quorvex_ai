@@ -1,6 +1,23 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 
+export interface ChatRuntimeSettings {
+  route_provider?: 'anthropic' | 'openai' | 'hermes' | string;
+  llm_provider?: string;
+  assistant_runtime?: string;
+  agent_runtime?: string;
+  base_url?: string;
+  api_key?: string;
+  model_name?: string;
+  chat_model?: string;
+  standard_model?: string;
+  model_tiers?: Record<string, string>;
+  hermes_enabled?: boolean;
+  hermes_api_url?: string;
+  hermes_api_key?: string;
+  hermes_model?: string;
+}
+
 /**
  * Normalize the base URL for @ai-sdk/anthropic.
  * The SDK appends "/messages" to baseURL, so the base must end with "/v1".
@@ -35,7 +52,8 @@ const _keySlots: KeySlot[] = [];
 let _roundRobinIndex = 0;
 let _keysInitialized = false;
 
-function initKeys() {
+function initKeys(runtime?: ChatRuntimeSettings) {
+  if (runtime?.api_key) return;
   if (_keysInitialized) return;
   _keysInitialized = true;
 
@@ -55,8 +73,8 @@ function initKeys() {
   }
 }
 
-function getAvailableSlot(): KeySlot | null {
-  initKeys();
+function getAvailableSlot(runtime?: ChatRuntimeSettings): KeySlot | null {
+  initKeys(runtime);
   if (_keySlots.length === 0) return null;
 
   const now = Date.now();
@@ -90,22 +108,25 @@ export function reportRateLimit(slot?: KeySlot) {
  * Get an Anthropic provider using the next available API key.
  * Returns { provider, slot } so callers can report rate limits.
  */
-export function getActiveProvider() {
-  const slot = getAvailableSlot();
-  const apiKey = slot?.token || process.env.QUORVEX_LLM_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
+export function getActiveProvider(runtime?: ChatRuntimeSettings) {
+  const slot = runtime?.api_key ? null : getAvailableSlot(runtime);
+  const apiKey = runtime?.api_key || slot?.token || process.env.QUORVEX_LLM_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN || '';
   const authToken = apiKey ? '' : process.env.CLAUDE_CODE_OAUTH_TOKEN || '';
 
   const provider = createAnthropic({
     ...(apiKey ? { apiKey } : { authToken }),
-    baseURL: normalizeBaseURL(process.env.QUORVEX_LLM_BASE_URL || process.env.ANTHROPIC_BASE_URL),
+    baseURL: normalizeBaseURL(runtime?.base_url || process.env.QUORVEX_LLM_BASE_URL || process.env.ANTHROPIC_BASE_URL),
   });
 
   return { provider, slot };
 }
 
-export function hasDirectAnthropicChatCredential() {
-  const explicitAssistantRuntime = getExplicitAssistantRuntime();
-  const assistantRuntime = getAssistantRuntime();
+export function hasDirectAnthropicChatCredential(runtime?: ChatRuntimeSettings) {
+  if (runtime) {
+    return runtime.route_provider === 'anthropic' && Boolean((runtime.api_key || process.env.CLAUDE_CODE_OAUTH_TOKEN || '').trim());
+  }
+  const explicitAssistantRuntime = getExplicitAssistantRuntime(runtime);
+  const assistantRuntime = getAssistantRuntime(runtime);
   if (assistantRuntime === 'hermes' || explicitAssistantRuntime === 'openai') return false;
 
   return Boolean(
@@ -120,43 +141,52 @@ export function hasDirectAnthropicChatCredential() {
   );
 }
 
-export function hasOpenAIChatCredential() {
-  const explicitAssistantRuntime = getExplicitAssistantRuntime();
-  const assistantRuntime = getAssistantRuntime();
+export function hasOpenAIChatCredential(runtime?: ChatRuntimeSettings) {
+  if (runtime) {
+    return runtime.route_provider === 'openai' && Boolean((runtime.api_key || process.env.OPENAI_API_KEY || '').trim());
+  }
+  const explicitAssistantRuntime = getExplicitAssistantRuntime(runtime);
+  const assistantRuntime = getAssistantRuntime(runtime);
   if (assistantRuntime === 'hermes' || explicitAssistantRuntime === 'claude_sdk') return false;
   return Boolean((process.env.OPENAI_API_KEY || process.env.QUORVEX_LLM_API_KEY || '').trim());
 }
 
-function getExplicitAssistantRuntime() {
-  return (process.env.QUORVEX_ASSISTANT_RUNTIME || '').trim().toLowerCase();
+function getExplicitAssistantRuntime(runtime?: ChatRuntimeSettings) {
+  return (runtime?.assistant_runtime || process.env.QUORVEX_ASSISTANT_RUNTIME || '').trim().toLowerCase();
 }
 
-export function getAssistantRuntime() {
+export function getAssistantRuntime(runtime?: ChatRuntimeSettings) {
   return (
+    runtime?.assistant_runtime ||
+    runtime?.agent_runtime ||
     process.env.QUORVEX_ASSISTANT_RUNTIME ||
     process.env.QUORVEX_AGENT_RUNTIME ||
     ''
   ).trim().toLowerCase();
 }
 
-export function hasHermesChatRuntime() {
+export function hasHermesChatRuntime(runtime?: ChatRuntimeSettings) {
+  if (runtime) {
+    return runtime.route_provider === 'hermes'
+      || (runtime.hermes_enabled === true && getAssistantRuntime(runtime) === 'hermes');
+  }
   return (process.env.HERMES_ENABLED || '').toLowerCase() === 'true'
-    && getAssistantRuntime() === 'hermes';
+    && getAssistantRuntime(runtime) === 'hermes';
 }
 
-export function getActiveOpenAIProvider() {
-  const apiKey = (process.env.OPENAI_API_KEY || process.env.QUORVEX_LLM_API_KEY || '').trim();
+export function getActiveOpenAIProvider(runtime?: ChatRuntimeSettings) {
+  const apiKey = (runtime?.api_key || process.env.OPENAI_API_KEY || process.env.QUORVEX_LLM_API_KEY || '').trim();
   const provider = createOpenAI({
     apiKey,
-    baseURL: normalizeOpenAIBaseURL(process.env.OPENAI_BASE_URL || process.env.QUORVEX_LLM_BASE_URL),
+    baseURL: normalizeOpenAIBaseURL(runtime?.base_url || process.env.OPENAI_BASE_URL || process.env.QUORVEX_LLM_BASE_URL),
   });
 
   return { provider };
 }
 
-export function getActiveHermesProvider() {
-  const apiKey = (process.env.HERMES_API_KEY || 'local-hermes').trim();
-  const rawBaseURL = normalizeOpenAIBaseURL(process.env.HERMES_API_URL || 'http://127.0.0.1:8642') || 'http://127.0.0.1:8642';
+export function getActiveHermesProvider(runtime?: ChatRuntimeSettings) {
+  const apiKey = (runtime?.hermes_api_key || process.env.HERMES_API_KEY || 'local-hermes').trim();
+  const rawBaseURL = normalizeOpenAIBaseURL(runtime?.hermes_api_url || process.env.HERMES_API_URL || 'http://127.0.0.1:8642') || 'http://127.0.0.1:8642';
   const baseURL = rawBaseURL.endsWith('/v1') ? rawBaseURL : `${rawBaseURL}/v1`;
   const provider = createOpenAI({
     apiKey,

@@ -24,6 +24,7 @@ from .models_db import (  # noqa: F401
     AgentToolDefinition,
     ApplicationMap,
     ArchiveJob,
+    BrowserAuthSession,
     AutonomousAgentWorkItem,
     AutonomousApproval,
     AutonomousFinding,
@@ -1307,6 +1308,66 @@ def _run_migrations():
                     )
                 )
                 logger.info("Added column: prd_generation_results.live_browser_requested")
+
+        if "browser_auth_sessions" not in inspector.get_table_names():
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            bool_default = "FALSE" if db_type == "postgresql" else "0"
+            conn.execute(
+                text(f"""
+                CREATE TABLE browser_auth_sessions (
+                    id VARCHAR PRIMARY KEY,
+                    project_id VARCHAR NOT NULL,
+                    name VARCHAR NOT NULL,
+                    base_url VARCHAR NOT NULL,
+                    login_url VARCHAR NOT NULL,
+                    username_key VARCHAR NOT NULL,
+                    password_key VARCHAR NOT NULL,
+                    username_selector VARCHAR,
+                    password_selector VARCHAR,
+                    username_continue_selector VARCHAR,
+                    submit_selector VARCHAR,
+                    success_url_pattern VARCHAR,
+                    storage_state_json_encrypted TEXT,
+                    status VARCHAR NOT NULL DEFAULT 'pending',
+                    is_default BOOLEAN NOT NULL DEFAULT {bool_default},
+                    created_at {timestamp_type},
+                    last_validated_at {timestamp_type},
+                    expires_at {timestamp_type},
+                    failure_reason TEXT,
+                    CONSTRAINT uq_browser_auth_sessions_project_name UNIQUE (project_id, name)
+                )
+                """)
+            )
+            logger.info("Created table: browser_auth_sessions")
+
+        if "browser_auth_sessions" in inspect(conn).get_table_names():
+            browser_auth_columns = {column["name"] for column in inspect(conn).get_columns("browser_auth_sessions")}
+            browser_auth_optional_columns = [
+                "username_selector",
+                "password_selector",
+                "username_continue_selector",
+                "submit_selector",
+                "success_url_pattern",
+            ]
+            for column_name in browser_auth_optional_columns:
+                if column_name not in browser_auth_columns:
+                    conn.execute(text(f"ALTER TABLE browser_auth_sessions ADD COLUMN {column_name} VARCHAR"))
+                    logger.info(f"Added column: browser_auth_sessions.{column_name}")
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_browser_auth_sessions_project_status "
+                        "ON browser_auth_sessions (project_id, status)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_browser_auth_sessions_project_default "
+                        "ON browser_auth_sessions (project_id, is_default)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Index may already exist on browser_auth_sessions: {e}")
 
         # ===== User tracking columns (Phase: Multi-User Support) =====
 

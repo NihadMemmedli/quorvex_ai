@@ -5,6 +5,7 @@ import { Save, AlertCircle, CheckCircle, Key, Globe, Box, Eye, EyeOff, Server, L
 import { useProject } from '@/contexts/ProjectContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { CredentialsManager } from '@/components/CredentialsManager';
+import { BrowserAuthSessionsManager } from '@/components/BrowserAuthSessionsManager';
 import { API_BASE } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
@@ -165,6 +166,7 @@ export default function SettingsPage() {
     const [browserPoolStatus, setBrowserPoolStatus] = useState<BrowserPoolStatus | null>(null);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
     const [showApiKey, setShowApiKey] = useState(false);
+    const [showHermesApiKey, setShowHermesApiKey] = useState(false);
 
     // TestRail integration state
     const [trUrl, setTrUrl] = useState('');
@@ -1371,7 +1373,7 @@ export default function SettingsPage() {
                         </button>
                     </div>
                     <p className="helper-text">
-                        Applied immediately and persisted to the project .env file.
+                        Saved securely and applied immediately.
                     </p>
                 </div>
 
@@ -1569,13 +1571,22 @@ export default function SettingsPage() {
                                 <Key size={18} />
                             </div>
                             <input
-                                type={showApiKey ? "text" : "password"}
+                                type={showHermesApiKey ? "text" : "password"}
                                 name="hermes_api_key"
                                 value={settings.hermes_api_key}
                                 onChange={handleChange}
                                 placeholder="local Hermes bearer token"
                                 className="input has-icon"
+                                style={{ paddingRight: '2.5rem' }}
                             />
+                            <button
+                                type="button"
+                                className="visibility-toggle"
+                                onClick={() => setShowHermesApiKey(!showHermesApiKey)}
+                                title={showHermesApiKey ? "Hide Hermes API Key" : "Show Hermes API Key"}
+                            >
+                                {showHermesApiKey ? <EyeOff size={18} /> : <Eye size={18} />}
+                            </button>
                         </div>
                     </div>
 
@@ -2972,11 +2983,25 @@ export default function SettingsPage() {
                 </h2>
 
                 {currentProject ? (
-                    <div className="card" style={{ boxShadow: 'var(--shadow-card)' }}>
-                        <CredentialsManager
-                            projectId={currentProject.id}
-                            projectName={currentProject.name}
-                        />
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                        <div className="card" style={{ boxShadow: 'var(--shadow-card)' }}>
+                            <CredentialsManager
+                                projectId={currentProject.id}
+                                projectName={currentProject.name}
+                            />
+                        </div>
+                        <div className="card" style={{ boxShadow: 'var(--shadow-card)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem' }}>
+                                <Key size={20} color="var(--primary)" />
+                                <div>
+                                    <div style={{ fontWeight: 600 }}>Browser Login Sessions</div>
+                                    <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                                        Reusable authenticated browser state for agent and live-browser runs.
+                                    </div>
+                                </div>
+                            </div>
+                            <BrowserAuthSessionsManager projectId={currentProject.id} />
+                        </div>
                     </div>
                 ) : (
                     <div className="card" style={{

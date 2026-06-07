@@ -576,9 +576,9 @@ export default function Home() {
     const attentionQualitySignals = qualitySignals.filter(signal => signal.tone !== 'healthy');
     const openQualityRiskCount = attentionQualitySignals.length;
     const lastRunAge = (() => {
-        if (!dashboard.last_run || dashboard.last_run === 'Never') return null;
-        const age = formatAge(dashboard.last_run);
-        return age === dashboard.last_run ? null : age;
+        if (!dashboard.last_run_at) return null;
+        const age = formatAge(dashboard.last_run_at);
+        return age === dashboard.last_run_at ? null : age;
     })();
     const activeAutomationCount = activeSessions.length + backgroundAgentTaskCount;
     const healthMetrics = [

@@ -1,19 +1,20 @@
 .PHONY: setup setup-skills start restart dev run clean help docker-up docker-down docker-build check-env logs stop \
         autopilot-stable-up autopilot-stable-down autopilot-dev-up autopilot-status autopilot-logs \
-        prod prod-up prod-down prod-down-safe prod-restart prod-logs prod-build prod-build-no-cache prod-status prod-dev \
+        prod prod-up prod-down prod-down-safe prod-restart prod-logs prod-build prod-build-no-cache prod-status prod-dev prod-dev-build prod-env-bootstrap \
         backup backup-full backup-status restore-list restore restore-from-minio \
         archival archival-dry-run storage-health minio-console \
         workers-up workers-down workers-scale workers-status workers-logs workers-build \
         swarm-up swarm-down swarm-scale swarm-status \
         k8s-deploy k8s-delete k8s-status k8s-scale k8s-logs \
-        db-migrate db-upgrade db-downgrade db-history db-stamp db-demo-seed \
+        db-migrate db-upgrade db-downgrade db-history db-stamp db-demo-seed youtube-demo-seed \
         docker-prune volume-sizes db-vacuum health-check upgrade deps-lock \
         load-test agent-runtime-ready agent-temporal-smoke-up agent-temporal-smoke agent-temporal-smoke-logs \
         k6-workers-up k6-workers-down k6-workers-scale k6-workers-logs k6-workers-status \
         zap-up zap-down zap-status zap-logs \
         lint format test autonomous-soak \
         docs-check docs-visual-check docs-visual-capture docs-serve docs-build docs-deploy \
-        youtube-pack youtube-voice youtube-avatar youtube-assemble
+        youtube-pack youtube-voice youtube-avatar youtube-assemble youtube-final \
+        youtube-mcp-check youtube-upload-dry-run youtube-upload-confirm obs-recording-dry-run obs-recording-confirm
 
 # Default target
 help:
@@ -22,7 +23,7 @@ help:
 	@echo "  Setup & Run:"
 	@echo "    make setup          - Install dependencies and setup environment"
 	@echo "    make setup-skills   - Install Playwright skill dependencies"
-	@echo "    make start          - Start the dashboard stack with security scanners"
+	@echo "    make start          - Start app runtime for external-nginx deployment"
 	@echo "    make stop           - Stop the dashboard stack and local dev processes"
 	@echo "    make restart        - Restart the dashboard stack"
 	@echo "    make dev            - Start the UI and Backend server (development)"
@@ -37,7 +38,7 @@ help:
 	@echo "  Docker (prod):"
 	@echo "    make prod           - Start production services"
 	@echo "    make prod-up        - Start production services"
-	@echo "    make prod-dev       - Start prod with local code and security scanners"
+	@echo "    make prod-dev       - Start app runtime with local code and security scanners"
 	@echo "    make prod-down      - Stop production services"
 	@echo "    make prod-down-safe - Stop with backup first (recommended)"
 	@echo "    make prod-restart   - Restart app services (picks up mounted code changes)"
@@ -110,6 +111,7 @@ help:
 	@echo "    make db-history       - Show migration history"
 	@echo "    make db-stamp R=...   - Stamp DB at revision (for existing DBs)"
 	@echo "    make db-demo-seed     - Seed Database Testing demo content"
+	@echo "    make youtube-demo-seed - Seed Quorvex Demo Shop YouTube walkthrough data"
 	@echo ""
 	@echo "  Maintenance:"
 	@echo "    make upgrade          - Full upgrade procedure (backup, pull, migrate, restart)"
@@ -136,9 +138,15 @@ help:
 	@echo ""
 	@echo "  YouTube Production:"
 	@echo "    make youtube-pack EP=001  - Generate episode script, captions, metadata, and checklist"
-	@echo "    make youtube-voice EP=001 - Generate ElevenLabs voiceover for an episode pack"
+	@echo "    make youtube-voice EP=001 VOICE=DODLEQrClDo8wCz460ld - Generate ElevenLabs voiceover for an episode pack"
 	@echo "    make youtube-avatar EP=001 - Generate HeyGen avatar payloads for presenter clips"
 	@echo "    make youtube-assemble EP=001 RECORDING=path.mp4 - Export a 1080p YouTube MP4"
+	@echo "    make youtube-final EP=001 RECORDING=path.mp4 - Seed, narrate with DODLEQrClDo8wCz460ld, and export final MP4"
+	@echo "    make youtube-mcp-check EP=001 - Compile and check local YouTube/OBS MCP wrappers"
+	@echo "    make youtube-upload-dry-run EP=001 - Write a YouTube upload dry-run manifest"
+	@echo "    make youtube-upload-confirm EP=001 VIDEO=path.mp4 - Confirm a guarded YouTube upload"
+	@echo "    make obs-recording-dry-run EP=001 - Write an OBS recording dry-run plan"
+	@echo "    make obs-recording-confirm EP=001 - Confirm guarded OBS recording start"
 	@echo ""
 	@echo "  Utilities:"
 	@echo "    make stop           - Stop all running services"
@@ -297,36 +305,36 @@ prod-up:
 prod: prod-up
 
 prod-dev:
-	@if [ ! -f ".env.prod" ]; then \
-		echo "No .env.prod file found. Creating from .env.prod.example..."; \
-		cp .env.prod.example .env.prod; \
-		echo "Created .env.prod — edit it with your API credentials."; \
-		echo "Default admin: admin@test.com / Admin123!@#"; \
-		echo ""; \
-	fi
-	@echo "Starting production services with LOCAL CODE MOUNTING and security scanners..."
+	@$(MAKE) prod-env-bootstrap
+	@echo "Starting external-nginx app runtime with LOCAL CODE MOUNTING and security scanners..."
 	@echo ""
-	@echo "This mounts your local ./orchestrator and ./web/src directories."
-	@echo "Code changes will be reflected automatically (uvicorn --reload)."
+	@echo "Company nginx should proxy the public subdomain to frontend :3000 and /websockify to backend :6080."
+	@echo "This target does not start the repo-managed nginx container."
 	@echo ""
-	@$(APP_COMPOSE) --profile standard --profile security up -d --no-build
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) --profile standard --profile security up -d --build db redis minio zap hermes
+	@python3 scripts/reconcile_prod_postgres.py
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) --profile standard --profile security up -d --build
 	@$(MAKE) agent-runtime-ready
 	@echo ""
-	@echo "Development mode started:"
-	@echo "  Dashboard:     http://localhost:3000"
-	@echo "  API:           http://localhost:8001 (auto-reload enabled)"
+	@echo "External-nginx runtime started:"
+	@echo "  Dashboard:     http://localhost:3000 (proxy target)"
+	@echo "  API:           http://localhost:8001 (private health/admin target)"
 	@echo "  API Docs:      http://localhost:8001/docs"
-	@echo "  VNC View:      http://localhost:6080"
+	@echo "  VNC WebSocket: http://localhost:6080/websockify (proxy target)"
 	@echo "  MinIO Console: http://localhost:9001"
 	@echo "  ZAP API:       http://localhost:$${ZAP_PORT:-8090}"
 	@echo ""
-	@echo "Code changes in ./orchestrator will auto-reload the backend."
+	@echo "Use the company URL for browser validation; direct localhost ports are server-local checks."
 	@echo "Security Testing full scans are available after ZAP health is ready."
 	@echo "View logs: make prod-logs"
 
 prod-dev-build:
 	@echo "Rebuilding production development images..."
 	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) --profile standard --profile security build --progress=plain
+
+prod-env-bootstrap:
+	@echo "Bootstrapping production environment..."
+	@python3 scripts/bootstrap_prod_env.py
 
 prod-down:
 	@echo "Stopping production services gracefully..."
@@ -553,17 +561,17 @@ check-env:
 	@if [ -f ".env.prod" ]; then \
 		echo "  + .env.prod file exists (production config)"; \
 		. .env.prod 2>/dev/null; \
-		if [ -n "$$POSTGRES_PASSWORD" ]; then \
+		if [ -n "$$POSTGRES_PASSWORD" ] && ! printf "%s" "$$POSTGRES_PASSWORD" | grep -q "^replace-with-"; then \
 			echo "  + POSTGRES_PASSWORD is configured"; \
 		else \
 			echo "  ! POSTGRES_PASSWORD not configured"; \
 		fi; \
-		if [ -n "$$MINIO_ROOT_PASSWORD" ]; then \
+		if [ -n "$$MINIO_ROOT_PASSWORD" ] && ! printf "%s" "$$MINIO_ROOT_PASSWORD" | grep -q "^replace-with-"; then \
 			echo "  + MINIO_ROOT_PASSWORD is configured"; \
 		else \
 			echo "  ! MINIO_ROOT_PASSWORD not configured"; \
 		fi; \
-		if [ -n "$$JWT_SECRET_KEY" ] && [ "$$JWT_SECRET_KEY" != "dev-secret-key-change-in-production" ]; then \
+		if [ -n "$$JWT_SECRET_KEY" ] && [ "$$JWT_SECRET_KEY" != "dev-secret-key-change-in-production" ] && ! printf "%s" "$$JWT_SECRET_KEY" | grep -q "^replace-with-"; then \
 			echo "  + JWT_SECRET_KEY is configured (secure)"; \
 		else \
 			echo "  ! JWT_SECRET_KEY using default (CHANGE FOR PRODUCTION!)"; \
@@ -968,6 +976,29 @@ db-demo-seed:
 		DATABASE_URL="$${DATABASE_URL:-postgresql://postgres:postgres@localhost:5434/playwright_agent}" \
 		python orchestrator/scripts/seed_database_testing_demo.py --project-id "$$PROJECT_ID" $$HOST_ARG $$PORT_ARG $$SCHEMA_ARG)
 
+youtube-demo-seed:
+	@echo "Seeding Quorvex Demo Shop YouTube walkthrough data..."
+	@PROJECT_ID="$(or $(PROJECT),quorvex-demo-shop)"; \
+	if [ -n "$(CONNECTION_HOST)" ]; then HOST_ARG="--connection-host $(CONNECTION_HOST)"; else HOST_ARG=""; fi; \
+	if [ -n "$(CONNECTION_PORT)" ]; then PORT_ARG="--connection-port $(CONNECTION_PORT)"; else PORT_ARG=""; fi; \
+	if [ "$(SKIP_DATABASE)" = "1" ]; then DB_ARG="--skip-database"; else DB_ARG=""; fi; \
+	if [ "$(NO_RESET_SCHEMA)" = "1" ]; then RESET_ARG="--no-reset-schema"; else RESET_ARG=""; fi; \
+	if nc -z localhost 5434 >/dev/null 2>&1; then \
+		(source venv/bin/activate 2>/dev/null || true; \
+		DATABASE_URL="$${DATABASE_URL:-postgresql://postgres:postgres@localhost:5434/playwright_agent}" \
+		JWT_SECRET_KEY="$${JWT_SECRET_KEY:-demo-seed-local-secret-key-change-me}" \
+		REQUIRE_AUTH="$${REQUIRE_AUTH:-false}" \
+		python orchestrator/scripts/seed_youtube_demo.py --project-id "$$PROJECT_ID" $$HOST_ARG $$PORT_ARG $$DB_ARG $$RESET_ARG); \
+	elif $(DOCKER_COMPOSE) ps --services --filter status=running 2>/dev/null | grep -qx backend; then \
+		$(DOCKER_COMPOSE) exec -T backend sh -lc 'DATABASE_URL="$${DATABASE_URL:-postgresql://playwright:postgres@db:5432/playwright_agent}" JWT_SECRET_KEY="$${JWT_SECRET_KEY:-demo-seed-local-secret-key-change-me}" REQUIRE_AUTH="$${REQUIRE_AUTH:-false}" python orchestrator/scripts/seed_youtube_demo.py --project-id "$$0" $$1 $$2 $$3 $$4' "$$PROJECT_ID" "$$HOST_ARG" "$$PORT_ARG" "$$DB_ARG" "$$RESET_ARG"; \
+	else \
+		(source venv/bin/activate 2>/dev/null || true; \
+		DATABASE_URL="$${DATABASE_URL:-postgresql://postgres:postgres@localhost:5434/playwright_agent}" \
+		JWT_SECRET_KEY="$${JWT_SECRET_KEY:-demo-seed-local-secret-key-change-me}" \
+		REQUIRE_AUTH="$${REQUIRE_AUTH:-false}" \
+		python orchestrator/scripts/seed_youtube_demo.py --project-id "$$PROJECT_ID" $$HOST_ARG $$PORT_ARG $$DB_ARG $$RESET_ARG); \
+	fi
+
 # ============================================================
 # Development Tools
 # ============================================================
@@ -1034,14 +1065,18 @@ docs-deploy:
 # YOUTUBE PRODUCTION
 # ==========================================
 
+YOUTUBE_DEMO_VOICE_ID ?= DODLEQrClDo8wCz460ld
+
 youtube-pack:
 	@EPISODE="$(if $(EP),$(EP),001)"; \
 	python scripts/youtube/generate-episode-pack.py --episode "$$EPISODE" --force
 
 youtube-voice:
 	@EPISODE="$(if $(EP),$(EP),001)"; \
-	python scripts/demo-video/generate-voice.py \
+	PYTHON_BIN="$$(if [ -x venv/bin/python ]; then echo venv/bin/python; else echo python; fi)"; \
+	"$$PYTHON_BIN" scripts/demo-video/generate-voice.py \
 		--lang en \
+		--voice "$(if $(VOICE),$(VOICE),$(YOUTUBE_DEMO_VOICE_ID))" \
 		--input "content/youtube/episodes/$$EPISODE/script.md" \
 		--output-dir "content/youtube/episodes/$$EPISODE/build"
 
@@ -1057,6 +1092,57 @@ youtube-assemble:
 	fi
 	@EPISODE="$(if $(EP),$(EP),001)"; \
 	bash scripts/youtube/assemble-episode.sh --episode "$$EPISODE" --recording "$(RECORDING)"
+
+youtube-final:
+	@if [ -z "$(RECORDING)" ]; then \
+		echo "Error: RECORDING argument is required."; \
+		echo "Usage: make youtube-final EP=001 RECORDING=path/to/recording.mp4"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(RECORDING)" ]; then \
+		echo "Error: recording not found: $(RECORDING)"; \
+		exit 1; \
+	fi
+	@EPISODE="$(if $(EP),$(EP),001)"; \
+	VOICE_NAME="$(if $(VOICE),$(VOICE),$(YOUTUBE_DEMO_VOICE_ID))"; \
+	$(MAKE) youtube-demo-seed; \
+	$(MAKE) youtube-voice EP="$$EPISODE" VOICE="$$VOICE_NAME"; \
+	$(MAKE) youtube-assemble EP="$$EPISODE" RECORDING="$(RECORDING)"
+
+youtube-mcp-check:
+	@EPISODE="$(if $(EP),$(EP),001)"; \
+	PYTHON_BIN="$$(if [ -x venv/bin/python ]; then echo venv/bin/python; else echo python; fi)"; \
+	"$$PYTHON_BIN" -m py_compile tools/youtube_mcp/server.py tools/obs_mcp/server.py; \
+	"$$PYTHON_BIN" tools/youtube_mcp/server.py check --episode "$$EPISODE"; \
+	"$$PYTHON_BIN" tools/obs_mcp/server.py check --episode "$$EPISODE"
+
+youtube-upload-dry-run:
+	@EPISODE="$(if $(EP),$(EP),001)"; \
+	PYTHON_BIN="$$(if [ -x venv/bin/python ]; then echo venv/bin/python; else echo python; fi)"; \
+	if [ -n "$(VIDEO)" ]; then VIDEO_ARG="--video-path $(VIDEO)"; else VIDEO_ARG=""; fi; \
+	if [ -n "$(THUMBNAIL)" ]; then THUMBNAIL_ARG="--thumbnail-path $(THUMBNAIL)"; else THUMBNAIL_ARG=""; fi; \
+	YOUTUBE_DRY_RUN=1 "$$PYTHON_BIN" tools/youtube_mcp/server.py prepare-upload --episode "$$EPISODE" $$VIDEO_ARG $$THUMBNAIL_ARG
+
+youtube-upload-confirm:
+	@if [ -z "$(VIDEO)" ]; then \
+		echo "Error: VIDEO argument is required."; \
+		echo "Usage: make youtube-upload-confirm EP=001 VIDEO=content/youtube/episodes/001/build/youtube-001.mp4"; \
+		exit 1; \
+	fi
+	@EPISODE="$(if $(EP),$(EP),001)"; \
+	PYTHON_BIN="$$(if [ -x venv/bin/python ]; then echo venv/bin/python; else echo python; fi)"; \
+	YOUTUBE_DRY_RUN=0 "$$PYTHON_BIN" tools/youtube_mcp/server.py upload-video --episode "$$EPISODE" --video-path "$(VIDEO)" --confirm
+
+obs-recording-dry-run:
+	@EPISODE="$(if $(EP),$(EP),001)"; \
+	PYTHON_BIN="$$(if [ -x venv/bin/python ]; then echo venv/bin/python; else echo python; fi)"; \
+	if [ -n "$(SCENES)" ]; then SCENE_ARG="--scene-sequence $(SCENES)"; else SCENE_ARG=""; fi; \
+	OBS_DRY_RUN=1 "$$PYTHON_BIN" tools/obs_mcp/server.py prepare-recording --episode "$$EPISODE" $$SCENE_ARG
+
+obs-recording-confirm:
+	@EPISODE="$(if $(EP),$(EP),001)"; \
+	PYTHON_BIN="$$(if [ -x venv/bin/python ]; then echo venv/bin/python; else echo python; fi)"; \
+	OBS_DRY_RUN=0 "$$PYTHON_BIN" tools/obs_mcp/server.py start-recording --episode "$$EPISODE" --confirm
 
 # ==========================================
 # MAINTENANCE & OPERATIONS

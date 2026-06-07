@@ -13,6 +13,7 @@ export interface DashboardStats {
     avg_duration_seconds: number;
     flaky_test_count: number;
     last_run: string;
+    last_run_at?: string | null;
     slowest_tests?: Array<{ spec_name: string; avg_duration: number; run_count: number; max_duration: number }>;
     flaky_tests?: Array<{ spec_name: string; passed: number; failed: number; total: number; flakiness_rate: number }>;
     healing_stats?: {
@@ -147,6 +148,7 @@ const DEFAULT_DASHBOARD_STATS: DashboardStats = {
     avg_duration_seconds: 0,
     flaky_test_count: 0,
     last_run: 'Never',
+    last_run_at: null,
     slowest_tests: [],
     flaky_tests: [],
 };

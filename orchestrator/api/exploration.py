@@ -32,7 +32,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
-from .db import get_session
+from .db import engine, get_session
 from .middleware.auth import get_current_user_optional
 from .middleware.rate_limit import API_LIMITS, limiter
 from .models_db import DiscoveredApiEndpoint, ExplorationSession
@@ -47,6 +47,7 @@ from services.exploration_policy import (
     policy_to_agent_instructions,
     validate_exploration_policy,
 )
+from orchestrator.services.browser_auth_sessions import BrowserAuthSessionError, resolve_browser_auth_for_run
 
 # Import MCP health checker
 from utils.mcp_health import verify_mcp_environment
@@ -81,6 +82,8 @@ class ExplorationStartRequest(BaseModel):
     timeout_minutes: int = Field(default=30, ge=1, le=120)
     login_url: str | None = None
     credentials: dict | None = None  # {username, password, username_var, password_var}
+    browser_auth_session_id: str | None = None
+    use_project_default_browser_auth: bool = False
     exclude_patterns: list[str] = Field(default_factory=list)
     focus_areas: list[str] = Field(default_factory=list)
     additional_instructions: str | None = None  # Custom instructions for AI
@@ -403,6 +406,11 @@ def _build_exploratory_agent_config(
         "project_id": request_body.project_id,
         "safety_policy": safety_policy.model_dump(),
     }
+    if request_body.browser_auth_session_id or request_body.use_project_default_browser_auth:
+        config["browser_auth"] = {
+            "session_id": request_body.browser_auth_session_id,
+            "use_project_default": request_body.use_project_default_browser_auth,
+        }
 
     # Build auth config
     if request_body.credentials:
@@ -474,12 +482,31 @@ def _build_playwright_mcp_server_config() -> dict[str, Any]:
     return build_playwright_mcp_server_config(Path(__file__).resolve().parent.parent.parent)
 
 
-def _prepare_exploration_mcp_config(session_id: str) -> Path:
+def _prepare_exploration_mcp_config(session_id: str, storage_state_path: Path | str | None = None) -> Path:
     """Create run-local MCP config so video output stays with this exploration."""
     project_root = Path(__file__).resolve().parent.parent.parent
     run_dir = project_root / "runs" / session_id
-    write_playwright_mcp_config(run_dir=run_dir, server_name="playwright", project_root=project_root)
+    write_playwright_mcp_config(
+        run_dir=run_dir,
+        server_name="playwright",
+        project_root=project_root,
+        storage_state_path=storage_state_path,
+    )
     return run_dir
+
+
+def _resolve_exploration_browser_auth(request_body: ExplorationStartRequest, run_dir: Path) -> Path | None:
+    if not (request_body.browser_auth_session_id or request_body.use_project_default_browser_auth):
+        return None
+    with Session(engine) as db_session:
+        resolved = resolve_browser_auth_for_run(
+            db_session,
+            request_body.project_id,
+            run_dir=run_dir,
+            browser_auth_session_id=request_body.browser_auth_session_id,
+            use_default=request_body.use_project_default_browser_auth,
+        )
+    return resolved.storage_state_path if resolved else None
 
 
 def _collect_exploration_artifacts(session_id: str) -> list[ExplorationArtifactResponse]:
@@ -882,7 +909,17 @@ async def run_exploration_session(session_id: str, request_body: ExplorationStar
 
             progress_task = asyncio.create_task(_poll_progress())
 
-            run_dir = _prepare_exploration_mcp_config(session_id)
+            run_dir = Path(__file__).resolve().parent.parent.parent / "runs" / session_id
+            try:
+                storage_state_path = _resolve_exploration_browser_auth(request_body, run_dir)
+            except BrowserAuthSessionError as exc:
+                store.update_session_status(
+                    session_id,
+                    "failed",
+                    f"{exc}. Refresh browser auth session.",
+                )
+                return
+            run_dir = _prepare_exploration_mcp_config(session_id, storage_state_path=storage_state_path)
             agent = ExploratoryAgent()
             agent.on_task_enqueued = _on_task_enqueued
             agent.agent_cwd = str(run_dir)

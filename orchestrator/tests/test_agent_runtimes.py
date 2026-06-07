@@ -111,3 +111,45 @@ async def test_hermes_runtime_rejects_when_persisted_and_env_disabled(tmp_path, 
 
     assert result.success is False
     assert result.error == "Hermes runtime is disabled. Set HERMES_ENABLED=true."
+
+
+@pytest.mark.asyncio
+async def test_hermes_runtime_stops_run_when_cancelled(tmp_path, monkeypatch):
+    from orchestrator.api import settings as settings_api
+
+    monkeypatch.setattr(settings_api, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.delenv("QUORVEX_SETTINGS_ENV_FILE", raising=False)
+    monkeypatch.setenv("HERMES_ENABLED", "true")
+    checks = 0
+    stopped: list[str] = []
+
+    class FakeHermesClient:
+        async def create_run(self, payload, timeout_seconds):
+            return {"run_id": "hrun-cancel"}
+
+        async def iter_events(self, run_id):
+            yield {"event": "message", "output": "partial evidence"}
+            yield {"event": "message", "output": "should not finish"}
+
+        async def stop_run(self, run_id):
+            stopped.append(run_id)
+            return {"status": "stopping"}
+
+        async def get_run(self, run_id):
+            return {"status": "completed", "output": "late success"}
+
+    def is_cancelled():
+        nonlocal checks
+        checks += 1
+        return checks > 2
+
+    runtime = HermesRuntime(client=FakeHermesClient())
+    result = await runtime.run(
+        "inspect app",
+        AgentRuntimeContext(timeout_seconds=60, owner_id="run-1", is_cancelled=is_cancelled),
+    )
+
+    assert result.success is False
+    assert result.cancelled is True
+    assert result.output == "partial evidence"
+    assert stopped == ["hrun-cancel"]

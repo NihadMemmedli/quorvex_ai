@@ -977,6 +977,38 @@ class Project(SQLModel, table=True):
     last_active: datetime = Field(default_factory=datetime.utcnow)
 
 
+class BrowserAuthSession(SQLModel, table=True):
+    """Encrypted project-scoped reusable browser authentication state."""
+
+    __tablename__ = "browser_auth_sessions"
+    __table_args__ = (
+        Index("ix_browser_auth_sessions_project_status", "project_id", "status"),
+        Index("ix_browser_auth_sessions_project_default", "project_id", "is_default"),
+        UniqueConstraint("project_id", "name", name="uq_browser_auth_sessions_project_name"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str = Field(foreign_key="projects.id", index=True)
+    name: str
+    base_url: str
+    login_url: str
+    username_key: str
+    password_key: str
+    username_selector: str | None = None
+    password_selector: str | None = None
+    username_continue_selector: str | None = None
+    submit_selector: str | None = None
+    success_url_pattern: str | None = None
+    storage_state_json_encrypted: str | None = Field(default=None, sa_column=Column(Text))
+    status: str = Field(default="pending", index=True)  # pending, active, invalid, revoked, expired
+    is_default: bool = Field(default=False, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    last_validated_at: datetime | None = None
+    expires_at: datetime | None = None
+    failure_reason: str | None = Field(default=None, sa_column=Column(Text))
+
+
 class RegressionBatch(SQLModel, table=True):
     """Regression batch for grouping related test runs"""
 

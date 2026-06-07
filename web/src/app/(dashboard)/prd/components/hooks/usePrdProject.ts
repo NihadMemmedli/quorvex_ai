@@ -51,9 +51,15 @@ export function usePrdProject() {
                 throw new Error(d.detail || 'Upload failed');
             }
             const data = await res.json();
+            const features = Array.isArray(data.features) ? data.features : [];
+            if (features.length === 0) {
+                throw new Error(
+                    'PRD analysis completed but extracted zero features. Check Settings provider credentials/model access and retry.'
+                );
+            }
             const info: ProjectInfo = {
                 project: data.project,
-                features: data.features || [],
+                features,
                 total_chunks: data.total_chunks || 0,
             };
             setProjectData(info);
@@ -74,11 +80,18 @@ export function usePrdProject() {
         setError('');
         try {
             const res = await fetch(`${API}/prd/${projectId}/features`);
-            if (!res.ok) throw new Error('Failed to load');
+            if (!res.ok) {
+                const d = await res.json().catch(() => ({}));
+                throw new Error(d.detail || 'Failed to load');
+            }
             const data = await res.json();
+            const features = Array.isArray(data.features) ? data.features : [];
+            if (features.length === 0) {
+                throw new Error('This PRD project has no extracted features. Re-upload the PDF to retry analysis.');
+            }
             setProjectData({
                 project: projectId,
-                features: data.features || [],
+                features,
                 total_chunks: 0,
             });
         } catch (e: any) {
@@ -124,6 +137,7 @@ export function usePrdProject() {
     );
 
     return {
+        currentProject,
         currentProjectId: currentProject?.id || null,
         existingProjects,
         projectData,

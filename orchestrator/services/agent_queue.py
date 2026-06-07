@@ -554,6 +554,7 @@ class AgentQueue:
         poll_interval: float = 0.5,
         queued_timeout: float = 120.0,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
+        is_cancelled: Callable[[], Any] | None = None,
     ) -> str | None:
         """
         Wait for a task to complete and return result.
@@ -586,6 +587,18 @@ class AgentQueue:
         last_progress_payload: dict[str, Any] | None = None
 
         while True:
+            if is_cancelled:
+                try:
+                    cancelled = is_cancelled()
+                    if hasattr(cancelled, "__await__"):
+                        cancelled = await cancelled
+                except Exception as exc:
+                    logger.debug("Agent queue cancellation check failed for %s: %s", task_id, exc)
+                    cancelled = False
+                if cancelled:
+                    await self.cancel_task(task_id)
+                    raise RuntimeError("Task cancelled")
+
             now = datetime.utcnow()
             active_elapsed = (now - start_time).total_seconds() - paused_total_seconds
             if paused_started_at is not None:
@@ -1222,6 +1235,7 @@ class AgentQueue:
                 AutoPilotSession,
                 AutonomousAgentWorkItem,
                 AutonomousMission,
+                BrowserAuthSession,
                 PrdGenerationResult,
                 TestRun,
             )
@@ -1250,6 +1264,8 @@ class AgentQueue:
                         owner = session.get(PrdGenerationResult, int(task.owner_id))
                     except (TypeError, ValueError):
                         owner = None
+                elif task.owner_type == "browser_auth_session":
+                    owner = session.get(BrowserAuthSession, task.owner_id)
                 else:
                     owner = None
 

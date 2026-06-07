@@ -41,6 +41,12 @@ from logging_config import get_logger, request_id_var, setup_logging
 from services.browser_pool import AbstractBrowserPool, get_browser_pool
 from services.browser_pool import OperationType as BrowserOpType
 from services.resource_manager import ResourceManager, ResourceType, get_resource_manager
+from orchestrator.services.browser_auth_sessions import (
+    BrowserAuthSessionError,
+    ensure_browser_auth_session_usable,
+    resolve_browser_auth_for_run,
+    resolve_browser_auth_session_row,
+)
 from orchestrator.services.agent_runtimes import normalize_agent_runtime
 from utils.agent_report import (
     CUSTOM_AGENT_REPORT_INSTRUCTIONS,
@@ -66,6 +72,7 @@ from . import (
     api_testing,
     auth,
     autopilot,
+    browser_auth_sessions,
     chat,
     ci_control,
     dashboard,
@@ -407,6 +414,7 @@ app.include_router(memory.router)
 app.include_router(prd.router)
 app.include_router(regression.router)
 app.include_router(projects.router)
+app.include_router(browser_auth_sessions.router)
 app.include_router(recordings.router)
 app.include_router(exploration.router)
 app.include_router(requirements.router)
@@ -5088,6 +5096,7 @@ def execute_run_task(
     batch_id: str = None,
     project_id: str = None,
     model_tier: str | None = None,
+    storage_state_path: str | None = None,
 ):
     """Execute the native pipeline (default) with optional hybrid healing mode.
 
@@ -5149,6 +5158,7 @@ def execute_run_task(
             base_dir=BASE_DIR,
             run_dir=run_dir_path,
             headless=headless,
+            storage_state_path=storage_state_path,
         )
         playwright_config_dst.write_text(config_content)
 
@@ -5157,6 +5167,7 @@ def execute_run_task(
         server_name="playwright-test",
         config_path=playwright_config_dst,
         headless=headless,
+        storage_state_path=storage_state_path,
     )
     _write_run_browser_metadata(
         run_dir_path,
@@ -5245,6 +5256,7 @@ async def execute_run_task_wrapper(
     spec_name: str = "",
     project_id: str = None,
     model_tier: str | None = None,
+    storage_state_path: str | None = None,
 ):
     """Async wrapper for execute_run_task with unified browser queue management.
 
@@ -5362,6 +5374,7 @@ async def execute_run_task_wrapper(
                 batch_id,
                 project_id,
                 model_tier,
+                storage_state_path,
             )
             _append_workflow_log("Native run executor returned.", run_id=run_id)
 
@@ -5793,11 +5806,77 @@ class RunRequest(BaseModel):
     max_iterations: int | None = 20  # Only used with hybrid=True
     project_id: str | None = None  # Project to associate run with
     model_tier: str | None = None
+    browser_auth_session_id: str | None = None
+    use_project_default_browser_auth: bool = False
 
     # Legacy fields - kept for backward compatibility
     ralph: bool | None = False
     native_healer: bool | None = False
     native_generator: bool | None = False
+
+
+def _has_browser_auth_selection(
+    *,
+    browser_auth_session_id: str | None,
+    use_project_default_browser_auth: bool,
+) -> bool:
+    return bool((browser_auth_session_id or "").strip() or use_project_default_browser_auth)
+
+
+def _validate_browser_auth_selection_for_project(
+    session: Session,
+    project_id: str | None,
+    *,
+    browser_auth_session_id: str | None,
+    use_project_default_browser_auth: bool,
+) -> None:
+    browser_auth_session_id = (browser_auth_session_id or "").strip() or None
+    if not _has_browser_auth_selection(
+        browser_auth_session_id=browser_auth_session_id,
+        use_project_default_browser_auth=use_project_default_browser_auth,
+    ):
+        return
+    if not project_id:
+        raise HTTPException(status_code=400, detail="Browser auth session selection requires a project")
+    try:
+        row = resolve_browser_auth_session_row(
+            session,
+            project_id,
+            browser_auth_session_id=browser_auth_session_id,
+            use_default=use_project_default_browser_auth,
+        )
+        if not row:
+            raise BrowserAuthSessionError("Project default browser auth session was not found")
+        ensure_browser_auth_session_usable(row)
+    except BrowserAuthSessionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _resolve_browser_auth_storage_state_for_run(
+    session: Session,
+    project_id: str | None,
+    *,
+    run_dir: Path,
+    browser_auth_session_id: str | None,
+    use_project_default_browser_auth: bool,
+) -> str | None:
+    browser_auth_session_id = (browser_auth_session_id or "").strip() or None
+    if not _has_browser_auth_selection(
+        browser_auth_session_id=browser_auth_session_id,
+        use_project_default_browser_auth=use_project_default_browser_auth,
+    ):
+        return None
+    try:
+        resolved = resolve_browser_auth_for_run(
+            session,
+            project_id,
+            run_dir=run_dir,
+            browser_auth_session_id=browser_auth_session_id,
+            use_default=use_project_default_browser_auth,
+        )
+    except BrowserAuthSessionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return str(resolved.storage_state_path) if resolved else None
 
 
 def get_try_code_path(spec_name: str, spec_path: Path) -> str | None:
@@ -5981,6 +6060,20 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
     if target == "mobile" and platform not in ("ios", "android"):
         raise HTTPException(status_code=400, detail="platform must be 'ios' or 'android'")
 
+    storage_state_path = None
+    if target == "browser":
+        try:
+            storage_state_path = _resolve_browser_auth_storage_state_for_run(
+                session,
+                request.project_id,
+                run_dir=run_dir,
+                browser_auth_session_id=request.browser_auth_session_id,
+                use_project_default_browser_auth=bool(request.use_project_default_browser_auth),
+            )
+        except HTTPException:
+            await asyncio.to_thread((run_dir / "status.txt").write_text, "error")
+            raise
+
     # Create DB Entry with queue info
     now = datetime.utcnow()
     run = DBTestRun(
@@ -6047,6 +6140,8 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
         "project_id": request.project_id,
         "model_tier": request.model_tier,
     }
+    if storage_state_path:
+        payload["storage_state_path"] = storage_state_path
     from orchestrator.config import settings as app_settings
 
     planned_runtime = dict(browser_runtime_status())
@@ -6234,6 +6329,13 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
     hybrid_mode = request.hybrid or request.ralph or False
     max_iterations = request.max_iterations or 20
 
+    _validate_browser_auth_selection_for_project(
+        session,
+        request.project_id,
+        browser_auth_session_id=request.browser_auth_session_id,
+        use_project_default_browser_auth=bool(request.use_project_default_browser_auth),
+    )
+
     config = BatchConfig(
         project_id=request.project_id,
         browser=request.browser,
@@ -6255,6 +6357,13 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
         run = session.get(DBTestRun, task_args["run_id"])
         if not run:
             continue
+        storage_state_path = _resolve_browser_auth_storage_state_for_run(
+            session,
+            task_args["project_id"],
+            run_dir=Path(task_args["run_dir"]),
+            browser_auth_session_id=request.browser_auth_session_id,
+            use_project_default_browser_auth=bool(request.use_project_default_browser_auth),
+        )
         payload = {
             "target": "browser",
             "spec_path": task_args["spec_path"],
@@ -6268,6 +6377,8 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
             "project_id": task_args["project_id"],
             "model_tier": request.model_tier,
         }
+        if storage_state_path:
+            payload["storage_state_path"] = storage_state_path
         planned_runtime = dict(browser_runtime_status())
         planned_headless = not bool(planned_runtime.get("live_view_available"))
         _write_run_browser_metadata(
@@ -6390,6 +6501,8 @@ class AgentRunRequest(BaseModel):
     project_id: str | None = None  # Project isolation
     runtime: str | None = None
     model_tier: str | None = None
+    browser_auth_session_id: str | None = None
+    use_project_default_browser_auth: bool = False
 
 
 class AgentDefinitionRequest(BaseModel):
@@ -6423,6 +6536,8 @@ class CustomAgentRunRequest(BaseModel):
     project_id: str | None = None
     runtime: str | None = None
     model_tier: str | None = None
+    browser_auth_session_id: str | None = None
+    use_project_default_browser_auth: bool = False
 
 
 def _agent_tool(
@@ -6748,6 +6863,8 @@ class ExploratoryRunRequest(BaseModel):
     project_id: str | None = None  # Project to associate generated specs with
     runtime: str | None = None
     model_tier: str | None = "tool_deep"
+    browser_auth_session_id: str | None = None
+    use_project_default_browser_auth: bool = False
 
 
 class SpecSynthesisRequest(BaseModel):
@@ -6767,6 +6884,13 @@ class FlowUpdateRequest(BaseModel):
     entry_point: str | None = None
     exit_point: str | None = None
     complexity: str | None = None
+
+
+class GenerateReportItemSpecRequest(BaseModel):
+    browser_auth_session_id: str | None = None
+    use_project_default_browser_auth: bool = False
+    skip_browser_auth: bool = False
+    inherit_browser_auth: bool = False
 
 
 def _collect_agent_run_artifacts(run_id: str) -> list[dict[str, Any]]:
@@ -7338,12 +7462,194 @@ def _resolve_agent_tools(tool_ids: list[str], session: Session) -> tuple[list[st
     return allowed_tools, [_serialize_agent_tool(tool) for tool in tools]
 
 
-def _prepare_custom_agent_mcp_config(run_id: str) -> Path:
+def _browser_auth_selection(config: dict[str, Any]) -> tuple[str | None, bool]:
+    auth_config = config.get("browser_auth") if isinstance(config.get("browser_auth"), dict) else {}
+    legacy_auth = config.get("auth") if isinstance(config.get("auth"), dict) else {}
+    browser_auth_session_id = (
+        config.get("browser_auth_session_id")
+        or auth_config.get("session_id")
+        or legacy_auth.get("browser_auth_session_id")
+        or legacy_auth.get("session_id")
+    )
+    use_default = bool(
+        config.get("use_project_default_browser_auth")
+        or auth_config.get("use_project_default")
+        or auth_config.get("use_project_default_browser_auth")
+        or legacy_auth.get("use_default")
+        or legacy_auth.get("use_project_default")
+        or legacy_auth.get("use_project_default_browser_auth")
+    )
+    return browser_auth_session_id, use_default
+
+
+class AgentBrowserAuthResolutionError(RuntimeError):
+    def __init__(self, message: str, *, browser_auth_session_id: str | None, use_default: bool):
+        super().__init__(message)
+        self.browser_auth_session_id = browser_auth_session_id
+        self.use_default = use_default
+
+
+def _browser_auth_request_fields_set(request: GenerateReportItemSpecRequest) -> set[str]:
+    fields = getattr(request, "model_fields_set", None)
+    if fields is None:
+        fields = getattr(request, "__fields_set__", set())
+    return set(fields or set())
+
+
+def _without_spec_generation_auth(config: dict[str, Any]) -> dict[str, Any]:
+    cleaned = {
+        key: value
+        for key, value in config.items()
+        if key not in {"auth", "browser_auth", "browser_auth_session_id", "use_project_default_browser_auth"}
+    }
+    return cleaned
+
+
+def _apply_report_spec_browser_auth_request(
+    inherited_config: dict[str, Any],
+    request: GenerateReportItemSpecRequest | None,
+) -> tuple[dict[str, Any], bool]:
+    if request is None:
+        return inherited_config, True
+
+    fields_set = _browser_auth_request_fields_set(request)
+    browser_auth_session_id = str(request.browser_auth_session_id or "").strip()
+    if request.skip_browser_auth:
+        return _without_spec_generation_auth(inherited_config), False
+    if browser_auth_session_id:
+        return {**_without_spec_generation_auth(inherited_config), "browser_auth_session_id": browser_auth_session_id}, False
+    if request.use_project_default_browser_auth:
+        return {**_without_spec_generation_auth(inherited_config), "use_project_default_browser_auth": True}, False
+    if request.inherit_browser_auth or not fields_set:
+        return inherited_config, True
+    return _without_spec_generation_auth(inherited_config), False
+
+
+def _resolve_agent_browser_auth_storage_path(
+    *,
+    run_id: str,
+    project_id: str | None,
+    config: dict[str, Any],
+    run_dir: Path,
+) -> Path | None:
+    browser_auth_session_id, use_default = _browser_auth_selection(config)
+    if not (browser_auth_session_id or use_default):
+        return None
+    try:
+        with Session(engine) as db_session:
+            resolved = resolve_browser_auth_for_run(
+                db_session,
+                project_id,
+                run_dir=run_dir,
+                browser_auth_session_id=browser_auth_session_id,
+                use_default=use_default,
+            )
+    except BrowserAuthSessionError as exc:
+        message = f"{exc}. Refresh browser auth session."
+        _update_agent_run_progress(
+            run_id,
+            {
+                "phase": "failed",
+                "status": "failed",
+                "message": message,
+            },
+        )
+        raise AgentBrowserAuthResolutionError(
+            message,
+            browser_auth_session_id=browser_auth_session_id,
+            use_default=use_default,
+        ) from exc
+    if resolved:
+        _update_agent_run_progress(
+            run_id,
+            {
+                "browser_auth_session_id": resolved.session_id,
+                "browser_auth_session_name": resolved.session_name,
+                "message": "Using project browser auth session.",
+            },
+        )
+    return resolved.storage_state_path if resolved else None
+
+
+def _prepare_custom_agent_mcp_config(run_id: str, storage_state_path: Path | str | None = None) -> Path:
     """Create run-local Playwright MCP config for UI-created custom agents."""
     run_dir = RUNS_DIR / run_id
-    runtime = write_playwright_mcp_config(run_dir=run_dir, server_name="playwright-test", project_root=BASE_DIR)
+    runtime = write_playwright_mcp_config(
+        run_dir=run_dir,
+        server_name="playwright-test",
+        project_root=BASE_DIR,
+        storage_state_path=storage_state_path,
+    )
     _update_agent_run_progress(run_id, runtime)
     return run_dir
+
+
+def _prepare_spec_generation_mcp_config(
+    run_dir: Path,
+    storage_state_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Create run-local Playwright MCP config for browser-backed spec generation."""
+    return write_playwright_mcp_config(
+        run_dir=run_dir,
+        server_name="playwright-test",
+        project_root=BASE_DIR,
+        storage_state_path=storage_state_path,
+    )
+
+
+def _safe_inherited_auth_config(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    safe_keys = {
+        "browser_auth_session_id",
+        "session_id",
+        "session_name",
+        "use_default",
+        "use_project_default",
+        "use_project_default_browser_auth",
+    }
+    return {key: value[key] for key in safe_keys if key in value and value[key] is not None}
+
+
+def _build_spec_generation_source_config(
+    source_config: dict[str, Any],
+    *,
+    target_url: str,
+    project_id: str | None,
+) -> dict[str, Any]:
+    """Carry only non-secret context needed by browser-backed spec generation."""
+    inherited: dict[str, Any] = {
+        "url": str(source_config.get("url") or target_url or "").strip(),
+    }
+    if project_id:
+        inherited["project_id"] = project_id
+    elif source_config.get("project_id"):
+        inherited["project_id"] = source_config.get("project_id")
+
+    if source_config.get("browser_auth_session_id"):
+        inherited["browser_auth_session_id"] = source_config.get("browser_auth_session_id")
+    if source_config.get("use_project_default_browser_auth"):
+        inherited["use_project_default_browser_auth"] = True
+
+    auth_config = _safe_inherited_auth_config(source_config.get("auth"))
+    if auth_config:
+        inherited["auth"] = auth_config
+    browser_auth_config = _safe_inherited_auth_config(source_config.get("browser_auth"))
+    if browser_auth_config:
+        inherited["browser_auth"] = browser_auth_config
+    return inherited
+
+
+def _spec_generation_auth_metadata(config: dict[str, Any], *, inherited: bool = True) -> dict[str, Any]:
+    browser_auth_session_id, use_default = _browser_auth_selection(config)
+    metadata: dict[str, Any] = {}
+    if browser_auth_session_id:
+        metadata["browser_auth_session_id"] = browser_auth_session_id
+    if use_default:
+        metadata["use_project_default_browser_auth"] = True
+    if metadata and inherited:
+        metadata["browser_auth_inherited"] = True
+    return metadata
 
 
 def _resolve_playwright_chromium_executable() -> Path | None:
@@ -7570,6 +7876,10 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
         runtime_name = normalize_agent_runtime(config.get("runtime"))
         if not await _wait_if_agent_run_paused(run_id):
             return
+        from orchestrator.services.agent_cancellation import owner_is_cancelled_sync
+
+        def _agent_run_cancelled() -> bool:
+            return owner_is_cancelled_sync("agent_run", run_id)
 
         uses_worker_browser_slot = (
             _agent_run_has_browser_tools(agent_type, config)
@@ -7679,11 +7989,14 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         agent_name=agent_type,
                         hermes_conversation=run_id,
                         metadata={"agent_type": agent_type, "run_id": run_id},
+                        is_cancelled=_agent_run_cancelled,
                         on_task_enqueued=_on_runtime_task_enqueued,
                         on_tool_use=_on_runtime_tool_use,
                         on_progress=_on_runtime_progress,
                     ),
                 )
+                if agent_result.cancelled:
+                    raise asyncio.CancelledError("Agent run cancelled")
                 result = {
                     "summary": (agent_result.output or agent_result.error or "")[:500],
                     "output": agent_result.output,
@@ -7711,7 +8024,14 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 agent.owner_type = "agent_run"
                 agent.owner_id = run_id
                 agent.owner_label = f"Agent run {run_id}"
-                run_dir = exploration._prepare_exploration_mcp_config(run_id)
+                run_dir = RUNS_DIR / run_id
+                storage_state_path = _resolve_agent_browser_auth_storage_path(
+                    run_id=run_id,
+                    project_id=config.get("project_id"),
+                    config=config,
+                    run_dir=run_dir,
+                )
+                run_dir = exploration._prepare_exploration_mcp_config(run_id, storage_state_path=storage_state_path)
                 agent.agent_cwd = str(run_dir)
                 agent.on_task_enqueued = lambda task_id: _update_agent_run_progress(
                     run_id,
@@ -7814,13 +8134,23 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 has_screenshot_tool = any(str(tool).endswith("__browser_take_screenshot") for tool in allowed_tools)
                 force_direct_execution = bool(config.get("_force_direct_agent_execution"))
                 runtime = browser_runtime_status() if has_browser_tools else {}
+                with Session(engine) as session:
+                    custom_run = session.get(AgentRun, run_id)
+                    custom_project_id = custom_run.project_id if custom_run else None
                 if any(str(tool).startswith("mcp__") for tool in allowed_tools):
                     if has_browser_tools:
                         _ensure_custom_agent_browser_available(
                             run_id,
                             force_direct_execution=force_direct_execution,
                         )
-                    run_dir = _prepare_custom_agent_mcp_config(run_id)
+                    candidate_run_dir = RUNS_DIR / run_id
+                    storage_state_path = _resolve_agent_browser_auth_storage_path(
+                        run_id=run_id,
+                        project_id=custom_project_id or config.get("project_id"),
+                        config=config,
+                        run_dir=candidate_run_dir,
+                    )
+                    run_dir = _prepare_custom_agent_mcp_config(run_id, storage_state_path=storage_state_path)
                     runtime = browser_runtime_status()
 
                 _update_agent_run_progress(
@@ -7856,9 +8186,6 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 if custom_config:
                     prompt_parts.append(f"Additional config JSON:\n{json.dumps(custom_config, indent=2)}")
                 prompt_parts.extend(["", "Task:", task_prompt])
-                with Session(engine) as session:
-                    custom_run = session.get(AgentRun, run_id)
-                    custom_project_id = custom_run.project_id if custom_run else None
 
                 def _on_custom_task_enqueued(task_id: str) -> None:
                     queued_message = "Hermes run started" if runtime_name == "hermes" else "Agent task queued for worker"
@@ -7953,10 +8280,13 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         "agent_definition_id": config.get("agent_definition_id"),
                         "run_id": run_id,
                     },
+                    is_cancelled=_agent_run_cancelled,
                 )
                 if not await _wait_if_agent_run_paused(run_id):
                     return
                 agent_result = await runtime_adapter.run("\n".join(prompt_parts), runtime_context)
+                if agent_result.cancelled:
+                    raise asyncio.CancelledError("Agent run cancelled")
                 artifacts = _collect_agent_run_artifacts(run_id)
                 structured_report = _build_custom_agent_structured_report(
                     agent_result.output or "",
@@ -8096,8 +8426,14 @@ async def run_agent(request: AgentRunRequest, session: Session = Depends(get_ses
     run_id = str(uuid.uuid4())
     runtime = normalize_agent_runtime(request.runtime or request.config.get("runtime"))
     run_config = {**request.config, "runtime": runtime}
+    if request.project_id and not run_config.get("project_id"):
+        run_config["project_id"] = request.project_id
     if request.model_tier:
         run_config["model_tier"] = request.model_tier
+    if request.browser_auth_session_id:
+        run_config["browser_auth_session_id"] = request.browser_auth_session_id
+    if request.use_project_default_browser_auth:
+        run_config["use_project_default_browser_auth"] = True
     browser_metadata = browser_runtime_status() if _agent_run_has_browser_tools(request.agent_type, run_config) else {}
     run = AgentRun(
         id=run_id,
@@ -8321,6 +8657,12 @@ async def run_agent_definition(
         "model_tier": request.model_tier
         or ((request.config or {}).get("model_tier") if isinstance(request.config, dict) else None)
         or getattr(definition, "model_tier", None),
+        "browser_auth_session_id": request.browser_auth_session_id
+        or ((request.config or {}).get("browser_auth_session_id") if isinstance(request.config, dict) else None),
+        "use_project_default_browser_auth": bool(
+            request.use_project_default_browser_auth
+            or ((request.config or {}).get("use_project_default_browser_auth") if isinstance(request.config, dict) else False)
+        ),
         "tool_ids": definition.tool_ids,
         "allowed_tools": allowed_tools,
         "selected_tools": selected_tools,
@@ -9816,9 +10158,31 @@ async def _run_flow_spec_generation(
         setup_claude_env()
         project_root = Path(__file__).parent.parent.parent
         flows_file = Path(flows_file_path)
-        spec_run_dir = project_root / "runs" / spec_agent_run_id if spec_agent_run_id else None
+        spec_run_dir = RUNS_DIR / spec_agent_run_id if spec_agent_run_id else None
         if spec_run_dir:
             await asyncio.to_thread(spec_run_dir.mkdir, parents=True, exist_ok=True)
+            storage_state_path = _resolve_agent_browser_auth_storage_path(
+                run_id=spec_agent_run_id,
+                project_id=run_project_id or run_config.get("project_id"),
+                config=run_config,
+                run_dir=spec_run_dir,
+            )
+            mcp_runtime = await asyncio.to_thread(
+                _prepare_spec_generation_mcp_config,
+                spec_run_dir,
+                storage_state_path,
+            )
+            if spec_agent_run_id:
+                _update_agent_run_progress(
+                    spec_agent_run_id,
+                    {
+                        "phase": "browser_setup",
+                        "message": "Prepared browser MCP runtime for spec generation.",
+                        "has_browser_tools": True,
+                        **_spec_generation_auth_metadata(run_config),
+                        **mcp_runtime,
+                    },
+                )
 
         _flow_spec_jobs[job_id]["message"] = "Preparing flow context..."
         if spec_agent_run_id:
@@ -9888,6 +10252,8 @@ async def _run_flow_spec_generation(
         # Run Native Planner
         _flow_spec_jobs[job_id]["message"] = "Running Native Planner (browser exploration)..."
         logger.info(f"Starting Native Planner for flow: {flow_title}")
+        if spec_run_dir and not await asyncio.to_thread((spec_run_dir / ".mcp.json").exists):
+            raise RuntimeError(f"Spec generation setup failed: missing browser MCP config at {spec_run_dir / '.mcp.json'}")
 
         domain_name = _extract_domain_name(entry_point)
         flow_slug = _slugify(flow_title)
@@ -9989,8 +10355,6 @@ async def _run_flow_spec_generation(
             )
         try:
             from sqlmodel import Session as SyncSession
-
-            from .db import engine
 
             with SyncSession(engine) as db_session:
                 spec_name = str(spec_path.relative_to(project_root / "specs"))
@@ -10148,6 +10512,7 @@ async def generate_report_item_spec(
     item_id: str,
     item_type: str | None = Query(default=None, description="finding or test_idea"),
     project_id: str | None = Query(default=None, description="Project ID for verification"),
+    request_body: GenerateReportItemSpecRequest | None = None,
     background_tasks: BackgroundTasks = BackgroundTasks(),
     session: Session = Depends(get_session),
 ):
@@ -10200,12 +10565,22 @@ async def generate_report_item_spec(
     _cleanup_flow_spec_jobs()
     job_id = f"reportspec-{run_id}-{item_id}-{uuid.uuid4().hex[:8]}"
     spec_agent_run_id = job_id
-    project_root = Path(__file__).parent.parent.parent
-    spec_run_dir = project_root / "runs" / spec_agent_run_id
+    spec_run_dir = RUNS_DIR / spec_agent_run_id
     await asyncio.to_thread(spec_run_dir.mkdir, parents=True, exist_ok=True)
     flows_file = spec_run_dir / "source-flow.json"
 
-    run_project_id = source_run.project_id or source_run.config.get("project_id") or project_id
+    source_config = source_run.config or {}
+    run_project_id = source_run.project_id or project_id or source_config.get("project_id")
+    inherited_run_config = _build_spec_generation_source_config(
+        source_config,
+        target_url=base_url or target_url,
+        project_id=run_project_id,
+    )
+    inherited_run_config, browser_auth_inherited = _apply_report_spec_browser_auth_request(
+        inherited_run_config,
+        request_body,
+    )
+    auth_metadata = _spec_generation_auth_metadata(inherited_run_config, inherited=browser_auth_inherited)
     spec_agent_run = AgentRun(
         id=spec_agent_run_id,
         agent_type="spec_generation",
@@ -10220,15 +10595,19 @@ async def generate_report_item_spec(
         "source_item_id": item_id,
         "source_item_type": kind,
         "flow_title": title,
+        "project_id": run_project_id,
         "url": target_url,
-        "allowed_tools": get_agent_allowed_tools("playwright-test-planner"),
+        "source_url": inherited_run_config.get("url"),
+        "allowed_tools": [],
+        **{key: inherited_run_config[key] for key in ("auth", "browser_auth") if key in inherited_run_config},
+        **auth_metadata,
     }
     spec_agent_run.progress = {
         "phase": "queued",
         "status": "running",
         "message": "Starting Native Planner spec generation...",
         "has_browser_tools": True,
-        **browser_runtime_status(),
+        **auth_metadata,
         "updated_at": datetime.utcnow().isoformat(),
     }
     session.add(spec_agent_run)
@@ -10250,6 +10629,90 @@ async def generate_report_item_spec(
         "agent_run_id": spec_agent_run_id,
     }
 
+    try:
+        storage_state_path = _resolve_agent_browser_auth_storage_path(
+            run_id=spec_agent_run_id,
+            project_id=run_project_id,
+            config=inherited_run_config,
+            run_dir=spec_run_dir,
+        )
+        mcp_runtime = await asyncio.to_thread(
+            _prepare_spec_generation_mcp_config,
+            spec_run_dir,
+            storage_state_path,
+        )
+        session.refresh(spec_agent_run)
+        spec_agent_run.config = {
+            **(spec_agent_run.config or {}),
+            "allowed_tools": get_agent_allowed_tools("playwright-test-planner", mcp_config_dir=spec_run_dir),
+        }
+        spec_agent_run.progress = {
+            **(spec_agent_run.progress or {}),
+            "phase": "queued",
+            "status": "running",
+            "message": "Starting Native Planner spec generation...",
+            "has_browser_tools": True,
+            **auth_metadata,
+            **mcp_runtime,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        session.add(spec_agent_run)
+        session.commit()
+    except RuntimeError as exc:
+        import time as _time
+
+        message = str(exc)
+        failure_metadata: dict[str, Any] = {}
+        if isinstance(exc, AgentBrowserAuthResolutionError):
+            action_message = (
+                "Selected browser auth session is revoked or invalid. "
+                "Choose an active session or generate without auth."
+            )
+            failure_metadata = {
+                "browser_auth_failure": True,
+                "browser_auth_error": message,
+                "message": action_message,
+            }
+            if exc.browser_auth_session_id:
+                failure_metadata["browser_auth_session_id"] = exc.browser_auth_session_id
+            message = action_message
+        session.refresh(spec_agent_run)
+        spec_agent_run.status = "failed"
+        spec_agent_run.completed_at = datetime.utcnow()
+        spec_agent_run.result = {
+            "error": message,
+            "source_run_id": run_id,
+            "source_item_id": item_id,
+            **failure_metadata,
+        }
+        spec_agent_run.progress = {
+            **(spec_agent_run.progress or {}),
+            "phase": "failed",
+            "status": "failed",
+            "message": message,
+            "has_browser_tools": True,
+            **auth_metadata,
+            **failure_metadata,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        session.add(spec_agent_run)
+        session.commit()
+        _flow_spec_jobs[job_id].update({"status": "failed", "message": message, "completed_at": _time.time()})
+        _record_agent_run_event(
+            spec_agent_run_id,
+            event_type="failed",
+            level="error",
+            message=message,
+            payload={"source_run_id": run_id, "source_item_id": item_id, "source_item_type": kind},
+            session=session,
+        )
+        return {
+            "status": "failed",
+            "job_id": job_id,
+            "agent_run_id": spec_agent_run_id,
+            "message": message,
+        }
+
     background_tasks.add_task(
         _run_flow_spec_generation,
         job_id=job_id,
@@ -10259,7 +10722,7 @@ async def generate_report_item_spec(
         flows=[flow],
         flows_file_path=str(flows_file),
         run_project_id=run_project_id,
-        run_config={"url": base_url or target_url, "project_id": run_project_id},
+        run_config=inherited_run_config,
         spec_agent_run_id=spec_agent_run_id,
     )
 
@@ -10291,9 +10754,7 @@ async def generate_flow_test(
     # Verify exploration run belongs to project
     _verify_exploration_run_project(run_id, project_id, session)
 
-    # Get project root
-    project_root = Path(__file__).parent.parent.parent
-    flows_file = project_root / "runs" / run_id / "flows.json"
+    flows_file = RUNS_DIR / run_id / "flows.json"
 
     if not await asyncio.to_thread(flows_file.exists):
         raise HTTPException(status_code=404, detail=f"Flows file not found for run {run_id}")
@@ -10307,7 +10768,7 @@ async def generate_flow_test(
         # Get project_id from parent exploration run for proper isolation
         exploration_run = session.get(AgentRun, run_id)
         run_config = json.loads(exploration_run.config_json) if exploration_run and exploration_run.config_json else {}
-        run_project_id = run_config.get("project_id")
+        run_project_id = exploration_run.project_id or project_id or run_config.get("project_id")
 
         # Find the requested flow
         flow = next((f for f in flows if f.get("id") == flow_id), None)
@@ -10322,6 +10783,12 @@ async def generate_flow_test(
 
         if not flow:
             raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+
+        inherited_run_config = _build_spec_generation_source_config(
+            run_config,
+            target_url=flow.get("entry_point") or "",
+            project_id=run_project_id,
+        )
 
         # Check for cached result (unless force_regenerate)
         if not force_regenerate and "generated_test" in flow:
@@ -10347,8 +10814,9 @@ async def generate_flow_test(
         job_id = f"flowspec-{run_id}-{flow_id}-{uuid.uuid4().hex[:8]}"
         spec_agent_run_id = job_id
 
-        spec_run_dir = project_root / "runs" / spec_agent_run_id
+        spec_run_dir = RUNS_DIR / spec_agent_run_id
         await asyncio.to_thread(spec_run_dir.mkdir, parents=True, exist_ok=True)
+        auth_metadata = _spec_generation_auth_metadata(inherited_run_config)
         spec_agent_run = AgentRun(
             id=spec_agent_run_id,
             agent_type="spec_generation",
@@ -10362,15 +10830,19 @@ async def generate_flow_test(
             "source_run_id": run_id,
             "source_flow_id": flow_id,
             "flow_title": flow.get("title", "Unnamed Flow"),
-            "url": run_config.get("url") or flow.get("entry_point"),
-            "allowed_tools": get_agent_allowed_tools("playwright-test-planner"),
+            "project_id": run_project_id,
+            "url": flow.get("entry_point") or inherited_run_config.get("url"),
+            "source_url": inherited_run_config.get("url"),
+            "allowed_tools": [],
+            **{key: inherited_run_config[key] for key in ("auth", "browser_auth") if key in inherited_run_config},
+            **auth_metadata,
         }
         spec_agent_run.progress = {
             "phase": "queued",
             "status": "running",
             "message": "Starting Native Planner spec generation...",
             "has_browser_tools": True,
-            **browser_runtime_status(),
+            **auth_metadata,
             "updated_at": datetime.utcnow().isoformat(),
         }
         session.add(spec_agent_run)
@@ -10392,6 +10864,68 @@ async def generate_flow_test(
             "agent_run_id": spec_agent_run_id,
         }
 
+        try:
+            storage_state_path = _resolve_agent_browser_auth_storage_path(
+                run_id=spec_agent_run_id,
+                project_id=run_project_id,
+                config=inherited_run_config,
+                run_dir=spec_run_dir,
+            )
+            mcp_runtime = await asyncio.to_thread(
+                _prepare_spec_generation_mcp_config,
+                spec_run_dir,
+                storage_state_path,
+            )
+            session.refresh(spec_agent_run)
+            spec_agent_run.config = {
+                **(spec_agent_run.config or {}),
+                "allowed_tools": get_agent_allowed_tools("playwright-test-planner", mcp_config_dir=spec_run_dir),
+            }
+            spec_agent_run.progress = {
+                **(spec_agent_run.progress or {}),
+                "phase": "queued",
+                "status": "running",
+                "message": "Starting Native Planner spec generation...",
+                "has_browser_tools": True,
+                **auth_metadata,
+                **mcp_runtime,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            session.add(spec_agent_run)
+            session.commit()
+        except RuntimeError as exc:
+            message = str(exc)
+            session.refresh(spec_agent_run)
+            spec_agent_run.status = "failed"
+            spec_agent_run.completed_at = datetime.utcnow()
+            spec_agent_run.result = {"error": message, "source_run_id": run_id, "source_flow_id": flow_id}
+            spec_agent_run.progress = {
+                **(spec_agent_run.progress or {}),
+                "phase": "failed",
+                "status": "failed",
+                "message": message,
+                "has_browser_tools": True,
+                **auth_metadata,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+            session.add(spec_agent_run)
+            session.commit()
+            _flow_spec_jobs[job_id].update({"status": "failed", "message": message, "completed_at": _time.time()})
+            _record_agent_run_event(
+                spec_agent_run_id,
+                event_type="failed",
+                level="error",
+                message=message,
+                payload={"source_run_id": run_id, "source_flow_id": flow_id, "flow_title": flow.get("title")},
+                session=session,
+            )
+            return {
+                "status": "failed",
+                "job_id": job_id,
+                "agent_run_id": spec_agent_run_id,
+                "message": message,
+            }
+
         background_tasks.add_task(
             _run_flow_spec_generation,
             job_id=job_id,
@@ -10401,7 +10935,7 @@ async def generate_flow_test(
             flows=flows,
             flows_file_path=str(flows_file),
             run_project_id=run_project_id,
-            run_config=run_config,
+            run_config=inherited_run_config,
             spec_agent_run_id=spec_agent_run_id,
         )
 

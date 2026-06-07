@@ -11,9 +11,14 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
+| `QUORVEX_ACTIVE_LLM_PROVIDER` | `zai` | Deploy only | Active deploy-time provider selector. Supported values: `zai`, `openrouter`, `openai`, `anthropic`, `hermes` |
+| `ZAI_API_KEY` | -- | Provider-specific | Z.ai GLM API key used when `QUORVEX_ACTIVE_LLM_PROVIDER=zai` |
+| `OPENROUTER_API_KEY` | -- | Provider-specific | OpenRouter API key used when `QUORVEX_ACTIVE_LLM_PROVIDER=openrouter` |
+| `OPENAI_API_KEY` | -- | Provider-specific | OpenAI API key used for memory embeddings and when `QUORVEX_ACTIVE_LLM_PROVIDER=openai` |
+| `ANTHROPIC_API_KEY` | -- | Provider-specific | Anthropic API key used when `QUORVEX_ACTIVE_LLM_PROVIDER=anthropic`; app containers receive Anthropic-compatible aliases from the active runtime key |
 | `QUORVEX_LLM_PROVIDER` | `anthropic_compatible` | No | Canonical runtime provider kind for app-owned AI calls |
 | `QUORVEX_LLM_BASE_URL` | `https://api.z.ai/api/anthropic` | No | Canonical runtime provider endpoint; mirrored to `ANTHROPIC_BASE_URL` for SDK compatibility |
-| `QUORVEX_LLM_API_KEY` | -- | Yes | Canonical single runtime API key; legacy Anthropic key names remain supported |
+| `QUORVEX_LLM_API_KEY` | -- | Runtime | Canonical single runtime API key mapped from the active provider key during deployment; legacy Anthropic key names remain supported |
 | `QUORVEX_LLM_API_KEYS` | -- | No | Canonical comma-separated runtime key pool for rotation |
 | `QUORVEX_LLM_LIGHT_MODEL` | `glm-4.5-air` | No | Cheap deterministic model for classification, repair, summaries, and memory extraction |
 | `QUORVEX_LLM_STANDARD_MODEL` | `glm-5-turbo` | No | Default model for synthesis and analysis tasks |
@@ -23,7 +28,6 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | `QUORVEX_EMBEDDING_MODEL` | `text-embedding-3-small` | No | Canonical embedding model for memory and PRD semantic indexing |
 | `ANTHROPIC_AUTH_TOKEN` | copied from `QUORVEX_LLM_API_KEY` when configured | No | Legacy Anthropic-compatible SDK token alias |
 | `ANTHROPIC_AUTH_TOKENS` | copied from `QUORVEX_LLM_API_KEYS` when configured | No | Legacy comma-separated token pool alias |
-| `ANTHROPIC_API_KEY` | copied from `QUORVEX_LLM_API_KEY` when configured | No | Anthropic SDK-compatible key name used by some runtime paths |
 | `CLAUDE_CODE_OAUTH_TOKEN` | -- | No | Claude Code OAuth token for Docker/dev setups that authenticate through Claude Code |
 | `ANTHROPIC_BASE_URL` | copied from `QUORVEX_LLM_BASE_URL` | No | Legacy SDK endpoint alias |
 | `ANTHROPIC_MODEL` | selected runtime tier model | No | Legacy active model alias used by SDK clients |
@@ -33,7 +37,6 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | `ANTHROPIC_CHAT_MODEL` | `glm-5-turbo` | No | Legacy chat model alias |
 | `ANTHROPIC_ENABLE_CHAT_THINKING` | `false` | No | Enable provider-specific chat reasoning controls when supported |
 | `API_TIMEOUT_MS` | `3000000` | No | Claude Code API timeout used by the Z.ai GLM Coding Plan |
-| `OPENAI_API_KEY` | -- | No | OpenAI API key for memory system embeddings |
 | `OPENAI_BASE_URL` | -- | No | Optional OpenAI-compatible endpoint for embedding/chat clients |
 | `OPENAI_CHAT_MODEL` | -- | No | Optional OpenAI chat model override for features that use OpenAI-compatible chat calls |
 
@@ -172,6 +175,7 @@ Settings can manage backend agent runtime and dashboard assistant runtime separa
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `VNC_ENABLED` | `true` (Docker prod) | No | Enable VNC mode (browser runs headed on virtual display) |
+| `VNC_PUBLIC_WS_URL` | `ws://localhost:6080/websockify` in VNC runtime | Company VNC deployments | Browser-facing noVNC WebSocket URL, for example `wss://quorvex.example.com/websockify` |
 | `DISPLAY` | `:99` | No | Xvfb virtual display number |
 
 When `VNC_ENABLED=true`, parallel browser execution is limited to 1 instance.
@@ -233,8 +237,8 @@ Temporal-backed missions, custom workflows, standalone agent runs, and domain jo
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `NEXT_PUBLIC_API_URL` | `http://localhost:8001` | No | Backend API URL for the frontend |
-| `QUORVEX_PUBLIC_API_URL` | -- | Docker prod | Public backend URL passed through production Compose to `NEXT_PUBLIC_API_URL` for the frontend container |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8001` locally, blank in company deployment | No | Browser API URL override. Leave blank behind company nginx so browser requests use same-origin `/backend-proxy`. |
+| `QUORVEX_PUBLIC_API_URL` | -- | Docker prod | Public backend URL passed through production Compose to `NEXT_PUBLIC_API_URL`; leave blank for same-origin company nginx deployments |
 | `INTERNAL_API_URL` | -- | No | Server-side backend URL used by Next.js routes and the backend proxy |
 | `NEXT_PUBLIC_TEMPORAL_UI_URL` | -- | No | Public Temporal UI URL displayed by frontend features |
 | `ALLOWED_ORIGINS` | `http://localhost:3000` | No | CORS allowed origins (comma-separated) |

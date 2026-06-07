@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Create HeyGen-ready avatar payloads from an episode's avatar segments.
-
-By default this writes JSON payloads only. Passing --submit will call HeyGen's
-v3 video API and may spend API balance.
-"""
+"""Create HeyGen-ready avatar payloads from an episode's avatar segments."""
 
 from __future__ import annotations
 
@@ -46,25 +42,25 @@ def parse_segments(path: Path) -> list[dict[str, str]]:
         raise FileNotFoundError(f"Avatar segments file not found: {path}")
 
     segments: list[dict[str, str]] = []
-    current_title = ""
-    current_lines: list[str] = []
+    title = ""
+    lines: list[str] = []
 
     def flush() -> None:
-        nonlocal current_title, current_lines
-        text = " ".join(line.strip() for line in current_lines if line.strip()).strip()
-        if current_title and text and "disclosure" not in current_title.lower():
-            segments.append({"title": current_title, "text": text})
-        current_title = ""
-        current_lines = []
+        nonlocal title, lines
+        text = " ".join(line.strip() for line in lines if line.strip()).strip()
+        if title and text and "disclosure" not in title.lower():
+            segments.append({"title": title, "text": text})
+        title = ""
+        lines = []
 
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = raw.rstrip()
         if line.startswith("## "):
             flush()
-            current_title = line.removeprefix("## ").strip()
+            title = line.removeprefix("## ").strip()
             continue
-        if current_title and line.strip() and not line.startswith("#"):
-            current_lines.append(line)
+        if title and line.strip() and not line.startswith("#"):
+            lines.append(line)
 
     flush()
     return segments
@@ -98,16 +94,14 @@ def submit_payload(api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
         HEYGEN_VIDEOS_URL,
         data=body,
         method="POST",
-        headers={
-            "X-Api-Key": api_key,
-            "Content-Type": "application/json",
-        },
+        headers={"X-Api-Key": api_key, "Content-Type": "application/json"},
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def main() -> int:
+    load_dotenv()
     parser = argparse.ArgumentParser(description="Generate or submit HeyGen avatar payloads for a YouTube episode")
     parser.add_argument("--episode", "-e", default="001")
     parser.add_argument("--avatar-id", default=os.environ.get("HEYGEN_AVATAR_ID", ""))
@@ -118,7 +112,6 @@ def main() -> int:
     parser.add_argument("--submit", action="store_true", help="Submit payloads to HeyGen. This may spend API balance.")
     args = parser.parse_args()
 
-    load_dotenv()
     episode_dir = EPISODES_DIR / args.episode
     build_dir = episode_dir / "build" / "avatar"
     build_dir.mkdir(parents=True, exist_ok=True)

@@ -17,8 +17,10 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 import logging
 
+import httpx
+
+from orchestrator.services.ai_runtime_config import RuntimeAISelection, resolve_model, resolve_runtime_ai_selection
 from orchestrator.utils.string_utils import slugify
-from orchestrator.services.ai_runtime_config import resolve_model, resolve_openai_chat_model
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,167 @@ class Chunk:
     id: str
     content: str
     metadata: dict[str, Any]
+
+
+class PRDProcessingError(RuntimeError):
+    """Actionable PRD processing failure that should be surfaced to API clients."""
+
+    def __init__(self, message: str, status_code: int = 502):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class _PRDExtractionClient:
+    """Small synchronous JSON-completion client for Settings-backed PRD extraction."""
+
+    def __init__(self, selection: RuntimeAISelection):
+        self.selection = selection
+
+    def complete_json(self, prompt: str) -> str:
+        if self.selection.provider == "anthropic_compatible":
+            return self._anthropic_compatible_completion(prompt)
+        if self.selection.provider == "hermes":
+            raise PRDProcessingError(
+                "PRD extraction does not support the Hermes runtime directly. "
+                "Select Z.ai or an OpenAI-compatible provider in Settings and retry.",
+                status_code=400,
+            )
+        return self._openai_compatible_completion(prompt)
+
+    def _anthropic_compatible_completion(self, prompt: str) -> str:
+        response = httpx.post(
+            f"{self.selection.base_url}/v1/messages",
+            headers={
+                "x-api-key": self.selection.api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.selection.model,
+                "max_tokens": self.selection.max_tokens,
+                "temperature": self.selection.temperature,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=120,
+        )
+        self._raise_for_status(response)
+        payload = response.json()
+        content = payload.get("content", [])
+        if isinstance(content, list):
+            text_parts = [
+                str(item.get("text") or "")
+                for item in content
+                if isinstance(item, dict) and item.get("type", "text") == "text"
+            ]
+            text = "\n".join(part for part in text_parts if part).strip()
+        else:
+            text = str(content or "").strip()
+        if not text:
+            raise PRDProcessingError("Provider returned an empty message body.")
+        return text
+
+    def _openai_compatible_completion(self, prompt: str) -> str:
+        response = httpx.post(
+            self._chat_completions_url(self.selection.base_url),
+            headers={
+                "Authorization": f"Bearer {self.selection.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.selection.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": self.selection.max_tokens,
+                "temperature": self.selection.temperature,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=120,
+        )
+        self._raise_for_status(response)
+        payload = response.json()
+        choices = payload.get("choices") or []
+        if not choices:
+            raise PRDProcessingError("Provider returned no completion choices.")
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            text = "\n".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict) and (part.get("type") in {None, "text", "output_text"})
+            ).strip()
+        else:
+            text = str(content or "").strip()
+        if not text:
+            raise PRDProcessingError("Provider returned an empty completion body.")
+        return text
+
+    @staticmethod
+    def _chat_completions_url(base_url: str) -> str:
+        base = base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return f"{base}/chat/completions"
+        return f"{base}/v1/chat/completions"
+
+    @staticmethod
+    def _raise_for_status(response: Any) -> None:
+        if response.status_code < 400:
+            return
+        detail = _sanitize_provider_error(getattr(response, "text", ""))
+        message = f"AI provider returned HTTP {response.status_code}."
+        if detail:
+            message = f"{message} {detail}"
+        raise PRDProcessingError(message)
+
+
+def _sanitize_provider_error(value: str, limit: int = 260) -> str:
+    """Keep provider error details useful while avoiding accidental secret echoing."""
+    if not value:
+        return ""
+    text = re.sub(r"(sk-[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{24,})", "<redacted>", str(value))
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:limit]
+
+
+def _extract_json_payload(text: str) -> Any:
+    """Parse model JSON from raw text, markdown fences, or surrounding prose."""
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("empty model output")
+
+    candidates = [raw]
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw, re.IGNORECASE)
+    if fence_match:
+        candidates.insert(0, fence_match.group(1).strip())
+
+    starts = [idx for idx in (raw.find("{"), raw.find("[")) if idx != -1]
+    if starts:
+        start = min(starts)
+        end = max(raw.rfind("}"), raw.rfind("]"))
+        if end > start:
+            candidates.append(raw[start : end + 1].strip())
+
+    last_error: Exception | None = None
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+    raise ValueError(f"model output was not valid JSON: {last_error}") from last_error
+
+
+def _feature_items_from_payload(data: Any) -> list[dict[str, Any]]:
+    """Normalize supported PRD feature JSON shapes into feature dictionaries."""
+    if isinstance(data, dict):
+        for key in ["features", "items", "data"]:
+            items = data.get(key)
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
+        if data.get("name"):
+            return [data]
+        return []
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
 
 
 class PRDProcessor:
@@ -127,10 +290,14 @@ class PRDProcessor:
         features = self._enrich_features_with_full_content(
             features, markdown_content, include_context_features=self.config.include_context_features
         )
+        if not features:
+            raise PRDProcessingError("PRD enrichment produced zero features. No project metadata was saved.")
 
         # 4. Semantic Chunking
         logger.info(f"Chunking {len(features)} features...")
         chunks = self._chunk_features(features)
+        if not chunks:
+            raise PRDProcessingError("PRD chunking produced zero searchable chunks. No project metadata was saved.")
 
         # 5. Store in ChromaDB
         logger.info("Storing vectors...")
@@ -239,24 +406,15 @@ class PRDProcessor:
 
     def _extract_features_with_llm(self, markdown_path: Path) -> list[Feature]:
         """
-        Use OpenAI (Map-Reduce) to intelligently extract features from potentially large PRD content.
+        Use the Settings-backed runtime (Map-Reduce) to intelligently extract features from potentially large PRD content.
 
         Strategy:
         1. Split content into large chunks (Map).
         2. Extract features from each chunk.
         3. Consolidate and deduplicate all features into a final list (Reduce).
         """
-        import os
-
-        from openai import OpenAI
-
         content = markdown_path.read_text()
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            logger.warning("OPENAI_API_KEY not found. Returning empty features.")
-            return []
-
-        client = OpenAI(api_key=api_key)
+        client = self._create_prd_ai_client()
 
         # 1. Split content into logical chunks (approx 12k tokens / 50k chars to be safe)
         # using our existing split helper but with larger size for LLM context
@@ -273,6 +431,7 @@ class PRDProcessor:
         logger.info(f"Split PRD into {len(chunks)} chunks for processing.")
 
         all_raw_features = []
+        extraction_failures: list[str] = []
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -294,13 +453,22 @@ class PRDProcessor:
                     else:
                         logger.info(f"Chunk {i + 1} returned no features.")
                 except Exception as e:
+                    extraction_failures.append(f"chunk {i + 1}: {e}")
                     logger.error(f"Error extracting from chunk {i + 1}: {e}")
 
         logger.info(f"Collected {len(all_raw_features)} raw feature candidates.")
 
         # 3. Reduce Phase: Merge and Deduplicate
         if not all_raw_features:
-            return []
+            if extraction_failures and len(extraction_failures) == len(chunks):
+                raise PRDProcessingError(
+                    "AI feature extraction failed for every PRD chunk. "
+                    f"Provider/error summary: {_sanitize_provider_error(extraction_failures[0])}"
+                )
+            raise PRDProcessingError(
+                "AI feature extraction completed but returned zero features. "
+                "Check that the uploaded PDF contains product requirements and that the configured model returns JSON features."
+            )
 
         final_features_data = self._merge_features(client, all_raw_features)
 
@@ -327,10 +495,37 @@ class PRDProcessor:
 
         logger.info(f"Final consolidated feature count: {len(features)}")
 
+        if not features:
+            raise PRDProcessingError(
+                "AI feature consolidation returned zero features. "
+                "Check the configured Settings model and retry the PRD upload."
+            )
+
         # Note: Enrichment is now done in process_prd() after this method returns
         return features
 
-    def _extract_chunk_features(self, client, text: str) -> list[dict[str, Any]]:
+    def _runtime_env_vars(self) -> dict[str, str]:
+        """Resolve Settings-backed runtime env vars, falling back to process env."""
+        try:
+            from orchestrator.api.settings import runtime_env_vars
+
+            return runtime_env_vars()
+        except Exception as exc:
+            logger.warning("Unable to read Settings-backed runtime values, falling back to process env: %s", exc)
+            return dict(os.environ)
+
+    def _create_prd_ai_client(self) -> "_PRDExtractionClient":
+        env_vars = self._runtime_env_vars()
+        selection = resolve_runtime_ai_selection("deep", env_vars=env_vars)
+        if not selection.api_key:
+            raise PRDProcessingError(
+                "No AI API key is configured for PRD extraction. Save a provider API key in Settings, "
+                "then use Test connection before uploading the PRD again.",
+                status_code=400,
+            )
+        return _PRDExtractionClient(selection)
+
+    def _extract_chunk_features(self, client: "_PRDExtractionClient", text: str) -> list[dict[str, Any]]:
         """Map step: Extract features from a single text chunk."""
         target = self.config.target_feature_count
         prompt = f"""Analyze this section of a PRD and extract HIGH-LEVEL TESTABLE FEATURES.
@@ -360,7 +555,8 @@ CONTENT:
 {text}
 ---
 
-Return a JSON array where each object has:
+Return JSON: {{ "features": [...] }}
+Each feature object must have:
 - "name": High-level feature name (e.g., "Content Library", not "Library Save Button")
 - "description": What this feature area does (1-2 sentences)
 - "requirements": List of specific testable requirements within this feature
@@ -368,33 +564,17 @@ Return a JSON array where each object has:
 Ignore generic intro text. Focus on functional requirements.
 Return ONLY valid JSON."""
 
-        response = client.chat.completions.create(
-            model=resolve_openai_chat_model(default="gpt-5.2"),
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-
         try:
-            result = response.choices[0].message.content
-            data = json.loads(result)
-            # Handle if wrapped in a key like "features"
-            if isinstance(data, dict):
-                for key in ["features", "items", "data"]:
-                    if key in data and isinstance(data[key], list):
-                        return data[key]
-                # If just a dict but not a list, maybe it's a single item or unknown structure?
-                # Fallback: check if the dict acts like a single feature
-                if "name" in data:
-                    return [data]
-                return []
-            elif isinstance(data, list):
-                return data
-            return []
+            result = client.complete_json(prompt)
+            data = _extract_json_payload(result)
+            features = _feature_items_from_payload(data)
+            if not features:
+                raise PRDProcessingError("Model returned valid JSON but no feature objects.")
+            return features
         except Exception as e:
-            logger.error(f"Chunk parsing error: {e}")
-            return []
+            raise PRDProcessingError(f"Chunk feature extraction failed: {e}") from e
 
-    def _merge_features(self, client, raw_features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _merge_features(self, client: "_PRDExtractionClient", raw_features: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Reduce step: Consolidate duplicate features from multiple chunks."""
 
         # Serialize inputs to JSON for the LLM
@@ -440,21 +620,19 @@ Each feature must have:
         # Log before making the merge API call
         logger.info(f"Merging {len(raw_features)} features with LLM (prompt size: {len(features_json)} chars)...")
 
-        response = client.chat.completions.create(
-            model=resolve_openai_chat_model(default="gpt-5.2"),
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-        )
-
         try:
-            result = response.choices[0].message.content
-            data = json.loads(result)
-            final_features = data.get("features", [])
+            result = client.complete_json(prompt)
+            data = _extract_json_payload(result)
+            final_features = _feature_items_from_payload(data)
+            if not final_features:
+                raise PRDProcessingError("Model consolidation returned valid JSON but no feature objects.")
 
             # Log after merge completes successfully
             logger.info(f"Merge completed successfully. Returning {len(final_features)} consolidated features.")
 
             return final_features
+        except PRDProcessingError:
+            raise
         except Exception as e:
             logger.error(f"Merge step error: {e}")
             return raw_features  # Fallback to raw list if merge fails
@@ -503,13 +681,14 @@ Each feature must have:
         feature_content_map = {f.slug: [] for f in features}
         unassigned_chunks = []
 
-        # Use semantic matching if enabled and OpenAI key available
-        if self.config.use_semantic_enrichment and os.getenv("OPENAI_API_KEY"):
+        # Use semantic matching only when an OpenAI-compatible embedding endpoint is configured.
+        embedding_config = self._openai_embedding_config()
+        if self.config.use_semantic_enrichment and embedding_config:
             logger.info("Using semantic similarity for content-to-feature matching...")
             try:
                 from openai import OpenAI
 
-                client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                client = OpenAI(api_key=embedding_config["api_key"], base_url=embedding_config["base_url"])
 
                 # Get embeddings for feature names + descriptions
                 feature_texts = [f"{f.name}: {f.content[:500]}" for f in features]
@@ -580,6 +759,32 @@ Each feature must have:
 
         logger.info(f"Enriched {len(enriched_features)} features with full document content")
         return enriched_features
+
+    def _openai_embedding_config(self) -> dict[str, str] | None:
+        env_vars = self._runtime_env_vars()
+        explicit_key = env_vars.get("QUORVEX_EMBEDDING_API_KEY") or os.environ.get("QUORVEX_EMBEDDING_API_KEY", "")
+        explicit_base = env_vars.get("QUORVEX_EMBEDDING_BASE_URL") or os.environ.get("QUORVEX_EMBEDDING_BASE_URL", "")
+        if explicit_key and explicit_base:
+            return {
+                "api_key": explicit_key,
+                "base_url": self._openai_v1_base_url(explicit_base),
+            }
+
+        selection = resolve_runtime_ai_selection("embedding", env_vars=env_vars)
+        if selection.provider == "openai_compatible" and selection.api_key and selection.base_url:
+            return {
+                "api_key": selection.api_key,
+                "base_url": self._openai_v1_base_url(selection.base_url),
+            }
+
+        return None
+
+    @staticmethod
+    def _openai_v1_base_url(base_url: str) -> str:
+        base = base_url.rstrip("/")
+        if base.endswith("/v1"):
+            return base
+        return f"{base}/v1"
 
     def _keyword_match_chunks(self, features: list[Feature], all_chunks_text: list[str]) -> tuple:
         """
@@ -709,23 +914,6 @@ Each feature must have:
                     )
                 else:
                     logger.warning("add_prd_chunk method not found in VectorStore")
-
-            # Save metadata
-            metadata = {
-                "project": project_name,
-                "total_chunks": len(chunks),
-                "processed_at": datetime.now().isoformat(),
-                # "features": [f.name for f in features] # passed features not avail here in scope, ignore for now
-            }
-            metadata_path = self.prds_dir / project_name / "metadata.json"
-
-            # Update metadata if exists (to keep features list if added elsewhere)
-            if metadata_path.exists():
-                existing = json.loads(metadata_path.read_text())
-                existing.update(metadata)
-                metadata = existing
-
-            metadata_path.write_text(json.dumps(metadata, indent=2))
 
         except ImportError:
             logger.warning("Memory system not available, skipping vector storage")

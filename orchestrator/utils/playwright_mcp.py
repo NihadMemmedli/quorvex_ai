@@ -283,6 +283,9 @@ def build_playwright_mcp_args(
     output_dir: Path,
     project_root: Path | None = None,
     isolated: bool = True,
+    storage_state_path: Path | str | None = None,
+    caps: list[str] | tuple[str, ...] | None = None,
+    secrets_file: Path | str | None = None,
 ) -> tuple[str, list[str], dict[str, Any]]:
     """Build command/args/runtime metadata for a run-local Playwright MCP config."""
     server = build_playwright_mcp_server_config(project_root)
@@ -294,6 +297,21 @@ def build_playwright_mcp_args(
         args.extend(["--output-dir", str(output_dir)])
     if isolated and "--isolated" not in args:
         args.append("--isolated")
+    if storage_state_path and "--storage-state" not in args:
+        args.extend(["--storage-state", str(storage_state_path)])
+    if caps:
+        requested_caps = [str(cap).strip() for cap in caps if str(cap).strip()]
+        if requested_caps:
+            if "--caps" in args:
+                index = args.index("--caps")
+                if index + 1 < len(args):
+                    existing = [part.strip() for part in args[index + 1].split(",") if part.strip()]
+                    merged = list(dict.fromkeys(existing + requested_caps))
+                    args[index + 1] = ",".join(merged)
+            else:
+                args.extend(["--caps", ",".join(dict.fromkeys(requested_caps))])
+    if secrets_file and "--secrets" not in args:
+        args.extend(["--secrets", str(secrets_file)])
     if should_run_headless() and "--headless" not in args:
         args.append("--headless")
     return str(server["command"]), args, browser_runtime_status()
@@ -326,12 +344,23 @@ def _browser_mcp_env(headless: bool | None = None) -> dict[str, str]:
     return env
 
 
+def _redact_storage_state_args(args: list[str]) -> list[str]:
+    redacted = list(args)
+    for index, value in enumerate(redacted):
+        if value == "--storage-state" and index + 1 < len(redacted):
+            redacted[index + 1] = "<run-local-storage-state>"
+        if value == "--secrets" and index + 1 < len(redacted):
+            redacted[index + 1] = "<run-local-secrets>"
+    return redacted
+
+
 def prepare_run_playwright_config_content(
     config_content: str,
     *,
     base_dir: Path,
     run_dir: Path,
     headless: bool,
+    storage_state_path: Path | str | None = None,
 ) -> str:
     """Prepare a Playwright config copy for isolated run execution."""
     config_content = config_content.replace(
@@ -360,6 +389,22 @@ def prepare_run_playwright_config_content(
     )
     config_content = config_content.replace("video: 'retain-on-failure'", "video: 'on'")
     config_content = config_content.replace('video: "retain-on-failure"', 'video: "on"')
+
+    if storage_state_path and "storageState:" not in config_content:
+        storage_state = str(storage_state_path).replace("\\", "\\\\").replace("'", "\\'")
+        if "  use: {\n" in config_content:
+            config_content = config_content.replace(
+                "  use: {\n",
+                f"  use: {{\n    storageState: '{storage_state}',\n",
+                1,
+            )
+        else:
+            config_content = re.sub(
+                r"use:\s*{",
+                f"use: {{\n    storageState: '{storage_state}',",
+                config_content,
+                count=1,
+            )
 
     if headless:
         return config_content
@@ -414,6 +459,7 @@ def write_playwright_test_mcp_config(
     server_name: str,
     config_path: Path,
     headless: bool,
+    storage_state_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Write a run-local Playwright Test MCP config.
 
@@ -423,6 +469,16 @@ def write_playwright_test_mcp_config(
     """
     mcp_output_dir = run_dir / "mcp-output"
     mcp_output_dir.mkdir(parents=True, exist_ok=True)
+
+    if storage_state_path and config_path.exists():
+        prepared = prepare_run_playwright_config_content(
+            config_path.read_text(),
+            base_dir=Path.cwd(),
+            run_dir=run_dir,
+            headless=headless,
+            storage_state_path=storage_state_path,
+        )
+        config_path.write_text(prepared)
 
     args = ["playwright", "run-test-mcp-server", "-c", str(config_path)]
     if headless:
@@ -457,18 +513,27 @@ def write_playwright_mcp_config(
     run_dir: Path,
     server_name: str,
     project_root: Path | None = None,
+    storage_state_path: Path | str | None = None,
+    caps: list[str] | tuple[str, ...] | None = None,
+    secrets_file: Path | str | None = None,
 ) -> dict[str, Any]:
     """Write a run-local MCP config and return runtime metadata."""
     artifacts_dir = run_dir / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    command, args, runtime = build_playwright_mcp_args(output_dir=artifacts_dir, project_root=project_root)
+    command, args, runtime = build_playwright_mcp_args(
+        output_dir=artifacts_dir,
+        project_root=project_root,
+        storage_state_path=storage_state_path,
+        caps=caps,
+        secrets_file=secrets_file,
+    )
     mcp_config = {"mcpServers": {server_name: {"command": command, "args": args}}}
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / ".mcp.json").write_text(json.dumps(mcp_config, indent=2))
     return {
         **runtime,
         "mcp_command": command,
-        "mcp_args": args,
+        "mcp_args": _redact_storage_state_args(args),
         "artifacts_dir": str(artifacts_dir),
         "mcp_config_path": str(run_dir / ".mcp.json"),
     }

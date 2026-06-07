@@ -66,6 +66,7 @@ class AgentRuntimeContext:
     on_task_enqueued: Callable[[str], None] | None = None
     on_tool_use: Callable[[str, dict[str, Any]], None] | None = None
     on_progress: Callable[[dict[str, Any]], None] | None = None
+    is_cancelled: Callable[[], Any] | None = None
 
 
 class AgentRuntime:

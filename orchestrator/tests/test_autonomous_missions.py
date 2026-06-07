@@ -1907,6 +1907,70 @@ def test_direct_work_item_execution_emits_progress_tool_browser_and_completion_e
         assert "complete" in event_types
 
 
+def test_direct_work_item_execution_does_not_overwrite_cancelled_state(monkeypatch, tmp_path):
+    _ensure_tables()
+    item_id_holder: dict[str, str] = {}
+
+    class FakeRuntime:
+        async def run(self, _prompt, context):
+            with Session(engine) as session:
+                item = session.get(AutonomousAgentWorkItem, item_id_holder["item_id"])
+                item.status = "cancelled"
+                item.error_message = "Cancelled while runtime was active"
+                item.progress = {"phase": "cancelled", "message": item.error_message}
+                session.add(item)
+                session.commit()
+            assert context.is_cancelled() is True
+            return AgentResult(
+                success=True,
+                output="Late successful output that must remain partial evidence only.",
+                tool_calls=[
+                    ToolCall(
+                        name="mcp__playwright__browser_snapshot",
+                        timestamp=datetime.utcnow(),
+                        success=True,
+                    )
+                ],
+                messages_received=2,
+                text_blocks_received=1,
+                duration_seconds=0.4,
+            )
+
+    monkeypatch.setattr("orchestrator.services.autonomous_activities.RUNS_DIR", tmp_path)
+    monkeypatch.setattr("orchestrator.services.agent_runtimes.get_agent_runtime", lambda _runtime: FakeRuntime())
+
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="exploration")
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        item = AutonomousAgentWorkItem(
+            id=f"amwi-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            role="explorer",
+            objective="Explore the homepage",
+            status="queued",
+        )
+        session.add(run)
+        session.add(item)
+        session.commit()
+        item_id_holder["item_id"] = item.id
+
+        assert _execute_agent_work_item_direct(session, mission, item) is False
+
+        cancelled = session.get(AutonomousAgentWorkItem, item.id)
+        assert cancelled.status == "cancelled"
+        assert cancelled.error_message == "Cancelled while runtime was active"
+        assert cancelled.result["output"] == "Late successful output that must remain partial evidence only."
+        assert cancelled.result["telemetry"]["cancelled"] is True
+
+
 def test_autonomous_artifacts_endpoint_returns_latest_screenshot(monkeypatch, tmp_path):
     _ensure_tables()
     monkeypatch.setattr(autonomous_api, "BASE_DIR", tmp_path)

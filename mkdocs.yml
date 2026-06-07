@@ -98,6 +98,7 @@ nav:
       - Integrations:
           - TestRail, Jira & CI/CD: guides/integrations.md
           - Credential Management: guides/credential-management.md
+          - YouTube MCP Production: guides/youtube-mcp-production.md
       - Operations:
           - Authentication & RBAC: guides/authentication.md
           - Choosing a Setup Path: guides/setup-options.md

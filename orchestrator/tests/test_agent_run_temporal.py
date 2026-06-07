@@ -101,6 +101,37 @@ def _create_run(run_id: str, status: str = "queued") -> AgentRun:
         return run
 
 
+class _AssertingSpecBackgroundTasks:
+    def __init__(self, runs_dir: Path):
+        self.runs_dir = runs_dir
+        self.tasks: list[tuple] = []
+
+    def add_task(self, func, *args, **kwargs):
+        spec_agent_run_id = kwargs["spec_agent_run_id"]
+        mcp_config_path = self.runs_dir / spec_agent_run_id / ".mcp.json"
+        assert mcp_config_path.exists()
+        config = json.loads(mcp_config_path.read_text())
+        assert "playwright-test" in config["mcpServers"]
+        self.tasks.append((func, args, kwargs))
+
+
+def _report_source_result(item_id: str = "F-001", page: str = "https://example.test/login") -> dict:
+    return {
+        "structured_report": {
+            "findings": [
+                {
+                    "id": item_id,
+                    "title": "Missing validation",
+                    "page": page,
+                    "description": "Invalid login can proceed.",
+                    "evidence": "Validation message is absent.",
+                }
+            ],
+            "test_ideas": [],
+        }
+    }
+
+
 def test_custom_agent_browser_tool_detection_only_matches_playwright_mcp_tools():
     assert _custom_agent_uses_browser_tools(["mcp__playwright-test__browser_click"]) is True
     assert _custom_agent_uses_browser_tools(["mcp__playwright__browser_navigate"]) is True
@@ -185,6 +216,756 @@ def test_run_seed_spec_rewrites_localhost_for_docker_browser(tmp_path):
 
     content = seed_path.read_text(encoding="utf-8")
     assert 'const targetUrl = "http://host.docker.internal:3000/dashboard?tab=live";' in content
+
+
+@pytest.mark.asyncio
+async def test_report_item_spec_generation_writes_mcp_config_before_scheduling(tmp_path, monkeypatch):
+    source_run_id = "report-spec-source"
+    _ensure_tables()
+    _cleanup_run(source_run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    background_tasks = _AssertingSpecBackgroundTasks(main_module.RUNS_DIR)
+
+    try:
+        with Session(engine) as session:
+            source_run = AgentRun(id=source_run_id, agent_type="custom", status="completed")
+            source_run.config = {"url": "https://example.test"}
+            source_run.result = {
+                "structured_report": {
+                    "findings": [
+                        {
+                            "id": "F-001",
+                            "title": "Missing validation",
+                            "page": "https://example.test/login",
+                            "description": "Invalid login can proceed.",
+                            "evidence": "Validation message is absent.",
+                        }
+                    ],
+                    "test_ideas": [],
+                }
+            }
+            session.add(source_run)
+            session.commit()
+
+            response = await main_module.generate_report_item_spec(
+                source_run_id,
+                "F-001",
+                item_type=None,
+                project_id=None,
+                background_tasks=background_tasks,
+                session=session,
+            )
+
+            spec_run = session.get(AgentRun, response["agent_run_id"])
+            assert spec_run is not None
+            assert spec_run.progress["mcp_config_path"] == str(
+                main_module.RUNS_DIR / response["agent_run_id"] / ".mcp.json"
+            )
+            assert spec_run.progress["artifacts_dir"] == str(
+                main_module.RUNS_DIR / response["agent_run_id"] / "artifacts"
+            )
+            assert "mcp__playwright-test__planner_setup_page" in spec_run.config["allowed_tools"]
+            assert len(background_tasks.tasks) == 1
+    finally:
+        if "response" in locals():
+            _cleanup_run(response["agent_run_id"])
+        _cleanup_run(source_run_id)
+
+
+@pytest.mark.asyncio
+async def test_report_item_spec_generation_inherits_browser_auth_session(tmp_path, monkeypatch):
+    source_run_id = "report-spec-source-auth"
+    project_id = "project-report-auth"
+    _ensure_tables()
+    _cleanup_run(source_run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    calls: list[dict] = []
+
+    def fake_resolve_browser_auth_for_run(
+        _db_session,
+        resolved_project_id,
+        *,
+        run_dir,
+        browser_auth_session_id=None,
+        use_default=False,
+    ):
+        calls.append(
+            {
+                "project_id": resolved_project_id,
+                "browser_auth_session_id": browser_auth_session_id,
+                "use_default": use_default,
+            }
+        )
+        storage_state_path = Path(run_dir) / "browser-auth-storage-state.json"
+        storage_state_path.write_text(json.dumps({"cookies": [], "origins": []}))
+        return types.SimpleNamespace(
+            session_id=browser_auth_session_id,
+            session_name="Team login",
+            storage_state_path=storage_state_path,
+        )
+
+    monkeypatch.setattr(main_module, "resolve_browser_auth_for_run", fake_resolve_browser_auth_for_run)
+    background_tasks = _AssertingSpecBackgroundTasks(main_module.RUNS_DIR)
+
+    try:
+        with Session(engine) as session:
+            source_run = AgentRun(id=source_run_id, agent_type="custom", status="completed", project_id=project_id)
+            source_run.config = {
+                "url": "https://example.test/user/crm/opportunities",
+                "project_id": project_id,
+                "browser_auth_session_id": "auth-session-1",
+                "auth": {
+                    "browser_auth_session_id": "legacy-auth-session",
+                    "password": "do-not-copy",
+                },
+            }
+            source_run.result = _report_source_result(page="https://example.test/user/crm/opportunities")
+            session.add(source_run)
+            session.commit()
+
+            response = await main_module.generate_report_item_spec(
+                source_run_id,
+                "F-001",
+                item_type="finding",
+                project_id=project_id,
+                background_tasks=background_tasks,
+                session=session,
+            )
+
+            spec_run = session.get(AgentRun, response["agent_run_id"])
+            assert spec_run is not None
+            assert spec_run.project_id == project_id
+            assert spec_run.config["project_id"] == project_id
+            assert spec_run.config["browser_auth_session_id"] == "auth-session-1"
+            assert spec_run.config["auth"] == {"browser_auth_session_id": "legacy-auth-session"}
+            assert spec_run.config["source_url"] == "https://example.test/user/crm/opportunities"
+            assert "do-not-copy" not in spec_run.config_json
+
+            mcp_config = json.loads((main_module.RUNS_DIR / response["agent_run_id"] / ".mcp.json").read_text())
+            args = mcp_config["mcpServers"]["playwright-test"]["args"]
+            assert "--storage-state" in args
+            storage_arg = args[args.index("--storage-state") + 1]
+            assert storage_arg.endswith("browser-auth-storage-state.json")
+
+            assert calls == [
+                {
+                    "project_id": project_id,
+                    "browser_auth_session_id": "auth-session-1",
+                    "use_default": False,
+                }
+            ]
+            assert len(background_tasks.tasks) == 1
+            task_kwargs = background_tasks.tasks[0][2]
+            assert task_kwargs["run_config"]["browser_auth_session_id"] == "auth-session-1"
+            assert task_kwargs["run_config"]["project_id"] == project_id
+    finally:
+        if "response" in locals():
+            _cleanup_run(response["agent_run_id"])
+        _cleanup_run(source_run_id)
+
+
+@pytest.mark.asyncio
+async def test_report_item_spec_generation_uses_project_default_browser_auth(tmp_path, monkeypatch):
+    source_run_id = "report-spec-source-default-auth"
+    request_project_id = "request-project-default-auth"
+    _ensure_tables()
+    _cleanup_run(source_run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    calls: list[dict] = []
+
+    def fake_resolve_browser_auth_for_run(
+        _db_session,
+        resolved_project_id,
+        *,
+        run_dir,
+        browser_auth_session_id=None,
+        use_default=False,
+    ):
+        calls.append(
+            {
+                "project_id": resolved_project_id,
+                "browser_auth_session_id": browser_auth_session_id,
+                "use_default": use_default,
+            }
+        )
+        storage_state_path = Path(run_dir) / "browser-auth-storage-state.json"
+        storage_state_path.write_text(json.dumps({"cookies": [], "origins": []}))
+        return types.SimpleNamespace(
+            session_id="default-auth-session",
+            session_name="Default login",
+            storage_state_path=storage_state_path,
+        )
+
+    monkeypatch.setattr(main_module, "resolve_browser_auth_for_run", fake_resolve_browser_auth_for_run)
+    background_tasks = _AssertingSpecBackgroundTasks(main_module.RUNS_DIR)
+
+    try:
+        with Session(engine) as session:
+            source_run = AgentRun(id=source_run_id, agent_type="custom", status="completed")
+            source_run.config = {
+                "url": "https://example.test",
+                "project_id": "source-config-project",
+                "use_project_default_browser_auth": True,
+            }
+            source_run.result = _report_source_result()
+            session.add(source_run)
+            session.commit()
+
+            response = await main_module.generate_report_item_spec(
+                source_run_id,
+                "F-001",
+                item_type="finding",
+                project_id=request_project_id,
+                background_tasks=background_tasks,
+                session=session,
+            )
+
+            spec_run = session.get(AgentRun, response["agent_run_id"])
+            assert spec_run is not None
+            assert spec_run.project_id == request_project_id
+            assert spec_run.config["project_id"] == request_project_id
+            assert spec_run.config["use_project_default_browser_auth"] is True
+            assert spec_run.progress["browser_auth_session_id"] == "default-auth-session"
+            assert calls == [
+                {
+                    "project_id": request_project_id,
+                    "browser_auth_session_id": None,
+                    "use_default": True,
+                }
+            ]
+            task_kwargs = background_tasks.tasks[0][2]
+            assert task_kwargs["run_project_id"] == request_project_id
+            assert task_kwargs["run_config"]["project_id"] == request_project_id
+            assert task_kwargs["run_config"]["use_project_default_browser_auth"] is True
+    finally:
+        if "response" in locals():
+            _cleanup_run(response["agent_run_id"])
+        _cleanup_run(source_run_id)
+
+
+@pytest.mark.asyncio
+async def test_report_item_spec_generation_explicit_session_overrides_inherited_auth(tmp_path, monkeypatch):
+    source_run_id = "report-spec-source-override-auth"
+    project_id = "project-report-override-auth"
+    _ensure_tables()
+    _cleanup_run(source_run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    calls: list[dict] = []
+
+    def fake_resolve_browser_auth_for_run(
+        _db_session,
+        resolved_project_id,
+        *,
+        run_dir,
+        browser_auth_session_id=None,
+        use_default=False,
+    ):
+        calls.append(
+            {
+                "project_id": resolved_project_id,
+                "browser_auth_session_id": browser_auth_session_id,
+                "use_default": use_default,
+            }
+        )
+        storage_state_path = Path(run_dir) / "browser-auth-storage-state.json"
+        storage_state_path.write_text(json.dumps({"cookies": [], "origins": []}))
+        return types.SimpleNamespace(
+            session_id=browser_auth_session_id,
+            session_name="Active login",
+            storage_state_path=storage_state_path,
+        )
+
+    monkeypatch.setattr(main_module, "resolve_browser_auth_for_run", fake_resolve_browser_auth_for_run)
+    background_tasks = _AssertingSpecBackgroundTasks(main_module.RUNS_DIR)
+
+    try:
+        with Session(engine) as session:
+            source_run = AgentRun(id=source_run_id, agent_type="custom", status="completed", project_id=project_id)
+            source_run.config = {
+                "url": "https://example.test",
+                "project_id": project_id,
+                "browser_auth_session_id": "revoked-auth-session",
+                "auth": {"browser_auth_session_id": "legacy-auth-session"},
+                "browser_auth": {"session_id": "nested-auth-session"},
+            }
+            source_run.result = _report_source_result()
+            session.add(source_run)
+            session.commit()
+
+            response = await main_module.generate_report_item_spec(
+                source_run_id,
+                "F-001",
+                item_type="finding",
+                project_id=project_id,
+                request_body=main_module.GenerateReportItemSpecRequest(
+                    browser_auth_session_id="active-auth-session"
+                ),
+                background_tasks=background_tasks,
+                session=session,
+            )
+
+            spec_run = session.get(AgentRun, response["agent_run_id"])
+            assert spec_run is not None
+            assert spec_run.config["browser_auth_session_id"] == "active-auth-session"
+            assert "auth" not in spec_run.config
+            assert "browser_auth" not in spec_run.config
+            assert "browser_auth_inherited" not in spec_run.config
+            assert calls == [
+                {
+                    "project_id": project_id,
+                    "browser_auth_session_id": "active-auth-session",
+                    "use_default": False,
+                }
+            ]
+            task_kwargs = background_tasks.tasks[0][2]
+            assert task_kwargs["run_config"]["browser_auth_session_id"] == "active-auth-session"
+            assert "auth" not in task_kwargs["run_config"]
+    finally:
+        if "response" in locals():
+            _cleanup_run(response["agent_run_id"])
+        _cleanup_run(source_run_id)
+
+
+@pytest.mark.asyncio
+async def test_report_item_spec_generation_skip_browser_auth_removes_inherited_auth(tmp_path, monkeypatch):
+    source_run_id = "report-spec-source-skip-auth"
+    project_id = "project-report-skip-auth"
+    _ensure_tables()
+    _cleanup_run(source_run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    calls: list[dict] = []
+
+    def fake_resolve_browser_auth_for_run(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        raise AssertionError("Browser auth should not be resolved when skip_browser_auth is true")
+
+    monkeypatch.setattr(main_module, "resolve_browser_auth_for_run", fake_resolve_browser_auth_for_run)
+    background_tasks = _AssertingSpecBackgroundTasks(main_module.RUNS_DIR)
+
+    try:
+        with Session(engine) as session:
+            source_run = AgentRun(id=source_run_id, agent_type="custom", status="completed", project_id=project_id)
+            source_run.config = {
+                "url": "https://example.test",
+                "project_id": project_id,
+                "browser_auth_session_id": "revoked-auth-session",
+                "auth": {"browser_auth_session_id": "legacy-auth-session"},
+            }
+            source_run.result = _report_source_result()
+            session.add(source_run)
+            session.commit()
+
+            response = await main_module.generate_report_item_spec(
+                source_run_id,
+                "F-001",
+                item_type="finding",
+                project_id=project_id,
+                request_body=main_module.GenerateReportItemSpecRequest(skip_browser_auth=True),
+                background_tasks=background_tasks,
+                session=session,
+            )
+
+            spec_run = session.get(AgentRun, response["agent_run_id"])
+            assert spec_run is not None
+            assert "browser_auth_session_id" not in spec_run.config
+            assert "use_project_default_browser_auth" not in spec_run.config
+            assert "auth" not in spec_run.config
+            assert calls == []
+            task_kwargs = background_tasks.tasks[0][2]
+            assert "browser_auth_session_id" not in task_kwargs["run_config"]
+            assert "auth" not in task_kwargs["run_config"]
+    finally:
+        if "response" in locals():
+            _cleanup_run(response["agent_run_id"])
+        _cleanup_run(source_run_id)
+
+
+@pytest.mark.asyncio
+async def test_report_item_spec_generation_project_default_overrides_inherited_auth(tmp_path, monkeypatch):
+    source_run_id = "report-spec-source-default-override-auth"
+    project_id = "project-report-default-override-auth"
+    _ensure_tables()
+    _cleanup_run(source_run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    calls: list[dict] = []
+
+    def fake_resolve_browser_auth_for_run(
+        _db_session,
+        resolved_project_id,
+        *,
+        run_dir,
+        browser_auth_session_id=None,
+        use_default=False,
+    ):
+        calls.append(
+            {
+                "project_id": resolved_project_id,
+                "browser_auth_session_id": browser_auth_session_id,
+                "use_default": use_default,
+            }
+        )
+        storage_state_path = Path(run_dir) / "browser-auth-storage-state.json"
+        storage_state_path.write_text(json.dumps({"cookies": [], "origins": []}))
+        return types.SimpleNamespace(
+            session_id="default-auth-session",
+            session_name="Default login",
+            storage_state_path=storage_state_path,
+        )
+
+    monkeypatch.setattr(main_module, "resolve_browser_auth_for_run", fake_resolve_browser_auth_for_run)
+    background_tasks = _AssertingSpecBackgroundTasks(main_module.RUNS_DIR)
+
+    try:
+        with Session(engine) as session:
+            source_run = AgentRun(id=source_run_id, agent_type="custom", status="completed", project_id=project_id)
+            source_run.config = {
+                "url": "https://example.test",
+                "project_id": project_id,
+                "browser_auth_session_id": "revoked-auth-session",
+                "auth": {"browser_auth_session_id": "legacy-auth-session"},
+            }
+            source_run.result = _report_source_result()
+            session.add(source_run)
+            session.commit()
+
+            response = await main_module.generate_report_item_spec(
+                source_run_id,
+                "F-001",
+                item_type="finding",
+                project_id=project_id,
+                request_body=main_module.GenerateReportItemSpecRequest(
+                    use_project_default_browser_auth=True
+                ),
+                background_tasks=background_tasks,
+                session=session,
+            )
+
+            spec_run = session.get(AgentRun, response["agent_run_id"])
+            assert spec_run is not None
+            assert spec_run.config["use_project_default_browser_auth"] is True
+            assert "browser_auth_session_id" not in spec_run.config
+            assert "auth" not in spec_run.config
+            assert spec_run.progress["browser_auth_session_id"] == "default-auth-session"
+            assert calls == [
+                {
+                    "project_id": project_id,
+                    "browser_auth_session_id": None,
+                    "use_default": True,
+                }
+            ]
+            task_kwargs = background_tasks.tasks[0][2]
+            assert task_kwargs["run_config"]["use_project_default_browser_auth"] is True
+            assert "auth" not in task_kwargs["run_config"]
+    finally:
+        if "response" in locals():
+            _cleanup_run(response["agent_run_id"])
+        _cleanup_run(source_run_id)
+
+
+@pytest.mark.asyncio
+async def test_report_item_spec_generation_invalid_explicit_browser_auth_marks_run_failed(tmp_path, monkeypatch):
+    source_run_id = "report-spec-source-invalid-auth"
+    project_id = "project-invalid-auth"
+    _ensure_tables()
+    _cleanup_run(source_run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+
+    def fake_resolve_browser_auth_for_run(*_args, **_kwargs):
+        raise main_module.BrowserAuthSessionError("Browser auth session was not found")
+
+    monkeypatch.setattr(main_module, "resolve_browser_auth_for_run", fake_resolve_browser_auth_for_run)
+    background_tasks = _AssertingSpecBackgroundTasks(main_module.RUNS_DIR)
+
+    try:
+        with Session(engine) as session:
+            source_run = AgentRun(id=source_run_id, agent_type="custom", status="completed", project_id=project_id)
+            source_run.config = {
+                "url": "https://example.test",
+                "project_id": project_id,
+                "browser_auth_session_id": "missing-auth-session",
+            }
+            source_run.result = _report_source_result()
+            session.add(source_run)
+            session.commit()
+
+            response = await main_module.generate_report_item_spec(
+                source_run_id,
+                "F-001",
+                item_type="finding",
+                project_id=project_id,
+                request_body=main_module.GenerateReportItemSpecRequest(
+                    browser_auth_session_id="missing-auth-session"
+                ),
+                background_tasks=background_tasks,
+                session=session,
+            )
+
+            assert response["status"] == "failed"
+            spec_run = session.get(AgentRun, response["agent_run_id"])
+            assert spec_run is not None
+            assert spec_run.status == "failed"
+            assert spec_run.result["browser_auth_failure"] is True
+            assert spec_run.result["browser_auth_session_id"] == "missing-auth-session"
+            assert "Browser auth session was not found" in spec_run.result["browser_auth_error"]
+            assert "Choose an active session or generate without auth" in spec_run.result["error"]
+            assert spec_run.progress["phase"] == "failed"
+            assert spec_run.progress["status"] == "failed"
+            assert spec_run.progress["browser_auth_failure"] is True
+            assert spec_run.progress["browser_auth_session_id"] == "missing-auth-session"
+            assert "Choose an active session or generate without auth" in spec_run.progress["message"]
+            assert main_module._flow_spec_jobs[response["job_id"]]["status"] == "failed"
+            assert len(background_tasks.tasks) == 0
+    finally:
+        if "response" in locals():
+            main_module._flow_spec_jobs.pop(response["job_id"], None)
+            _cleanup_run(response["agent_run_id"])
+        _cleanup_run(source_run_id)
+
+
+@pytest.mark.asyncio
+async def test_flow_spec_generation_writes_mcp_config_before_scheduling(tmp_path, monkeypatch):
+    source_run_id = "flow-spec-source"
+    _ensure_tables()
+    _cleanup_run(source_run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    run_dir = main_module.RUNS_DIR / source_run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "flows.json").write_text(
+        json.dumps(
+            {
+                "flows": [
+                    {
+                        "id": "flow_1",
+                        "title": "Login flow",
+                        "entry_point": "https://example.test/login",
+                        "exit_point": "https://example.test/dashboard",
+                        "happy_path": "Open login and submit valid credentials.",
+                        "edge_cases": [],
+                        "test_ideas": ["Validate login controls."],
+                    }
+                ]
+            }
+        )
+    )
+    background_tasks = _AssertingSpecBackgroundTasks(main_module.RUNS_DIR)
+
+    try:
+        with Session(engine) as session:
+            source_run = AgentRun(id=source_run_id, agent_type="exploratory", status="completed")
+            source_run.config = {"url": "https://example.test"}
+            session.add(source_run)
+            session.commit()
+
+            response = await main_module.generate_flow_test(
+                source_run_id,
+                "flow_1",
+                force_regenerate=False,
+                project_id=None,
+                background_tasks=background_tasks,
+                session=session,
+            )
+
+            spec_run = session.get(AgentRun, response["agent_run_id"])
+            assert spec_run is not None
+            assert spec_run.progress["mcp_config_path"] == str(
+                main_module.RUNS_DIR / response["agent_run_id"] / ".mcp.json"
+            )
+            assert spec_run.progress["artifacts_dir"] == str(
+                main_module.RUNS_DIR / response["agent_run_id"] / "artifacts"
+            )
+            assert "mcp__playwright-test__planner_setup_page" in spec_run.config["allowed_tools"]
+            assert len(background_tasks.tasks) == 1
+    finally:
+        if "response" in locals():
+            _cleanup_run(response["agent_run_id"])
+        _cleanup_run(source_run_id)
+
+
+@pytest.mark.asyncio
+async def test_flow_spec_generation_recreates_mcp_config_in_background(tmp_path, monkeypatch):
+    run_id = "flow-spec-background-source"
+    spec_run_id = "flowspec-background-recreate"
+    job_id = spec_run_id
+    _ensure_tables()
+    _cleanup_run(run_id)
+    _cleanup_run(spec_run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.syspath_prepend(str(Path(main_module.__file__).resolve().parent.parent))
+
+    import workflows.native_planner as native_planner_module
+
+    flows_file = tmp_path / "flows.json"
+    flow = {
+        "id": "flow_1",
+        "title": "Checkout",
+        "entry_point": "https://example.test/checkout",
+        "exit_point": "https://example.test/done",
+        "happy_path": "Complete checkout.",
+        "edge_cases": [],
+        "test_ideas": ["Checkout succeeds."],
+    }
+    flows_file.write_text(json.dumps({"flows": [flow]}))
+    spec_run_dir = main_module.RUNS_DIR / spec_run_id
+    spec_run_dir.mkdir(parents=True)
+    mcp_config_path = spec_run_dir / ".mcp.json"
+    assert not mcp_config_path.exists()
+    constructed: dict[str, bool] = {}
+    auth_calls: list[dict] = []
+
+    def fake_resolve_browser_auth_for_run(
+        _db_session,
+        resolved_project_id,
+        *,
+        run_dir,
+        browser_auth_session_id=None,
+        use_default=False,
+    ):
+        auth_calls.append(
+            {
+                "project_id": resolved_project_id,
+                "browser_auth_session_id": browser_auth_session_id,
+                "use_default": use_default,
+            }
+        )
+        storage_state_path = Path(run_dir) / "browser-auth-storage-state.json"
+        storage_state_path.write_text(json.dumps({"cookies": [], "origins": []}))
+        return types.SimpleNamespace(
+            session_id=browser_auth_session_id,
+            session_name="Background auth",
+            storage_state_path=storage_state_path,
+        )
+
+    class FakeNativePlanner:
+        def __init__(self, *args, session_dir=None, cwd=None, **kwargs):
+            constructed["mcp_exists_before_planner"] = mcp_config_path.exists()
+            assert session_dir == spec_run_dir
+            assert cwd == spec_run_dir
+
+        async def generate_spec_from_flow_context(self, **kwargs):
+            spec_path = tmp_path / "generated-spec.md"
+            spec_path.write_text("# Checkout spec\n\n- Target URL: https://example.test/checkout\n")
+            return spec_path
+
+    monkeypatch.setattr(native_planner_module, "NativePlanner", FakeNativePlanner)
+    monkeypatch.setattr(main_module, "resolve_browser_auth_for_run", fake_resolve_browser_auth_for_run)
+    main_module._flow_spec_jobs[job_id] = {
+        "status": "running",
+        "message": "Starting spec generation...",
+        "started_at": 0,
+        "run_id": run_id,
+        "flow_id": "flow_1",
+        "agent_run_id": spec_run_id,
+    }
+
+    try:
+        with Session(engine) as session:
+            session.add(AgentRun(id=spec_run_id, agent_type="spec_generation", status="running"))
+            session.commit()
+
+        await main_module._run_flow_spec_generation(
+            job_id=job_id,
+            run_id=run_id,
+            flow_id="flow_1",
+            flow=flow,
+            flows=[flow],
+            flows_file_path=str(flows_file),
+            run_project_id="background-project",
+            run_config={
+                "url": "https://example.test",
+                "project_id": "background-project",
+                "browser_auth_session_id": "background-auth-session",
+            },
+            spec_agent_run_id=spec_run_id,
+        )
+
+        assert constructed["mcp_exists_before_planner"] is True
+        assert mcp_config_path.exists()
+        mcp_config = json.loads(mcp_config_path.read_text())
+        args = mcp_config["mcpServers"]["playwright-test"]["args"]
+        assert "--storage-state" in args
+        assert args[args.index("--storage-state") + 1].endswith("browser-auth-storage-state.json")
+        assert auth_calls == [
+            {
+                "project_id": "background-project",
+                "browser_auth_session_id": "background-auth-session",
+                "use_default": False,
+            }
+        ]
+        with Session(engine) as session:
+            spec_run = session.get(AgentRun, spec_run_id)
+            assert spec_run is not None
+            assert spec_run.status == "completed"
+            assert spec_run.progress["mcp_config_path"] == str(mcp_config_path)
+            assert spec_run.progress["artifacts_dir"] == str(spec_run_dir / "artifacts")
+            assert spec_run.progress["browser_auth_session_id"] == "background-auth-session"
+        assert main_module._flow_spec_jobs[job_id]["status"] == "completed"
+    finally:
+        main_module._flow_spec_jobs.pop(job_id, None)
+        _cleanup_run(spec_run_id)
+        _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_flow_spec_generation_mcp_setup_failure_marks_agent_run_failed(tmp_path, monkeypatch):
+    spec_run_id = "reportspec-mcp-setup-failure"
+    job_id = spec_run_id
+    _ensure_tables()
+    _cleanup_run(spec_run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    flow = {
+        "id": "F-001",
+        "title": "Broken setup",
+        "entry_point": "https://example.test/login",
+        "happy_path": "Open login.",
+        "edge_cases": [],
+        "test_ideas": ["Generate regression spec."],
+    }
+    flows_file = tmp_path / "source-flow.json"
+    flows_file.write_text(json.dumps({"flows": [flow]}))
+
+    def fail_mcp_setup(_run_dir, _storage_state_path=None):
+        raise RuntimeError("MCP setup failed for test")
+
+    monkeypatch.setattr(main_module, "_prepare_spec_generation_mcp_config", fail_mcp_setup)
+    main_module._flow_spec_jobs[job_id] = {
+        "status": "running",
+        "message": "Starting spec generation...",
+        "started_at": 0,
+        "run_id": "source-run",
+        "flow_id": "F-001",
+        "agent_run_id": spec_run_id,
+    }
+
+    try:
+        with Session(engine) as session:
+            session.add(AgentRun(id=spec_run_id, agent_type="spec_generation", status="running"))
+            session.commit()
+
+        await main_module._run_flow_spec_generation(
+            job_id=job_id,
+            run_id="source-run",
+            flow_id="F-001",
+            flow=flow,
+            flows=[flow],
+            flows_file_path=str(flows_file),
+            run_project_id=None,
+            run_config={"url": "https://example.test"},
+            spec_agent_run_id=spec_run_id,
+        )
+
+        with Session(engine) as session:
+            spec_run = session.get(AgentRun, spec_run_id)
+            assert spec_run is not None
+            assert spec_run.status == "failed"
+            assert spec_run.result["error"] == "MCP setup failed for test"
+            assert spec_run.progress["phase"] == "failed"
+            assert spec_run.progress["status"] == "failed"
+            assert "MCP setup failed for test" in spec_run.progress["message"]
+        assert main_module._flow_spec_jobs[job_id]["status"] == "failed"
+        assert "MCP setup failed for test" in main_module._flow_spec_jobs[job_id]["message"]
+    finally:
+        main_module._flow_spec_jobs.pop(job_id, None)
+        _cleanup_run(spec_run_id)
 
 
 def test_extract_run_target_url_reads_spec_content():

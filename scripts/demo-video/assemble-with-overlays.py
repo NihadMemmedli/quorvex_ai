@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Assemble a captioned MP4 when FFmpeg lacks the subtitles/drawtext filters."""
+"""Assemble an MP4 with PNG-rendered caption overlays."""
 
 from __future__ import annotations
 
 import argparse
-import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -35,6 +34,7 @@ def load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/SFNS.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ]
     for candidate in candidates:
         if Path(candidate).exists():
@@ -50,10 +50,10 @@ def render_caption_images(captions: list[tuple[float, float, str]], output_dir: 
     for index, (_, _, text) in enumerate(captions, start=1):
         image = Image.new("RGBA", (1920, 1080), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
-        text_lines: list[str] = []
+        wrapped: list[str] = []
         for line in text.splitlines():
-            text_lines.extend(textwrap.wrap(line, width=58) or [""])
-        caption_text = "\n".join(text_lines)
+            wrapped.extend(textwrap.wrap(line, width=58) or [""])
+        caption_text = "\n".join(wrapped)
         bbox = draw.multiline_textbbox((0, 0), caption_text, font=font, spacing=10, align="center")
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
@@ -86,22 +86,13 @@ def media_duration(path: Path) -> int:
         text=True,
         capture_output=True,
     )
-    duration = float(result.stdout.strip())
-    return int(duration) + 2
+    return int(float(result.stdout.strip())) + 2
 
 
-def assemble(
-    recording: Path,
-    voiceover: Path,
-    captions: Path,
-    output: Path,
-    overlay_dir: Path,
-    sound_design: Path | None = None,
-) -> None:
+def assemble(recording: Path, voiceover: Path, captions: Path, output: Path, overlay_dir: Path) -> None:
     parsed_captions = parse_srt(captions)
     overlay_paths = render_caption_images(parsed_captions, overlay_dir)
     target_duration = media_duration(voiceover)
-    has_sound_design = sound_design is not None and sound_design.exists()
 
     command = [
         "ffmpeg",
@@ -113,8 +104,6 @@ def assemble(
         "-i",
         str(voiceover),
     ]
-    if has_sound_design:
-        command.extend(["-i", str(sound_design)])
     for overlay_path in overlay_paths:
         command.extend(["-loop", "1", "-i", str(overlay_path)])
 
@@ -123,24 +112,14 @@ def assemble(
         "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black[base]"
     ]
     last_label = "base"
-    overlay_input_offset = 3 if has_sound_design else 2
     for index, (start, end, _) in enumerate(parsed_captions, start=1):
         next_label = f"v{index}"
         filters.append(
-            f"[{last_label}][{index + overlay_input_offset - 1}:v]"
-            f"overlay=0:0:enable=between(t\\,{start:.3f}\\,{end:.3f})[{next_label}]"
+            f"[{last_label}][{index + 1}:v]overlay=0:0:enable=between(t\\,{start:.3f}\\,{end:.3f})[{next_label}]"
         )
         last_label = next_label
 
-    if has_sound_design:
-        filters.extend(
-            [
-                "[1:a]volume=1.0[a0]",
-                "[2:a]volume=0.32[a1]",
-                "[a0][a1]amix=inputs=2:duration=first:dropout_transition=0[a]",
-            ]
-        )
-
+    output.parent.mkdir(parents=True, exist_ok=True)
     command.extend(
         [
             "-t",
@@ -150,7 +129,7 @@ def assemble(
             "-map",
             f"[{last_label}]",
             "-map",
-            "[a]" if has_sound_design else "1:a:0",
+            "1:a:0",
             "-c:v",
             "libx264",
             "-preset",
@@ -186,10 +165,9 @@ def main() -> int:
     parser.add_argument("--captions", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--overlay-dir", type=Path, required=True)
-    parser.add_argument("--sound-design", type=Path)
     args = parser.parse_args()
 
-    assemble(args.recording, args.voiceover, args.captions, args.output, args.overlay_dir, args.sound_design)
+    assemble(args.recording, args.voiceover, args.captions, args.output, args.overlay_dir)
     return 0
 
 

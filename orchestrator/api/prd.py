@@ -38,6 +38,7 @@ from orchestrator.utils.playwright_mcp import (
     prepare_run_playwright_config_content,
     write_playwright_test_mcp_config,
 )
+from orchestrator.services.browser_auth_sessions import BrowserAuthSessionError, resolve_browser_auth_for_run
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,8 @@ class GenerateRequest(BaseModel):
     target_url: str | None = None  # URL for live browser exploration
     login_url: str | None = None  # URL for login page
     credentials: dict | None = None  # {username: str, password: str}
+    browser_auth_session_id: str | None = None
+    use_project_default_browser_auth: bool = False
 
 
 class HealRequest(BaseModel):
@@ -233,6 +236,15 @@ def _imported_requirement_to_response(requirement: Requirement) -> ImportedRequi
     )
 
 
+def _is_stale_empty_prd_metadata(meta: dict[str, Any]) -> bool:
+    features = meta.get("features")
+    try:
+        total_chunks = int(meta.get("total_chunks", 0) or 0)
+    except (TypeError, ValueError):
+        total_chunks = 0
+    return isinstance(features, list) and len(features) == 0 and total_chunks == 0
+
+
 @router.post("/upload", response_model=PRDResponse)
 async def upload_prd(
     file: UploadFile = File(...),
@@ -252,7 +264,8 @@ async def upload_prd(
         target_features: Target number of high-level features to extract (default: 15)
         tenant_project_id: Optional tenant project ID for multi-project isolation
     """
-    extension = Path(file.filename).suffix.lower()
+    safe_filename = Path(file.filename).name
+    extension = Path(safe_filename).suffix.lower()
     if extension != ".pdf":
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
@@ -272,9 +285,7 @@ async def upload_prd(
     if pool_status["available"] == 0:
         logger.info(f"Browser slot not available, queuing PRD request {request_id}")
 
-    temp_dir = Path("temp_uploads")
-    temp_dir.mkdir(exist_ok=True)
-    temp_path = temp_dir / file.filename
+    temp_path: Path | None = None
 
     # Block if a load test is running
     from orchestrator.services.load_test_lock import check_system_available
@@ -290,10 +301,20 @@ async def upload_prd(
 
             logger.info(f"Browser slot acquired for PRD request {request_id}")
 
-            with open(temp_path, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
+            temp_dir = BASE_DIR / "prds" / "uploads"
+            temp_path = temp_dir / f"{request_id}-{safe_filename}"
+            try:
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                with open(temp_path, "wb") as buffer:
+                    shutil.copyfileobj(file.file, buffer)
+            except OSError as e:
+                logger.error(f"Unable to store uploaded PRD in {temp_dir}: {e}", exc_info=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"PRD upload storage is not writable. Verify {temp_dir} exists and is writable.",
+                )
 
-            from orchestrator.workflows.prd_processor import PRDProcessor
+            from orchestrator.workflows.prd_processor import PRDProcessingError, PRDProcessor
 
             processor = PRDProcessor()
             # Use filename stem if project not provided
@@ -313,6 +334,13 @@ async def upload_prd(
                     timeout=600,  # 10 minutes maximum
                 )
 
+                if not result.get("features"):
+                    raise PRDProcessingError(
+                        "PRD extraction returned zero features. Check Settings provider credentials/model access "
+                        "and retry with a requirements-focused PDF.",
+                        status_code=502,
+                    )
+
                 # Add tenant_project_id to metadata if provided
                 if tenant_project_id:
                     metadata_path = BASE_DIR / "prds" / project_name / "metadata.json"
@@ -328,6 +356,8 @@ async def upload_prd(
                     status_code=504,
                     detail="PRD processing timed out after 10 minutes. Please try a smaller document or contact support.",
                 )
+            except PRDProcessingError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=str(exc))
 
     except HTTPException:
         raise
@@ -335,7 +365,7 @@ async def upload_prd(
         logger.error(f"Failed to upload PRD: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        if temp_path.exists():
+        if temp_path and temp_path.exists():
             os.remove(temp_path)
 
 
@@ -367,6 +397,12 @@ async def list_projects(project_id: str | None = None):
                             "processed_at": meta.get("processed_at"),
                             "total_chunks": meta.get("total_chunks", 0),
                             "feature_count": len(meta.get("features", [])),
+                            "status": "stale" if _is_stale_empty_prd_metadata(meta) else "ready",
+                            "message": (
+                                "Previous PRD analysis produced no features. Re-upload the PDF to retry."
+                                if _is_stale_empty_prd_metadata(meta)
+                                else None
+                            ),
                         }
                     )
                 except json.JSONDecodeError as e:
@@ -410,6 +446,11 @@ async def get_features(project_id: str, include_context: bool = False):
 
     try:
         data = import_json(metadata_path)
+        if _is_stale_empty_prd_metadata(data):
+            raise HTTPException(
+                status_code=409,
+                detail="Previous PRD analysis produced no features. Re-upload the PDF to retry.",
+            )
         features = data.get("features", [])
 
         # Filter out context-only features (no requirements) unless explicitly requested
@@ -417,6 +458,8 @@ async def get_features(project_id: str, include_context: bool = False):
             features = [f for f in features if f.get("requirements") and len(f["requirements"]) > 0]
 
         return {"features": features, "total": len(features), "config": data.get("config", {})}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get features for PRD project: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -530,6 +573,7 @@ def _prepare_prd_generation_mcp_workspace(
     *,
     headless: bool = True,
     base_dir: Path | None = None,
+    storage_state_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Create run-local Playwright Test MCP config for PRD planner generation."""
     base_dir = base_dir or BASE_DIR
@@ -543,6 +587,7 @@ def _prepare_prd_generation_mcp_workspace(
             base_dir=base_dir,
             run_dir=session_dir,
             headless=headless,
+            storage_state_path=storage_state_path,
         )
         playwright_config_dst.write_text(config_content)
 
@@ -551,6 +596,7 @@ def _prepare_prd_generation_mcp_workspace(
         server_name="playwright-test",
         config_path=playwright_config_dst,
         headless=headless,
+        storage_state_path=storage_state_path,
     )
 
 
@@ -1031,6 +1077,9 @@ async def _run_generation_task(
     login_url: str | None,
     credentials: dict | None,
     log_path: Path,
+    browser_project_id: str | None = None,
+    browser_auth_session_id: str | None = None,
+    use_project_default_browser_auth: bool = False,
 ):
     """Background task that runs the actual generation.
 
@@ -1079,7 +1128,25 @@ async def _run_generation_task(
         session_dir = _generation_run_dir(generation_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         if live_browser_requested:
-            runtime = _prepare_prd_generation_mcp_workspace(session_dir, headless=False)
+            storage_state_path = None
+            if browser_auth_session_id or use_project_default_browser_auth:
+                try:
+                    with Session(engine) as db_session:
+                        resolved = resolve_browser_auth_for_run(
+                            db_session,
+                            browser_project_id,
+                            run_dir=session_dir,
+                            browser_auth_session_id=browser_auth_session_id,
+                            use_default=use_project_default_browser_auth,
+                        )
+                    storage_state_path = resolved.storage_state_path if resolved else None
+                except BrowserAuthSessionError as exc:
+                    raise RuntimeError(f"{exc}. Refresh browser auth session.") from exc
+            runtime = _prepare_prd_generation_mcp_workspace(
+                session_dir,
+                headless=False,
+                storage_state_path=storage_state_path,
+            )
         else:
             runtime = {
                 "browser_runtime": "prd_only",
@@ -1349,6 +1416,8 @@ async def generate_plan(project_id: str, request: GenerateRequest, background_ta
                 "feature_name": request.feature,
                 "target_url": request.target_url,
                 "live_browser_requested": live_browser_requested,
+                "browser_auth_session_id": request.browser_auth_session_id,
+                "use_project_default_browser_auth": request.use_project_default_browser_auth,
                 "log_path": str(log_path),
             },
         )
@@ -1363,6 +1432,9 @@ async def generate_plan(project_id: str, request: GenerateRequest, background_ta
                 login_url=request.login_url,
                 credentials=request.credentials,
                 log_path=log_path,
+                browser_project_id=tenant_project_id,
+                browser_auth_session_id=request.browser_auth_session_id,
+                use_project_default_browser_auth=request.use_project_default_browser_auth,
             )
         )
         _running_generations[generation_id] = task

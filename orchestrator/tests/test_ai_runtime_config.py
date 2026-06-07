@@ -15,6 +15,44 @@ from orchestrator.services.ai_runtime_config import (
 )
 
 
+RUNTIME_ENV_KEYS = {
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_AUTH_TOKENS",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_CHAT_MODEL",
+    "QUORVEX_LLM_PROVIDER",
+    "QUORVEX_LLM_BASE_URL",
+    "QUORVEX_LLM_API_KEY",
+    "QUORVEX_LLM_API_KEYS",
+    "QUORVEX_LLM_LIGHT_MODEL",
+    "QUORVEX_LLM_STANDARD_MODEL",
+    "QUORVEX_LLM_DEEP_MODEL",
+    "QUORVEX_LLM_TOOL_DEEP_MODEL",
+    "QUORVEX_LLM_CHAT_MODEL",
+    "QUORVEX_EMBEDDING_MODEL",
+    "QUORVEX_SETTINGS_ENV_FILE",
+    "ZAI_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+}
+
+
+@pytest.fixture(autouse=True)
+def restore_runtime_env():
+    original = {key: os.environ.get(key) for key in RUNTIME_ENV_KEYS}
+    yield
+    for key, value in original.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 def test_model_tiers_prefer_canonical_env(monkeypatch):
     monkeypatch.setenv("QUORVEX_LLM_LIGHT_MODEL", "cheap-model")
     monkeypatch.setenv("QUORVEX_LLM_STANDARD_MODEL", "standard-model")
@@ -92,6 +130,63 @@ def test_runtime_selection_supports_canonical_key_pool(monkeypatch):
     assert selection.api_key_env == "QUORVEX_LLM_API_KEY"
 
 
+def test_zai_runtime_selection_accepts_provider_specific_key(monkeypatch):
+    for key in (
+        "QUORVEX_LLM_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("QUORVEX_LLM_PROVIDER", "anthropic_compatible")
+    monkeypatch.setenv("QUORVEX_LLM_BASE_URL", "https://api.z.ai/api/anthropic")
+    monkeypatch.setenv("ZAI_API_KEY", "zai-runtime-key")
+
+    selection = resolve_runtime_ai_selection("tool_deep")
+
+    assert selection.provider == "anthropic_compatible"
+    assert selection.api_key == "zai-runtime-key"
+    assert selection.api_key_env == "ZAI_API_KEY"
+
+    apply_runtime_env_aliases(None, tier="tool_deep")
+    assert os.environ["QUORVEX_LLM_API_KEY"] == "zai-runtime-key"
+    assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "zai-runtime-key"
+    assert os.environ["ANTHROPIC_API_KEY"] == "zai-runtime-key"
+
+    env_file_selection = resolve_runtime_ai_selection(
+        "tool_deep",
+        env_vars={
+            "QUORVEX_LLM_PROVIDER": "anthropic_compatible",
+            "QUORVEX_LLM_BASE_URL": "https://api.z.ai/api/anthropic",
+            "QUORVEX_LLM_API_KEY": "",
+            "ZAI_API_KEY": "zai-runtime-key",
+        },
+    )
+    assert env_file_selection.api_key == "zai-runtime-key"
+    assert env_file_selection.api_key_env == "ZAI_API_KEY"
+
+
+def test_api_key_rotator_accepts_zai_key_for_zai_base_url(monkeypatch):
+    from orchestrator.services.api_key_rotator import ApiKeyRotator
+
+    for key in (
+        "QUORVEX_LLM_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "QUORVEX_LLM_API_KEYS",
+        "ANTHROPIC_AUTH_TOKENS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("QUORVEX_LLM_BASE_URL", "https://api.z.ai/api/anthropic")
+    monkeypatch.setenv("ZAI_API_KEY", "zai-rotator-key")
+
+    rotator = ApiKeyRotator()
+    rotator.initialize()
+    slot = rotator.get_active_key()
+
+    assert slot is not None
+    assert slot.token == "zai-rotator-key"
+
+
 def test_openai_chat_model_is_separate_from_anthropic_runtime(monkeypatch):
     monkeypatch.setenv("QUORVEX_LLM_LIGHT_MODEL", "glm-light")
     monkeypatch.setenv("OPENAI_MODEL_ID", "gpt-mini")
@@ -121,6 +216,13 @@ def test_agent_runner_uses_resolved_model_in_claude_options(monkeypatch):
 def test_agent_runner_diagnostics_reports_runtime_and_memory(monkeypatch):
     from orchestrator.utils.agent_runner import AgentRunner
 
+    for key in (
+        "QUORVEX_LLM_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ZAI_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("QUORVEX_LLM_TOOL_DEEP_MODEL", "diagnostic-tool-model")
     runner = AgentRunner(
         allowed_tools=["Read", "mcp__playwright__browser_navigate"],
@@ -134,6 +236,7 @@ def test_agent_runner_diagnostics_reports_runtime_and_memory(monkeypatch):
     assert diagnostics["agent_class"] == "NativeHealer"
     assert diagnostics["tier"] == "tool_deep"
     assert diagnostics["model"] == "diagnostic-tool-model"
+    assert diagnostics["api_key_set"] is False
     assert diagnostics["mcp_prefixes"] == ["mcp__playwright"]
     assert diagnostics["memory"]["inject"] is True
     assert len(diagnostics["prompt"]["hash"]) == 64
@@ -158,6 +261,50 @@ def test_agent_runner_forwards_browser_runtime_env(monkeypatch):
     assert env_vars["PLAYWRIGHT_HEADLESS"] == "false"
     assert env_vars["PLAYWRIGHT_BROWSERS_PATH"] == "/ms-playwright"
     assert env_vars["PLAYWRIGHT_WORKERS"] == "1"
+
+
+def test_agent_runner_forwards_resolved_zai_key(monkeypatch):
+    from orchestrator.utils.agent_runner import AgentRunner
+
+    for key in (
+        "QUORVEX_LLM_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("QUORVEX_LLM_PROVIDER", "anthropic_compatible")
+    monkeypatch.setenv("QUORVEX_LLM_BASE_URL", "https://api.z.ai/api/anthropic")
+    monkeypatch.setenv("ZAI_API_KEY", "zai-forwarded-key")
+
+    runner = AgentRunner(allowed_tools=[])
+    env_vars = runner._collect_api_env_vars()
+
+    assert env_vars["QUORVEX_LLM_API_KEY"] == "zai-forwarded-key"
+    assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "zai-forwarded-key"
+    assert env_vars["ANTHROPIC_API_KEY"] == "zai-forwarded-key"
+
+
+def test_settings_active_config_reads_zai_provider_key(tmp_path, monkeypatch):
+    from orchestrator.api import settings as settings_api
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "QUORVEX_LLM_PROVIDER=anthropic_compatible",
+                "QUORVEX_LLM_BASE_URL=https://api.z.ai/api/anthropic",
+                "ZAI_API_KEY=zai-settings-key",
+                "QUORVEX_LLM_CHAT_MODEL=glm-5-turbo",
+            ]
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
+
+    active = settings_api._active_settings()
+
+    assert active["llm_provider"] == "zai"
+    assert active["api_key"] == "zai-settings-key"
 
 
 def test_settings_update_model_name_updates_standard_and_chat_only(tmp_path, monkeypatch):

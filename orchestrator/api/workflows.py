@@ -19,6 +19,7 @@ from orchestrator.services.temporal_client import (
     signal_custom_workflow_run,
     start_custom_workflow_run,
 )
+from orchestrator.services.agent_cancellation import cancel_workflow_child_agent_runs
 from orchestrator.services.workflow_operations import (
     create_workflow_revision,
     emit_workflow_event,
@@ -2000,6 +2001,7 @@ async def cancel_workflow_run(run_id: str, session: Session = Depends(get_sessio
         raise HTTPException(status_code=404, detail="Workflow run not found")
     if run.status in TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail="Workflow run is already terminal")
+    child_cancel = await cancel_workflow_child_agent_runs(run, session, reason="workflow_cancelled")
     run.status = "cancelled"
     run.completed_at = datetime.utcnow()
     run.updated_at = datetime.utcnow()
@@ -2020,6 +2022,7 @@ async def cancel_workflow_run(run_id: str, session: Session = Depends(get_sessio
         message=f"Workflow run {run.id} was cancelled.",
         severity="warning",
         run=run,
+        payload=child_cancel,
     )
     session.commit()
     if run.temporal_workflow_id:

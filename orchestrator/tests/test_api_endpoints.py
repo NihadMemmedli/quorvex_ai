@@ -601,6 +601,69 @@ class TestProjectEndpoints:
         data = response.json()
         assert data["id"] == "default"
 
+    def test_create_project_accepts_valid_base_url(self, client):
+        """POST /projects should persist a valid project base URL."""
+        name = f"Project Base URL {uuid4().hex}"
+        response = client.post(
+            "/projects",
+            json={
+                "name": name,
+                "description": "Project with default app URL",
+                "base_url": "  https://pre.wetravel.to/  ",
+            },
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        try:
+            assert data["name"] == name
+            assert data["base_url"] == "https://pre.wetravel.to/"
+        finally:
+            client.delete(f"/projects/{data['id']}")
+
+    def test_create_project_allows_blank_and_omitted_base_url(self, client):
+        """POST /projects should allow empty or omitted base_url."""
+        created_ids: list[str] = []
+        try:
+            omitted_response = client.post("/projects", json={"name": f"Omitted Base URL {uuid4().hex}"})
+            assert omitted_response.status_code == 200, omitted_response.text
+            omitted = omitted_response.json()
+            created_ids.append(omitted["id"])
+            assert omitted["base_url"] is None
+
+            blank_response = client.post(
+                "/projects",
+                json={"name": f"Blank Base URL {uuid4().hex}", "base_url": "   "},
+            )
+            assert blank_response.status_code == 200, blank_response.text
+            blank = blank_response.json()
+            created_ids.append(blank["id"])
+            assert blank["base_url"] is None
+        finally:
+            for project_id in created_ids:
+                client.delete(f"/projects/{project_id}")
+
+    def test_project_base_url_rejects_invalid_urls(self, client):
+        """Project create and update should reject malformed base URLs."""
+        create_response = client.post(
+            "/projects",
+            json={"name": f"Invalid Base URL {uuid4().hex}", "base_url": "ftp://example.com"},
+        )
+        assert create_response.status_code == 422
+
+        name = f"Invalid Update Base URL {uuid4().hex}"
+        response = client.post("/projects", json={"name": name, "base_url": "https://example.com"})
+        assert response.status_code == 200, response.text
+        project_id = response.json()["id"]
+        try:
+            update_response = client.put(f"/projects/{project_id}", json={"base_url": "not-a-url"})
+            assert update_response.status_code == 422
+
+            clear_response = client.put(f"/projects/{project_id}", json={"base_url": ""})
+            assert clear_response.status_code == 200, clear_response.text
+            assert clear_response.json()["base_url"] is None
+        finally:
+            client.delete(f"/projects/{project_id}")
+
     def test_get_nonexistent_project_returns_404(self, client):
         """GET /projects/{id} with non-existent ID should return 404."""
         response = client.get("/projects/nonexistent-project-xyz")

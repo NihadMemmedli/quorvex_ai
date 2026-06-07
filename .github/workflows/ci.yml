@@ -60,3 +60,6 @@ jobs:
 
     - name: Type check frontend
       run: cd web && npx tsc --noEmit
+
+    - name: Build frontend
+      run: cd web && npm run build

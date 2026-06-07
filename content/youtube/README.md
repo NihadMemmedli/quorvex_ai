@@ -1,121 +1,63 @@
-# Quorvex AI YouTube Channel
+# Quorvex AI YouTube Production
 
-This workspace keeps the YouTube tutorial process repeatable: episode briefs,
-scripts, avatar prompts, voiceover inputs, captions, upload metadata, and
-production checklists live together.
+This folder contains deterministic production assets for Quorvex AI product videos.
 
-## Launch Format
-
-- Language: English first.
-- Presenter: AI avatar for hooks, transitions, and outros.
-- Main footage: real Quorvex screen recordings, terminal commands, generated
-  Playwright code, and dashboard evidence.
-- Voice: ElevenLabs narration from the generated script.
-- Budget posture: use avatar minutes sparingly and put most runtime into
-  screen-first teaching.
-
-## Generate an Episode Pack
+Episode 001 is designed to be recorded against the seeded `Quorvex Demo Shop` project:
 
 ```bash
-make youtube-pack EP=001
+make youtube-demo-seed
 ```
 
-The generated pack is written to:
-
-```text
-content/youtube/episodes/001/
-```
-
-Useful files:
-
-- `script.md` - narration script for ElevenLabs.
-- `avatar-segments.md` - short avatar lines for HeyGen, Synthesia, or another
-  digital presenter tool.
-- `captions.srt` - draft captions for the narration.
-- `metadata.md` - title, description, tags, pinned comment, and chapters.
-- `shot-list.md` - screen recording plan.
-- `production-checklist.md` - publish readiness checklist.
-
-## Generate Voiceover
-
-After creating the pack, generate narration with the existing ElevenLabs helper:
+Use `SKIP_DATABASE=1` when the local database-testing schema is not needed:
 
 ```bash
-python scripts/demo-video/generate-voice.py \
+make youtube-demo-seed SKIP_DATABASE=1
+```
+
+Generate narration with the default ElevenLabs DODLE voice ID:
+
+```bash
+make youtube-voice EP=001 VOICE=DODLEQrClDo8wCz460ld
+```
+
+Generate a short preview before full narration:
+
+```bash
+ELEVENLABS_DEMO_VOICE_ID=DODLEQrClDo8wCz460ld \
+  venv/bin/python scripts/demo-video/generate-voice.py \
   --lang en \
-  --input content/youtube/episodes/001/script.md \
-  --output-dir content/youtube/episodes/001/build
+  --input /tmp/quorvex-voice-preview.md \
+  --output-dir content/youtube/episodes/001/build/voice-preview-dodle
 ```
 
-Generated media under `content/youtube/episodes/*/build/` is local-only and
-ignored by Git.
-
-## Assemble a YouTube MP4
-
-After recording the product walkthrough and generating narration:
+To use a different ElevenLabs account voice, list voices and set the exact ID:
 
 ```bash
-make youtube-assemble EP=001 RECORDING=path/to/screen-recording.mp4
+python scripts/demo-video/generate-voice.py --list-voices
+export ELEVENLABS_DEMO_VOICE_ID=...
 ```
 
-This exports:
-
-```text
-content/youtube/episodes/001/build/youtube-001.mp4
-```
-
-Avatar clips should be edited into the screen recording before assembly, or
-assembled in a video editor after this export. Keep avatar segments short so the
-main tutorial remains product-led.
-
-## Avatar Use
-
-Use avatar clips for:
-
-- Opening hook.
-- Section transitions.
-- Final recap and call to action.
-
-Do not make the whole tutorial a talking-avatar video. Developer trust comes
-from showing the product, the terminal, generated code, and run artifacts.
-
-When uploading, disclose realistic AI avatar usage if YouTube asks for altered
-or synthetic content disclosure. Voice-only cleanup or cloning your own voice
-for narration generally does not need the same disclosure, but avatar-led clips
-should be treated conservatively.
-
-## Generate Avatar Payloads
-
-Set the HeyGen IDs after creating or choosing a reusable avatar look and voice:
+Assemble the final MP4 from a real screen recording:
 
 ```bash
-export HEYGEN_AVATAR_ID=your_look_id
-export HEYGEN_VOICE_ID=your_voice_id
+make youtube-final EP=001 RECORDING=path/to/recording.mp4
 ```
 
-Generate JSON payloads for the short presenter clips:
+The final export is written to `content/youtube/episodes/001/build/youtube-001.mp4`. Generated media under `build/` is local-only and ignored by Git.
+
+Prepare MCP-controlled release dry runs:
 
 ```bash
-make youtube-avatar EP=001
+make youtube-mcp-check EP=001
+make obs-recording-dry-run EP=001
+make youtube-upload-dry-run EP=001
 ```
 
-This writes payloads under:
-
-```text
-content/youtube/episodes/001/build/avatar/
-```
-
-To submit them to HeyGen through the API, also set `HEYGEN_API_KEY` and pass:
+Confirmed actions are intentionally separate:
 
 ```bash
-make youtube-avatar EP=001 SUBMIT=1
+make obs-recording-confirm EP=001
+make youtube-upload-confirm EP=001 VIDEO=content/youtube/episodes/001/build/youtube-001.mp4
 ```
 
-Submitting may spend HeyGen API balance. Use this only after reviewing
-`avatar-segments.md`.
-
-## First Season
-
-The first eight episode briefs live in `episode-catalog.json`. Start with
-episode `001`, publish it, then use analytics and comments to adjust the next
-two scripts before scaling production.
+Confirmed YouTube actions require `YOUTUBE_DRY_RUN=0` and explicit confirmation in the tool call. Confirmed OBS actions require `OBS_DRY_RUN=0` and explicit confirmation.

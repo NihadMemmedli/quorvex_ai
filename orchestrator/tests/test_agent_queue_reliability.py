@@ -13,7 +13,7 @@ from sqlmodel import Session, SQLModel, create_engine
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import orchestrator.api.db as db_module
-from orchestrator.api.models_db import PrdGenerationResult
+from orchestrator.api.models_db import BrowserAuthSession, PrdGenerationResult, Project
 from orchestrator.services.agent_queue import AgentQueue, AgentTask, AgentTaskStatus
 from orchestrator.services.agent_worker import AgentWorker, BrowserObservationRecorder, _event_tool_uses
 from orchestrator.utils.agent_runner import AgentRunner
@@ -164,7 +164,37 @@ def _create_prd_generation(engine, status="running"):
         session.add(generation)
         session.commit()
         session.refresh(generation)
-        return generation.id
+    return generation.id
+
+
+def _make_browser_auth_engine(monkeypatch):
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine, tables=[Project.__table__, BrowserAuthSession.__table__])
+    monkeypatch.setattr(db_module, "engine", engine)
+    return engine
+
+
+def _create_browser_auth_session(engine, status="pending"):
+    with Session(engine) as session:
+        project = Project(id="browser-auth-project", name="Browser Auth Project")
+        session.add(project)
+        row = BrowserAuthSession(
+            project_id=project.id,
+            name="Login",
+            base_url="https://example.com",
+            login_url="https://example.com/login",
+            username_key="LOGIN_USERNAME",
+            password_key="LOGIN_PASSWORD",
+            status=status,
+        )
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return row.id
 
 
 def test_agent_task_round_trips_execution_telemetry():
@@ -710,6 +740,29 @@ async def test_cancel_tasks_for_test_run_cancels_owner_and_parent_tasks():
 
 
 @pytest.mark.asyncio
+async def test_wait_for_result_cancels_task_when_owner_is_cancelled():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    task = AgentTask(
+        id="agent-owner-cancelled",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        owner_type="autonomous_work_item",
+        owner_id="amwi-cancelled",
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, task.id)
+
+    with pytest.raises(RuntimeError, match="Task cancelled"):
+        await queue.wait_for_result(task.id, timeout=5, poll_interval=0.01, is_cancelled=lambda: True)
+
+    cancelled = await queue.get_task(task.id)
+    assert cancelled.status == AgentTaskStatus.CANCELLED
+    assert await queue.is_cancelled(task.id) is True
+    assert redis.lists[queue.QUEUE_KEY] == []
+
+
+@pytest.mark.asyncio
 async def test_cancel_requested_task_becomes_cancelled_when_worker_submits_cancel_result():
     redis = _MemoryRedis()
     queue = _MemoryQueue(redis)
@@ -956,6 +1009,30 @@ async def test_cleanup_fails_tasks_with_missing_or_invalid_prd_generation_owner(
         "Agent task stopped because owner prd_generation:not-an-int is missing"
     )
     assert redis.lists[queue.QUEUE_KEY] == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_browser_auth_session_owner_queued(monkeypatch):
+    engine = _make_browser_auth_engine(monkeypatch)
+    session_id = _create_browser_auth_session(engine, status="pending")
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    task = AgentTask(
+        id="agent-browser-auth-owner",
+        prompt="capture login",
+        status=AgentTaskStatus.QUEUED,
+        owner_type="browser_auth_session",
+        owner_id=session_id,
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, task.id)
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks(max_age_minutes=45)
+
+    kept = await queue.get_task(task.id)
+    assert counts["terminal_owner"] == 0
+    assert kept.status == AgentTaskStatus.QUEUED
+    assert redis.lists[queue.QUEUE_KEY] == [task.id]
 
 
 @pytest.mark.asyncio

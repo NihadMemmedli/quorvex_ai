@@ -7,6 +7,8 @@ __pycache__/
 venv/
 env/
 ENV/
+!deploy/private-repo-template/env/
+!deploy/private-repo-template/env/quorvex.prod.env.example
 *.egg-info/
 .eggs/
 dist/
@@ -50,8 +52,10 @@ Thumbs.db
 marketing/
 .playwright-mcp/
 
-# Marketing demo specs and video production (local only)
+# Marketing and video production (local only)
 specs/demo-marketing/
+docs/assets/social-preview.png
+docs/assets/social-preview.svg
 scripts/demo-video/output/
 scripts/demo-video/campaign-config.json
 scripts/docs-assets/output/

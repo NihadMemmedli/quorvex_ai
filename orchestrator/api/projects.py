@@ -372,7 +372,7 @@ def update_project(project_id: str, request: ProjectUpdate, session: Session = D
             raise HTTPException(status_code=400, detail="Project with this name already exists")
         project.name = request.name
 
-    if request.base_url is not None:
+    if "base_url" in request.model_fields_set:
         project.base_url = request.base_url
 
     if request.description is not None:

@@ -49,6 +49,12 @@ DEFAULT_MODEL_BY_TIER: dict[RuntimeModelTier, str] = {
     "embedding": DEFAULT_EMBEDDING_MODEL,
 }
 
+ANTHROPIC_COMPATIBLE_KEY_ENV = (
+    "QUORVEX_LLM_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+)
+
 
 @dataclass(frozen=True)
 class RuntimeAISelection:
@@ -74,10 +80,15 @@ def _env_get(env_vars: dict[str, str] | None, key: str, default: str = "") -> st
 
 def _first_env(env_vars: dict[str, str] | None, keys: tuple[str, ...], default: str = "") -> tuple[str, str | None]:
     if env_vars is not None:
+        found_in_env_vars = False
         for key in keys:
+            if key in env_vars:
+                found_in_env_vars = True
             value = env_vars.get(key, "")
             if value:
                 return value, key
+        if found_in_env_vars:
+            return default, None
     for key in keys:
         value = os.environ.get(key, "")
         if value:
@@ -113,6 +124,15 @@ def infer_display_provider(base_url: str | None) -> str:
     if "anthropic.com" in base_url_lower or not base_url_lower:
         return "anthropic"
     return "custom"
+
+
+def anthropic_compatible_key_env(base_url: str | None = None) -> tuple[str, ...]:
+    """Return credential env precedence for Anthropic-compatible runtimes."""
+
+    provider = infer_display_provider(base_url)
+    if provider == "zai":
+        return (*ANTHROPIC_COMPATIBLE_KEY_ENV, "ZAI_API_KEY")
+    return ANTHROPIC_COMPATIBLE_KEY_ENV
 
 
 def resolve_model(tier: RuntimeModelTier, env_vars: dict[str, str] | None = None, override: str | None = None) -> str:
@@ -153,10 +173,7 @@ def resolve_runtime_ai_selection(
         api_key, api_key_env = _first_env(env_vars, ("HERMES_API_KEY",), "local-hermes")
     else:
         model = resolve_model(tier, env_vars, model_override)
-        api_key, api_key_env = _first_env(
-            env_vars,
-            ("QUORVEX_LLM_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"),
-        )
+        api_key, api_key_env = _first_env(env_vars, anthropic_compatible_key_env(base_url))
 
     temperature_by_tier = {
         "light": 0.0,

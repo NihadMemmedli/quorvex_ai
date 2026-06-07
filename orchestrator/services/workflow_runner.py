@@ -14,6 +14,7 @@ from sqlmodel import Session, select
 
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import WorkflowDefinition, WorkflowRun, WorkflowRunStep, WorkflowSchedule
+from orchestrator.services.agent_cancellation import cancel_agent_run_by_id
 from orchestrator.services.workflow_operations import emit_workflow_event
 from orchestrator.services.workflow_output_contract import normalize_step_output, validate_output_contract
 from orchestrator.services.workflow_step_registry import (
@@ -1125,9 +1126,17 @@ async def _wait_for_status(data: dict[str, Any], context: dict[str, Any]) -> dic
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://workflow.local", timeout=30.0) as client:
         while True:
-            _raise_if_run_controlled(run_id)
+            try:
+                _raise_if_run_controlled(run_id)
+            except WorkflowCancelled:
+                await _cancel_waited_external_job(external)
+                raise
             status_payload = await _read_external_status(client, external["external_kind"], external["external_id"], data)
-            _raise_if_run_controlled(run_id)
+            try:
+                _raise_if_run_controlled(run_id)
+            except WorkflowCancelled:
+                await _cancel_waited_external_job(external)
+                raise
             status = str(status_payload.get("status") or "").lower()
             if status in {"completed", "passed", "failed", "cancelled", "error", "timeout"}:
                 result = {
@@ -1151,6 +1160,13 @@ async def _wait_for_status(data: dict[str, Any], context: dict[str, Any]) -> dic
             if asyncio.get_event_loop().time() >= deadline:
                 raise RuntimeError(f"Timed out waiting for {external['external_kind']} {external['external_id']}")
             await asyncio.sleep(poll_seconds)
+
+
+async def _cancel_waited_external_job(external: dict[str, Any]) -> None:
+    if external.get("external_kind") != "agent_run" or not external.get("external_id"):
+        return
+    with Session(engine) as session:
+        await cancel_agent_run_by_id(str(external["external_id"]), session, reason="workflow_cancelled")
 
 
 def _raise_if_run_controlled(run_id: str) -> None:

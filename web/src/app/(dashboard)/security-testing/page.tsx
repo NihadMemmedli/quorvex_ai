@@ -5,6 +5,7 @@ import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
+import { applyProjectDefaultUrl, getProjectDefaultUrl, trimUrlInput } from '@/lib/project-url';
 import { createTabStyle, getAuthHeaders, cardStyle } from '@/lib/styles';
 import { severityColor } from '@/lib/colors';
 import {
@@ -25,6 +26,8 @@ import FindingsTab from './components/FindingsTab';
 export default function SecurityTestingPage() {
     const { currentProject } = useProject();
     const projectId = currentProject?.id || 'default';
+    const projectDefaultUrl = getProjectDefaultUrl(currentProject);
+    const previousProjectDefaultUrlRef = useRef('');
 
     const [activeTab, setActiveTab] = useState<TabType>('scanner');
     const [visitedTabs, setVisitedTabs] = useState<Set<TabType>>(new Set(['scanner']));
@@ -56,6 +59,11 @@ export default function SecurityTestingPage() {
 
     // Polling
     const pollRef = useRef<NodeJS.Timeout | null>(null);
+
+    useEffect(() => {
+        setScanUrl(prev => applyProjectDefaultUrl(prev, projectDefaultUrl, previousProjectDefaultUrlRef.current));
+        previousProjectDefaultUrlRef.current = projectDefaultUrl;
+    }, [projectDefaultUrl]);
 
     // ========== Data Fetching ==========
 
@@ -165,12 +173,13 @@ export default function SecurityTestingPage() {
     // ========== Actions ==========
 
     const startScan = useCallback(async () => {
-        if (!scanUrl.trim()) return;
+        const targetUrl = trimUrlInput(scanUrl);
+        if (!targetUrl) return;
         setIsScanning(true);
         setJobStatus(null);
         try {
             const body: Record<string, unknown> = {
-                target_url: scanUrl,
+                target_url: targetUrl,
                 project_id: projectId,
                 active_scan_level: activeScanLevel,
                 excluded_paths: excludedPaths.split('\n').map(p => p.trim()).filter(Boolean),

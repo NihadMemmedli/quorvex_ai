@@ -67,6 +67,88 @@ def test_write_playwright_test_mcp_config_preserves_headless_mode(tmp_path, monk
     assert "PLAYWRIGHT_WORKERS" not in server["env"]
 
 
+def test_write_playwright_mcp_config_includes_storage_state_and_isolated(tmp_path, monkeypatch):
+    from orchestrator.utils.playwright_mcp import write_playwright_mcp_config
+
+    monkeypatch.setenv("PLAYWRIGHT_MCP_COMMAND", "playwright-mcp")
+    monkeypatch.setenv("PLAYWRIGHT_MCP_ARGS", "--browser chromium")
+
+    storage_state = tmp_path / "state.json"
+    storage_state.write_text('{"cookies":[],"origins":[]}')
+
+    write_playwright_mcp_config(
+        run_dir=tmp_path,
+        server_name="playwright",
+        project_root=tmp_path,
+        storage_state_path=storage_state,
+    )
+
+    config = json.loads((tmp_path / ".mcp.json").read_text())
+    args = config["mcpServers"]["playwright"]["args"]
+    assert "--isolated" in args
+    assert "--storage-state" in args
+    assert args[args.index("--storage-state") + 1] == str(storage_state)
+
+
+def test_write_playwright_mcp_config_includes_caps_and_redacts_secrets(tmp_path, monkeypatch):
+    from orchestrator.utils.playwright_mcp import write_playwright_mcp_config
+
+    monkeypatch.setenv("PLAYWRIGHT_MCP_COMMAND", "playwright-mcp")
+    monkeypatch.setenv("PLAYWRIGHT_MCP_ARGS", "--browser chromium")
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text('BROWSER_AUTH_USERNAME="user@example.com"\n')
+
+    runtime = write_playwright_mcp_config(
+        run_dir=tmp_path,
+        server_name="playwright-test",
+        project_root=tmp_path,
+        caps=("storage",),
+        secrets_file=secrets,
+    )
+
+    config = json.loads((tmp_path / ".mcp.json").read_text())
+    args = config["mcpServers"]["playwright-test"]["args"]
+    assert "--caps" in args
+    assert args[args.index("--caps") + 1] == "storage"
+    assert "--secrets" in args
+    assert args[args.index("--secrets") + 1] == str(secrets)
+    assert "<run-local-secrets>" in runtime["mcp_args"]
+    assert str(secrets) not in runtime["mcp_args"]
+
+
+def test_write_playwright_test_mcp_config_injects_storage_state(tmp_path, monkeypatch):
+    from orchestrator.utils.playwright_mcp import write_playwright_test_mcp_config
+
+    monkeypatch.setenv("HEADLESS", "true")
+    storage_state = tmp_path / "state.json"
+    storage_state.write_text('{"cookies":[],"origins":[]}')
+    config_path = tmp_path / "playwright.config.ts"
+    config_path.write_text(
+        """import { defineConfig } from '@playwright/test';
+
+export default defineConfig({
+  use: {
+    video: 'retain-on-failure',
+  },
+});
+"""
+    )
+
+    write_playwright_test_mcp_config(
+        run_dir=tmp_path,
+        server_name="playwright-test",
+        config_path=config_path,
+        headless=True,
+        storage_state_path=storage_state,
+    )
+
+    config_content = config_path.read_text()
+    assert f"storageState: '{storage_state}'" in config_content
+    mcp_config = json.loads((tmp_path / ".mcp.json").read_text())
+    assert "--storage-state" not in mcp_config["mcpServers"]["playwright-test"]["args"]
+
+
 def test_prepare_run_playwright_config_content_forces_headed_vnc_config(tmp_path):
     from orchestrator.utils.playwright_mcp import prepare_run_playwright_config_content
 

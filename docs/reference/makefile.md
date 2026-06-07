@@ -13,7 +13,7 @@ Complete reference for all `make` targets in Quorvex AI.
 |---------|-------------|---------------|---------|
 | `make setup` | Install Python venv, Node deps, Playwright browsers, database | -- | `make setup` |
 | `make setup-skills` | Install Playwright skill dependencies (npm + Chromium) | `.claude/skills/playwright` directory | `make setup-skills` |
-| `make start` | Start the dashboard stack via `make prod-dev` | Docker, `.env.prod` | `make start` |
+| `make start` | Start the app runtime for external-nginx deployment via `make prod-dev` | Docker, `.env.prod`, company nginx | `make start` |
 | `make restart` | Stop and restart the dashboard stack | Docker, `.env.prod` | `make restart` |
 | `make dev` | Start backend API (port 8001) + frontend (port 3000) | `make setup` | `make dev` |
 | `make run SPEC=...` | Run a specific test spec via CLI (native pipeline) | `make setup`, venv | `make run SPEC=specs/login.md` |
@@ -40,7 +40,7 @@ Complete reference for all `make` targets in Quorvex AI.
 |---------|-------------|---------------|---------|
 | `make prod-up` | Start production services (standard + VNC + nginx) | Docker, `.env.prod` | `make prod-up` |
 | `make prod` | Alias for `make prod-up` | Docker, `.env.prod` | `make prod` |
-| `make prod-dev` | Start production with local code mounting (auto-reload) | Docker, `.env.prod` | `make prod-dev` |
+| `make prod-dev` | Start the app runtime with local code mounting and security scanners; does not start repo nginx | Docker, `.env.prod` | `make prod-dev` |
 | `make prod-down` | Stop production services (30s graceful timeout) | Docker | `make prod-down` |
 | `make prod-down-safe` | Stop with backup first | Docker | `make prod-down-safe` |
 | `make prod-restart` | Restart backend (picks up code changes) | Docker | `make prod-restart` |
@@ -67,7 +67,7 @@ Complete reference for all `make` targets in Quorvex AI.
 | Temporal UI | 8233 | Workflow inspection UI |
 
 !!! warning
-    `.env.prod.example` contains development-friendly defaults. Change `JWT_SECRET_KEY`, database passwords, MinIO passwords, and initial admin credentials before using `make prod-up` for a real deployment.
+    `.env.prod.example` uses placeholders. Set `JWT_SECRET_KEY`, database passwords, MinIO passwords, initial admin credentials, `ALLOWED_ORIGINS`, and `VNC_PUBLIC_WS_URL` before exposing a deployment.
 
 ## Auto Pilot Runtime
 
@@ -192,6 +192,12 @@ Default namespace: `K8S_NAMESPACE=quorvex` (overridable).
 | `make youtube-voice EP=...` | Generate ElevenLabs voiceover for an episode script | `ELEVENLABS_API_KEY`, episode pack | `make youtube-voice EP=001` |
 | `make youtube-avatar EP=...` | Generate HeyGen avatar payloads for short presenter clips | `HEYGEN_AVATAR_ID`, `HEYGEN_VOICE_ID` | `make youtube-avatar EP=001` |
 | `make youtube-assemble EP=... RECORDING=...` | Export a 1080p YouTube MP4 from a screen recording, episode voiceover, and captions | `ffmpeg`, generated voiceover | `make youtube-assemble EP=001 RECORDING=recording.mp4` |
+| `make youtube-final EP=... RECORDING=...` | Seed demo data, generate narration, and export the final MP4 | recording file, ElevenLabs credentials | `make youtube-final EP=001 RECORDING=recording.mp4` |
+| `make youtube-mcp-check EP=...` | Compile and check the local YouTube and OBS MCP wrappers | `mcp`, `pydantic` | `make youtube-mcp-check EP=001` |
+| `make youtube-upload-dry-run EP=...` | Write a YouTube upload manifest without mutating YouTube | episode metadata and final MP4 | `make youtube-upload-dry-run EP=001` |
+| `make youtube-upload-confirm EP=... VIDEO=...` | Confirm a guarded YouTube upload | YouTube OAuth token, `YOUTUBE_DRY_RUN=0` target wrapper | `make youtube-upload-confirm EP=001 VIDEO=content/youtube/episodes/001/build/youtube-001.mp4` |
+| `make obs-recording-dry-run EP=...` | Write an OBS recording plan without controlling OBS | episode folder | `make obs-recording-dry-run EP=001` |
+| `make obs-recording-confirm EP=...` | Confirm guarded OBS recording start | OBS WebSocket password, `OBS_DRY_RUN=0` target wrapper | `make obs-recording-confirm EP=001` |
 
 ## Maintenance & Operations
 

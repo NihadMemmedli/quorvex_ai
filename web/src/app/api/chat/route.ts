@@ -1,5 +1,6 @@
 import { streamText, stepCountIs, convertToModelMessages, createUIMessageStream, createUIMessageStreamResponse } from 'ai';
 import {
+  ChatRuntimeSettings,
   getActiveOpenAIProvider,
   getActiveHermesProvider,
   getActiveProvider,
@@ -21,12 +22,6 @@ const OPTIONAL_CONTEXT_TIMEOUT_MS = 1500;
 const SETTINGS_TIMEOUT_MS = 1500;
 const CHAT_HISTORY_MESSAGE_LIMIT = 12;
 const CHAT_TOOL_STEP_LIMIT = 8;
-
-interface RuntimeSettings {
-  model_name?: string;
-  chat_model?: string;
-  model_tiers?: Record<string, string>;
-}
 
 interface AgentRunSummary {
   id?: string;
@@ -62,8 +57,22 @@ function supportsExtendedThinking(modelId: string) {
   );
 }
 
-async function getRuntimeModelId(authToken?: string) {
-  const settingsRes = await backendFetch<RuntimeSettings>('/settings', {
+async function getChatRuntimeSettings(authToken?: string): Promise<ChatRuntimeSettings | undefined> {
+  const settingsRes = await backendFetch<ChatRuntimeSettings>('/settings/runtime-chat', {
+    authToken,
+    headers: { 'X-Quorvex-Internal-Caller': 'web-chat' },
+    timeoutMs: SETTINGS_TIMEOUT_MS,
+  });
+
+  return settingsRes.ok ? settingsRes.data : undefined;
+}
+
+async function getRuntimeModelId(authToken?: string, runtime?: ChatRuntimeSettings) {
+  if (runtime?.chat_model || runtime?.model_tiers?.chat || runtime?.model_name || runtime?.standard_model) {
+    return runtime.chat_model || runtime.model_tiers?.chat || runtime.model_name || runtime.standard_model!;
+  }
+
+  const settingsRes = await backendFetch<ChatRuntimeSettings>('/settings', {
     authToken,
     timeoutMs: SETTINGS_TIMEOUT_MS,
   });
@@ -989,7 +998,7 @@ function extractUserMessage(error: unknown): string {
     if (/subscription|plan|access|not.*include/i.test(providerMessage))
       return `${providerMessage}. Check your provider plan or change the model in settings.`;
     if (/unknown model|model.*not.*found|invalid.*model/i.test(providerMessage))
-      return `${providerMessage}. Check ANTHROPIC_MODEL in your .env.prod file.`;
+      return `${providerMessage}. Check the chat model in Settings, or env fallback values if Settings is unavailable.`;
     if (/rate.limit|usage.limit|quota/i.test(providerMessage))
       return `${providerMessage}. Please wait a few minutes and try again.`;
   }
@@ -1024,14 +1033,23 @@ export async function POST(req: Request) {
   const authHeader = req.headers.get('authorization');
   const authToken = authHeader?.replace('Bearer ', '') || undefined;
   const latestUserText = extractLatestUserText(messages);
-  const useHermes = hasHermesChatRuntime();
-  const useAnthropic = !useHermes && hasDirectAnthropicChatCredential();
-  const useOpenAI = !useHermes && !useAnthropic && hasOpenAIChatCredential();
+  const runtimeSettings = await getChatRuntimeSettings(authToken);
+  const useHermes = hasHermesChatRuntime(runtimeSettings);
+  const useAnthropic = !useHermes && hasDirectAnthropicChatCredential(runtimeSettings);
+  const useOpenAI = !useHermes && !useAnthropic && hasOpenAIChatCredential(runtimeSettings);
   let routedModelId: string | undefined;
 
   if (useHermes || useAnthropic || useOpenAI) {
-    routedModelId = useHermes ? HERMES_MODEL_ID : useAnthropic ? await getRuntimeModelId(authToken) : OPENAI_MODEL_ID;
-    const { provider } = useHermes ? getActiveHermesProvider() : useAnthropic ? getActiveProvider() : getActiveOpenAIProvider();
+    routedModelId = useHermes
+      ? runtimeSettings?.hermes_model || HERMES_MODEL_ID
+      : useAnthropic
+        ? await getRuntimeModelId(authToken, runtimeSettings)
+        : runtimeSettings?.chat_model || runtimeSettings?.model_tiers?.chat || runtimeSettings?.standard_model || OPENAI_MODEL_ID;
+    const { provider } = useHermes
+      ? getActiveHermesProvider(runtimeSettings)
+      : useAnthropic
+        ? getActiveProvider(runtimeSettings)
+        : getActiveOpenAIProvider(runtimeSettings);
     const intentRoute = await routeAssistantIntent({
       messages,
       projectId,
@@ -1051,7 +1069,7 @@ export async function POST(req: Request) {
   }
 
   const [modelId, ctxRes, summRes, memoryRes] = await Promise.all([
-    routedModelId ? Promise.resolve(routedModelId) : getRuntimeModelId(authToken),
+    routedModelId ? Promise.resolve(routedModelId) : getRuntimeModelId(authToken, runtimeSettings),
     timedBackendFetch<{
       recent_runs?: number;
       recent_failures?: number;
@@ -1107,17 +1125,21 @@ export async function POST(req: Request) {
 
   if (!useHermes && !useAnthropic && !useOpenAI) {
     return textToUIMessageResponse(
-      'AI chat tools are not configured. Set QUORVEX_LLM_API_KEY or QUORVEX_LLM_API_KEYS for the configured runtime provider, OPENAI_API_KEY for OpenAI, or HERMES_ENABLED=true with QUORVEX_ASSISTANT_RUNTIME=hermes so the assistant can execute real platform data requests.'
+      'AI chat tools are not configured. Save an API key in Settings first. If the backend settings service is unavailable, set QUORVEX_LLM_API_KEY, OPENAI_API_KEY, or Hermes env fallback values for this server.'
     );
   }
 
   try {
     const modelMessages = await convertToModelMessages(recentMessages);
     const { provider, selectedModelId, providerName } = useHermes
-      ? { ...getActiveHermesProvider(), selectedModelId: HERMES_MODEL_ID, providerName: 'Hermes' }
+      ? { ...getActiveHermesProvider(runtimeSettings), selectedModelId: runtimeSettings?.hermes_model || HERMES_MODEL_ID, providerName: 'Hermes' }
       : useAnthropic
-        ? { ...getActiveProvider(), selectedModelId: modelId, providerName: 'Anthropic' }
-        : { ...getActiveOpenAIProvider(), selectedModelId: OPENAI_MODEL_ID, providerName: 'OpenAI' };
+        ? { ...getActiveProvider(runtimeSettings), selectedModelId: modelId, providerName: 'Anthropic' }
+        : {
+            ...getActiveOpenAIProvider(runtimeSettings),
+            selectedModelId: runtimeSettings?.chat_model || runtimeSettings?.model_tiers?.chat || runtimeSettings?.standard_model || OPENAI_MODEL_ID,
+            providerName: 'OpenAI',
+          };
     const supportsThinking = useAnthropic && supportsExtendedThinking(selectedModelId);
 
     console.info(
@@ -1161,12 +1183,12 @@ export async function POST(req: Request) {
     const isRateLimit = /429|rate.limit|usage.limit|quota/i.test(errMsg);
 
     if (isRateLimit && useAnthropic) {
-      const { slot: firstSlot } = getActiveProvider();
+      const { slot: firstSlot } = getActiveProvider(runtimeSettings);
       reportRateLimit(firstSlot ?? undefined);
 
       try {
         console.warn('[chat/route] Rate limit hit, retrying with next key');
-        const { provider: retryProvider } = getActiveProvider();
+        const { provider: retryProvider } = getActiveProvider(runtimeSettings);
         const modelMessages = await convertToModelMessages(recentMessages);
         const supportsThinking = supportsExtendedThinking(modelId);
 

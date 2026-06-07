@@ -133,6 +133,9 @@ export function LiveBrowserView({
         }
         if (vncUrl) return vncUrl;
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+            return `${protocol}//${window.location.host}/websockify`;
+        }
         return `${protocol}//${window.location.hostname}:6080/websockify`;
     })();
     const effectiveArtifacts = providedArtifacts ?? artifacts;

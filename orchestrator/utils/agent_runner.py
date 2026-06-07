@@ -296,6 +296,7 @@ class AgentResult:
     messages_received: int = 0
     text_blocks_received: int = 0
     timed_out: bool = False
+    cancelled: bool = False
     api_error_status: int | None = None
     stop_reason: str | None = None
     session_id: str | None = None
@@ -338,6 +339,7 @@ class AgentRunner:
         owner_id: str | None = None,
         owner_label: str | None = None,
         requires_live_browser: bool = False,
+        is_cancelled: Callable[[], Any] | None = None,
         memory_project_id: str | None = None,
         memory_agent_type: str | None = None,
         memory_source_type: str | None = None,
@@ -376,6 +378,7 @@ class AgentRunner:
             owner_id: Optional logical owner ID for queue lifecycle cleanup
             owner_label: Optional human-readable owner label for queue diagnostics
             requires_live_browser: Route queued tasks only to workers that can provide a headed/VNC browser.
+            is_cancelled: Optional callback checked during direct runtime execution.
             memory_project_id: Optional project scope for prompt memory
             memory_agent_type: Optional memory actor label
             memory_source_type: Optional memory source type for capture/telemetry
@@ -409,6 +412,7 @@ class AgentRunner:
         self.owner_id = owner_id
         self.owner_label = owner_label
         self.requires_live_browser = requires_live_browser
+        self.is_cancelled = is_cancelled
         self.memory_project_id = memory_project_id
         self.memory_agent_type = memory_agent_type or "AgentRunner"
         self.memory_source_type = memory_source_type or "agent_run"
@@ -469,6 +473,8 @@ class AgentRunner:
             "runtime": selection.runtime,
             "tier": selection.tier,
             "model": selection.model,
+            "api_key_set": bool(selection.api_key),
+            "api_key_env": selection.api_key_env,
             "allowed_tools": list(self.allowed_tools),
             "tools": self._effective_tools(),
             "mcp_prefixes": mcp_prefixes,
@@ -503,6 +509,49 @@ class AgentRunner:
             self.on_progress(progress)
         except Exception as exc:
             logger.debug(f"Agent progress callback failed: {exc}")
+
+    async def _check_cancelled(self) -> bool:
+        if not self.is_cancelled:
+            return False
+        try:
+            result = self.is_cancelled()
+            if inspect.isawaitable(result):
+                result = await result
+            return bool(result)
+        except Exception as exc:
+            logger.debug("Agent cancellation check failed: %s", exc)
+            return False
+
+    def _cancelled_result(
+        self,
+        *,
+        start_time: datetime,
+        output_parts: list[str] | None = None,
+        tool_calls: list[ToolCall] | None = None,
+        messages_received: int = 0,
+        text_blocks_received: int = 0,
+        api_error_status: int | None = None,
+        stop_reason: str | None = None,
+        session_id: str | None = None,
+        total_cost_usd: float | None = None,
+        hook_events_received: int = 0,
+    ) -> AgentResult:
+        return AgentResult(
+            success=False,
+            output="\n".join(output_parts or []),
+            error="Agent run cancelled",
+            duration_seconds=(datetime.now() - start_time).total_seconds(),
+            tool_calls=tool_calls or [],
+            messages_received=messages_received,
+            text_blocks_received=text_blocks_received,
+            timed_out=False,
+            cancelled=True,
+            api_error_status=api_error_status,
+            stop_reason=stop_reason,
+            session_id=session_id,
+            total_cost_usd=total_cost_usd,
+            hook_events_received=hook_events_received,
+        )
 
     def _should_attach_mcp_config(self, cwd: Path | None = None) -> bool:
         base_dir = cwd or Path.cwd()
@@ -579,7 +628,7 @@ class AgentRunner:
         try:
             from orchestrator.api import settings as settings_api
 
-            env_vars = settings_api._read_env_file()
+            env_vars = settings_api.runtime_env_vars()
             settings_api._apply_runtime_settings(env_vars)
             apply_runtime_env_aliases(env_vars, tier=model_tier, model_override=model)
         except Exception as exc:
@@ -656,14 +705,12 @@ class AgentRunner:
         """
         timeout = timeout_override or self.timeout_seconds
         start_time = datetime.now()
-        selection = apply_runtime_env_aliases(
-            None,
-            tier=self.model_tier,
-            model_override=self.model,
-        )
+        if await self._check_cancelled():
+            return self._cancelled_result(start_time=start_time)
+        self._apply_active_ai_settings(self.model, self.model_tier)
+        selection = apply_runtime_env_aliases(None, tier=self.model_tier, model_override=self.model)
         if not self.model:
             self.model = selection.model
-        self._apply_active_ai_settings(self.model, self.model_tier)
         self._validate_mcp_config_for_allowed_tools(self.cwd)
         original_prompt = prompt
         self._last_memory_injected = False
@@ -816,6 +863,8 @@ class AgentRunner:
                     prompt=prompt,
                     options=ClaudeAgentOptions(**self._claude_options_kwargs()),
                 ):
+                    if await self._check_cancelled():
+                        raise asyncio.CancelledError("Agent run cancelled")
                     messages_received += 1
 
                     # Log message type for debugging
@@ -1022,6 +1071,21 @@ class AgentRunner:
                 hook_events_received=hook_events_received,
             )
 
+        except asyncio.CancelledError:
+            logger.info("Agent run cancelled cooperatively")
+            agent_result = self._cancelled_result(
+                start_time=start_time,
+                output_parts=result_parts,
+                tool_calls=tool_calls,
+                messages_received=messages_received,
+                text_blocks_received=text_blocks_received,
+                api_error_status=api_error_status,
+                stop_reason=stop_reason,
+                session_id=session_id,
+                total_cost_usd=total_cost_usd,
+                hook_events_received=hook_events_received,
+            )
+
         except Exception as e:
             duration = (datetime.now() - start_time).total_seconds()
             error_str = str(e).lower()
@@ -1176,6 +1240,7 @@ class AgentRunner:
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_AUTH_TOKENS",
             "ANTHROPIC_API_KEY",
+            "ZAI_API_KEY",
             "CLAUDE_CODE_OAUTH_TOKEN",
             "ANTHROPIC_BASE_URL",
             "ANTHROPIC_MODEL",
@@ -1218,6 +1283,11 @@ class AgentRunner:
             env_vars["ANTHROPIC_MODEL"] = selection.model
             env_vars["QUORVEX_LLM_ACTIVE_TIER"] = selection.tier
             env_vars["QUORVEX_LLM_ACTIVE_MODEL"] = selection.model
+            if selection.api_key:
+                env_vars["QUORVEX_LLM_API_KEY"] = selection.api_key
+                if selection.provider == "anthropic_compatible":
+                    env_vars["ANTHROPIC_AUTH_TOKEN"] = selection.api_key
+                    env_vars["ANTHROPIC_API_KEY"] = selection.api_key
         except Exception as exc:
             logger.debug("Unable to collect resolved model env vars: %s", exc)
         return env_vars if env_vars else None
@@ -1258,6 +1328,8 @@ class AgentRunner:
         try:
             queue = get_agent_queue()
             await queue.connect()
+            if await self._check_cancelled():
+                return self._cancelled_result(start_time=start_time)
 
             # Pre-enqueue diagnostics: check worker availability
             try:
@@ -1340,6 +1412,9 @@ class AgentRunner:
                     self.on_task_enqueued(task_id)
                 except Exception as cb_err:
                     logger.warning(f"on_task_enqueued callback error: {cb_err}")
+            if await self._check_cancelled():
+                await queue.cancel_task(task_id)
+                return self._cancelled_result(start_time=start_time)
 
             # Progress callback to surface worker activity in logs
             def _on_progress(progress: dict):
@@ -1360,6 +1435,7 @@ class AgentRunner:
                 timeout=timeout,
                 poll_interval=0.5,
                 on_progress=_on_progress,
+                is_cancelled=self._check_cancelled if self.is_cancelled else None,
             )
             completed_task = await queue.get_task(task_id)
             telemetry = completed_task.telemetry if completed_task else {}
@@ -1538,6 +1614,14 @@ class AgentRunner:
         except RuntimeError as e:
             duration = (datetime.now() - start_time).total_seconds()
             error_msg = str(e)
+            if "cancelled" in error_msg.lower() or "canceled" in error_msg.lower():
+                return AgentResult(
+                    success=False,
+                    output="",
+                    error=error_msg,
+                    duration_seconds=duration,
+                    cancelled=True,
+                )
 
             # Classify the error for clearer user feedback
             if (

@@ -113,7 +113,7 @@ export function UploadPhase({
                     <input
                         ref={inputRef}
                         type="file"
-                        accept=".pdf,.doc,.docx"
+                        accept=".pdf,application/pdf"
                         onChange={handleInputChange}
                         style={{ display: 'none' }}
                     />
@@ -206,7 +206,7 @@ export function UploadPhase({
                                 fontSize: '0.75rem',
                                 color: 'var(--text-tertiary)',
                             }}>
-                                PDF, DOC, DOCX up to 50MB
+                                PDF up to 50MB
                             </span>
                         </>
                     )}
@@ -369,10 +369,12 @@ function ProjectItem({
     onDelete: () => void;
 }) {
     const [hovered, setHovered] = useState(false);
+    const isStale = project.status === 'stale';
 
     return (
         <div
             onClick={onLoad}
+            title={project.message || undefined}
             onMouseEnter={() => setHovered(true)}
             onMouseLeave={() => setHovered(false)}
             style={{
@@ -382,7 +384,7 @@ function ProjectItem({
                 padding: '0.75rem 1rem',
                 background: hovered ? 'var(--surface-hover)' : 'var(--surface)',
                 border: '1px solid',
-                borderColor: hovered ? 'var(--border-bright)' : 'var(--border-subtle)',
+                borderColor: isStale ? 'rgba(245,158,11,0.35)' : hovered ? 'var(--border-bright)' : 'var(--border-subtle)',
                 borderRadius: 'var(--radius)',
                 cursor: 'pointer',
                 transition: 'all 0.2s var(--ease-smooth)',
@@ -425,7 +427,7 @@ function ProjectItem({
                 whiteSpace: 'nowrap',
                 flexShrink: 0,
             }}>
-                {project.feature_count} feature{project.feature_count !== 1 ? 's' : ''}
+                {isStale ? 'retry needed' : `${project.feature_count} feature${project.feature_count !== 1 ? 's' : ''}`}
             </span>
 
             <button

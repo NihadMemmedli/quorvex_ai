@@ -25,6 +25,7 @@ export interface SpecsBulkActionBarProps {
     onClear: () => void;
     actions: SpecsBulkAction[];
     label?: string;
+    extraControls?: React.ReactNode;
     disabled?: boolean;
     className?: string;
     style?: React.CSSProperties;
@@ -104,6 +105,7 @@ export function SpecsBulkActionBar({
     onClear,
     actions,
     label = 'Specs selected',
+    extraControls,
     disabled = false,
     className,
     style,
@@ -157,6 +159,13 @@ export function SpecsBulkActionBar({
                 </div>
 
                 <div style={{ height: '24px', width: '1px', background: 'var(--border)', flexShrink: 0, margin: '0 0.25rem' }} />
+
+                {extraControls && (
+                    <>
+                        <div style={{ minWidth: 0 }}>{extraControls}</div>
+                        <div style={{ height: '24px', width: '1px', background: 'var(--border)', flexShrink: 0, margin: '0 0.25rem' }} />
+                    </>
+                )}
 
                 <div
                     style={{

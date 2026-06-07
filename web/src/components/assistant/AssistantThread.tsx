@@ -2807,6 +2807,96 @@ function ToolSummaryCard({ summary }: { summary: ToolResultSummary }) {
   );
 }
 
+function stringArrayField(data: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = data[key];
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => (typeof item === 'string' ? item : undefined))
+        .filter((item): item is string => Boolean(item));
+    }
+  }
+  return [];
+}
+
+function specFileLink(specName: string) {
+  return `/specs?file=${encodeURIComponent(specName)}`;
+}
+
+function specsSearchLink(search: string) {
+  return `/specs?search=${encodeURIComponent(search)}`;
+}
+
+function SplitSpecResultCard({ data }: { data: Record<string, unknown> }) {
+  const files = stringArrayField(data, ['files', 'specs', 'generated_specs']);
+  const outputDir = stringField(data, ['output_dir', 'outputDir']);
+  const count = numberField(data, ['count', 'created_count', 'specs_created']) ?? files.length;
+  const visibleFiles = files.slice(0, 12);
+  const remainingCount = Math.max(files.length - visibleFiles.length, 0);
+
+  if (count === 0 && files.length === 0 && !outputDir) return null;
+
+  return (
+    <div style={{
+      padding: '0.75rem',
+      background: 'var(--surface)',
+      border: '1px solid var(--border)',
+      borderRadius: '8px',
+      marginTop: '0.5rem',
+      fontSize: '0.85rem',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: files.length > 0 ? '0.6rem' : 0, flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ fontWeight: 600, color: 'var(--text)' }}>
+            {count > 0 ? `Created ${count} split spec${count === 1 ? '' : 's'}` : 'Split completed'}
+          </div>
+          {outputDir && (
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginTop: '0.15rem' }}>
+              Output: {outputDir}
+            </div>
+          )}
+        </div>
+        {outputDir && (
+          <Link href={specsSearchLink(outputDir)} style={{ fontSize: '0.75rem', color: 'var(--primary)', whiteSpace: 'nowrap' }}>
+            View output folder &rarr;
+          </Link>
+        )}
+      </div>
+
+      {visibleFiles.length > 0 && (
+        <div style={{ display: 'grid', gap: '0.35rem' }}>
+          {visibleFiles.map((file) => (
+            <Link
+              key={file}
+              href={specFileLink(file)}
+              style={{
+                display: 'block',
+                padding: '0.45rem 0.55rem',
+                background: 'var(--code-bg)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: '6px',
+                color: 'var(--text)',
+                fontSize: '0.78rem',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+              title={file}
+            >
+              {file}
+            </Link>
+          ))}
+          {remainingCount > 0 && (
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', padding: '0.2rem 0.1rem' }}>
+              {remainingCount} more split spec{remainingCount === 1 ? '' : 's'} in this output folder.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ToolCallFallback({ toolName, args, result, addResult, toolCallId }: {
   toolName: string;
   args: Record<string, unknown>;
@@ -2862,6 +2952,7 @@ function ToolCallFallback({ toolName, args, result, addResult, toolCallId }: {
   return (
     <div>
       <ToolSummaryCard summary={summary} />
+      {toolName === 'splitSpec' && <SplitSpecResultCard data={data} />}
       <details style={{
         padding: '0.75rem',
         background: 'var(--surface)',

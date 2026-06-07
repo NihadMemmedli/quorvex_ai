@@ -2,8 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { FolderKanban, Plus, Pencil, Trash2, X, Check, AlertTriangle, FileText, Play, Layers } from 'lucide-react';
+import { FolderKanban, Plus, Pencil, Trash2, X, Check, AlertTriangle, FileText, Play, Layers, Globe } from 'lucide-react';
 import { useProject, Project } from '@/contexts/ProjectContext';
+import { trimUrlInput, validateOptionalHttpUrl } from '@/lib/project-url';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -65,11 +66,18 @@ export default function ProjectsPage() {
             return;
         }
 
+        const baseUrl = trimUrlInput(formBaseUrl);
+        const baseUrlError = validateOptionalHttpUrl(baseUrl, 'Base URL');
+        if (baseUrlError) {
+            setFormError(baseUrlError);
+            return;
+        }
+
         setIsSubmitting(true);
         setFormError('');
 
         try {
-            const newProject = await createProject(formName.trim(), formDescription.trim() || undefined, formBaseUrl.trim() || undefined);
+            const newProject = await createProject(formName.trim(), formDescription.trim() || null, baseUrl || null);
             setShowCreateModal(false);
             setCurrentProject(newProject);
         } catch (err) {
@@ -85,14 +93,21 @@ export default function ProjectsPage() {
             return;
         }
 
+        const baseUrl = trimUrlInput(formBaseUrl);
+        const baseUrlError = validateOptionalHttpUrl(baseUrl, 'Base URL');
+        if (baseUrlError) {
+            setFormError(baseUrlError);
+            return;
+        }
+
         setIsSubmitting(true);
         setFormError('');
 
         try {
             await updateProject(selectedProject.id, {
                 name: formName.trim(),
-                description: formDescription.trim() || undefined,
-                base_url: formBaseUrl.trim() || undefined
+                description: formDescription.trim() || null,
+                base_url: baseUrl || null
             });
             setShowEditModal(false);
             setSelectedProject(null);
@@ -231,6 +246,21 @@ export default function ProjectsPage() {
                                             marginBottom: '0.75rem'
                                         }}>
                                             {project.description}
+                                        </p>
+                                    )}
+
+                                    {project.base_url && (
+                                        <p style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '0.35rem',
+                                            color: 'var(--text-secondary)',
+                                            fontSize: '0.85rem',
+                                            marginBottom: '0.75rem',
+                                            wordBreak: 'break-all'
+                                        }}>
+                                            <Globe size={14} />
+                                            {project.base_url}
                                         </p>
                                     )}
 

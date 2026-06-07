@@ -25,7 +25,7 @@ def _persisted_runtime_env() -> dict[str, str]:
     try:
         from orchestrator.api import settings as settings_api
 
-        return settings_api._read_env_file()
+        return settings_api.runtime_env_vars()
     except Exception:
         return {}
 
@@ -157,9 +157,54 @@ class HermesRuntime(AgentRuntime):
     def __init__(self, client: HermesClient | None = None):
         self.client = client or HermesClient()
 
+    async def _is_cancelled(self, context: AgentRuntimeContext) -> bool:
+        if not context.is_cancelled:
+            return False
+        try:
+            result = context.is_cancelled()
+            if hasattr(result, "__await__"):
+                result = await result
+            return bool(result)
+        except Exception as exc:
+            logger.debug("Hermes cancellation check failed: %s", exc)
+            return False
+
+    def _cancelled_result(
+        self,
+        *,
+        start_time: datetime,
+        run_id: str | None,
+        output_parts: list[str],
+        tool_calls: list[ToolCall],
+        messages_received: int,
+        text_blocks_received: int,
+        total_cost_usd: float | None = None,
+    ) -> AgentResult:
+        return AgentResult(
+            success=False,
+            output="\n".join(output_parts),
+            error="Hermes run cancelled",
+            duration_seconds=(datetime.utcnow() - start_time).total_seconds(),
+            tool_calls=tool_calls,
+            messages_received=messages_received,
+            text_blocks_received=text_blocks_received,
+            cancelled=True,
+            session_id=run_id,
+            total_cost_usd=total_cost_usd,
+        )
+
     async def run(self, prompt: str, context: AgentRuntimeContext) -> AgentResult:
         if not _hermes_enabled():
             return AgentResult(success=False, error="Hermes runtime is disabled. Set HERMES_ENABLED=true.")
+        if await self._is_cancelled(context):
+            return self._cancelled_result(
+                start_time=datetime.utcnow(),
+                run_id=None,
+                output_parts=[],
+                tool_calls=[],
+                messages_received=0,
+                text_blocks_received=0,
+            )
 
         timeout_seconds = max(30, int(context.timeout_seconds or 1800))
         start_time = datetime.utcnow()
@@ -189,6 +234,12 @@ class HermesRuntime(AgentRuntime):
             async def _watch_events() -> None:
                 nonlocal messages_received, text_blocks_received
                 async for event in self.client.iter_events(str(run_id)):
+                    if await self._is_cancelled(context):
+                        try:
+                            await self.client.stop_run(str(run_id))
+                        except Exception:
+                            logger.debug("Failed to stop cancelled Hermes run %s", run_id, exc_info=True)
+                        raise asyncio.CancelledError("Hermes run cancelled")
                     messages_received += 1
                     self._handle_event(event, context, output_parts, tool_calls)
                     if _extract_text(event):
@@ -198,8 +249,32 @@ class HermesRuntime(AgentRuntime):
 
             try:
                 await asyncio.wait_for(_watch_events(), timeout=timeout_seconds)
+            except asyncio.CancelledError:
+                return self._cancelled_result(
+                    start_time=start_time,
+                    run_id=run_id,
+                    output_parts=output_parts,
+                    tool_calls=tool_calls,
+                    messages_received=messages_received,
+                    text_blocks_received=text_blocks_received,
+                    total_cost_usd=total_cost_usd,
+                )
             except (httpx.HTTPError, asyncio.TimeoutError) as exc:
                 logger.debug("Hermes event stream ended for %s: %s", run_id, exc)
+            if await self._is_cancelled(context):
+                try:
+                    await self.client.stop_run(str(run_id))
+                except Exception:
+                    logger.debug("Failed to stop cancelled Hermes run %s", run_id, exc_info=True)
+                return self._cancelled_result(
+                    start_time=start_time,
+                    run_id=run_id,
+                    output_parts=output_parts,
+                    tool_calls=tool_calls,
+                    messages_received=messages_received,
+                    text_blocks_received=text_blocks_received,
+                    total_cost_usd=total_cost_usd,
+                )
 
             final_state = await self.client.get_run(str(run_id))
             status = str(final_state.get("status") or "").lower()
@@ -233,6 +308,7 @@ class HermesRuntime(AgentRuntime):
                 messages_received=messages_received or 1,
                 text_blocks_received=text_blocks_received or (1 if final_output else 0),
                 timed_out=status == "timeout",
+                cancelled=status in {"cancelled", "canceled"},
                 session_id=run_id,
                 total_cost_usd=total_cost_usd,
             )

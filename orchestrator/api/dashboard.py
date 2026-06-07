@@ -1005,10 +1005,12 @@ def get_dashboard_stats(
     flaky_tests = get_flaky_tests(runs_list, min_runs=2)  # Lower threshold for better detection
 
     last_run = "Never"
+    last_run_at = None
     if runs_list:
         # Sort by timestamp desc
         last_run_obj = sorted(runs_list, key=lambda x: x["timestamp"], reverse=True)[0]
         last_run = last_run_obj["id"]
+        last_run_at = datetime.fromtimestamp(last_run_obj["timestamp"]).isoformat()
 
     # Calculate actual test counts (individual tests in test files)
     actual_total_tests, total_test_files = 0, 0
@@ -1035,6 +1037,7 @@ def get_dashboard_stats(
         "slowest_test_duration": slowest_tests[0]["avg_duration"] if slowest_tests else 0,
         "flaky_test_count": len(flaky_tests),
         "last_run": last_run,
+        "last_run_at": last_run_at,
         "trends": trends,
         "errors": errors,
         "slowest_tests": slowest_tests,

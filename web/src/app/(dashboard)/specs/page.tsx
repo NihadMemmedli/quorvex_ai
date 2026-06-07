@@ -7,6 +7,12 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import TagEditor from '@/components/TagEditor';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
+import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
+import {
+    browserAuthSessionLabel,
+    fetchProjectBrowserAuthSessions,
+    isBrowserAuthSessionSelectable,
+} from '@/lib/browser-auth-sessions';
 import { WorkflowBreadcrumb } from '@/components/workflow/WorkflowBreadcrumb';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
@@ -46,6 +52,7 @@ interface TreeNode {
 }
 
 type TabType = 'specs' | 'templates';
+type SpecsBrowserAuthMode = 'project_default' | 'session' | 'none';
 
 function formatFolderName(name: string): string {
     return name
@@ -105,10 +112,17 @@ function normalizeSpecFileQueryParam(fileParam: string): string | null {
     return segments.map(segment => encodeURIComponent(segment)).join('/');
 }
 
+function specsBrowserAuthRequestBody(mode: SpecsBrowserAuthMode, sessionId: string) {
+    if (mode === 'session') return { browser_auth_session_id: sessionId };
+    if (mode === 'project_default') return { use_project_default_browser_auth: true };
+    return {};
+}
+
 function SpecsPageContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const fileParam = searchParams.get('file');
+    const searchParam = searchParams.get('search') || '';
     const { currentProject, isLoading: projectLoading } = useProject();
 
     const [activeTab, setActiveTab] = useState<TabType>('specs');
@@ -116,7 +130,7 @@ function SpecsPageContent() {
     const [templates, setTemplates] = useState<Spec[]>([]);
     const [metadata, setMetadata] = useState<Record<string, any>>({});
     const [loading, setLoading] = useState(true);
-    const [searchTerm, setSearchTerm] = useState('');
+    const [searchTerm, setSearchTerm] = useState(searchParam);
     const [templatesSearchTerm, setTemplatesSearchTerm] = useState('');
     const [selectedTags, setSelectedTags] = useState<string[]>([]);
     const [automatedOnly, setAutomatedOnly] = useState(false);
@@ -128,6 +142,16 @@ function SpecsPageContent() {
     const [hasMore, setHasMore] = useState(false);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const [specsSummary, setSpecsSummary] = useState<{ total_all: number; automated_count: number; all_tags: string[] } | null>(null);
+    const [runModalOpen, setRunModalOpen] = useState(false);
+    const [selectedSpec, setSelectedSpec] = useState<string | null>(null);
+    const [selectedBrowser, setSelectedBrowser] = useState('chromium');
+    const [hybridHealing, setHybridHealing] = useState(false);
+    const [maxIterations, setMaxIterations] = useState(20);
+    const [isStartingRun, setIsStartingRun] = useState(false);
+    const [browserAuthSessions, setBrowserAuthSessions] = useState<BrowserAuthSession[]>([]);
+    const [browserAuthMode, setBrowserAuthMode] = useState<SpecsBrowserAuthMode>('none');
+    const [browserAuthSessionId, setBrowserAuthSessionId] = useState('');
+    const [browserAuthError, setBrowserAuthError] = useState<string | null>(null);
 
     useEffect(() => {
         if (!fileParam) return;
@@ -139,8 +163,13 @@ function SpecsPageContent() {
     }, [fileParam, router]);
 
     // Debounced search
-    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(searchParam);
     const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => {
+        setSearchTerm(searchParam);
+        setDebouncedSearchTerm(searchParam);
+    }, [searchParam]);
 
     // Debounce search term (300ms)
     useEffect(() => {
@@ -324,6 +353,107 @@ function SpecsPageContent() {
             .catch(() => {});
     }, [currentProject?.id]);
 
+    const activeBrowserAuthSessions = useMemo(
+        () => browserAuthSessions.filter(isBrowserAuthSessionSelectable),
+        [browserAuthSessions]
+    );
+    const projectDefaultBrowserAuthSession = useMemo(
+        () => activeBrowserAuthSessions.find(session => session.is_default),
+        [activeBrowserAuthSessions]
+    );
+
+    useEffect(() => {
+        let cancelled = false;
+        setBrowserAuthError(null);
+        if (!currentProject?.id) {
+            setBrowserAuthSessions([]);
+            setBrowserAuthMode('none');
+            setBrowserAuthSessionId('');
+            return;
+        }
+
+        fetchProjectBrowserAuthSessions(currentProject.id)
+            .then(sessions => {
+                if (cancelled) return;
+                setBrowserAuthSessions(sessions);
+                const defaultSession = sessions.find(session => session.is_default && isBrowserAuthSessionSelectable(session));
+                setBrowserAuthMode(defaultSession ? 'project_default' : 'none');
+                setBrowserAuthSessionId('');
+            })
+            .catch(error => {
+                if (cancelled) return;
+                console.error('Failed to load browser login sessions', error);
+                setBrowserAuthSessions([]);
+                setBrowserAuthMode('none');
+                setBrowserAuthSessionId('');
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [currentProject?.id]);
+
+    const browserAuthSelectValue = browserAuthMode === 'session' ? `session:${browserAuthSessionId}` : browserAuthMode;
+    const handleBrowserAuthSelectChange = (value: string) => {
+        setBrowserAuthError(null);
+        if (value.startsWith('session:')) {
+            setBrowserAuthMode('session');
+            setBrowserAuthSessionId(value.slice('session:'.length));
+            return;
+        }
+        setBrowserAuthMode(value as SpecsBrowserAuthMode);
+        setBrowserAuthSessionId('');
+    };
+
+    const validateBrowserAuthSelection = (showAlert = false) => {
+        let error: string | null = null;
+        if (browserAuthMode === 'session') {
+            const selected = activeBrowserAuthSessions.find(session => session.id === browserAuthSessionId);
+            if (!selected) {
+                error = 'Selected browser login session is unavailable.';
+            }
+        }
+        if (browserAuthMode === 'project_default' && !projectDefaultBrowserAuthSession) {
+            error = 'Project default browser login session is unavailable.';
+        }
+        setBrowserAuthError(error);
+        if (error && showAlert) alert(error);
+        return !error;
+    };
+
+    const selectedBrowserAuthBody = () => specsBrowserAuthRequestBody(browserAuthMode, browserAuthSessionId);
+
+    const renderBrowserAuthSelect = (compact = false) => (
+        <label style={{ display: 'grid', gap: compact ? '0.25rem' : '0.45rem', fontSize: compact ? '0.75rem' : '0.85rem', fontWeight: 650, color: 'var(--text-secondary)', minWidth: compact ? 220 : undefined }}>
+            Browser login
+            <select
+                aria-label={compact ? 'Bulk browser login session' : 'Browser login session'}
+                value={browserAuthSelectValue}
+                onChange={event => handleBrowserAuthSelectChange(event.target.value)}
+                disabled={isStartingRun}
+                style={{
+                    minHeight: compact ? 34 : 38,
+                    borderRadius: '6px',
+                    border: '1px solid var(--border)',
+                    background: 'var(--background)',
+                    color: 'var(--text)',
+                    padding: compact ? '0.35rem 0.5rem' : '0.45rem 0.6rem',
+                    fontSize: compact ? '0.78rem' : '0.85rem',
+                }}
+            >
+                <option value="project_default" disabled={!projectDefaultBrowserAuthSession}>
+                    {projectDefaultBrowserAuthSession ? `Project default: ${projectDefaultBrowserAuthSession.name || projectDefaultBrowserAuthSession.id}` : 'Project default unavailable'}
+                </option>
+                <option value="none">No auth</option>
+                {browserAuthSessions.map(session => (
+                    <option key={session.id} value={`session:${session.id}`} disabled={!isBrowserAuthSessionSelectable(session)}>
+                        {browserAuthSessionLabel(session)}
+                    </option>
+                ))}
+            </select>
+        </label>
+    );
+
     const toggleFolder = (path: string) => {
         const next = new Set(expandedFolders);
         if (next.has(path)) next.delete(path);
@@ -337,13 +467,6 @@ function SpecsPageContent() {
         else next.add(path);
         setTemplatesExpandedFolders(next);
     };
-
-    const [runModalOpen, setRunModalOpen] = useState(false);
-    const [selectedSpec, setSelectedSpec] = useState<string | null>(null);
-    const [selectedBrowser, setSelectedBrowser] = useState('chromium');
-    const [hybridHealing, setHybridHealing] = useState(false);  // false = Automated Repair, true = Extended Recovery
-    const [maxIterations, setMaxIterations] = useState(20);
-    const [isStartingRun, setIsStartingRun] = useState(false);
 
     const [tagEditModalOpen, setTagEditModalOpen] = useState(false);
     const [editingSpecName, setEditingSpecName] = useState<string | null>(null);
@@ -529,8 +652,11 @@ function SpecsPageContent() {
 
     const confirmRun = async () => {
         if (!selectedSpec || isStartingRun) return;
+        if (!validateBrowserAuthSelection()) return;
 
         setIsStartingRun(true);
+        setBrowserAuthError(null);
+        let shouldClose = false;
         try {
             const res = await fetch(`${API_BASE}/runs`, {
                 method: 'POST',
@@ -540,19 +666,28 @@ function SpecsPageContent() {
                     browser: selectedBrowser,
                     hybrid: hybridHealing,
                     max_iterations: hybridHealing ? maxIterations : undefined,
-                    project_id: currentProject?.id
+                    project_id: currentProject?.id,
+                    ...selectedBrowserAuthBody()
                 })
             });
             const data = await res.json();
+            if (!res.ok) {
+                setBrowserAuthError(data.detail || 'Failed to start run');
+                return;
+            }
             if (data.status === 'started') {
                 console.log('Run started', data.mode);
             }
+            shouldClose = true;
         } catch (e) {
             console.error('Failed to start run');
+            setBrowserAuthError('Failed to start run');
         } finally {
-            setRunModalOpen(false);
-            setSelectedSpec(null);
-            setHybridHealing(false);
+            if (shouldClose) {
+                setRunModalOpen(false);
+                setSelectedSpec(null);
+                setHybridHealing(false);
+            }
             setIsStartingRun(false);
         }
     };
@@ -939,6 +1074,7 @@ function SpecsPageContent() {
 
     const handleBulkRun = async () => {
         if (selectedSpecs.size === 0) return;
+        if (!validateBrowserAuthSelection(true)) return;
 
         try {
             const res = await fetch(`${API_BASE}/runs/bulk`, {
@@ -949,11 +1085,16 @@ function SpecsPageContent() {
                     browser: selectedBrowser,
                     hybrid: hybridHealing,
                     max_iterations: hybridHealing ? maxIterations : undefined,
-                    project_id: currentProject?.id
+                    project_id: currentProject?.id,
+                    ...selectedBrowserAuthBody()
                 })
             });
 
             const data = await res.json();
+            if (!res.ok) {
+                alert(data.detail || 'Bulk run failed to start');
+                return;
+            }
             if (data.batch_id) {
                 alert(`Successfully started ${data.count} test runs!`);
                 clearSelection();
@@ -1482,6 +1623,7 @@ function SpecsPageContent() {
                         onClick={async (e) => {
                             e.stopPropagation();
                             const folderSpecs = getAllSpecsInNode(node);
+                            if (!validateBrowserAuthSelection(true)) return;
                             if (folderSpecs.length > 0) {
                                 if (confirm(`Run all ${folderSpecs.length} specs in '${node.name}'?`)) {
                                     try {
@@ -1491,11 +1633,16 @@ function SpecsPageContent() {
                                             body: JSON.stringify({
                                                 spec_names: folderSpecs,
                                                 browser: selectedBrowser,
-                                                project_id: currentProject?.id
+                                                project_id: currentProject?.id,
+                                                ...selectedBrowserAuthBody()
                                             })
                                         });
 
                                         const data = await res.json();
+                                        if (!res.ok) {
+                                            alert(data.detail || 'Bulk run failed to start');
+                                            return;
+                                        }
                                         if (data.batch_id) {
                                             alert(`Successfully started ${data.count} test runs!`);
                                             router.push(`/regression/batches/${data.batch_id}`);
@@ -2259,7 +2406,7 @@ function SpecsPageContent() {
             {/* Delete Spec Modal */}
             {deleteModalOpen && (
                 <div className="modal-overlay" onClick={() => !deleting && setDeleteModalOpen(false)}>
-                    <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '450px' }}>
+                    <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '520px' }}>
                         <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                             <Trash2 size={24} color="var(--danger)" />
                             Delete Spec
@@ -2548,6 +2695,15 @@ function SpecsPageContent() {
                             </div>
                         </div>
 
+                        <div style={{ marginBottom: '1.5rem' }}>
+                            {renderBrowserAuthSelect(false)}
+                            {browserAuthError && (
+                                <div style={{ marginTop: '0.5rem', color: 'var(--danger)', fontSize: '0.82rem', fontWeight: 600 }}>
+                                    {browserAuthError}
+                                </div>
+                            )}
+                        </div>
+
                         {/* Pipeline Info */}
                         <div style={{
                             marginBottom: '1.5rem',
@@ -2705,6 +2861,7 @@ function SpecsPageContent() {
                     selectedAutomatedCount={selectedAutomatedCount}
                     onClear={clearSelection}
                     label="Specs Selected"
+                    extraControls={renderBrowserAuthSelect(true)}
                     actions={[
                         {
                             id: 'export',
@@ -2727,6 +2884,7 @@ function SpecsPageContent() {
                             variant: 'success',
                             hidden: !(selectedAutomatedCount > 0 && selectedAutomatedCount < selectedSpecs.size),
                             onClick: async () => {
+                                if (!validateBrowserAuthSelection(true)) return;
                                 const automatedSpecs = Array.from(selectedSpecs).filter(name => {
                                     const spec = specs.find(s => s.name === name);
                                     return spec?.is_automated;
@@ -2740,10 +2898,15 @@ function SpecsPageContent() {
                                             browser: selectedBrowser,
                                             hybrid: hybridHealing,
                                             max_iterations: hybridHealing ? maxIterations : undefined,
-                                            project_id: currentProject?.id
+                                            project_id: currentProject?.id,
+                                            ...selectedBrowserAuthBody()
                                         })
                                     });
                                     const data = await res.json();
+                                    if (!res.ok) {
+                                        alert(data.detail || 'Failed to start automated tests');
+                                        return;
+                                    }
                                     if (data.batch_id) {
                                         alert(`Successfully started ${data.count} automated test runs!`);
                                         clearSelection();

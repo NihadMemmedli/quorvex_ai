@@ -1,6 +1,7 @@
 import os
 import sys
 import types
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -29,6 +30,8 @@ slowapi_util.get_remote_address = lambda request: "test-client"
 sys.modules.setdefault("slowapi", slowapi)
 sys.modules.setdefault("slowapi.errors", slowapi_errors)
 sys.modules.setdefault("slowapi.util", slowapi_util)
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from orchestrator.api import ci_control
 from orchestrator.api.models_db import Project, SpecMetadata
@@ -75,7 +78,16 @@ class FakeGithubClient:
         return True
 
     async def get_workflow_runs(self, owner: str, repo: str, workflow_id: str | None = None, per_page: int = 5):
-        return [{"id": 12345, "html_url": "https://github.example/acme/app/actions/runs/12345", "head_branch": "main", "path": ".github/workflows/quorvex-subset-tests.yml", "status": "queued"}]
+        run_id = 12344 + len(self.dispatched)
+        return [
+            {
+                "id": run_id,
+                "html_url": f"https://github.example/acme/app/actions/runs/{run_id}",
+                "head_branch": "main",
+                "path": ".github/workflows/quorvex-subset-tests.yml",
+                "status": "queued",
+            }
+        ]
 
     async def close(self):
         return None
@@ -191,4 +203,76 @@ def test_chat_controlled_ci_subset_flow_end_to_end(monkeypatch, tmp_path):
         assert fake_github.dispatched[-1]["inputs"] == {
             "subset_slug": "checkout-smoke",
             "browser": "firefox",
+            "base_url": "https://app.example.test",
         }
+
+
+def test_workflow_dispatch_injects_project_base_url_only_for_subset_workflows(monkeypatch):
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    fake_github = FakeGithubClient()
+
+    def override_session():
+        with Session(engine) as session:
+            yield session
+
+    async def fake_build_client(_project):
+        return fake_github
+
+    monkeypatch.setattr(ci_control, "_build_github_client", fake_build_client)
+
+    with Session(engine) as session:
+        session.add(
+            Project(
+                id="default",
+                name="Default",
+                base_url="https://app.example.test",
+                settings={
+                    "integrations": {
+                        "github": {
+                            "owner": "acme",
+                            "repo": "app",
+                            "default_ref": "main",
+                            "token_encrypted": "unused-in-test",
+                        }
+                    }
+                },
+            )
+        )
+        session.commit()
+
+    app = FastAPI()
+    app.include_router(ci_control.router)
+    app.dependency_overrides[ci_control.get_session] = override_session
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        subset_response = client.post(
+            "/projects/default/ci/workflows/dispatch",
+            json={
+                "provider": "github",
+                "workflow_id": "quorvex-subset-tests.yml",
+                "inputs": {"suite": "playwright-e2e"},
+            },
+        )
+        assert subset_response.status_code == 200, subset_response.text
+        assert fake_github.dispatched[-1]["inputs"] == {
+            "suite": "playwright-e2e",
+            "browser": "chromium",
+            "pytest_marker": "not integration",
+            "base_url": "https://app.example.test",
+        }
+
+        arbitrary_response = client.post(
+            "/projects/default/ci/workflows/dispatch",
+            json={
+                "provider": "github",
+                "workflow_id": "deploy.yml",
+                "inputs": {"environment": "staging"},
+            },
+        )
+        assert arbitrary_response.status_code == 200, arbitrary_response.text
+        assert fake_github.dispatched[-1]["inputs"] == {"environment": "staging"}

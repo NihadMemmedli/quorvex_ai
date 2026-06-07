@@ -1,5 +1,5 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { ArrowLeft, Edit, Save, Play, Code, FileText, Eye, X } from 'lucide-react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
@@ -9,6 +9,12 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
+import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
+import {
+    browserAuthSessionLabel,
+    fetchProjectBrowserAuthSessions,
+    isBrowserAuthSessionSelectable,
+} from '@/lib/browser-auth-sessions';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 
@@ -29,6 +35,14 @@ function getSpecNameCandidates(name: string): string[] {
     if (!trimmed) return [];
     if (trimmed.endsWith('.md')) return [trimmed];
     return [trimmed, `${trimmed}.md`];
+}
+
+type SpecsBrowserAuthMode = 'project_default' | 'session' | 'none';
+
+function specsBrowserAuthRequestBody(mode: SpecsBrowserAuthMode, sessionId: string) {
+    if (mode === 'session') return { browser_auth_session_id: sessionId };
+    if (mode === 'project_default') return { use_project_default_browser_auth: true };
+    return {};
 }
 
 export default function SpecDetailPage() {
@@ -60,6 +74,57 @@ export default function SpecDetailPage() {
     const [savingCode, setSavingCode] = useState(false);
     const [isEditingCode, setIsEditingCode] = useState(false);
     const [isRunning, setIsRunning] = useState(false);
+    const [browserAuthSessions, setBrowserAuthSessions] = useState<BrowserAuthSession[]>([]);
+    const [browserAuthMode, setBrowserAuthMode] = useState<SpecsBrowserAuthMode>('none');
+    const [browserAuthSessionId, setBrowserAuthSessionId] = useState('');
+
+    const activeBrowserAuthSessions = useMemo(
+        () => browserAuthSessions.filter(isBrowserAuthSessionSelectable),
+        [browserAuthSessions]
+    );
+    const projectDefaultBrowserAuthSession = useMemo(
+        () => activeBrowserAuthSessions.find(session => session.is_default),
+        [activeBrowserAuthSessions]
+    );
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!currentProject?.id) {
+            setBrowserAuthSessions([]);
+            setBrowserAuthMode('none');
+            setBrowserAuthSessionId('');
+            return;
+        }
+        fetchProjectBrowserAuthSessions(currentProject.id)
+            .then(sessions => {
+                if (cancelled) return;
+                setBrowserAuthSessions(sessions);
+                const defaultSession = sessions.find(session => session.is_default && isBrowserAuthSessionSelectable(session));
+                setBrowserAuthMode(defaultSession ? 'project_default' : 'none');
+                setBrowserAuthSessionId('');
+            })
+            .catch(() => {
+                if (cancelled) return;
+                setBrowserAuthSessions([]);
+                setBrowserAuthMode('none');
+                setBrowserAuthSessionId('');
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [currentProject?.id]);
+
+    const browserAuthSelectValue = browserAuthMode === 'session' ? `session:${browserAuthSessionId}` : browserAuthMode;
+
+    const handleBrowserAuthSelectChange = (value: string) => {
+        if (value.startsWith('session:')) {
+            setBrowserAuthMode('session');
+            setBrowserAuthSessionId(value.slice('session:'.length));
+            return;
+        }
+        setBrowserAuthMode(value as SpecsBrowserAuthMode);
+        setBrowserAuthSessionId('');
+    };
 
     useEffect(() => {
         if (!decodedName) return;
@@ -194,12 +259,15 @@ export default function SpecDetailPage() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     spec_name: activeSpecName,
-                    project_id: currentProject?.id
+                    project_id: currentProject?.id,
+                    ...specsBrowserAuthRequestBody(browserAuthMode, browserAuthSessionId)
                 })
             });
             const data = await res.json();
             if (data.id) {
                 router.push('/runs');
+            } else if (!res.ok) {
+                alert(data.detail || 'Failed to start run');
             }
         } catch (e) {
             alert('Failed to start run');
@@ -247,23 +315,42 @@ export default function SpecDetailPage() {
                     </Link>
                 }
                 actions={
-                    <button
-                        className="btn btn-primary"
-                        onClick={runTest}
-                        disabled={isRunning}
-                        style={{ opacity: isRunning ? 0.7 : 1, cursor: isRunning ? 'not-allowed' : 'pointer' }}
-                    >
-                        {isRunning ? (
-                            <>
-                                <span className="loading-spinner" style={{ width: '18px', height: '18px' }}></span>
-                                Starting...
-                            </>
-                        ) : (
-                            <>
-                                <Play size={18} /> Run Test
-                            </>
-                        )}
-                    </button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                        <select
+                            aria-label="Browser login session"
+                            value={browserAuthSelectValue}
+                            onChange={event => handleBrowserAuthSelectChange(event.target.value)}
+                            disabled={isRunning}
+                            style={{ minHeight: 38, borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--text)', padding: '0.45rem 0.6rem', fontSize: '0.85rem' }}
+                        >
+                            <option value="project_default" disabled={!projectDefaultBrowserAuthSession}>
+                                {projectDefaultBrowserAuthSession ? `Project default: ${projectDefaultBrowserAuthSession.name || projectDefaultBrowserAuthSession.id}` : 'Project default unavailable'}
+                            </option>
+                            <option value="none">No auth</option>
+                            {browserAuthSessions.map(session => (
+                                <option key={session.id} value={`session:${session.id}`} disabled={!isBrowserAuthSessionSelectable(session)}>
+                                    {browserAuthSessionLabel(session)}
+                                </option>
+                            ))}
+                        </select>
+                        <button
+                            className="btn btn-primary"
+                            onClick={runTest}
+                            disabled={isRunning}
+                            style={{ opacity: isRunning ? 0.7 : 1, cursor: isRunning ? 'not-allowed' : 'pointer' }}
+                        >
+                            {isRunning ? (
+                                <>
+                                    <span className="loading-spinner" style={{ width: '18px', height: '18px' }}></span>
+                                    Starting...
+                                </>
+                            ) : (
+                                <>
+                                    <Play size={18} /> Run Test
+                                </>
+                            )}
+                        </button>
+                    </div>
                 }
             />
 

@@ -19,9 +19,9 @@ interface UseJobPollerOptions {
     /** Polling interval in ms (default: 2000) */
     interval?: number;
     /** Called when job completes */
-    onComplete?: (result: Record<string, unknown> | undefined) => void;
+    onComplete?: (result: Record<string, unknown> | undefined, status: JobStatus) => void;
     /** Called when job fails */
-    onFailed?: (message: string | undefined) => void;
+    onFailed?: (message: string | undefined, status: JobStatus) => void;
     /** Extra headers for requests */
     headers?: Record<string, string>;
 }
@@ -62,10 +62,10 @@ export function useJobPoller(options: UseJobPollerOptions): UseJobPollerReturn {
 
         if (data.status === 'completed') {
             terminalRef.current = true;
-            onCompleteRef.current?.(data.result);
+            onCompleteRef.current?.(data.result, data);
         } else if (data.status === 'failed') {
             terminalRef.current = true;
-            onFailedRef.current?.(data.message);
+            onFailedRef.current?.(data.message, data);
         }
     }, [jobId, apiBase, urlPattern, headers]);
 

@@ -1,6 +1,5 @@
 #!/bin/bash
-# Assemble a YouTube tutorial from a screen recording, ElevenLabs voiceover,
-# and generated captions.
+# Assemble a YouTube tutorial from screen recording, voiceover, and captions.
 
 set -euo pipefail
 
@@ -43,7 +42,7 @@ USAGE
             exit 0
             ;;
         *)
-            echo "Unknown argument: $1"
+            echo "Unknown argument: $1" >&2
             exit 1
             ;;
     esac
@@ -53,48 +52,53 @@ EPISODE_DIR="$PROJECT_ROOT/content/youtube/episodes/$EPISODE"
 BUILD_DIR="$EPISODE_DIR/build"
 VOICEOVER="$BUILD_DIR/voiceover-en.mp3"
 CAPTIONS="$EPISODE_DIR/captions.srt"
+OVERLAY_DIR="$BUILD_DIR/caption-overlays"
 
 if [[ -z "$OUTPUT" ]]; then
     OUTPUT="$BUILD_DIR/youtube-$EPISODE.mp4"
 fi
 
 if [[ -z "$RECORDING" ]]; then
-    echo "Recording is required."
-    echo "Usage: scripts/youtube/assemble-episode.sh --episode $EPISODE --recording path/to/recording.mp4"
+    echo "Error: RECORDING is required." >&2
+    echo "Usage: make youtube-assemble EP=$EPISODE RECORDING=path/to/recording.mp4" >&2
     exit 1
 fi
 
-mkdir -p "$BUILD_DIR"
-
 missing=0
 if ! command -v ffmpeg >/dev/null 2>&1; then
-    echo "FFmpeg not found. Install with: brew install ffmpeg"
+    echo "Error: ffmpeg not found. Install it with: brew install ffmpeg" >&2
     missing=1
 fi
 if ! command -v ffprobe >/dev/null 2>&1; then
-    echo "ffprobe not found. Install with: brew install ffmpeg"
+    echo "Error: ffprobe not found. Install it with: brew install ffmpeg" >&2
     missing=1
 fi
 if [[ ! -f "$RECORDING" ]]; then
-    echo "Recording not found: $RECORDING"
+    echo "Error: recording not found: $RECORDING" >&2
     missing=1
 fi
 if [[ ! -f "$VOICEOVER" ]]; then
-    echo "Voiceover not found: $VOICEOVER"
-    echo "Run: make youtube-voice EP=$EPISODE"
+    echo "Error: voiceover not found: $VOICEOVER" >&2
+    echo "Run: make youtube-voice EP=$EPISODE VOICE=${ELEVENLABS_DEMO_VOICE_ID:-DODLEQrClDo8wCz460ld}" >&2
     missing=1
 fi
 if [[ ! -f "$CAPTIONS" ]]; then
-    echo "Captions not found: $CAPTIONS"
-    echo "Run: make youtube-pack EP=$EPISODE"
+    echo "Error: captions not found: $CAPTIONS" >&2
+    echo "Expected episode captions at content/youtube/episodes/$EPISODE/captions.srt" >&2
     missing=1
 fi
 if [[ "$missing" -eq 1 ]]; then
     exit 1
 fi
 
-audio_duration=$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$VOICEOVER" | cut -d'.' -f1)
-target_duration=$((audio_duration + 2))
+mkdir -p "$BUILD_DIR"
+
+audio_duration="$(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$VOICEOVER")"
+target_duration="$(python - "$audio_duration" <<'PY'
+import sys
+print(int(float(sys.argv[1])) + 2)
+PY
+)"
 subtitle_style="FontName=Arial,FontSize=26,PrimaryColour=&H00FFFFFF,OutlineColour=&H90000000,BorderStyle=3,Outline=1,Shadow=0,MarginV=44,Alignment=2"
 
 echo "Assembling YouTube episode $EPISODE"
@@ -103,12 +107,15 @@ echo "  Voiceover: $VOICEOVER"
 echo "  Captions:  $CAPTIONS"
 echo "  Output:    $OUTPUT"
 
+set +e
 ffmpeg -y \
     -stream_loop -1 \
     -i "$RECORDING" \
     -i "$VOICEOVER" \
     -t "$target_duration" \
-    -vf "subtitles=filename=${CAPTIONS}:force_style='${subtitle_style}',scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black" \
+    -vf "subtitles=filename='${CAPTIONS}':force_style='${subtitle_style}',scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black" \
+    -map 0:v:0 \
+    -map 1:a:0 \
     -c:v libx264 \
     -preset medium \
     -crf "$CRF" \
@@ -120,9 +127,19 @@ ffmpeg -y \
     -ar 48000 \
     -r 30 \
     -movflags +faststart \
-    -map 0:v:0 \
-    -map 1:a:0 \
     "$OUTPUT"
+status=$?
+set -e
+
+if [[ "$status" -ne 0 ]]; then
+    echo "FFmpeg subtitle filter failed; retrying with rendered PNG caption overlays." >&2
+    python "$PROJECT_ROOT/scripts/demo-video/assemble-with-overlays.py" \
+        --recording "$RECORDING" \
+        --voiceover "$VOICEOVER" \
+        --captions "$CAPTIONS" \
+        --output "$OUTPUT" \
+        --overlay-dir "$OVERLAY_DIR"
+fi
 
 size_mb=$(du -m "$OUTPUT" | cut -f1)
 echo "Saved $OUTPUT (${size_mb} MB)"

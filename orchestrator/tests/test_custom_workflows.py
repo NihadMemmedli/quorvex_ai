@@ -45,6 +45,7 @@ from orchestrator.api.models_db import (
 )
 from orchestrator.services import custom_workflow_activities, custom_workflow_worker
 from orchestrator.api.time_utils import utc_iso
+from orchestrator.services.agent_cancellation import cancel_workflow_child_agent_runs
 from orchestrator.services.scheduler import execute_workflow_schedule
 from orchestrator.services.temporal_client import (
     TemporalUnavailableError,
@@ -922,6 +923,47 @@ def test_raise_if_run_controlled_rejects_cancelled_run():
 
     with pytest.raises(WorkflowCancelled):
         _raise_if_run_controlled(run_id)
+
+
+@pytest.mark.asyncio
+async def test_cancel_workflow_child_agent_runs_preserves_step_evidence():
+    _ensure_tables()
+    with Session(engine) as session:
+        definition = _create_definition(session)
+        run = WorkflowRun(definition_id=definition.id, project_id=definition.project_id, status="running")
+        child = AgentRun(
+            id=f"agent-{uuid.uuid4().hex[:12]}",
+            project_id=definition.project_id,
+            agent_type="custom",
+            status="running",
+            config={},
+            progress={"phase": "running"},
+        )
+        session.add(run)
+        session.add(child)
+        session.commit()
+        step = WorkflowRunStep(
+            run_id=run.id,
+            definition_id=definition.id,
+            step_order=0,
+            step_key="agent",
+            step_type="start_custom_agent",
+            label="Agent",
+            status="completed",
+            external_kind="agent_run",
+            external_id=child.id,
+        )
+        step.output = {"external_kind": "agent_run", "external_id": child.id, "artifact": {"log": "partial"}}
+        session.add(step)
+        session.commit()
+
+        summary = await cancel_workflow_child_agent_runs(run, session, reason="workflow_cancelled")
+        session.refresh(child)
+        session.refresh(step)
+
+    assert summary["agent_run_ids"] == [child.id]
+    assert child.status == "cancelled"
+    assert step.output["artifact"] == {"log": "partial"}
 
 
 def test_active_workflow_definition_query_hides_archived_by_default():

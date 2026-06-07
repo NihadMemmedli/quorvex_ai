@@ -24,6 +24,11 @@ from orchestrator.services.autonomous_activities import (
     monitor_autonomous_project,
     recover_autonomous_project_stale_work,
 )
+from orchestrator.services.agent_cancellation import (
+    cancel_active_autonomous_work_items,
+    cancel_autonomous_work_item_task,
+    cancel_agent_task_id,
+)
 from orchestrator.services.autonomous_events import (
     create_autonomous_agent_event,
     emit_mission_event,
@@ -1286,7 +1291,12 @@ async def cancel_mission(
     mission = _get_project_mission(project_id, mission_id, session)
     await _require_project_edit(project_id, current_user, session)
     await _signal_mission(mission, "cancel")
-    await _cancel_mission_work_items(mission.id, session)
+    cancelled_items = await cancel_active_autonomous_work_items(
+        mission.id,
+        session,
+        runtime=(mission.config or {}).get("runtime"),
+        reason="Mission cancellation stopped this assignment.",
+    )
     mission.status = "cancelled"
     mission.health_status = "blocked"
     mission.paused_reason = "cancelled"
@@ -1296,7 +1306,12 @@ async def cancel_mission(
     session.add(mission)
     session.commit()
     session.refresh(mission)
-    emit_mission_event(mission, "Mission cancelled.", event_type="lifecycle", payload={"status": mission.status})
+    emit_mission_event(
+        mission,
+        "Mission cancelled.",
+        event_type="lifecycle",
+        payload={"status": mission.status, "cancelled_work": cancelled_items},
+    )
     return _mission_to_response(mission, session)
 
 
@@ -1723,18 +1738,18 @@ async def cancel_work_item(
 ):
     await _require_project_edit(project_id, current_user, session)
     item = _get_project_work_item(project_id, work_item_id, session)
-    if item.agent_task_id:
-        await _cancel_agent_task(item.agent_task_id)
+    mission = session.get(AutonomousMission, item.mission_id)
+    task_cancel = await cancel_autonomous_work_item_task(item, runtime=(mission.config or {}).get("runtime") if mission else None)
     now = datetime.utcnow()
     item.status = "cancelled"
     item.error_message = "Cancelled by user"
     item.completed_at = now
-    item.progress = {"phase": "cancelled", "message": "Work item was cancelled."}
+    item.progress = {"phase": "cancelled", "message": "Work item was cancelled.", "task_cancel": task_cancel}
     item.updated_at = now
     session.add(item)
     session.commit()
     session.refresh(item)
-    emit_work_item_status_event(item, "Work item cancelled by user.", event_type="lifecycle")
+    emit_work_item_status_event(item, "Work item cancelled by user.", event_type="lifecycle", payload={"task_cancel": task_cancel})
     return _work_item_to_response(item)
 
 
@@ -2173,17 +2188,7 @@ async def _signal_mission(mission: AutonomousMission, signal_name: str) -> None:
 
 
 async def _cancel_agent_task(task_id: str) -> None:
-    try:
-        from orchestrator.services.agent_queue import get_agent_queue
-
-        queue = get_agent_queue()
-        await queue.connect()
-        try:
-            await queue.cancel_task(task_id)
-        finally:
-            await queue.disconnect()
-    except Exception as exc:
-        logger.warning("Could not cancel autonomous agent task %s: %s", task_id, exc)
+    await cancel_agent_task_id(task_id)
 
 
 async def _pause_agent_task(task_id: str) -> None:
@@ -2215,25 +2220,13 @@ async def _resume_agent_task(task_id: str) -> None:
 
 
 async def _cancel_mission_work_items(mission_id: str, session: Session) -> None:
-    items = session.exec(
-        select(AutonomousAgentWorkItem).where(
-            AutonomousAgentWorkItem.mission_id == mission_id,
-            col(AutonomousAgentWorkItem.status).in_(("queued", "running")),
-        )
-    ).all()
-    now = datetime.utcnow()
-    for item in items:
-        if item.agent_task_id:
-            await _cancel_agent_task(item.agent_task_id)
-        item.status = "cancelled"
-        item.error_message = "Mission cancelled"
-        item.completed_at = now
-        item.updated_at = now
-        item.progress = {"phase": "cancelled", "message": "Mission cancellation stopped this assignment."}
-        session.add(item)
-    session.commit()
-    for item in items:
-        emit_work_item_status_event(item, "Mission cancellation stopped this assignment.", event_type="lifecycle")
+    mission = session.get(AutonomousMission, mission_id)
+    await cancel_active_autonomous_work_items(
+        mission_id,
+        session,
+        runtime=(mission.config or {}).get("runtime") if mission else None,
+        reason="Mission cancellation stopped this assignment.",
+    )
 
 
 async def _pause_mission_work_items(mission_id: str, session: Session) -> None:

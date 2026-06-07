@@ -46,6 +46,7 @@ from orchestrator.services.autonomous_events import (
     emit_mission_event,
     emit_work_item_status_event,
 )
+from orchestrator.services.browser_auth_sessions import BrowserAuthSessionError, resolve_browser_auth_for_run
 from orchestrator.utils.json_utils import extract_json_from_markdown
 from orchestrator.utils.string_utils import slugify
 
@@ -1826,8 +1827,30 @@ def _prepare_autonomous_work_item_runtime(mission: AutonomousMission, item: Auto
     try:
         from orchestrator.utils.playwright_mcp import browser_runtime_status, write_playwright_mcp_config
 
-        write_playwright_mcp_config(run_dir=run_dir, server_name="playwright", project_root=REPOSITORY_ROOT)
+        mission_config = mission.config
+        storage_state_path = None
+        if mission_config.get("browser_auth_session_id") or mission_config.get("use_project_default_browser_auth"):
+            try:
+                with Session(engine) as db_session:
+                    resolved = resolve_browser_auth_for_run(
+                        db_session,
+                        mission.project_id,
+                        run_dir=run_dir,
+                        browser_auth_session_id=mission_config.get("browser_auth_session_id"),
+                        use_default=bool(mission_config.get("use_project_default_browser_auth")),
+                    )
+                storage_state_path = resolved.storage_state_path if resolved else None
+            except BrowserAuthSessionError as exc:
+                raise RuntimeError(f"{exc}. Refresh browser auth session.") from exc
+        write_playwright_mcp_config(
+            run_dir=run_dir,
+            server_name="playwright",
+            project_root=REPOSITORY_ROOT,
+            storage_state_path=storage_state_path,
+        )
         runtime = browser_runtime_status()
+    except RuntimeError:
+        raise
     except Exception:
         logger.debug("Could not prepare autonomous work item browser runtime", exc_info=True)
     return run_dir, runtime
@@ -1848,6 +1871,10 @@ def _execute_agent_work_item_direct(
 ) -> bool:
     """Execute one autonomous work item inside the Temporal activity worker."""
     now = _utcnow()
+    current_item = session.get(AutonomousAgentWorkItem, item.id)
+    current_mission = session.get(AutonomousMission, mission.id)
+    if not current_item or current_item.status == "cancelled" or (current_mission and current_mission.status == "cancelled"):
+        return False
     timeout_seconds = max(300, min(mission.max_runtime_minutes * 60, 7200))
     run_dir, browser_runtime = _prepare_autonomous_work_item_runtime(mission, item)
     allowed_tools = _allowed_tools_for_work_item(item, mcp_config_dir=run_dir)
@@ -2006,6 +2033,16 @@ def _execute_agent_work_item_direct(
             except Exception:
                 logger.debug("Failed to persist autonomous task id", exc_info=True)
 
+        def _is_cancelled() -> bool:
+            with Session(engine) as check_session:
+                current = check_session.get(AutonomousAgentWorkItem, item.id)
+                current_mission = check_session.get(AutonomousMission, mission.id)
+                return (
+                    not current
+                    or current.status == "cancelled"
+                    or bool(current_mission and current_mission.status == "cancelled")
+                )
+
         async def _run_agent():
             runtime = get_agent_runtime(runtime_name)
             return await runtime.run(
@@ -2038,13 +2075,27 @@ def _execute_agent_work_item_direct(
                         "role": item.role,
                         "planner_key": item.planner_key,
                     },
+                    is_cancelled=_is_cancelled,
                 ),
             )
 
         result = asyncio.run(_run_agent())
     except Exception as exc:
         now = _utcnow()
+        session.expire_all()
         item = session.get(AutonomousAgentWorkItem, item.id) or item
+        current_mission = session.get(AutonomousMission, mission.id)
+        if item.status == "cancelled" or (current_mission and current_mission.status == "cancelled"):
+            item.status = "cancelled"
+            item.error_message = item.error_message or "Mission cancelled"
+            item.completed_at = item.completed_at or now
+            item.updated_at = now
+            item.last_heartbeat_at = now
+            item.progress = {**(item.progress or {}), "phase": "cancelled", "message": item.error_message, **browser_runtime}
+            session.add(item)
+            session.commit()
+            emit_work_item_status_event(item, item.error_message, event_type="lifecycle")
+            return False
         item.status = "failed"
         item.error_message = str(exc)
         item.completed_at = now
@@ -2058,7 +2109,32 @@ def _execute_agent_work_item_direct(
         return False
 
     now = _utcnow()
+    session.expire_all()
     item = session.get(AutonomousAgentWorkItem, item.id) or item
+    current_mission = session.get(AutonomousMission, mission.id) or mission
+    if item.status == "cancelled" or current_mission.status == "cancelled" or getattr(result, "cancelled", False):
+        item.status = "cancelled"
+        item.error_message = item.error_message or "Agent work item cancelled"
+        item.completed_at = item.completed_at or now
+        item.updated_at = now
+        item.last_heartbeat_at = now
+        item.result = {
+            **(item.result or {}),
+            "output": getattr(result, "output", "") or "",
+            "telemetry": {
+                "runtime": str((mission.config or {}).get("runtime") or "claude_sdk"),
+                "tool_calls": len(getattr(result, "tool_calls", []) or []),
+                "messages_received": getattr(result, "messages_received", 0),
+                "text_blocks_received": getattr(result, "text_blocks_received", 0),
+                "duration_seconds": getattr(result, "duration_seconds", 0.0),
+                "cancelled": True,
+            },
+        }
+        item.progress = {**(item.progress or {}), "phase": "cancelled", "message": item.error_message, **browser_runtime}
+        session.add(item)
+        session.commit()
+        emit_work_item_status_event(item, item.error_message, event_type="lifecycle")
+        return False
     telemetry = {
         "runtime": str((mission.config or {}).get("runtime") or "claude_sdk"),
         "tool_calls": len(result.tool_calls),

@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { applyProjectDefaultUrl } from '@/lib/project-url';
 import type { PrdSettings } from '../types';
 
 const DEFAULT_SETTINGS: PrdSettings = {
@@ -21,8 +22,9 @@ function hasTargetUrl(targetUrl: string): boolean {
     return targetUrl.trim().length > 0;
 }
 
-export function usePrdSettings(projectId: string | undefined) {
+export function usePrdSettings(projectId: string | undefined, projectDefaultUrl = '') {
     const [settings, setSettings] = useState<PrdSettings>(DEFAULT_SETTINGS);
+    const previousProjectDefaultUrlRef = useRef('');
 
     // Load from localStorage when project changes
     useEffect(() => {
@@ -31,13 +33,14 @@ export function usePrdSettings(projectId: string | undefined) {
             const saved = localStorage.getItem(getStorageKey(projectId));
             if (saved) {
                 const parsed = JSON.parse(saved);
+                const targetUrl = parsed.targetUrl || projectDefaultUrl;
                 setSettings(prev => ({
                     ...prev,
-                    targetUrl: parsed.targetUrl || '',
+                    targetUrl,
                     loginUrl: parsed.loginUrl || '',
                     username: parsed.username || '',
                     password: '',
-                    useLiveValidation: hasTargetUrl(parsed.targetUrl || ''),
+                    useLiveValidation: hasTargetUrl(targetUrl),
                     useNativeAgents: parsed.useNativeAgents ?? true,
                     targetFeatures: parsed.targetFeatures || 15,
                 }));
@@ -45,7 +48,24 @@ export function usePrdSettings(projectId: string | undefined) {
         } catch {
             // ignore parse errors
         }
-    }, [projectId]);
+    }, [projectId, projectDefaultUrl]);
+
+    useEffect(() => {
+        setSettings(prev => {
+            const targetUrl = applyProjectDefaultUrl(
+                prev.targetUrl,
+                projectDefaultUrl,
+                previousProjectDefaultUrlRef.current
+            );
+            previousProjectDefaultUrlRef.current = projectDefaultUrl;
+            if (targetUrl === prev.targetUrl) return prev;
+            return {
+                ...prev,
+                targetUrl,
+                useLiveValidation: hasTargetUrl(targetUrl),
+            };
+        });
+    }, [projectId, projectDefaultUrl]);
 
     // Auto-save to localStorage on change (exclude password)
     useEffect(() => {

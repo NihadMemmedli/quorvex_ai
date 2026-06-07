@@ -5,7 +5,7 @@
 <p class="caption">Projects dashboard for company workspace and membership setup.</p>
 
 
-Deploy Quorvex AI to an on-premises or private network environment, including VM setup, TLS configuration, and ongoing maintenance.
+Deploy Quorvex AI to an on-premises or private network environment with company DNS and company-managed nginx terminating TLS in front of the Compose app.
 
 ## Prerequisites
 
@@ -13,7 +13,39 @@ Deploy Quorvex AI to an on-premises or private network environment, including VM
 - Docker Engine and Docker Compose v2 installed
 - Network access to your AI provider API (direct or via proxy)
 - An internal Git repository for hosting the code
-- Organization-issued TLS certificates (optional but recommended)
+- A dedicated internal subdomain, for example `quorvex.example.com`
+- Company nginx or a load balancer that can proxy HTTP and WebSocket traffic
+- Organization-issued TLS certificates on the company nginx endpoint
+
+## Recommended: Private Deploy Repo
+
+Keep local development in the public/source repo unchanged. `make start` still
+runs the local mounted-code stack. For production, use a separate private deploy
+repo on the server and copy the template from
+`deploy/private-repo-template/`.
+
+First setup:
+
+```bash
+./scripts/bootstrap.sh
+```
+
+Normal release after the public repository tag has published GHCR images:
+
+```bash
+./scripts/deploy.sh v1.2.3
+```
+
+Emergency rollback:
+
+```bash
+./scripts/rollback.sh
+```
+
+The private repo stores real files such as
+`env/quorvex.prod.env`, `compose/docker-compose.mytest.yml`,
+`reverse-proxy/mytest.idda.az.conf`, and `.state/current-version`. Do not commit
+those files to the public repo.
 
 ## Step 1: Prepare Code for Internal Git
 
@@ -87,9 +119,11 @@ Edit `.env.prod` with production values:
 
 ```bash title=".env.prod"
 # Required secrets -- generate secure values
-QUORVEX_LLM_API_KEY=<your-api-key>
-QUORVEX_LLM_BASE_URL=<your-endpoint>
-QUORVEX_LLM_STANDARD_MODEL=<model-id>
+QUORVEX_ACTIVE_LLM_PROVIDER=zai
+ZAI_API_KEY=<your-zai-api-key>
+# The private deploy scripts map the active provider key into the runtime
+# QUORVEX_LLM_API_KEY value. If you run Docker Compose directly from .env.prod,
+# mirror the active provider key into QUORVEX_LLM_API_KEY as well.
 JWT_SECRET_KEY=$(openssl rand -hex 32)
 POSTGRES_PASSWORD=$(openssl rand -base64 32)
 MINIO_ROOT_PASSWORD=$(openssl rand -base64 32)
@@ -102,45 +136,99 @@ INITIAL_ADMIN_PASSWORD=<strong-password>
 REQUIRE_AUTH=true
 ALLOW_REGISTRATION=false
 
-# URLs -- adjust to your domain/IP
-QUORVEX_PUBLIC_API_URL=https://playwright.example.com/api
-NEXT_PUBLIC_API_URL=https://playwright.example.com/api
-ALLOWED_ORIGINS=https://playwright.example.com
+# URLs -- adjust to your dedicated company subdomain
+ALLOWED_ORIGINS=https://quorvex.example.com
+TEMPORAL_CORS_ORIGINS=https://quorvex.example.com
+VNC_PUBLIC_WS_URL=wss://quorvex.example.com/websockify
 
-# Corporate proxy (if needed)
-HTTP_PROXY=http://proxy.example.com:8080
-HTTPS_PROXY=http://proxy.example.com:8080
+# Leave blank for company-nginx deployments. Browser API calls use
+# same-origin /backend-proxy, and Next.js routes to http://backend:8001.
+QUORVEX_PUBLIC_API_URL=
+NEXT_PUBLIC_API_URL=
+
+# Corporate outbound proxy (only if outbound AI/API calls require it)
+# HTTP_PROXY=http://proxy.example.com:8080
+# HTTPS_PROXY=http://proxy.example.com:8080
+NO_PROXY=localhost,127.0.0.1,db,redis,minio,zap,backend,frontend,temporal,hermes
 ```
 
-## Step 4: Set Up TLS (Optional but Recommended)
+## Step 4: Configure Company Nginx
 
-The checked-in nginx config is an HTTP reverse proxy on port 80. For TLS, prefer terminating HTTPS at your load balancer, ingress controller, or corporate reverse proxy. If you want nginx in this Compose stack to terminate TLS directly, update `nginx/nginx.conf` to add `listen 443 ssl` and certificate directives before relying on the `443` port mapping.
+Use company DNS and company nginx as the public entrypoint. The Compose app should not use the repo-managed nginx container for this deployment mode.
 
-```bash
-mkdir -p nginx/certs
+Required proxy routes:
 
-# Option A: Organization-issued certificates
-cp /path/to/your-cert.pem nginx/certs/cert.pem
-cp /path/to/your-key.pem nginx/certs/key.pem
+- `https://quorvex.example.com/` -> `http://<app-server>:3000`
+- `https://quorvex.example.com/websockify` -> `http://<app-server>:6080/websockify`
 
-# Option B: Self-signed certificates
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout nginx/certs/key.pem \
-  -out nginx/certs/cert.pem \
-  -subj "/CN=playwright.example.com"
+The `/websockify` location must preserve WebSocket upgrade headers. Use long proxy timeouts for dashboard/backend requests and large enough upload limits for artifacts and specs.
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      '';
+}
+
+upstream quorvex_frontend {
+    server <app-server>:3000;
+    keepalive 32;
+}
+
+upstream quorvex_backend {
+    server <app-server>:6080;
+    keepalive 32;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name quorvex.example.com;
+
+    ssl_certificate /etc/nginx/certs/quorvex.example.com/fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/quorvex.example.com/privkey.pem;
+
+    client_max_body_size 50m;
+
+    location /websockify {
+        proxy_pass http://quorvex_backend/websockify;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location / {
+        proxy_pass http://quorvex_frontend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 600s;
+        proxy_read_timeout 600s;
+    }
+}
 ```
 
 ## Step 5: Build and Start
 
 ```bash
-# Build images (first time -- no cache)
+# Validate Compose interpolation before starting
+docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.dev-override.yml --profile standard --profile security config --quiet
+
+# Build images when needed
 make prod-build-no-cache
 
-# Start all services
-make prod-up
+# Start the app runtime behind company nginx
+make start
 
-# Manual equivalent of make prod-up:
-docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard --profile nginx --profile backup-scheduler up -d
+# Manual equivalent of make start:
+docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.dev-override.yml --profile standard --profile security up -d --no-build
 ```
 
 Services started:
@@ -155,7 +243,8 @@ Services started:
 | Temporal | 7233 | Durable workflow engine for autonomous missions |
 | Temporal UI | 8233 | Workflow inspection UI |
 | Backup Scheduler | -- | Automated daily backups |
-| Nginx reverse proxy | 80 by default, 443 with custom TLS config | HTTP reverse proxy; terminate TLS externally or add nginx SSL config |
+| Live browser WebSocket | 6080 | websockify target for company nginx `/websockify` |
+| ZAP | 8090 | Security scanner API, private |
 
 ## Step 6: Back Up `.env.prod` Immediately
 
@@ -165,22 +254,22 @@ Services started:
 ## Step 7: Verify the Deployment
 
 ```bash
-# All-in-one health check
-make health-check
+# Runtime readiness
+make agent-runtime-ready
 
-# Individual checks
-curl -sf http://localhost:8001/health
+# App-server checks
 curl -sf http://localhost:3000
+curl -sf http://localhost:8001/health
 curl -sf http://localhost:8001/health/storage
 ```
 
-Functional verification:
+Company-workstation verification:
 
 1. Log in to the dashboard with admin credentials
-2. Create a new project
-3. Upload a test spec
-4. Run a test -- verify it completes
-5. Check VNC view at port 6080 during test execution
+2. Confirm dashboard API calls work without CORS errors
+3. Start a small browser-backed run
+4. Confirm the live browser view connects through `wss://quorvex.example.com/websockify`
+5. Check the browser console and network panel for failed `localhost`, `127.0.0.1`, or mixed-content requests
 
 Backup verification:
 
@@ -233,8 +322,9 @@ Confirm the full deployment:
 1. `make health-check` passes all endpoints
 2. Dashboard login works with admin credentials
 3. Test execution completes with VNC showing browser activity
-4. `make backup-full` creates a backup visible in MinIO console (port 9001)
-5. Health monitoring cron is active: `crontab -l | grep health-monitor`
+4. Live browser view connects through the company `/websockify` proxy
+5. `make backup-full` creates a backup visible in MinIO console (port 9001)
+6. Health monitoring cron is active: `crontab -l | grep health-monitor`
 
 ## Related Guides
 

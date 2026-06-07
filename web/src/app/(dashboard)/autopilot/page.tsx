@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
+import { applyProjectDefaultUrl, getProjectDefaultUrl } from '@/lib/project-url';
 import { toast } from 'sonner';
 import { PageLayout } from '@/components/ui/page-layout';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -897,6 +898,8 @@ function TaskDetailDialog({
 
 export default function AutoPilotPage() {
     const { currentProject, isLoading: projectLoading } = useProject();
+    const projectDefaultUrl = getProjectDefaultUrl(currentProject);
+    const previousProjectDefaultUrlRef = useRef('');
 
     // View state
     const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -940,6 +943,11 @@ export default function AutoPilotPage() {
     // Countdown timer ref
     const countdownRef = useRef<NodeJS.Timeout | null>(null);
     const [countdown, setCountdown] = useState<number | null>(null);
+
+    useEffect(() => {
+        setFormUrls(prev => applyProjectDefaultUrl(prev, projectDefaultUrl, previousProjectDefaultUrlRef.current));
+        previousProjectDefaultUrlRef.current = projectDefaultUrl;
+    }, [projectDefaultUrl]);
 
     // ============ DATA FETCHING ============
 
@@ -1111,7 +1119,7 @@ export default function AutoPilotPage() {
                 const newId = data.session_id || data.id;
                 setActiveSessionId(newId);
                 // Reset form
-                setFormUrls('');
+                setFormUrls(projectDefaultUrl);
                 setFormLoginUrl('');
                 setFormUsername('');
                 setFormPassword('');

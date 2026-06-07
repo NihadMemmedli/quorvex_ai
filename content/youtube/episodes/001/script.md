@@ -1,59 +1,105 @@
-# Quorvex AI in 10 Minutes: Generate Your First Playwright Test
+# AI-Generated Playwright Tests Failed — Now What?
 
-> If your team already uses Playwright, the hard part is not believing that automated tests matter. The hard part is writing enough useful coverage without spending every sprint inside selectors, waits, setup code, and flaky failures.
+## Demo 001 Script
 
-> Quorvex AI is built around one practical idea: let agents help create and validate tests, but keep the final output as normal Playwright code your team can inspect, commit, and run in CI.
+### 0:00-0:30 Cold Open
 
-> In this tutorial, I will show the first workflow end to end. We will start from the repo, open the dashboard, describe a small test in plain English, run it through the pipeline, and inspect the generated Playwright file.
+We are starting on a red checkout failure in Quorvex Demo Shop. The generated Playwright run did not pass, and that is the point.
 
-> The point is not to watch a polished demo and assume everything is automatic. The point is to understand the loop: write a clear spec, let Quorvex plan against the target, generate a test, validate it in a browser, and then review the output like engineering work.
+Here we have a commerce project called Quorvex Demo Shop. The dashboard already tells us the release is risky: failed checkout tests, flaky state restoration, a slow checkout retry, and a database quality run with customer and order issues.
 
-> Start on the GitHub repo. The README gives the product shape: Quorvex is self-hosted, AI-assisted, and code-first. It can work with specs, PRDs, exploration, API checks, load tests, security checks, database checks, CI gates, and autonomous coverage discovery, but the first video should stay narrow.
+Most demo videos start with a perfect generated test. Real QA work does not look like that. Real QA work starts when generated tests fail, selectors drift, validation changes, the database disagrees with the UI, and someone has to decide what matters.
 
-> The fastest path is the minimal setup. For a local evaluation, it keeps the number of services low while still showing the real dashboard and generation flow. For production or team usage, Quorvex also supports the full stack with queues, storage, browser viewing, credentials, schedules, and integrations.
+This walkthrough shows how Quorvex AI turns those failures into organized QA evidence.
 
-> If you want the quickest trial, use the minimal README. If you want to evaluate the full platform shape, use the main getting-started tutorial. Either way, the first target is simple: get the backend and dashboard running, then generate one test.
+### 0:30-1:15 Problem
 
-> Before adding credentials, pause on the model configuration. Quorvex uses an Anthropic-compatible setup. That can point to Anthropic, OpenRouter, Z.ai, or another compatible endpoint, depending on how you run it. The exact provider matters less than having a working token and a model that can follow the generation workflow.
+AI-generated tests and QA agents are useful, but they are not magic. They can produce brittle selectors. They can expose a real bug and still need a human review. They can fail because the application changed, or because the generated assertion was wrong.
 
-> Once the app is running, open the dashboard. The dashboard is not just decoration around a CLI. It is where a team can create specs, inspect runs, review artifacts, track requirements, see regression history, and understand what the agents did.
+The useful system is not the one that pretends every generated test is perfect. The useful system is the one that keeps the failure explainable.
 
-> For the first video, keep the dashboard tour brief. We only need enough context to create or run a spec. Later videos can go deeper into requirements, API testing, PRDs, autonomous missions, and CI quality gates.
+For a QA team, that means you need specs, historical runs, logs, failure categories, agent findings, generated test ideas, and enough evidence to decide the next action.
 
-> Now move to the most important object in the first workflow: the spec. A Quorvex spec is just markdown. It names the test, describes the steps, and states the expected outcome. That makes the request reviewable before any code is generated.
+That is the workflow in this demo.
 
-> This is an important design choice. If the input is vague, the generated code will probably be vague too. A good spec gives the agent a clear target URL, a small user flow, and an observable outcome.
+### 1:15-2:30 Project Setup
 
-> For the first run, use a simple public page or one workflow in your own application. Keep it small. A good first test proves the pipeline and gives you generated code that is easy to inspect.
+I am starting from the project selector and choosing Quorvex Demo Shop.
 
-> In the getting-started tutorial, the example checks a dynamic loading page and verifies that the Hello World message appears after the loading step completes. That is not a business-critical workflow, but it is a good first proof because the expected result is easy to see.
+This project is seeded for the demo, so the data is deterministic. I am not depending on a live agent run behaving perfectly during a recording. The point is to show the workflow clearly: what a QA engineer sees after checkout coverage has been generated and a nightly run found problems.
 
-> After the spec is ready, run the pipeline. Under the hood, Quorvex is not trying to give you a cute code snippet. The workflow is planning, generation, validation, and repair attempts when failures are concrete enough to address.
+The specs cover login, cart pricing, discount codes, payment validation, checkout state, and order confirmation.
 
-> Planning matters because web tests need sequencing. The agent has to understand where to navigate, what to click, what to wait for, and what assertion proves the flow worked.
+The run history includes passed tests, failed tests, a healed checkout run, a flaky checkout-state case, and a slow timeout. That gives us enough signal to talk like a real QA review instead of just clicking through a platform tour.
 
-> Browser context matters because selectors are not reliable when they are guessed from a prompt alone. A real browser gives the system evidence about what is actually on the page.
+### 2:30-4:00 Failed Run Walkthrough
 
-> Generation matters because the output should be standard Playwright TypeScript. This is the key ownership point. You should be able to open the file, read it, edit it, commit it, and run it without Quorvex sitting in the middle of every future CI job.
+Now I will open the failed run for checkout payment validation.
 
-> Validation matters because generated code is only useful after it runs. A failing generated test is not worthless, but it is not done. The run artifacts tell you whether the failure is in the target app, the spec, timing, selectors, authentication, or the generated code itself.
+The first failure is selector drift. The test was looking for a Pay now button, but the current page has a hidden old button and a visible submit control with a more stable test id.
 
-> When the run completes, do not just look for a green status. Open the generated file. Check the locators. Check the assertions. Check whether the code reads like something you would accept in a pull request.
+That is not the same as a product bug. It is automation maintenance. The run details show the stage, the failure reason, and the log evidence. A QA engineer can fix the locator or ask Quorvex to generate a revised Playwright test from the same spec.
 
-> This review habit is what separates useful AI automation from throwaway demos. If the test is readable and the assertion is meaningful, the generated file can become part of the suite. If it is too broad, too brittle, or too clever, edit it or improve the spec and run again.
+The next failure is more serious: payment validation regression. The test expected an expired card to be blocked with an inline message. Instead, the page showed payment authorized.
 
-> If validation fails, the run artifacts still matter. Screenshots, logs, browser evidence, and failure details make the problem concrete. The goal is not magic. The goal is a faster loop with evidence.
+That looks like a product defect. The difference matters. Quorvex is not just saying failed. It is separating selector drift from a validation regression, so the team can route the work correctly.
 
-> In a real team, this also changes the review conversation. Instead of asking whether AI wrote a perfect test, the better question is whether the system produced a useful candidate with enough evidence for an engineer or QA automation owner to make a decision.
+I also have a cart total mismatch: expected 86 dollars and 40 cents, but the UI showed 91 dollars and 40 cents after a discount. That points to pricing logic or duplicated shipping.
 
-> This workflow is why Quorvex is self-hosted and code-first. AI helps with planning, generation, validation, exploration, and repair, but your team keeps normal tests that can run without an AI dependency during every CI job.
+Finally, there is a checkout-state timeout after refresh. That one is marked flaky because historical runs show both passing and failing outcomes.
 
-> That also means you can start small. You do not need to migrate a whole test suite. Pick one flow with clear value. Generate one test. Review the output. Run it locally. Then decide whether the next workflow should be another UI test, an API check, a PRD-to-tests flow, or a CI gate.
+### 4:00-5:45 Agent Findings
 
-> If you are evaluating Quorvex for a team, I would measure three things after this first run. First, did it save time compared with writing the same Playwright test by hand? Second, is the generated code readable enough to maintain? Third, did the artifacts explain what happened when the run passed or failed?
+Now I will open the agent run called Checkout Failure Triage.
 
-> If the answer is no, the feedback is still useful. It tells us whether the spec format needs better guidance, whether the dashboard needs clearer evidence, or whether the generation pipeline needs a stronger constraint.
+This is a completed report, not a live agent performance demo. It shows what I want from an agent after a failed run: findings, evidence, test ideas, and follow-up actions.
 
-> To try this yourself, open the repo, follow the minimal setup, and create one spec from a real workflow your team cares about. If that first generated test is useful, the next step is to add PRD coverage, API checks, regression batches, and CI quality gates.
+The first finding says the payment button locator drifted after a copy and layout change. The evidence points to the failed run log where the locator resolved to a hidden element.
 
-> The repo is https://github.com/NihadMemmedli/quorvex_ai, and the docs are at https://nihadmemmedli.github.io/quorvex_ai/. Star Quorvex AI if you want to follow the project, and send feedback from real Playwright workflows. That feedback is the most useful signal for what to improve next.
+The second finding is the important one: expired card validation allows order submission. The evidence says the expected inline error was absent and the run captured Payment authorized text.
+
+The third finding connects the UI mismatch to cart pricing. The frontend total diverges from the pricing preview.
+
+From here, the test ideas are actionable. One suggestion is to add an API-backed cart total contract before checkout. Another is to retry checkout after an expired session and make sure the customer returns to the original checkout path.
+
+This is the value of the agent layer. It does not replace QA ownership. It collects context and proposes work that a QA engineer can review.
+
+### 5:45-7:00 Specs and Coverage
+
+Next I will open the specs.
+
+The checkout payment validation spec is written in plain markdown. It says what the user does, what data is used, and what the expected result is. This is important because the generated Playwright code should be traceable back to the requirement, not just appear as a random script.
+
+The cart total spec describes the exact pricing expectation: line items, discount, tax, shipping, and total. That makes the failed assertion useful. We can tell whether the test is wrong, the UI is wrong, or the backend preview is wrong.
+
+The login recovery and checkout state specs cover edge cases that are easy to miss in a happy-path demo. Session expiry and page refresh are exactly where checkout flows become flaky.
+
+The generated tests are not the source of truth. The specs are the source of intent. The tests are executable coverage that should evolve as the app changes.
+
+### 7:00-8:15 Quality Signals
+
+Now I will switch to database testing.
+
+This is not a full database-testing tour. I just want to show why UI failures often need backend evidence.
+
+The demo database run has passing and failing checks. It catches duplicate customers, invalid email format, a negative order item quantity, and a payment total that does not match the order total.
+
+Those issues connect directly to checkout quality. If a payment run fails in the browser, and the database also shows order/payment mismatches, the QA story becomes stronger.
+
+The dashboard then gives the broader signal: pass/fail trend, failure categories, flaky tests, and slowest tests. A QA lead can decide whether the release risk is mostly automation maintenance, product regression, data quality, or performance.
+
+### 8:15-9:30 Recap
+
+Here is the workflow again.
+
+We started with failed checkout tests. We inspected a specific failure and separated selector drift from product regression. We reviewed an agent report with findings, evidence, test ideas, and follow-up actions. We connected specs to generated Playwright work. Then we looked at database and dashboard signals to understand release risk.
+
+That is the shape of Quorvex AI: generate and organize Playwright QA work, keep evidence attached, and make failures reviewable.
+
+Teams still own the code. Teams still decide what should ship. Quorvex helps collect the context faster and keeps the work from turning into scattered logs, screenshots, and chat messages.
+
+### 9:30-10:00 CTA
+
+If you want to try this exact demo, seed the project with `make youtube-demo-seed` and open Quorvex Demo Shop.
+
+Star the repo if this workflow is useful, and comment with the QA workflow you want next: API contract testing, PR test selection, database quality checks, or agent-assisted Playwright maintenance.

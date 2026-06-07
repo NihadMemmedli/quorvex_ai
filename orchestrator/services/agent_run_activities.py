@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from contextlib import contextmanager
 from datetime import datetime
@@ -100,7 +101,32 @@ async def execute_agent_run(payload: dict[str, Any]) -> dict[str, Any]:
     from orchestrator.api.main import execute_agent_background
 
     with _temporal_agent_execution_env():
-        await execute_agent_background(run_id, agent_type, config)
+        try:
+            await execute_agent_background(run_id, agent_type, config)
+        except asyncio.CancelledError:
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                if run and run.status not in TERMINAL_STATUSES:
+                    run.status = "cancelled"
+                    run.completed_at = datetime.utcnow()
+                    run.progress = {
+                        **(run.progress or {}),
+                        "phase": "cancelled",
+                        "status": "cancelled",
+                        "message": "Agent run cancelled.",
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                    session.add(run)
+                    session.commit()
+                    create_agent_run_event(
+                        run_id=run.id,
+                        agent_task_id=run.agent_task_id,
+                        event_type="cancel",
+                        message="Agent activity cancelled.",
+                        payload={"status": run.status},
+                        session=session,
+                    )
+                return _run_payload(run)
     with Session(engine) as session:
         run = session.get(AgentRun, run_id)
         return _run_payload(run)

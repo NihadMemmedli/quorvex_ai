@@ -1,5 +1,5 @@
 x-backend-slim: &backend-slim
-  image: quorvex-backend-slim:prod
+  image: ${QUORVEX_BACKEND_SLIM_IMAGE:-quorvex-backend-slim:prod}
   build:
     context: .
     dockerfile: docker/backend-slim/Dockerfile
@@ -12,7 +12,7 @@ services:
   # Each worker runs in its own container with crash isolation.
   # Scale with: docker-compose up -d --scale browser-workers=8
   browser-workers:
-    image: quorvex-browser-worker:prod
+    image: ${QUORVEX_BROWSER_WORKER_IMAGE:-quorvex-browser-worker:prod}
     build:
       context: .
       dockerfile: docker/browser-worker/Dockerfile
@@ -102,6 +102,7 @@ services:
       HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
       HERMES_HOME: ${HERMES_HOME:-/app/data/hermes}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Browser workers mode (no local browsers)
       BROWSER_WORKERS_ENABLED: "true"
@@ -226,6 +227,7 @@ services:
       HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
       HERMES_HOME: ${HERMES_HOME:-/app/data/hermes}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Authentication config is imported by backend modules used in workers.
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
@@ -324,6 +326,7 @@ services:
       HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
       HERMES_HOME: ${HERMES_HOME:-/app/data/hermes}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Authentication config is imported by backend modules used in workers.
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
@@ -401,6 +404,7 @@ services:
       HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
       HERMES_HOME: ${HERMES_HOME:-/app/data/hermes}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Authentication config is imported by backend modules used in workers.
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
@@ -590,6 +594,7 @@ services:
   # Standard backend with VNC and browsers (default mode)
   # Use: make prod-up (no profile needed)
   backend:
+    image: ${QUORVEX_BACKEND_IMAGE:-quorvex-backend:prod}
     build:
       context: .
       dockerfile: Dockerfile
@@ -637,11 +642,14 @@ services:
       HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
       HERMES_HOME: ${HERMES_HOME:-/app/data/hermes}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # VNC mode: headed browser on virtual display
       # When VNC_ENABLED=true, browser runs headed on Xvfb display :99
       # HEADLESS must be "false" for VNC to work (need visible browser)
       VNC_ENABLED: ${VNC_ENABLED:-true}
+      VNC_PUBLIC_WS_URL: ${VNC_PUBLIC_WS_URL:-}
+      VNC_PUBLIC_URL: ${VNC_PUBLIC_URL:-}
       DISPLAY: ":99"
       HEADLESS: "false"
       PLAYWRIGHT_HEADLESS: "false"
@@ -792,6 +800,7 @@ services:
         max-file: "3"
 
   frontend:
+    image: ${QUORVEX_FRONTEND_IMAGE:-quorvex-frontend:prod}
     build:
       context: ./web
       dockerfile: Dockerfile
@@ -1130,6 +1139,7 @@ services:
   # Scale with: make k6-workers-scale N=3
   # Does NOT affect existing commands (make prod-up, make prod-dev, etc.)
   k6-workers:
+    image: ${QUORVEX_K6_WORKER_IMAGE:-quorvex-k6-worker:prod}
     build:
       context: .
       dockerfile: docker/k6-worker/Dockerfile

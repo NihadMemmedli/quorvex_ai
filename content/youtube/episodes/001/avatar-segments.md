@@ -1,23 +1,19 @@
-# Avatar Segments: Quorvex AI in 10 Minutes: Generate Your First Playwright Test
+# Avatar Segments
 
-Use these as short AI-avatar clips. Keep each clip under 20 seconds when possible.
+Use avatar footage only for short bookends and section transitions. Keep the main video screen-first.
 
 ## Hook
 
-Today we are going from a plain-English testing idea to generated Playwright code with Quorvex AI.
+Most AI testing demos show a perfect green run. This one starts on the red checkout failure, where real QA work starts.
 
-## Transition 1
+## Transition To Agent Findings
 
-Now that the setup is running, the important part is the spec. It is readable before any code is generated.
+Now that the runs tell us what failed, the useful question is what a QA engineer should do next.
 
-## Transition 2
+## Transition To Specs
 
-The generated file is the proof point. We are not stopping at a summary. We are checking the actual Playwright output.
+The generated Playwright code is not the source of truth. The spec is the source of intent.
 
 ## Outro
 
-Try this with one real workflow from your app, then inspect the generated code like you would inspect any pull request.
-
-## Upload Disclosure Note
-
-If the avatar looks or sounds like a realistic person, disclose AI-avatar usage in YouTube Studio when prompted for altered or synthetic content.
+Seed the demo, inspect the AI-generated Playwright failures, and tell me which QA workflow you want to see next.

@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,12 +12,38 @@ from sqlmodel import Session, SQLModel, select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-prd-generation-tests")
+
 import orchestrator.api.prd as prd_api
 from orchestrator.services import agent_queue as agent_queue_module
 from orchestrator.api.models_db import PrdGenerationEvent, PrdGenerationResult, Project, Requirement
 from orchestrator.api.prd import GenerateRequest, _prepare_prd_generation_mcp_workspace
 from orchestrator.services.agent_queue import AgentTask, AgentTaskStatus
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
+
+
+class _AcquiredBrowserSlot:
+    async def __aenter__(self):
+        return True
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _AvailableBrowserPool:
+    async def get_status(self):
+        return {"available": 1}
+
+    def browser_slot(self, *args, **kwargs):
+        return _AcquiredBrowserSlot()
+
+
+async def _fake_get_browser_pool():
+    return _AvailableBrowserPool()
+
+
+async def _fake_check_system_available(operation: str):
+    return None
 
 
 def test_prd_generation_workspace_uses_playwright_test_mcp(tmp_path):
@@ -60,6 +87,203 @@ export default defineConfig({
     allowed_tools = get_agent_allowed_tools("playwright-test-planner", mcp_config_dir=run_dir)
     assert "mcp__playwright-test__planner_setup_page" in allowed_tools
     assert "mcp__playwright-test__planner_save_plan" in allowed_tools
+
+
+def test_upload_prd_uses_writable_runtime_upload_dir_and_cleans_temp_file(monkeypatch, tmp_path):
+    import orchestrator.services.load_test_lock as load_test_lock
+    import orchestrator.workflows.prd_processor as prd_processor
+
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(prd_api, "get_browser_pool", _fake_get_browser_pool)
+    monkeypatch.setattr(load_test_lock, "check_system_available", _fake_check_system_available)
+
+    captured: dict[str, Path | str | int] = {}
+
+    class FakePRDProcessor:
+        def process_prd(self, pdf_path, project_name, target_feature_count=15):
+            temp_path = Path(pdf_path)
+            captured["temp_path"] = temp_path
+            captured["project_name"] = project_name
+            captured["target_feature_count"] = target_feature_count
+
+            assert temp_path.exists()
+            assert temp_path.parent == tmp_path / "prds" / "uploads"
+            assert temp_path.name.startswith("prd_")
+            assert temp_path.name.endswith("-wetravel-manage-rooms.pdf")
+
+            return {
+                "project": project_name,
+                "features": [
+                    {
+                        "name": "Room Management",
+                        "slug": "room-management",
+                        "requirements": ["Users can manage rooms."],
+                        "content": "Room management",
+                    }
+                ],
+                "total_chunks": 1,
+                "config": {"target_feature_count": target_feature_count},
+            }
+
+    monkeypatch.setattr(prd_processor, "PRDProcessor", FakePRDProcessor)
+
+    app = FastAPI()
+    app.include_router(prd_api.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/prd/upload?project=custom-prd&target_features=12",
+        files={"file": ("wetravel-manage-rooms.pdf", b"%PDF-1.4\n", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["project"] == "custom-prd"
+    assert captured["project_name"] == "custom-prd"
+    assert captured["target_feature_count"] == 12
+    assert not captured["temp_path"].exists()
+    assert list((tmp_path / "prds" / "uploads").iterdir()) == []
+
+
+def test_upload_prd_returns_actionable_error_when_upload_storage_unwritable(monkeypatch, tmp_path):
+    import orchestrator.services.load_test_lock as load_test_lock
+    import orchestrator.workflows.prd_processor as prd_processor
+
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(prd_api, "get_browser_pool", _fake_get_browser_pool)
+    monkeypatch.setattr(load_test_lock, "check_system_available", _fake_check_system_available)
+
+    class UnexpectedPRDProcessor:
+        def process_prd(self, *args, **kwargs):
+            raise AssertionError("PRD processing should not start when upload storage is unavailable")
+
+    monkeypatch.setattr(prd_processor, "PRDProcessor", UnexpectedPRDProcessor)
+
+    original_mkdir = Path.mkdir
+
+    def fail_upload_dir_mkdir(self, *args, **kwargs):
+        if self == tmp_path / "prds" / "uploads":
+            raise PermissionError("permission denied")
+        return original_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_upload_dir_mkdir)
+
+    app = FastAPI()
+    app.include_router(prd_api.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/prd/upload",
+        files={"file": ("wetravel-manage-rooms.pdf", b"%PDF-1.4\n", "application/pdf")},
+    )
+
+    assert response.status_code == 500
+    assert "PRD upload storage is not writable" in response.json()["detail"]
+
+
+def test_upload_prd_rejects_zero_feature_processor_result(monkeypatch, tmp_path):
+    import orchestrator.services.load_test_lock as load_test_lock
+    import orchestrator.workflows.prd_processor as prd_processor
+
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(prd_api, "get_browser_pool", _fake_get_browser_pool)
+    monkeypatch.setattr(load_test_lock, "check_system_available", _fake_check_system_available)
+
+    class EmptyPRDProcessor:
+        def process_prd(self, pdf_path, project_name, target_feature_count=15):
+            return {
+                "project": project_name,
+                "features": [],
+                "total_chunks": 0,
+                "config": {"target_feature_count": target_feature_count},
+            }
+
+    monkeypatch.setattr(prd_processor, "PRDProcessor", EmptyPRDProcessor)
+
+    app = FastAPI()
+    app.include_router(prd_api.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/prd/upload",
+        files={"file": ("wetravel-manage-rooms.pdf", b"%PDF-1.4\n", "application/pdf")},
+    )
+
+    assert response.status_code == 502
+    assert "zero features" in response.json()["detail"]
+
+
+def test_upload_prd_surfaces_extraction_failure(monkeypatch, tmp_path):
+    import orchestrator.services.load_test_lock as load_test_lock
+    import orchestrator.workflows.prd_processor as prd_processor
+    from orchestrator.workflows.prd_processor import PRDProcessingError
+
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(prd_api, "get_browser_pool", _fake_get_browser_pool)
+    monkeypatch.setattr(load_test_lock, "check_system_available", _fake_check_system_available)
+
+    class FailingPRDProcessor:
+        def process_prd(self, pdf_path, project_name, target_feature_count=15):
+            raise PRDProcessingError("AI feature extraction failed for every PRD chunk.", status_code=502)
+
+    monkeypatch.setattr(prd_processor, "PRDProcessor", FailingPRDProcessor)
+
+    app = FastAPI()
+    app.include_router(prd_api.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/prd/upload",
+        files={"file": ("wetravel-manage-rooms.pdf", b"%PDF-1.4\n", "application/pdf")},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "AI feature extraction failed for every PRD chunk."
+
+
+@pytest.mark.asyncio
+async def test_list_projects_marks_empty_metadata_as_stale(monkeypatch, tmp_path):
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+    stale_dir = tmp_path / "prds" / "wetravel-manage-rooms"
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "project": "wetravel-manage-rooms",
+                "features": [],
+                "total_chunks": 0,
+                "processed_at": "2026-06-07T10:00:00",
+            }
+        )
+    )
+
+    projects = await prd_api.list_projects()
+
+    assert projects == [
+        {
+            "project": "wetravel-manage-rooms",
+            "processed_at": "2026-06-07T10:00:00",
+            "total_chunks": 0,
+            "feature_count": 0,
+            "status": "stale",
+            "message": "Previous PRD analysis produced no features. Re-upload the PDF to retry.",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_features_rejects_empty_stale_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr(prd_api, "BASE_DIR", tmp_path)
+    stale_dir = tmp_path / "prds" / "wetravel-manage-rooms"
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "metadata.json").write_text(
+        json.dumps({"project": "wetravel-manage-rooms", "features": [], "total_chunks": 0})
+    )
+
+    with pytest.raises(prd_api.HTTPException) as exc_info:
+        await prd_api.get_features("wetravel-manage-rooms")
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "Previous PRD analysis produced no features. Re-upload the PDF to retry."
 
 
 @pytest.mark.asyncio

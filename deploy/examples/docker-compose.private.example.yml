@@ -1,0 +1,73 @@
+# Example private deployment overlay.
+#
+# Usage from a private deploy repo or server checkout:
+#   docker compose --env-file env/quorvex.prod.env \
+#     -f /path/to/quorvex_ai/docker-compose.prod.yml \
+#     -f compose/docker-compose.private.yml \
+#     --profile standard up -d
+#
+# Keep real domains, credentials, bind mounts, and host-specific paths in the
+# private repo. This file is safe to copy and customize there.
+
+services:
+  backend:
+    image: ${QUORVEX_BACKEND_IMAGE:?Set QUORVEX_BACKEND_IMAGE}
+    build: !reset null
+    pull_policy: always
+    environment:
+      REQUIRE_AUTH: "true"
+      ALLOW_REGISTRATION: "false"
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Set ALLOWED_ORIGINS}
+      VNC_PUBLIC_WS_URL: ${VNC_PUBLIC_WS_URL:?Set VNC_PUBLIC_WS_URL}
+
+  backend-slim:
+    image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
+    build: !reset null
+    pull_policy: always
+    environment:
+      REQUIRE_AUTH: "true"
+      ALLOW_REGISTRATION: "false"
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Set ALLOWED_ORIGINS}
+
+  agent-worker:
+    image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
+    build: !reset null
+    pull_policy: always
+
+  autonomous-mission-worker:
+    image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
+    build: !reset null
+    pull_policy: always
+
+  custom-workflow-worker:
+    image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
+    build: !reset null
+    pull_policy: always
+
+  backup-scheduler:
+    image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
+    build: !reset null
+    pull_policy: always
+
+  archival:
+    image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
+    build: !reset null
+    pull_policy: always
+
+  frontend:
+    image: ${QUORVEX_FRONTEND_IMAGE:?Set QUORVEX_FRONTEND_IMAGE}
+    build: !reset null
+    pull_policy: always
+    environment:
+      NEXT_PUBLIC_API_URL: ${QUORVEX_PUBLIC_API_URL:-}
+      INTERNAL_API_URL: http://backend:8001
+
+  browser-workers:
+    image: ${QUORVEX_BROWSER_WORKER_IMAGE:?Set QUORVEX_BROWSER_WORKER_IMAGE}
+    build: !reset null
+    pull_policy: always
+
+  k6-workers:
+    image: ${QUORVEX_K6_WORKER_IMAGE:?Set QUORVEX_K6_WORKER_IMAGE}
+    build: !reset null
+    pull_policy: always

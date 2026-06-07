@@ -1329,8 +1329,9 @@ async def dispatch_test_subset_workflow(
         "subset_slug": subset.slug,
         "browser": request.browser or subset.default_browser,
     }
-    if request.base_url:
-        inputs["base_url"] = _validate_runner_subset_base_url(request.base_url)
+    base_url = request.base_url or project.base_url
+    if base_url:
+        inputs["base_url"] = _validate_runner_subset_base_url(base_url)
     client = await _build_github_client(project)
     try:
         await client.trigger_workflow(owner, repo, workflow_id, ref, inputs=inputs)
@@ -1574,7 +1575,10 @@ async def dispatch_workflow(
     ref = request.ref or config.get("default_ref") or "main"
     if not workflow_id:
         raise HTTPException(status_code=400, detail="workflow_id is required")
-    workflow_inputs = _validate_github_dispatch_inputs(workflow_id, request.inputs)
+    workflow_inputs_raw = dict(request.inputs or {})
+    if project.base_url and _is_runner_subset_workflow(workflow_id, workflow_inputs_raw) and not workflow_inputs_raw.get("base_url"):
+        workflow_inputs_raw["base_url"] = project.base_url
+    workflow_inputs = _validate_github_dispatch_inputs(workflow_id, workflow_inputs_raw or None)
     client = await _build_github_client(project)
     try:
         await client.trigger_workflow(owner, repo, workflow_id, ref, inputs=workflow_inputs)

@@ -90,6 +90,8 @@ export interface ExistingProject {
     project: string;
     processed_at?: string;
     feature_count: number;
+    status?: 'ready' | 'stale' | string;
+    message?: string | null;
 }
 
 export interface PrdSettings {

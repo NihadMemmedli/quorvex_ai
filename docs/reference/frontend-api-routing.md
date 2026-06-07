@@ -35,6 +35,8 @@ Use `apiUrl(path)` or `API_BASE` from `web/src/lib/api.ts` in browser components
 
 The proxy exists so deployed dashboards do not send browser traffic to a localhost backend that only exists inside the server environment.
 
+For company nginx deployments, leave `QUORVEX_PUBLIC_API_URL` and `NEXT_PUBLIC_API_URL` blank. Browser requests then use same-origin `/backend-proxy`, while the Next.js container routes those requests to `INTERNAL_API_URL=http://backend:8001` inside Compose.
+
 ## Server-Side Backend Client
 
 `web/src/lib/ai/backend-client.ts` is for Next.js server routes.

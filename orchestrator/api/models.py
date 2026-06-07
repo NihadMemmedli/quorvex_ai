@@ -1,6 +1,7 @@
 from typing import Any, Generic, TypeVar
+from urllib.parse import urlparse
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 T = TypeVar("T")
 
@@ -98,6 +99,8 @@ class BulkRunRequest(BaseModel):
     max_iterations: int | None = 20
     project_id: str | None = None  # Project to associate runs with
     model_tier: str | None = None
+    browser_auth_session_id: str | None = None
+    use_project_default_browser_auth: bool = False
 
     # Legacy fields - kept for backward compatibility
     ralph: bool | None = False
@@ -321,12 +324,36 @@ class PaginatedAutomatedSpecsResponse(BaseModel):
 # ========== Project Models ==========
 
 
+def _normalize_project_base_url(value: str | None) -> str | None:
+    """Normalize and validate the optional project application URL."""
+    if value is None:
+        return None
+
+    url = value.strip()
+    if not url:
+        return None
+
+    if any(char.isspace() for char in url):
+        raise ValueError("base_url must be an http or https URL")
+
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("base_url must be an http or https URL")
+
+    return url
+
+
 class ProjectCreate(BaseModel):
     """Request model for creating a project."""
 
     name: str
     base_url: str | None = None
     description: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str | None) -> str | None:
+        return _normalize_project_base_url(value)
 
 
 class ProjectUpdate(BaseModel):
@@ -335,6 +362,11 @@ class ProjectUpdate(BaseModel):
     name: str | None = None
     base_url: str | None = None
     description: str | None = None
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str | None) -> str | None:
+        return _normalize_project_base_url(value)
 
 
 class ProjectResponse(BaseModel):

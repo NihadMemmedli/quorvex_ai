@@ -12,6 +12,11 @@ const allSpecs = [
 ];
 
 const metadata = Object.fromEntries(allSpecs.map(spec => [spec.name, { tags: [] }]));
+const browserAuthSessions = [
+  { id: 'auth-default', name: 'Default Login', status: 'active', is_default: true },
+  { id: 'auth-expired', name: 'Expired Login', status: 'expired', is_default: false },
+  { id: 'auth-alt', name: 'Alt Login', status: 'active', is_default: false },
+];
 
 class SpecsSelectionPage {
   constructor(private readonly page: Page) {}
@@ -85,6 +90,9 @@ class SpecsSelectionPage {
       route.fulfill({ status: 200, json: { configured: false, project_id: null, suite_id: null } }),
     );
     await this.routeApi('/testrail/default/mappings', route => route.fulfill({ status: 200, json: [] }));
+    await this.routeApi('/projects/default/browser-auth-sessions', route =>
+      route.fulfill({ status: 200, json: { project_id: 'default', sessions: browserAuthSessions } }),
+    );
   }
 
   async open() {
@@ -210,5 +218,54 @@ test.describe('Specs selection', () => {
 
     await expect(page).toHaveURL(/\/specs\/wetravel-manage-rooms\/trip-publishing-customer-trip-page\.md$/);
     await expect(page.getByRole('heading', { name: 'Trip Publishing Customer Trip Page' })).toBeVisible();
+  });
+
+  test('prefills search query links and filters the specs list', async ({ page }) => {
+    const specs = new SpecsSelectionPage(page);
+    await specs.mockBackend();
+    await specs.authenticate();
+
+    await page.goto('/specs?search=Autopilot');
+
+    await expect(page.getByRole('heading', { name: 'Test Specifications' })).toBeVisible();
+    await expect(page.getByLabel('Search specs...')).toHaveValue('Autopilot');
+    await expect(specs.folderCheckbox('Autopilot')).toBeVisible();
+    await expect(specs.folderCheckbox('Api')).toHaveCount(0);
+  });
+
+  test('preselects project default browser auth and disables unusable sessions in run modal', async ({ page }) => {
+    const specs = new SpecsSelectionPage(page);
+    await specs.mockBackend();
+    await specs.open();
+
+    await page.getByRole('button', { name: 'Expand Api' }).click();
+    await page.getByLabel('Run login.md').click();
+
+    const authSelect = page.getByLabel('Browser login session');
+    await expect(authSelect).toHaveValue('project_default');
+    await expect(authSelect.locator('option[value="session:auth-expired"]')).toBeDisabled();
+  });
+
+  test('sends selected browser auth for bulk runs', async ({ page }) => {
+    const specs = new SpecsSelectionPage(page);
+    await specs.mockBackend();
+    let bulkPayload: any = null;
+    page.on('dialog', dialog => dialog.accept());
+    await specs.routeApi('/runs/bulk', async route => {
+      bulkPayload = route.request().postDataJSON();
+      await route.fulfill({ status: 200, json: { batch_id: 'batch-auth', run_ids: ['run-1'], count: 1 } });
+    });
+    await specs.open();
+
+    await page.getByRole('button', { name: 'Expand Autopilot' }).click();
+    await specs.specCheckbox('Autopilot/launch.md').click();
+    await page.getByLabel('Bulk browser login session').selectOption('session:auth-alt');
+    await specs.bulkBar().getByRole('button', { name: 'Run All (1)' }).click();
+
+    expect(bulkPayload).toMatchObject({
+      browser_auth_session_id: 'auth-alt',
+      project_id: 'default',
+    });
+    expect(bulkPayload.use_project_default_browser_auth).toBeUndefined();
   });
 });

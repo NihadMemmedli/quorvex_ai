@@ -7,8 +7,8 @@ import { API_BASE } from '@/lib/api';
 export interface Project {
     id: string;
     name: string;
-    base_url?: string;
-    description?: string;
+    base_url?: string | null;
+    description?: string | null;
     created_at: string;
     last_active?: string;
     spec_count: number;
@@ -23,8 +23,8 @@ interface ProjectContextType {
     error: string | null;
     setCurrentProject: (project: Project | null) => void;
     refreshProjects: () => Promise<Project[]>;
-    createProject: (name: string, description?: string, base_url?: string) => Promise<Project>;
-    updateProject: (id: string, updates: { name?: string; description?: string; base_url?: string }) => Promise<Project>;
+    createProject: (name: string, description?: string | null, base_url?: string | null) => Promise<Project>;
+    updateProject: (id: string, updates: { name?: string; description?: string | null; base_url?: string | null }) => Promise<Project>;
     deleteProject: (id: string) => Promise<void>;
 }
 
@@ -85,7 +85,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }, []);
 
     // Create a new project
-    const createProject = useCallback(async (name: string, description?: string, base_url?: string): Promise<Project> => {
+    const createProject = useCallback(async (name: string, description?: string | null, base_url?: string | null): Promise<Project> => {
         const response = await fetchWithAuth(`${API_BASE}/projects`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -105,7 +105,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     // Update a project
     const updateProject = useCallback(async (
         id: string,
-        updates: { name?: string; description?: string; base_url?: string }
+        updates: { name?: string; description?: string | null; base_url?: string | null }
     ): Promise<Project> => {
         const response = await fetchWithAuth(`${API_BASE}/projects/${encodeURIComponent(id)}`, {
             method: 'PUT',

@@ -130,6 +130,7 @@ async def execute_test_run(payload: dict[str, Any]) -> dict[str, Any]:
             spec_name=str(payload.get("spec_name") or ""),
             project_id=payload.get("project_id"),
             model_tier=payload.get("model_tier"),
+            storage_state_path=payload.get("storage_state_path"),
         )
 
     with Session(engine) as session:

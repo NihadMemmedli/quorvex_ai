@@ -125,6 +125,12 @@ class ApiKeyRotator:
                     or os.environ.get("ANTHROPIC_AUTH_TOKEN", "").strip()
                     or os.environ.get("ANTHROPIC_API_KEY", "").strip()
                 )
+                base_url = (
+                    os.environ.get("QUORVEX_LLM_BASE_URL", "")
+                    or os.environ.get("ANTHROPIC_BASE_URL", "")
+                ).lower()
+                if not single and ("api.z.ai" in base_url or "bigmodel.cn" in base_url):
+                    single = os.environ.get("ZAI_API_KEY", "").strip()
                 tokens = [single] if single else []
 
             self._slots = [ApiKeySlot(token=token, index=i) for i, token in enumerate(tokens)]

@@ -186,7 +186,13 @@ def list_events(
             db.close()
 
 
-def emit_work_item_status_event(item: AutonomousAgentWorkItem, message: str, *, event_type: str = "status") -> None:
+def emit_work_item_status_event(
+    item: AutonomousAgentWorkItem,
+    message: str,
+    *,
+    event_type: str = "status",
+    payload: dict[str, Any] | None = None,
+) -> None:
     create_autonomous_agent_event(
         project_id=item.project_id,
         mission_id=item.mission_id,
@@ -195,7 +201,7 @@ def emit_work_item_status_event(item: AutonomousAgentWorkItem, message: str, *, 
         agent_task_id=item.agent_task_id,
         event_type=event_type,
         message=message,
-        payload={"status": item.status, "progress": item.progress},
+        payload={"status": item.status, "progress": item.progress, **(payload or {})},
     )
 
 

@@ -4,9 +4,12 @@ from typing import Any
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
+from sqlmodel import Session
 
+from orchestrator.api.db import get_session
+from orchestrator.api.models_db import Project
 from orchestrator.services.ai_runtime_config import (
     CANONICAL_MODEL_ENV,
     DEFAULT_BASE_URL,
@@ -18,6 +21,9 @@ from orchestrator.services.ai_runtime_config import (
 )
 
 router = APIRouter()
+DEFAULT_PROJECT_ID = "default"
+DEFAULT_PROJECT_NAME = "Default Project"
+RUNTIME_SETTINGS_KEY = "ai_runtime_settings"
 
 
 class Settings(BaseModel):
@@ -126,6 +132,22 @@ def _read_env_file() -> dict:
     return env_vars
 
 
+def _ensure_default_project(session: Session) -> Project:
+    project = session.get(Project, DEFAULT_PROJECT_ID)
+    if project:
+        return project
+    project = Project(
+        id=DEFAULT_PROJECT_ID,
+        name=DEFAULT_PROJECT_NAME,
+        description="Default project for all existing and new content",
+        settings={},
+    )
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    return project
+
+
 def _write_env_file(env_vars: dict):
     """Write key-value pairs to .env file, preserving comments and structure"""
     env_file = _env_file_path()
@@ -176,6 +198,18 @@ def _is_masked_api_key(api_key: str | None) -> bool:
     if not api_key:
         return False
     return set(api_key) == {"*"} or "*" in api_key
+
+
+def _encrypt_runtime_secret(value: str) -> str:
+    from orchestrator.api.credentials import encrypt_credential
+
+    return encrypt_credential(value)
+
+
+def _decrypt_runtime_secret(value: str) -> str:
+    from orchestrator.api.credentials import decrypt_credential
+
+    return decrypt_credential(value)
 
 
 def _infer_provider(base_url: str | None) -> str:
@@ -347,8 +381,8 @@ def _check_hermes_gateway(active: dict[str, str] | None = None) -> dict[str, Any
         }
 
 
-def _active_settings(env_vars: dict[str, str] | None = None) -> dict[str, str]:
-    """Return the currently active AI settings, preferring .env then process env."""
+def _active_settings_from_env(env_vars: dict[str, str] | None = None) -> dict[str, str]:
+    """Return active AI settings from a resolved env-style mapping."""
     env_vars = env_vars if env_vars is not None else _read_env_file()
     selection = resolve_runtime_ai_selection("chat", env_vars=env_vars)
     tiers = model_tiers(env_vars)
@@ -357,24 +391,33 @@ def _active_settings(env_vars: dict[str, str] | None = None) -> dict[str, str]:
     provider_label = env_vars.get("QUORVEX_LLM_PROVIDER") or os.environ.get("QUORVEX_LLM_PROVIDER") or ""
     if provider_label in {"anthropic_compatible", "openai_compatible"}:
         provider_label = _infer_provider(base_url)
-    if provider_label == "openai":
-        api_key = (
-            env_vars.get("QUORVEX_LLM_API_KEY")
-            or env_vars.get("OPENAI_API_KEY")
-            or os.environ.get("QUORVEX_LLM_API_KEY", "")
-            or os.environ.get("OPENAI_API_KEY", "")
+    if selection.provider == "anthropic_compatible":
+        model_name = (
+            env_vars.get("QUORVEX_LLM_DEEP_MODEL")
+            or env_vars.get("ANTHROPIC_MODEL")
+            or env_vars.get("ANTHROPIC_DEFAULT_OPUS_MODEL")
+            or selection.model
         )
-    else:
-        api_key = (
-            env_vars.get("QUORVEX_LLM_API_KEY")
-            or env_vars.get("QUORVEX_LLM_API_KEYS", "").split(",", 1)[0].strip()
-            or env_vars.get("ANTHROPIC_AUTH_TOKEN")
-            or env_vars.get("ANTHROPIC_API_KEY")
-            or os.environ.get("QUORVEX_LLM_API_KEY", "")
-            or os.environ.get("QUORVEX_LLM_API_KEYS", "").split(",", 1)[0].strip()
-            or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
-            or os.environ.get("ANTHROPIC_API_KEY", "")
-        )
+    api_key = selection.api_key
+    if not api_key:
+        if provider_label == "openai":
+            api_key = (
+                env_vars.get("QUORVEX_LLM_API_KEY")
+                or env_vars.get("OPENAI_API_KEY")
+                or os.environ.get("QUORVEX_LLM_API_KEY", "")
+                or os.environ.get("OPENAI_API_KEY", "")
+            )
+        else:
+            api_key = (
+                env_vars.get("QUORVEX_LLM_API_KEY")
+                or env_vars.get("QUORVEX_LLM_API_KEYS", "").split(",", 1)[0].strip()
+                or env_vars.get("ANTHROPIC_AUTH_TOKEN")
+                or env_vars.get("ANTHROPIC_API_KEY")
+                or os.environ.get("QUORVEX_LLM_API_KEY", "")
+                or os.environ.get("QUORVEX_LLM_API_KEYS", "").split(",", 1)[0].strip()
+                or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
+                or os.environ.get("ANTHROPIC_API_KEY", "")
+            )
     agent_runtime = _normalize_runtime(env_vars.get("QUORVEX_AGENT_RUNTIME") or os.environ.get("QUORVEX_AGENT_RUNTIME"))
     return {
         "base_url": base_url,
@@ -407,6 +450,156 @@ def _active_settings(env_vars: dict[str, str] | None = None) -> dict[str, str]:
         "hermes_upstream_model": env_vars.get("HERMES_UPSTREAM_MODEL") or os.environ.get("HERMES_UPSTREAM_MODEL", ""),
         "hermes_home": env_vars.get("HERMES_HOME") or os.environ.get("HERMES_HOME", ""),
     }
+
+
+def _settings_to_env_vars(settings: dict[str, Any]) -> dict[str, str]:
+    env_vars: dict[str, str] = {}
+    provider = str(settings.get("llm_provider") or "zai")
+    base_url = str(settings.get("base_url") or DEFAULT_ANTHROPIC_BASE_URL).rstrip("/")
+    api_key = _decrypt_runtime_secret(str(settings.get("api_key_encrypted") or ""))
+    hermes_api_key = _decrypt_runtime_secret(str(settings.get("hermes_api_key_encrypted") or ""))
+
+    env_vars["QUORVEX_LLM_PROVIDER"] = provider
+    env_vars["QUORVEX_LLM_BASE_URL"] = base_url
+    env_vars["ANTHROPIC_BASE_URL"] = base_url
+    if provider == "openai":
+        env_vars["OPENAI_BASE_URL"] = base_url
+    if api_key:
+        env_vars["QUORVEX_LLM_API_KEY"] = api_key
+        env_vars["QUORVEX_LLM_API_KEYS"] = ""
+        if provider == "openai":
+            env_vars["OPENAI_API_KEY"] = api_key
+        else:
+            env_vars["ANTHROPIC_AUTH_TOKEN"] = api_key
+            env_vars["ANTHROPIC_API_KEY"] = api_key
+            env_vars["ANTHROPIC_AUTH_TOKENS"] = ""
+
+    tiers = {
+        "light": settings.get("light_model"),
+        "standard": settings.get("standard_model") or settings.get("model_name"),
+        "deep": settings.get("deep_model") or settings.get("model_name"),
+        "tool_deep": settings.get("tool_deep_model") or settings.get("deep_model") or settings.get("model_name"),
+        "chat": settings.get("chat_model") or settings.get("standard_model") or settings.get("model_name"),
+        "embedding": settings.get("embedding_model"),
+    }
+    for tier, model in tiers.items():
+        if model and tier in CANONICAL_MODEL_ENV:
+            env_vars[CANONICAL_MODEL_ENV[tier]] = str(model)
+    if tiers.get("light"):
+        env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = str(tiers["light"])
+    if tiers.get("standard"):
+        env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] = str(tiers["standard"])
+        env_vars["ANTHROPIC_MODEL"] = str(tiers["standard"])
+        if provider == "openai":
+            env_vars["OPENAI_MODEL_ID"] = str(tiers["standard"])
+    if tiers.get("deep"):
+        env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] = str(tiers["deep"])
+    if tiers.get("chat"):
+        env_vars["ANTHROPIC_CHAT_MODEL"] = str(tiers["chat"])
+        if provider == "openai":
+            env_vars["OPENAI_CHAT_MODEL"] = str(tiers["chat"])
+    if tiers.get("embedding"):
+        env_vars["EMBEDDING_MODEL"] = str(tiers["embedding"])
+
+    env_vars["QUORVEX_AGENT_RUNTIME"] = _normalize_runtime(str(settings.get("agent_runtime") or "claude_sdk"))
+    env_vars["QUORVEX_ASSISTANT_RUNTIME"] = _normalize_assistant_runtime(
+        str(settings.get("assistant_runtime") or env_vars["QUORVEX_AGENT_RUNTIME"])
+    )
+    env_vars["HERMES_ENABLED"] = "true" if bool(settings.get("hermes_enabled")) else "false"
+    env_vars["HERMES_API_URL"] = str(settings.get("hermes_api_url") or DEFAULT_HERMES_API_URL).rstrip("/")
+    env_vars["HERMES_MODEL"] = str(settings.get("hermes_model") or DEFAULT_HERMES_MODEL)
+    env_vars["HERMES_SYNC_PROVIDER"] = "true" if bool(settings.get("hermes_sync_provider", True)) else "false"
+    if hermes_api_key:
+        env_vars["HERMES_API_KEY"] = hermes_api_key
+    for source_key, env_key in (
+        ("hermes_home", "HERMES_HOME"),
+        ("hermes_upstream_provider", "HERMES_UPSTREAM_PROVIDER"),
+        ("hermes_upstream_model", "HERMES_UPSTREAM_MODEL"),
+    ):
+        if settings.get(source_key):
+            env_vars[env_key] = str(settings[source_key])
+    return env_vars
+
+
+def _settings_from_active(active: dict[str, str]) -> dict[str, Any]:
+    return {
+        "llm_provider": active["llm_provider"],
+        "base_url": active["base_url"],
+        "model_name": active["model_name"],
+        "light_model": active["light_model"],
+        "standard_model": active["standard_model"],
+        "deep_model": active["deep_model"],
+        "tool_deep_model": active["tool_deep_model"],
+        "chat_model": active["chat_model"],
+        "embedding_model": active["embedding_model"],
+        "api_key_encrypted": _encrypt_runtime_secret(active["api_key"]) if active.get("api_key") else "",
+        "agent_runtime": active["agent_runtime"],
+        "assistant_runtime": active["assistant_runtime"],
+        "hermes_enabled": _is_truthy(active["hermes_enabled"]),
+        "hermes_api_url": active["hermes_api_url"],
+        "hermes_api_key_encrypted": _encrypt_runtime_secret(active["hermes_api_key"]) if active.get("hermes_api_key") else "",
+        "hermes_model": active["hermes_model"],
+        "hermes_sync_provider": _is_truthy(active["hermes_sync_provider"], default=True),
+        "hermes_upstream_provider": active["hermes_upstream_provider"],
+        "hermes_upstream_model": active["hermes_upstream_model"],
+        "hermes_home": active["hermes_home"],
+    }
+
+
+def _db_runtime_settings(session: Session, *, initialize: bool = True) -> dict[str, Any] | None:
+    project = _ensure_default_project(session)
+    project_settings = dict(project.settings or {})
+    runtime_settings = project_settings.get(RUNTIME_SETTINGS_KEY)
+    if isinstance(runtime_settings, dict):
+        return runtime_settings
+    if not initialize:
+        return None
+
+    runtime_settings = _settings_from_active(_active_settings_from_env(_read_env_file()))
+    project_settings[RUNTIME_SETTINGS_KEY] = runtime_settings
+    project.settings = project_settings
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+    return runtime_settings
+
+
+def _save_db_runtime_settings(session: Session, runtime_settings: dict[str, Any]) -> None:
+    project = _ensure_default_project(session)
+    project_settings = dict(project.settings or {})
+    project_settings[RUNTIME_SETTINGS_KEY] = runtime_settings
+    project.settings = project_settings
+    session.add(project)
+    session.commit()
+    session.refresh(project)
+
+
+def runtime_env_vars(session: Session | None = None) -> dict[str, str]:
+    """Return Settings-backed runtime values as env-style keys, falling back to env bootstrap."""
+    if session is not None:
+        runtime_settings = _db_runtime_settings(session)
+        return _settings_to_env_vars(runtime_settings or {})
+    try:
+        from orchestrator.api.db import engine
+
+        with Session(engine) as db_session:
+            runtime_settings = _db_runtime_settings(db_session)
+            return _settings_to_env_vars(runtime_settings or {})
+    except Exception:
+        return _read_env_file()
+
+
+def _coerce_session(session: Any) -> tuple[Session, bool]:
+    if isinstance(session, Session):
+        return session, False
+    from orchestrator.api.db import engine
+
+    return Session(engine), True
+
+
+def _active_settings(env_vars: dict[str, str] | None = None, session: Session | None = None) -> dict[str, str]:
+    """Return active AI settings, preferring DB-backed Settings over env bootstrap."""
+    return _active_settings_from_env(env_vars if env_vars is not None else runtime_env_vars(session))
 
 
 def _apply_runtime_settings(env_vars: dict[str, str], new_api_key: str | None = None):
@@ -511,30 +704,40 @@ def _settings_response(env_vars: dict[str, str] | None = None) -> dict[str, Any]
 
 
 @router.get("/settings")
-def get_settings():
-    """Get current settings from .env file (masked sensitive data)"""
-    return _settings_response()
+def get_settings(session: Session = Depends(get_session)):
+    """Get current Settings-backed runtime settings (masked sensitive data)."""
+    db_session, should_close = _coerce_session(session)
+    try:
+        return _settings_response(runtime_env_vars(db_session))
+    finally:
+        if should_close:
+            db_session.close()
 
 
 @router.post("/settings")
-def update_settings(new_settings: Settings):
-    """Update settings in .env file and apply them to the running process."""
+def update_settings(new_settings: Settings, session: Session = Depends(get_session)):
+    """Update Settings-backed runtime configuration and apply it to this process."""
+    db_session, should_close = _coerce_session(session)
+    try:
+        return _update_settings(new_settings, db_session)
+    finally:
+        if should_close:
+            db_session.close()
 
-    # Read existing env vars
-    env_vars = _read_env_file()
 
-    # Update fields
-    provider_value = new_settings.llm_provider or env_vars.get("QUORVEX_LLM_PROVIDER") or os.environ.get("QUORVEX_LLM_PROVIDER", "")
+def _update_settings(new_settings: Settings, session: Session):
+    existing = dict(_db_runtime_settings(session) or {})
+    env_vars = _settings_to_env_vars(existing) if existing else runtime_env_vars(session)
+    active = _active_settings_from_env(env_vars)
+
+    runtime_settings = _settings_from_active(active)
+    provider_value = new_settings.llm_provider or runtime_settings.get("llm_provider") or "zai"
+    runtime_settings["llm_provider"] = provider_value
 
     if new_settings.base_url:
-        base_url = new_settings.base_url.rstrip("/")
-        env_vars["QUORVEX_LLM_BASE_URL"] = base_url
-        env_vars["ANTHROPIC_BASE_URL"] = base_url
-        if provider_value == "openai":
-            env_vars["OPENAI_BASE_URL"] = base_url
-
-    if new_settings.llm_provider:
-        env_vars["QUORVEX_LLM_PROVIDER"] = new_settings.llm_provider
+        runtime_settings["base_url"] = new_settings.base_url.rstrip("/")
+    if new_settings.model_name:
+        runtime_settings["model_name"] = new_settings.model_name
 
     tier_updates: dict[RuntimeModelTier, str] = {}
     if new_settings.model_tiers:
@@ -552,8 +755,15 @@ def update_settings(new_settings: Settings):
         if model:
             tier_updates[tier] = model  # type: ignore[assignment]
 
+    previous_tiers = {
+        "light": runtime_settings.get("light_model") or active["light_model"],
+        "standard": runtime_settings.get("standard_model") or active["standard_model"],
+        "deep": runtime_settings.get("deep_model") or active["deep_model"],
+        "tool_deep": runtime_settings.get("tool_deep_model") or active["tool_deep_model"],
+        "chat": runtime_settings.get("chat_model") or active["chat_model"],
+        "embedding": runtime_settings.get("embedding_model") or active["embedding_model"],
+    }
     if new_settings.model_name and tier_updates:
-        previous_tiers = model_tiers(env_vars)
         standard_unchanged = (new_settings.standard_model or previous_tiers["standard"]) == previous_tiers["standard"]
         chat_unchanged = (new_settings.chat_model or previous_tiers["chat"]) == previous_tiers["chat"]
         if standard_unchanged and chat_unchanged and new_settings.model_name != previous_tiers["chat"]:
@@ -564,63 +774,49 @@ def update_settings(new_settings: Settings):
         tier_updates["chat"] = new_settings.model_name
 
     for tier, model in tier_updates.items():
-        env_vars[CANONICAL_MODEL_ENV[tier]] = model
-        if tier == "light":
-            env_vars["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model
-        elif tier == "standard":
-            env_vars["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model
-            env_vars["ANTHROPIC_MODEL"] = model
-        elif tier == "deep":
-            env_vars["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model
-        elif tier == "chat":
-            env_vars["ANTHROPIC_CHAT_MODEL"] = model
-            if provider_value == "openai":
-                env_vars["OPENAI_CHAT_MODEL"] = model
-        elif tier == "embedding":
-            env_vars["EMBEDDING_MODEL"] = model
-        if provider_value == "openai" and tier == "standard":
-            env_vars["OPENAI_MODEL_ID"] = model
+        runtime_settings[f"{tier}_model"] = model
+    if runtime_settings.get("standard_model"):
+        runtime_settings["model_name"] = runtime_settings["standard_model"]
 
-    env_vars["QUORVEX_AGENT_RUNTIME"] = _normalize_runtime(
-        new_settings.agent_runtime or env_vars.get("QUORVEX_AGENT_RUNTIME") or os.environ.get("QUORVEX_AGENT_RUNTIME")
+    runtime_settings["agent_runtime"] = _normalize_runtime(
+        new_settings.agent_runtime or str(runtime_settings.get("agent_runtime") or "claude_sdk")
     )
-    env_vars["QUORVEX_ASSISTANT_RUNTIME"] = _normalize_assistant_runtime(
+    runtime_settings["assistant_runtime"] = _normalize_assistant_runtime(
         new_settings.assistant_runtime
-        or env_vars.get("QUORVEX_ASSISTANT_RUNTIME")
-        or os.environ.get("QUORVEX_ASSISTANT_RUNTIME")
-        or env_vars.get("QUORVEX_AGENT_RUNTIME")
+        or str(runtime_settings.get("assistant_runtime") or runtime_settings["agent_runtime"])
     )
 
     if new_settings.hermes_enabled is not None:
-        env_vars["HERMES_ENABLED"] = "true" if new_settings.hermes_enabled else "false"
+        runtime_settings["hermes_enabled"] = new_settings.hermes_enabled
     if new_settings.hermes_api_url:
-        env_vars["HERMES_API_URL"] = new_settings.hermes_api_url.rstrip("/")
+        runtime_settings["hermes_api_url"] = new_settings.hermes_api_url.rstrip("/")
     if new_settings.hermes_model:
-        env_vars["HERMES_MODEL"] = new_settings.hermes_model
+        runtime_settings["hermes_model"] = new_settings.hermes_model
     if new_settings.hermes_sync_provider is not None:
-        env_vars["HERMES_SYNC_PROVIDER"] = "true" if new_settings.hermes_sync_provider else "false"
+        runtime_settings["hermes_sync_provider"] = new_settings.hermes_sync_provider
 
     new_api_key = None
     if new_settings.api_key and not _is_masked_api_key(new_settings.api_key):
         new_api_key = new_settings.api_key
-        env_vars["QUORVEX_LLM_API_KEY"] = new_settings.api_key
-        env_vars["QUORVEX_LLM_API_KEYS"] = ""
-        if provider_value == "openai":
-            env_vars["OPENAI_API_KEY"] = new_settings.api_key
-        else:
-            env_vars["ANTHROPIC_AUTH_TOKEN"] = new_settings.api_key
-            env_vars["ANTHROPIC_API_KEY"] = new_settings.api_key
-            env_vars["ANTHROPIC_AUTH_TOKENS"] = ""
+        runtime_settings["api_key_encrypted"] = _encrypt_runtime_secret(new_settings.api_key)
+    elif "api_key_encrypted" not in runtime_settings:
+        runtime_settings["api_key_encrypted"] = ""
 
     if new_settings.hermes_api_key and not _is_masked_api_key(new_settings.hermes_api_key):
-        env_vars["HERMES_API_KEY"] = new_settings.hermes_api_key
+        runtime_settings["hermes_api_key_encrypted"] = _encrypt_runtime_secret(new_settings.hermes_api_key)
+    elif "hermes_api_key_encrypted" not in runtime_settings:
+        runtime_settings["hermes_api_key_encrypted"] = ""
 
+    env_vars = _settings_to_env_vars(runtime_settings)
     hermes_bundle = None
     if _is_truthy(env_vars.get("HERMES_SYNC_PROVIDER"), default=True):
-        hermes_bundle = _write_hermes_provider_bundle(_active_settings(env_vars), env_vars)
+        hermes_bundle = _write_hermes_provider_bundle(_active_settings_from_env(env_vars), env_vars)
+        runtime_settings["hermes_home"] = hermes_bundle["home"]
+        runtime_settings["hermes_upstream_provider"] = hermes_bundle["provider"]
+        runtime_settings["hermes_upstream_model"] = hermes_bundle["model"]
+        env_vars = _settings_to_env_vars(runtime_settings)
 
-    # Write back to .env file
-    _write_env_file(env_vars)
+    _save_db_runtime_settings(session, runtime_settings)
     _apply_runtime_settings(env_vars, new_api_key=new_api_key)
 
     settings_response = _settings_response(env_vars)
@@ -643,9 +839,14 @@ def update_settings(new_settings: Settings):
 
 
 @router.post("/settings/test-hermes", response_model=HermesConnectionResult)
-async def test_hermes_connection():
+async def test_hermes_connection(session: Session = Depends(get_session)):
     """Test the Hermes API server and generated Hermes home bundle."""
-    active = _active_settings()
+    db_session, should_close = _coerce_session(session)
+    try:
+        active = _active_settings(session=db_session)
+    finally:
+        if should_close:
+            db_session.close()
     hermes_home = active["hermes_home"] or str(_hermes_config_dir())
     config_path = str(Path(hermes_home) / "config.yaml")
     env_path = str(Path(hermes_home) / ".env")
@@ -694,10 +895,16 @@ async def test_hermes_connection():
 
 
 @router.post("/settings/test-connection", response_model=SettingsConnectionResult)
-async def test_settings_connection():
+async def test_settings_connection(session: Session = Depends(get_session)):
     """Test the currently active runtime AI settings without exposing secrets."""
-    active = _active_settings()
-    selection = resolve_runtime_ai_selection("chat", env_vars=_read_env_file())
+    db_session, should_close = _coerce_session(session)
+    try:
+        env_vars = runtime_env_vars(db_session)
+    finally:
+        if should_close:
+            db_session.close()
+    active = _active_settings(env_vars)
+    selection = resolve_runtime_ai_selection("chat", env_vars=env_vars)
     api_key = active["api_key"]
     base_url = (selection.base_url or DEFAULT_ANTHROPIC_BASE_URL).rstrip("/")
     model_name = selection.model
@@ -818,3 +1025,52 @@ async def test_settings_connection():
             message=str(e),
             latency_ms=latency_ms,
         )
+
+
+@router.get("/settings/runtime-chat")
+def get_runtime_chat_settings(
+    session: Session = Depends(get_session),
+    internal_caller: str | None = Header(default=None, alias="X-Quorvex-Internal-Caller"),
+):
+    """Return resolved secret-bearing runtime settings for server-side chat routing."""
+    if internal_caller != "web-chat":
+        raise HTTPException(status_code=403, detail="Runtime chat settings are only available to server-side chat.")
+    db_session, should_close = _coerce_session(session)
+    try:
+        env_vars = runtime_env_vars(db_session)
+    finally:
+        if should_close:
+            db_session.close()
+    active = _active_settings(env_vars)
+    assistant_runtime = active["assistant_runtime"]
+    hermes_enabled = _is_truthy(active["hermes_enabled"])
+    if assistant_runtime == "hermes" and hermes_enabled:
+        route_provider = "hermes"
+    elif assistant_runtime == "openai" or active["llm_provider"] == "openai":
+        route_provider = "openai"
+    else:
+        route_provider = "anthropic"
+    return {
+        "route_provider": route_provider,
+        "llm_provider": active["llm_provider"],
+        "assistant_runtime": assistant_runtime,
+        "agent_runtime": active["agent_runtime"],
+        "base_url": active["base_url"],
+        "api_key": active["api_key"],
+        "model_name": active["model_name"],
+        "chat_model": active["chat_model"],
+        "standard_model": active["standard_model"],
+        "model_tiers": {
+            "light": active["light_model"],
+            "standard": active["standard_model"],
+            "deep": active["deep_model"],
+            "tool_deep": active["tool_deep_model"],
+            "chat": active["chat_model"],
+            "embedding": active["embedding_model"],
+        },
+        "hermes_enabled": hermes_enabled,
+        "hermes_api_url": active["hermes_api_url"],
+        "hermes_api_key": active["hermes_api_key"],
+        "hermes_model": active["hermes_model"],
+        "source": "settings",
+    }

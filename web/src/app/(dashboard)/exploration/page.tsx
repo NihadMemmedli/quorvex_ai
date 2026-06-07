@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { Compass, Plus, Play, Square, Eye, FileText, Clock, Globe, Zap, Activity, X, Loader2, Bot, Terminal, ChevronRight, CheckCircle2, AlertTriangle, RotateCcw, Lock, Settings, Download, Sparkles, ArrowRight, Info, RefreshCw, Scissors, ExternalLink, Edit, Trash2, Save, Video as VideoIcon, Monitor, Image as ImageIcon } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
+import { applyProjectDefaultUrl, getProjectDefaultUrl, trimUrlInput } from '@/lib/project-url';
 import { useJobPoller } from '@/hooks/useJobPoller';
 import { WorkflowBreadcrumb } from '@/components/workflow/WorkflowBreadcrumb';
 import { PageLayout } from '@/components/ui/page-layout';
@@ -10,6 +11,12 @@ import { PageHeader } from '@/components/ui/page-header';
 import { EmptyState } from '@/components/ui/empty-state';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
 import { LiveBrowserView } from '@/components/LiveBrowserView';
+import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
+import {
+    browserAuthSessionLabel,
+    fetchProjectBrowserAuthSessions,
+    isBrowserAuthSessionSelectable,
+} from '@/lib/browser-auth-sessions';
 
 // ============ SESSIONS TAB TYPES ============
 interface ExplorationSession {
@@ -284,6 +291,8 @@ async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 15000): Promise<
 
 export default function DiscoveryPage() {
     const { currentProject, isLoading: projectLoading } = useProject();
+    const projectDefaultUrl = getProjectDefaultUrl(currentProject);
+    const previousProjectDefaultUrlRef = useRef('');
 
     // ============ TAB STATE ============
     const [activeTab, setActiveTab] = useState<TabType>('sessions');
@@ -353,7 +362,7 @@ export default function DiscoveryPage() {
     const [isAgentStarting, setIsAgentStarting] = useState(false);
     const [isSynthesizing, setIsSynthesizing] = useState(false);
     const [showAdvanced, setShowAdvanced] = useState(false);
-    const [agentSessions, setAgentSessions] = useState<any[]>([]);
+    const [agentSessions, setAgentSessions] = useState<BrowserAuthSession[]>([]);
     const [flowModalOpen, setFlowModalOpen] = useState(false);
     const [selectedFlow, setSelectedFlow] = useState<any | null>(null);
     const [loadingFlowDetails, setLoadingFlowDetails] = useState(false);
@@ -372,6 +381,11 @@ export default function DiscoveryPage() {
     const [hermesStatusMessage, setHermesStatusMessage] = useState('');
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
     const hasRunningRef = useRef(false);
+
+    useEffect(() => {
+        setEntryUrl(prev => applyProjectDefaultUrl(prev, projectDefaultUrl, previousProjectDefaultUrlRef.current));
+        previousProjectDefaultUrlRef.current = projectDefaultUrl;
+    }, [projectDefaultUrl]);
 
     const fetchRuntimeSettings = async () => {
         try {
@@ -476,7 +490,8 @@ export default function DiscoveryPage() {
     }, [fetchSessions, activeTab]);
 
     const startExploration = async () => {
-        if (!entryUrl || isStarting) return;
+        const targetUrl = trimUrlInput(entryUrl);
+        if (!targetUrl || isStarting) return;
 
         setIsStarting(true);
 
@@ -500,7 +515,7 @@ export default function DiscoveryPage() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    entry_url: entryUrl,
+                    entry_url: targetUrl,
                     project_id: currentProject?.id || 'default',
                     strategy: explorationMode === 'api_focused' ? 'api_focused' : 'goal_directed',
                     login_url: loginUrl || undefined,
@@ -515,7 +530,7 @@ export default function DiscoveryPage() {
 
             if (res.ok) {
                 setModalOpen(false);
-                setEntryUrl('');
+                setEntryUrl(projectDefaultUrl);
                 setLoginUrl('');
                 setLoginUsername('');
                 setLoginPassword('');
@@ -1116,13 +1131,14 @@ export default function DiscoveryPage() {
     };
 
     const fetchAgentSessions = async () => {
+        if (!currentProject?.id) {
+            setAgentSessions([]);
+            setAgentSessionId('');
+            return;
+        }
         try {
-            const res = await fetch(`${API_BASE}/api/agents/sessions`);
-            if (res.ok) {
-                const data = await res.json();
-                setAgentSessions(data.sessions || []);
-            }
-        } catch (e) { console.error("Failed to fetch sessions", e); }
+            setAgentSessions(await fetchProjectBrowserAuthSessions(currentProject.id));
+        } catch (e) { console.error("Failed to fetch browser login sessions", e); }
     };
 
     useEffect(() => {
@@ -1462,8 +1478,23 @@ export default function DiscoveryPage() {
 
         setIsAgentStarting(true);
         try {
+            const selectedBrowserAuthSessionId = authType === 'session' ? agentSessionId.trim() : '';
+            if (authType === 'session' && !selectedBrowserAuthSessionId) {
+                alert("Select a browser login session");
+                setIsAgentStarting(false);
+                return;
+            }
+            const selectedBrowserAuthSession = selectedBrowserAuthSessionId
+                ? agentSessions.find(session => session.id === selectedBrowserAuthSessionId)
+                : undefined;
+            if (selectedBrowserAuthSessionId && (!selectedBrowserAuthSession || !isBrowserAuthSessionSelectable(selectedBrowserAuthSession))) {
+                alert("Select an active browser login session");
+                setIsAgentStarting(false);
+                return;
+            }
+
             let authConfig: any = null;
-            if (authType !== 'none') {
+            if (authType !== 'none' && authType !== 'session') {
                 authConfig = { type: authType };
                 if (authType === 'credentials') {
                     authConfig.credentials = {
@@ -1471,8 +1502,6 @@ export default function DiscoveryPage() {
                         password: authCredentials.password
                     };
                     authConfig.login_url = authCredentials.loginUrl;
-                } else if (authType === 'session') {
-                    authConfig.session_id = agentSessionId;
                 }
             }
 
@@ -1493,16 +1522,17 @@ export default function DiscoveryPage() {
             const endpoint = `${API_BASE}/api/agents/exploratory`;
 
             const body = {
-                    url: agentUrl,
-                    time_limit_minutes: timeLimitMinutes,
-                    instructions,
-                    auth: authConfig,
-                    test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
-                    focus_areas: focusAreasList.length > 0 ? focusAreasList : undefined,
-                    excluded_patterns: excludedPatternsList.length > 0 ? excludedPatternsList : undefined,
-                    runtime: agentRuntime,
-                    project_id: currentProject?.id
-                };
+                url: agentUrl,
+                time_limit_minutes: timeLimitMinutes,
+                instructions,
+                auth: authConfig,
+                browser_auth_session_id: selectedBrowserAuthSessionId || undefined,
+                test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
+                focus_areas: focusAreasList.length > 0 ? focusAreasList : undefined,
+                excluded_patterns: excludedPatternsList.length > 0 ? excludedPatternsList : undefined,
+                runtime: agentRuntime,
+                project_id: currentProject?.id
+            };
 
             const res = await fetch(endpoint, {
                 method: 'POST',
@@ -2096,7 +2126,7 @@ export default function DiscoveryPage() {
                     <div className="card" style={{ padding: '0', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                         <div style={{ padding: '1rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                             <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>Run History</h3>
-                            <button onClick={fetchHistory} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)' }}>
+                            <button className="btn-icon" type="button" onClick={fetchHistory} title="Refresh run history" aria-label="Refresh run history">
                                 <RotateCcw size={14} />
                             </button>
                         </div>
@@ -2205,7 +2235,7 @@ export default function DiscoveryPage() {
                                 >
                                     <option value="none">No Authentication</option>
                                     <option value="credentials">Credentials (Login Form)</option>
-                                    <option value="session">Session (Saved)</option>
+                                    <option value="session">Browser Login Session</option>
                                 </select>
                             </div>
 
@@ -2255,25 +2285,26 @@ export default function DiscoveryPage() {
 
                             {authType === 'session' && (
                                 <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '6px' }}>
-                                    <label style={{ fontSize: '0.75rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>Session ID</label>
-                                    <input
-                                        type="text"
-                                        placeholder="my-session"
+                                    <label style={{ fontSize: '0.75rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>Browser Login Session</label>
+                                    <select
                                         value={agentSessionId}
                                         onChange={e => setAgentSessionId(e.target.value)}
-                                        list="sessions-list"
                                         style={{
                                             width: '100%', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem',
                                             border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
                                         }}
-                                    />
-                                    <datalist id="sessions-list">
+                                    >
+                                        <option value="">Select a browser login session</option>
                                         {agentSessions.map(s => (
-                                            <option key={s.session_id} value={s.session_id} />
+                                            <option key={s.id} value={s.id} disabled={!isBrowserAuthSessionSelectable(s)}>
+                                                {browserAuthSessionLabel(s)}
+                                            </option>
                                         ))}
-                                    </datalist>
+                                    </select>
                                     <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-                                        {agentSessions.length} saved session{agentSessions.length !== 1 ? 's' : ''} available
+                                        {agentSessions.length === 0
+                                            ? 'No browser login sessions found in Settings.'
+                                            : `${agentSessions.filter(isBrowserAuthSessionSelectable).length} active browser login session${agentSessions.filter(isBrowserAuthSessionSelectable).length !== 1 ? 's' : ''} available`}
                                     </p>
                                 </div>
                             )}
@@ -2664,7 +2695,7 @@ export default function DiscoveryPage() {
                             <button
                                 className="btn btn-primary"
                                 onClick={startExploration}
-                                disabled={!entryUrl || isStarting}
+                                disabled={!trimUrlInput(entryUrl) || isStarting}
                                 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
                             >
                                 {isStarting ? <Loader2 size={16} className="spinning" /> : <Play size={16} />}
