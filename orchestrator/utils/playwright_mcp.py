@@ -354,6 +354,24 @@ def _redact_storage_state_args(args: list[str]) -> list[str]:
     return redacted
 
 
+def resolve_run_playwright_config(output_dir: Path | str | None = None) -> Path | None:
+    """Return the run-local Playwright config when one is available."""
+    candidates: list[Path] = []
+    if output_dir:
+        candidates.append(Path(output_dir) / "playwright.config.ts")
+    candidates.append(Path.cwd() / "playwright.config.ts")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def playwright_config_cli_arg(output_dir: Path | str | None = None) -> str:
+    """Return a shell-safe Playwright --config argument for run-local execution."""
+    config_path = resolve_run_playwright_config(output_dir)
+    return f" --config {shlex.quote(str(config_path))}" if config_path else ""
+
+
 def prepare_run_playwright_config_content(
     config_content: str,
     *,

@@ -57,6 +57,9 @@ class TestRun(SQLModel, table=True):
     # Compact summary of agentic QA artifacts. Full artifacts stay in run directory.
     agentic_summary: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
 
+    # Browser auth intent/resolution for audit, rerun inheritance, and diagnostics.
+    browser_auth: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+
     # We can store heavy JSONs as text/jsonb if needed, or stick to file for big logs.
     # For now, let's keep metadata in DB.
 
@@ -301,6 +304,7 @@ class AgentDefinition(SQLModel, table=True):
     model_tier: str | None = None
     timeout_seconds: int = 1800
     tool_ids_json: str = "[]"
+    test_data_refs_json: str = Field(default="[]", sa_column=Column(Text))
     status: str = "active"  # active, archived
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -316,6 +320,18 @@ class AgentDefinition(SQLModel, table=True):
     @tool_ids.setter
     def tool_ids(self, value: list[str]):
         self.tool_ids_json = json.dumps(value)
+
+    @property
+    def test_data_refs(self) -> list[str]:
+        try:
+            value = json.loads(self.test_data_refs_json or "[]")
+            return [str(item) for item in value if item]
+        except json.JSONDecodeError:
+            return []
+
+    @test_data_refs.setter
+    def test_data_refs(self, value: list[str]):
+        self.test_data_refs_json = json.dumps([str(item) for item in value if item])
 
 
 class WorkflowDefinition(SQLModel, table=True):
@@ -1009,6 +1025,103 @@ class BrowserAuthSession(SQLModel, table=True):
     failure_reason: str | None = Field(default=None, sa_column=Column(Text))
 
 
+class TestDataSet(SQLModel, table=True):
+    """Project-scoped reusable test data collection."""
+
+    __tablename__ = "test_data_sets"
+    __table_args__ = (
+        Index("ix_test_data_sets_project_status", "project_id", "status"),
+        Index("ix_test_data_sets_project_format", "project_id", "format"),
+        UniqueConstraint("project_id", "key", name="uq_test_data_sets_project_key"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    project_id: str = Field(foreign_key="projects.id", index=True)
+    key: str = Field(index=True)
+    name: str
+    description: str = ""
+    tags_json: str = Field(default="[]", sa_column=Column(Text))
+    status: str = Field(default="active", index=True)  # active, archived
+    format: str = Field(default="json", index=True)  # json, text, mixed
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def tags(self) -> list[str]:
+        try:
+            value = json.loads(self.tags_json or "[]")
+            return [str(item) for item in value if str(item).strip()]
+        except json.JSONDecodeError:
+            return []
+
+    @tags.setter
+    def tags(self, value: list[str]):
+        self.tags_json = json.dumps([str(item).strip() for item in value if str(item).strip()])
+
+
+class TestDataItem(SQLModel, table=True):
+    """One project-scoped test data fixture item."""
+
+    __tablename__ = "test_data_items"
+    __table_args__ = (
+        Index("ix_test_data_items_dataset_status", "dataset_id", "status"),
+        UniqueConstraint("dataset_id", "key", name="uq_test_data_items_dataset_key"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
+    dataset_id: str = Field(foreign_key="test_data_sets.id", index=True)
+    key: str = Field(index=True)
+    name: str = ""
+    description: str = ""
+    status: str = Field(default="active", index=True)  # active, archived
+    format: str = Field(default="json", index=True)  # json, text, mixed
+    data_json: str | None = Field(default=None, sa_column=Column(Text))
+    data_text: str | None = Field(default=None, sa_column=Column(Text))
+    sensitive_fields_json: str = Field(default="[]", sa_column=Column(Text))
+    encrypted_values_json: str = Field(default="{}", sa_column=Column(Text))
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @property
+    def data(self) -> Any:
+        if not self.data_json:
+            return None
+        try:
+            return json.loads(self.data_json)
+        except json.JSONDecodeError:
+            return None
+
+    @data.setter
+    def data(self, value: Any):
+        self.data_json = json.dumps(value) if value is not None else None
+
+    @property
+    def sensitive_fields(self) -> list[str]:
+        try:
+            value = json.loads(self.sensitive_fields_json or "[]")
+            return [str(item) for item in value if str(item).strip()]
+        except json.JSONDecodeError:
+            return []
+
+    @sensitive_fields.setter
+    def sensitive_fields(self, value: list[str]):
+        self.sensitive_fields_json = json.dumps([str(item).strip() for item in value if str(item).strip()])
+
+    @property
+    def encrypted_values(self) -> dict[str, str]:
+        try:
+            value = json.loads(self.encrypted_values_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @encrypted_values.setter
+    def encrypted_values(self, value: dict[str, str]):
+        self.encrypted_values_json = json.dumps(value or {})
+
+
 class RegressionBatch(SQLModel, table=True):
     """Regression batch for grouping related test runs"""
 
@@ -1661,8 +1774,26 @@ class PrdGenerationResult(SQLModel, table=True):
     # Log file path for real-time streaming
     log_path: str | None = None
 
+    # Queued agent ownership and live queue diagnostics
+    agent_task_id: str | None = Field(default=None, index=True)
+    agent_worker_id: str | None = Field(default=None, index=True)
+    last_heartbeat_at: datetime | None = None
+    queue_telemetry_json: str = "{}"
+
     # Project isolation
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+
+    @property
+    def queue_telemetry(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.queue_telemetry_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @queue_telemetry.setter
+    def queue_telemetry(self, value: dict[str, Any]):
+        self.queue_telemetry_json = json.dumps(value or {})
 
 
 class PrdGenerationEvent(SQLModel, table=True):

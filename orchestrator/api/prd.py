@@ -104,6 +104,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 RUNS_DIR = BASE_DIR / "runs"
 
 router = APIRouter(prefix="/api/prd", tags=["prd"])
+ACTIVE_GENERATION_STATUSES = {"pending", "queued", "running"}
+QUEUE_TERMINAL_FAILURE_STATUSES = {"failed", "timeout"}
+QUEUE_TERMINAL_CANCEL_STATUSES = {"cancelled"}
+PRD_QUEUE_STALE_GRACE_SECONDS = int(os.environ.get("PRD_QUEUE_STALE_GRACE_SECONDS", "300"))
 
 
 class FeatureResponse(BaseModel):
@@ -126,6 +130,7 @@ class GenerateRequest(BaseModel):
     target_url: str | None = None  # URL for live browser exploration
     login_url: str | None = None  # URL for login page
     credentials: dict | None = None  # {username: str, password: str}
+    test_data_refs: list[str] = []
     browser_auth_session_id: str | None = None
     use_project_default_browser_auth: bool = False
 
@@ -164,7 +169,9 @@ class GenerationStatusResponse(BaseModel):
     agent_task_id: str | None = None
     agent_task_status: str | None = None
     agent_worker_id: str | None = None
+    last_heartbeat_at: datetime | None = None
     agent_queue_health: dict[str, Any] | None = None
+    queue_telemetry: dict[str, Any] | None = None
 
 
 class PrdGenerationEventResponse(BaseModel):
@@ -800,11 +807,39 @@ def _enrich_display_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str,
     return enriched
 
 
+def _parse_queue_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        text = str(value).strip()
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _active_generation_status(status: str | None) -> bool:
+    return str(status or "").lower() in ACTIVE_GENERATION_STATUSES
+
+
+def _persist_generation_agent_task_id(generation_id: int, agent_task_id: str) -> None:
+    with Session(engine) as session:
+        gen = session.get(PrdGenerationResult, generation_id)
+        if not gen:
+            return
+        gen.agent_task_id = agent_task_id
+        session.add(gen)
+        session.commit()
+
+
 def _generation_status_response(gen: PrdGenerationResult) -> GenerationStatusResponse:
     artifacts = _collect_generation_artifacts(gen.id, gen.log_path) if gen.id else []
     latest_image = _latest_image_artifact(artifacts)
     target_url = _normalize_target_url(getattr(gen, "target_url", None))
     live_browser_requested = bool(target_url)
+    queue_telemetry = gen.queue_telemetry if hasattr(gen, "queue_telemetry") else {}
     runtime = browser_runtime_status()
     if not live_browser_requested:
         runtime = {
@@ -864,13 +899,22 @@ def _generation_status_response(gen: PrdGenerationResult) -> GenerationStatusRes
         browser_activity_seen=browser_activity_seen,
         browser_active=browser_active,
         browser_last_tool=browser_last_tool,
-        runtime_message=runtime.get("runtime_message"),
+        runtime_message=queue_telemetry.get("runtime_message") or runtime.get("runtime_message"),
         display_diagnostics=runtime.get("display_diagnostics"),
+        agent_task_id=getattr(gen, "agent_task_id", None),
+        agent_task_status=queue_telemetry.get("agent_task_status"),
+        agent_worker_id=getattr(gen, "agent_worker_id", None),
+        last_heartbeat_at=getattr(gen, "last_heartbeat_at", None),
+        agent_queue_health=queue_telemetry.get("agent_queue_health"),
+        queue_telemetry=queue_telemetry,
     )
 
 
 def _generation_agent_task_id(generation_id: int) -> str | None:
     with Session(engine) as session:
+        gen = session.get(PrdGenerationResult, generation_id)
+        if gen and getattr(gen, "agent_task_id", None):
+            return str(gen.agent_task_id)
         event = session.exec(
             select(PrdGenerationEvent)
             .where(PrdGenerationEvent.generation_id == generation_id)
@@ -884,12 +928,212 @@ def _generation_agent_task_id(generation_id: int) -> str | None:
     return str(task_id) if task_id else None
 
 
+async def _queue_heartbeat_snapshot(queue: Any, task_id: str) -> tuple[datetime | None, dict[str, Any] | None]:
+    heartbeat: dict[str, Any] | None = None
+    if hasattr(queue, "get_task_heartbeat"):
+        heartbeat = await queue.get_task_heartbeat(task_id)
+    if heartbeat:
+        return _parse_queue_datetime(heartbeat.get("ts")), heartbeat.get("progress") if isinstance(heartbeat.get("progress"), dict) else None
+    progress = await queue.get_task_progress(task_id) if hasattr(queue, "get_task_progress") else None
+    return None, progress if isinstance(progress, dict) else None
+
+
+def _progress_stage_message(progress: dict[str, Any] | None) -> tuple[str | None, str | None]:
+    if not progress:
+        return None, None
+    stage = str(progress.get("phase") or progress.get("current_stage") or "invoking_agent")
+    message = progress.get("message") or progress.get("activity_label")
+    last_tool = progress.get("last_tool") or progress.get("last_tool_label")
+    if not message and last_tool:
+        message = f"Using {_short_tool_name(str(last_tool))}..."
+    return stage, str(message) if message else None
+
+
+async def _reconcile_generation_with_queue(generation_id: int) -> None:
+    """Make the PRD generation row reflect the durable queue task state."""
+    with Session(engine) as session:
+        gen = session.get(PrdGenerationResult, generation_id)
+        if not gen:
+            return
+        task_id = gen.agent_task_id or _generation_agent_task_id(generation_id)
+        if task_id and not gen.agent_task_id:
+            gen.agent_task_id = task_id
+            session.add(gen)
+            session.commit()
+        if not task_id or not _active_generation_status(gen.status):
+            return
+
+    try:
+        from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
+
+        if not REDIS_AVAILABLE or not should_use_agent_queue():
+            return
+
+        queue = get_agent_queue()
+        await queue.connect()
+        task = await queue.get_task(task_id)
+        health = await queue.get_worker_health()
+        heartbeat_at, progress = await _queue_heartbeat_snapshot(queue, task_id)
+        heartbeat_alive = await queue.check_heartbeat(task_id) if task else False
+    except Exception as exc:
+        logger.debug("Failed to reconcile PRD generation %s with agent queue: %s", generation_id, exc)
+        return
+
+    terminal_event: tuple[str, str, str, dict[str, Any]] | None = None
+    status_value = task.status.value if task else "missing"
+    task_telemetry = task.telemetry if task and isinstance(task.telemetry, dict) else {}
+    runtime_message: str | None = None
+
+    with Session(engine) as session:
+        gen = session.get(PrdGenerationResult, generation_id)
+        if not gen or not _active_generation_status(gen.status):
+            return
+
+        now = datetime.now(timezone.utc)
+        worker_id = task.worker_id if task else None
+        stage, message = _progress_stage_message(progress)
+
+        telemetry = {
+            "agent_task_id": task_id,
+            "agent_task_status": status_value,
+            "agent_worker_id": worker_id,
+            "agent_queue_health": health,
+            "heartbeat_alive": heartbeat_alive,
+            "last_heartbeat_at": heartbeat_at.isoformat() if heartbeat_at else None,
+            "progress": progress or {},
+            "task_telemetry": task_telemetry,
+        }
+
+        if task:
+            gen.agent_worker_id = worker_id
+            if heartbeat_at:
+                gen.last_heartbeat_at = heartbeat_at
+
+            if status_value in QUEUE_TERMINAL_FAILURE_STATUSES:
+                error = task.error or f"Agent task {status_value}"
+                gen.status = "failed"
+                gen.current_stage = "error"
+                gen.stage_message = "Generation failed"
+                gen.error_message = error
+                gen.completed_at = now
+                terminal_event = (
+                    "validator",
+                    "failed",
+                    error,
+                    {"queue_status": status_value, "agent_task_id": task_id, "task_telemetry": task_telemetry},
+                )
+            elif status_value in QUEUE_TERMINAL_CANCEL_STATUSES:
+                message_text = task.error or "Generation cancelled"
+                gen.status = "cancelled"
+                gen.current_stage = "cancelled"
+                gen.stage_message = message_text
+                gen.completed_at = now
+                terminal_event = (
+                    "orchestrator",
+                    "cancelled",
+                    message_text,
+                    {"queue_status": status_value, "agent_task_id": task_id, "task_telemetry": task_telemetry},
+                )
+            elif status_value in {"running", "cancel_requested", "paused"}:
+                stale_reference = heartbeat_at or task.started_at or task.created_at
+                stale_seconds = (now - _parse_queue_datetime(stale_reference)).total_seconds() if stale_reference else 0
+                if heartbeat_alive:
+                    gen.status = "running"
+                    gen.current_stage = stage or gen.current_stage or "invoking_agent"
+                    gen.stage_message = message or gen.stage_message or "Agent task is running."
+                elif stale_seconds > PRD_QUEUE_STALE_GRACE_SECONDS:
+                    error = f"Agent task heartbeat was stale for {int(stale_seconds)} seconds."
+                    gen.status = "failed"
+                    gen.current_stage = "error"
+                    gen.stage_message = "Generation failed"
+                    gen.error_message = error
+                    gen.completed_at = now
+                    telemetry["stale_seconds"] = stale_seconds
+                    terminal_event = (
+                        "validator",
+                        "failed",
+                        error,
+                        {"queue_status": status_value, "agent_task_id": task_id, "stale_seconds": stale_seconds},
+                    )
+                else:
+                    gen.status = "running"
+                    gen.current_stage = "agent_reconnecting"
+                    gen.stage_message = "Waiting for agent heartbeat to recover..."
+                    runtime_message = gen.stage_message
+            elif status_value == "queued":
+                gen.status = "queued"
+                gen.current_stage = "waiting"
+                gen.stage_message = message or gen.stage_message or "Waiting for an agent worker..."
+                worker_count = int(health.get("worker_count") or 0)
+                live_worker_count = int(health.get("live_browser_worker_count") or 0)
+                if task.requires_live_browser and worker_count > 0 and live_worker_count == 0:
+                    runtime_message = (
+                        "No live-browser-capable agent worker is available. Restart the dashboard stack so "
+                        "agent_worker runs with DISPLAY=:99, or start a worker that advertises live_browser=true."
+                    )
+                elif task.requires_live_browser and worker_count == 0:
+                    runtime_message = (
+                        "No agent workers are available to pick up this live browser generation. "
+                        "Check the agent_worker supervisor process."
+                    )
+            elif status_value == "completed":
+                gen.status = "running"
+                gen.current_stage = gen.current_stage or "saving_spec"
+                gen.stage_message = gen.stage_message or "Planner completed; finalizing generated spec..."
+        else:
+            age_reference = _parse_queue_datetime(gen.started_at or gen.created_at) or now
+            age_seconds = (now - age_reference).total_seconds()
+            telemetry["missing_task_age_seconds"] = age_seconds
+            if age_seconds > PRD_QUEUE_STALE_GRACE_SECONDS:
+                error = f"Agent task {task_id} is no longer present in the queue."
+                gen.status = "failed"
+                gen.current_stage = "error"
+                gen.stage_message = "Generation failed"
+                gen.error_message = error
+                gen.completed_at = now
+                terminal_event = (
+                    "validator",
+                    "failed",
+                    error,
+                    {"queue_status": "missing", "agent_task_id": task_id, "age_seconds": age_seconds},
+                )
+
+        if runtime_message:
+            telemetry["runtime_message"] = runtime_message
+        gen.queue_telemetry = telemetry
+        session.add(gen)
+        session.commit()
+
+    if terminal_event:
+        role, event_type, event_message, payload = terminal_event
+        _append_generation_event(
+            generation_id,
+            role=role,
+            event_type=event_type,
+            level="error" if event_type == "failed" else "warning",
+            message=event_message,
+            payload=payload,
+        )
+        if event_type == "failed":
+            try:
+                await queue.fail_stale_running_task(task_id, event_message)
+            except Exception:
+                pass
+
+
 async def _generation_status_response_with_queue(gen: PrdGenerationResult) -> GenerationStatusResponse:
+    if gen.id:
+        await _reconcile_generation_with_queue(gen.id)
+        with Session(engine) as session:
+            fresh_gen = session.get(PrdGenerationResult, gen.id)
+            if fresh_gen:
+                gen = fresh_gen
+
     response = _generation_status_response(gen)
     if not response.live_browser_requested or response.status not in {"pending", "queued", "running"}:
         return response
 
-    task_id = _generation_agent_task_id(response.id)
+    task_id = response.agent_task_id or _generation_agent_task_id(response.id)
     if not task_id:
         return response
 
@@ -1076,6 +1320,7 @@ async def _run_generation_task(
     target_url: str | None,
     login_url: str | None,
     credentials: dict | None,
+    test_data_refs: list[str] | None,
     log_path: Path,
     browser_project_id: str | None = None,
     browser_auth_session_id: str | None = None,
@@ -1167,6 +1412,7 @@ async def _run_generation_task(
         )
 
         def _on_planner_task_enqueued(agent_task_id: str) -> None:
+            _persist_generation_agent_task_id(generation_id, agent_task_id)
             _append_generation_event(
                 generation_id,
                 role="playwright_planner",
@@ -1298,6 +1544,22 @@ async def _run_generation_task(
             )
             print(f"[{datetime.now(timezone.utc).isoformat()}] Invoking Playwright agent...")
             print("-" * 60)
+            test_data_markdown = ""
+            if test_data_refs:
+                try:
+                    from orchestrator.services.test_data_resolver import resolve_test_data_refs
+
+                    with Session(engine) as db_session:
+                        resolved = resolve_test_data_refs(
+                            db_session,
+                            project_id=browser_project_id or "default",
+                            refs=[str(ref) for ref in test_data_refs],
+                            render_as="markdown",
+                            decrypt_sensitive=True,
+                        )
+                        test_data_markdown = resolved.get("markdown") or ""
+                except Exception as exc:
+                    logger.warning("Failed to resolve PRD generation test data refs for %s: %s", generation_id, exc)
 
             path = await planner.generate_spec_for_feature(
                 feature_name=feature_name,
@@ -1305,6 +1567,7 @@ async def _run_generation_task(
                 target_url=target_url,
                 login_url=login_url,
                 credentials=credentials,
+                additional_context=test_data_markdown,
             )
 
             print("-" * 60)
@@ -1418,6 +1681,7 @@ async def generate_plan(project_id: str, request: GenerateRequest, background_ta
                 "live_browser_requested": live_browser_requested,
                 "browser_auth_session_id": request.browser_auth_session_id,
                 "use_project_default_browser_auth": request.use_project_default_browser_auth,
+                "test_data_refs": request.test_data_refs,
                 "log_path": str(log_path),
             },
         )
@@ -1431,6 +1695,7 @@ async def generate_plan(project_id: str, request: GenerateRequest, background_ta
                 target_url=request.target_url,
                 login_url=request.login_url,
                 credentials=request.credentials,
+                test_data_refs=request.test_data_refs,
                 log_path=log_path,
                 browser_project_id=tenant_project_id,
                 browser_auth_session_id=request.browser_auth_session_id,
@@ -1558,6 +1823,7 @@ async def stop_generation(generation_id: int):
         gen = session.get(PrdGenerationResult, generation_id)
         if not gen:
             raise HTTPException(status_code=404, detail="Generation not found")
+        agent_task_id = gen.agent_task_id or _generation_agent_task_id(generation_id)
 
         # 2. Check if it's actually running
         if gen.status not in ["pending", "queued", "running"]:
@@ -1573,10 +1839,29 @@ async def stop_generation(generation_id: int):
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass  # Expected - task was cancelled
 
-    # 4. Update DB status (in case task didn't handle it)
-    _cancel_generation(generation_id, "Cancelled by user")
+    # 4. Cancel persisted queue task if the generation was handed to the worker
+    queue_cancel_result = None
+    if agent_task_id:
+        try:
+            from orchestrator.services.agent_cancellation import cancel_agent_task_id
 
-    # 5. Append cancellation message to log file
+            queue_cancel_result = await cancel_agent_task_id(agent_task_id, runtime="queue")
+        except Exception as exc:
+            logger.warning("Failed to cancel PRD generation queue task %s: %s", agent_task_id, exc)
+
+    # 5. Update DB status (in case task didn't handle it)
+    _cancel_generation(generation_id, "Cancelled by user")
+    if queue_cancel_result:
+        _append_generation_event(
+            generation_id,
+            role="orchestrator",
+            event_type="queue_cancelled",
+            level="warning",
+            message="Cancellation was forwarded to the agent queue.",
+            payload=queue_cancel_result,
+        )
+
+    # 6. Append cancellation message to log file
     with Session(engine) as session:
         gen = session.get(PrdGenerationResult, generation_id)
         if gen and gen.log_path:
@@ -1586,7 +1871,7 @@ async def stop_generation(generation_id: int):
                     f.write(f"\n[{datetime.now(timezone.utc).isoformat()}] STOPPED: Generation cancelled by user\n")
 
     logger.info(f"Generation {generation_id} stopped by user")
-    return {"status": "cancelled", "generation_id": generation_id}
+    return {"status": "cancelled", "generation_id": generation_id, "agent_task_id": agent_task_id}
 
 
 @router.get("/generation/{generation_id}/log/stream")
@@ -1663,10 +1948,11 @@ async def stream_generation_log(generation_id: int):
                         elif consecutive_no_change % 5 == 0:
                             yield f"data: {json.dumps({'status': 'waiting', 'message': 'Waiting for agent...'})}\n\n"
 
-                    # Timeout after 10 minutes of no activity
+                    # Long PRD planning runs can be quiet while the worker is still alive.
+                    # Keep the SSE open and let backend generation status remain the source of truth.
                     if consecutive_no_change > 600:  # 600 * 1s = 10 minutes
-                        yield f"data: {json.dumps({'status': 'timeout', 'message': 'Stream timed out after 10 minutes of no activity'})}\n\n"
-                        break
+                        yield f"data: {json.dumps({'status': 'reconnecting', 'message': 'No new log output; generation status is still being polled.'})}\n\n"
+                        consecutive_no_change = 0
 
                     await asyncio.sleep(1)
 

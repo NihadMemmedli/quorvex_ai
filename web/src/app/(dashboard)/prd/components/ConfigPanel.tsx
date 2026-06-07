@@ -1,10 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { Settings2, ChevronDown, Globe, LogIn, User, Key, Zap } from 'lucide-react';
+import { Settings2, ChevronDown, Globe, LogIn, User, Key, Zap, Database } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
+import { TestDataPicker } from '@/components/TestDataPicker';
+import { useProject } from '@/contexts/ProjectContext';
 import type { PrdSettings } from './types';
 
 interface ConfigPanelProps {
@@ -13,6 +15,7 @@ interface ConfigPanelProps {
 }
 
 export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
+    const { currentProject } = useProject();
     const [isExpanded, setIsExpanded] = useState(false);
     const targetUrl = settings.targetUrl.trim();
     const targetUrlPresent = targetUrl.length > 0;
@@ -56,7 +59,7 @@ export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
             {/* Collapsible Content */}
             <div
                 style={{
-                    maxHeight: isExpanded ? '600px' : '0px',
+                    maxHeight: isExpanded ? '760px' : '0px',
                     overflow: 'hidden',
                     transition: 'max-height 0.3s var(--ease-smooth), opacity 0.2s var(--ease-smooth)',
                     opacity: isExpanded ? 1 : 0,
@@ -229,6 +232,29 @@ export function ConfigPanel({ settings, onUpdate }: ConfigPanelProps) {
                                 (5-50)
                             </span>
                         </div>
+                    </div>
+
+                    <div
+                        className="p-3 rounded-lg"
+                        style={{
+                            background: 'rgba(255,255,255,0.02)',
+                            border: '1px solid rgba(255,255,255,0.05)',
+                        }}
+                    >
+                        <Label className="mb-2 flex items-center gap-2 text-xs" style={{ color: 'var(--text-secondary)' }}>
+                            <Database size={14} /> Project Test Data Refs
+                        </Label>
+                        <Input
+                            value={settings.testDataRefs}
+                            onChange={(e) => onUpdate('testDataRefs', e.target.value)}
+                            placeholder="login-users.valid-admin"
+                            className="mb-2 h-9 text-sm"
+                        />
+                        <TestDataPicker
+                            projectId={currentProject?.id}
+                            mode="ref"
+                            onInsert={(value) => onUpdate('testDataRefs', settings.testDataRefs ? `${settings.testDataRefs}, ${value}` : value)}
+                        />
                     </div>
                 </div>
             </div>

@@ -328,6 +328,7 @@ class GenerateSpecFromRequirementRequest(BaseModel):
     target_url: str = Field(..., description="URL of the application to test")
     login_url: str | None = Field(None, description="URL for login page if auth required")
     credentials: dict[str, str] | None = Field(None, description="Credentials with username/password keys")
+    test_data_refs: list[str] = Field(default_factory=list, description="Explicit project test data refs")
     force_regenerate: bool = Field(False, description="Force regeneration even if spec exists")
 
 
@@ -1754,8 +1755,28 @@ async def generate_spec_from_requirement(
         logger.warning(f"Could not load project credentials: {e}")
 
     # Build flow context from requirement
+    test_data_markdown = ""
+    if request.test_data_refs:
+        try:
+            from orchestrator.services.test_data_resolver import resolve_test_data_refs
+
+            with next(get_session()) as db_session:
+                resolved = resolve_test_data_refs(
+                    db_session,
+                    project_id=project_id,
+                    refs=request.test_data_refs,
+                    render_as="markdown",
+                    decrypt_sensitive=True,
+                )
+                test_data_markdown = resolved.get("markdown") or ""
+        except Exception as e:
+            logger.warning(f"Could not resolve project test data refs: {e}")
+
     flow_context = _build_flow_context_from_requirement(
-        requirement, base_url_origin=base_url_origin, credential_keys=credential_keys
+        requirement,
+        base_url_origin=base_url_origin,
+        credential_keys=credential_keys,
+        test_data_markdown=test_data_markdown,
     )
 
     # Determine output directory - use project name slug instead of UUID
@@ -1846,7 +1867,12 @@ async def generate_spec_from_requirement(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-def _build_flow_context_from_requirement(requirement, base_url_origin: str = None, credential_keys: list = None) -> str:
+def _build_flow_context_from_requirement(
+    requirement,
+    base_url_origin: str = None,
+    credential_keys: list = None,
+    test_data_markdown: str = "",
+) -> str:
     """
     Build a context string from requirement for NativePlanner.
 
@@ -1875,6 +1901,10 @@ def _build_flow_context_from_requirement(requirement, base_url_origin: str = Non
             context_parts.append(f"- `{{{{{key}}}}}`")
         context_parts.append('Use these placeholders in steps like: Enter "{{LOGIN_USERNAME}}" into the username field')
         context_parts.append("NEVER use hardcoded credentials. Always use the {{PLACEHOLDER}} syntax.")
+
+    if test_data_markdown:
+        context_parts.append("")
+        context_parts.append(test_data_markdown)
 
     # Description
     if requirement.description:

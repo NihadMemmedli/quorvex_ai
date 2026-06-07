@@ -45,7 +45,12 @@ if config_dir:
     os.chdir(config_dir)
 
 from utils.browser_cleanup import cleanup_orphaned_browsers
-from utils.progress_reporter import extract_run_id_from_path, init_progress_reporter, report_progress
+from utils.playwright_mcp import playwright_config_cli_arg
+from utils.progress_reporter import (
+    extract_run_id_from_path,
+    init_progress_reporter,
+    report_progress,
+)
 from utils.spec_detector import SpecDetector, SpecType
 from workflows.agentic_quality import (
     FailureTriageAgent,
@@ -103,8 +108,12 @@ class FullNativePipeline:
         self.owner_type = owner_type
         self.owner_id = owner_id
         self.owner_label = owner_label
-        self.model_tier = model_tier or os.environ.get("QUORVEX_RUN_MODEL_TIER") or "tool_deep"
+        self.model_tier = (
+            model_tier or os.environ.get("QUORVEX_RUN_MODEL_TIER") or "tool_deep"
+        )
         self._memory_run_id: str | None = None
+        self.test_data_execution_context: dict[str, Any] = {}
+        self.test_data_env_vars: dict[str, str] = {}
         self._load_project_credentials()
         self.native_planner = NativePlanner(
             project_id=project_id,
@@ -115,6 +124,7 @@ class FullNativePipeline:
             owner_id=owner_id,
             owner_label=owner_label,
             model_tier=self.model_tier,
+            env_vars=self.test_data_env_vars,
         )
         self.native_generator = NativeGenerator(
             on_tool_use=on_tool_use,
@@ -124,6 +134,8 @@ class FullNativePipeline:
             owner_id=owner_id,
             owner_label=owner_label,
             model_tier=self.model_tier,
+            project_id=project_id,
+            env_vars=self.test_data_env_vars,
         )
         self.native_healer = NativeHealer(
             on_tool_use=on_tool_use,
@@ -133,6 +145,7 @@ class FullNativePipeline:
             owner_id=owner_id,
             owner_label=owner_label,
             model_tier=self.model_tier,
+            env_vars=self.test_data_env_vars,
         )
         self.api_generator = NativeApiGenerator()
         self.api_healer = NativeApiHealer()
@@ -171,7 +184,9 @@ class FullNativePipeline:
                 # Load credentials into environment
                 for key, value in creds.items():
                     os.environ[key] = value
-                logger.info(f"[Credentials] Loaded {len(creds)} credential(s): {list(creds.keys())}")
+                logger.info(
+                    f"[Credentials] Loaded {len(creds)} credential(s): {list(creds.keys())}"
+                )
             else:
                 logger.info("[Credentials] No credentials found for project")
 
@@ -210,12 +225,55 @@ class FullNativePipeline:
         """
         spec_file = Path(spec_path)
         spec_content = spec_file.read_text()
+        auth_context = self._load_browser_auth_context()
+        raw_included_spec_content = self._resolve_includes(
+            spec_content, spec_path, resolve_testdata=False
+        )
+
+        test_data_context = self._resolve_test_data_execution_context(
+            f"{spec_content}\n\n{raw_included_spec_content}"
+        )
+        self._log_test_data_resolution_context(test_data_context)
+        missing_test_data = (test_data_context or {}).get("missing") or []
+        if missing_test_data:
+            missing_refs = ", ".join(
+                f"{item.get('ref')} ({item.get('reason') or 'not_found'})"
+                for item in missing_test_data
+            )
+            error_msg = f"Missing required @testdata refs: {missing_refs}"
+            logger.error("[TestData] %s", error_msg)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "spec.md").write_text(spec_content)
+            (run_dir / "spec_resolved.md").write_text(raw_included_spec_content)
+            (run_dir / "status.txt").write_text("failed")
+            self._write_pipeline_error(
+                run_dir,
+                error_msg,
+                "test_data_resolution",
+                {
+                    "refs": list((test_data_context or {}).get("refs") or []),
+                    "missing_test_data": missing_test_data,
+                },
+            )
+            return {
+                "success": False,
+                "error": error_msg,
+                "stage": "test_data_resolution",
+                "missing_test_data": missing_test_data,
+            }
+        fixture_file = self._write_test_data_fixture_file(run_dir, test_data_context)
+        self._apply_test_data_execution_context(test_data_context)
+        self._log_test_data_fixture_context(test_data_context, fixture_file)
 
         # Extract URL from spec (resolves @include directives first)
         target_url = self._extract_url(spec_content, spec_path)
         if not target_url:
-            logger.error("Spec must contain a target URL (e.g., 'Navigate to https://...')")
-            logger.error("Note: @include templates are resolved when searching for URLs")
+            logger.error(
+                "Spec must contain a target URL (e.g., 'Navigate to https://...')"
+            )
+            logger.error(
+                "Note: @include templates are resolved when searching for URLs"
+            )
             # Write status file so the API wrapper can update DB
             (run_dir / "status.txt").write_text("error")
             return {
@@ -233,7 +291,9 @@ class FullNativePipeline:
         logger.info(f"   Spec: {spec_file.name}")
         logger.info(f"   Target URL: {target_url}")
         logger.info(f"   Browser: {browser}")
-        logger.info(f"   Healing Mode: {'Hybrid (Native -> Ralph)' if hybrid_healing else 'Native Only'}")
+        logger.info(
+            f"   Healing Mode: {'Hybrid (Native -> Ralph)' if hybrid_healing else 'Native Only'}"
+        )
 
         # Initialize progress reporter for real-time UI updates
         run_id = extract_run_id_from_path(run_dir)
@@ -245,8 +305,12 @@ class FullNativePipeline:
         (run_dir / "spec.md").write_text(spec_content)
         (run_dir / "spec_resolved.md").write_text(resolved_spec_content)
 
-        # Extract credentials from resolved spec (so we find credentials in templates too)
-        credentials = self._extract_credentials(resolved_spec_content)
+        # Extract credentials before @testdata directives are rendered into masked markdown.
+        credentials = (
+            (test_data_context or {}).get("login_credentials")
+            or self._extract_credentials(spec_content)
+            or self._extract_credentials(resolved_spec_content)
+        )
         login_url = self._extract_login_url(resolved_spec_content, target_url)
 
         # --- DETECT SPEC TYPE ---
@@ -273,7 +337,9 @@ class FullNativePipeline:
         # --- MIXED TEST PIPELINE ---
         if spec_type == SpecType.MIXED:
             logger.info("Mixed browser + API spec detected")
-            logger.info("   Browser steps will use page fixture, API steps will use request fixture")
+            logger.info(
+                "   Browser steps will use page fixture, API steps will use request fixture"
+            )
             # Mixed specs go through the normal browser pipeline with a flag
             # The generator handles [API] prefixed steps specially
 
@@ -289,7 +355,11 @@ class FullNativePipeline:
                     error_msg = f"Existing test file not found: {existing_test_path}"
                     (run_dir / "status.txt").write_text("error")
                     self._write_pipeline_error(run_dir, error_msg, "healing_setup")
-                    return {"success": False, "error": error_msg, "stage": "healing_setup"}
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "stage": "healing_setup",
+                    }
 
                 # Create export.json for dashboard
                 export_data = {
@@ -318,7 +388,12 @@ class FullNativePipeline:
                         return stability_result
                     (run_dir / "status.txt").write_text("passed")
                     self._publish_agentic_summary(run_dir)
-                    return {"success": True, "test_path": str(test_path), "attempts": 0, "stage": "completed"}
+                    return {
+                        "success": True,
+                        "test_path": str(test_path),
+                        "attempts": 0,
+                        "stage": "completed",
+                    }
 
                 logger.error(f"Test FAILED: {result.error_summary}")
                 diagnosis = self._run_failure_triage(
@@ -329,7 +404,9 @@ class FullNativePipeline:
                     critic=None,
                 )
                 if not diagnosis.get("heal_allowed", True):
-                    logger.error("Failure triage marked this failure as non-healable; skipping healing")
+                    logger.error(
+                        "Failure triage marked this failure as non-healable; skipping healing"
+                    )
                     (run_dir / "status.txt").write_text("failed")
                     self._publish_agentic_summary(run_dir)
                     return {
@@ -351,7 +428,11 @@ class FullNativePipeline:
                     )
                 else:
                     return await self._native_healing(
-                        test_path=test_path, run_dir=run_dir, browser=browser, result=result, diagnosis=diagnosis
+                        test_path=test_path,
+                        run_dir=run_dir,
+                        browser=browser,
+                        result=result,
+                        diagnosis=diagnosis,
                     )
             except Exception as e:
                 error_msg = f"Healing-only pipeline crashed: {e}"
@@ -381,12 +462,15 @@ class FullNativePipeline:
                     target_url=target_url,
                     login_url=login_url,
                     credentials=credentials,
+                    auth_context=auth_context,
                 )
 
                 if plan_path and plan_path.exists():
                     logger.info(f"Plan created: {plan_path}")
                 else:
-                    logger.warning("Planner didn't create a structured plan, continuing with original spec")
+                    logger.warning(
+                        "Planner didn't create a structured plan, continuing with original spec"
+                    )
 
                 # Safety-net: clean up any orphaned browsers from planner stage
                 cleanup_orphaned_browsers()
@@ -410,13 +494,17 @@ class FullNativePipeline:
             # Use resolved spec for generation so all included content is visible
             # But keep the original spec name for the output file
             resolved_spec_path = run_dir / "spec_resolved.md"
-            original_spec_name = spec_file.stem  # e.g., "12-create-trip-with-minimal-information"
+            original_spec_name = (
+                spec_file.stem
+            )  # e.g., "12-create-trip-with-minimal-information"
             test_path = await self._run_native_generator(
                 spec_path=str(resolved_spec_path),
                 target_url=target_url,
                 output_name=original_spec_name,
                 design_context=design_context,
                 memory_run_id=getattr(self, "_memory_run_id", None),
+                auth_context=auth_context,
+                execution_credentials=credentials,
             )
 
             if not test_path or not test_path.exists():
@@ -437,13 +525,17 @@ class FullNativePipeline:
             try:
                 gen_content = test_path.read_text()
                 if len(gen_content.strip()) < 100:
-                    error_msg = (
-                        f"Generated test file is too small ({len(gen_content)} chars) - likely incomplete generation"
-                    )
+                    error_msg = f"Generated test file is too small ({len(gen_content)} chars) - likely incomplete generation"
                     logger.error(error_msg)
                     (run_dir / "status.txt").write_text("error")
-                    self._write_pipeline_error(run_dir, error_msg, "generation_validation")
-                    return {"success": False, "error": error_msg, "stage": "generation_validation"}
+                    self._write_pipeline_error(
+                        run_dir, error_msg, "generation_validation"
+                    )
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "stage": "generation_validation",
+                    }
                 if "test(" not in gen_content and "test.describe" not in gen_content:
                     logger.warning(
                         "Generated test file may be invalid - missing test() or test.describe markers. "
@@ -465,7 +557,9 @@ class FullNativePipeline:
 
             logger.info("Agentic quality: reviewing generated test...")
             report_progress("generating", "Reviewing generated test for flake risks...")
-            critic = self.test_critic_agent.review(test_path=test_path, design=design, run_dir=run_dir)
+            critic = self.test_critic_agent.review(
+                test_path=test_path, design=design, run_dir=run_dir
+            )
             self._publish_agentic_summary(run_dir)
 
             # Create export.json for dashboard
@@ -508,7 +602,12 @@ class FullNativePipeline:
                     return stability_result
                 (run_dir / "status.txt").write_text("passed")
                 self._publish_agentic_summary(run_dir)
-                return {"success": True, "test_path": str(test_path), "attempts": 0, "stage": "completed"}
+                return {
+                    "success": True,
+                    "test_path": str(test_path),
+                    "attempts": 0,
+                    "stage": "completed",
+                }
 
             logger.error(f"Test FAILED: {result.error_summary}")
             self._attribute_memory_outcome(
@@ -528,7 +627,9 @@ class FullNativePipeline:
                 critic=critic,
             )
             if not diagnosis.get("heal_allowed", True):
-                logger.error("Failure triage marked this failure as non-healable; skipping healing")
+                logger.error(
+                    "Failure triage marked this failure as non-healable; skipping healing"
+                )
                 (run_dir / "status.txt").write_text("failed")
                 self._publish_agentic_summary(run_dir)
                 return {
@@ -550,7 +651,11 @@ class FullNativePipeline:
                 )
             else:
                 healing_result = await self._native_healing(
-                    test_path=test_path, run_dir=run_dir, browser=browser, result=result, diagnosis=diagnosis
+                    test_path=test_path,
+                    run_dir=run_dir,
+                    browser=browser,
+                    result=result,
+                    diagnosis=diagnosis,
                 )
 
             # Safety-net: clean up any orphaned browsers from healing stage
@@ -580,6 +685,7 @@ class FullNativePipeline:
         target_url: str,
         login_url: str | None = None,
         credentials: dict[str, str] | None = None,
+        auth_context: dict[str, Any] | None = None,
     ) -> Path | None:
         """Run native planner to explore the app and enhance the spec."""
 
@@ -592,12 +698,23 @@ class FullNativePipeline:
         # Build flow context from spec
         flow_context = f"""## Test: {test_name}
 
+### Source Spec File
+{spec_file.name}
+
 ### Spec Content
 {spec_content}
 
 ### Target URL
 {target_url}
 """
+        auth_prompt_context = self._browser_auth_prompt_context(auth_context)
+        if auth_prompt_context:
+            flow_context = f"{flow_context}\n{auth_prompt_context}\n"
+        test_data_prompt = (self.test_data_execution_context or {}).get(
+            "prompt_markdown"
+        )
+        if test_data_prompt:
+            flow_context = f"{flow_context}\n\n{test_data_prompt}\n"
 
         try:
             plan_path = await self.native_planner.generate_spec_from_flow_context(
@@ -635,6 +752,8 @@ class FullNativePipeline:
         output_name: str | None = None,
         design_context: str | None = None,
         memory_run_id: str | None = None,
+        auth_context: dict[str, Any] | None = None,
+        execution_credentials: dict[str, str] | None = None,
     ) -> Path | None:
         """Run native generator to create test code.
 
@@ -650,6 +769,8 @@ class FullNativePipeline:
                 output_name=output_name,
                 design_context=design_context,
                 memory_run_id=memory_run_id,
+                auth_context=auth_context,
+                execution_credentials=execution_credentials,
             )
             return test_path
         except Exception as e:
@@ -667,7 +788,9 @@ class FullNativePipeline:
     ) -> dict:
         """Create failure_diagnosis.json and publish compact run summary."""
         report_progress("healing", "Classifying failure before healing...")
-        failure_context = self._build_structured_failure_context(test_path=test_path, run_dir=run_dir, result=result)
+        failure_context = self._build_structured_failure_context(
+            test_path=test_path, run_dir=run_dir, result=result
+        )
         diagnosis = self.failure_triage_agent.diagnose(
             test_path=test_path,
             error_output=f"{result.output}\n\n{failure_context}",
@@ -678,7 +801,9 @@ class FullNativePipeline:
         self._publish_agentic_summary(run_dir)
         return diagnosis
 
-    def _run_stability_gate(self, *, test_path: Path, run_dir: Path, browser: str) -> dict | None:
+    def _run_stability_gate(
+        self, *, test_path: Path, run_dir: Path, browser: str
+    ) -> dict | None:
         """Verify a passing test remains stable across additional reruns."""
         report_progress("testing", "Verifying test stability...")
         stability = self.stability_verifier.verify(
@@ -699,9 +824,16 @@ class FullNativePipeline:
                 "message": "Test passed initially but failed stability verification",
                 "stability": stability,
             }
-            (run_dir / "validation.json").write_text(json.dumps(validation_result, indent=2))
+            (run_dir / "validation.json").write_text(
+                json.dumps(validation_result, indent=2)
+            )
             self._publish_agentic_summary(run_dir)
-            return {"success": False, "test_path": str(test_path), "attempts": 0, "stage": "stability_failed"}
+            return {
+                "success": False,
+                "test_path": str(test_path),
+                "attempts": 0,
+                "stage": "stability_failed",
+            }
         return None
 
     async def _verify_stability_or_harden(
@@ -714,17 +846,25 @@ class FullNativePipeline:
         attempts: int,
     ) -> dict | None:
         """Run stability gate and give the healer one flake-hardening pass before failing."""
-        stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+        stability_result = self._run_stability_gate(
+            test_path=test_path, run_dir=run_dir, browser=browser
+        )
         if not stability_result:
             return None
 
-        report_progress("healing", "Hardening flaky healed test before final failure...", healing_attempt=attempts + 1)
+        report_progress(
+            "healing",
+            "Hardening flaky healed test before final failure...",
+            healing_attempt=attempts + 1,
+        )
         context = self._build_stability_failure_context(run_dir)
         try:
             fixed_code = await self.native_healer.heal_test(
                 str(test_path),
                 error_log=context,
-                timeout_seconds=int(os.environ.get("HEALER_ATTEMPT_TIMEOUT_SECONDS", "600")),
+                timeout_seconds=int(
+                    os.environ.get("HEALER_ATTEMPT_TIMEOUT_SECONDS", "600")
+                ),
                 diagnosis_context=(
                     "Stability verification found this test flaky after an initial pass. "
                     "Make one targeted hardening pass for timing, selector durability, and deterministic assertions."
@@ -751,7 +891,9 @@ class FullNativePipeline:
             stability_result["attempts"] = attempts + 1
             return stability_result
 
-        second_stability_result = self._run_stability_gate(test_path=test_path, run_dir=run_dir, browser=browser)
+        second_stability_result = self._run_stability_gate(
+            test_path=test_path, run_dir=run_dir, browser=browser
+        )
         if second_stability_result:
             second_stability_result["attempts"] = attempts + 1
             return second_stability_result
@@ -765,7 +907,9 @@ class FullNativePipeline:
             "browser": browser,
             "message": "Test passed after one flake-hardening heal attempt",
         }
-        (run_dir / "validation.json").write_text(json.dumps(validation_result, indent=2))
+        (run_dir / "validation.json").write_text(
+            json.dumps(validation_result, indent=2)
+        )
         self._publish_agentic_summary(run_dir)
         return {
             "success": True,
@@ -778,7 +922,9 @@ class FullNativePipeline:
     def _build_stability_failure_context(self, run_dir: Path) -> str:
         report = self._read_json_file(run_dir / "stability_report.json") or {}
         failed_attempts = [
-            attempt for attempt in report.get("attempts", []) if not attempt.get("passed")
+            attempt
+            for attempt in report.get("attempts", [])
+            if not attempt.get("passed")
         ]
         lines = [
             "## Stability Failure Context",
@@ -814,6 +960,31 @@ class FullNativePipeline:
 
         return summary
 
+    def _load_browser_auth_context(self) -> dict[str, Any]:
+        try:
+            raw = os.environ.get("QUORVEX_BROWSER_AUTH_CONTEXT")
+            value = json.loads(raw) if raw else {}
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def _browser_auth_prompt_context(
+        self, context: dict[str, Any] | None = None
+    ) -> str:
+        context = context or self._load_browser_auth_context()
+        if not context or not context.get("storage_state_attached"):
+            return ""
+        session_name = (
+            context.get("browser_auth_session_name")
+            or context.get("browser_auth_session_id")
+            or "selected session"
+        )
+        return (
+            "## Browser Authentication Context\n"
+            f"The browser starts authenticated with saved session `{session_name}`. "
+            "Do not generate login steps unless the scenario explicitly tests login, logout, or authentication failure."
+        )
+
     def _attribute_memory_outcome(
         self,
         *,
@@ -828,7 +999,9 @@ class FullNativePipeline:
         if os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
             return
         try:
-            from orchestrator.memory.effectiveness import get_memory_effectiveness_service
+            from orchestrator.memory.effectiveness import (
+                get_memory_effectiveness_service,
+            )
 
             get_memory_effectiveness_service().attribute_outcome(
                 project_id=self.project_id,
@@ -857,18 +1030,26 @@ class FullNativePipeline:
         report_progress("healing", "Starting native healing...", healing_attempt=1)
 
         max_attempts = 3
-        error_log = self._build_structured_failure_context(test_path=test_path, run_dir=run_dir, result=result)
+        error_log = self._build_structured_failure_context(
+            test_path=test_path, run_dir=run_dir, result=result
+        )
         diagnosis_context = self.failure_triage_agent.condensed_context(diagnosis)
 
         for attempt in range(1, max_attempts + 1):
             logger.info(f"Healing attempt {attempt}/{max_attempts}...")
-            report_progress("healing", f"Native healing attempt {attempt}/{max_attempts}...", healing_attempt=attempt)
+            report_progress(
+                "healing",
+                f"Native healing attempt {attempt}/{max_attempts}...",
+                healing_attempt=attempt,
+            )
 
             try:
                 fixed_code = await self.native_healer.heal_test(
                     str(test_path),
                     error_log,
-                    timeout_seconds=int(os.environ.get("HEALER_ATTEMPT_TIMEOUT_SECONDS", "600")),
+                    timeout_seconds=int(
+                        os.environ.get("HEALER_ATTEMPT_TIMEOUT_SECONDS", "600")
+                    ),
                     diagnosis_context=diagnosis_context,
                     memory_run_id=getattr(self, "_memory_run_id", None),
                 )
@@ -898,10 +1079,17 @@ class FullNativePipeline:
                             "browser": browser,
                             "message": f"Test healed after {attempt} attempts",
                         }
-                        (run_dir / "validation.json").write_text(json.dumps(validation_result, indent=2))
+                        (run_dir / "validation.json").write_text(
+                            json.dumps(validation_result, indent=2)
+                        )
                         self._publish_agentic_summary(run_dir)
 
-                        return {"success": True, "test_path": str(test_path), "attempts": attempt, "stage": "healed"}
+                        return {
+                            "success": True,
+                            "test_path": str(test_path),
+                            "attempts": attempt,
+                            "stage": "healed",
+                        }
                     else:
                         error_log = self._build_structured_failure_context(
                             test_path=test_path,
@@ -914,7 +1102,9 @@ class FullNativePipeline:
                     logger.warning("Healer returned no code")
 
             except HealerTimeoutError:
-                logger.error(f"Healer timed out on attempt {attempt}/{max_attempts} — stopping retries")
+                logger.error(
+                    f"Healer timed out on attempt {attempt}/{max_attempts} — stopping retries"
+                )
                 break
 
             except Exception as e:
@@ -931,10 +1121,17 @@ class FullNativePipeline:
             "browser": browser,
             "message": f"Failed after {max_attempts} native healing attempts",
         }
-        (run_dir / "validation.json").write_text(json.dumps(validation_result, indent=2))
+        (run_dir / "validation.json").write_text(
+            json.dumps(validation_result, indent=2)
+        )
         self._publish_agentic_summary(run_dir)
 
-        return {"success": False, "test_path": str(test_path), "attempts": max_attempts, "stage": "healing_exhausted"}
+        return {
+            "success": False,
+            "test_path": str(test_path),
+            "attempts": max_attempts,
+            "stage": "healing_exhausted",
+        }
 
     async def _run_api_pipeline(
         self,
@@ -973,14 +1170,21 @@ class FullNativePipeline:
 
             original_spec_name = spec_file.stem
             test_path = await self.api_generator.generate_test(
-                spec_path=spec_path, target_url=target_url, output_name=original_spec_name
+                spec_path=spec_path,
+                target_url=target_url,
+                output_name=original_spec_name,
             )
 
             if not test_path or not test_path.exists():
                 error_msg = "API generator failed to create test file"
                 (run_dir / "status.txt").write_text("error")
                 self._write_pipeline_error(run_dir, error_msg, "api_generation")
-                return {"success": False, "error": error_msg, "stage": "api_generation", "test_type": "api"}
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "stage": "api_generation",
+                    "test_type": "api",
+                }
 
             logger.info(f"API test generated: {test_path}")
 
@@ -1015,15 +1219,21 @@ class FullNativePipeline:
 
             # Stage 3: API Healing
             logger.info("Stage 3: API Test Healing (up to 3 attempts)...")
-            report_progress("healing", "Starting API test healing...", healing_attempt=1)
+            report_progress(
+                "healing", "Starting API test healing...", healing_attempt=1
+            )
 
             max_heal_attempts = 3
-            error_log = self._build_structured_failure_context(test_path=test_path, run_dir=run_dir, result=result)
+            error_log = self._build_structured_failure_context(
+                test_path=test_path, run_dir=run_dir, result=result
+            )
 
             for attempt in range(1, max_heal_attempts + 1):
                 logger.info(f"Healing attempt {attempt}/{max_heal_attempts}...")
                 report_progress(
-                    "healing", f"API healing attempt {attempt}/{max_heal_attempts}...", healing_attempt=attempt
+                    "healing",
+                    f"API healing attempt {attempt}/{max_heal_attempts}...",
+                    healing_attempt=attempt,
                 )
 
                 try:
@@ -1039,7 +1249,9 @@ class FullNativePipeline:
                         result = self._run_test(str(test_path), str(run_dir), browser)
 
                         if result.passed:
-                            logger.info(f"Healed API test PASSED (after {attempt} attempt(s))!")
+                            logger.info(
+                                f"Healed API test PASSED (after {attempt} attempt(s))!"
+                            )
                             (run_dir / "status.txt").write_text("passed")
 
                             validation_result = {
@@ -1051,7 +1263,9 @@ class FullNativePipeline:
                                 "testType": "api",
                                 "message": f"API test healed after {attempt} attempts",
                             }
-                            (run_dir / "validation.json").write_text(json.dumps(validation_result, indent=2))
+                            (run_dir / "validation.json").write_text(
+                                json.dumps(validation_result, indent=2)
+                            )
 
                             return {
                                 "success": True,
@@ -1067,7 +1281,9 @@ class FullNativePipeline:
                                 result=result,
                             )
                             if attempt < max_heal_attempts:
-                                logger.warning("API test still failing, trying again...")
+                                logger.warning(
+                                    "API test still failing, trying again..."
+                                )
                     else:
                         logger.warning("Healer returned no code")
 
@@ -1086,7 +1302,9 @@ class FullNativePipeline:
                 "testType": "api",
                 "message": f"API test failed after {max_heal_attempts} healing attempts",
             }
-            (run_dir / "validation.json").write_text(json.dumps(validation_result, indent=2))
+            (run_dir / "validation.json").write_text(
+                json.dumps(validation_result, indent=2)
+            )
 
             return {
                 "success": False,
@@ -1100,19 +1318,33 @@ class FullNativePipeline:
             logger.error(f"API pipeline error: {e}", exc_info=True)
             (run_dir / "status.txt").write_text("error")
             self._write_pipeline_error(run_dir, str(e), "exception")
-            return {"success": False, "error": str(e), "stage": "exception", "test_type": "api"}
+            return {
+                "success": False,
+                "error": str(e),
+                "stage": "exception",
+                "test_type": "api",
+            }
 
     async def _hybrid_healing(
-        self, test_path: Path, run_dir: Path, browser: str, max_iterations: int, spec_path: str
+        self,
+        test_path: Path,
+        run_dir: Path,
+        browser: str,
+        max_iterations: int,
+        spec_path: str,
     ) -> dict:
         """Hybrid healing: Native (3) + Ralph (up to 17 more)."""
         logger.info("Stage 4: Hybrid Healing...")
         logger.info("   Phase 1: Native Healing (1-3 iterations)")
         logger.info(f"   Phase 2: Ralph Loop (4-{max_iterations} iterations)")
-        report_progress("healing", "Starting hybrid healing (Native + Ralph)...", healing_attempt=1)
+        report_progress(
+            "healing", "Starting hybrid healing (Native + Ralph)...", healing_attempt=1
+        )
 
         # Use RalphValidator in hybrid mode which handles both phases
-        validator = RalphValidator(max_iterations=max_iterations, hybrid_mode=True, native_phase_iterations=3)
+        validator = RalphValidator(
+            max_iterations=max_iterations, hybrid_mode=True, native_phase_iterations=3
+        )
 
         plan_file = run_dir / "plan.json"
 
@@ -1164,8 +1396,15 @@ class FullNativePipeline:
             cmd += f"PLAYWRIGHT_JSON_OUTPUT_FILE='{json_results_file}' "
             cmd += (
                 f"npx playwright test '{test_file}' --reporter=list,html,json "
-                f"--project {browser} --timeout=120000{playwright_headed_args()}"
+                f"--project {browser} --timeout=120000"
+                f"{playwright_config_cli_arg(output_dir)}{playwright_headed_args()}"
             )
+
+            subprocess_env = {
+                key: value
+                for key, value in os.environ.copy().items()
+                if not key.startswith("TESTDATA_")
+            }
 
             result = subprocess.run(
                 cmd,
@@ -1173,14 +1412,24 @@ class FullNativePipeline:
                 capture_output=True,
                 text=True,
                 timeout=600,  # 10 minutes to allow for multiple tests in a file
+                env={**subprocess_env, **self.test_data_env_vars},
             )
 
             output = result.stdout + result.stderr
             json_results = self._read_json_file(json_results_file)
-            json_summary = self._summarize_playwright_json(json_results) if json_results else {}
+            json_summary = (
+                self._summarize_playwright_json(json_results) if json_results else {}
+            )
             if json_summary:
                 passed = result.returncode == 0 and json_summary.get("failed", 0) == 0
-                error_summary = "" if passed else (json_summary.get("error_summary") or self._summarize_error(output))
+                error_summary = (
+                    ""
+                    if passed
+                    else (
+                        json_summary.get("error_summary")
+                        or self._summarize_error(output)
+                    )
+                )
             else:
                 passed = result.returncode == 0 and "passed" in output
                 error_summary = self._summarize_error(output) if not passed else ""
@@ -1200,7 +1449,9 @@ class FullNativePipeline:
                 error_summary="Timeout - test suite took too long",
             )
         except Exception as e:
-            return TestResult(passed=False, exit_code=-1, output=str(e), error_summary=str(e)[:100])
+            return TestResult(
+                passed=False, exit_code=-1, output=str(e), error_summary=str(e)[:100]
+            )
 
     def _read_json_file(self, path: Path) -> dict[str, Any] | None:
         try:
@@ -1264,7 +1515,9 @@ class FullNativePipeline:
             "errors": errors[:5],
         }
 
-    def _build_structured_failure_context(self, *, test_path: Path, run_dir: Path, result: TestResult) -> str:
+    def _build_structured_failure_context(
+        self, *, test_path: Path, run_dir: Path, result: TestResult
+    ) -> str:
         """Build compact healer context from Playwright JSON, output tails, code frame, and attachments."""
         json_results = self._read_json_file(run_dir / "test-results.json")
         summary = self._summarize_playwright_json(json_results) if json_results else {}
@@ -1272,7 +1525,9 @@ class FullNativePipeline:
         code_frame = self._extract_code_frame(test_path, result.output)
         error_contexts = [
             f"{path}: {path.read_text(errors='ignore')[:2000]}"
-            for path in sorted((run_dir / "test-results").glob("**/error-context.md"))[:3]
+            for path in sorted((run_dir / "test-results").glob("**/error-context.md"))[
+                :3
+            ]
             if path.exists()
         ]
         sections = [
@@ -1298,7 +1553,9 @@ class FullNativePipeline:
         if code_frame:
             sections.append(f"Code frame:\n```typescript\n{code_frame}\n```")
         if attachments:
-            sections.append("Attachments:\n" + "\n".join(f"- {item}" for item in attachments[:10]))
+            sections.append(
+                "Attachments:\n" + "\n".join(f"- {item}" for item in attachments[:10])
+            )
         if error_contexts:
             sections.append("Error context files:\n" + "\n\n".join(error_contexts))
         stdout_tail = result.output[-6000:] if result.output else ""
@@ -1306,7 +1563,9 @@ class FullNativePipeline:
             sections.append(f"Stdout/stderr tail:\n```\n{stdout_tail}\n```")
         return "\n\n".join(sections)
 
-    def _collect_playwright_attachments(self, run_dir: Path, json_results: dict[str, Any] | None) -> list[str]:
+    def _collect_playwright_attachments(
+        self, run_dir: Path, json_results: dict[str, Any] | None
+    ) -> list[str]:
         attachments: list[str] = []
 
         def visit(node: Any) -> None:
@@ -1316,8 +1575,12 @@ class FullNativePipeline:
                         continue
                     name = attachment.get("name") or "attachment"
                     path = attachment.get("path")
-                    content_type = attachment.get("contentType") or attachment.get("content_type")
-                    attachments.append(f"{name} ({content_type or 'unknown'}): {path or 'inline'}")
+                    content_type = attachment.get("contentType") or attachment.get(
+                        "content_type"
+                    )
+                    attachments.append(
+                        f"{name} ({content_type or 'unknown'}): {path or 'inline'}"
+                    )
                 for key in ("suites", "specs", "tests", "results"):
                     for child in node.get(key) or []:
                         visit(child)
@@ -1353,11 +1616,35 @@ class FullNativePipeline:
         end = min(line_no + 4, len(lines))
         return "\n".join(f"{idx}: {lines[idx - 1]}" for idx in range(start, end + 1))
 
-    def _resolve_includes(self, content: str, spec_path: str = None) -> str:
+    def _resolve_includes(
+        self,
+        content: str,
+        spec_path: str = None,
+        *,
+        resolve_testdata: bool = True,
+    ) -> str:
         """
-        Resolve @include directives in spec content.
+        Resolve @include and @testdata directives in spec content.
         Returns the expanded content with all includes resolved.
         """
+        if resolve_testdata:
+            try:
+                from sqlmodel import Session
+
+                from orchestrator.api.db import engine
+                from orchestrator.services.test_data_resolver import (
+                    resolve_testdata_in_markdown,
+                )
+
+                with Session(engine) as session:
+                    content = resolve_testdata_in_markdown(
+                        content,
+                        session=session,
+                        project_id=self.project_id or "default",
+                    )
+            except Exception as exc:
+                logger.warning("Failed to resolve @testdata directives: %s", exc)
+
         processed_lines = []
 
         base_dir = Path("specs")
@@ -1386,7 +1673,11 @@ class FullNativePipeline:
                 if target_file.exists():
                     template_content = target_file.read_text()
                     # Recursively resolve includes in the template
-                    resolved_template = self._resolve_includes(template_content, str(target_file))
+                    resolved_template = self._resolve_includes(
+                        template_content,
+                        str(target_file),
+                        resolve_testdata=resolve_testdata,
+                    )
                     processed_lines.append(f"\n# --- Included from {ref_path} ---")
                     processed_lines.append(resolved_template)
                     processed_lines.append("# --- End Include ---\n")
@@ -1401,7 +1692,9 @@ class FullNativePipeline:
     def _extract_url(self, spec_content: str, spec_path: str = None) -> str | None:
         """Extract target URL from spec content (after resolving includes)."""
         # First resolve all includes to get full content
-        resolved_content = self._resolve_includes(spec_content, spec_path)
+        resolved_content = self._resolve_includes(
+            spec_content, spec_path, resolve_testdata=False
+        )
 
         # Look for Navigate to http(s)://...
         patterns = [
@@ -1442,13 +1735,23 @@ class FullNativePipeline:
 
             parsed = urlparse(target_url)
             # Common login URL patterns
-            for login_path in ["/login", "/signin", "/sign_in", "/users/sign_in", "/auth/login"]:
+            for login_path in [
+                "/login",
+                "/signin",
+                "/sign_in",
+                "/users/sign_in",
+                "/auth/login",
+            ]:
                 return f"{parsed.scheme}://{parsed.netloc}{login_path}"
 
         return None
 
     def _extract_credentials(self, spec_content: str) -> dict[str, str] | None:
         """Extract credential placeholders from spec."""
+        testdata_credentials = self._extract_testdata_credentials(spec_content)
+        if testdata_credentials:
+            return testdata_credentials
+
         credentials = {}
 
         # Look for {{VAR_NAME}} patterns
@@ -1481,6 +1784,120 @@ class FullNativePipeline:
 
         return credentials if credentials else None
 
+    def _resolve_test_data_execution_context(
+        self, spec_content: str
+    ) -> dict[str, Any]:
+        try:
+            from sqlmodel import Session
+
+            from orchestrator.api.db import engine
+            from orchestrator.services.test_data_resolver import (
+                resolve_test_data_execution_context,
+            )
+
+            with Session(engine) as session:
+                return resolve_test_data_execution_context(
+                    session,
+                    project_id=self.project_id or "default",
+                    markdown=spec_content,
+                )
+        except Exception as exc:
+            logger.warning("[Credentials] Failed to resolve execution test data: %s", exc)
+            return {}
+
+    def _apply_test_data_execution_context(self, context: dict[str, Any] | None) -> None:
+        self.test_data_execution_context = context or {}
+        fixture_file = self.test_data_execution_context.get("runtime_fixture_file")
+        self.test_data_env_vars = (
+            {"QUORVEX_TEST_DATA_FILE": str(fixture_file)} if fixture_file else {}
+        )
+        for component in (
+            getattr(self, "native_planner", None),
+            getattr(self, "native_generator", None),
+            getattr(self, "native_healer", None),
+        ):
+            if hasattr(component, "env_vars"):
+                component.env_vars = dict(self.test_data_env_vars)
+
+    def _write_test_data_fixture_file(
+        self, run_dir: Path, context: dict[str, Any] | None
+    ) -> Path | None:
+        fixtures = (context or {}).get("runtime_fixtures") or {}
+        if not fixtures:
+            return None
+        fixture_dir = run_dir / "test-data"
+        fixture_dir.mkdir(parents=True, exist_ok=True)
+        fixture_file = fixture_dir / "resolved-fixtures.json"
+        payload = {
+            "project_id": self.project_id or "default",
+            "refs": list((context or {}).get("refs") or []),
+            "items": fixtures,
+        }
+        fixture_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+        try:
+            os.chmod(fixture_file, 0o600)
+        except OSError as exc:
+            logger.debug("Could not restrict test data fixture permissions: %s", exc)
+        if context is not None:
+            context["runtime_fixture_file"] = str(fixture_file.resolve())
+        return fixture_file
+
+    def _log_test_data_resolution_context(self, context: dict[str, Any] | None) -> None:
+        refs = [str(item) for item in (context or {}).get("refs") or [] if item]
+        missing = [
+            f"{item.get('ref')} ({item.get('reason') or 'not_found'})"
+            for item in (context or {}).get("missing") or []
+            if isinstance(item, dict) and item.get("ref")
+        ]
+        resolved_count = len((context or {}).get("runtime_fixtures") or {})
+        logger.info(
+            "[TestData] refs=%s resolved_count=%s missing=%s",
+            refs or [],
+            resolved_count,
+            missing or [],
+        )
+
+    def _log_test_data_fixture_context(
+        self, context: dict[str, Any] | None, fixture_file: Path | None
+    ) -> None:
+        refs = [str(item) for item in (context or {}).get("refs") or [] if item]
+        if not refs and not fixture_file:
+            return
+        injected = "QUORVEX_TEST_DATA_FILE" in self.test_data_env_vars
+        logger.info(
+            "[TestData] fixture_file=%s refs=%s env_injected=%s",
+            str(fixture_file.resolve()) if fixture_file else None,
+            refs,
+            injected,
+        )
+
+    def _extract_testdata_credentials(self, spec_content: str) -> dict[str, str] | None:
+        """Extract login credentials from @testdata refs and expose them as transient env vars."""
+        try:
+            from orchestrator.services.test_data_resolver import (
+                extract_test_data_refs_from_markdown,
+            )
+
+            refs = extract_test_data_refs_from_markdown(spec_content)
+            if not refs:
+                return None
+            context = self._resolve_test_data_execution_context(spec_content)
+            self._apply_test_data_execution_context(context)
+            credentials = context.get("login_credentials")
+            if not credentials:
+                return None
+            logger.info(
+                "[Credentials] Loaded login credentials from test data ref %s for runtime fixture context (legacy placeholders: %s)",
+                credentials.get("test_data_ref"),
+                list((context.get("env_vars") or {}).keys()),
+            )
+            return credentials
+        except Exception as exc:
+            logger.warning(
+                "[Credentials] Failed to resolve @testdata login credentials: %s", exc
+            )
+            return None
+
     def _extract_test_name(self, spec_content: str) -> str:
         """Extract test name from spec."""
         # Look for # Test: or # Title: pattern
@@ -1492,14 +1909,28 @@ class FullNativePipeline:
 
         return "Unnamed Test"
 
-    def _write_pipeline_error(self, run_dir: Path, error: str, stage: str) -> None:
+    def _write_pipeline_error(
+        self,
+        run_dir: Path,
+        error: str,
+        stage: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         """Write pipeline_error.json so the API wrapper can populate DB error_message."""
         try:
-            error_data = {"error": error[:2000], "stage": stage, "timestamp": datetime.now().isoformat()}
+            error_data = {
+                "error": error[:2000],
+                "stage": stage,
+                "timestamp": datetime.now().isoformat(),
+            }
+            if extra:
+                error_data.update(extra)
             # Include the tail of long errors so the root cause (often at the end) is visible
             if len(error) > 2000:
                 error_data["error_tail"] = error[-500:]
-            (run_dir / "pipeline_error.json").write_text(json.dumps(error_data, indent=2))
+            (run_dir / "pipeline_error.json").write_text(
+                json.dumps(error_data, indent=2)
+            )
         except Exception as e:
             logger.warning(f"Failed to write pipeline_error.json: {e}")
 
@@ -1559,10 +1990,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Full Native Pipeline")
     parser.add_argument("spec", help="Path to the markdown spec file")
     parser.add_argument("--run-dir", help="Directory for run artifacts")
-    parser.add_argument("--browser", default="chromium", choices=["chromium", "firefox", "webkit"])
+    parser.add_argument(
+        "--browser", default="chromium", choices=["chromium", "firefox", "webkit"]
+    )
     parser.add_argument("--hybrid", action="store_true", help="Use hybrid healing mode")
     parser.add_argument("--max-iterations", type=int, default=20)
-    parser.add_argument("--existing-test", help="Existing test file to heal (skips planning/generation)")
+    parser.add_argument(
+        "--existing-test", help="Existing test file to heal (skips planning/generation)"
+    )
     parser.add_argument("--api", action="store_true", help="Force API test mode")
 
     args = parser.parse_args()

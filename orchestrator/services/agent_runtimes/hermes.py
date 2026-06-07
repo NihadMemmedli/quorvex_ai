@@ -25,7 +25,15 @@ def _persisted_runtime_env() -> dict[str, str]:
     try:
         from orchestrator.api import settings as settings_api
 
-        return settings_api.runtime_env_vars()
+        read_env_file = getattr(settings_api, "_read_env_file", None)
+        if os.environ.get("QUORVEX_SETTINGS_ENV_FILE") and callable(read_env_file):
+            return read_env_file()
+        env_vars = settings_api.runtime_env_vars()
+        if env_vars:
+            return env_vars
+        if callable(read_env_file):
+            return read_env_file()
+        return {}
     except Exception:
         return {}
 
@@ -364,6 +372,8 @@ class HermesRuntime(AgentRuntime):
             payload["instructions"] = instructions
         if context.hermes_profile:
             payload["profile"] = context.hermes_profile
+        if context.env_vars:
+            payload["env"] = {str(key): str(value) for key, value in context.env_vars.items()}
         return payload
 
     def _handle_event(

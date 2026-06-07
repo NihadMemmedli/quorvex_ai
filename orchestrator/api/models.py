@@ -52,6 +52,7 @@ class TestRun(BaseModel):
     stage_message: str | None = None  # Detailed stage status message
     healing_attempt: int | None = None  # Current healing attempt number
     agentic_summary: dict[str, Any] | None = None  # Compact Agentic QA artifact summary
+    browser_auth: dict[str, Any] | None = None  # Browser auth intent/resolution metadata
 
 
 class CreateSpecRequest(BaseModel):

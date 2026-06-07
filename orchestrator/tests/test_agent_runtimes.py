@@ -6,6 +6,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime, normalize_agent_runtime
+from orchestrator.services.agent_runtimes.claude import ClaudeAgentSdkRuntime
 from orchestrator.services.agent_runtimes.hermes import HermesRuntime
 
 
@@ -21,6 +22,37 @@ def test_normalize_agent_runtime_defaults_and_aliases(monkeypatch):
 
 def test_runtime_resolver_returns_hermes_adapter():
     assert isinstance(get_agent_runtime("hermes"), HermesRuntime)
+
+
+@pytest.mark.asyncio
+async def test_claude_runtime_passes_env_vars_to_agent_runner(monkeypatch):
+    captured = {}
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def run(self, prompt):
+            assert prompt == "inspect"
+            from orchestrator.utils.agent_runner import AgentResult
+
+            return AgentResult(success=True, output="ok")
+
+    monkeypatch.setattr(
+        "orchestrator.services.agent_runtimes.claude.AgentRunner", FakeRunner
+    )
+
+    result = await ClaudeAgentSdkRuntime().run(
+        "inspect",
+        AgentRuntimeContext(
+            env_vars={"TESTDATA_WETRAVEL_AUTH_VALID_USER_USERNAME": "user@example.com"}
+        ),
+    )
+
+    assert result.success is True
+    assert captured["env_vars"] == {
+        "TESTDATA_WETRAVEL_AUTH_VALID_USER_USERNAME": "user@example.com"
+    }
 
 
 @pytest.mark.asyncio

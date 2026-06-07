@@ -95,6 +95,7 @@ class WorkflowDefinitionUpdateRequest(BaseModel):
 
 class WorkflowRunRequest(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
+    test_data_refs: list[str] = Field(default_factory=list)
     triggered_by: str | None = None
     start_step_key: str | None = None
     trigger_type: str | None = None
@@ -1742,7 +1743,10 @@ async def start_workflow_run(
         trigger_type=request.trigger_type or ("assistant" if request.triggered_by == "chat" else "manual"),
         trigger_id=request.trigger_id,
     )
-    run.inputs = request.inputs
+    run_inputs = dict(request.inputs or {})
+    if request.test_data_refs:
+        run_inputs["test_data_refs"] = request.test_data_refs
+    run.inputs = run_inputs
     run.recovery_policy = recovery_policy
     session.add(run)
     session.commit()

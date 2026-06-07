@@ -24,6 +24,7 @@ from claude_agent_sdk import ClaudeAgentOptions, query
 
 from utils.agent_tool_allowlists import get_agent_allowed_tools
 from utils.json_utils import extract_json_from_markdown
+from utils.playwright_mcp import playwright_config_cli_arg
 
 
 class Validator:
@@ -195,7 +196,10 @@ class Validator:
         import subprocess
 
         try:
-            cmd = f"npx playwright test '{test_file}' --reporter=list,html --project {browser}"
+            cmd = (
+                f"npx playwright test '{test_file}' --reporter=list,html "
+                f"--project {browser}{playwright_config_cli_arg(output_dir)}"
+            )
             if output_dir:
                 results_dir = Path(output_dir) / "test-results"
                 report_dir = Path(output_dir) / "report"

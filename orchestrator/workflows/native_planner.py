@@ -72,6 +72,7 @@ class NativePlanner:
         model_tier: str = "tool_deep",
         session_dir: Path | None = None,
         cwd: Path | str | None = None,
+        env_vars: dict[str, str] | None = None,
     ):
         self.project_id = project_id
         self.on_tool_use = on_tool_use
@@ -83,6 +84,7 @@ class NativePlanner:
         self.model_tier = model_tier
         self.session_dir = Path(session_dir) if session_dir else None
         self.cwd = Path(cwd) if cwd else self.session_dir
+        self.env_vars = dict(env_vars or {})
         self.memory_manager = get_memory_manager(project_id=project_id)
         # Use absolute path relative to project root (up from orchestrator/workflows/native_planner.py)
         self.specs_dir = Path(__file__).resolve().parent.parent.parent / "specs"
@@ -95,6 +97,7 @@ class NativePlanner:
         target_url: str | None = None,
         login_url: str | None = None,
         credentials: dict[str, str] | None = None,
+        additional_context: str | None = None,
     ) -> Path:
         """
         Generate a test spec for a specific feature using Hybrid Mode.
@@ -126,6 +129,8 @@ class NativePlanner:
         if not prd_context.strip():
             logger.warning(f"No PRD context found for {feature_name}")
             prd_context = "No specific PRD context available. Generate based on feature name."
+        if additional_context:
+            prd_context = f"{prd_context.rstrip()}\n\n{additional_context.strip()}"
 
         # 2. Build the hybrid prompt
         prompt = self._build_hybrid_prompt(
@@ -189,6 +194,13 @@ class NativePlanner:
     ) -> str:
         """Build the prompt that combines PRD context with browser exploration instructions."""
 
+        split_tc_section = self._split_tc_scope_section(
+            feature_name=feature_name,
+            feature_slug=feature_slug,
+            prd_context=prd_context,
+            output_path=output_path,
+        )
+
         browser_section = ""
         if target_url:
             # Build login section if credentials provided
@@ -200,6 +212,15 @@ class NativePlanner:
                 # Get environment variable names if provided
                 username_var = credentials.get("username_var", "LOGIN_USERNAME")
                 password_var = credentials.get("password_var", "LOGIN_PASSWORD")
+                test_data_ref = credentials.get("test_data_ref")
+                ref_instruction = ""
+                if test_data_ref:
+                    ref_instruction = f"""
+## Test Data Directive Preservation
+The source spec referenced `@testdata "{test_data_ref}"`.
+Preserve that exact directive or an equivalent **Test Data** note in every generated TC that depends on these credentials.
+Generated steps must use placeholders `{{{{{username_var}}}}}` and `{{{{{password_var}}}}}`, not plaintext credential values.
+"""
                 login_section = f"""
 ## Step 1: Login to the Application
 Before exploring the feature, you MUST login first:
@@ -220,6 +241,7 @@ When writing the test spec, use these PLACEHOLDERS (not actual values):
 - For password: `{{{{{password_var}}}}}`
 
 Example in spec: `Enter "{{{{{username_var}}}}}" into the email field`
+{ref_instruction}
 """
 
             browser_section = f"""
@@ -279,17 +301,26 @@ The system will write your final markdown to: **{output_path}**
 Do not call `planner_save_plan` or `browser_close`.
 """
 
-        prompt = f"""You are the Playwright Test Planner agent.
+        if split_tc_section:
+            output_requirements = f"""
+## Output Requirements
+{split_tc_section}
 
-# Task: Generate Test Plan for "{feature_name}"
-
-{browser_section}
-
-## PRD Requirements Context
-The following requirements were extracted from the Product Requirements Document:
-
-{prd_context}
-
+Return exactly one independently runnable TC section for "{feature_name}":
+- `### TC-XXX: [Scenario Name]`
+- `**Description:** ...`
+- `**Preconditions:** ...`
+- `**Steps:**` numbered action steps with ACTUAL SELECTORS if discovered
+- `**Expected Result:**` concrete assertions or observable outcomes
+- `**Test Data:**` preserve required placeholders, URLs, and `@testdata` refs
+"""
+            critical_scope = (
+                "**CRITICAL**: Preserve exactly one scenario. Do NOT add extra "
+                "negative/login-reset/mobile/accessibility/responsive cases unless "
+                "the input split spec explicitly asks for them."
+            )
+        else:
+            output_requirements = """
 ## Output Requirements
 Create balanced E2E scenario specs for "{feature_name}". Prefer 6-12 scenarios when the evidence supports it. Each scenario must be specific enough to run through the existing markdown-to-Playwright pipeline.
 
@@ -302,12 +333,6 @@ Cover these categories where evidence exists:
 6. **Responsive/Runtime Regression** - Mobile viewport and critical console-error checks
 7. **API-backed Assertions** - Only when API/network evidence was observed
 
-## Evidence Rules
-- Do not invent unsupported business behavior.
-- If evidence is thin, generate conservative page/journey checks: reachability, no blocking errors, accessibility basics, responsive rendering, and stable navigation.
-- Use observed selectors, text, URLs, and API endpoints when available.
-- Mark auth or data needs in Preconditions instead of hardcoding secrets.
-
 ## Test Spec Format
 Return a split-ready plan with TC-XXX sections. Every TC must be independently runnable after splitting:
 - `### TC-XXX: [Scenario Name]`
@@ -316,10 +341,36 @@ Return a split-ready plan with TC-XXX sections. Every TC must be independently r
 - `**Steps:**` numbered action steps with ACTUAL SELECTORS if discovered
 - `**Expected Result:**` concrete assertions or observable outcomes
 - `**Test Data:**` optional placeholders and URLs
+""".format(feature_name=feature_name)
+            critical_scope = (
+                "**CRITICAL**: Your final text response MUST contain the full test "
+                "plan with all TC-XXX test cases, steps, and expected results. "
+                'Do NOT output just a summary like "I created 24 test cases". '
+                'Do NOT create a single shallow spec with only "Navigate" and "Verify".'
+            )
+
+        prompt = f"""You are the Playwright Test Planner agent.
+
+# Task: Generate Test Plan for "{feature_name}"
+
+{browser_section}
+
+## PRD Requirements Context
+The following requirements were extracted from the Product Requirements Document:
+
+{prd_context}
+
+{output_requirements}
+
+## Evidence Rules
+- Do not invent unsupported business behavior.
+- If evidence is thin, generate conservative page/journey checks: reachability, no blocking errors, accessibility basics, responsive rendering, and stable navigation.
+- Use observed selectors, text, URLs, and API endpoints when available.
+- Mark auth or data needs in Preconditions instead of hardcoding secrets.
 
 {save_section}
 
-**CRITICAL**: Your final text response MUST contain the full test plan with all TC-XXX test cases, steps, and expected results. Do NOT output just a summary like "I created 24 test cases". Do NOT create a single shallow spec with only "Navigate" and "Verify".
+{critical_scope}
 
 Start the test plan with:
 # Test Plan: {feature_name}
@@ -332,6 +383,41 @@ Start the test plan with:
             rendered_prompt=prompt,
         )
         return attach_prompt_metadata(prompt, metadata)
+
+    @staticmethod
+    def _split_tc_scope_section(
+        *,
+        feature_name: str,
+        feature_slug: str,
+        prd_context: str,
+        output_path: str,
+    ) -> str:
+        candidates = " ".join(
+            [
+                feature_name or "",
+                feature_slug or "",
+                Path(output_path).name if output_path else "",
+                prd_context[:1000] if prd_context else "",
+            ]
+        ).lower()
+        match = re.search(r"\btc[-_ ]?(\d{3})\b", candidates)
+        if not match:
+            return ""
+        tc_id = f"TC-{match.group(1)}"
+        extra = ""
+        if match.group(1) == "001":
+            extra = (
+                "\nFor TC-001 valid-login specs, wrong-password exploration belongs "
+                "only in a different negative TC unless the input split spec explicitly "
+                "asks for wrong-password behavior."
+            )
+        return f"""## Split TC Scope Control
+The input is an already split single test-case spec (`{tc_id}`). Enhance only that TC.
+- Preserve exactly one scenario and keep the same `{tc_id}` identity.
+- Do not generate extra negative/login-reset/mobile/accessibility/responsive/regression cases.
+- Preserve any canonical `@testdata` reference from the source spec, including `@testdata "wetravel-auth.valid-user"` when present.
+- Use browser exploration only to strengthen selectors and assertions for this one scenario.{extra}
+"""
 
     async def _query_planner_agent(self, prompt: str, target_url: str | None = None):
         """
@@ -361,6 +447,7 @@ Start the test plan with:
             owner_label=self.owner_label,
             requires_live_browser=bool(target_url),
             model_tier=self.model_tier,
+            env_vars=self.env_vars,
         )
 
         result = await runner.run(prompt)

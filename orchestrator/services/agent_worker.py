@@ -413,6 +413,83 @@ class AgentWorker:
         except Exception as exc:
             logger.debug("Failed to emit agent run event for task %s: %s", task_id, exc)
 
+    def _emit_prd_generation_event(
+        self,
+        *,
+        owner_type: str | None,
+        owner_id: str | None,
+        task_id: str,
+        event_type: str,
+        message: str,
+        level: str = "info",
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        if owner_type != "prd_generation" or not owner_id:
+            return
+        def _redact(value: object, depth: int = 0, key: str = "") -> object:
+            lowered = key.lower()
+            if any(marker in lowered for marker in ("password", "secret", "token", "credential", "api_key", "authorization", "cookie")):
+                return "<redacted>"
+            if depth > 4:
+                return "<truncated>"
+            if isinstance(value, dict):
+                return {str(item_key): _redact(item_value, depth + 1, str(item_key)) for item_key, item_value in list(value.items())[:40]}
+            if isinstance(value, list):
+                return [_redact(item, depth + 1, key) for item in value[:40]]
+            if isinstance(value, str):
+                return value if len(value) <= 1200 else value[:1200] + "...<truncated>"
+            if isinstance(value, (int, float, bool)) or value is None:
+                return value
+            return str(value)[:1200]
+
+        try:
+            from sqlalchemy import func
+            from sqlmodel import Session, select
+
+            from orchestrator.api.db import engine
+            from orchestrator.api.models_db import PrdGenerationEvent, PrdGenerationResult
+
+            generation_id = int(owner_id)
+            event_payload = {
+                "agent_task_id": task_id,
+                "agent_worker_id": self.worker_id,
+                **(payload or {}),
+            }
+            redacted_payload = _redact(event_payload)
+            event_payload = redacted_payload if isinstance(redacted_payload, dict) else {}
+            with Session(engine) as session:
+                generation = session.get(PrdGenerationResult, generation_id)
+                if not generation:
+                    return
+                generation.agent_task_id = generation.agent_task_id or task_id
+                generation.agent_worker_id = self.worker_id
+                generation.queue_telemetry = {
+                    **generation.queue_telemetry,
+                    "agent_task_id": task_id,
+                    "agent_worker_id": self.worker_id,
+                    "last_worker_event_type": event_type,
+                    "last_worker_event_message": message,
+                }
+                max_sequence = session.exec(
+                    select(func.max(PrdGenerationEvent.sequence)).where(
+                        PrdGenerationEvent.generation_id == generation_id
+                    )
+                ).one()
+                event = PrdGenerationEvent(
+                    generation_id=generation_id,
+                    sequence=int(max_sequence or 0) + 1,
+                    role="agent_worker",
+                    event_type=event_type,
+                    level=level,
+                    message=message if len(message) <= 1200 else message[:1200] + "...",
+                )
+                event.payload = event_payload
+                session.add(generation)
+                session.add(event)
+                session.commit()
+        except Exception as exc:
+            logger.debug("Failed to emit PRD generation event for task %s: %s", task_id, exc)
+
     async def start(self):
         """Start the worker loop."""
         logger.info(f"Starting agent worker: {self.worker_id}")
@@ -781,6 +858,8 @@ class AgentWorker:
         saved_env = {}
         if task.env_vars:
             for key, value in task.env_vars.items():
+                if key.startswith("TESTDATA_"):
+                    continue
                 saved_env[key] = os.environ.get(key)  # None if not set
                 os.environ[key] = value
             logger.info(f"Applied {len(task.env_vars)} env var(s) from task: {list(task.env_vars.keys())}")
@@ -932,6 +1011,18 @@ class AgentWorker:
                     "worker_id": self.worker_id,
                 },
             )
+            self._emit_prd_generation_event(
+                owner_type=task.owner_type,
+                owner_id=task.owner_id,
+                task_id=task.id,
+                event_type="lifecycle",
+                message="Agent task started.",
+                payload={
+                    "agent_type": task.agent_type,
+                    "operation_type": task.operation_type,
+                    "worker_id": self.worker_id,
+                },
+            )
             for attempt in range(1, max_retries + 1):
                 # Select API key before each attempt
                 slot = rotator.get_active_key()
@@ -982,6 +1073,14 @@ class AgentWorker:
                         message="Agent task completed.",
                         payload={"telemetry": telemetry, "result_preview": result[:1200]},
                     )
+                    self._emit_prd_generation_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="complete",
+                        message="Agent task completed.",
+                        payload={"telemetry": telemetry, "result_preview": result[:1200]},
+                    )
                     await self.queue.submit_result(task.id, result, success=True, telemetry=telemetry)
                     _result_submitted = True
                     return
@@ -1000,6 +1099,15 @@ class AgentWorker:
                         payload={"telemetry": telemetry},
                     )
                     self._emit_agent_run_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=f"Agent task timed out: {e}",
+                        payload={"telemetry": telemetry},
+                    )
+                    self._emit_prd_generation_event(
                         owner_type=task.owner_type,
                         owner_id=task.owner_id,
                         task_id=task.id,
@@ -1030,6 +1138,15 @@ class AgentWorker:
                             owner_id=task.owner_id,
                             task_id=task.id,
                             event_type="lifecycle",
+                            message="Agent task cancelled.",
+                            payload={"telemetry": telemetry},
+                        )
+                        self._emit_prd_generation_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="lifecycle",
+                            level="warning",
                             message="Agent task cancelled.",
                             payload={"telemetry": telemetry},
                         )
@@ -1079,6 +1196,19 @@ class AgentWorker:
                                     "provider_error": error_str[:2000],
                                 },
                             )
+                            self._emit_prd_generation_event(
+                                owner_type=task.owner_type,
+                                owner_id=task.owner_id,
+                                task_id=task.id,
+                                event_type="error",
+                                level="error",
+                                message=message,
+                                payload={
+                                    "telemetry": telemetry,
+                                    "retry_after_seconds": retry_after,
+                                    "provider_error": error_str[:2000],
+                                },
+                            )
                             await self.queue.submit_result(task.id, "", success=False, error=message, telemetry=telemetry)
                             _result_submitted = True
                             return
@@ -1095,6 +1225,15 @@ class AgentWorker:
                             f"{attempt + 1}/{max_retries}"
                         )
                         self._emit_agent_run_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="retry",
+                            level="warning",
+                            message=f"Agent task rate limited; retrying attempt {attempt + 1}/{max_retries}.",
+                            payload={"retry_attempt": attempt + 1, "retry_wait_seconds": wait_seconds},
+                        )
+                        self._emit_prd_generation_event(
                             owner_type=task.owner_type,
                             owner_id=task.owner_id,
                             task_id=task.id,
@@ -1141,6 +1280,15 @@ class AgentWorker:
                             message=f"Agent task failed: {error_str}",
                             payload={"telemetry": telemetry},
                         )
+                        self._emit_prd_generation_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="error",
+                            level="error",
+                            message=f"Agent task failed: {error_str}",
+                            payload={"telemetry": telemetry},
+                        )
                         await self.queue.submit_result(task.id, "", success=False, error=error_str, telemetry=telemetry)
                         _result_submitted = True
                         return
@@ -1167,6 +1315,15 @@ class AgentWorker:
                         message=f"Agent task failed: {e}",
                         payload={"telemetry": telemetry},
                     )
+                    self._emit_prd_generation_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=f"Agent task failed: {e}",
+                        payload={"telemetry": telemetry},
+                    )
                     await self.queue.submit_result(task.id, "", success=False, error=str(e), telemetry=telemetry)
                     _result_submitted = True
                     return
@@ -1183,6 +1340,15 @@ class AgentWorker:
                 payload={"telemetry": telemetry},
             )
             self._emit_agent_run_event(
+                owner_type=task.owner_type,
+                owner_id=task.owner_id,
+                task_id=task.id,
+                event_type="error",
+                level="error",
+                message=f"Agent task exhausted {max_retries} retries due to rate limiting.",
+                payload={"telemetry": telemetry},
+            )
+            self._emit_prd_generation_event(
                 owner_type=task.owner_type,
                 owner_id=task.owner_id,
                 task_id=task.id,
@@ -1489,7 +1655,7 @@ class AgentWorker:
         proc = None
         stream_file = None
         try:
-            if owner_type == "agent_run" and owner_id:
+            if owner_type in {"agent_run", "prd_generation"} and owner_id:
                 try:
                     artifact_path = Path(effective_cwd) / "agent-stream.jsonl"
                     artifact_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1578,6 +1744,21 @@ class AgentWorker:
                                                     "retry_delay_ms": retry_delay_ms,
                                                 },
                                             )
+                                            self._emit_prd_generation_event(
+                                                owner_type=owner_type,
+                                                owner_id=owner_id,
+                                                task_id=task_id,
+                                                event_type="retry",
+                                                level="warning",
+                                                message=retry_message,
+                                                payload={
+                                                    "attempt": attempt,
+                                                    "max_retries": max_retries,
+                                                    "error_status": error_status,
+                                                    "error": evt.get("error"),
+                                                    "retry_delay_ms": retry_delay_ms,
+                                                },
+                                            )
                                     elif evt_type == "result":
                                         stream_stats["result_events"] += 1
                                         stream_stats["api_error_status"] = evt.get("api_error_status")
@@ -1610,6 +1791,14 @@ class AgentWorker:
                                                             task_id=task_id,
                                                             event_type="assistant_output",
                                                             message=text,
+                                                            payload={"chars": len(text)},
+                                                        )
+                                                        self._emit_prd_generation_event(
+                                                            owner_type=owner_type,
+                                                            owner_id=owner_id,
+                                                            task_id=task_id,
+                                                            event_type="assistant_output",
+                                                            message=text[:1200],
                                                             payload={"chars": len(text)},
                                                         )
                                             for item in _event_tool_uses(evt):
@@ -1659,6 +1848,19 @@ class AgentWorker:
                                                     payload={
                                                         "tool_name": tool_name,
                                                         "short_name": short_name,
+                                                        "input": item.get("input") or {},
+                                                    },
+                                                )
+                                                self._emit_prd_generation_event(
+                                                    owner_type=owner_type,
+                                                    owner_id=owner_id,
+                                                    task_id=task_id,
+                                                    event_type=event_type,
+                                                    message=f"Tool call: {short_name or tool_name}",
+                                                    payload={
+                                                        "tool_name": tool_name,
+                                                        "short_name": short_name,
+                                                        "tool_label": short_name,
                                                         "input": item.get("input") or {},
                                                     },
                                                 )
@@ -1761,6 +1963,29 @@ class AgentWorker:
                 "raw_output_chars": len(raw_output),
                 "cli_elapsed_seconds": elapsed,
             }
+        if owner_type == "prd_generation" and owner_id:
+            try:
+                artifact_dir = Path(effective_cwd)
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                (artifact_dir / "raw_output.txt").write_text(raw_output, encoding="utf-8")
+                (artifact_dir / "tool_calls.json").write_text(
+                    json.dumps(final_progress.get("tool_call_records") or [], indent=2, default=str),
+                    encoding="utf-8",
+                )
+                (artifact_dir / "agent_summary.json").write_text(
+                    json.dumps(self._last_execution_telemetry, indent=2, default=str),
+                    encoding="utf-8",
+                )
+                self._emit_prd_generation_event(
+                    owner_type=owner_type,
+                    owner_id=owner_id,
+                    task_id=task_id,
+                    event_type="telemetry",
+                    message="Agent telemetry artifacts captured.",
+                    payload={"telemetry": self._last_execution_telemetry},
+                )
+            except Exception as exc:
+                logger.debug("Failed to write PRD agent artifacts for task %s: %s", task_id, exc)
 
         if task_id in self._cancelled_task_ids:
             self._cancelled_task_ids.discard(task_id)

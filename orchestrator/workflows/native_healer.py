@@ -9,6 +9,7 @@ This workflow uses the Playwright Test Healer agent to:
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -63,6 +64,7 @@ class NativeHealer:
         owner_id: str | None = None,
         owner_label: str | None = None,
         model_tier: str = "tool_deep",
+        env_vars: dict[str, str] | None = None,
     ):
         self.on_tool_use = on_tool_use
         self.on_progress = on_progress
@@ -71,6 +73,7 @@ class NativeHealer:
         self.owner_id = owner_id
         self.owner_label = owner_label
         self.model_tier = model_tier
+        self.env_vars = dict(env_vars or {})
         self._last_timed_out = False
 
     async def heal_test(
@@ -172,6 +175,22 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 {diagnosis_context}
 """
 
+        test_data_section = ""
+        fixture_file = (self.env_vars or {}).get("QUORVEX_TEST_DATA_FILE")
+        if fixture_file:
+            refs = self._runtime_fixture_refs(fixture_file)
+            import_path = self._fixture_import_path(test_file)
+            lines = [
+                "## Project Test Data Fixture",
+                f"Runtime fixture file: `{fixture_file}`",
+                f"Import fixture test/expect from `{import_path}` when repairing test-data code.",
+                "Use `testData.get('<canonical-ref>')` or `testData.field('<canonical-ref>', '<path>')` for project test data.",
+                "Never write `process.env.TESTDATA_*` in the test file.",
+            ]
+            for ref in refs:
+                lines.append(f"- Available ref: `{ref}`")
+            test_data_section = "\n" + "\n".join(lines) + "\n"
+
         memory_section = self._build_memory_context_section(
             query=f"{test_file}\n{error_log or ''}\n{diagnosis_context or ''}\n{test_content[:3000]}",
             project_id=os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID"),
@@ -191,6 +210,7 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 
 {error_section}
 {diagnosis_section}
+{test_data_section}
 {memory_section}
 
 ## Your Workflow
@@ -292,6 +312,24 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
             logger.debug("Healer memory context skipped: %s", exc)
             return ""
 
+    def _fixture_import_path(self, test_file: str) -> str:
+        fixture_path = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "test-data"
+        relative = os.path.relpath(fixture_path, Path(test_file).parent)
+        relative = Path(relative).as_posix()
+        if not relative.startswith("."):
+            relative = f"./{relative}"
+        return relative
+
+    def _runtime_fixture_refs(self, fixture_file: str) -> list[str]:
+        try:
+            payload = json.loads(Path(fixture_file).read_text())
+            items = payload.get("items") if isinstance(payload, dict) else {}
+            if isinstance(items, dict):
+                return sorted(str(ref) for ref in items)
+        except Exception as exc:
+            logger.debug("Could not read runtime test data fixture refs: %s", exc)
+        return []
+
     def _capture_successful_healing_memory(
         self,
         *,
@@ -373,6 +411,7 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
                 memory_source_type="test_file",
                 memory_stage="native_healer",
                 inject_memory=False,
+                env_vars=self.env_vars,
             )
             result = await runner.run(prompt)
             self._last_timed_out = result.timed_out

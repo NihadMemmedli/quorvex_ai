@@ -267,6 +267,13 @@ def _run_migrations():
                     conn.execute(text("ALTER TABLE testrun ADD COLUMN agentic_summary JSON"))
                 logger.info("Added column: testrun.agentic_summary")
 
+            if "browser_auth" not in existing_columns:
+                if db_type == "postgresql":
+                    conn.execute(text("ALTER TABLE testrun ADD COLUMN browser_auth JSONB"))
+                else:
+                    conn.execute(text("ALTER TABLE testrun ADD COLUMN browser_auth JSON"))
+                logger.info("Added column: testrun.browser_auth")
+
         # Create regression_batches table if it doesn't exist
         if "regression_batches" not in inspector.get_table_names():
             if db_type == "postgresql":
@@ -707,6 +714,7 @@ def _run_migrations():
                         model_tier VARCHAR,
                         timeout_seconds INTEGER NOT NULL DEFAULT 1800,
                         tool_ids_json TEXT NOT NULL DEFAULT '[]',
+                        test_data_refs_json TEXT NOT NULL DEFAULT '[]',
                         status VARCHAR NOT NULL DEFAULT 'active',
                         created_at TIMESTAMP,
                         updated_at TIMESTAMP
@@ -727,6 +735,7 @@ def _run_migrations():
                         model_tier VARCHAR,
                         timeout_seconds INTEGER NOT NULL DEFAULT 1800,
                         tool_ids_json TEXT NOT NULL DEFAULT '[]',
+                        test_data_refs_json TEXT NOT NULL DEFAULT '[]',
                         status VARCHAR NOT NULL DEFAULT 'active',
                         created_at DATETIME,
                         updated_at DATETIME
@@ -742,6 +751,9 @@ def _run_migrations():
             if "model_tier" not in agent_definition_columns:
                 conn.execute(text("ALTER TABLE agent_definitions ADD COLUMN model_tier VARCHAR"))
                 logger.info("Added column: agent_definitions.model_tier")
+            if "test_data_refs_json" not in agent_definition_columns:
+                conn.execute(text("ALTER TABLE agent_definitions ADD COLUMN test_data_refs_json TEXT NOT NULL DEFAULT '[]'"))
+                logger.info("Added column: agent_definitions.test_data_refs_json")
 
         if "agent_tool_definitions" not in inspector.get_table_names():
             if db_type == "postgresql":
@@ -1308,6 +1320,32 @@ def _run_migrations():
                     )
                 )
                 logger.info("Added column: prd_generation_results.live_browser_requested")
+            timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
+            queue_columns_to_add = {
+                "agent_task_id": "VARCHAR",
+                "agent_worker_id": "VARCHAR",
+                "last_heartbeat_at": timestamp_type,
+                "queue_telemetry_json": "VARCHAR NOT NULL DEFAULT '{}'",
+            }
+            for column_name, column_type in queue_columns_to_add.items():
+                if column_name not in prd_gen_columns:
+                    conn.execute(text(f"ALTER TABLE prd_generation_results ADD COLUMN {column_name} {column_type}"))
+                    logger.info("Added column: prd_generation_results.%s", column_name)
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_prd_generation_results_agent_task_id "
+                        "ON prd_generation_results (agent_task_id)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_prd_generation_results_agent_worker_id "
+                        "ON prd_generation_results (agent_worker_id)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"PRD generation queue ownership index migration note: {e}")
 
         if "browser_auth_sessions" not in inspector.get_table_names():
             timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"

@@ -1,9 +1,11 @@
 'use client';
 import { useState, useEffect, useMemo } from 'react';
-import { ArrowLeft, Edit, Save, Play, Code, FileText, Eye, X } from 'lucide-react';
+import type { CSSProperties } from 'react';
+import { ArrowLeft, Database, Edit, Save, Play, Code, FileText, Eye, X } from 'lucide-react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import SpecBuilder from '@/components/SpecBuilder';
+import { TestDataPicker } from '@/components/TestDataPicker';
 import CodeEditor from '@/components/CodeEditor';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -45,6 +47,76 @@ function specsBrowserAuthRequestBody(mode: SpecsBrowserAuthMode, sessionId: stri
     return {};
 }
 
+function segmentedControlStyle(): CSSProperties {
+    return {
+        background: 'var(--background-raised)',
+        borderRadius: 'var(--radius)',
+        padding: '3px',
+        display: 'flex',
+        border: '1px solid var(--border)',
+        gap: '2px',
+        flexWrap: 'wrap',
+    };
+}
+
+function segmentButtonStyle(active: boolean): CSSProperties {
+    return {
+        minHeight: 32,
+        padding: '0.35rem 0.75rem',
+        background: active ? 'var(--primary)' : 'transparent',
+        color: active ? 'white' : 'var(--text-secondary)',
+        borderRadius: 'var(--radius-sm)',
+        border: 'none',
+        fontSize: '0.8rem',
+        fontWeight: active ? 600 : 500,
+        cursor: 'pointer',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '0.375rem',
+        whiteSpace: 'nowrap',
+    };
+}
+
+const toolbarGroupStyle: CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '0.75rem',
+    flexWrap: 'wrap',
+};
+
+const contentTabBarStyle: CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-start',
+    marginBottom: '0.75rem',
+};
+
+const editorHeaderStyle: CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '0.75rem',
+    padding: '0.75rem 1rem',
+    borderBottom: '1px solid var(--border)',
+    background: 'var(--surface)',
+    flexWrap: 'wrap',
+};
+
+const editorHeaderActionsStyle: CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: '0.5rem',
+    flexWrap: 'wrap',
+    marginLeft: 'auto',
+};
+
+const testDataPanelStyle: CSSProperties = {
+    padding: '0.75rem 1rem',
+    borderBottom: '1px solid var(--border)',
+    background: 'var(--background-raised)',
+};
+
 export default function SpecDetailPage() {
     const params = useParams();
     const router = useRouter();
@@ -64,6 +136,7 @@ export default function SpecDetailPage() {
     const [saving, setSaving] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
     const [mode, setMode] = useState<'code' | 'visual'>('code');
+    const [showTestDataPanel, setShowTestDataPanel] = useState(false);
 
     const [activeTab, setActiveTab] = useState<'spec' | 'generated'>('spec');
     const [isAutomated, setIsAutomated] = useState(false);
@@ -141,6 +214,7 @@ export default function SpecDetailPage() {
             setOriginalGeneratedCode(null);
             setCodePath(null);
             setIsAutomated(false);
+            setShowTestDataPanel(false);
 
             const candidates = getSpecNameCandidates(decodedName);
 
@@ -202,7 +276,18 @@ export default function SpecDetailPage() {
         if (activeTab === 'generated' && isAutomated) {
             loadGeneratedCode();
         }
+        if (activeTab !== 'spec') {
+            setShowTestDataPanel(false);
+        }
     }, [activeTab, isAutomated]);
+
+    const handleCancelSpecEdit = () => {
+        setContent(originalContent);
+        setIsEditing(false);
+        if (mode === 'visual') {
+            setMode('code');
+        }
+    };
 
     const handleSaveGeneratedCode = async () => {
         if (!generatedCode) return;
@@ -354,133 +439,114 @@ export default function SpecDetailPage() {
                 }
             />
 
-            {/* Toolbar row */}
-            <div
-                className="card-elevated animate-in stagger-2"
-                style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    height: '3rem',
-                    padding: '0 1rem',
-                    marginBottom: '1rem',
-                }}
-            >
-                {/* Left: toggles */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                    {activeTab === 'spec' && (
-                        <div style={{ background: 'var(--surface)', borderRadius: 'var(--radius)', padding: '3px', display: 'flex', border: '1px solid var(--border)' }}>
-                            <button
-                                onClick={() => setMode('code')}
-                                style={{
-                                    padding: '3px 10px',
-                                    background: mode === 'code' ? 'var(--primary)' : 'transparent',
-                                    color: mode === 'code' ? 'white' : 'var(--text-secondary)',
-                                    borderRadius: '4px',
-                                    border: 'none',
-                                    fontSize: '0.8rem',
-                                    cursor: 'pointer',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.375rem',
-                                }}
-                            >
-                                <Code size={13} />
-                                Code
-                            </button>
-                            <button
-                                onClick={() => { setMode('visual'); setIsEditing(true); }}
-                                style={{
-                                    padding: '3px 10px',
-                                    background: mode === 'visual' ? 'var(--primary)' : 'transparent',
-                                    color: mode === 'visual' ? 'white' : 'var(--text-secondary)',
-                                    borderRadius: '4px',
-                                    border: 'none',
-                                    fontSize: '0.8rem',
-                                    cursor: 'pointer',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.375rem',
-                                }}
-                            >
-                                <Eye size={13} />
-                                Visual
-                            </button>
-                        </div>
-                    )}
-
-                    {isAutomated && (
-                        <div style={{ background: 'var(--surface)', borderRadius: 'var(--radius)', padding: '3px', display: 'flex', border: '1px solid var(--border)' }}>
-                            <button
-                                onClick={() => setActiveTab('spec')}
-                                style={{
-                                    padding: '3px 10px',
-                                    background: activeTab === 'spec' ? 'var(--primary)' : 'transparent',
-                                    color: activeTab === 'spec' ? 'white' : 'var(--text-secondary)',
-                                    borderRadius: '4px',
-                                    border: 'none',
-                                    fontSize: '0.8rem',
-                                    cursor: 'pointer',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.375rem',
-                                }}
-                            >
-                                <FileText size={13} />
-                                Spec
-                            </button>
-                            <button
-                                onClick={() => setActiveTab('generated')}
-                                style={{
-                                    padding: '3px 10px',
-                                    background: activeTab === 'generated' ? 'var(--success)' : 'transparent',
-                                    color: activeTab === 'generated' ? 'white' : 'var(--text-secondary)',
-                                    borderRadius: '4px',
-                                    border: 'none',
-                                    fontSize: '0.8rem',
-                                    cursor: 'pointer',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    gap: '0.375rem',
-                                }}
-                            >
-                                <Code size={13} />
-                                Generated Test
-                            </button>
-                        </div>
-                    )}
-                </div>
-
-                {/* Right: edit/save controls */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    {activeTab === 'spec' && mode === 'code' && (
+            {isAutomated && (
+                <div className="animate-in stagger-2" style={contentTabBarStyle}>
+                    <div style={segmentedControlStyle()} role="tablist" aria-label="Spec detail view">
                         <button
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => {
-                                if (isEditing) {
-                                    setContent(originalContent);
-                                    setIsEditing(false);
-                                } else {
-                                    setIsEditing(true);
-                                }
-                            }}
+                            type="button"
+                            role="tab"
+                            aria-selected={activeTab === 'spec'}
+                            aria-label="Show spec markdown"
+                            onClick={() => setActiveTab('spec')}
+                            style={segmentButtonStyle(activeTab === 'spec')}
                         >
-                            {isEditing ? <><X size={14} /> Cancel</> : <><Edit size={14} /> Edit</>}
+                            <FileText size={13} />
+                            Spec
                         </button>
-                    )}
-                    {activeTab === 'spec' && (isEditing || hasChanges) && (
-                        <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
-                            {saving ? 'Saving...' : <><Save size={14} /> Save</>}
+                        <button
+                            type="button"
+                            role="tab"
+                            aria-selected={activeTab === 'generated'}
+                            aria-label="Show generated test"
+                            onClick={() => setActiveTab('generated')}
+                            style={segmentButtonStyle(activeTab === 'generated')}
+                        >
+                            <Code size={13} />
+                            Generated Test
                         </button>
-                    )}
+                    </div>
                 </div>
-            </div>
+            )}
 
             {/* Content area */}
             <div className="animate-in stagger-3" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: '500px' }}>
                 {activeTab === 'spec' ? (
                     <div className="card-elevated" style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', padding: 0 }}>
-                        <div style={{ flex: 1, overflow: 'hidden', position: 'relative', background: 'var(--code-bg)', borderRadius: 'var(--radius)' }}>
+                        <div style={editorHeaderStyle}>
+                            <div style={toolbarGroupStyle}>
+                                <div style={segmentedControlStyle()} role="group" aria-label="Spec editor mode">
+                                    <button
+                                        type="button"
+                                        aria-label="Switch to code editor"
+                                        onClick={() => setMode('code')}
+                                        style={segmentButtonStyle(mode === 'code')}
+                                    >
+                                        <Code size={13} />
+                                        Code
+                                    </button>
+                                    <button
+                                        type="button"
+                                        aria-label="Switch to visual editor"
+                                        onClick={() => { setMode('visual'); setIsEditing(true); }}
+                                        style={segmentButtonStyle(mode === 'visual')}
+                                    >
+                                        <Eye size={13} />
+                                        Visual
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div style={editorHeaderActionsStyle}>
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary btn-sm"
+                                    aria-expanded={showTestDataPanel}
+                                    aria-controls="spec-test-data-panel"
+                                    onClick={() => setShowTestDataPanel(prev => !prev)}
+                                >
+                                    <Database size={14} /> Insert test data
+                                </button>
+                                {!isEditing && mode === 'code' && (
+                                    <button
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={() => setIsEditing(true)}
+                                    >
+                                        <Edit size={14} /> Edit spec
+                                    </button>
+                                )}
+                                {(isEditing || hasChanges) && (
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary btn-sm"
+                                        onClick={handleCancelSpecEdit}
+                                    >
+                                        <X size={14} /> Cancel
+                                    </button>
+                                )}
+                                {(isEditing || hasChanges) && (
+                                    <button className="btn btn-primary btn-sm" onClick={handleSave} disabled={saving}>
+                                        {saving ? 'Saving...' : <><Save size={14} /> Save</>}
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                        {showTestDataPanel && (
+                            <div id="spec-test-data-panel" style={testDataPanelStyle}>
+                                <TestDataPicker
+                                    projectId={currentProject?.id}
+                                    mode="directive"
+                                    compact
+                                    insertLabel="Insert"
+                                    editLabel="Edit data"
+                                    onInserted={() => setShowTestDataPanel(false)}
+                                    onInsert={(value) => {
+                                        setContent(prev => `${prev.trimEnd()}\n\n${value}\n`);
+                                        setIsEditing(true);
+                                    }}
+                                />
+                            </div>
+                        )}
+                        <div style={{ flex: 1, overflow: 'hidden', position: 'relative', background: 'var(--code-bg)' }}>
                             {mode === 'visual' ? (
                                 <div style={{ position: 'absolute', inset: 0, overflow: 'auto' }}>
                                     <SpecBuilder content={content} onChange={setContent} />
@@ -555,7 +621,7 @@ export default function SpecDetailPage() {
                                                 className="btn btn-secondary btn-sm"
                                                 onClick={() => setIsEditingCode(true)}
                                             >
-                                                <Edit size={14} /> Edit
+                                                <Edit size={14} /> Edit generated test
                                             </button>
                                         )}
                                     </div>

@@ -1,13 +1,13 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Plus, Trash2, ArrowUp, ArrowDown, MousePointer, Type, Globe, CheckCircle, HelpCircle, LayoutTemplate, Lock, Search } from 'lucide-react';
+import { Plus, Trash2, ArrowUp, ArrowDown, MousePointer, Type, Globe, CheckCircle, HelpCircle, LayoutTemplate, Lock, Search, Database } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
 
 interface SpecStep {
     id: string;
-    type: 'navigate' | 'click' | 'fill' | 'assert' | 'custom' | 'include';
+    type: 'navigate' | 'click' | 'fill' | 'assert' | 'custom' | 'include' | 'testdata';
     description: string;
 }
 
@@ -61,7 +61,7 @@ export default function SpecBuilder({ content, onChange }: SpecBuilderProps) {
         if (!md) md = '';
         const lines = md.split('\n');
         let parsedTitle = '';
-        let parsedDesc = [];
+        let parsedDesc: string[] = [];
         let parsedSteps: SpecStep[] = [];
         let isStepsStart = false;
 
@@ -69,7 +69,13 @@ export default function SpecBuilder({ content, onChange }: SpecBuilderProps) {
             const trimmed = line.trim();
             if (!trimmed) continue;
 
-            if (trimmed.startsWith('# ')) {
+            if (/^@testdata\s+"[^"]+"\s*$/.test(trimmed)) {
+                parsedSteps.push({
+                    id: Math.random().toString(36).substr(2, 9),
+                    type: 'testdata',
+                    description: line
+                });
+            } else if (trimmed.startsWith('# ')) {
                 parsedTitle = trimmed.replace('# ', '').trim();
             } else if (trimmed.startsWith('Test:')) {
                 // Support legacy format
@@ -96,6 +102,7 @@ export default function SpecBuilder({ content, onChange }: SpecBuilderProps) {
     const inferType = (text: string): SpecStep['type'] => {
         const lower = text.toLowerCase();
         if (lower.startsWith('@include')) return 'include';
+        if (lower.startsWith('@testdata')) return 'testdata';
         if (lower.includes('go to') || lower.includes('navigate') || lower.includes('open')) return 'navigate';
         if (lower.includes('click') || lower.includes('press') || lower.includes('select')) return 'click';
         if (lower.includes('type') || lower.includes('fill') || lower.includes('enter')) return 'fill';
@@ -108,8 +115,14 @@ export default function SpecBuilder({ content, onChange }: SpecBuilderProps) {
         if (currentTitle) md += `# ${currentTitle}\n\n`;
         if (currentDesc) md += `${currentDesc}\n\n`;
 
-        currentSteps.forEach((step, index) => {
-            md += `${index + 1}. ${step.description}\n`;
+        let stepNumber = 1;
+        currentSteps.forEach((step) => {
+            if (step.type === 'testdata') {
+                md += `${step.description}\n`;
+                return;
+            }
+            md += `${stepNumber}. ${step.description}\n`;
+            stepNumber += 1;
         });
 
         return md;
@@ -172,6 +185,7 @@ export default function SpecBuilder({ content, onChange }: SpecBuilderProps) {
             case 'fill': return <Type size={16} className="text-yellow-400" />;
             case 'assert': return <CheckCircle size={16} className="text-purple-400" />;
             case 'include': return <LayoutTemplate size={16} className="text-cyan-400" />;
+            case 'testdata': return <Database size={16} className="text-emerald-400" />;
             default: return <HelpCircle size={16} className="text-gray-400" />;
         }
     };
@@ -232,8 +246,8 @@ export default function SpecBuilder({ content, onChange }: SpecBuilderProps) {
                         alignItems: 'flex-start',
                         gap: '1rem',
                         padding: '1rem',
-                        background: step.type === 'include' ? 'rgba(6, 182, 212, 0.05)' : 'var(--surface)',
-                        border: step.type === 'include' ? '1px solid rgba(6, 182, 212, 0.2)' : '1px solid var(--border)',
+                        background: step.type === 'include' || step.type === 'testdata' ? 'rgba(6, 182, 212, 0.05)' : 'var(--surface)',
+                        border: step.type === 'include' || step.type === 'testdata' ? '1px solid rgba(6, 182, 212, 0.2)' : '1px solid var(--border)',
                         borderRadius: 'var(--radius)',
                         transition: 'border-color 0.2s'
                     }}>
@@ -249,7 +263,7 @@ export default function SpecBuilder({ content, onChange }: SpecBuilderProps) {
                             fontWeight: 600,
                             marginTop: '0.5rem'
                         }}>
-                            {index + 1}
+                            {step.type === 'testdata' ? 'TD' : steps.slice(0, index).filter(candidate => candidate.type !== 'testdata').length + 1}
                         </div>
 
                         <div style={{ flex: 1 }}>
@@ -259,10 +273,10 @@ export default function SpecBuilder({ content, onChange }: SpecBuilderProps) {
                                     textTransform: 'uppercase',
                                     fontSize: '0.7rem',
                                     letterSpacing: '0.05em',
-                                    color: step.type === 'include' ? 'var(--cyan-400)' : 'var(--text-secondary)',
+                                    color: step.type === 'include' || step.type === 'testdata' ? 'var(--cyan-400)' : 'var(--text-secondary)',
                                     fontWeight: 600
                                 }}>
-                                    {step.type === 'include' ? 'Template Include' : step.type}
+                                    {step.type === 'include' ? 'Template Include' : step.type === 'testdata' ? 'Test Data' : step.type}
                                 </span>
                             </div>
                             <input
@@ -277,7 +291,7 @@ export default function SpecBuilder({ content, onChange }: SpecBuilderProps) {
                                     color: 'white',
                                     fontSize: '1rem',
                                     outline: 'none',
-                                    fontFamily: step.type === 'include' ? 'monospace' : 'inherit'
+                                    fontFamily: step.type === 'include' || step.type === 'testdata' ? 'monospace' : 'inherit'
                                 }}
                             />
                         </div>

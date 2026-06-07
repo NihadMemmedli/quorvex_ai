@@ -11,6 +11,7 @@ Tests cover:
 Run with: JWT_SECRET_KEY=test pytest orchestrator/tests/test_api_endpoints.py -v
 """
 
+import json
 import os
 import shutil
 import sys
@@ -293,6 +294,80 @@ class TestAgentDefinitionEndpoints:
             assert "Browser Pool" in data["log"]
             assert data["blocker_message"] == "Planner agent is waiting for browser slot held by parent run."
             assert any(section["title"] == "Browser Pool" for section in data["log_sections"])
+        finally:
+            shutil.rmtree(main_module.RUNS_DIR / run_id, ignore_errors=True)
+            with Session(engine) as session:
+                run = session.get(DBTestRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
+
+    def test_get_run_surfaces_pipeline_error_without_stale_browser_blocker(self, client, monkeypatch):
+        """Terminal pipeline failures should show root-cause logs instead of stale browser queue blockers."""
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import TestRun as DBTestRun
+
+        class _Pool:
+            async def get_status(self):
+                return {
+                    "max_browsers": 1,
+                    "running": 0,
+                    "queued": 1,
+                    "available": 1,
+                    "running_requests": [],
+                    "queued_requests": [run_id],
+                    "by_type": {},
+                }
+
+        run_id = f"pipeline-error-{uuid4()}"
+        error_msg = "Missing required @testdata refs: wetravel-auth.valid-user (dataset_not_found)"
+        monkeypatch.setattr(main_module, "BROWSER_POOL", _Pool())
+
+        with Session(engine) as session:
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="missing-testdata.md",
+                    status="failed",
+                    created_at=datetime.utcnow(),
+                    current_stage="running",
+                    stage_message="Running native pipeline",
+                )
+            )
+            session.commit()
+
+        try:
+            run_dir = main_module.RUNS_DIR / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "status.txt").write_text("failed")
+            (run_dir / "pipeline_error.json").write_text(
+                json.dumps(
+                    {
+                        "stage": "test_data_resolution",
+                        "error": error_msg,
+                        "refs": ["wetravel-auth.valid-user"],
+                        "missing_test_data": [
+                            {
+                                "ref": "wetravel-auth.valid-user",
+                                "reason": "dataset_not_found",
+                            }
+                        ],
+                    }
+                )
+            )
+
+            response = client.get(f"/runs/{run_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["error_message"] == f"[test_data_resolution] {error_msg}"
+            assert data["blocker_message"] is None
+            assert "Pipeline Error" in data["log"]
+            assert "Test Data" in data["log"]
+            assert "missing_refs=wetravel-auth.valid-user (dataset_not_found)" in data["log"]
+            assert "Test run is waiting for a browser slot" not in data["log"]
+            assert any(section["title"] == "Pipeline Error" for section in data["log_sections"])
+            assert any(section["title"] == "Test Data" for section in data["log_sections"])
         finally:
             shutil.rmtree(main_module.RUNS_DIR / run_id, ignore_errors=True)
             with Session(engine) as session:

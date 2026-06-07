@@ -21,7 +21,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     requiredRole: 'editor',
     confirmationRequired: true,
     getPath: () => '/runs',
-    getBody: (args, pid) => ({ spec_name: args.specName, project_id: pid }),
+    getBody: (args, pid) => ({ spec_name: args.specName, project_id: pid, ...buildBrowserAuthControls(args) }),
   },
   startDiscoveryExploration: {
     label: 'Start Discovery Exploration',
@@ -42,6 +42,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       exclude_patterns: args.excludePatterns || [],
       focus_areas: args.focusAreas || [],
       additional_instructions: args.instructions || undefined,
+      ...buildBrowserAuthControls(args),
     }),
   },
   startExploration: {
@@ -63,6 +64,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       exclude_patterns: args.excludePatterns || [],
       focus_areas: args.focusAreas || [],
       additional_instructions: args.instructions || undefined,
+      ...buildBrowserAuthControls(args),
     }),
   },
   startExplorerAgent: {
@@ -81,6 +83,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       focus_areas: args.focusAreas || undefined,
       excluded_patterns: args.excludedPatterns || undefined,
       project_id: pid || 'default',
+      ...buildBrowserAuthControls(args),
     }),
   },
   startAdhocCustomAgent: {
@@ -180,6 +183,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       if (args.forceRegenerate !== undefined) params.set('force_regenerate', String(args.forceRegenerate));
       return `/api/agents/exploratory/${encodeURIComponent(String(args.runId))}/flows/${encodeURIComponent(String(args.flowId))}/generate?${params}`;
     },
+    getBody: (args) => buildBrowserAuthControls(args),
   },
   updateExplorerFlow: {
     label: 'Update Explorer Flow',
@@ -492,7 +496,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     requiredRole: 'editor',
     confirmationRequired: true,
     getPath: () => '/runs/bulk',
-    getBody: (args, pid) => ({ spec_names: args.specNames, project_id: pid }),
+    getBody: (args, pid) => ({ spec_names: args.specNames, project_id: pid, ...buildBrowserAuthControls(args) }),
   },
   executeUiTestCoveragePlan: {
     label: 'Execute UI Test Coverage Plan',
@@ -505,6 +509,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       spec_names: args.specNames,
       project_id: pid,
       reason: args.reason || undefined,
+      ...buildBrowserAuthControls(args),
     }),
   },
   stopRun: {
@@ -626,7 +631,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     requiredRole: 'editor',
     confirmationRequired: true,
     getPath: () => '/runs',
-    getBody: (args, pid) => ({ spec_name: args.specName, project_id: pid }),
+    getBody: (args, pid) => ({ spec_name: args.specName, project_id: pid, ...buildBrowserAuthControls(args) }),
   },
   healFailedRun: {
     label: 'Heal Failed Run',
@@ -635,7 +640,12 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     requiredRole: 'editor',
     confirmationRequired: true,
     getPath: () => '/runs',
-    getBody: (args, pid) => ({ spec_name: args.specName, project_id: pid, hybrid_mode: args.useHybridHealing }),
+    getBody: (args, pid) => ({
+      spec_name: args.specName,
+      project_id: pid,
+      hybrid: args.useHybridHealing,
+      ...buildBrowserAuthControls(args),
+    }),
   },
   triggerScheduleNow: {
     label: 'Trigger Schedule Now',
@@ -1907,6 +1917,22 @@ function hostnameLabel(rawUrl: string) {
   } catch {
     return 'website';
   }
+}
+
+function buildBrowserAuthControls(args: Record<string, unknown>) {
+  if (args.skipBrowserAuth === true) {
+    return { skip_browser_auth: true };
+  }
+  const explicitSession = typeof args.browserAuthSessionId === 'string' ? args.browserAuthSessionId.trim() : '';
+  const explorerSession = typeof args.sessionId === 'string' && args.authType === 'session' ? args.sessionId.trim() : '';
+  const sessionId = explicitSession || explorerSession;
+  if (sessionId) {
+    return { browser_auth_session_id: sessionId };
+  }
+  if (args.useProjectDefaultBrowserAuth === true) {
+    return { use_project_default_browser_auth: true };
+  }
+  return {};
 }
 
 function buildExplorerAuth(args: Record<string, unknown>) {

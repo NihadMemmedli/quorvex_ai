@@ -63,6 +63,7 @@ from orchestrator.api.models_db import (
     RtmSnapshot,
 )
 from orchestrator.services.autonomous_activities import (
+    _agent_prompt_for_work_item,
     _allowed_tools_for_work_item,
     _auto_materialize_low_risk_proposals,
     _create_findings_from_completed_work_items,
@@ -110,6 +111,44 @@ def _create_project_and_mission(session: Session, *, mission_type: str = "covera
     session.commit()
     session.refresh(mission)
     return mission
+
+
+def test_autonomous_work_item_prompt_includes_testdata_and_delegation_instructions():
+    mission = AutonomousMission(
+        id="am-testdata",
+        project_id="project-1",
+        name="Coverage mission",
+        mission_type="coverage",
+        status="running",
+        target_urls_json='["https://example.com"]',
+        config_json='{"runtime": "hermes", "test_data_refs": ["wetravel-auth.valid-user"]}',
+    )
+    item = AutonomousAgentWorkItem(
+        id="work-1",
+        mission_id=mission.id,
+        role="explorer",
+        objective="Explore login",
+    )
+    prompt = _agent_prompt_for_work_item(
+        mission,
+        item,
+        {
+            "prompt_markdown": (
+                "## Available Project Test Data\n"
+                "### wetravel-auth.valid-user\n"
+                "- `testData.get('wetravel-auth.valid-user')` returns the resolved fixture data"
+            ),
+            "env_vars": {
+                "TESTDATA_WETRAVEL_AUTH_VALID_USER_USERNAME": "user@example.com"
+            },
+        },
+    )
+
+    assert "Available Project Test Data" in prompt
+    assert "wetravel-auth.valid-user" in prompt
+    assert "TESTDATA_WETRAVEL_AUTH_VALID_USER_USERNAME" not in prompt
+    assert "copy the relevant test-data ref names" in prompt
+    assert "subagents do not automatically inherit" in prompt.lower()
 
 
 def test_load_mission_policy_returns_durable_controls():

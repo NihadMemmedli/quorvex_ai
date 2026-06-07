@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS: PrdSettings = {
     useLiveValidation: false,
     useNativeAgents: true,
     targetFeatures: 15,
+    testDataRefs: '',
 };
 
 function getStorageKey(projectId: string | undefined): string {
@@ -43,6 +44,7 @@ export function usePrdSettings(projectId: string | undefined, projectDefaultUrl 
                     useLiveValidation: hasTargetUrl(targetUrl),
                     useNativeAgents: parsed.useNativeAgents ?? true,
                     targetFeatures: parsed.targetFeatures || 15,
+                    testDataRefs: parsed.testDataRefs || '',
                 }));
             }
         } catch {

@@ -776,6 +776,7 @@ async def _dispatch_step(
         if not definition_id:
             raise RuntimeError("Custom agent definition_id is required")
         body = {key: value for key, value in data.items() if key != "definition_id"}
+        body = _inherit_test_data_refs(body, context)
         return normalize_step_output(await _post_json(
             f"/api/agents/definitions/{definition_id}/runs",
             {**body, "project_id": project_id or "default"},
@@ -790,35 +791,64 @@ async def _dispatch_step(
     if action == "start_exploration":
         return normalize_step_output(await _post_json(
             "/exploration/start",
-            {**data, "project_id": project_id or data.get("project_id") or "default"},
+            _apply_browser_auth_step_controls({**data, "project_id": project_id or data.get("project_id") or "default"}),
             expected_kind="exploration",
         ))
     if action == "generate_requirements":
         session_id = data.get("exploration_session_id")
+        body = _inherit_test_data_refs({"exploration_session_id": session_id, **data}, context)
         return normalize_step_output(await _post_json(
             f"/requirements/generate?project_id={project_id or 'default'}",
-            {"exploration_session_id": session_id},
+            body,
             expected_kind="requirements_job",
         ))
     if action == "generate_specs_from_requirements":
+        body = _inherit_test_data_refs(dict(data), context)
         return normalize_step_output(await _post_json(
             f"/requirements/bulk-generate-specs?project_id={project_id or 'default'}",
-            data,
+            body,
             expected_kind="bulk_specs_job",
         ))
     if action == "run_spec":
         return normalize_step_output(await _post_json(
             "/runs",
-            {**data, "project_id": project_id or data.get("project_id") or "default"},
+            _apply_browser_auth_step_controls({**data, "project_id": project_id or data.get("project_id") or "default"}),
             expected_kind="test_run",
         ))
     if action == "run_regression_batch":
         return normalize_step_output(await _post_json(
             "/runs/bulk",
-            {**data, "project_id": project_id or data.get("project_id") or "default"},
+            _apply_browser_auth_step_controls({**data, "project_id": project_id or data.get("project_id") or "default"}),
             expected_kind="regression_batch",
         ))
     raise RuntimeError(f"Unsupported step type: {step_type}")
+
+
+def _inherit_test_data_refs(body: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    if "test_data_refs" in body:
+        return body
+    refs = context.get("test_data_refs")
+    if isinstance(refs, list) and refs:
+        return {**body, "test_data_refs": [str(ref) for ref in refs]}
+    return body
+
+
+def _apply_browser_auth_step_controls(body: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(body)
+    skip_auth = bool(cleaned.pop("skip_browser_auth", False))
+    session_id = str(cleaned.get("browser_auth_session_id") or "").strip()
+    if skip_auth:
+        cleaned.pop("browser_auth_session_id", None)
+        cleaned.pop("use_project_default_browser_auth", None)
+        return cleaned
+    if session_id:
+        cleaned["browser_auth_session_id"] = session_id
+        cleaned.pop("use_project_default_browser_auth", None)
+        return cleaned
+    cleaned.pop("browser_auth_session_id", None)
+    if not cleaned.get("use_project_default_browser_auth"):
+        cleaned.pop("use_project_default_browser_auth", None)
+    return cleaned
 
 
 async def _post_json(path: str, body: dict[str, Any], *, expected_kind: str | None = None) -> dict[str, Any]:
@@ -1251,11 +1281,64 @@ def _build_context(session: Session, run_id: str, run: WorkflowRun) -> dict[str,
     steps = session.exec(
         select(WorkflowRunStep).where(WorkflowRunStep.run_id == run_id).order_by(WorkflowRunStep.step_order)
     ).all()
+    test_data_refs: list[str] = []
+    inputs_refs = run.inputs.get("test_data_refs") if isinstance(run.inputs, dict) else None
+    if isinstance(inputs_refs, list):
+        test_data_refs.extend(str(ref) for ref in inputs_refs)
+    test_data_refs.extend(_discover_test_data_refs_from_workflow_inputs(run.inputs))
+    for step in steps:
+        step_refs = step.input.get("test_data_refs") if isinstance(step.input, dict) else None
+        if isinstance(step_refs, list):
+            test_data_refs.extend(str(ref) for ref in step_refs)
+        test_data_refs.extend(_discover_test_data_refs_from_workflow_inputs(step.input))
+    test_data: dict[str, Any] = {}
+    if test_data_refs:
+        try:
+            from orchestrator.services.test_data_resolver import resolve_test_data_refs
+
+            test_data = resolve_test_data_refs(
+                session,
+                project_id=run.project_id or "default",
+                refs=test_data_refs,
+                render_as="json",
+                decrypt_sensitive=False,
+            ).get("json", {})
+        except Exception as exc:
+            logger.warning("Failed to resolve workflow test data refs for run %s: %s", run_id, exc)
+    deduped_test_data_refs = list(dict.fromkeys(test_data_refs))
     return {
         "run": {"id": run.id, "inputs": run.inputs, "project_id": run.project_id},
         "inputs": run.inputs,
         "steps": {step.step_key: (step.output or {}) for step in steps},
+        "test_data": test_data,
+        "test_data_refs": deduped_test_data_refs,
     }
+
+
+def _discover_test_data_refs_from_workflow_inputs(value: Any) -> list[str]:
+    """Find @testdata refs embedded in markdown-like workflow string inputs."""
+    try:
+        from orchestrator.services.test_data_resolver import extract_test_data_refs_from_markdown
+    except Exception:
+        return []
+
+    markdown_keys = {"content", "spec_content", "markdown", "spec"}
+    refs: list[str] = []
+
+    def visit(child: Any, key: str | None = None) -> None:
+        if isinstance(child, dict):
+            for child_key, child_value in child.items():
+                visit(child_value, str(child_key))
+            return
+        if isinstance(child, list):
+            for item in child:
+                visit(item, key)
+            return
+        if isinstance(child, str) and key in markdown_keys:
+            refs.extend(extract_test_data_refs_from_markdown(child))
+
+    visit(value)
+    return refs
 
 
 def _render_templates(value: Any, context: dict[str, Any]) -> Any:

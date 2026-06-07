@@ -41,5 +41,6 @@ class ClaudeAgentSdkRuntime(AgentRuntime):
             model=context.model,
             model_tier=context.model_tier,  # type: ignore[arg-type]
             reasoning_budget=context.reasoning_budget,
+            env_vars=context.env_vars,
         )
         return await runner.run(prompt)

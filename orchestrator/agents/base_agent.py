@@ -577,6 +577,7 @@ echo "done" > {done_file}
                 "ANTHROPIC_DEFAULT_SONNET_MODEL",
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL",
                 "API_TIMEOUT_MS",
+                "QUORVEX_TEST_DATA_FILE",
             ]
             env_vars = {k: os.environ[k] for k in api_env_keys if os.environ.get(k)}
             tool_config = self._resolved_tool_config()

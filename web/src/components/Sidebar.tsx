@@ -41,6 +41,7 @@ const navGroups: NavGroup[] = [
             { href: '/prd', label: 'PRD', icon: ClipboardList },
             { href: '/recordings', label: 'Recorder', icon: MousePointerClick },
             { href: '/templates', label: 'Templates', icon: FileText },
+            { href: '/test-data', label: 'Test Data', icon: Database },
             { href: '/requirements', label: 'Requirements', icon: CheckSquare },
             { href: '/rtm', label: 'RTM', icon: GitBranch },
             { href: '/coverage', label: 'Coverage', icon: PieChart },

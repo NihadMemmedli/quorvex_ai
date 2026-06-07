@@ -465,15 +465,25 @@ class AgentQueue:
 
         Returns the progress dict if available, or None.
         """
+        heartbeat_data = await self.get_task_heartbeat(task_id)
+        if not heartbeat_data:
+            return None
+        progress = heartbeat_data.get("progress")
+        return progress if isinstance(progress, dict) else None
+
+    async def get_task_heartbeat(self, task_id: str) -> dict[str, Any] | None:
+        """Return parsed task heartbeat data, including timestamp and progress."""
         redis = await self._ensure_connected()
         heartbeat = await redis.get(f"{self.HEARTBEAT_PREFIX}{task_id}")
         if not heartbeat:
             return None
         try:
             data = json.loads(heartbeat)
-            return data.get("progress")
+            if isinstance(data, dict):
+                return data
         except (json.JSONDecodeError, TypeError):
-            return None
+            return {"ts": heartbeat, "progress": {}}
+        return None
 
     @staticmethod
     def _worker_supports_live_browser() -> bool:

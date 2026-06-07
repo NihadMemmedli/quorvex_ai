@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -221,3 +223,63 @@ export default defineConfig({
 
     assert prepared_again.count("testDir: '/app/tests'") == 1
     assert prepared_again.count("seed.spec.ts") == 1
+
+
+def test_playwright_config_cli_arg_prefers_run_local_config(tmp_path):
+    from orchestrator.utils.playwright_mcp import playwright_config_cli_arg
+
+    config_path = tmp_path / "playwright.config.ts"
+    config_path.write_text("export default {};\n")
+
+    arg = playwright_config_cli_arg(tmp_path)
+
+    assert "--config" in arg
+    assert str(config_path) in arg
+
+
+def test_cli_existing_code_run_uses_run_local_playwright_config(tmp_path, monkeypatch):
+    from orchestrator import cli
+
+    spec_path = tmp_path / "checkout.md"
+    spec_path.write_text("# Checkout\n\n1. Open https://example.com")
+    code_path = tmp_path / "checkout.spec.ts"
+    code_path.write_text("import { test } from '@playwright/test';\n")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    config_path = run_dir / "playwright.config.ts"
+    config_path.write_text("export default {};\n")
+
+    commands: list[str] = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run_command(command, **_kwargs):
+        commands.append(command)
+        return Result()
+
+    monkeypatch.setattr(cli, "run_command", fake_run_command)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "orchestrator/cli.py",
+            str(spec_path),
+            "--run-dir",
+            str(run_dir),
+            "--browser",
+            "chromium",
+            "--try-code",
+            str(code_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert exc_info.value.code == 0
+    assert commands
+    assert "--config" in commands[0]
+    assert str(config_path) in commands[0]

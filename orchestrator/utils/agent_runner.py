@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -351,6 +352,7 @@ class AgentRunner:
         model: str | None = None,
         model_tier: RuntimeModelTier | None = None,
         reasoning_budget: int | None = None,
+        env_vars: dict[str, str] | None = None,
     ):
         """
         Initialize the agent runner.
@@ -391,6 +393,7 @@ class AgentRunner:
             model: Optional model override for this run.
             model_tier: Optional canonical model tier for this run.
             reasoning_budget: Optional provider reasoning budget for compatible models.
+            env_vars: Explicit environment variables to expose to direct and queued execution.
         """
         self.timeout_seconds = timeout_seconds
         self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
@@ -424,6 +427,7 @@ class AgentRunner:
         self.model = model
         self.model_tier = model_tier if model_tier in {"light", "standard", "deep", "tool_deep", "chat", "embedding"} else self._infer_model_tier()
         self.reasoning_budget = reasoning_budget
+        self.env_vars = {str(key): str(value) for key, value in (env_vars or {}).items() if key and value is not None}
         self._last_memory_injected = False
 
     def _effective_tools(self) -> list[str] | dict[str, str] | None:
@@ -451,7 +455,7 @@ class AgentRunner:
     def diagnostics(self, *, agent_class: str | None = None, prompt: str | None = None) -> dict[str, Any]:
         """Return resolved runtime/tool/memory diagnostics for observability tests and logs."""
 
-        selection = apply_runtime_env_aliases(None, tier=self.model_tier, model_override=self.model)
+        selection = apply_runtime_env_aliases(self.env_vars or None, tier=self.model_tier, model_override=self.model)
         mcp_prefixes = sorted(
             {
                 "__".join(str(tool).split("__")[:2])
@@ -985,7 +989,8 @@ class AgentRunner:
                         rotator.activate_key(slot)
 
                 try:
-                    await asyncio.wait_for(_run_query(), timeout=timeout)
+                    with self._scoped_explicit_env():
+                        await asyncio.wait_for(_run_query(), timeout=timeout)
 
                     # Report success
                     if rotator and rotator.key_count > 0:
@@ -1268,12 +1273,20 @@ class AgentRunner:
             "PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT",
             "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
             "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
+            "QUORVEX_TEST_DATA_FILE",
         ]
-        env_vars = {}
+        env_vars: dict[str, str] = {}
         for key in keys:
             val = os.environ.get(key)
             if val:
                 env_vars[key] = val
+        env_vars.update(
+            {
+                key: value
+                for key, value in self.env_vars.items()
+                if not key.startswith("TESTDATA_")
+            }
+        )
         try:
             selection = apply_runtime_env_aliases(
                 env_vars or None,
@@ -1291,6 +1304,26 @@ class AgentRunner:
         except Exception as exc:
             logger.debug("Unable to collect resolved model env vars: %s", exc)
         return env_vars if env_vars else None
+
+    @contextmanager
+    def _scoped_explicit_env(self):
+        if not self.env_vars:
+            yield
+            return
+        saved_env: dict[str, str | None] = {}
+        for key, value in self.env_vars.items():
+            if key.startswith("TESTDATA_"):
+                continue
+            saved_env[key] = os.environ.get(key)
+            os.environ[key] = value
+        try:
+            yield
+        finally:
+            for key, original in saved_env.items():
+                if original is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = original
 
     def _queue_owner_metadata(self) -> tuple[str | None, str | None, str | None, str | None, str | None]:
         """Return explicit queue owner plus parent browser-slot metadata."""

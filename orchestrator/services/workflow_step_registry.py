@@ -115,12 +115,18 @@ BUILTIN_STEP_TYPES: dict[str, dict[str, Any]] = {
             {
                 "entry_url": {"type": "string", "minLength": 1},
                 "max_interactions": {"type": "integer", "minimum": 1},
+                "browser_auth_session_id": {"type": "string"},
+                "use_project_default_browser_auth": {"type": "boolean"},
+                "skip_browser_auth": {"type": "boolean"},
             },
         ),
         "ui_schema": {
             "fields": [
                 {"key": "entry_url", "label": "Entry URL", "control": "text", "placeholder": "https://example.com"},
                 {"key": "max_interactions", "label": "Max interactions", "control": "number", "min": 1},
+                {"key": "browser_auth_session_id", "label": "Browser auth session", "control": "text", "placeholder": "Optional session ID"},
+                {"key": "use_project_default_browser_auth", "label": "Use project default auth", "control": "boolean"},
+                {"key": "skip_browser_auth", "label": "Skip browser auth", "control": "boolean"},
             ],
             "recommended_next_steps": [
                 {
@@ -209,9 +215,22 @@ BUILTIN_STEP_TYPES: dict[str, dict[str, Any]] = {
         "auto_wait_defaults": _auto_wait(1800, 10),
         "required": ["spec_name"],
         "default_input": {"spec_name": "examples/hello-world.md"},
-        "input_schema": _object_schema(["spec_name"], {"spec_name": {"type": "string", "minLength": 1}}),
+        "input_schema": _object_schema(
+            ["spec_name"],
+            {
+                "spec_name": {"type": "string", "minLength": 1},
+                "browser_auth_session_id": {"type": "string"},
+                "use_project_default_browser_auth": {"type": "boolean"},
+                "skip_browser_auth": {"type": "boolean"},
+            },
+        ),
         "ui_schema": {
-            "fields": [{"key": "spec_name", "label": "Spec name", "control": "text", "placeholder": "examples/hello-world.md"}],
+            "fields": [
+                {"key": "spec_name", "label": "Spec name", "control": "text", "placeholder": "examples/hello-world.md"},
+                {"key": "browser_auth_session_id", "label": "Browser auth session", "control": "text", "placeholder": "Optional session ID"},
+                {"key": "use_project_default_browser_auth", "label": "Use project default auth", "control": "boolean"},
+                {"key": "skip_browser_auth", "label": "Skip browser auth", "control": "boolean"},
+            ],
             "recommended_next_steps": [
                 {
                     "type": "review_gate",
@@ -245,6 +264,9 @@ BUILTIN_STEP_TYPES: dict[str, dict[str, Any]] = {
                 "spec_names": {"type": "array", "items": {"type": "string"}},
                 "automated_only": {"type": "boolean"},
                 "hybrid": {"type": "boolean"},
+                "browser_auth_session_id": {"type": "string"},
+                "use_project_default_browser_auth": {"type": "boolean"},
+                "skip_browser_auth": {"type": "boolean"},
             },
         ),
         "ui_schema": {
@@ -255,6 +277,9 @@ BUILTIN_STEP_TYPES: dict[str, dict[str, Any]] = {
                 {"key": "spec_names", "label": "Spec names", "control": "string_list", "rows": 3, "placeholder": "examples/hello-world.md"},
                 {"key": "automated_only", "label": "Automated specs only", "control": "boolean"},
                 {"key": "hybrid", "label": "Hybrid healing", "control": "boolean"},
+                {"key": "browser_auth_session_id", "label": "Browser auth session", "control": "text", "placeholder": "Optional session ID"},
+                {"key": "use_project_default_browser_auth", "label": "Use project default auth", "control": "boolean"},
+                {"key": "skip_browser_auth", "label": "Skip browser auth", "control": "boolean"},
             ],
             "recommended_next_steps": [
                 {

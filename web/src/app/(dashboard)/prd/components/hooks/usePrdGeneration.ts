@@ -6,7 +6,6 @@ import type { GenerationResult, PrdSettings } from '../types';
 
 const API = `${API_BASE}/api`;
 const ACTIVE_GENERATION_STATUSES = new Set(['pending', 'queued', 'running']);
-const MAX_POLL_ATTEMPTS = 300;
 const MAX_POLL_FAILURES = 5;
 const POLL_INTERVAL_MS = 2000;
 
@@ -50,7 +49,9 @@ function generationResultFromApi(gen: any): GenerationResult {
         agentTaskId: gen.agent_task_id || null,
         agentTaskStatus: gen.agent_task_status || null,
         agentWorkerId: gen.agent_worker_id || null,
+        lastHeartbeatAt: parseUtcTimestamp(gen.last_heartbeat_at),
         agentQueueHealth: gen.agent_queue_health || null,
+        queueTelemetry: gen.queue_telemetry || null,
         targetUrl: gen.target_url || null,
         specPath: gen.spec_path || null,
     };
@@ -66,41 +67,18 @@ export function usePrdGeneration(projectName: string | undefined, settings: PrdS
         if (pollingRef.current.has(generationId)) return;
         pollingRef.current.add(generationId);
 
-        let polls = 0;
         let failures = 0;
         let stopped = false;
 
-        async function applyTerminalOrStale(fallbackMessage: string) {
-            try {
-                const res = await fetch(`${API}/prd/generation/${generationId}`);
-                if (res.ok) {
-                    const data = await res.json();
-                    const result = generationResultFromApi(data);
-                    if (!isActiveGenerationStatus(data.status)) {
-                        setResults(prev => ({ ...prev, [featureName]: result }));
-                        if (data.status === 'completed' && data.spec_path) {
-                            setGeneratedSpecs(prev =>
-                                prev.includes(data.spec_path) ? prev : [...prev, data.spec_path]
-                            );
-                        }
-                        return;
-                    }
-                }
-            } catch (err) {
-                console.error('Final generation status reconciliation failed:', err);
-            } finally {
-                pollingRef.current.delete(generationId);
-            }
-
+        function applyPollingUnavailable(message: string) {
             setResults(prev => ({
                 ...prev,
                 [featureName]: {
                     ...(prev[featureName] || {}),
                     success: false,
-                    status: 'failed',
-                    stage: 'polling_stale',
-                    message: fallbackMessage,
-                    error: fallbackMessage,
+                    status: isActiveGenerationStatus(prev[featureName]?.status) ? prev[featureName]?.status : 'running',
+                    stage: 'status_unavailable',
+                    message,
                     generationId,
                 },
             }));
@@ -117,9 +95,7 @@ export function usePrdGeneration(projectName: string | undefined, settings: PrdS
                 if (!res.ok) {
                     failures++;
                     if (failures >= MAX_POLL_FAILURES) {
-                        stopped = true;
-                        await applyTerminalOrStale(`Generation status polling failed after ${failures} attempts.`);
-                        return;
+                        applyPollingUnavailable('Generation status unavailable; reconnecting to backend status...');
                     }
                     scheduleNextPoll();
                     return;
@@ -135,13 +111,7 @@ export function usePrdGeneration(projectName: string | undefined, settings: PrdS
                 }));
 
                 if (isActiveGenerationStatus(data.status)) {
-                    polls++;
-                    if (polls < MAX_POLL_ATTEMPTS) {
-                        scheduleNextPoll();
-                    } else {
-                        stopped = true;
-                        await applyTerminalOrStale('Generation status polling timed out before completion.');
-                    }
+                    scheduleNextPoll();
                 } else {
                     stopped = true;
                     pollingRef.current.delete(generationId);
@@ -155,9 +125,7 @@ export function usePrdGeneration(projectName: string | undefined, settings: PrdS
                 console.error('Polling error:', err);
                 failures++;
                 if (failures >= MAX_POLL_FAILURES) {
-                    stopped = true;
-                    await applyTerminalOrStale(`Generation status polling was interrupted after ${failures} errors.`);
-                    return;
+                    applyPollingUnavailable('Generation status unavailable; reconnecting to backend status...');
                 }
                 scheduleNextPoll();
             }
@@ -220,6 +188,9 @@ export function usePrdGeneration(projectName: string | undefined, settings: PrdS
                     credentials: liveBrowserRequested && settings.username && settings.password
                         ? { username: settings.username, password: settings.password }
                         : undefined,
+                    test_data_refs: settings.testDataRefs
+                        ? settings.testDataRefs.split(',').map(item => item.trim()).filter(Boolean)
+                        : [],
                 }),
             });
             const data = await res.json();
@@ -252,7 +223,9 @@ export function usePrdGeneration(projectName: string | undefined, settings: PrdS
                         agentTaskId: null,
                         agentTaskStatus: null,
                         agentWorkerId: null,
+                        lastHeartbeatAt: undefined,
                         agentQueueHealth: null,
+                        queueTelemetry: null,
                     },
                 }));
                 pollGeneration(data.generation_id, featureName);

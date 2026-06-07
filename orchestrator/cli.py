@@ -20,6 +20,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from orchestrator.utils.playwright_mcp import playwright_config_cli_arg
+
 
 def playwright_headed_args() -> str:
     """Return Playwright CLI flags needed for VNC-visible execution."""
@@ -1289,7 +1291,10 @@ def main():
 
                 # Execute Test
                 print(f"   Running test: {test_path.name}")
-                cmd = f"npx playwright test '{test_path}' --project {args.browser}{playwright_headed_args()}"
+                cmd = (
+                    f"npx playwright test '{test_path}' --project {args.browser}"
+                    f"{playwright_config_cli_arg(args.run_dir)}{playwright_headed_args()}"
+                )
                 result = run_command(cmd, stream_output=True, is_python=False)
 
                 if result.returncode == 0:
@@ -1464,7 +1469,10 @@ def main():
             (run_dir / "plan.json").write_text(json.dumps(plan_data, indent=2))
 
             # Run existing test
-            cmd = f"npx playwright test '{code_path}' --project {args.browser}{playwright_headed_args()}"
+            cmd = (
+                f"npx playwright test '{code_path}' --project {args.browser}"
+                f"{playwright_config_cli_arg(run_dir)}{playwright_headed_args()}"
+            )
             print(f"   Executing: {cmd}")
             result = run_command(cmd, stream_output=True, is_python=False)
 
@@ -1594,7 +1602,10 @@ def main():
 
             # Run the test
             output_dir = run_dir / "test-results"
-            cmd = f"PLAYWRIGHT_OUTPUT_DIR='{output_dir}' npx playwright test '{code_path}' --project {args.browser}{playwright_headed_args()}"
+            cmd = (
+                f"PLAYWRIGHT_OUTPUT_DIR='{output_dir}' npx playwright test '{code_path}' --project {args.browser}"
+                f"{playwright_config_cli_arg(run_dir)}{playwright_headed_args()}"
+            )
             print(f"   Executing: {cmd}")
             sys.stdout.flush()
 

@@ -31,6 +31,7 @@ setup_claude_env()
 
 from agents.base_agent import BaseAgent
 from utils.json_utils import extract_json_from_markdown
+from utils.playwright_mcp import playwright_config_cli_arg
 
 
 class RalphValidator(BaseAgent):
@@ -846,7 +847,8 @@ Begin by running: test_run
         try:
             cmd = (
                 f"npx playwright test '{test_file}' --reporter=list,html "
-                f"--project {browser} --timeout=120000{playwright_headed_args()}"
+                f"--project {browser} --timeout=120000"
+                f"{playwright_config_cli_arg(output_dir)}{playwright_headed_args()}"
             )
             if output_dir:
                 results_dir = Path(output_dir) / "test-results"

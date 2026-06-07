@@ -33,6 +33,7 @@ if config_dir:
     os.chdir(config_dir)
 
 from orchestrator.utils.agent_runner import AgentRunner
+from orchestrator.utils.playwright_mcp import playwright_config_cli_arg
 
 
 class NativeApiHealer:
@@ -282,7 +283,10 @@ Return the COMPLETE fixed TypeScript code inside a ```typescript code block.
             Dict with 'passed', 'exit_code', 'output', 'error_summary'
         """
         try:
-            cmd = f"npx playwright test '{test_file}' --reporter=list --project {browser} --timeout=60000"
+            cmd = (
+                f"npx playwright test '{test_file}' --reporter=list "
+                f"--project {browser} --timeout=60000{playwright_config_cli_arg()}"
+            )
 
             result = subprocess.run(
                 cmd,

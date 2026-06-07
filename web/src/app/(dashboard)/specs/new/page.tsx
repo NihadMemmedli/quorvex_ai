@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import TagEditor from '@/components/TagEditor';
 import SpecBuilder from '@/components/SpecBuilder';
+import { TestDataPicker } from '@/components/TestDataPicker';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
@@ -598,8 +599,13 @@ ${req.acceptance_criteria.map(ac => `- ${ac}`).join('\n') || '- [Expected result
                 </div>
 
                 <div className="card" style={{ height: 'calc(100vh - 450px)', display: 'flex', flexDirection: 'column', padding: 0, overflow: 'hidden' }}>
-                    <div style={{ padding: '1rem', borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: '0.95rem', color: 'var(--text)' }}>
-                        Content
+                    <div style={{ padding: '1rem', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
+                        <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text)' }}>Content</span>
+                        <TestDataPicker
+                            projectId={currentProject?.id}
+                            mode="directive"
+                            onInsert={(value) => setContent(prev => `${prev.trimEnd()}\n\n${value}\n`)}
+                        />
                     </div>
                     <div style={{ flex: 1, overflow: 'auto', background: 'var(--code-bg)' }}>
                         {mode === 'visual' ? (

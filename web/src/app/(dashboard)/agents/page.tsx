@@ -8,6 +8,7 @@ import { useJobPoller } from '@/hooks/useJobPoller';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { LiveBrowserView } from '@/components/LiveBrowserView';
+import { TestDataPicker } from '@/components/TestDataPicker';
 import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
 import {
     browserAuthSessionLabel,
@@ -117,6 +118,7 @@ interface AgentDefinition {
     model?: string | null;
     timeout_seconds: number;
     tool_ids: string[];
+    test_data_refs?: string[];
     status: string;
     project_id?: string | null;
 }
@@ -948,6 +950,7 @@ export default function AgentsPage() {
     const [authCredentials, setAuthCredentials] = useState({ username: '', password: '', loginUrl: '/login' });
     const [sessionId, setSessionId] = useState('');
     const [testData, setTestData] = useState('');
+    const [testDataRefs, setTestDataRefs] = useState('');
     const [focusAreas, setFocusAreas] = useState('');
     const [excludedPatterns, setExcludedPatterns] = useState('');
 
@@ -995,6 +998,7 @@ export default function AgentsPage() {
         runtime: 'claude_sdk',
         timeout_seconds: 1800,
         tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console'],
+        test_data_refs: '',
     });
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
     const activeBrowserAuthSessions = useMemo(
@@ -1497,6 +1501,7 @@ export default function AgentsPage() {
             runtime: agentRuntime,
             timeout_seconds: 1800,
             tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console', 'browser_screenshot'],
+            test_data_refs: '',
         });
         setBuilderOpen(true);
     };
@@ -1510,6 +1515,7 @@ export default function AgentsPage() {
             runtime: definition.runtime || 'claude_sdk',
             timeout_seconds: definition.timeout_seconds || 1800,
             tool_ids: definition.tool_ids || [],
+            test_data_refs: (definition.test_data_refs || []).join(', '),
         });
         setBuilderOpen(true);
     };
@@ -1564,6 +1570,7 @@ export default function AgentsPage() {
                     runtime: definitionForm.runtime,
                     timeout_seconds: definitionForm.timeout_seconds,
                     tool_ids: definitionForm.tool_ids,
+                    test_data_refs: definitionForm.test_data_refs.split(',').map(s => s.trim()).filter(Boolean),
                     project_id: currentProject?.id,
                 }),
             });
@@ -1654,6 +1661,7 @@ export default function AgentsPage() {
 
             // Build focus areas
             const focusAreasList = focusAreas ? focusAreas.split(',').map(s => s.trim()).filter(s => s) : [];
+            const testDataRefsList = testDataRefs ? testDataRefs.split(',').map(s => s.trim()).filter(Boolean) : [];
 
             // Build excluded patterns
             const excludedPatternsList = excludedPatterns ? excludedPatterns.split(',').map(s => s.trim()).filter(s => s) : [];
@@ -1674,10 +1682,12 @@ export default function AgentsPage() {
                     prompt: instructions || `Inspect ${url || 'the current application context'} and report useful QA findings.`,
                     url: url || undefined,
                     runtime: selectedRuntime,
+                    test_data_refs: testDataRefsList,
                     config: {
                         auth: authConfig,
                         browser_auth_session_id: selectedBrowserAuthSessionId || undefined,
                         test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
+                        test_data_refs: testDataRefsList.length > 0 ? testDataRefsList : undefined,
                         focus_areas: focusAreasList,
                         excluded_patterns: excludedPatternsList,
                     },
@@ -2016,6 +2026,23 @@ export default function AgentsPage() {
                                     onChange={e => setDefinitionForm({ ...definitionForm, timeout_seconds: parseInt(e.target.value) || 1800 })}
                                     style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', margin: '0.25rem 0 0.65rem' }}
                                 />
+                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Default Test Data Refs</label>
+                                <input
+                                    value={definitionForm.test_data_refs}
+                                    onChange={e => setDefinitionForm({ ...definitionForm, test_data_refs: e.target.value })}
+                                    placeholder="login-users.valid-admin"
+                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', margin: '0.25rem 0 0.5rem' }}
+                                />
+                                <div style={{ marginBottom: '0.65rem' }}>
+                                    <TestDataPicker
+                                        projectId={currentProject?.id}
+                                        mode="ref"
+                                        onInsert={(value) => setDefinitionForm(prev => ({
+                                            ...prev,
+                                            test_data_refs: prev.test_data_refs ? `${prev.test_data_refs}, ${value}` : value,
+                                        }))}
+                                    />
+                                </div>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem' }}>
                                     <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>Tools</div>
                                     <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
@@ -2282,6 +2309,25 @@ export default function AgentsPage() {
                                 }}
                             />
                         </div>
+
+                        {selectedAgent === 'custom' && (
+                            <div style={{ marginBottom: '1rem' }}>
+                                <label style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
+                                    Project Test Data Refs
+                                </label>
+                                <input
+                                    value={testDataRefs}
+                                    onChange={e => setTestDataRefs(e.target.value)}
+                                    placeholder="login-users.valid-admin"
+                                    style={{ width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', marginBottom: '0.5rem' }}
+                                />
+                                <TestDataPicker
+                                    projectId={currentProject?.id}
+                                    mode="ref"
+                                    onInsert={(value) => setTestDataRefs(prev => prev ? `${prev}, ${value}` : value)}
+                                />
+                            </div>
+                        )}
 
                         {selectedAgent === 'exploratory' && (
                             <button

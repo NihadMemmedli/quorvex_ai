@@ -201,6 +201,19 @@ def test_create_run_resolves_explicit_browser_auth_session_into_temporal_payload
     storage_state_path = Path(started_payloads[0]["storage_state_path"])
     assert storage_state_path.parent.parent == runs_dir
     assert "single-run" in storage_state_path.read_text()
+    assert started_payloads[0]["browser_auth_context"]["browser_auth_session_id"] == auth_session_id
+    assert started_payloads[0]["browser_auth_context"]["storage_state_attached"] is True
+    body = response.json()
+    assert body["browser_auth"]["browser_auth_session_id"] == auth_session_id
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        detail_response = client.get(f"/runs/{body['id']}")
+        list_response = client.get("/runs", params={"project_id": project_id})
+
+    assert detail_response.status_code == 200, detail_response.text
+    assert detail_response.json()["browser_auth"]["browser_auth_session_id"] == auth_session_id
+    assert list_response.status_code == 200, list_response.text
+    assert list_response.json()["runs"][0]["browser_auth"]["browser_auth_session_id"] == auth_session_id
 
 
 def test_create_run_without_browser_auth_leaves_temporal_payload_unchanged(tmp_path, monkeypatch):
@@ -234,6 +247,55 @@ def test_create_run_without_browser_auth_leaves_temporal_payload_unchanged(tmp_p
     assert response.status_code == 200, response.text
     assert len(started_payloads) == 1
     assert "storage_state_path" not in started_payloads[0]
+    assert started_payloads[0]["browser_auth_context"]["mode"] == "none"
+    assert started_payloads[0]["browser_auth_context"]["storage_state_attached"] is False
+
+
+def test_login_spec_forces_no_browser_auth_even_when_session_selected(tmp_path, monkeypatch):
+    from orchestrator.api import main as main_module
+    from orchestrator.api.main import app
+
+    project_id = _create_project()
+    auth_session_id = _create_active_browser_auth_session(
+        project_id,
+        state={"cookies": [{"name": "sid", "value": "preauth", "domain": "example.com", "path": "/"}], "origins": []},
+    )
+    specs_dir = tmp_path / "specs"
+    runs_dir = tmp_path / "runs"
+    specs_dir.mkdir()
+    runs_dir.mkdir()
+    (specs_dir / "login.md").write_text("# TC-001 Login With Valid Credentials\n\n## Steps\n1. Open https://example.com/login")
+    _patch_main_datetime(monkeypatch, main_module, 4)
+    monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+    monkeypatch.setattr(main_module, "RUNS_DIR", runs_dir)
+
+    started_payloads: list[dict] = []
+
+    async def fake_start_test_run_workflow(run_id, payload, *, task_queue=None):
+        started_payloads.append(payload)
+        return TemporalWorkflowStart(workflow_id=f"test-run-{run_id}", run_id="temporal-run")
+
+    monkeypatch.setattr(
+        "orchestrator.services.temporal_client.start_test_run_workflow",
+        fake_start_test_run_workflow,
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/runs",
+            json={
+                "spec_name": "login.md",
+                "project_id": project_id,
+                "browser_auth_session_id": auth_session_id,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert "storage_state_path" not in started_payloads[0]
+    auth_context = started_payloads[0]["browser_auth_context"]
+    assert auth_context["mode"] == "none"
+    assert auth_context["requested_browser_auth_session_id"] == auth_session_id
+    assert "ignored" in auth_context["auth_conflict_warning"]
 
 
 def test_bulk_run_writes_one_storage_state_file_per_run_for_project_default(tmp_path, monkeypatch):

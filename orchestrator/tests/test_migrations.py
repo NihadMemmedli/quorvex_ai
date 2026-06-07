@@ -54,6 +54,9 @@ class TestDatabaseInit:
         assert len(revisions.get("043", [])) == 1
         assert len(revisions.get("044", [])) == 1
         assert len(revisions.get("045", [])) == 1
+        assert len(revisions.get("046", [])) == 1
+        assert len(revisions.get("047", [])) == 1
+        assert len(revisions.get("048", [])) == 1
         assert down_revisions["032"] == "031"
         assert down_revisions["033"] == "032"
         assert down_revisions["034"] == "033"
@@ -68,10 +71,13 @@ class TestDatabaseInit:
         assert down_revisions["043"] == "042"
         assert down_revisions["044"] == "043"
         assert down_revisions["045"] == "044"
+        assert down_revisions["046"] == "045"
+        assert down_revisions["047"] == "046"
+        assert down_revisions["048"] == "047"
 
         referenced = {revision for revision in down_revisions.values() if revision}
         heads = sorted(set(revisions) - referenced)
-        assert heads == ["045"]
+        assert heads == ["048"]
 
     def test_init_db_fresh_sqlite(self, tmp_path):
         """init_db() should run cleanly on a fresh SQLite database."""
@@ -624,7 +630,7 @@ class TestDatabaseInit:
             columns = {col["name"] for col in inspector.get_columns("agent_definitions")}
             indexes = {idx["name"] for idx in inspector.get_indexes("agent_definitions")}
 
-            assert {"runtime", "model_tier"} <= columns
+            assert {"runtime", "model_tier", "test_data_refs_json"} <= columns
             assert "ix_agent_definitions_runtime" in indexes
 
             definition = AgentDefinition(

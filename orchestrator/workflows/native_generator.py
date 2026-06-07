@@ -33,7 +33,10 @@ config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 if config_dir:
     os.chdir(config_dir)
 
-from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
+from orchestrator.ai.prompt_registry import (
+    attach_prompt_metadata,
+    build_prompt_metadata,
+)
 from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
 
@@ -61,6 +64,8 @@ class NativeGenerator:
         owner_id: str | None = None,
         owner_label: str | None = None,
         model_tier: str = "tool_deep",
+        project_id: str | None = None,
+        env_vars: dict[str, str] | None = None,
     ):
         self.on_tool_use = on_tool_use
         self.on_progress = on_progress
@@ -69,6 +74,8 @@ class NativeGenerator:
         self.owner_id = owner_id
         self.owner_label = owner_label
         self.model_tier = model_tier
+        self.project_id = project_id
+        self.env_vars = dict(env_vars or {})
         # Use absolute path to project's tests directory (not relative to cwd)
         # This fixes Docker issue where cwd changes to run directory
         self.tests_dir = BASE_DIR / "tests" / "generated"
@@ -81,6 +88,8 @@ class NativeGenerator:
         output_name: str | None = None,
         design_context: str | None = None,
         memory_run_id: str | None = None,
+        auth_context: dict[str, Any] | None = None,
+        execution_credentials: dict[str, str] | None = None,
     ) -> Path:
         """
         Generate a Playwright test from a markdown spec.
@@ -104,7 +113,9 @@ class NativeGenerator:
         # Determine output path
         output_path = self.tests_dir / f"{spec_name}.spec.ts"
         if output_path.exists():
-            logger.info(f"Removing stale generated test before regeneration: {output_path}")
+            logger.info(
+                f"Removing stale generated test before regeneration: {output_path}"
+            )
             output_path.unlink()
 
         logger.info(f"Generating test from: {spec_path}")
@@ -119,6 +130,8 @@ class NativeGenerator:
             target_url=target_url,
             design_context=design_context,
             memory_run_id=memory_run_id,
+            auth_context=auth_context,
+            execution_credentials=execution_credentials,
         )
 
         # Invoke the Generator Agent
@@ -162,6 +175,8 @@ class NativeGenerator:
         target_url: str | None,
         design_context: str | None = None,
         memory_run_id: str | None = None,
+        auth_context: dict[str, Any] | None = None,
+        execution_credentials: dict[str, str] | None = None,
     ) -> str:
         """Build prompt matching the playwright-test-generator agent format."""
 
@@ -174,6 +189,25 @@ class NativeGenerator:
 
         # Extract and resolve credential placeholders
         credentials = self._extract_credential_placeholders(spec_content)
+        test_data_ref = (execution_credentials or {}).get("test_data_ref")
+        if execution_credentials and not test_data_ref:
+            username_var = execution_credentials.get("username_var") or "LOGIN_USERNAME"
+            password_var = execution_credentials.get("password_var") or "LOGIN_PASSWORD"
+            if execution_credentials.get("username"):
+                credentials[username_var] = execution_credentials["username"]
+            if execution_credentials.get("password"):
+                credentials[password_var] = execution_credentials["password"]
+        if self.env_vars:
+            credentials.update(
+                {
+                    key: value
+                    for key, value in self.env_vars.items()
+                    if key.startswith("TESTDATA_")
+                }
+            )
+        credentials = {
+            key: value for key, value in credentials.items() if not key.startswith("TESTDATA_")
+        }
         credentials_section = ""
         if credentials:
             cred_lines = []
@@ -184,11 +218,17 @@ class NativeGenerator:
             credentials_section = f"""
 
 ## Credentials (IMPORTANT)
-The spec contains credential placeholders. During browser execution, use the ACTUAL values shown below.
+The run has credential/test-data variables available. During browser execution, use the ACTUAL values shown below.
 In the generated code, use `process.env.VAR_NAME!` instead of hardcoding.
+This section is only for non-project-test-data placeholders. Project `@testdata` refs must use the fixture helper.
 
 {chr(10).join(cred_lines)}
 """
+
+        test_data_fixture_section = self._build_test_data_fixture_section(
+            output_path=output_path,
+            execution_credentials=execution_credentials,
+        )
 
         design_section = ""
         if design_context:
@@ -200,9 +240,24 @@ Use this design guidance to reduce flaky output. Treat it as advisory context fr
 {design_context}
 """
 
+        auth_section = ""
+        if auth_context and auth_context.get("storage_state_attached"):
+            session_name = (
+                auth_context.get("browser_auth_session_name")
+                or auth_context.get("browser_auth_session_id")
+                or "selected session"
+            )
+            auth_section = f"""
+
+## Browser Authentication Context
+The browser starts authenticated with saved session `{session_name}`.
+Do not generate login steps unless the scenario explicitly tests login, logout, or authentication failure.
+"""
+
         memory_section = self._build_memory_context_section(
             query=f"{target_url or ''}\n{spec_content}",
-            project_id=os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID"),
+            project_id=os.environ.get("MEMORY_PROJECT_ID")
+            or os.environ.get("PROJECT_ID"),
             source_id=spec_path,
             run_id=memory_run_id,
         )
@@ -216,10 +271,12 @@ Context: User wants to generate automated tests from the following test plan.
 <seed-file>tests/seed.spec.ts</seed-file>
 {url_section}
 {credentials_section}
+{test_data_fixture_section}
 <spec-content file="{spec_path}">
 {spec_content}
 </spec-content>
 {design_section}
+{auth_section}
 {memory_section}
 
 ## Instructions
@@ -247,14 +304,16 @@ When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dia
 ## Code Generation Requirements
 
 - Generate complete Playwright TypeScript test code
+- If fixture test data is required, import `{{ test, expect }}` from the fixture helper path shown above instead of `@playwright/test`
 - Use `test.describe('{test_suite}', () => {{ ... }})` to group all tests
-- Each test case from the spec becomes a `test('...', async ({{ page }}) => {{ ... }})`
+- Each test case from the spec becomes a `test('...', async ({{ page, testData }}) => {{ ... }})` when fixture test data is used, otherwise `test('...', async ({{ page }}) => {{ ... }})`
 - Include comments with the step text before each action
 - Use the EXACT selectors discovered during browser execution
 - Add proper `await` statements
 - Use `expect()` for assertions
 - Follow best practices from the seed file
-- **CRITICAL**: For credentials with `{{{{VAR_NAME}}}}` placeholders, use `process.env.VAR_NAME!` in code (NOT hardcoded values)
+- **CRITICAL**: Never write `process.env.TESTDATA_*` in generated code. Use `testData.get('<canonical-ref>')` or `testData.field('<canonical-ref>', '<path>')` for project test data.
+- For non-TESTDATA legacy credentials with `{{{{VAR_NAME}}}}` placeholders, use `process.env.VAR_NAME!` in code (NOT hardcoded values)
 
 ## Cleanup (IMPORTANT)
 After writing the test file, call `browser_close` to close the browser before finishing.
@@ -271,6 +330,51 @@ Save the generated test file to: {output_path}
             rendered_prompt=prompt,
         )
         return attach_prompt_metadata(prompt, metadata)
+
+    def _build_test_data_fixture_section(
+        self,
+        *,
+        output_path: str,
+        execution_credentials: dict[str, str] | None = None,
+    ) -> str:
+        ref = (execution_credentials or {}).get("test_data_ref")
+        if not ref:
+            return ""
+
+        import_path = self._fixture_import_path(output_path)
+        username = (execution_credentials or {}).get("username", "")
+        password = (execution_credentials or {}).get("password", "")
+        username_field = (execution_credentials or {}).get("username_field") or "username"
+        password_field = (execution_credentials or {}).get("password_field") or "password"
+
+        return f"""
+
+## Project Test Data Fixture (IMPORTANT)
+The source spec uses project test data ref `{ref}`. During browser execution, use these actual values:
+- `{username_field}`: `{username}`
+- `{password_field}`: `{password}`
+
+Generated code must load these values from the Playwright fixture, not environment variables:
+```typescript
+import {{ test, expect }} from '{import_path}';
+
+test('...', async ({{ page, testData }}) => {{
+  const user = testData.get<{{ {username_field}: string; {password_field}: string }}>('{ref}');
+  await page.getByLabel('Email').fill(user.{username_field});
+  await page.getByLabel('Password').fill(user.{password_field});
+}});
+```
+
+Do not write `process.env.TESTDATA_*` in generated code.
+"""
+
+    def _fixture_import_path(self, output_path: str) -> str:
+        fixture_path = BASE_DIR / "tests" / "fixtures" / "test-data"
+        relative = os.path.relpath(fixture_path, Path(output_path).parent)
+        relative = Path(relative).as_posix()
+        if not relative.startswith("."):
+            relative = f"./{relative}"
+        return relative
 
     def _build_memory_context_section(
         self,
@@ -332,7 +436,9 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
 
         Uses explicit timeout and comprehensive logging.
         """
-        timeout = int(os.environ.get("GENERATOR_TIMEOUT_SECONDS", get_default_timeout()))
+        timeout = int(
+            os.environ.get("GENERATOR_TIMEOUT_SECONDS", get_default_timeout())
+        )
 
         logger.info(f"Timeout: {timeout}s ({timeout // 60} minutes)")
 
@@ -351,6 +457,7 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
             memory_source_type="spec",
             memory_stage="native_generator",
             inject_memory=False,
+            env_vars=self.env_vars,
         )
 
         result = await runner.run(prompt)
@@ -370,7 +477,9 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
 
         return result.output
 
-    async def generate_all_tests(self, specs_dir: str = "specs", target_url: str | None = None) -> list[Path]:
+    async def generate_all_tests(
+        self, specs_dir: str = "specs", target_url: str | None = None
+    ) -> list[Path]:
         """
         Generate tests for all specs in a directory.
 
@@ -407,7 +516,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Generate Playwright tests from specs")
     parser.add_argument("--spec", help="Specific spec file to generate")
-    parser.add_argument("--all", action="store_true", help="Generate all prd-*.md specs")
+    parser.add_argument(
+        "--all", action="store_true", help="Generate all prd-*.md specs"
+    )
     parser.add_argument("--url", help="Target URL for browser validation (optional)")
     args = parser.parse_args()
 

@@ -84,6 +84,7 @@ class ExplorationStartRequest(BaseModel):
     credentials: dict | None = None  # {username, password, username_var, password_var}
     browser_auth_session_id: str | None = None
     use_project_default_browser_auth: bool = False
+    skip_browser_auth: bool = False
     exclude_patterns: list[str] = Field(default_factory=list)
     focus_areas: list[str] = Field(default_factory=list)
     additional_instructions: str | None = None  # Custom instructions for AI
@@ -406,7 +407,9 @@ def _build_exploratory_agent_config(
         "project_id": request_body.project_id,
         "safety_policy": safety_policy.model_dump(),
     }
-    if request_body.browser_auth_session_id or request_body.use_project_default_browser_auth:
+    if not request_body.skip_browser_auth and (
+        request_body.browser_auth_session_id or request_body.use_project_default_browser_auth
+    ):
         config["browser_auth"] = {
             "session_id": request_body.browser_auth_session_id,
             "use_project_default": request_body.use_project_default_browser_auth,
@@ -496,7 +499,9 @@ def _prepare_exploration_mcp_config(session_id: str, storage_state_path: Path | 
 
 
 def _resolve_exploration_browser_auth(request_body: ExplorationStartRequest, run_dir: Path) -> Path | None:
-    if not (request_body.browser_auth_session_id or request_body.use_project_default_browser_auth):
+    if request_body.skip_browser_auth or not (
+        request_body.browser_auth_session_id or request_body.use_project_default_browser_auth
+    ):
         return None
     with Session(engine) as db_session:
         resolved = resolve_browser_auth_for_run(

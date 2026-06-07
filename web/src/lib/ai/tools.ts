@@ -19,6 +19,11 @@ const RUNNER_SUBSET_SUITES = [
 const RUNNER_SUBSET_BROWSERS = ['chromium', 'firefox', 'webkit'] as const;
 const RUNNER_SUBSET_MARKERS = ['not integration', 'integration'] as const;
 const CI_TEST_SUBSET_MODES = ['manual', 'pr-impact', 'both'] as const;
+const browserAuthToolFields = {
+  browserAuthSessionId: z.string().optional().describe('Optional saved browser auth session ID to start authenticated'),
+  useProjectDefaultBrowserAuth: z.boolean().optional().default(false).describe('Use the project default browser auth session'),
+  skipBrowserAuth: z.boolean().optional().default(false).describe('Force no saved browser auth session'),
+};
 const CI_TEST_SUBSET_ITEM_SCHEMA = z.object({
   specName: z.string().describe('Quorvex spec name, e.g. folder/login.md'),
   targetPath: z.string().optional().describe('Optional repo-relative Playwright test path under tests/generated or tests/e2e'),
@@ -1445,6 +1450,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       description: 'Execute a test specification. Returns a run ID that can be used to check status. IMPORTANT: Use the spec_name field from run data (the file name like "login-test.md"), NOT the test_name (human-friendly display name).',
       inputSchema: z.object({
         specName: z.string().describe('The spec file name/path (e.g. "login-test.md"). Use spec_name from run data, not the human-friendly test_name.'),
+        ...browserAuthToolFields,
       }),
     }),
 
@@ -1462,6 +1468,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         excludePatterns: z.array(z.string()).optional().describe('URL patterns to avoid'),
         focusAreas: z.array(z.string()).optional().describe('Specific features or areas to focus on'),
         instructions: z.string().optional().describe('Additional instructions for the exploration agent'),
+        ...browserAuthToolFields,
       }),
     }),
 
@@ -1479,6 +1486,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         excludePatterns: z.array(z.string()).optional().describe('URL patterns to avoid'),
         focusAreas: z.array(z.string()).optional().describe('Specific features or areas to focus on'),
         instructions: z.string().optional().describe('Additional instructions for the discovery exploration'),
+        ...browserAuthToolFields,
       }),
     }),
 
@@ -1496,6 +1504,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         testData: z.record(z.unknown()).optional().describe('Optional structured test data'),
         focusAreas: z.array(z.string()).optional().describe('Specific features or areas to focus on'),
         excludedPatterns: z.array(z.string()).optional().describe('URL patterns to avoid'),
+        ...browserAuthToolFields,
       }),
     }),
 
@@ -1558,6 +1567,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         runId: z.string(),
         flowId: z.string(),
         forceRegenerate: z.boolean().optional().default(false),
+        ...browserAuthToolFields,
       }),
     }),
 
@@ -1567,6 +1577,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         runId: z.string(),
         flowId: z.string(),
         forceRegenerate: z.boolean().optional().default(false),
+        ...browserAuthToolFields,
       }),
     }),
 
@@ -1707,6 +1718,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       description: 'Run multiple test specs as a regression batch.',
       inputSchema: z.object({
         specNames: z.array(z.string()).describe('Array of spec names to run as a batch'),
+        ...browserAuthToolFields,
       }),
     }),
 
@@ -1715,6 +1727,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       inputSchema: z.object({
         specNames: z.array(z.string()).min(1),
         reason: z.string().optional().describe('Short explanation of the coverage plan being executed'),
+        ...browserAuthToolFields,
       }),
     }),
 
@@ -1754,6 +1767,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       description: 'Re-run a test that previously failed. IMPORTANT: Use the spec_name field from run data (the file name like "login-test.md"), NOT the test_name (human-friendly display name).',
       inputSchema: z.object({
         specName: z.string().describe('The spec file name (e.g. "login-test.md"). Use spec_name from run data, not the human-friendly test_name.'),
+        ...browserAuthToolFields,
       }),
     }),
 
@@ -1839,6 +1853,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       inputSchema: z.object({
         specName: z.string().describe('The spec file name (e.g. "login-test.md"). Use spec_name from run data, not the human-friendly test_name.'),
         useHybridHealing: z.boolean().optional().default(false).describe('Use extended hybrid healing mode'),
+        ...browserAuthToolFields,
       }),
     }),
 

@@ -95,6 +95,7 @@ from . import (
     scheduling,
     security_testing,
     settings,
+    test_data,
     testrail,
     users,
     workflows,
@@ -414,6 +415,7 @@ app.include_router(memory.router)
 app.include_router(prd.router)
 app.include_router(regression.router)
 app.include_router(projects.router)
+app.include_router(test_data.router)
 app.include_router(browser_auth_sessions.router)
 app.include_router(recordings.router)
 app.include_router(exploration.router)
@@ -710,6 +712,89 @@ def _read_text_if_exists(path: Path, *, max_chars: int | None = None) -> str | N
     return text
 
 
+def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(errors="replace"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _pipeline_error_message(error_data: dict[str, Any] | None) -> str | None:
+    if not error_data:
+        return None
+    error = str(error_data.get("error") or "").strip()
+    if not error:
+        return None
+    stage = str(error_data.get("stage") or "").strip()
+    return f"[{stage}] {error}" if stage else error
+
+
+def _format_pipeline_error_section(error_data: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for key in ("stage", "error", "error_tail", "timestamp"):
+        value = error_data.get(key)
+        if value:
+            lines.append(f"{key}={value}")
+    missing = error_data.get("missing_test_data") or error_data.get("missing")
+    if isinstance(missing, list) and missing:
+        lines.append("missing_refs=" + ", ".join(
+            f"{item.get('ref')} ({item.get('reason') or 'not_found'})"
+            for item in missing
+            if isinstance(item, dict) and item.get("ref")
+        ))
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _format_test_data_section(run_dir: Path, pipeline_error: dict[str, Any] | None) -> str | None:
+    lines: list[str] = []
+    fixture_file = run_dir / "test-data" / "resolved-fixtures.json"
+    fixture_data = _read_json_if_exists(fixture_file)
+
+    refs: list[str] = []
+    if fixture_data:
+        refs = [str(item) for item in fixture_data.get("refs") or [] if item]
+        items = fixture_data.get("items") if isinstance(fixture_data.get("items"), dict) else {}
+        lines.append("fixture_file=" + str(fixture_file))
+        lines.append("refs=" + (", ".join(refs) if refs else "-"))
+        lines.append(f"resolved_count={len(items)}")
+        lines.append("quorvex_test_data_file_injected=yes")
+
+    missing = []
+    if pipeline_error and pipeline_error.get("stage") == "test_data_resolution":
+        missing = pipeline_error.get("missing_test_data") or pipeline_error.get("missing") or []
+        refs = refs or [str(item) for item in pipeline_error.get("refs") or [] if item]
+        if refs and not fixture_data:
+            lines.append("refs=" + ", ".join(refs))
+        if isinstance(missing, list) and missing:
+            lines.append(
+                "missing_refs="
+                + ", ".join(
+                    f"{item.get('ref')} ({item.get('reason') or 'not_found'})"
+                    for item in missing
+                    if isinstance(item, dict) and item.get("ref")
+                )
+            )
+        lines.append("quorvex_test_data_file_injected=no")
+
+    return "\n".join(line for line in lines if line).strip() or None
+
+
+def _is_terminal_run_status(status: str | None) -> bool:
+    return str(status or "").lower() in {
+        "passed",
+        "completed",
+        "failed",
+        "error",
+        "cancelled",
+        "canceled",
+        "stopped",
+        "aborted",
+    }
+
+
 def _format_browser_pool_status(status: dict[str, Any], run_id: str) -> tuple[str, str | None]:
     lines = [
         f"max_browsers={status.get('max_browsers')} running={status.get('running')} queued={status.get('queued')} available={status.get('available')}",
@@ -748,6 +833,8 @@ async def _compose_test_run_log_payload(run_db: DBTestRun, run_dir: Path) -> dic
     sections: list[dict[str, Any]] = []
     diagnostics: dict[str, Any] = {}
     blocker_message: str | None = None
+    pipeline_error = _read_json_if_exists(run_dir / "pipeline_error.json") if run_dir.exists() else None
+    known_pipeline_error = bool(_pipeline_error_message(pipeline_error))
 
     lifecycle_lines = [
         f"run_id={run_db.id}",
@@ -758,7 +845,19 @@ async def _compose_test_run_log_payload(run_db: DBTestRun, run_dir: Path) -> dic
         f"temporal_workflow_id={run_db.temporal_workflow_id or '-'}",
         f"temporal_run_id={run_db.temporal_run_id or '-'}",
     ]
+    if run_db.browser_auth:
+        lifecycle_lines.append("browser_auth=" + json.dumps(run_db.browser_auth, sort_keys=True))
     sections.append({"source": "db", "title": "Run Lifecycle", "content": "\n".join(lifecycle_lines)})
+
+    if pipeline_error:
+        diagnostics["pipeline_error"] = pipeline_error
+        pipeline_error_text = _format_pipeline_error_section(pipeline_error)
+        if pipeline_error_text:
+            sections.append({"source": "pipeline_error.json", "title": "Pipeline Error", "content": pipeline_error_text})
+
+    test_data_text = _format_test_data_section(run_dir, pipeline_error) if run_dir.exists() else None
+    if test_data_text:
+        sections.append({"source": "test_data", "title": "Test Data", "content": test_data_text})
 
     execution_log = _read_text_if_exists(run_dir / "execution.log") if run_dir.exists() else None
     if execution_log:
@@ -782,7 +881,12 @@ async def _compose_test_run_log_payload(run_db: DBTestRun, run_dir: Path) -> dic
         browser_status = await pool.get_status()
         browser_text, browser_blocker = _format_browser_pool_status(browser_status, run_db.id)
         diagnostics["browser_pool"] = browser_status
-        if browser_blocker:
+        suppress_browser_blocker = _is_terminal_run_status(run_db.status) and known_pipeline_error
+        if browser_blocker and suppress_browser_blocker:
+            browser_text = "\n".join(
+                line for line in browser_text.splitlines() if line != browser_blocker
+            )
+        elif browser_blocker:
             blocker_message = browser_blocker
         sections.append({"source": "browser_pool", "title": "Browser Pool", "content": browser_text})
     except Exception as exc:
@@ -3746,6 +3850,7 @@ def list_runs(
                 stage_message=r.stage_message,
                 healing_attempt=r.healing_attempt,
                 agentic_summary=r.agentic_summary,
+                browser_auth=r.browser_auth,
             )
         )
 
@@ -3990,8 +4095,10 @@ async def get_run(
             "spec_name": run_db.spec_name,
             "test_name": run_db.test_name,
             "agentic_summary": run_db.agentic_summary,
+            "browser_auth": run_db.browser_auth,
             "current_stage": run_db.current_stage,
             "stage_message": run_db.stage_message,
+            "error_message": run_db.error_message,
             "healing_attempt": run_db.healing_attempt,
             "queue_position": run_db.queue_position,
             "queued_at": run_db.queued_at.isoformat() if run_db.queued_at else None,
@@ -4014,14 +4121,18 @@ async def get_run(
     export_file = run_dir / "export.json"
     export_file = run_dir / "export.json"
     validation_file = run_dir / "validation.json"
+    pipeline_error = _read_json_if_exists(run_dir / "pipeline_error.json")
+    pipeline_error_message = _pipeline_error_message(pipeline_error)
 
     data = {
         "id": id,
         "spec_name": run_db.spec_name,
         "test_name": run_db.test_name,
         "agentic_summary": run_db.agentic_summary,
+        "browser_auth": run_db.browser_auth,
         "current_stage": run_db.current_stage,
         "stage_message": run_db.stage_message,
+        "error_message": run_db.error_message or pipeline_error_message,
         "healing_attempt": run_db.healing_attempt,
         "queue_position": run_db.queue_position,
         "queued_at": run_db.queued_at.isoformat() if run_db.queued_at else None,
@@ -5097,6 +5208,7 @@ def execute_run_task(
     project_id: str = None,
     model_tier: str | None = None,
     storage_state_path: str | None = None,
+    browser_auth_context: dict[str, Any] | None = None,
 ):
     """Execute the native pipeline (default) with optional hybrid healing mode.
 
@@ -5209,6 +5321,8 @@ def execute_run_task(
     if project_id:
         env["PROJECT_ID"] = project_id
         env["MEMORY_PROJECT_ID"] = project_id
+    if browser_auth_context:
+        env["QUORVEX_BROWSER_AUTH_CONTEXT"] = json.dumps(browser_auth_context)
 
     with Session(engine) as session:
         run = session.get(DBTestRun, run_id)
@@ -5257,6 +5371,7 @@ async def execute_run_task_wrapper(
     project_id: str = None,
     model_tier: str | None = None,
     storage_state_path: str | None = None,
+    browser_auth_context: dict[str, Any] | None = None,
 ):
     """Async wrapper for execute_run_task with unified browser queue management.
 
@@ -5375,6 +5490,7 @@ async def execute_run_task_wrapper(
                 project_id,
                 model_tier,
                 storage_state_path,
+                browser_auth_context,
             )
             _append_workflow_log("Native run executor returned.", run_id=run_id)
 
@@ -5426,13 +5542,16 @@ async def execute_run_task_wrapper(
                         if error_file.exists():
                             try:
                                 error_data = json.loads(error_file.read_text())
-                                if not run.error_message and error_data.get("error"):
-                                    error_msg = error_data["error"][:500]
-                                    stage = error_data.get("stage", "")
-                                    if stage:
-                                        run.error_message = f"[{stage}] {error_msg}"
-                                    else:
-                                        run.error_message = error_msg
+                                if error_data.get("error"):
+                                    error_msg = str(error_data["error"])[:500]
+                                    stage = str(error_data.get("stage", "") or "")
+                                    if stage == "test_data_resolution":
+                                        run.stage_message = f"{stage}: {error_msg}"
+                                    if not run.error_message:
+                                        if stage:
+                                            run.error_message = f"[{stage}] {error_msg}"
+                                        else:
+                                            run.error_message = error_msg
                             except json.JSONDecodeError:
                                 pass
 
@@ -5689,11 +5808,16 @@ async def execute_mobile_run_task_wrapper(
                         pass
 
                 error_file = run_dir_path / "pipeline_error.json"
-                if error_file.exists() and not run.error_message:
+                if error_file.exists():
                     try:
                         error_data = json.loads(error_file.read_text())
                         if error_data.get("error"):
-                            run.error_message = str(error_data["error"])[:500]
+                            error_msg = str(error_data["error"])[:500]
+                            stage = str(error_data.get("stage", "") or "")
+                            if stage == "test_data_resolution":
+                                run.stage_message = f"{stage}: {error_msg}"
+                            if not run.error_message:
+                                run.error_message = f"[{stage}] {error_msg}" if stage else error_msg
                     except json.JSONDecodeError:
                         pass
 
@@ -5859,13 +5983,22 @@ def _resolve_browser_auth_storage_state_for_run(
     run_dir: Path,
     browser_auth_session_id: str | None,
     use_project_default_browser_auth: bool,
-) -> str | None:
+) -> tuple[str | None, dict[str, Any]]:
     browser_auth_session_id = (browser_auth_session_id or "").strip() or None
+    intent: dict[str, Any] = {
+        "mode": "project_default" if use_project_default_browser_auth else ("session" if browser_auth_session_id else "none"),
+        "requested_browser_auth_session_id": browser_auth_session_id,
+        "browser_auth_session_id": None,
+        "browser_auth_session_name": None,
+        "use_project_default_browser_auth": bool(use_project_default_browser_auth),
+        "project_default_used": False,
+        "storage_state_attached": False,
+    }
     if not _has_browser_auth_selection(
         browser_auth_session_id=browser_auth_session_id,
         use_project_default_browser_auth=use_project_default_browser_auth,
     ):
-        return None
+        return None, intent
     try:
         resolved = resolve_browser_auth_for_run(
             session,
@@ -5876,7 +6009,22 @@ def _resolve_browser_auth_storage_state_for_run(
         )
     except BrowserAuthSessionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return str(resolved.storage_state_path) if resolved else None
+    if not resolved:
+        return None, intent
+    intent.update(
+        {
+            "browser_auth_session_id": resolved.session_id,
+            "browser_auth_session_name": resolved.session_name,
+            "project_default_used": bool(use_project_default_browser_auth),
+            "storage_state_attached": True,
+        }
+    )
+    return str(resolved.storage_state_path), intent
+
+
+def _is_login_specific_spec(spec_name: str, spec_content: str) -> bool:
+    haystack = f"{spec_name}\n{spec_content[:1000]}".lower()
+    return bool(re.search(r"\b(log\s*in|login|sign\s*in|signin|sign-in|logout|log\s*out|sign\s*out)\b", haystack))
 
 
 def get_try_code_path(spec_name: str, spec_path: Path) -> str | None:
@@ -6061,18 +6209,45 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
         raise HTTPException(status_code=400, detail="platform must be 'ios' or 'android'")
 
     storage_state_path = None
+    browser_auth_intent: dict[str, Any] = {
+        "mode": "none",
+        "requested_browser_auth_session_id": None,
+        "browser_auth_session_id": None,
+        "browser_auth_session_name": None,
+        "use_project_default_browser_auth": False,
+        "project_default_used": False,
+        "storage_state_attached": False,
+    }
     if target == "browser":
+        requested_browser_auth_session_id = request.browser_auth_session_id
+        requested_project_default_auth = bool(request.use_project_default_browser_auth)
+        auth_conflict_warning: str | None = None
+        if _has_browser_auth_selection(
+            browser_auth_session_id=requested_browser_auth_session_id,
+            use_project_default_browser_auth=requested_project_default_auth,
+        ) and _is_login_specific_spec(request.spec_name, spec_content):
+            auth_conflict_warning = (
+                "Selected browser auth was ignored because this spec appears to test login/logout."
+            )
+            requested_browser_auth_session_id = None
+            requested_project_default_auth = False
         try:
-            storage_state_path = _resolve_browser_auth_storage_state_for_run(
+            storage_state_path, browser_auth_intent = _resolve_browser_auth_storage_state_for_run(
                 session,
                 request.project_id,
                 run_dir=run_dir,
-                browser_auth_session_id=request.browser_auth_session_id,
-                use_project_default_browser_auth=bool(request.use_project_default_browser_auth),
+                browser_auth_session_id=requested_browser_auth_session_id,
+                use_project_default_browser_auth=requested_project_default_auth,
             )
         except HTTPException:
             await asyncio.to_thread((run_dir / "status.txt").write_text, "error")
             raise
+        if auth_conflict_warning:
+            browser_auth_intent["auth_conflict_warning"] = auth_conflict_warning
+            browser_auth_intent["requested_browser_auth_session_id"] = (
+                request.browser_auth_session_id or ""
+            ).strip() or None
+            browser_auth_intent["use_project_default_browser_auth"] = bool(request.use_project_default_browser_auth)
 
     # Create DB Entry with queue info
     now = datetime.utcnow()
@@ -6086,6 +6261,7 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
         queued_at=now,
         queue_position=queue_position,
         project_id=request.project_id,
+        browser_auth=browser_auth_intent,
     )
     session.add(run)
     session.commit()
@@ -6142,6 +6318,7 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
     }
     if storage_state_path:
         payload["storage_state_path"] = storage_state_path
+    payload["browser_auth_context"] = browser_auth_intent
     from orchestrator.config import settings as app_settings
 
     planned_runtime = dict(browser_runtime_status())
@@ -6165,6 +6342,7 @@ async def create_run(request: RunRequest, session: Session = Depends(get_session
         "max_iterations": max_iterations if hybrid_mode else None,
         "temporal_workflow_id": run.temporal_workflow_id,
         "temporal_run_id": run.temporal_run_id,
+        "browser_auth": browser_auth_intent,
     }
 
 
@@ -6357,13 +6535,38 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
         run = session.get(DBTestRun, task_args["run_id"])
         if not run:
             continue
-        storage_state_path = _resolve_browser_auth_storage_state_for_run(
+        requested_browser_auth_session_id = request.browser_auth_session_id
+        requested_project_default_auth = bool(request.use_project_default_browser_auth)
+        auth_conflict_warning: str | None = None
+        try:
+            task_spec_content = Path(task_args["spec_path"]).read_text(encoding="utf-8")
+        except Exception:
+            task_spec_content = ""
+        if _has_browser_auth_selection(
+            browser_auth_session_id=requested_browser_auth_session_id,
+            use_project_default_browser_auth=requested_project_default_auth,
+        ) and _is_login_specific_spec(task_args["spec_name"], task_spec_content):
+            auth_conflict_warning = (
+                "Selected browser auth was ignored because this spec appears to test login/logout."
+            )
+            requested_browser_auth_session_id = None
+            requested_project_default_auth = False
+        storage_state_path, browser_auth_intent = _resolve_browser_auth_storage_state_for_run(
             session,
             task_args["project_id"],
             run_dir=Path(task_args["run_dir"]),
-            browser_auth_session_id=request.browser_auth_session_id,
-            use_project_default_browser_auth=bool(request.use_project_default_browser_auth),
+            browser_auth_session_id=requested_browser_auth_session_id,
+            use_project_default_browser_auth=requested_project_default_auth,
         )
+        if auth_conflict_warning:
+            browser_auth_intent["auth_conflict_warning"] = auth_conflict_warning
+            browser_auth_intent["requested_browser_auth_session_id"] = (
+                request.browser_auth_session_id or ""
+            ).strip() or None
+            browser_auth_intent["use_project_default_browser_auth"] = bool(request.use_project_default_browser_auth)
+        run.browser_auth = browser_auth_intent
+        session.add(run)
+        session.commit()
         payload = {
             "target": "browser",
             "spec_path": task_args["spec_path"],
@@ -6379,6 +6582,7 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
         }
         if storage_state_path:
             payload["storage_state_path"] = storage_state_path
+        payload["browser_auth_context"] = browser_auth_intent
         planned_runtime = dict(browser_runtime_status())
         planned_headless = not bool(planned_runtime.get("live_view_available"))
         _write_run_browser_metadata(
@@ -6514,6 +6718,7 @@ class AgentDefinitionRequest(BaseModel):
     model_tier: str | None = None
     timeout_seconds: int = 1800
     tool_ids: list[str] = []
+    test_data_refs: list[str] = []
     project_id: str | None = None
 
 
@@ -6526,6 +6731,7 @@ class AgentDefinitionUpdateRequest(BaseModel):
     model_tier: str | None = None
     timeout_seconds: int | None = None
     tool_ids: list[str] | None = None
+    test_data_refs: list[str] | None = None
     status: str | None = None
 
 
@@ -6533,6 +6739,7 @@ class CustomAgentRunRequest(BaseModel):
     prompt: str
     url: str | None = None
     config: dict[str, Any] | None = None
+    test_data_refs: list[str] = []
     project_id: str | None = None
     runtime: str | None = None
     model_tier: str | None = None
@@ -6891,6 +7098,13 @@ class GenerateReportItemSpecRequest(BaseModel):
     use_project_default_browser_auth: bool = False
     skip_browser_auth: bool = False
     inherit_browser_auth: bool = False
+
+
+class GenerateFlowTestRequest(BaseModel):
+    browser_auth_session_id: str | None = None
+    use_project_default_browser_auth: bool = False
+    skip_browser_auth: bool = False
+    inherit_browser_auth: bool = True
 
 
 def _collect_agent_run_artifacts(run_id: str) -> list[dict[str, Any]]:
@@ -7416,6 +7630,7 @@ def _serialize_agent_definition(
         "model_tier": getattr(definition, "model_tier", None),
         "timeout_seconds": definition.timeout_seconds,
         "tool_ids": definition.tool_ids,
+        "test_data_refs": getattr(definition, "test_data_refs", []),
         "tools": selected_tools,
         "risk_level": risk_level,
         "status": definition.status,
@@ -7489,7 +7704,7 @@ class AgentBrowserAuthResolutionError(RuntimeError):
         self.use_default = use_default
 
 
-def _browser_auth_request_fields_set(request: GenerateReportItemSpecRequest) -> set[str]:
+def _browser_auth_request_fields_set(request: Any) -> set[str]:
     fields = getattr(request, "model_fields_set", None)
     if fields is None:
         fields = getattr(request, "__fields_set__", set())
@@ -7856,6 +8071,29 @@ def _generic_agent_runtime_prompt(agent_type: str, config: dict[str, Any]) -> st
     )
 
 
+def _resolve_agent_execution_test_data_context(
+    *,
+    project_id: str | None,
+    refs: list[Any] | None = None,
+    markdown: str | None = None,
+) -> dict[str, Any]:
+    try:
+        from orchestrator.services.test_data_resolver import (
+            resolve_test_data_execution_context,
+        )
+
+        with Session(engine) as session:
+            return resolve_test_data_execution_context(
+                session,
+                project_id=project_id or "default",
+                refs=[str(ref) for ref in (refs or [])],
+                markdown=markdown or "",
+            )
+    except Exception as exc:
+        logger.warning("Failed to resolve agent execution test data: %s", exc)
+        return {}
+
+
 async def execute_agent_background(run_id: str, agent_type: str, config: dict):
     """Execute an agent in the background with unified browser pool management.
 
@@ -7933,7 +8171,19 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             if runtime_name == "hermes" and agent_type in {"exploratory", "writer", "spec-synthesis"}:
                 from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
 
+                test_data_refs = config.get("test_data_refs") if isinstance(config.get("test_data_refs"), list) else []
+                test_data_context = _resolve_agent_execution_test_data_context(
+                    project_id=config.get("project_id"),
+                    refs=test_data_refs,
+                    markdown=json.dumps(config, default=str),
+                )
                 prompt = _generic_agent_runtime_prompt(agent_type, config)
+                if test_data_context.get("prompt_markdown"):
+                    prompt = (
+                        f"{prompt}\n\n{test_data_context['prompt_markdown']}\n\n"
+                        "If you delegate work to subagents, copy the relevant test-data ref names and plaintext values needed for execution "
+                        "into each delegated prompt. Subagents do not automatically inherit this full parent context."
+                    )
 
                 def _on_runtime_task_enqueued(task_id: str) -> None:
                     _update_agent_run_progress(
@@ -7989,6 +8239,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         agent_name=agent_type,
                         hermes_conversation=run_id,
                         metadata={"agent_type": agent_type, "run_id": run_id},
+                        env_vars=None,
                         is_cancelled=_agent_run_cancelled,
                         on_task_enqueued=_on_runtime_task_enqueued,
                         on_tool_use=_on_runtime_tool_use,
@@ -8185,6 +8436,18 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     prompt_parts.append(f"Target URL: {target_url}")
                 if custom_config:
                     prompt_parts.append(f"Additional config JSON:\n{json.dumps(custom_config, indent=2)}")
+                test_data_refs = config.get("test_data_refs") if isinstance(config.get("test_data_refs"), list) else []
+                resolved_test_data = _resolve_agent_execution_test_data_context(
+                    project_id=custom_project_id or config.get("project_id"),
+                    refs=test_data_refs,
+                    markdown="\n".join(str(part) for part in [task_prompt, json.dumps(custom_config, default=str)]),
+                )
+                markdown = resolved_test_data.get("prompt_markdown")
+                if markdown:
+                    prompt_parts.extend(["", markdown])
+                    prompt_parts.append(
+                        "If you delegate work to subagents, copy the relevant test-data ref names and plaintext values needed for execution into each delegated prompt. Subagents do not automatically inherit this full parent context."
+                    )
                 prompt_parts.extend(["", "Task:", task_prompt])
 
                 def _on_custom_task_enqueued(task_id: str) -> None:
@@ -8280,6 +8543,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         "agent_definition_id": config.get("agent_definition_id"),
                         "run_id": run_id,
                     },
+                    env_vars=None,
                     is_cancelled=_agent_run_cancelled,
                 )
                 if not await _wait_if_agent_run_paused(run_id):
@@ -8546,6 +8810,7 @@ async def create_agent_definition(
         status="active",
     )
     definition.tool_ids = request.tool_ids
+    definition.test_data_refs = request.test_data_refs
     session.add(definition)
     session.commit()
     session.refresh(definition)
@@ -8577,6 +8842,8 @@ async def update_agent_definition(
     if request.tool_ids is not None:
         _resolve_agent_tools(request.tool_ids, session)
         definition.tool_ids = request.tool_ids
+    if request.test_data_refs is not None:
+        definition.test_data_refs = request.test_data_refs
     if request.name is not None:
         if not request.name.strip():
             raise HTTPException(status_code=400, detail="Agent name is required")
@@ -8643,6 +8910,15 @@ async def run_agent_definition(
 
     run_id = str(uuid.uuid4())
     run_project_id = definition.project_id or request.project_id
+    run_test_data_refs = [
+        *getattr(definition, "test_data_refs", []),
+        *request.test_data_refs,
+        *(
+            (request.config or {}).get("test_data_refs", [])
+            if isinstance((request.config or {}).get("test_data_refs", []), list)
+            else []
+        ),
+    ]
     run_config = {
         "agent_definition_id": definition.id,
         "agent_name": definition.name,
@@ -8650,6 +8926,7 @@ async def run_agent_definition(
         "url": request.url,
         "project_id": run_project_id,
         "custom_config": request.config or {},
+        "test_data_refs": run_test_data_refs,
         "system_prompt": definition.system_prompt,
         "timeout_seconds": definition.timeout_seconds,
         "runtime": normalize_agent_runtime(request.runtime or definition.runtime),
@@ -10248,6 +10525,14 @@ async def _run_flow_spec_generation(
 ### Test Ideas
 {chr(10).join(f"- {idea}" for idea in test_ideas[:5]) if test_ideas else "- Test the happy path"}
 """
+        auth_metadata = _spec_generation_auth_metadata(run_config)
+        if auth_metadata.get("browser_auth_session_id") or auth_metadata.get("use_project_default_browser_auth"):
+            session_name = auth_metadata.get("browser_auth_session_name") or auth_metadata.get("browser_auth_session_id") or "selected session"
+            flow_context += (
+                "\n## Browser Authentication Context\n"
+                f"The browser starts authenticated with saved session `{session_name}`. "
+                "Do not generate login steps unless the scenario explicitly tests login, logout, or authentication failure.\n"
+            )
 
         # Run Native Planner
         _flow_spec_jobs[job_id]["message"] = "Running Native Planner (browser exploration)..."
@@ -10740,6 +11025,7 @@ async def generate_flow_test(
     flow_id: str,
     force_regenerate: bool = False,
     project_id: str | None = Query(default=None, description="Project ID for verification"),
+    request_body: GenerateFlowTestRequest | None = None,
     background_tasks: BackgroundTasks = BackgroundTasks(),
     session: Session = Depends(get_session),
 ):
@@ -10789,6 +11075,7 @@ async def generate_flow_test(
             target_url=flow.get("entry_point") or "",
             project_id=run_project_id,
         )
+        inherited_run_config, _ = _apply_report_spec_browser_auth_request(inherited_run_config, request_body)
 
         # Check for cached result (unless force_regenerate)
         if not force_regenerate and "generated_test" in flow:

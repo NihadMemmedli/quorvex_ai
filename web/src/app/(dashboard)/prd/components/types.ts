@@ -32,7 +32,9 @@ export interface GenerationResult {
     agentTaskId?: string | null;
     agentTaskStatus?: string | null;
     agentWorkerId?: string | null;
+    lastHeartbeatAt?: Date;
     agentQueueHealth?: Record<string, any> | null;
+    queueTelemetry?: Record<string, any> | null;
     targetUrl?: string | null;
     specPath?: string | null;
     createdAt?: Date;
@@ -102,6 +104,7 @@ export interface PrdSettings {
     useLiveValidation: boolean;
     useNativeAgents: boolean;
     targetFeatures: number;
+    testDataRefs: string;
 }
 
 export interface FeatureStats {

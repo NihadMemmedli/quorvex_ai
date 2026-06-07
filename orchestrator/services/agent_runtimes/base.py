@@ -59,6 +59,7 @@ class AgentRuntimeContext:
     model: str | None = None
     model_tier: str | None = None
     reasoning_budget: int | None = None
+    env_vars: dict[str, str] | None = None
     agent_name: str | None = None
     hermes_profile: str | None = None
     hermes_conversation: str | None = None

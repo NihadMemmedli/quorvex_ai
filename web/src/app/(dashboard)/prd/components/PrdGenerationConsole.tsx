@@ -92,6 +92,7 @@ export function PrdGenerationConsole({ generation, isRunning, currentTargetUrl =
     const logEndRef = useRef<HTMLDivElement>(null);
     const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
     const eventsRef = useRef<PrdGenerationEvent[]>([]);
+    const eventReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
         setEvents([]);
@@ -128,34 +129,79 @@ export function PrdGenerationConsole({ generation, isRunning, currentTargetUrl =
     }, [generationId]);
 
     useEffect(() => {
-        if (!generationId || !isRunning || eventSourceRef.current) return;
-        const lastSequence = eventsRef.current.reduce((max, event) => Math.max(max, event.sequence), 0);
-        const source = new EventSource(`${API_BASE_API}/prd/generation/${generationId}/events/stream?after_sequence=${lastSequence}`);
-        eventSourceRef.current = source;
-        source.onmessage = (event) => {
+        if (!generationId || !isRunning) return;
+        let cancelled = false;
+        let attempts = 0;
+
+        const mergeEvents = (incoming: PrdGenerationEvent[]) => {
+            setEvents(prev => {
+                const bySequence = new Map<number, PrdGenerationEvent>();
+                [...prev, ...incoming].forEach(item => bySequence.set(item.sequence, item));
+                return [...bySequence.values()].sort((a, b) => a.sequence - b.sequence);
+            });
+        };
+
+        const backfillEvents = async () => {
+            const lastSequence = eventsRef.current.reduce((max, item) => Math.max(max, item.sequence), 0);
             try {
-                const data = JSON.parse(event.data);
-                if (data.event) {
-                    setEvents(prev => {
-                        if (prev.some(item => item.sequence === data.event.sequence)) return prev;
-                        return [...prev, data.event].sort((a, b) => a.sequence - b.sequence);
-                    });
-                }
-                if (data.status === 'complete' || data.status === 'error') {
-                    source.close();
-                    eventSourceRef.current = null;
+                const res = await fetch(`${API_BASE_API}/prd/generation/${generationId}/events?after_sequence=${lastSequence}`);
+                if (!cancelled && res.ok) {
+                    const data = await res.json();
+                    if (Array.isArray(data)) mergeEvents(data);
                 }
             } catch {
-                source.close();
-                eventSourceRef.current = null;
+                // Polling still owns generation status; SSE backfill can retry.
             }
         };
-        source.onerror = () => {
-            source.close();
-            eventSourceRef.current = null;
+
+        const connect = () => {
+            if (cancelled || eventSourceRef.current) return;
+            const lastSequence = eventsRef.current.reduce((max, item) => Math.max(max, item.sequence), 0);
+            const source = new EventSource(`${API_BASE_API}/prd/generation/${generationId}/events/stream?after_sequence=${lastSequence}`);
+            eventSourceRef.current = source;
+            source.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.event) {
+                        attempts = 0;
+                        mergeEvents([data.event]);
+                    }
+                    if (data.status === 'complete' || data.status === 'error') {
+                        source.close();
+                        eventSourceRef.current = null;
+                    }
+                } catch {
+                    source.close();
+                    eventSourceRef.current = null;
+                    scheduleReconnect();
+                }
+            };
+            source.onerror = () => {
+                source.close();
+                eventSourceRef.current = null;
+                scheduleReconnect();
+            };
         };
+
+        const scheduleReconnect = () => {
+            if (cancelled) return;
+            if (eventReconnectTimerRef.current) clearTimeout(eventReconnectTimerRef.current);
+            attempts += 1;
+            const delay = Math.min(15000, 750 * Math.pow(2, Math.min(attempts, 5)));
+            eventReconnectTimerRef.current = setTimeout(async () => {
+                eventReconnectTimerRef.current = null;
+                await backfillEvents();
+                connect();
+            }, delay);
+        };
+
+        void backfillEvents();
+        connect();
         return () => {
-            source.close();
+            cancelled = true;
+            if (eventReconnectTimerRef.current) clearTimeout(eventReconnectTimerRef.current);
+            eventReconnectTimerRef.current = null;
+            eventSourceRef.current?.close();
             eventSourceRef.current = null;
         };
     }, [generationId, isRunning]);
@@ -173,7 +219,10 @@ export function PrdGenerationConsole({ generation, isRunning, currentTargetUrl =
                 } else if (data.log) {
                     setStreamingLog(prev => prev + data.log);
                 }
-                if (data.status === 'complete' || data.status === 'timeout' || data.status === 'error') {
+                if (data.status === 'reconnecting') {
+                    setStreamingLog(prev => prev + '\n--- No new log output; reconnecting status remains active ---\n');
+                }
+                if (data.status === 'complete' || data.status === 'error') {
                     source.close();
                     logSourceRef.current = null;
                 }
@@ -203,10 +252,14 @@ export function PrdGenerationConsole({ generation, isRunning, currentTargetUrl =
     const imageArtifacts = artifacts.filter(artifact => artifact.type === 'image');
     const groupedEvents = useMemo(() => groupByRole(events), [events]);
     const lastEvent = events[events.length - 1] || generation?.latestEvent || null;
-    const lastTool = latestTool(events);
+    const lastTool = latestTool(events) || generation?.browserLastTool || generation?.queueTelemetry?.progress?.last_tool || null;
     const failedEvent = [...events].reverse().find(event => event.level === 'error' || event.event_type === 'failed');
     const elapsed = formatElapsed(generation?.startedAt || generation?.createdAt, generation?.completedAt);
     const eventCount = events.length || generation?.eventsCount || 0;
+    const lastEventTime = lastEvent ? formatEventTime(lastEvent.created_at) : null;
+    const queueHealth = generation?.agentQueueHealth
+        ? `${generation.agentQueueHealth.worker_count ?? 0} workers, ${generation.agentQueueHealth.running_tasks ?? 0} running`
+        : 'No queue telemetry';
     const hasUsefulDetails =
         isRunning ||
         generation?.status === 'failed' ||
@@ -421,12 +474,10 @@ export function PrdGenerationConsole({ generation, isRunning, currentTargetUrl =
 
                 .prd-console-summary-value {
                     margin-top: 0.25rem;
-                    overflow: hidden;
                     color: var(--text);
                     font-size: 14px;
                     line-height: 1.35;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
+                    overflow-wrap: anywhere;
                 }
 
                 .prd-console-alert {
@@ -552,18 +603,17 @@ export function PrdGenerationConsole({ generation, isRunning, currentTargetUrl =
                 .prd-console-event-header {
                     display: flex;
                     min-width: 0;
-                    align-items: center;
+                    align-items: flex-start;
                     gap: 0.5rem;
                 }
 
                 .prd-console-event-message {
                     min-width: 0;
-                    overflow: hidden;
                     color: var(--text);
                     font-size: 0.875rem;
                     line-height: 1.35;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
+                    overflow-wrap: anywhere;
+                    white-space: normal;
                 }
 
                 .prd-console-event-time {
@@ -793,6 +843,10 @@ export function PrdGenerationConsole({ generation, isRunning, currentTargetUrl =
                         ['Elapsed', elapsed],
                         ['Last activity', lastTool || lastEvent?.message || 'No tool calls recorded'],
                         ['Browser captures', imageArtifacts.length ? `${imageArtifacts.length} screenshots` : 'No screenshots captured'],
+                        ['Agent task', generation.agentTaskStatus || generation.agentTaskId || 'Not enqueued'],
+                        ['Worker', generation.agentWorkerId || 'Not assigned'],
+                        ['Queue health', queueHealth],
+                        ['Last event', lastEventTime || 'No events yet'],
                         ['Runtime', generation.runtimeMessage || (isPrdOnlyRun ? 'PRD-only generation' : 'Ready')],
                     ].map(([label, value]) => (
                         <div key={label} className="prd-console-summary-card">

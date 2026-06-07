@@ -1607,15 +1607,52 @@ def _role_objective(role: str, mission: AutonomousMission) -> str:
     return objectives.get(role, f"Perform autonomous QA work for role {role} on {target_text}.")
 
 
-def _agent_prompt_for_work_item(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> str:
+def _autonomous_test_data_execution_context(mission: AutonomousMission) -> dict[str, Any]:
+    config = mission.config or {}
+    refs = config.get("test_data_refs") if isinstance(config.get("test_data_refs"), list) else []
+    markdown = "\n".join(
+        [
+            mission.name or "",
+            json.dumps(config, default=str),
+            "\n".join(mission.target_urls or []),
+        ]
+    )
+    try:
+        from orchestrator.services.test_data_resolver import resolve_test_data_execution_context
+
+        with Session(engine) as session:
+            return resolve_test_data_execution_context(
+                session,
+                project_id=mission.project_id or "default",
+                refs=[str(ref) for ref in refs],
+                markdown=markdown,
+            )
+    except Exception:
+        logger.debug("Unable to resolve autonomous mission test data.", exc_info=True)
+        return {}
+
+
+def _agent_prompt_for_work_item(
+    mission: AutonomousMission,
+    item: AutonomousAgentWorkItem,
+    test_data_context: dict[str, Any] | None = None,
+) -> str:
     surfaces = item.assigned_surface or mission.target_urls
     revision_context = item.progress or {}
     context_bundle = _work_item_context_bundle(mission, item)
+    test_data_context = test_data_context or _autonomous_test_data_execution_context(mission)
     context_note = ""
     if context_bundle:
         context_note = f"""
 Canonical context bundle:
 {_compact_json(context_bundle, max_chars=7000)}
+"""
+    test_data_note = ""
+    if test_data_context.get("prompt_markdown"):
+        test_data_note = f"""
+{test_data_context["prompt_markdown"]}
+
+When delegating to subagents, copy the relevant test-data ref names and plaintext values needed for execution into each delegated prompt. Subagents do not automatically inherit this full parent context.
 """
     revision_note = ""
     if revision_context.get("revision_of_work_item_id"):
@@ -1635,6 +1672,7 @@ Address the reviewer feedback directly and explain what changed from the prior o
 Hermes delegation policy:
 - You may delegate bounded subtasks to subagents when it improves coverage or parallelism.
 - Give each subagent all context it needs; subagents do not inherit this full prompt automatically.
+- If a subagent needs test data, copy the relevant test-data ref/value/env-var context into its prompt.
 - Use at most {max_children} concurrent child agents and do not exceed delegation depth {max_depth}.
 - Aggregate subagent findings into the required final JSON shape.
 """
@@ -1644,6 +1682,7 @@ Mission: {mission.name}
 Objective: {item.objective}
 Target surfaces: {', '.join(surfaces or ['project data and known app artifacts'])}
 {context_note}
+{test_data_note}
 {revision_note}
 {hermes_note}
 
@@ -2043,10 +2082,13 @@ def _execute_agent_work_item_direct(
                     or bool(current_mission and current_mission.status == "cancelled")
                 )
 
+        test_data_context = _autonomous_test_data_execution_context(mission)
+        test_data_env_vars = {}
+
         async def _run_agent():
             runtime = get_agent_runtime(runtime_name)
             return await runtime.run(
-                _agent_prompt_for_work_item(mission, item),
+                _agent_prompt_for_work_item(mission, item, test_data_context),
                 AgentRuntimeContext(
                     timeout_seconds=timeout_seconds,
                     allowed_tools=allowed_tools,
@@ -2075,6 +2117,7 @@ def _execute_agent_work_item_direct(
                         "role": item.role,
                         "planner_key": item.planner_key,
                     },
+                    env_vars=test_data_env_vars or None,
                     is_cancelled=_is_cancelled,
                 ),
             )
@@ -2220,11 +2263,13 @@ def _enqueue_agent_work_item_legacy(
             queue = get_agent_queue()
             await queue.connect()
             try:
+                test_data_context = _autonomous_test_data_execution_context(mission)
                 return await queue.enqueue_task(
-                    prompt=_agent_prompt_for_work_item(mission, item),
+                    prompt=_agent_prompt_for_work_item(mission, item, test_data_context),
                     timeout_seconds=max(300, min(mission.max_runtime_minutes * 60, 7200)),
                     agent_type=item.role,
                     operation_type="autonomous_mission",
+                    env_vars=None,
                     allowed_tools=_allowed_tools_for_work_item(item),
                     max_budget_usd=mission.max_llm_budget_usd,
                     owner_type="autonomous_work_item",

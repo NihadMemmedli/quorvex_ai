@@ -766,8 +766,9 @@ async def test_live_browser_status_reports_missing_live_browser_capable_worker(m
         session.add(generation)
         session.commit()
         session.refresh(generation)
+        generation_id = generation.id
         event = PrdGenerationEvent(
-            generation_id=generation.id,
+            generation_id=generation_id,
             sequence=1,
             role="playwright_planner",
             event_type="task_enqueued",
@@ -888,3 +889,216 @@ def test_generation_artifacts_include_planner_debug_files(tmp_path, monkeypatch)
     names = {artifact["name"] for artifact in artifacts}
 
     assert {"raw_output.txt", "tool_calls.json", "agent_summary.json"}.issubset(names)
+
+
+def test_prd_task_enqueued_persists_agent_task_id(monkeypatch):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine, tables=[PrdGenerationResult.__table__, PrdGenerationEvent.__table__])
+    monkeypatch.setattr(prd_api, "engine", engine)
+
+    with Session(engine) as session:
+        generation = PrdGenerationResult(prd_project="prd-project", feature_name="Checkout", status="running")
+        session.add(generation)
+        session.commit()
+        session.refresh(generation)
+        generation_id = generation.id
+
+    prd_api._persist_generation_agent_task_id(generation_id, "agent-persisted")
+
+    with Session(engine) as session:
+        generation = session.get(PrdGenerationResult, generation_id)
+        assert generation.agent_task_id == "agent-persisted"
+        assert prd_api._generation_status_response(generation).agent_task_id == "agent-persisted"
+
+
+def test_prd_agent_task_id_falls_back_to_legacy_task_enqueued_event(monkeypatch):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine, tables=[PrdGenerationResult.__table__, PrdGenerationEvent.__table__])
+    monkeypatch.setattr(prd_api, "engine", engine)
+
+    with Session(engine) as session:
+        generation = PrdGenerationResult(prd_project="prd-project", feature_name="Checkout", status="running")
+        session.add(generation)
+        session.commit()
+        session.refresh(generation)
+        generation_id = generation.id
+        event = PrdGenerationEvent(
+            generation_id=generation_id,
+            sequence=1,
+            role="playwright_planner",
+            event_type="task_enqueued",
+            message="Planner task enqueued.",
+        )
+        event.payload = {"agent_task_id": "agent-legacy"}
+        session.add(event)
+        session.commit()
+
+    assert prd_api._generation_agent_task_id(generation_id) == "agent-legacy"
+
+
+@pytest.mark.asyncio
+async def test_prd_reconciliation_keeps_fresh_queue_task_running(monkeypatch):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine, tables=[PrdGenerationResult.__table__, PrdGenerationEvent.__table__])
+    monkeypatch.setattr(prd_api, "engine", engine)
+    monkeypatch.setattr(
+        prd_api,
+        "browser_runtime_status",
+        lambda: {"browser_runtime": "vnc", "live_view_available": True, "runtime_message": "ok"},
+    )
+    monkeypatch.setattr(
+        prd_api,
+        "live_browser_display_diagnostics",
+        lambda: {"browser_window_count": 1, "browser_process_count": 1},
+    )
+
+    task = AgentTask(
+        id="agent-running",
+        prompt="inspect",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-1",
+        requires_live_browser=True,
+    )
+    heartbeat_at = "2026-06-07T12:00:00"
+
+    class FakeQueue:
+        async def connect(self):
+            return None
+
+        async def get_task(self, task_id: str):
+            return task if task_id == task.id else None
+
+        async def get_worker_health(self):
+            return {"worker_count": 1, "live_browser_worker_count": 1, "running_tasks": 1, "alive_tasks": 1}
+
+        async def get_task_heartbeat(self, task_id: str):
+            return {"ts": heartbeat_at, "progress": {"phase": "tool_use", "message": "Using browser_snapshot...", "last_tool": "browser_snapshot"}}
+
+        async def get_task_progress(self, task_id: str):
+            return {"tool_calls": 1, "last_tool": "browser_snapshot"}
+
+        async def check_heartbeat(self, task_id: str, max_stale_seconds: int = 120):
+            return True
+
+    monkeypatch.setattr(agent_queue_module, "REDIS_AVAILABLE", True)
+    monkeypatch.setattr(agent_queue_module, "should_use_agent_queue", lambda: True)
+    monkeypatch.setattr(agent_queue_module, "get_agent_queue", lambda: FakeQueue())
+
+    with Session(engine) as session:
+        generation = PrdGenerationResult(
+            prd_project="prd-project",
+            feature_name="Checkout",
+            status="running",
+            target_url="https://example.test",
+            live_browser_requested=True,
+            agent_task_id=task.id,
+        )
+        session.add(generation)
+        session.commit()
+        session.refresh(generation)
+        generation_id = generation.id
+
+    with Session(engine) as session:
+        generation = session.get(PrdGenerationResult, generation_id)
+        response = await prd_api._generation_status_response_with_queue(generation)
+
+    assert response.status == "running"
+    assert response.current_stage == "tool_use"
+    assert response.stage_message == "Using browser_snapshot..."
+    assert response.agent_task_id == task.id
+    assert response.agent_task_status == "running"
+    assert response.agent_worker_id == "worker-1"
+    assert response.queue_telemetry["heartbeat_alive"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("queue_status", "expected_status"),
+    [
+        (AgentTaskStatus.FAILED, "failed"),
+        (AgentTaskStatus.TIMEOUT, "failed"),
+        (AgentTaskStatus.CANCELLED, "cancelled"),
+    ],
+)
+async def test_prd_reconciliation_maps_terminal_queue_status(monkeypatch, queue_status, expected_status):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine, tables=[PrdGenerationResult.__table__, PrdGenerationEvent.__table__])
+    monkeypatch.setattr(prd_api, "engine", engine)
+    monkeypatch.setattr(
+        prd_api,
+        "browser_runtime_status",
+        lambda: {"browser_runtime": "vnc", "live_view_available": True, "runtime_message": "ok"},
+    )
+    monkeypatch.setattr(
+        prd_api,
+        "live_browser_display_diagnostics",
+        lambda: {"browser_window_count": 0, "browser_process_count": 0},
+    )
+
+    task = AgentTask(
+        id=f"agent-{queue_status.value}",
+        prompt="inspect",
+        status=queue_status,
+        worker_id="worker-1",
+        error=f"queue {queue_status.value}",
+        telemetry={"tool_calls": 2},
+        requires_live_browser=True,
+    )
+
+    class FakeQueue:
+        async def connect(self):
+            return None
+
+        async def get_task(self, task_id: str):
+            return task if task_id == task.id else None
+
+        async def get_worker_health(self):
+            return {"worker_count": 1, "live_browser_worker_count": 1}
+
+        async def get_task_heartbeat(self, task_id: str):
+            return None
+
+        async def get_task_progress(self, task_id: str):
+            return {}
+
+        async def check_heartbeat(self, task_id: str, max_stale_seconds: int = 120):
+            return False
+
+        async def fail_stale_running_task(self, task_id: str, error: str):
+            return True
+
+    monkeypatch.setattr(agent_queue_module, "REDIS_AVAILABLE", True)
+    monkeypatch.setattr(agent_queue_module, "should_use_agent_queue", lambda: True)
+    monkeypatch.setattr(agent_queue_module, "get_agent_queue", lambda: FakeQueue())
+
+    with Session(engine) as session:
+        generation = PrdGenerationResult(
+            prd_project="prd-project",
+            feature_name="Checkout",
+            status="running",
+            target_url="https://example.test",
+            live_browser_requested=True,
+            agent_task_id=task.id,
+        )
+        session.add(generation)
+        session.commit()
+        session.refresh(generation)
+        generation_id = generation.id
+
+    with Session(engine) as session:
+        generation = session.get(PrdGenerationResult, generation_id)
+        response = await prd_api._generation_status_response_with_queue(generation)
+        event = session.exec(
+            select(PrdGenerationEvent)
+            .where(PrdGenerationEvent.generation_id == generation_id)
+            .order_by(PrdGenerationEvent.sequence.desc())
+        ).first()
+
+    assert response.status == expected_status
+    if expected_status == "failed":
+        assert response.error_message == task.error
+    else:
+        assert response.stage_message == task.error
+    assert event is not None
+    assert event.event_type == expected_status
+    assert event.payload["agent_task_id"] == task.id

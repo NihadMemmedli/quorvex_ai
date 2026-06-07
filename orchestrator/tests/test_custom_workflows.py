@@ -35,6 +35,9 @@ from orchestrator.api.db import _has_empty_alembic_version, _required_workflow_s
 from orchestrator.api.workflows import RUNS_DIR, _launch_run_durably, _workflow_debug_payload, get_workflow_temporal_health
 from orchestrator.api.models_db import (
     AgentRun,
+    Project,
+    TestDataItem,
+    TestDataSet,
     WorkflowDefinition,
     WorkflowEvent,
     WorkflowNotification,
@@ -66,6 +69,7 @@ from orchestrator.services.workflow_runner import (
     WorkflowCancelled,
     WorkflowPaused,
     _dispatch_step,
+    _build_context,
     _execute_step,
     _raise_if_run_controlled,
     create_workflow_run_steps,
@@ -78,6 +82,7 @@ from orchestrator.services.workflow_runner import (
     validate_workflow_steps,
     workflow_step_catalog,
 )
+from orchestrator.services.test_data_resolver import prepare_test_data_item_storage
 from orchestrator.services.workflow_step_registry import WORKFLOW_TEMPLATES, sync_builtin_workflow_step_types
 
 
@@ -207,6 +212,57 @@ def test_validate_workflow_steps_rejects_inline_secret_values():
         )
 
 
+def test_workflow_context_discovers_testdata_refs_embedded_in_markdown_inputs():
+    _ensure_tables()
+    project_id = f"project-{uuid.uuid4()}"
+    with Session(engine) as session:
+        session.add(Project(id=project_id, name=f"Workflow Test Data Project {project_id}"))
+        dataset = TestDataSet(project_id=project_id, key="auth-users", name="Auth Users")
+        session.add(dataset)
+        session.flush()
+        storage = prepare_test_data_item_storage(
+            data={"email": "admin@example.com", "password": "replace-me"},
+            sensitive_fields=["password"],
+        )
+        item = TestDataItem(dataset_id=dataset.id, key="valid-admin", name="Valid admin")
+        item.data = storage["data"]
+        item.sensitive_fields = storage["sensitive_fields"]
+        item.encrypted_values = storage["encrypted_values"]
+        session.add(item)
+
+        definition = _create_definition(session)
+        run = WorkflowRun(
+            definition_id=definition.id,
+            project_id=project_id,
+            status="queued",
+        )
+        run.inputs = {
+            "content": 'Run login\n@testdata "auth-users.valid-admin"',
+            "test_data_refs": [],
+        }
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        step = WorkflowRunStep(
+            run_id=run.id,
+            definition_id=definition.id,
+            step_order=0,
+            step_key="generate",
+            step_type="review_gate",
+            label="Generate",
+        )
+        step.input = {"spec_content": 'Spec body\n@testdata "auth-users.valid-admin"'}
+        session.add(step)
+        session.commit()
+
+        context = _build_context(session, run.id, run)
+
+    payload = context["test_data"]["auth-users.valid-admin"]
+    assert payload["data"]["email"] == "admin@example.com"
+    assert payload["data"]["password"] == "{{TESTDATA_AUTH_USERS_VALID_ADMIN_PASSWORD}}"
+    assert "replace-me" not in str(context["test_data"])
+
+
 def test_validate_workflow_steps_requires_supported_type_and_inputs():
     with pytest.raises(ValueError, match="Unsupported workflow step type"):
         validate_workflow_steps([{"key": "bad", "type": "unknown", "input": {}}])
@@ -239,6 +295,7 @@ def test_workflow_step_catalog_exposes_dynamic_ui_metadata():
 
     start_exploration = next(item for item in catalog if item["type"] == "start_exploration")
     assert start_exploration["ui_schema"]["recommended_next_steps"][0]["type"] == "generate_requirements"
+    assert "browser_auth_session_id" in start_exploration["input_schema"]["properties"]
 
     wait_for_status = next(item for item in catalog if item["type"] == "wait_for_status")
     assert wait_for_status["default_input"]["source_step"] == ""
@@ -405,6 +462,73 @@ async def test_dispatch_custom_agent_step_uses_agent_handler(monkeypatch):
             "agent_run",
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_steps_inherit_workflow_test_data_refs(monkeypatch):
+    calls: list[tuple[str, dict, str | None]] = []
+
+    async def fake_post_json(path: str, body: dict, *, expected_kind: str | None = None):
+        calls.append((path, body, expected_kind))
+        return {"status": "queued", "id": "external-1"}
+
+    monkeypatch.setattr("orchestrator.services.workflow_runner._post_json", fake_post_json)
+    context = {"steps": {}, "test_data_refs": ["wetravel-auth.valid-user"]}
+
+    await _dispatch_step(
+        "start_custom_agent",
+        {"definition_id": "agent-def-1", "prompt": "Inspect"},
+        "project-1",
+        context,
+        {"handler_kind": "agent_run"},
+    )
+    await _dispatch_step(
+        "generate_requirements",
+        {"exploration_session_id": "explore-1"},
+        "project-1",
+        context,
+        {"handler_config": {"action": "generate_requirements"}},
+    )
+
+    assert calls[0][1]["test_data_refs"] == ["wetravel-auth.valid-user"]
+    assert calls[1][1]["test_data_refs"] == ["wetravel-auth.valid-user"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_browser_auth_controls_survive_builtin_steps(monkeypatch):
+    calls: list[tuple[str, dict, str | None]] = []
+
+    async def fake_post_json(path: str, body: dict, *, expected_kind: str | None = None):
+        calls.append((path, body, expected_kind))
+        return {"status": "queued", "id": "external-1"}
+
+    monkeypatch.setattr("orchestrator.services.workflow_runner._post_json", fake_post_json)
+
+    await _dispatch_step(
+        "run_spec",
+        {"spec_name": "examples/hello-world.md", "browser_auth_session_id": "auth-1"},
+        "project-1",
+        {"steps": {}},
+        {"handler_config": {"action": "run_spec"}},
+    )
+    await _dispatch_step(
+        "run_regression_batch",
+        {"spec_names": ["one.md"], "browser_auth_session_id": "auth-1", "skip_browser_auth": True},
+        "project-1",
+        {"steps": {}},
+        {"handler_config": {"action": "run_regression_batch"}},
+    )
+
+    assert calls[0] == (
+        "/runs",
+        {"spec_name": "examples/hello-world.md", "browser_auth_session_id": "auth-1", "project_id": "project-1"},
+        "test_run",
+    )
+    assert calls[1] == (
+        "/runs/bulk",
+        {"spec_names": ["one.md"], "project_id": "project-1"},
+        "regression_batch",
+    )
 
 
 @pytest.mark.parametrize(
