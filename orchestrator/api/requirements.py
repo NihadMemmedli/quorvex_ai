@@ -5,14 +5,17 @@ Provides CRUD endpoints for requirements management and
 integration with exploration-based requirements generation.
 """
 
+import asyncio
 import logging
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -25,13 +28,14 @@ router = APIRouter(prefix="/requirements", tags=["requirements"])
 # ========== In-Memory Job Tracking ==========
 _req_gen_jobs: dict[str, dict] = {}
 _bulk_gen_jobs: dict[str, dict] = {}
+_req_spec_jobs: dict[str, dict] = {}
 MAX_TRACKED_JOBS = 50
 
 
 def _cleanup_old_req_jobs():
     """Remove completed/failed jobs older than 1 hour."""
     now = time.time()
-    for job_store in (_req_gen_jobs, _bulk_gen_jobs):
+    for job_store in (_req_gen_jobs, _bulk_gen_jobs, _req_spec_jobs):
         to_remove = []
         for job_id, job in job_store.items():
             if job["status"] in ("completed", "failed"):
@@ -328,6 +332,8 @@ class GenerateSpecFromRequirementRequest(BaseModel):
     target_url: str = Field(..., description="URL of the application to test")
     login_url: str | None = Field(None, description="URL for login page if auth required")
     credentials: dict[str, str] | None = Field(None, description="Credentials with username/password keys")
+    browser_auth_session_id: str | None = Field(None, description="Saved browser auth session ID")
+    use_project_default_browser_auth: bool = Field(False, description="Use the project default browser auth session")
     test_data_refs: list[str] = Field(default_factory=list, description="Explicit project test data refs")
     force_regenerate: bool = Field(False, description="Force regeneration even if spec exists")
 
@@ -360,6 +366,570 @@ class SpecStatusResponse(BaseModel):
     truth_state: str | None = None
     generation_warning: str | None = None
     generation_allowed: bool = True
+
+
+@dataclass
+class RequirementSpecGenerationContext:
+    requirement: Any
+    truth_state: str
+    generation_warning: str | None
+    target_url: str
+    flow_context: str
+    auth_context: dict[str, Any] | None
+    planner_session_dir: Path | None
+    specs_dir: Path
+    spec_name: str
+    mcp_runtime: dict[str, Any]
+    browser_auth_metadata: dict[str, Any]
+
+
+def _dump_model(model: BaseModel) -> dict[str, Any]:
+    dump = getattr(model, "model_dump", None)
+    if callable(dump):
+        return dump()
+    return model.dict()
+
+
+def _requirement_browser_auth_metadata(
+    request: GenerateSpecFromRequirementRequest,
+    auth_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    requested_browser_auth_session_id = (request.browser_auth_session_id or "").strip()
+    if requested_browser_auth_session_id:
+        metadata["browser_auth_session_id"] = requested_browser_auth_session_id
+    if request.use_project_default_browser_auth:
+        metadata["use_project_default_browser_auth"] = True
+    if auth_context:
+        if auth_context.get("browser_auth_session_id"):
+            metadata["browser_auth_session_id"] = auth_context["browser_auth_session_id"]
+        if auth_context.get("browser_auth_session_name"):
+            metadata["browser_auth_session_name"] = auth_context["browser_auth_session_name"]
+        if auth_context.get("use_project_default_browser_auth"):
+            metadata["use_project_default_browser_auth"] = True
+        if auth_context.get("storage_state_attached"):
+            metadata["storage_state_attached"] = True
+    return metadata
+
+
+async def _cached_requirement_spec_response(
+    req_id: int,
+    request: GenerateSpecFromRequirementRequest,
+    project_id: str,
+    requirement: Any,
+    truth_state: str,
+    generation_warning: str | None,
+) -> GenerateSpecFromRequirementResponse | None:
+    if request.force_regenerate:
+        return None
+
+    status = await get_spec_status(req_id, project_id)
+    if not status.has_spec:
+        return None
+
+    spec_path = Path(status.spec_path) if status.spec_path else None
+    if not spec_path or not spec_path.exists():
+        return None
+
+    from orchestrator.api.db import get_session
+    from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
+
+    specs_base_dir = Path(__file__).resolve().parent.parent.parent / "specs"
+    try:
+        relative_spec_name = str(spec_path.relative_to(specs_base_dir))
+        with next(get_session()) as db:
+            existing_meta = db.get(DBSpecMetadata, relative_spec_name)
+            if not existing_meta:
+                meta = DBSpecMetadata(spec_name=relative_spec_name, project_id=project_id, tags_json="[]")
+                db.add(meta)
+                db.commit()
+                logger.info(
+                    f"Registered existing spec in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}"
+                )
+            elif existing_meta.project_id != project_id:
+                existing_meta.project_id = project_id
+                db.commit()
+                logger.info(
+                    f"Updated existing spec project_id in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}"
+                )
+    except ValueError:
+        logger.warning(f"Spec path {spec_path} is not under specs directory, skipping DBSpecMetadata registration")
+
+    return GenerateSpecFromRequirementResponse(
+        status="cached",
+        spec_path=str(spec_path),
+        spec_name=status.spec_name or spec_path.name,
+        spec_content=spec_path.read_text(),
+        requirement_id=req_id,
+        requirement_code=requirement.req_code,
+        rtm_entry_id=status.rtm_entry_id or 0,
+        generated_at=status.generated_at or datetime.utcnow().isoformat(),
+        cached=True,
+        truth_state=truth_state,
+        generation_warning=generation_warning,
+        generation_allowed=True,
+    )
+
+
+async def _prepare_requirement_spec_generation(
+    req_id: int,
+    request: GenerateSpecFromRequirementRequest,
+    project_id: str,
+    *,
+    planner_session_dir: Path | None = None,
+    prepare_mcp: bool = False,
+) -> RequirementSpecGenerationContext:
+    from memory.exploration_store import get_exploration_store
+    from orchestrator.api.db import get_session
+    from utils.string_utils import slugify
+
+    store = get_exploration_store(project_id=project_id)
+
+    requirement = store.get_requirement(req_id)
+    if not requirement:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+
+    truth_state = _requirement_truth_state(requirement)
+    generation_warning = _requirement_generation_warning(requirement)
+    project_root = Path(__file__).resolve().parent.parent.parent
+
+    base_url_origin = None
+    if requirement.source_session_id:
+        try:
+            source_session = store.get_session(requirement.source_session_id)
+            if source_session and source_session.entry_url:
+                from urllib.parse import urlparse
+
+                parsed = urlparse(source_session.entry_url)
+                base_url_origin = f"{parsed.scheme}://{parsed.netloc}"
+                logger.info(f"Resolved base URL origin from exploration session: {base_url_origin}")
+        except Exception as e:
+            logger.warning(f"Could not resolve exploration session URL: {e}")
+
+    target_url = request.target_url
+    if target_url and target_url.startswith("/") and base_url_origin:
+        target_url = f"{base_url_origin}{target_url}"
+        logger.info(f"Resolved relative target_url to absolute: {target_url}")
+
+    credential_keys = []
+    try:
+        from api.credentials import list_project_credentials
+
+        with next(get_session()) as db_session:
+            creds = list_project_credentials(project_id, db_session, include_env=True)
+            credential_keys = [c["key"] for c in creds]
+    except Exception as e:
+        logger.warning(f"Could not load project credentials: {e}")
+
+    test_data_markdown = ""
+    if request.test_data_refs:
+        try:
+            from orchestrator.services.test_data_resolver import resolve_test_data_refs
+
+            with next(get_session()) as db_session:
+                resolved = resolve_test_data_refs(
+                    db_session,
+                    project_id=project_id,
+                    refs=request.test_data_refs,
+                    render_as="markdown",
+                    decrypt_sensitive=True,
+                )
+            missing_test_data = resolved.get("missing") or []
+            if missing_test_data:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "test_data_refs_unresolved",
+                        "message": "Some selected test data refs are unavailable",
+                        "missing_test_data": missing_test_data,
+                    },
+                )
+            test_data_markdown = resolved.get("markdown") or ""
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "test_data_refs_unresolved",
+                    "message": f"Could not resolve selected test data refs: {e}",
+                    "refs": request.test_data_refs,
+                },
+            ) from e
+
+    auth_context = None
+    storage_state_path = None
+    requested_browser_auth_session_id = (request.browser_auth_session_id or "").strip() or None
+    needs_browser_auth = requested_browser_auth_session_id or request.use_project_default_browser_auth
+    if needs_browser_auth:
+        try:
+            from orchestrator.services.browser_auth_sessions import (
+                BrowserAuthSessionError,
+                resolve_browser_auth_for_run,
+            )
+
+            if planner_session_dir is None:
+                planner_session_dir = project_root / "runs" / f"requirements-generate-spec-{uuid.uuid4().hex}"
+            await asyncio.to_thread(planner_session_dir.mkdir, parents=True, exist_ok=True)
+            with next(get_session()) as db_session:
+                resolved_auth = resolve_browser_auth_for_run(
+                    db_session,
+                    project_id,
+                    run_dir=planner_session_dir,
+                    browser_auth_session_id=requested_browser_auth_session_id,
+                    use_default=bool(request.use_project_default_browser_auth),
+                )
+            if not resolved_auth:
+                raise BrowserAuthSessionError("Browser auth session was not found")
+            storage_state_path = resolved_auth.storage_state_path
+            auth_context = {
+                "mode": "project_default" if request.use_project_default_browser_auth else "session",
+                "storage_state_attached": True,
+                "requested_browser_auth_session_id": requested_browser_auth_session_id,
+                "browser_auth_session_id": resolved_auth.session_id,
+                "browser_auth_session_name": resolved_auth.session_name,
+                "use_project_default_browser_auth": bool(request.use_project_default_browser_auth),
+            }
+        except BrowserAuthSessionError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    mcp_runtime: dict[str, Any] = {}
+    if prepare_mcp or needs_browser_auth:
+        from orchestrator.utils.playwright_mcp import write_playwright_mcp_config
+
+        if planner_session_dir is None:
+            planner_session_dir = project_root / "runs" / f"requirements-generate-spec-{uuid.uuid4().hex}"
+        await asyncio.to_thread(planner_session_dir.mkdir, parents=True, exist_ok=True)
+        mcp_runtime = await asyncio.to_thread(
+            write_playwright_mcp_config,
+            run_dir=planner_session_dir,
+            server_name="playwright-test",
+            project_root=project_root,
+            storage_state_path=storage_state_path,
+        )
+        logger.info("Prepared browser MCP runtime for requirement spec generation: %s", mcp_runtime)
+
+    flow_context = _build_flow_context_from_requirement(
+        requirement,
+        base_url_origin=base_url_origin,
+        credential_keys=credential_keys,
+        test_data_markdown=test_data_markdown,
+    )
+
+    from orchestrator.api.models_db import Project as _Project
+
+    folder_name = project_id
+    try:
+        with next(get_session()) as db:
+            project = db.get(_Project, project_id)
+            if project and project.name:
+                folder_name = slugify(project.name)
+    except Exception:
+        pass
+
+    specs_dir = project_root / "specs" / "requirements" / folder_name
+    await asyncio.to_thread(specs_dir.mkdir, parents=True, exist_ok=True)
+    req_slug = slugify(requirement.title)
+    spec_name = f"{requirement.req_code.lower()}-{req_slug}.md"
+
+    return RequirementSpecGenerationContext(
+        requirement=requirement,
+        truth_state=truth_state,
+        generation_warning=generation_warning,
+        target_url=target_url,
+        flow_context=flow_context,
+        auth_context=auth_context,
+        planner_session_dir=planner_session_dir,
+        specs_dir=specs_dir,
+        spec_name=spec_name,
+        mcp_runtime=mcp_runtime,
+        browser_auth_metadata=_requirement_browser_auth_metadata(request, auth_context),
+    )
+
+
+async def _execute_requirement_spec_generation(
+    req_id: int,
+    request: GenerateSpecFromRequirementRequest,
+    project_id: str,
+    context: RequirementSpecGenerationContext,
+    *,
+    job_id: str | None = None,
+    agent_run_id: str | None = None,
+) -> GenerateSpecFromRequirementResponse:
+    from memory.exploration_store import get_exploration_store
+    from orchestrator.api.db import get_session
+    from orchestrator.api.models_db import AgentRun, SpecMetadata as DBSpecMetadata
+    from orchestrator.utils.playwright_mcp import browser_runtime_status
+    from workflows.native_planner import NativePlanner
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    store = get_exploration_store(project_id=project_id)
+    browser_tool_calls = 0
+
+    def _set_job_message(message: str) -> None:
+        if job_id and job_id in _req_spec_jobs:
+            _req_spec_jobs[job_id]["message"] = message
+
+    def _update_agent_progress(patch: dict[str, Any]) -> None:
+        if not agent_run_id:
+            return
+        from orchestrator.api import main as main_api
+
+        runtime = browser_runtime_status()
+        main_api._update_agent_run_progress(
+            agent_run_id,
+            {
+                "status": "running",
+                "has_browser_tools": True,
+                **runtime,
+                **patch,
+            },
+        )
+
+    def _record_event(event_type: str, message: str, payload: dict[str, Any], level: str = "info") -> None:
+        if not agent_run_id:
+            return
+        from orchestrator.api import main as main_api
+
+        main_api._record_agent_run_event(
+            agent_run_id,
+            event_type=event_type,
+            level=level,
+            message=message,
+            payload=payload,
+        )
+
+    def _on_planner_task_enqueued(agent_task_id: str) -> None:
+        if job_id and job_id in _req_spec_jobs:
+            _req_spec_jobs[job_id]["agent_task_id"] = agent_task_id
+        _update_agent_progress({"agent_task_id": agent_task_id})
+
+    def _on_planner_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
+        nonlocal browser_tool_calls
+        browser_tool_calls += 1
+        from orchestrator.api import main as main_api
+
+        tool_label = main_api._short_tool_name(tool_name)
+        _set_job_message(f"Using {tool_label}...")
+        _update_agent_progress(
+            {
+                "phase": "tool_use",
+                "message": f"Using {tool_label}",
+                "last_tool": tool_name,
+                "last_tool_input": tool_input,
+                "browser_tool_calls": browser_tool_calls,
+            }
+        )
+        _record_event(
+            "browser_action" if str(tool_name).startswith("mcp__playwright") else "tool_call",
+            f"Using {tool_label}.",
+            {
+                "tool_name": tool_name,
+                "tool_label": tool_label,
+                "tool_input": tool_input,
+                "requirement_id": req_id,
+                "requirement_code": context.requirement.req_code,
+            },
+        )
+
+    def _on_planner_progress(progress: dict[str, Any]) -> None:
+        from orchestrator.api import main as main_api
+
+        last_tool = progress.get("last_tool")
+        message = progress.get("message")
+        if not message and last_tool:
+            message = f"Using {main_api._short_tool_name(str(last_tool))}"
+        _update_agent_progress(
+            {
+                **progress,
+                "phase": progress.get("phase") or "running",
+                "message": message or "Native Planner is exploring the browser",
+                "browser_tool_calls": progress.get("browser_tool_calls", browser_tool_calls),
+            }
+        )
+
+    _set_job_message("Running Native Planner (browser exploration)...")
+    _update_agent_progress(
+        {
+            "phase": "running",
+            "message": "Running Native Planner (browser exploration)...",
+            "browser_tool_calls": browser_tool_calls,
+        }
+    )
+
+    planner = NativePlanner(
+        project_id=project_id,
+        on_tool_use=_on_planner_tool_use if agent_run_id else None,
+        on_progress=_on_planner_progress if agent_run_id else None,
+        on_task_enqueued=_on_planner_task_enqueued if agent_run_id else None,
+        owner_type="agent_run" if agent_run_id else None,
+        owner_id=agent_run_id,
+        owner_label=f"Requirement spec {context.requirement.req_code}" if agent_run_id else None,
+        session_dir=context.planner_session_dir,
+        cwd=context.planner_session_dir,
+    )
+    spec_path = await planner.generate_spec_from_flow_context(
+        flow_title=f"{context.requirement.req_code}: {context.requirement.title}",
+        flow_context=context.flow_context,
+        target_url=context.target_url,
+        login_url=request.login_url,
+        credentials=request.credentials,
+        auth_context=context.auth_context,
+        output_dir=context.specs_dir,
+    )
+
+    spec_content = await asyncio.to_thread(spec_path.read_text) if await asyncio.to_thread(spec_path.exists) else ""
+
+    specs_base_dir = project_root / "specs"
+    relative_spec_name = str(spec_path.relative_to(specs_base_dir))
+    with next(get_session()) as db:
+        existing = db.get(DBSpecMetadata, relative_spec_name)
+        if not existing:
+            meta = DBSpecMetadata(spec_name=relative_spec_name, project_id=project_id, tags_json="[]")
+            db.add(meta)
+            logger.info(f"Registered spec in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}")
+        else:
+            existing.project_id = project_id
+            logger.info(f"Updated spec project_id in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}")
+        db.commit()
+
+    logger.info(
+        f"Creating RTM entry: req_id={req_id}, spec_name={context.spec_name}, spec_path={spec_path}, project_id={project_id}"
+    )
+    rtm_entry = store.store_rtm_entry(
+        requirement_id=req_id,
+        test_spec_name=context.spec_name,
+        test_spec_path=str(spec_path),
+        mapping_type="full",
+        confidence=1.0,
+        coverage_notes=f"Auto-generated from requirement {context.requirement.req_code}",
+    )
+    logger.info(f"RTM entry created successfully: id={rtm_entry.id}, requirement_id={rtm_entry.requirement_id}")
+
+    response = GenerateSpecFromRequirementResponse(
+        status="generated",
+        spec_path=str(spec_path),
+        spec_name=context.spec_name,
+        spec_content=spec_content,
+        requirement_id=req_id,
+        requirement_code=context.requirement.req_code,
+        rtm_entry_id=rtm_entry.id,
+        generated_at=datetime.utcnow().isoformat(),
+        cached=False,
+        truth_state=context.truth_state,
+        generation_warning=context.generation_warning,
+        generation_allowed=True,
+    )
+
+    if agent_run_id:
+        with next(get_session()) as db:
+            run = db.get(AgentRun, agent_run_id)
+            if run:
+                run.status = "completed"
+                run.completed_at = datetime.utcnow()
+                run.result = {
+                    "summary": f"Generated spec for {context.requirement.req_code}",
+                    "spec_path": str(spec_path),
+                    "spec_name": context.spec_name,
+                    "spec_content": spec_content,
+                    "requirement_id": req_id,
+                    "requirement_code": context.requirement.req_code,
+                    "rtm_entry_id": rtm_entry.id,
+                    "pipeline": "native_planner_generator",
+                }
+                run.progress = {
+                    **(run.progress or {}),
+                    "phase": "completed",
+                    "status": "completed",
+                    "message": "Spec generation complete",
+                    "has_browser_tools": True,
+                    "browser_tool_calls": browser_tool_calls,
+                    **browser_runtime_status(),
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+                db.add(run)
+                db.commit()
+        _record_event(
+            "completed",
+            "Spec generation complete.",
+            {"spec_path": str(spec_path), "requirement_id": req_id, "requirement_code": context.requirement.req_code},
+        )
+
+    return response
+
+
+async def _run_requirement_spec_generation_job(
+    job_id: str,
+    req_id: int,
+    request: GenerateSpecFromRequirementRequest,
+    project_id: str,
+    context: RequirementSpecGenerationContext,
+    agent_run_id: str,
+) -> None:
+    from orchestrator.api.db import get_session
+    from orchestrator.api.models_db import AgentRun
+    from orchestrator.utils.playwright_mcp import browser_runtime_status
+
+    try:
+        result = await _execute_requirement_spec_generation(
+            req_id,
+            request,
+            project_id,
+            context,
+            job_id=job_id,
+            agent_run_id=agent_run_id,
+        )
+        _req_spec_jobs[job_id].update(
+            {
+                "status": "completed",
+                "message": "Spec generation complete",
+                "completed_at": time.time(),
+                "result": _dump_model(result),
+            }
+        )
+    except Exception as exc:
+        message = str(exc)
+        logger.error(f"Requirement spec generation job failed: {message}", exc_info=True)
+        _req_spec_jobs[job_id].update(
+            {
+                "status": "failed",
+                "message": message,
+                "completed_at": time.time(),
+            }
+        )
+        with next(get_session()) as db:
+            run = db.get(AgentRun, agent_run_id)
+            if run:
+                run.status = "failed"
+                run.completed_at = datetime.utcnow()
+                run.result = {
+                    "error": message,
+                    "requirement_id": req_id,
+                    "requirement_code": getattr(context.requirement, "req_code", None),
+                }
+                run.progress = {
+                    **(run.progress or {}),
+                    "phase": "failed",
+                    "status": "failed",
+                    "message": message,
+                    "has_browser_tools": True,
+                    **browser_runtime_status(),
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+                db.add(run)
+                db.commit()
+        try:
+            from orchestrator.api import main as main_api
+
+            main_api._record_agent_run_event(
+                agent_run_id,
+                event_type="failed",
+                level="error",
+                message=message,
+                payload={"requirement_id": req_id, "requirement_code": getattr(context.requirement, "req_code", None)},
+            )
+        except Exception as event_exc:
+            logger.debug("Failed to record requirement spec failure event: %s", event_exc)
 
 
 # ========== API Endpoints ==========
@@ -1649,6 +2219,164 @@ async def get_spec_status(req_id: int, project_id: str = Query(default="default"
     )
 
 
+@router.post("/{req_id}/generate-spec-jobs")
+async def start_generate_spec_job(
+    req_id: int,
+    request: GenerateSpecFromRequirementRequest,
+    background_tasks: BackgroundTasks,
+    project_id: str = Query(default="default"),
+):
+    """Start async browser-backed spec generation for the RTM/requirements modal."""
+    from memory.exploration_store import get_exploration_store
+    from orchestrator.api.db import get_session
+    from orchestrator.api.models_db import AgentRun
+    from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
+    from orchestrator.utils.playwright_mcp import browser_runtime_status
+
+    _cleanup_old_req_jobs()
+
+    store = get_exploration_store(project_id=project_id)
+    requirement = store.get_requirement(req_id)
+    if not requirement:
+        raise HTTPException(status_code=404, detail="Requirement not found")
+
+    truth_state = _requirement_truth_state(requirement)
+    generation_warning = _requirement_generation_warning(requirement)
+    cached = await _cached_requirement_spec_response(req_id, request, project_id, requirement, truth_state, generation_warning)
+    if cached:
+        return {"status": "cached", "result": _dump_model(cached)}
+
+    job_id = f"reqspec-{req_id}-{uuid.uuid4().hex[:8]}"
+    agent_run_id = job_id
+    run_dir = Path(__file__).resolve().parent.parent.parent / "runs" / agent_run_id
+
+    context = await _prepare_requirement_spec_generation(
+        req_id,
+        request,
+        project_id,
+        planner_session_dir=run_dir,
+        prepare_mcp=True,
+    )
+    browser_metadata = browser_runtime_status()
+    allowed_tools = get_agent_allowed_tools("playwright-test-planner", mcp_config_dir=run_dir)
+
+    agent_run = AgentRun(
+        id=agent_run_id,
+        agent_type="spec_generation",
+        runtime="claude_sdk",
+        status="running",
+        started_at=datetime.utcnow(),
+        project_id=project_id,
+    )
+    agent_run.config = {
+        "source": "requirement",
+        "requirement_id": req_id,
+        "requirement_code": context.requirement.req_code,
+        "flow_title": context.requirement.title,
+        "project_id": project_id,
+        "url": context.target_url,
+        "target_url": context.target_url,
+        "login_url": request.login_url,
+        "test_data_refs": request.test_data_refs,
+        "allowed_tools": allowed_tools,
+        **context.browser_auth_metadata,
+    }
+    agent_run.progress = {
+        "phase": "queued",
+        "status": "running",
+        "message": "Starting Native Planner spec generation...",
+        "has_browser_tools": True,
+        "browser_tool_calls": 0,
+        **browser_metadata,
+        **context.browser_auth_metadata,
+        **context.mcp_runtime,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    with next(get_session()) as db:
+        db.add(agent_run)
+        db.commit()
+
+    try:
+        from orchestrator.api import main as main_api
+
+        main_api._record_agent_run_event(
+            agent_run_id,
+            event_type="started",
+            message="Started Native Planner spec generation.",
+            payload={"requirement_id": req_id, "requirement_code": context.requirement.req_code},
+        )
+    except Exception as exc:
+        logger.debug("Failed to record requirement spec start event: %s", exc)
+
+    _req_spec_jobs[job_id] = {
+        "status": "running",
+        "message": "Spec generation started. Poll for status.",
+        "started_at": time.time(),
+        "requirement_id": req_id,
+        "project_id": project_id,
+        "agent_run_id": agent_run_id,
+    }
+
+    background_tasks.add_task(
+        _run_requirement_spec_generation_job,
+        job_id,
+        req_id,
+        request,
+        project_id,
+        context,
+        agent_run_id,
+    )
+
+    return {
+        "status": "running",
+        "job_id": job_id,
+        "agent_run_id": agent_run_id,
+        "message": "Spec generation started. Poll for status.",
+    }
+
+
+@router.get("/generate-spec-jobs/{job_id}")
+async def get_generate_spec_job_status(job_id: str):
+    """Poll async requirement spec generation status."""
+    from orchestrator.api.db import get_session
+    from orchestrator.api.models_db import AgentRun
+
+    job = _req_spec_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    response = {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "message": job.get("message"),
+        "agent_run_id": job.get("agent_run_id"),
+        "agent_task_id": job.get("agent_task_id"),
+        "result": job.get("result"),
+    }
+    agent_run_id = job.get("agent_run_id")
+    if agent_run_id:
+        with next(get_session()) as db:
+            agent_run = db.get(AgentRun, agent_run_id)
+            if agent_run:
+                try:
+                    from orchestrator.api import main as main_api
+
+                    response["agent_run"] = main_api._serialize_agent_run(agent_run, db)
+                except Exception as exc:
+                    logger.debug("Failed to serialize requirement spec AgentRun %s: %s", agent_run_id, exc)
+                    response["agent_run"] = {
+                        "id": agent_run.id,
+                        "agent_type": agent_run.agent_type,
+                        "status": agent_run.status,
+                        "config": agent_run.config,
+                        "progress": agent_run.progress,
+                        "result": agent_run.result,
+                        "agent_task_id": agent_run.agent_task_id,
+                    }
+                response["agent_task_id"] = response.get("agent_task_id") or agent_run.agent_task_id
+    return response
+
+
 @router.post("/{req_id}/generate-spec", response_model=GenerateSpecFromRequirementResponse)
 async def generate_spec_from_requirement(
     req_id: int, request: GenerateSpecFromRequirementRequest, project_id: str = Query(default="default")
@@ -1656,212 +2384,32 @@ async def generate_spec_from_requirement(
     """
     Generate a test spec from a requirement using AI browser exploration.
 
-    Uses NativePlanner to explore the application and generate a spec
-    based on the requirement's title, description, and acceptance criteria.
-    Automatically creates an RTM entry linking the spec to the requirement.
+    This compatibility endpoint remains synchronous. The RTM modal uses
+    /requirements/{req_id}/generate-spec-jobs for live browser visibility.
     """
-    from memory.exploration_store import get_exploration_store
-    from orchestrator.api.db import get_session
-    from utils.string_utils import slugify
-    from workflows.native_planner import NativePlanner
-
-    store = get_exploration_store(project_id=project_id)
-
-    # Get the requirement
-    requirement = store.get_requirement(req_id)
-    if not requirement:
-        raise HTTPException(status_code=404, detail="Requirement not found")
-    truth_state = _requirement_truth_state(requirement)
-    generation_warning = _requirement_generation_warning(requirement)
-
-    # Check if spec already exists (unless force_regenerate)
-    if not request.force_regenerate:
-        status = await get_spec_status(req_id, project_id)
-        if status.has_spec:
-            # Return existing spec info
-            spec_path = Path(status.spec_path) if status.spec_path else None
-            if spec_path and spec_path.exists():
-                # Ensure spec is registered in DBSpecMetadata for this project
-                from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
-
-                specs_base_dir = Path(__file__).resolve().parent.parent.parent / "specs"
-                try:
-                    relative_spec_name = str(spec_path.relative_to(specs_base_dir))
-                    with next(get_session()) as db:
-                        existing_meta = db.get(DBSpecMetadata, relative_spec_name)
-                        if not existing_meta:
-                            meta = DBSpecMetadata(spec_name=relative_spec_name, project_id=project_id, tags_json="[]")
-                            db.add(meta)
-                            db.commit()
-                            logger.info(
-                                f"Registered existing spec in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}"
-                            )
-                        elif existing_meta.project_id != project_id:
-                            existing_meta.project_id = project_id
-                            db.commit()
-                            logger.info(
-                                f"Updated existing spec project_id in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}"
-                            )
-                except ValueError:
-                    # spec_path is not under specs_base_dir, skip registration
-                    logger.warning(
-                        f"Spec path {spec_path} is not under specs directory, skipping DBSpecMetadata registration"
-                    )
-
-                return GenerateSpecFromRequirementResponse(
-                    status="cached",
-                    spec_path=str(spec_path),
-                    spec_name=status.spec_name,
-                    spec_content=spec_path.read_text(),
-                    requirement_id=req_id,
-                    requirement_code=requirement.req_code,
-                    rtm_entry_id=status.rtm_entry_id,
-                    generated_at=status.generated_at,
-                    cached=True,
-                    truth_state=truth_state,
-                    generation_warning=generation_warning,
-                    generation_allowed=True,
-                )
-
-    # Resolve base URL from exploration session if available
-    base_url_origin = None
-    if requirement.source_session_id:
-        try:
-            session = store.get_session(requirement.source_session_id)
-            if session and session.entry_url:
-                from urllib.parse import urlparse
-
-                parsed = urlparse(session.entry_url)
-                base_url_origin = f"{parsed.scheme}://{parsed.netloc}"
-                logger.info(f"Resolved base URL origin from exploration session: {base_url_origin}")
-        except Exception as e:
-            logger.warning(f"Could not resolve exploration session URL: {e}")
-
-    # Resolve relative target_url against exploration base URL
-    target_url = request.target_url
-    if target_url and target_url.startswith("/") and base_url_origin:
-        target_url = f"{base_url_origin}{target_url}"
-        logger.info(f"Resolved relative target_url to absolute: {target_url}")
-
-    # Collect available credential keys for the project
-    credential_keys = []
     try:
-        from api.credentials import list_project_credentials
+        from memory.exploration_store import get_exploration_store
 
-        with next(get_session()) as db_session:
-            creds = list_project_credentials(project_id, db_session, include_env=True)
-            credential_keys = [c["key"] for c in creds]
-    except Exception as e:
-        logger.warning(f"Could not load project credentials: {e}")
-
-    # Build flow context from requirement
-    test_data_markdown = ""
-    if request.test_data_refs:
-        try:
-            from orchestrator.services.test_data_resolver import resolve_test_data_refs
-
-            with next(get_session()) as db_session:
-                resolved = resolve_test_data_refs(
-                    db_session,
-                    project_id=project_id,
-                    refs=request.test_data_refs,
-                    render_as="markdown",
-                    decrypt_sensitive=True,
-                )
-                test_data_markdown = resolved.get("markdown") or ""
-        except Exception as e:
-            logger.warning(f"Could not resolve project test data refs: {e}")
-
-    flow_context = _build_flow_context_from_requirement(
-        requirement,
-        base_url_origin=base_url_origin,
-        credential_keys=credential_keys,
-        test_data_markdown=test_data_markdown,
-    )
-
-    # Determine output directory - use project name slug instead of UUID
-    from orchestrator.api.models_db import Project as _Project
-
-    _folder_name = project_id
-    try:
-        with next(get_session()) as _db:
-            _project = _db.get(_Project, project_id)
-            if _project and _project.name:
-                _folder_name = slugify(_project.name)
-    except Exception:
-        pass  # Fall back to project_id if lookup fails
-
-    specs_dir = Path(__file__).resolve().parent.parent.parent / "specs" / "requirements" / _folder_name
-    specs_dir.mkdir(parents=True, exist_ok=True)
-
-    # Generate spec name
-    req_slug = slugify(requirement.title)
-    spec_name = f"{requirement.req_code.lower()}-{req_slug}.md"
-
-    # Initialize planner and generate spec
-    try:
-        planner = NativePlanner(project_id=project_id)
-        spec_path = await planner.generate_spec_from_flow_context(
-            flow_title=f"{requirement.req_code}: {requirement.title}",
-            flow_context=flow_context,
-            target_url=target_url,
-            login_url=request.login_url,
-            credentials=request.credentials,
-            output_dir=specs_dir,
+        store = get_exploration_store(project_id=project_id)
+        requirement = store.get_requirement(req_id)
+        if not requirement:
+            raise HTTPException(status_code=404, detail="Requirement not found")
+        truth_state = _requirement_truth_state(requirement)
+        generation_warning = _requirement_generation_warning(requirement)
+        cached = await _cached_requirement_spec_response(
+            req_id,
+            request,
+            project_id,
+            requirement,
+            truth_state,
+            generation_warning,
         )
-
-        # Read the generated spec content
-        spec_content = spec_path.read_text() if spec_path.exists() else ""
-
-        # Register spec in DBSpecMetadata for project filtering
-        from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
-
-        # Calculate relative spec name (relative to specs/ directory)
-        specs_base_dir = Path(__file__).resolve().parent.parent.parent / "specs"
-        relative_spec_name = str(spec_path.relative_to(specs_base_dir))
-
-        with next(get_session()) as db:
-            existing = db.get(DBSpecMetadata, relative_spec_name)
-            if not existing:
-                meta = DBSpecMetadata(spec_name=relative_spec_name, project_id=project_id, tags_json="[]")
-                db.add(meta)
-                logger.info(f"Registered spec in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}")
-            else:
-                existing.project_id = project_id
-                logger.info(
-                    f"Updated spec project_id in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}"
-                )
-            db.commit()
-
-        # Create RTM entry
-        logger.info(
-            f"Creating RTM entry: req_id={req_id}, spec_name={spec_name}, spec_path={spec_path}, project_id={project_id}"
-        )
-        rtm_entry = store.store_rtm_entry(
-            requirement_id=req_id,
-            test_spec_name=spec_name,
-            test_spec_path=str(spec_path),
-            mapping_type="full",
-            confidence=1.0,
-            coverage_notes=f"Auto-generated from requirement {requirement.req_code}",
-        )
-        logger.info(f"RTM entry created successfully: id={rtm_entry.id}, requirement_id={rtm_entry.requirement_id}")
-
-        return GenerateSpecFromRequirementResponse(
-            status="generated",
-            spec_path=str(spec_path),
-            spec_name=spec_name,
-            spec_content=spec_content,
-            requirement_id=req_id,
-            requirement_code=requirement.req_code,
-            rtm_entry_id=rtm_entry.id,
-            generated_at=datetime.utcnow().isoformat(),
-            cached=False,
-            truth_state=truth_state,
-            generation_warning=generation_warning,
-            generation_allowed=True,
-        )
-
+        if cached:
+            return cached
+        context = await _prepare_requirement_spec_generation(req_id, request, project_id)
+        return await _execute_requirement_spec_generation(req_id, request, project_id, context)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Spec generation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")

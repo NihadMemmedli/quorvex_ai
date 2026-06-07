@@ -194,19 +194,63 @@ export default function SpecsPanel({
             });
             if (res.ok) {
                 const data = await res.json();
-                if (data.job_ids) {
-                    for (const jobId of data.job_ids) {
-                        setActiveJobs(prev => ({ ...prev, [jobId]: { job_id: jobId, status: 'running', message: 'Running...' } }));
-                        pollJob(jobId);
-                    }
+                const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+                const jobIds = jobs.length > 0
+                    ? jobs.map((job: { job_id: string }) => job.job_id)
+                    : (data.job_ids || data.child_job_ids || []);
+                if (jobs.length > 0) {
+                    setSpecJobMap(prev => {
+                        const next = { ...prev };
+                        for (const job of jobs) {
+                            next[job.spec_path] = job.job_id;
+                        }
+                        return next;
+                    });
                 }
-                setMessage({ type: 'success', text: `Started ${specPaths.length} test run(s)` });
+                for (const jobId of jobIds) {
+                    setActiveJobs(prev => ({
+                        ...prev,
+                        [jobId]: {
+                            job_id: jobId,
+                            status: 'running',
+                            stage: 'executing',
+                            message: 'Running API test...',
+                        },
+                    }));
+                    pollJob(jobId, () => { refresh(currentPage); fetchLatestRuns(); fetchGeneratedTests(0); });
+                }
+                const skippedCount = Array.isArray(data.skipped) ? data.skipped.length : 0;
+                if (jobIds.length > 0) {
+                    setMessage({
+                        type: 'success',
+                        text: skippedCount > 0
+                            ? `Started ${jobIds.length} generated test run(s); skipped ${skippedCount} spec(s) that need generation.`
+                            : `Started ${jobIds.length} generated test run(s).`,
+                    });
+                } else {
+                    setMessage({ type: 'error', text: 'No generated tests found for the selected specs. Generate tests first.' });
+                }
                 setSelectedSpecs(new Set());
+            } else {
+                const err = await res.json();
+                setMessage({ type: 'error', text: err.detail || 'Failed to start bulk run' });
             }
         } catch {
             setMessage({ type: 'error', text: 'Failed to start bulk run' });
         }
-    }, [apiSpecs, selectedSpecs, projectId, setActiveJobs, pollJob, setMessage]);
+    }, [
+        apiSpecs,
+        selectedSpecs,
+        projectId,
+        setActiveJobs,
+        setSpecJobMap,
+        pollJob,
+        setMessage,
+        refresh,
+        currentPage,
+        fetchLatestRuns,
+        fetchGeneratedTests,
+    ]);
 
     const handleBulkGenerate = useCallback(async () => {
         const specNames = apiSpecs.filter(s => selectedSpecs.has(s.path)).map(s => s.name);

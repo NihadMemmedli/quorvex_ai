@@ -16,6 +16,10 @@ from orchestrator.api.models_db import TestDataItem, TestDataSet
 VALID_REF_RE = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 TESTDATA_DIRECTIVE_RE = re.compile(r'^[ \t]*@testdata\s+"([^"]+)"[ \t]*$', re.MULTILINE)
 TESTDATA_FRONTMATTER_RE = re.compile(r"^test_data_refs:\s*(.+?)\s*$", re.MULTILINE)
+TESTDATA_CODE_ACCESS_RE = re.compile(
+    r"\btestData\.(?:get|field)\s*(?:<[^>\n]*>)?\s*\(\s*['\"]([^'\"]+)['\"]",
+    re.MULTILINE,
+)
 SECRET_TEXT_PATH = "$text"
 
 
@@ -138,6 +142,7 @@ def resolve_test_data_execution_context(
     project_id: str,
     refs: list[str] | None = None,
     markdown: str | None = None,
+    generated_code: str | None = None,
     include_archived: bool = False,
 ) -> dict[str, Any]:
     """Resolve project test data for execution prompts and subprocess env.
@@ -151,6 +156,7 @@ def resolve_test_data_execution_context(
         [
             *(refs or []),
             *extract_test_data_refs_from_markdown(markdown or ""),
+            *extract_test_data_refs_from_generated_code(generated_code or ""),
         ]
     )
     masked = resolve_test_data_refs(
@@ -343,6 +349,29 @@ def extract_test_data_refs_from_markdown(content: str) -> list[str]:
     if frontmatter_match:
         refs.extend(_parse_refs_value(frontmatter_match.group(1)))
     return _dedupe_refs(refs)
+
+
+def extract_test_data_refs_from_generated_code(content: str) -> list[str]:
+    """Extract canonical refs used by the Playwright testData fixture."""
+
+    return _dedupe_refs(TESTDATA_CODE_ACCESS_RE.findall(content or ""))
+
+
+def extract_test_data_refs_from_sources(
+    *,
+    refs: list[str] | None = None,
+    markdown: str | None = None,
+    generated_code: str | None = None,
+) -> list[str]:
+    """Merge explicit refs, markdown directives/frontmatter, and generated-code fixture refs."""
+
+    return _dedupe_refs(
+        [
+            *(refs or []),
+            *extract_test_data_refs_from_markdown(markdown or ""),
+            *extract_test_data_refs_from_generated_code(generated_code or ""),
+        ]
+    )
 
 
 def resolve_testdata_in_markdown(

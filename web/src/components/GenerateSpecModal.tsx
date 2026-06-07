@@ -1,9 +1,19 @@
 'use client';
-import { useState, useEffect, useRef } from 'react';
-import { X, Sparkles, Loader2, CheckCircle, AlertCircle, ExternalLink, Eye, Edit3, Save, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import Link from 'next/link';
+import { X, Sparkles, Loader2, CheckCircle, AlertCircle, Edit3, Save, RefreshCw } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
+import { useJobPoller } from '@/hooks/useJobPoller';
 import { applyProjectDefaultUrl, getProjectDefaultUrl, trimUrlInput } from '@/lib/project-url';
+import { LiveBrowserView } from '@/components/LiveBrowserView';
+import { TestDataPicker } from '@/components/TestDataPicker';
+import {
+    BrowserAuthSession,
+    browserAuthSessionLabel,
+    fetchProjectBrowserAuthSessions,
+    isBrowserAuthSessionSelectable,
+} from '@/lib/browser-auth-sessions';
 
 interface Requirement {
     id: number;
@@ -24,6 +34,7 @@ interface GenerateSpecModalProps {
 }
 
 type GenerationStatus = 'idle' | 'generating' | 'success' | 'error';
+type AuthMode = 'none' | 'credentials' | 'session';
 
 interface GenerationResult {
     status: string;
@@ -35,6 +46,23 @@ interface GenerationResult {
     rtm_entry_id: number;
     generated_at: string;
     cached: boolean;
+}
+
+interface AgentArtifact {
+    name: string;
+    path: string;
+    type: string;
+    modified_at?: string | null;
+}
+
+interface AgentRun {
+    id: string;
+    agent_type: string;
+    status: string;
+    progress?: Record<string, any>;
+    result?: Record<string, any> | null;
+    artifacts?: AgentArtifact[];
+    agent_task_id?: string | null;
 }
 
 export default function GenerateSpecModal({
@@ -50,14 +78,21 @@ export default function GenerateSpecModal({
     // Form state
     const [targetUrl, setTargetUrl] = useState(projectDefaultUrl);
     const [loginUrl, setLoginUrl] = useState('');
-    const [useCredentials, setUseCredentials] = useState(false);
+    const [authMode, setAuthMode] = useState<AuthMode>('none');
     const [usernameVar, setUsernameVar] = useState('LOGIN_USERNAME');
     const [passwordVar, setPasswordVar] = useState('LOGIN_PASSWORD');
+    const [browserAuthSessions, setBrowserAuthSessions] = useState<BrowserAuthSession[]>([]);
+    const [selectedBrowserAuthSessionId, setSelectedBrowserAuthSessionId] = useState('');
+    const [loadingBrowserAuthSessions, setLoadingBrowserAuthSessions] = useState(false);
+    const [browserAuthError, setBrowserAuthError] = useState<string | null>(null);
+    const [selectedTestDataRefs, setSelectedTestDataRefs] = useState<string[]>([]);
 
     // Generation state
     const [status, setStatus] = useState<GenerationStatus>('idle');
     const [error, setError] = useState<string | null>(null);
     const [result, setResult] = useState<GenerationResult | null>(null);
+    const [agentRunId, setAgentRunId] = useState<string | null>(null);
+    const [agentRun, setAgentRun] = useState<AgentRun | null>(null);
 
     // Preview state
     const [showPreview, setShowPreview] = useState(false);
@@ -72,16 +107,79 @@ export default function GenerateSpecModal({
     } | null>(null);
     const [checkingStatus, setCheckingStatus] = useState(true);
 
-    useEffect(() => {
-        checkExistingSpec();
-    }, [requirement.id]);
+    const showGenerationBrowser = status === 'generating' && Boolean(agentRunId);
 
-    useEffect(() => {
-        setTargetUrl(prev => applyProjectDefaultUrl(prev, projectDefaultUrl, previousProjectDefaultUrlRef.current));
-        previousProjectDefaultUrlRef.current = projectDefaultUrl;
-    }, [projectDefaultUrl]);
+    const normalizeGenerationResult = (data: Record<string, unknown>): GenerationResult => ({
+        status: String(data.status || 'generated'),
+        spec_path: String(data.spec_path || ''),
+        spec_name: String(data.spec_name || 'spec.md'),
+        spec_content: String(data.spec_content || ''),
+        requirement_id: Number(data.requirement_id || requirement.id),
+        requirement_code: String(data.requirement_code || requirement.req_code),
+        rtm_entry_id: Number(data.rtm_entry_id || 0),
+        generated_at: String(data.generated_at || new Date().toISOString()),
+        cached: Boolean(data.cached),
+    });
 
-    const checkExistingSpec = async () => {
+    const formatApiError = (detail: unknown, fallback: string) => {
+        if (!detail) return fallback;
+        if (typeof detail === 'string') return detail;
+        if (typeof detail === 'object' && detail !== null) {
+            const maybeMessage = (detail as { message?: unknown }).message;
+            if (typeof maybeMessage === 'string') return maybeMessage;
+        }
+        try {
+            return JSON.stringify(detail);
+        } catch {
+            return fallback;
+        }
+    };
+
+    const completeWithResult = (data: GenerationResult) => {
+        setResult(data);
+        setEditedContent(data.spec_content);
+        setStatus('success');
+        setShowPreview(true);
+        setAgentRunId(null);
+        setAgentRun(null);
+        if (onSuccess) {
+            onSuccess(data.spec_path, data.spec_name);
+        }
+    };
+
+    const generateSpecPoller = useJobPoller({
+        apiBase: API_BASE,
+        urlPattern: '/requirements/generate-spec-jobs/{jobId}',
+        interval: 3000,
+        onComplete: (pollResult, pollStatus) => {
+            const embeddedRun = pollStatus.agent_run as AgentRun | undefined;
+            if (embeddedRun?.id) {
+                setAgentRun(embeddedRun);
+                setAgentRunId(embeddedRun.id);
+            }
+            if (pollResult) {
+                completeWithResult(normalizeGenerationResult(pollResult));
+            } else {
+                setStatus('error');
+                setError('Spec generation completed without a result.');
+            }
+        },
+        onFailed: (message, pollStatus) => {
+            const embeddedRun = pollStatus.agent_run as AgentRun | undefined;
+            if (embeddedRun?.id) {
+                setAgentRun(embeddedRun);
+                setAgentRunId(embeddedRun.id);
+            }
+            const runError = embeddedRun?.result?.error || embeddedRun?.progress?.message;
+            setError(String(message || runError || 'Spec generation failed.'));
+            setStatus('error');
+        },
+    });
+    const generateSpecPollerStatus = generateSpecPoller.status;
+    const clearGenerateSpecPolling = generateSpecPoller.clear;
+    const startGenerateSpecPolling = generateSpecPoller.startPolling;
+
+    const checkExistingSpec = useCallback(async () => {
         setCheckingStatus(true);
         try {
             const projectParam = currentProject?.id
@@ -101,6 +199,69 @@ export default function GenerateSpecModal({
         } finally {
             setCheckingStatus(false);
         }
+    }, [currentProject?.id, requirement.id]);
+
+    useEffect(() => {
+        checkExistingSpec();
+    }, [checkExistingSpec]);
+
+    useEffect(() => {
+        const nextAgentRunId = generateSpecPollerStatus?.agent_run_id;
+        if (nextAgentRunId && nextAgentRunId !== agentRunId) {
+            setAgentRunId(nextAgentRunId);
+        }
+        const nextAgentRun = generateSpecPollerStatus?.agent_run as AgentRun | undefined;
+        if (nextAgentRun?.id) {
+            setAgentRun(nextAgentRun);
+        }
+    }, [generateSpecPollerStatus, agentRunId]);
+
+    useEffect(() => {
+        return () => {
+            clearGenerateSpecPolling();
+        };
+    }, [clearGenerateSpecPolling]);
+
+    useEffect(() => {
+        setTargetUrl(prev => applyProjectDefaultUrl(prev, projectDefaultUrl, previousProjectDefaultUrlRef.current));
+        previousProjectDefaultUrlRef.current = projectDefaultUrl;
+    }, [projectDefaultUrl]);
+
+    useEffect(() => {
+        if (!currentProject?.id) {
+            setBrowserAuthSessions([]);
+            setSelectedBrowserAuthSessionId('');
+            return;
+        }
+
+        setLoadingBrowserAuthSessions(true);
+        setBrowserAuthError(null);
+        fetchProjectBrowserAuthSessions(currentProject.id)
+            .then(sessions => {
+                setBrowserAuthSessions(sessions);
+                const selectable = sessions.filter(isBrowserAuthSessionSelectable);
+                setSelectedBrowserAuthSessionId(prev => {
+                    if (prev && selectable.some(session => session.id === prev)) return prev;
+                    return selectable.find(session => session.is_default)?.id || selectable[0]?.id || '';
+                });
+            })
+            .catch(err => {
+                console.error('Failed to load browser auth sessions:', err);
+                setBrowserAuthSessions([]);
+                setSelectedBrowserAuthSessionId('');
+                setBrowserAuthError('Browser login sessions could not be loaded.');
+            })
+            .finally(() => setLoadingBrowserAuthSessions(false));
+    }, [currentProject?.id]);
+
+    const addTestDataRef = (ref: string) => {
+        const trimmed = ref.trim();
+        if (!trimmed) return;
+        setSelectedTestDataRefs(prev => prev.includes(trimmed) ? prev : [...prev, trimmed]);
+    };
+
+    const removeTestDataRef = (ref: string) => {
+        setSelectedTestDataRefs(prev => prev.filter(item => item !== ref));
     };
 
     const handleGenerate = async (forceRegenerate = false) => {
@@ -109,8 +270,19 @@ export default function GenerateSpecModal({
             return;
         }
 
+        if (authMode === 'session' && !selectedBrowserAuthSessionId) {
+            setError('Select an active browser login session or choose another authentication option.');
+            return;
+        }
+
         setStatus('generating');
         setError(null);
+        setResult(null);
+        setShowPreview(false);
+        setEditMode(false);
+        setAgentRunId(null);
+        setAgentRun(null);
+        clearGenerateSpecPolling();
 
         try {
             const projectParam = currentProject?.id
@@ -126,15 +298,23 @@ export default function GenerateSpecModal({
                 requestBody.login_url = loginUrl.trim();
             }
 
-            if (useCredentials) {
+            if (authMode === 'credentials') {
                 requestBody.credentials = {
                     username_var: usernameVar,
                     password_var: passwordVar
                 };
             }
 
+            if (authMode === 'session' && selectedBrowserAuthSessionId) {
+                requestBody.browser_auth_session_id = selectedBrowserAuthSessionId;
+            }
+
+            if (selectedTestDataRefs.length > 0) {
+                requestBody.test_data_refs = selectedTestDataRefs;
+            }
+
             const res = await fetch(
-                `${API_BASE}/requirements/${requirement.id}/generate-spec${projectParam}`,
+                `${API_BASE}/requirements/${requirement.id}/generate-spec-jobs${projectParam}`,
                 {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -143,18 +323,23 @@ export default function GenerateSpecModal({
             );
 
             if (res.ok) {
-                const data: GenerationResult = await res.json();
-                setResult(data);
-                setEditedContent(data.spec_content);
-                setStatus('success');
-                setShowPreview(true);
-
-                if (onSuccess) {
-                    onSuccess(data.spec_path, data.spec_name);
+                const data = await res.json();
+                if (data.status === 'cached' && data.result) {
+                    completeWithResult(normalizeGenerationResult(data.result));
+                    return;
                 }
+                if (data.status === 'running' && data.job_id) {
+                    if (data.agent_run_id) {
+                        setAgentRunId(data.agent_run_id);
+                    }
+                    startGenerateSpecPolling(data.job_id);
+                    return;
+                }
+                setError(data.message || 'Unexpected response from spec generation.');
+                setStatus('error');
             } else {
-                const errData = await res.json();
-                setError(errData.detail || 'Failed to generate spec');
+                const errData = await res.json().catch(() => ({}));
+                setError(formatApiError(errData.detail, 'Failed to generate spec'));
                 setStatus('error');
             }
         } catch (err) {
@@ -188,16 +373,21 @@ export default function GenerateSpecModal({
         }
     };
 
+    const handleClose = () => {
+        clearGenerateSpecPolling();
+        onClose();
+    };
+
     return (
         <div
             className="modal-overlay"
-            onClick={(e) => e.target === e.currentTarget && status !== 'generating' && onClose()}
+            onClick={(e) => e.target === e.currentTarget && handleClose()}
         >
             <div
                 className="modal-content"
                 onClick={(e) => e.stopPropagation()}
                 style={{
-                    width: showPreview ? '800px' : '550px',
+                    width: showPreview ? '800px' : showGenerationBrowser ? '1040px' : '550px',
                     maxWidth: '95vw',
                     maxHeight: '90vh',
                     overflow: 'auto',
@@ -233,15 +423,13 @@ export default function GenerateSpecModal({
                         </div>
                     </div>
                     <button
-                        onClick={onClose}
-                        disabled={status === 'generating'}
+                        onClick={handleClose}
                         style={{
                             background: 'none',
                             border: 'none',
-                            cursor: status === 'generating' ? 'not-allowed' : 'pointer',
+                            cursor: 'pointer',
                             padding: '0.5rem',
                             color: 'var(--text-secondary)',
-                            opacity: status === 'generating' ? 0.5 : 1
                         }}
                     >
                         <X size={20} />
@@ -383,7 +571,7 @@ export default function GenerateSpecModal({
                             marginTop: '1.5rem'
                         }}>
                             <button
-                                onClick={onClose}
+                                onClick={handleClose}
                                 className="btn btn-primary"
                             >
                                 Done
@@ -448,25 +636,50 @@ export default function GenerateSpecModal({
                                 </p>
                             </div>
 
-                            {/* Credentials Section */}
+                            {/* Authentication Section */}
                             <div>
-                                <label style={{
+                                <div style={{
                                     display: 'flex',
+                                    justifyContent: 'space-between',
                                     alignItems: 'center',
-                                    gap: '0.5rem',
-                                    cursor: 'pointer',
-                                    fontWeight: 500
+                                    gap: '1rem',
+                                    marginBottom: '0.5rem'
                                 }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={useCredentials}
-                                        onChange={(e) => setUseCredentials(e.target.checked)}
-                                        disabled={status === 'generating'}
-                                    />
-                                    Use credentials from environment variables
-                                </label>
+                                    <label style={{ fontWeight: 600 }}>Authentication</label>
+                                    <Link href="/settings" style={{ color: 'var(--primary)', fontSize: '0.8rem', fontWeight: 600 }}>
+                                        Settings
+                                    </Link>
+                                </div>
+                                <div style={{ display: 'grid', gap: '0.5rem' }}>
+                                    {[
+                                        { value: 'none', label: 'No auth' },
+                                        { value: 'credentials', label: 'Environment credentials' },
+                                        { value: 'session', label: 'Browser login session' },
+                                    ].map(option => (
+                                        <label
+                                            key={option.value}
+                                            style={{
+                                                display: 'flex',
+                                                alignItems: 'center',
+                                                gap: '0.5rem',
+                                                cursor: status === 'generating' ? 'not-allowed' : 'pointer',
+                                                fontSize: '0.9rem'
+                                            }}
+                                        >
+                                            <input
+                                                type="radio"
+                                                name="generate-spec-auth-mode"
+                                                value={option.value}
+                                                checked={authMode === option.value}
+                                                onChange={() => setAuthMode(option.value as AuthMode)}
+                                                disabled={status === 'generating'}
+                                            />
+                                            {option.label}
+                                        </label>
+                                    ))}
+                                </div>
 
-                                {useCredentials && (
+                                {authMode === 'credentials' && (
                                     <div style={{
                                         marginTop: '0.75rem',
                                         padding: '1rem',
@@ -513,6 +726,124 @@ export default function GenerateSpecModal({
                                         </div>
                                     </div>
                                 )}
+
+                                {authMode === 'session' && (
+                                    <div style={{
+                                        marginTop: '0.75rem',
+                                        padding: '1rem',
+                                        background: 'var(--surface-hover)',
+                                        borderRadius: '8px',
+                                        display: 'grid',
+                                        gap: '0.75rem'
+                                    }}>
+                                        {loadingBrowserAuthSessions ? (
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                                <Loader2 size={16} className="spinning" /> Loading browser login sessions...
+                                            </div>
+                                        ) : browserAuthError ? (
+                                            <div style={{ color: '#ef4444', fontSize: '0.9rem' }}>{browserAuthError}</div>
+                                        ) : browserAuthSessions.some(isBrowserAuthSessionSelectable) ? (
+                                            <>
+                                                <select
+                                                    className="input"
+                                                    value={selectedBrowserAuthSessionId}
+                                                    onChange={(event) => setSelectedBrowserAuthSessionId(event.target.value)}
+                                                    disabled={status === 'generating'}
+                                                    style={{ width: '100%' }}
+                                                >
+                                                    {browserAuthSessions.map(session => (
+                                                        <option
+                                                            key={session.id}
+                                                            value={session.id}
+                                                            disabled={!isBrowserAuthSessionSelectable(session)}
+                                                        >
+                                                            {browserAuthSessionLabel(session)}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: 0 }}>
+                                                    The planner will treat this saved session as already authenticated.
+                                                </p>
+                                            </>
+                                        ) : (
+                                            <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                                                No active browser login sessions are saved for this project.{' '}
+                                                <Link href="/settings" style={{ color: 'var(--primary)', fontWeight: 600 }}>
+                                                    Add one in Settings
+                                                </Link>
+                                                .
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Project Test Data */}
+                            <div>
+                                <div style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    gap: '1rem',
+                                    marginBottom: '0.5rem'
+                                }}>
+                                    <label style={{ fontWeight: 600 }}>Project Test Data</label>
+                                    <Link href="/test-data" style={{ color: 'var(--primary)', fontSize: '0.8rem', fontWeight: 600 }}>
+                                        Manage Test Data
+                                    </Link>
+                                </div>
+                                <TestDataPicker
+                                    projectId={currentProject?.id}
+                                    mode="ref"
+                                    compact
+                                    insertLabel="Add"
+                                    onInsert={addTestDataRef}
+                                />
+                                {selectedTestDataRefs.length > 0 ? (
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.75rem' }}>
+                                        {selectedTestDataRefs.map(ref => (
+                                            <span
+                                                key={ref}
+                                                style={{
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: '0.35rem',
+                                                    border: '1px solid var(--border)',
+                                                    borderRadius: '999px',
+                                                    padding: '0.25rem 0.55rem',
+                                                    fontSize: '0.8rem',
+                                                    background: 'var(--surface-hover)'
+                                                }}
+                                            >
+                                                {ref}
+                                                <button
+                                                    type="button"
+                                                    aria-label={`Remove ${ref}`}
+                                                    onClick={() => removeTestDataRef(ref)}
+                                                    disabled={status === 'generating'}
+                                                    style={{
+                                                        border: 'none',
+                                                        background: 'transparent',
+                                                        color: 'var(--text-secondary)',
+                                                        cursor: status === 'generating' ? 'not-allowed' : 'pointer',
+                                                        padding: 0,
+                                                        display: 'inline-flex'
+                                                    }}
+                                                >
+                                                    <X size={13} />
+                                                </button>
+                                            </span>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <p style={{
+                                        marginTop: '0.5rem',
+                                        fontSize: '0.8rem',
+                                        color: 'var(--text-secondary)'
+                                    }}>
+                                        Optional project test data refs will be resolved by the backend for the generated spec.
+                                    </p>
+                                )}
                             </div>
                         </div>
 
@@ -537,19 +868,50 @@ export default function GenerateSpecModal({
                         {status === 'generating' && (
                             <div style={{
                                 marginTop: '1.5rem',
-                                padding: '1.5rem',
-                                background: 'rgba(59, 130, 246, 0.05)',
+                                padding: showGenerationBrowser ? '1rem' : '1.5rem',
+                                background: showGenerationBrowser ? 'var(--surface)' : 'rgba(59, 130, 246, 0.05)',
+                                border: showGenerationBrowser ? '1px solid var(--border)' : 'none',
                                 borderRadius: '8px',
-                                textAlign: 'center'
+                                textAlign: showGenerationBrowser ? 'left' : 'center'
                             }}>
-                                <Loader2 size={32} color="var(--primary)" className="spinning" style={{ margin: '0 auto 1rem' }} />
-                                <div style={{ fontWeight: 600, marginBottom: '0.5rem' }}>
-                                    Generating spec...
-                                </div>
-                                <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                                    AI is exploring the application and creating test cases.
-                                    This may take a few moments.
-                                </div>
+                                {showGenerationBrowser && agentRunId ? (
+                                    <div style={{ display: 'grid', gap: '0.85rem' }}>
+                                        <LiveBrowserView
+                                            runId={agentRunId}
+                                            isActive={agentRun?.status !== 'failed'}
+                                            showHeader
+                                            artifacts={agentRun?.artifacts || []}
+                                            statusMessage={(agentRun?.progress?.message as string | undefined) || generateSpecPoller.status?.message}
+                                            liveViewAvailable={Boolean(agentRun?.progress?.live_view_available ?? true)}
+                                            runtimeMessage={agentRun?.progress?.runtime_message as string | undefined}
+                                            vncUrl={agentRun?.progress?.vnc_url as string | undefined}
+                                            browserActivitySeen={Boolean(agentRun?.progress?.browser_tool_calls)}
+                                            browserActive={agentRun?.progress?.phase === 'tool_use'}
+                                            browserLastTool={agentRun?.progress?.last_tool as string | undefined}
+                                        />
+                                        <div style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '0.5rem',
+                                            fontSize: '0.9rem',
+                                            color: 'var(--text-secondary)'
+                                        }}>
+                                            <Loader2 size={16} color="var(--primary)" className="spinning" />
+                                            <span>{(agentRun?.progress?.message as string | undefined) || generateSpecPoller.status?.message || 'Generating spec...'}</span>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <Loader2 size={32} color="var(--primary)" className="spinning" style={{ margin: '0 auto 1rem' }} />
+                                        <div style={{ fontWeight: 600, marginBottom: '0.5rem' }}>
+                                            Generating spec...
+                                        </div>
+                                        <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                                            AI is exploring the application and creating test cases.
+                                            This may take a few moments.
+                                        </div>
+                                    </>
+                                )}
                             </div>
                         )}
 
@@ -564,7 +926,7 @@ export default function GenerateSpecModal({
                                 borderTop: '1px solid var(--border)'
                             }}>
                                 <button
-                                    onClick={onClose}
+                                    onClick={handleClose}
                                     className="btn btn-secondary"
                                 >
                                     Cancel
@@ -572,6 +934,7 @@ export default function GenerateSpecModal({
                                 <button
                                     onClick={() => handleGenerate(existingSpec?.has_spec || false)}
                                     className="btn btn-primary"
+                                    disabled={authMode === 'session' && !selectedBrowserAuthSessionId}
                                     style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
                                 >
                                     <Sparkles size={18} />

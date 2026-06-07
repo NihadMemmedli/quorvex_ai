@@ -46,6 +46,7 @@ _api_spec_cache: dict[str, tuple] = {}
 # ========== In-Memory Job Tracking ==========
 _api_jobs: dict[str, dict] = {}
 MAX_TRACKED_JOBS = 200
+API_JOB_TERMINAL_STATUSES = {"completed", "failed", "needs_input"}
 DEFAULT_OPENAPI_IMPORT_MODE = "plan_and_tests"
 OPENAPI_IMPORT_MODES = ("evidence_specs", "plan_only", "tests_only", "plan_and_tests")
 OPENAPI_IMPORT_MODES_SET = set(OPENAPI_IMPORT_MODES)
@@ -54,8 +55,85 @@ OPENAPI_IMPORT_RUNNING_TTL_SECONDS = 2 * 60 * 60
 OPENAPI_IMPORT_EXPIRED_MESSAGE = "Import status expired before completion; re-import to retry."
 
 
+def _reconcile_api_batch_job(job_id: str, now: float | None = None) -> None:
+    """Mark a parent batch job terminal once all child jobs are terminal."""
+    job = _api_jobs.get(job_id)
+    if not job or job.get("stage") != "batch" or job.get("status") != "running":
+        return
+
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    child_job_ids = result.get("child_job_ids") or []
+    if not child_job_ids:
+        job.update(
+            {
+                "status": "completed",
+                "message": "No batch jobs were started.",
+                "completed_at": now or time.time(),
+            }
+        )
+        return
+
+    child_jobs = []
+    missing_job_ids = []
+    active_job_ids = []
+    failed_job_ids = []
+    for child_id in child_job_ids:
+        child_job = _api_jobs.get(child_id)
+        if not child_job:
+            missing_job_ids.append(child_id)
+            continue
+
+        child_status = child_job.get("status")
+        child_jobs.append(
+            {
+                "job_id": child_id,
+                "status": child_status,
+                "stage": child_job.get("stage"),
+                "message": child_job.get("message"),
+                "result": child_job.get("result"),
+                "spec_path": child_job.get("spec_path"),
+            }
+        )
+        if child_status not in API_JOB_TERMINAL_STATUSES:
+            active_job_ids.append(child_id)
+        elif child_status != "completed":
+            failed_job_ids.append(child_id)
+
+    if active_job_ids:
+        return
+
+    next_result = {**result, "jobs": child_jobs, "missing_job_ids": missing_job_ids}
+    failed_count = len(failed_job_ids) + len(missing_job_ids)
+    if failed_count:
+        job.update(
+            {
+                "status": "failed",
+                "message": f"Batch completed with {failed_count} failed or missing job(s).",
+                "result": next_result,
+                "completed_at": now or time.time(),
+            }
+        )
+        return
+
+    job.update(
+        {
+            "status": "completed",
+            "message": f"Batch completed successfully with {len(child_job_ids)} job(s).",
+            "result": next_result,
+            "completed_at": now or time.time(),
+        }
+    )
+
+
+def _reconcile_api_batch_jobs() -> None:
+    now = time.time()
+    for job_id in list(_api_jobs):
+        _reconcile_api_batch_job(job_id, now=now)
+
+
 def _cleanup_old_jobs():
     """Remove completed/failed jobs older than 1 hour."""
+    _reconcile_api_batch_jobs()
     now = time.time()
     to_remove = []
     for job_id, job in _api_jobs.items():
@@ -374,6 +452,54 @@ def _find_api_spec_by_name(name: str, project_id: str = "default") -> Path | Non
     return None
 
 
+def _resolve_generated_api_tests(spec_path: Path, project_id: str = "default") -> list[dict]:
+    """Find generated Playwright API tests for a saved API spec."""
+    stem = spec_path.stem
+    generated_tests = []
+    seen_paths = set()
+    tests_dir = _get_tests_dir(project_id)
+    globs = [
+        tests_dir.glob(f"{stem}*.api.spec.ts"),
+        tests_dir.glob(f"openapi-{stem}*.api.spec.ts"),
+        tests_dir.glob(f"{stem}*.spec.ts"),
+        tests_dir.glob(f"openapi-{stem}*.spec.ts"),
+    ]
+    api_sub = tests_dir / "api"
+    if api_sub.exists():
+        globs.append(api_sub.glob(f"{stem}*.spec.ts"))
+        globs.append(api_sub.glob(f"openapi-{stem}*.spec.ts"))
+
+    for glob_iter in globs:
+        for ts_file in sorted(glob_iter):
+            rel = str(ts_file.relative_to(BASE_DIR))
+            if rel in seen_paths:
+                continue
+            seen_paths.add(rel)
+            generated_tests.append(
+                {
+                    "path": rel,
+                    "name": ts_file.name,
+                    "test_count": count_tests_in_file(str(ts_file)),
+                }
+            )
+    return generated_tests
+
+
+def _apply_generated_test_metadata(spec_dict: dict, generated_tests: list[dict]) -> dict:
+    """Attach generated test metadata to a spec dictionary."""
+    total_test_count = sum(t["test_count"] for t in generated_tests)
+    spec_dict.update(
+        {
+            "has_generated_test": len(generated_tests) > 0,
+            "generated_test_path": generated_tests[0]["path"] if generated_tests else None,
+            "generated_tests": generated_tests,
+            "file_count": len(generated_tests),
+            "test_count": total_test_count,
+        }
+    )
+    return spec_dict
+
+
 def _scan_api_specs(
     project_id: str = "default",
     search: str | None = None,
@@ -414,7 +540,9 @@ def _scan_api_specs(
         # Check cache
         cached = _api_spec_cache.get(file_key)
         if cached and cached[0] == current_mtime:
-            api_specs.append(cached[1])
+            spec_dict = dict(cached[1])
+            _apply_generated_test_metadata(spec_dict, _resolve_generated_api_tests(md_file, project_id))
+            api_specs.append(spec_dict)
             continue
 
         try:
@@ -424,29 +552,7 @@ def _scan_api_specs(
                 _api_spec_cache.pop(file_key, None)
                 continue
 
-            stem = md_file.stem
-            generated_tests = []
-            seen_paths = set()
-            tests_dir = _get_tests_dir(project_id)
-            globs = [
-                tests_dir.glob(f"{stem}*.api.spec.ts"),
-                tests_dir.glob(f"openapi-{stem}*.api.spec.ts"),
-                tests_dir.glob(f"{stem}*.spec.ts"),
-                tests_dir.glob(f"openapi-{stem}*.spec.ts"),
-            ]
-            api_sub = tests_dir / "api"
-            if api_sub.exists():
-                globs.append(api_sub.glob(f"{stem}*.spec.ts"))
-                globs.append(api_sub.glob(f"openapi-{stem}*.spec.ts"))
-            for glob_iter in globs:
-                for ts_file in sorted(glob_iter):
-                    rel = str(ts_file.relative_to(BASE_DIR))
-                    if rel not in seen_paths:
-                        seen_paths.add(rel)
-                        file_test_count = count_tests_in_file(str(ts_file))
-                        generated_tests.append({"path": rel, "name": ts_file.name, "test_count": file_test_count})
-
-            total_test_count = sum(t["test_count"] for t in generated_tests)
+            generated_tests = _resolve_generated_api_tests(md_file, project_id)
 
             # Extract folder from relative path
             rel_path = md_file.relative_to(specs_dir)
@@ -470,11 +576,11 @@ def _scan_api_specs(
                 "name": md_file.name,
                 "path": str(md_file.relative_to(BASE_DIR)),
                 "spec_type": "api",
-                "has_generated_test": len(generated_tests) > 0,
-                "generated_test_path": generated_tests[0]["path"] if generated_tests else None,
-                "generated_tests": generated_tests,
-                "file_count": len(generated_tests),
-                "test_count": total_test_count,
+                "has_generated_test": False,
+                "generated_test_path": None,
+                "generated_tests": [],
+                "file_count": 0,
+                "test_count": 0,
                 "defined_cases": defined_cases,
                 "folder": spec_folder,
                 "base_url": base_url,
@@ -484,6 +590,7 @@ def _scan_api_specs(
                 "last_run_at": None,
                 "tags": [],
             }
+            _apply_generated_test_metadata(spec_dict, generated_tests)
 
             _api_spec_cache[file_key] = (current_mtime, spec_dict)
             api_specs.append(spec_dict)
@@ -770,14 +877,17 @@ def _scan_generated_tests(
 
 async def _run_generate_test(job_id: str, spec_path: str, project_id: str):
     """Background task to generate an API test from a spec."""
-    _api_jobs[job_id] = {
-        "status": "running",
-        "message": "Generating API test...",
-        "started_at": time.time(),
-        "result": None,
-        "completed_at": None,
-        "project_id": project_id,
-    }
+    job = _api_jobs.setdefault(job_id, {})
+    job.update(
+        {
+            "status": "running",
+            "message": "Generating API test...",
+            "started_at": job.get("started_at") or time.time(),
+            "result": None,
+            "completed_at": None,
+            "project_id": project_id,
+        }
+    )
     try:
         from workflows.native_api_generator import NativeApiGenerator
 
@@ -1096,7 +1206,7 @@ def _run_api_test_sync(job_id: str, spec_path: str, project_id: str):
     _api_jobs[job_id].update(
         {
             "stage": "starting",
-            "message": "Starting API test pipeline...",
+            "message": "Generating, running, and healing...",
             "result": {"run_id": run_id, "run_dir": run_dir},
         }
     )
@@ -1112,7 +1222,7 @@ def _run_api_test_sync(job_id: str, spec_path: str, project_id: str):
                 test_name=Path(spec_path).name,
                 project_id=project_id,
                 current_stage="pipeline",
-                stage_message="Starting API test pipeline...",
+                stage_message="Generating, running, and healing...",
                 started_at=datetime.utcnow(),
             )
             session.add(db_run)
@@ -1152,7 +1262,7 @@ def _run_api_test_sync(job_id: str, spec_path: str, project_id: str):
             _api_jobs[job_id].update(
                 {
                     "stage": "running",
-                    "message": "Pipeline running (generate + test + heal)...",
+                    "message": "Generating, running, and healing...",
                 }
             )
 
@@ -1312,7 +1422,7 @@ def _is_playwright_infrastructure_failure(output: str) -> bool:
 
 def _configure_direct_playwright_env(env: dict[str, str], run_dir_path: Path) -> None:
     env["PLAYWRIGHT_OUTPUT_DIR"] = str(run_dir_path / "test-results")
-    env["PLAYWRIGHT_HTML_REPORT"] = str(run_dir_path / "playwright-report")
+    env.pop("PLAYWRIGHT_HTML_REPORT", None)
     env["PLAYWRIGHT_JSON_OUTPUT_FILE"] = str(run_dir_path / "test-results.json")
 
 
@@ -1327,6 +1437,7 @@ def _run_direct_test_sync(
     """Run an already-generated test file directly with npx playwright test."""
     run_dir_path = RUNS_DIR / run_id
     run_dir_path.mkdir(parents=True, exist_ok=True)
+    stage_message = "Running API test with healing..." if heal_on_failure else "Running API test..."
 
     # Create DB record
     try:
@@ -1339,7 +1450,7 @@ def _run_direct_test_sync(
                 test_name=spec_name,
                 project_id=project_id,
                 current_stage="executing",
-                stage_message="Running test directly...",
+                stage_message=stage_message,
                 started_at=datetime.utcnow(),
             )
             session.add(db_run)
@@ -1381,7 +1492,7 @@ def _run_direct_test_sync(
             _api_jobs[job_id].update(
                 {
                     "stage": "executing",
-                    "message": "Running test...",
+                    "message": stage_message,
                 }
             )
 
@@ -1977,7 +2088,7 @@ async def run_api_test(req: RunApiTestRequest, background_tasks: BackgroundTasks
     _api_jobs[job_id] = {
         "status": "running",
         "stage": "queued",
-        "message": "Queuing API test run...",
+        "message": "Generating, running, and healing...",
         "started_at": time.time(),
         "result": None,
         "completed_at": None,
@@ -1989,7 +2100,7 @@ async def run_api_test(req: RunApiTestRequest, background_tasks: BackgroundTasks
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, _run_api_test_sync, job_id, str(spec_path), req.project_id)
 
-    return {"job_id": job_id, "status": "running", "message": "API test run started"}
+    return {"job_id": job_id, "status": "running", "message": "Generating, running, and healing..."}
 
 
 @router.post("/run-direct")
@@ -2010,7 +2121,7 @@ async def run_direct_test(req: RunDirectRequest):
     _api_jobs[job_id] = {
         "status": "running",
         "stage": "queued",
-        "message": "Queuing direct test run...",
+        "message": "Running API test with healing..." if req.heal_on_failure else "Running API test...",
         "started_at": time.time(),
         "result": {
             "run_id": run_id,
@@ -2035,7 +2146,12 @@ async def run_direct_test(req: RunDirectRequest):
         req.heal_on_failure,
     )
 
-    return {"job_id": job_id, "run_id": run_id, "status": "running", "message": "Direct test run started"}
+    return {
+        "job_id": job_id,
+        "run_id": run_id,
+        "status": "running",
+        "message": "Running API test with healing..." if req.heal_on_failure else "Running API test...",
+    }
 
 
 @router.get("/jobs")
@@ -2068,6 +2184,7 @@ async def list_jobs(status: str | None = Query(None), project_id: str | None = Q
 @router.get("/jobs/{job_id}")
 async def get_job_status(job_id: str):
     """Get the status of a background job."""
+    _reconcile_api_batch_job(job_id)
     job = _api_jobs.get(job_id)
     if not job:
         # Fallback: check DB for completed runs that match the job_id
@@ -2524,51 +2641,87 @@ async def retry_api_run(run_id: str, session: Session = Depends(get_session)):
 
 @router.post("/specs/bulk-run")
 async def bulk_run_specs(req: BulkRunRequest):
-    """Run multiple API specs. Returns a batch job_id grouping individual jobs."""
+    """Run generated API tests for multiple specs without implicit regeneration."""
     _cleanup_old_jobs()
     import uuid
 
+    project_id = req.project_id or "default"
     batch_id = f"batch-{str(uuid.uuid4())[:8]}"
     child_job_ids = []
+    child_jobs = []
+    skipped = []
+    loop = asyncio.get_event_loop()
 
     for spec_path in req.spec_paths:
         abs_path = BASE_DIR / spec_path
         if not abs_path.exists():
             logger.warning(f"Bulk run: spec not found, skipping: {spec_path}")
+            skipped.append({"spec_path": spec_path, "reason": "spec_not_found"})
+            continue
+
+        generated_tests = _resolve_generated_api_tests(abs_path, project_id)
+        if not generated_tests:
+            logger.info(f"Bulk run: generated test not found, skipping: {spec_path}")
+            skipped.append({"spec_path": spec_path, "reason": "needs_generation"})
             continue
 
         job_id = str(uuid.uuid4())[:8]
+        run_id = f"api-direct-{job_id}"
+        test_path = generated_tests[0]["path"]
         _api_jobs[job_id] = {
             "status": "running",
             "stage": "queued",
-            "message": f"Queuing API test run for {spec_path}...",
+            "message": "Running API test...",
             "started_at": time.time(),
-            "result": None,
+            "result": {
+                "run_id": run_id,
+                "test_path": test_path,
+                "run_dir": str(RUNS_DIR / run_id),
+                "heal_on_failure": False,
+            },
             "completed_at": None,
             "spec_path": spec_path,
-            "project_id": req.project_id,
+            "project_id": project_id,
             "batch_id": batch_id,
         }
         child_job_ids.append(job_id)
+        child_jobs.append({"job_id": job_id, "spec_path": spec_path, "test_path": test_path, "run_id": run_id})
+        loop.run_in_executor(
+            None,
+            _run_direct_test_sync,
+            job_id,
+            run_id,
+            test_path,
+            abs_path.name,
+            project_id,
+            False,
+        )
 
-        loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, _run_api_test_sync, job_id, str(abs_path), req.project_id)
+    status = "running" if child_job_ids else "completed"
+    message = (
+        f"Batch direct run started with {len(child_job_ids)} generated test(s)"
+        if child_job_ids
+        else "No generated API tests found for selected specs"
+    )
 
     _api_jobs[batch_id] = {
-        "status": "running",
+        "status": status,
         "stage": "batch",
-        "message": f"Batch run started with {len(child_job_ids)} spec(s)",
+        "message": message,
         "started_at": time.time(),
-        "result": {"child_job_ids": child_job_ids},
-        "completed_at": None,
-        "project_id": req.project_id,
+        "result": {"child_job_ids": child_job_ids, "jobs": child_jobs, "skipped": skipped},
+        "completed_at": None if child_job_ids else time.time(),
+        "project_id": project_id,
     }
 
     return {
         "job_id": batch_id,
         "child_job_ids": child_job_ids,
-        "status": "running",
-        "message": f"Batch run started for {len(child_job_ids)} spec(s)",
+        "job_ids": child_job_ids,
+        "jobs": child_jobs,
+        "skipped": skipped,
+        "status": status,
+        "message": message,
     }
 
 
@@ -2595,23 +2748,41 @@ async def bulk_generate_specs(req: BulkGenerateRequest, background_tasks: Backgr
 
         job_id = str(uuid.uuid4())[:8]
         child_job_ids.append(job_id)
+        _api_jobs[job_id] = {
+            "status": "running",
+            "stage": "queued",
+            "message": "Generating API test...",
+            "started_at": time.time(),
+            "result": None,
+            "completed_at": None,
+            "spec_path": str(target.relative_to(BASE_DIR)),
+            "project_id": req.project_id,
+            "batch_id": batch_id,
+        }
         background_tasks.add_task(_run_generate_test, job_id, str(target), req.project_id)
 
+    status = "running" if child_job_ids else "completed"
+    message = (
+        f"Batch generation started with {len(child_job_ids)} spec(s)"
+        if child_job_ids
+        else "No API specs found for bulk generation"
+    )
+
     _api_jobs[batch_id] = {
-        "status": "running",
+        "status": status,
         "stage": "batch",
-        "message": f"Batch generation started with {len(child_job_ids)} spec(s)",
+        "message": message,
         "started_at": time.time(),
         "result": {"child_job_ids": child_job_ids},
-        "completed_at": None,
+        "completed_at": None if child_job_ids else time.time(),
         "project_id": req.project_id,
     }
 
     return {
         "job_id": batch_id,
         "child_job_ids": child_job_ids,
-        "status": "running",
-        "message": f"Batch generation started for {len(child_job_ids)} spec(s)",
+        "status": status,
+        "message": message,
     }
 
 

@@ -1782,6 +1782,9 @@ def _start_regression_tasks(tasks_to_start: list[dict[str, Any]], runtime) -> No
                 batch_id=task_args["batch_id"],
                 spec_name=task_args["spec_name"],
                 project_id=task_args["project_id"],
+                storage_state_path=task_args.get("storage_state_path"),
+                browser_auth_context=task_args.get("browser_auth_context"),
+                test_data_refs=task_args.get("test_data_refs"),
             )
         )
         task.add_done_callback(task_exception_handler)
@@ -1805,6 +1808,13 @@ async def rerun_failed(batch_id: str, session: Session = Depends(get_session)):
         raise HTTPException(status_code=400, detail="No failed tests to re-run")
 
     failed_spec_names = [r.spec_name for r in failed_runs]
+    source_by_spec = {run.spec_name: run for run in failed_runs}
+    test_data_refs_by_spec: dict[str, list[str]] = {}
+    for run in failed_runs:
+        browser_auth = run.browser_auth or {}
+        refs = browser_auth.get("test_data_refs") if isinstance(browser_auth, dict) else None
+        if isinstance(refs, list):
+            test_data_refs_by_spec[run.spec_name] = [str(ref) for ref in refs if str(ref).strip()]
 
     try:
         runtime = _get_bulk_run_runtime()
@@ -1823,12 +1833,63 @@ async def rerun_failed(batch_id: str, session: Session = Depends(get_session)):
         automated_only=False,
         batch_name=f"Re-run Failed: {batch.name or batch.id}",
         triggered_by="rerun-failed",
+        test_data_refs_by_spec=test_data_refs_by_spec,
     )
 
     try:
         result = create_regression_batch(config, session)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        for task_args in result.tasks_to_start:
+            source_run = source_by_spec.get(task_args["spec_name"])
+            source_auth = source_run.browser_auth if source_run else None
+            if not isinstance(source_auth, dict):
+                continue
+            requested_session_id = None
+            use_project_default = False
+            if source_auth.get("mode") == "session":
+                requested_session_id = source_auth.get("browser_auth_session_id") or source_auth.get("requested_browser_auth_session_id")
+            elif source_auth.get("mode") == "project_default" or source_auth.get("use_project_default_browser_auth"):
+                use_project_default = True
+            task_refs = task_args.get("test_data_refs") or []
+            storage_state_path = None
+            if requested_session_id or use_project_default:
+                from .main import _resolve_browser_auth_storage_state_for_run
+
+                storage_state_path, browser_auth_context = _resolve_browser_auth_storage_state_for_run(
+                    session,
+                    task_args.get("project_id"),
+                    run_dir=Path(task_args["run_dir"]),
+                    browser_auth_session_id=requested_session_id,
+                    use_project_default_browser_auth=use_project_default,
+                )
+            else:
+                browser_auth_context = {
+                    "mode": "none",
+                    "requested_browser_auth_session_id": None,
+                    "browser_auth_session_id": None,
+                    "browser_auth_session_name": None,
+                    "use_project_default_browser_auth": False,
+                    "project_default_used": False,
+                    "storage_state_attached": False,
+                }
+            if task_refs:
+                browser_auth_context["test_data_refs"] = task_refs
+            task_args["browser_auth_context"] = browser_auth_context
+            if storage_state_path:
+                task_args["storage_state_path"] = storage_state_path
+            new_run = session.get(DBTestRun, task_args["run_id"])
+            if new_run:
+                new_run.browser_auth = browser_auth_context
+                session.add(new_run)
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Failed to preserve rerun browser auth context: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to preserve re-run browser auth context") from exc
 
     _start_regression_tasks(result.tasks_to_start, runtime)
 

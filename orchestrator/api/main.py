@@ -2690,6 +2690,7 @@ def list_automated_specs(
                     "name": name,
                     "path": str(f.absolute()),
                     "code_path": code_path,
+                    "required_test_data_refs": _required_test_data_refs_for_spec(f, code_path),
                     "spec_type": spec_info["type"],
                     "test_count": spec_info["test_count"],
                     "categories": spec_info["categories"],
@@ -5209,6 +5210,7 @@ def execute_run_task(
     model_tier: str | None = None,
     storage_state_path: str | None = None,
     browser_auth_context: dict[str, Any] | None = None,
+    test_data_refs: list[str] | None = None,
 ):
     """Execute the native pipeline (default) with optional hybrid healing mode.
 
@@ -5323,6 +5325,9 @@ def execute_run_task(
         env["MEMORY_PROJECT_ID"] = project_id
     if browser_auth_context:
         env["QUORVEX_BROWSER_AUTH_CONTEXT"] = json.dumps(browser_auth_context)
+    normalized_test_data_refs = _normalize_request_test_data_refs(test_data_refs)
+    if normalized_test_data_refs:
+        env["QUORVEX_TEST_DATA_REFS"] = json.dumps(normalized_test_data_refs)
 
     with Session(engine) as session:
         run = session.get(DBTestRun, run_id)
@@ -5372,6 +5377,7 @@ async def execute_run_task_wrapper(
     model_tier: str | None = None,
     storage_state_path: str | None = None,
     browser_auth_context: dict[str, Any] | None = None,
+    test_data_refs: list[str] | None = None,
 ):
     """Async wrapper for execute_run_task with unified browser queue management.
 
@@ -5491,6 +5497,7 @@ async def execute_run_task_wrapper(
                 model_tier,
                 storage_state_path,
                 browser_auth_context,
+                test_data_refs,
             )
             _append_workflow_log("Native run executor returned.", run_id=run_id)
 
@@ -6022,6 +6029,96 @@ def _resolve_browser_auth_storage_state_for_run(
     return str(resolved.storage_state_path), intent
 
 
+def _normalize_request_test_data_refs(refs: list[str] | None) -> list[str]:
+    from orchestrator.services.test_data_resolver import extract_test_data_refs_from_sources
+
+    return extract_test_data_refs_from_sources(refs=refs or [])
+
+
+def _read_text_if_exists(path_value: str | None) -> str:
+    if not path_value:
+        return ""
+    try:
+        path = Path(path_value)
+        if path.exists() and path.is_file():
+            return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    return ""
+
+
+def _required_test_data_refs_for_spec(spec_path: Path, code_path: str | None = None) -> list[str]:
+    from orchestrator.services.test_data_resolver import extract_test_data_refs_from_sources
+
+    markdown = _read_text_if_exists(str(spec_path))
+    generated_code = _read_text_if_exists(code_path)
+    return extract_test_data_refs_from_sources(markdown=markdown, generated_code=generated_code)
+
+
+def _validate_bulk_test_data_refs(
+    session: Session,
+    *,
+    project_id: str | None,
+    spec_names: list[str],
+    shared_refs: list[str] | None,
+    refs_by_spec: dict[str, list[str]] | None = None,
+) -> dict[str, list[str]]:
+    from orchestrator.services import batch_executor
+    from orchestrator.services.test_data_resolver import (
+        extract_test_data_refs_from_sources,
+        resolve_test_data_refs,
+    )
+
+    explicit_shared_refs = _normalize_request_test_data_refs(shared_refs)
+    explicit_by_spec = refs_by_spec or {}
+    resolved_by_spec: dict[str, list[str]] = {}
+    refs_to_validate: list[str] = []
+
+    for spec_name in spec_names:
+        spec_path = batch_executor.SPECS_DIR / spec_name
+        code_path = batch_executor._get_try_code_path(spec_name, spec_path) if spec_path.exists() else None
+        explicit_refs = explicit_by_spec.get(spec_name, explicit_shared_refs)
+        spec_refs = extract_test_data_refs_from_sources(
+            refs=explicit_refs,
+            markdown=_read_text_if_exists(str(spec_path)),
+            generated_code=_read_text_if_exists(code_path),
+        )
+        resolved_by_spec[spec_name] = spec_refs
+        refs_to_validate.extend(spec_refs)
+
+    refs_to_validate = extract_test_data_refs_from_sources(refs=refs_to_validate)
+    if refs_to_validate and not project_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "test_data_project_required",
+                "message": "Project test data selection requires a project",
+                "refs": refs_to_validate,
+            },
+        )
+    if not refs_to_validate:
+        return resolved_by_spec
+
+    resolved = resolve_test_data_refs(
+        session,
+        project_id=project_id or "default",
+        refs=refs_to_validate,
+        render_as="json",
+        decrypt_sensitive=False,
+    )
+    missing = resolved.get("missing") or []
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "test_data_refs_unresolved",
+                "message": "Some selected or required test data refs are unavailable",
+                "missing_test_data": missing,
+            },
+        )
+    return resolved_by_spec
+
+
 def _is_login_specific_spec(spec_name: str, spec_content: str) -> bool:
     haystack = f"{spec_name}\n{spec_content[:1000]}".lower()
     return bool(re.search(r"\b(log\s*in|login|sign\s*in|signin|sign-in|logout|log\s*out|sign\s*out)\b", haystack))
@@ -6502,7 +6599,7 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
     - automated_only=True: Only run specs with generated .spec.ts files
     - tags: Filter specs by tags (OR logic - matches ANY selected tag)
     """
-    from orchestrator.services.batch_executor import BatchConfig, create_regression_batch
+    from orchestrator.services.batch_executor import BatchConfig, create_regression_batch, select_regression_specs
 
     hybrid_mode = request.hybrid or request.ralph or False
     max_iterations = request.max_iterations or 20
@@ -6522,9 +6619,20 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
         tags=request.tags,
         automated_only=request.automated_only or False,
         spec_names=request.spec_names,
+        test_data_refs=_normalize_request_test_data_refs(request.test_data_refs),
+        test_data_refs_by_spec=request.test_data_refs_by_spec,
     )
 
     try:
+        selected_spec_names = select_regression_specs(config, session)
+        resolved_refs_by_spec = _validate_bulk_test_data_refs(
+            session,
+            project_id=request.project_id,
+            spec_names=selected_spec_names,
+            shared_refs=request.test_data_refs,
+            refs_by_spec=request.test_data_refs_by_spec,
+        )
+        config.test_data_refs_by_spec = resolved_refs_by_spec
         result = create_regression_batch(config, session)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -6564,6 +6672,9 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
                 request.browser_auth_session_id or ""
             ).strip() or None
             browser_auth_intent["use_project_default_browser_auth"] = bool(request.use_project_default_browser_auth)
+        task_test_data_refs = _normalize_request_test_data_refs(task_args.get("test_data_refs") or [])
+        if task_test_data_refs:
+            browser_auth_intent["test_data_refs"] = task_test_data_refs
         run.browser_auth = browser_auth_intent
         session.add(run)
         session.commit()
@@ -6579,6 +6690,7 @@ async def create_bulk_run(request: BulkRunRequest, session: Session = Depends(ge
             "spec_name": task_args["spec_name"],
             "project_id": task_args["project_id"],
             "model_tier": request.model_tier,
+            "test_data_refs": task_test_data_refs,
         }
         if storage_state_path:
             payload["storage_state_path"] = storage_state_path

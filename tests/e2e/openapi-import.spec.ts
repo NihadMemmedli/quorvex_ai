@@ -11,7 +11,12 @@ class OpenApiImportPage {
     await Promise.all(API_PREFIXES.map(prefix => this.page.route(`${prefix}${normalizedPath}`, handler)));
   }
 
-  async mockBackend(capturedBodies: unknown[], historyItems?: Array<Record<string, unknown>>, historyMode = 'plan_and_tests') {
+  async mockBackend(
+    capturedBodies: unknown[],
+    historyItems?: Array<Record<string, unknown>>,
+    historyMode = 'plan_and_tests',
+    jobsHandler?: (route: Route) => void | Promise<void>,
+  ) {
     const defaultHistoryItems = [
       {
         id: 'oai-e2e',
@@ -101,7 +106,7 @@ class OpenApiImportPage {
         },
       }),
     );
-    await this.routeApi('/api-testing/jobs?*', route => route.fulfill({ status: 200, json: [] }));
+    await this.routeApi('/api-testing/jobs?*', jobsHandler || (route => route.fulfill({ status: 200, json: [] })));
     await this.routeApi('/api-testing/runs/latest-by-spec?*', route => route.fulfill({ status: 200, json: { specs: {} } }));
     await this.routeApi('/api-testing/import-history?*', route =>
       route.fulfill({
@@ -298,5 +303,34 @@ test.describe('OpenAPI import plan and tests', () => {
     await expect(page.getByText('Failed')).toBeVisible();
     await expect(page.getByText('Import status expired before completion; re-import to retry.')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Import Jobs' })).toHaveCount(0);
+  });
+
+  test('clears stale running jobs after backend reports none', async ({ page }) => {
+    const capturedBodies: unknown[] = [];
+    const importPage = new OpenApiImportPage(page);
+    let returnRunningJobs = true;
+    await importPage.mockBackend(capturedBodies, undefined, 'plan_and_tests', route => {
+      return route.fulfill({
+        status: 200,
+        json: returnRunningJobs
+          ? [
+              {
+                job_id: 'stale-batch',
+                status: 'running',
+                stage: 'batch',
+                message: 'Batch direct run started with 1 generated test(s)',
+                result: { child_job_ids: ['completed-child'] },
+                project_id: 'default',
+              },
+            ]
+          : [],
+      });
+    });
+    await importPage.open();
+
+    await expect(page.getByText('Jobs running...')).toBeVisible();
+    returnRunningJobs = false;
+    await page.reload();
+    await expect(page.getByText('Jobs running...')).toHaveCount(0);
   });
 });

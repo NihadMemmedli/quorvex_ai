@@ -224,6 +224,23 @@ def test_resolve_and_resolve_spec_render_masked_values(test_data_client):
     assert "replace-me" not in content
 
 
+def test_extract_test_data_refs_from_generated_code():
+    from orchestrator.services.test_data_resolver import extract_test_data_refs_from_generated_code
+
+    code = """
+    test('uses fixture', async ({ testData }) => {
+      const admin = testData.get<{ email: string }>('auth-users.valid-admin');
+      const password = testData.field("billing-card.primary", "number");
+      testData.get('not a ref');
+    });
+    """
+
+    assert extract_test_data_refs_from_generated_code(code) == [
+        "auth-users.valid-admin",
+        "billing-card.primary",
+    ]
+
+
 def test_wetravel_login_testdata_resolves_masked_and_decrypted_for_execution(tmp_path):
     from orchestrator.api.models_db import Project, TestDataItem, TestDataSet
     from orchestrator.services.test_data_resolver import (

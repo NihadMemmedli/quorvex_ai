@@ -117,9 +117,11 @@ function JobStatusPanel({ job }: { job: JobStatus }) {
     const stageLabel = (() => {
         switch (job.stage) {
             case 'queued': return 'Queued';
-            case 'starting': return 'Starting pipeline...';
-            case 'running': return 'Running (generate + test + heal)...';
+            case 'starting': return 'Generating, running, and healing...';
+            case 'running': return 'Generating, running, and healing...';
             case 'executing': return job.message || 'Running test...';
+            case 'healing': return job.message || 'Running API test with healing...';
+            case 'retesting': return job.message || 'Re-running healed test...';
             case 'done': return passed ? 'Passed' : 'Failed';
             case 'error': return 'Error';
             default: return job.message || 'Processing...';
@@ -313,7 +315,7 @@ export default React.memo(function ApiSpecsTable({
                     job_id: data.job_id,
                     status: data.status === 'failed' ? 'failed' : 'running',
                     stage: data.status === 'failed' ? 'validation' : 'queued',
-                    message: data.message,
+                    message: data.message || 'Generating, running, and healing...',
                 };
                 setActiveJobs(prev => ({ ...prev, [data.job_id]: job }));
                 setSpecJobMap(prev => ({ ...prev, [specPath]: data.job_id }));
@@ -368,7 +370,7 @@ export default React.memo(function ApiSpecsTable({
                     job_id: data.job_id,
                     status: 'running',
                     stage: 'executing',
-                    message: healOnFailure ? 'Running test with healing...' : 'Running test directly...',
+                    message: data.message || (healOnFailure ? 'Running API test with healing...' : 'Running API test...'),
                 };
                 setActiveJobs(prev => ({ ...prev, [data.job_id]: job }));
                 setSpecJobMap(prev => ({ ...prev, [specPath]: data.job_id }));
@@ -621,16 +623,15 @@ export default React.memo(function ApiSpecsTable({
                                             border: '1px solid var(--border)', borderRadius: 'var(--radius)',
                                             boxShadow: '0 4px 12px rgba(0,0,0,0.3)', overflow: 'hidden',
                                         }}>
-                                            {/* Run (if has generated test) */}
                                             {spec.has_generated_test && spec.generated_test_path && (
                                                 <button
                                                     onClick={() => { setMenuOpen(null); handleRunDirect(spec.name, spec.generated_test_path!, spec.path); }}
                                                     style={menuItemStyle}
                                                     onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
                                                     onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                                >
-                                                    <Zap size={13} style={{ color: 'var(--success)' }} /> Run
-                                                </button>
+                                            >
+                                                <Zap size={13} style={{ color: 'var(--success)' }} /> Run
+                                            </button>
                                             )}
                                             {spec.has_generated_test && spec.generated_test_path && (
                                                 <button
@@ -638,9 +639,9 @@ export default React.memo(function ApiSpecsTable({
                                                     style={menuItemStyle}
                                                     onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
                                                     onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-                                                >
-                                                    <Heart size={13} style={{ color: 'var(--warning)' }} /> Run with healing
-                                                </button>
+                                            >
+                                                <Heart size={13} style={{ color: 'var(--warning)' }} /> Run with healing
+                                            </button>
                                             )}
                                             <button
                                                 onClick={() => { setMenuOpen(null); handleGenerateTest(spec.name); }}
@@ -656,7 +657,7 @@ export default React.memo(function ApiSpecsTable({
                                                 onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
                                                 onMouseLeave={e => (e.currentTarget.style.background = 'none')}
                                             >
-                                                <Activity size={13} style={{ color: 'var(--primary)' }} /> Generate & Run
+                                                <Activity size={13} style={{ color: 'var(--primary)' }} /> Generate & Run (AI)
                                             </button>
                                             <button
                                                 onClick={() => { setMenuOpen(null); handleEdgeCases(spec.path); }}
@@ -864,6 +865,36 @@ export default React.memo(function ApiSpecsTable({
                                                     <Zap size={12} /> Run
                                                 </button>
                                             )}
+                                            {spec.has_generated_test && spec.generated_test_path && (
+                                                <button
+                                                    onClick={() => handleRunDirect(spec.name, spec.generated_test_path!, spec.path, true)}
+                                                    disabled={isRunning}
+                                                    style={{
+                                                        display: 'flex', alignItems: 'center', gap: '0.3rem',
+                                                        padding: '0.4rem 0.8rem',
+                                                        background: 'var(--warning-muted)', color: 'var(--warning)',
+                                                        border: '1px solid rgba(245, 158, 11, 0.2)',
+                                                        borderRadius: 'var(--radius)', cursor: isRunning ? 'wait' : 'pointer',
+                                                        fontSize: '0.8rem', opacity: isRunning ? 0.5 : 1,
+                                                    }}
+                                                >
+                                                    <Heart size={12} /> Run with healing
+                                                </button>
+                                            )}
+                                            <button
+                                                onClick={() => handleGenerateTest(spec.name)}
+                                                disabled={isRunning}
+                                                style={{
+                                                    display: 'flex', alignItems: 'center', gap: '0.3rem',
+                                                    padding: '0.4rem 0.8rem',
+                                                    background: 'rgba(139, 92, 246, 0.12)', color: 'var(--accent)',
+                                                    border: '1px solid rgba(139, 92, 246, 0.2)',
+                                                    borderRadius: 'var(--radius)', cursor: isRunning ? 'wait' : 'pointer',
+                                                    fontSize: '0.8rem', opacity: isRunning ? 0.5 : 1,
+                                                }}
+                                            >
+                                                <Play size={12} /> Generate
+                                            </button>
                                             <button
                                                 onClick={() => handleRunTest(spec.path)}
                                                 disabled={isRunning}
@@ -876,7 +907,7 @@ export default React.memo(function ApiSpecsTable({
                                                     fontSize: '0.8rem', opacity: isRunning ? 0.5 : 1,
                                                 }}
                                             >
-                                                <Activity size={12} /> Generate & Run
+                                                <Activity size={12} /> Generate & Run (AI)
                                             </button>
                                         </div>
 

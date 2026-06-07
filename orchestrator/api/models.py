@@ -1,7 +1,7 @@
 from typing import Any, Generic, TypeVar
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 T = TypeVar("T")
 
@@ -102,6 +102,8 @@ class BulkRunRequest(BaseModel):
     model_tier: str | None = None
     browser_auth_session_id: str | None = None
     use_project_default_browser_auth: bool = False
+    test_data_refs: list[str] = Field(default_factory=list)
+    test_data_refs_by_spec: dict[str, list[str]] | None = None
 
     # Legacy fields - kept for backward compatibility
     ralph: bool | None = False

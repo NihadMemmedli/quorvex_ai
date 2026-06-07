@@ -21,10 +21,15 @@ build/
 /runs/
 /test-results/
 
-# Generated specs and tests
-/specs/generated/
+# Generated specs, requirements, recordings, and tests
+/specs/*
+!/specs/examples/
+!/specs/examples/**
+!/specs/templates/
+!/specs/templates/**
 /tests/apps/
 /tests/generated/
+/tests/recordings/
 
 *.png
 !docs/assets/**/*.png

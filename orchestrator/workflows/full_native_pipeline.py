@@ -230,8 +230,16 @@ class FullNativePipeline:
             spec_content, spec_path, resolve_testdata=False
         )
 
+        existing_test_content = ""
+        if existing_test_path:
+            try:
+                existing_test_content = Path(existing_test_path).read_text()
+            except OSError:
+                existing_test_content = ""
+
         test_data_context = self._resolve_test_data_execution_context(
-            f"{spec_content}\n\n{raw_included_spec_content}"
+            f"{spec_content}\n\n{raw_included_spec_content}",
+            generated_code=existing_test_content,
         )
         self._log_test_data_resolution_context(test_data_context)
         missing_test_data = (test_data_context or {}).get("missing") or []
@@ -268,9 +276,17 @@ class FullNativePipeline:
         # Extract URL from spec (resolves @include directives first)
         target_url = self._extract_url(spec_content, spec_path)
         if not target_url:
-            logger.error(
-                "Spec must contain a target URL (e.g., 'Navigate to https://...')"
-            )
+            generated_from = re.search(r"Generated from:\s*`?([^`\n]+)`?", spec_content)
+            if generated_from:
+                error_msg = (
+                    "Generated child spec is missing a standalone target URL. "
+                    f"Generated from: {generated_from.group(1).strip()}. "
+                    "Regenerate or repair the child spec so it contains a URL, "
+                    "for example 'Navigate to https://...'."
+                )
+            else:
+                error_msg = "No target URL found in spec (checked includes too)"
+            logger.error(error_msg)
             logger.error(
                 "Note: @include templates are resolved when searching for URLs"
             )
@@ -278,7 +294,7 @@ class FullNativePipeline:
             (run_dir / "status.txt").write_text("error")
             return {
                 "success": False,
-                "error": "No target URL found in spec (checked includes too)",
+                "error": error_msg,
                 "stage": "url_extraction",
             }
 
@@ -1785,7 +1801,7 @@ class FullNativePipeline:
         return credentials if credentials else None
 
     def _resolve_test_data_execution_context(
-        self, spec_content: str
+        self, spec_content: str, generated_code: str | None = None
     ) -> dict[str, Any]:
         try:
             from sqlmodel import Session
@@ -1795,11 +1811,23 @@ class FullNativePipeline:
                 resolve_test_data_execution_context,
             )
 
+            explicit_refs: list[str] = []
+            raw_refs = os.environ.get("QUORVEX_TEST_DATA_REFS", "")
+            if raw_refs:
+                try:
+                    parsed_refs = json.loads(raw_refs)
+                    if isinstance(parsed_refs, list):
+                        explicit_refs = [str(ref) for ref in parsed_refs]
+                except json.JSONDecodeError:
+                    explicit_refs = [ref.strip() for ref in raw_refs.split(",") if ref.strip()]
+
             with Session(engine) as session:
                 return resolve_test_data_execution_context(
                     session,
                     project_id=self.project_id or "default",
+                    refs=explicit_refs,
                     markdown=spec_content,
+                    generated_code=generated_code,
                 )
         except Exception as exc:
             logger.warning("[Credentials] Failed to resolve execution test data: %s", exc)

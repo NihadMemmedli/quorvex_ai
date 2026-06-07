@@ -348,6 +348,114 @@ def test_bulk_run_writes_one_storage_state_file_per_run_for_project_default(tmp_
     assert all("bulk-run" in path.read_text() for path in storage_paths)
 
 
+def test_bulk_run_rejects_missing_test_data_before_temporal_start(tmp_path, monkeypatch):
+    from orchestrator.api import main as main_module
+    from orchestrator.api.main import app
+    from orchestrator.services import batch_executor
+
+    project_id = _create_project()
+    specs_dir = tmp_path / "specs"
+    runs_dir = tmp_path / "runs"
+    specs_dir.mkdir()
+    runs_dir.mkdir()
+    (specs_dir / "needs-data.md").write_text("# Needs Data\n\n@testdata \"missing.ref\"\n\n1. Open https://example.com")
+    monkeypatch.setattr(batch_executor, "SPECS_DIR", specs_dir)
+    monkeypatch.setattr(batch_executor, "RUNS_DIR", runs_dir)
+    monkeypatch.setattr(main_module, "RUNS_DIR", runs_dir)
+
+    async def fail_if_temporal_starts(run_id, payload, *, task_queue=None):
+        raise AssertionError("Temporal should not start for unresolved test data")
+
+    monkeypatch.setattr(
+        "orchestrator.services.temporal_client.start_test_run_workflow",
+        fail_if_temporal_starts,
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/runs/bulk",
+            json={
+                "spec_names": ["needs-data.md"],
+                "project_id": project_id,
+                "test_data_refs": ["missing.ref"],
+            },
+        )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["error"] == "test_data_refs_unresolved"
+    assert detail["missing_test_data"] == [{"ref": "missing.ref", "reason": "dataset_not_found"}]
+    assert list(runs_dir.iterdir()) == []
+
+
+def test_bulk_run_discovers_generated_code_test_data_refs_and_propagates_payload(tmp_path, monkeypatch):
+    from orchestrator.api import main as main_module
+    from orchestrator.api.main import app
+    from orchestrator.api.models_db import TestDataItem, TestDataSet
+    from orchestrator.services import batch_executor
+    from orchestrator.services.test_data_resolver import prepare_test_data_item_storage
+
+    project_id = _create_project()
+    specs_dir = tmp_path / "specs"
+    runs_dir = tmp_path / "runs"
+    generated_dir = tmp_path / "generated"
+    specs_dir.mkdir()
+    runs_dir.mkdir()
+    generated_dir.mkdir()
+    spec_path = specs_dir / "generated-data.md"
+    code_path = generated_dir / "generated-data.spec.ts"
+    spec_path.write_text("# Generated Data\n\n1. Open https://example.com")
+    code_path.write_text("testData.get('auth-users.valid-admin');")
+
+    storage = prepare_test_data_item_storage(
+        data={"email": "admin@example.com", "password": "secret-pass"},
+        sensitive_fields=["password"],
+    )
+    with Session(engine) as session:
+        dataset = TestDataSet(project_id=project_id, key="auth-users", name="Auth Users", status="active")
+        session.add(dataset)
+        session.commit()
+        session.refresh(dataset)
+        item = TestDataItem(
+            dataset_id=dataset.id,
+            key="valid-admin",
+            name="Valid Admin",
+            status="active",
+            format="json",
+        )
+        item.data = storage["data"]
+        item.sensitive_fields = storage["sensitive_fields"]
+        item.encrypted_values = storage["encrypted_values"]
+        session.add(item)
+        session.commit()
+
+    monkeypatch.setattr(batch_executor, "SPECS_DIR", specs_dir)
+    monkeypatch.setattr(batch_executor, "RUNS_DIR", runs_dir)
+    monkeypatch.setattr(main_module, "RUNS_DIR", runs_dir)
+    monkeypatch.setattr(batch_executor, "_get_try_code_path", lambda _spec_name, _spec_path: str(code_path))
+
+    started_payloads: list[dict] = []
+
+    async def fake_start_test_run_workflow(run_id, payload, *, task_queue=None):
+        started_payloads.append(payload)
+        return TemporalWorkflowStart(workflow_id=f"test-run-{run_id}", run_id="temporal-run")
+
+    monkeypatch.setattr(
+        "orchestrator.services.temporal_client.start_test_run_workflow",
+        fake_start_test_run_workflow,
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/runs/bulk",
+            json={"spec_names": ["generated-data.md"], "project_id": project_id},
+        )
+
+    assert response.status_code == 200, response.text
+    assert started_payloads[0]["test_data_refs"] == ["auth-users.valid-admin"]
+    assert "secret-pass" not in str(started_payloads[0])
+
+
 def test_run_rejects_cross_project_browser_auth_session_before_temporal_start(tmp_path, monkeypatch):
     from orchestrator.api import main as main_module
     from orchestrator.api.main import app

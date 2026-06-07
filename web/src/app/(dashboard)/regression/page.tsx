@@ -3,10 +3,17 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Play, Search, Tag, X, CheckCircle, Clock, XCircle, RefreshCw, Zap, AlertTriangle, Layers, ChevronRight, ChevronDown, Folder, FolderOpen, Menu } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+import { fetchWithAuth } from '@/contexts/AuthContext';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
+import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
+import {
+    browserAuthSessionLabel,
+    fetchProjectBrowserAuthSessions,
+    isBrowserAuthSessionSelectable,
+} from '@/lib/browser-auth-sessions';
 
 interface AutomatedSpec {
     name: string;
@@ -19,6 +26,7 @@ interface AutomatedSpec {
     last_run_status: string | null;
     last_run_id: string | null;
     last_run_at: string | null;
+    required_test_data_refs?: string[];
 }
 
 interface FolderNode {
@@ -38,6 +46,28 @@ interface RecentBatch {
     failed: number;
     running: number;
     success_rate: number;
+}
+
+interface TestDataDataset {
+    id: string;
+    key: string;
+    name: string;
+    item_count?: number;
+}
+
+interface TestDataItem {
+    id: string;
+    key: string;
+    ref: string;
+    name?: string;
+}
+
+type BrowserAuthMode = 'project_default' | 'session' | 'none';
+
+function browserAuthRequestBody(mode: BrowserAuthMode, sessionId: string) {
+    if (mode === 'session') return { browser_auth_session_id: sessionId };
+    if (mode === 'project_default') return { use_project_default_browser_auth: true };
+    return {};
 }
 
 // FolderTree Component
@@ -192,6 +222,16 @@ export default function RegressionPage() {
     const [hybridHealing, setHybridHealing] = useState(false);
     const [running, setRunning] = useState(false);
     const [recentBatches, setRecentBatches] = useState<RecentBatch[]>([]);
+    const [runSetupOpen, setRunSetupOpen] = useState(false);
+    const [pendingRunSpecs, setPendingRunSpecs] = useState<string[]>([]);
+    const [pendingRunLabel, setPendingRunLabel] = useState('');
+    const [browserAuthSessions, setBrowserAuthSessions] = useState<BrowserAuthSession[]>([]);
+    const [browserAuthMode, setBrowserAuthMode] = useState<BrowserAuthMode>('none');
+    const [browserAuthSessionId, setBrowserAuthSessionId] = useState('');
+    const [testDataDatasets, setTestDataDatasets] = useState<TestDataDataset[]>([]);
+    const [testDataItems, setTestDataItems] = useState<TestDataItem[]>([]);
+    const [selectedTestDataRefs, setSelectedTestDataRefs] = useState<Set<string>>(new Set());
+    const [runSetupError, setRunSetupError] = useState<string | null>(null);
 
     // Folder tree state
     const [folders, setFolders] = useState<FolderNode[]>([]);
@@ -235,6 +275,61 @@ export default function RegressionPage() {
         if (!projectLoading) {
             fetchRecentBatches();
         }
+    }, [currentProject?.id, projectLoading]);
+
+    useEffect(() => {
+        let cancelled = false;
+        setRunSetupError(null);
+        setSelectedTestDataRefs(new Set());
+        if (!currentProject?.id || projectLoading) {
+            setBrowserAuthSessions([]);
+            setBrowserAuthMode('none');
+            setBrowserAuthSessionId('');
+            setTestDataDatasets([]);
+            setTestDataItems([]);
+            return;
+        }
+
+        fetchProjectBrowserAuthSessions(currentProject.id)
+            .then(sessions => {
+                if (cancelled) return;
+                setBrowserAuthSessions(sessions);
+                const defaultSession = sessions.find(session => session.is_default && isBrowserAuthSessionSelectable(session));
+                setBrowserAuthMode(defaultSession ? 'project_default' : 'none');
+                setBrowserAuthSessionId('');
+            })
+            .catch(() => {
+                if (cancelled) return;
+                setBrowserAuthSessions([]);
+                setBrowserAuthMode('none');
+                setBrowserAuthSessionId('');
+            });
+
+        fetchWithAuth(`${API_BASE}/test-data/datasets?project_id=${encodeURIComponent(currentProject.id)}&status=active`)
+            .then(async response => (response.ok ? response.json() : { datasets: [] }))
+            .then(async data => {
+                if (cancelled) return;
+                const datasets: TestDataDataset[] = data.datasets || [];
+                setTestDataDatasets(datasets);
+                const itemGroups = await Promise.all(
+                    datasets.map(dataset =>
+                        fetchWithAuth(`${API_BASE}/test-data/datasets/${encodeURIComponent(dataset.id)}/items?status=active`)
+                            .then(async response => (response.ok ? response.json() : { items: [] }))
+                            .then(itemsData => (itemsData.items || []) as TestDataItem[])
+                            .catch(() => [])
+                    )
+                );
+                if (!cancelled) setTestDataItems(itemGroups.flat());
+            })
+            .catch(() => {
+                if (cancelled) return;
+                setTestDataDatasets([]);
+                setTestDataItems([]);
+            });
+
+        return () => {
+            cancelled = true;
+        };
     }, [currentProject?.id, projectLoading]);
 
     // Fetch specs when folder/tags/search/project changes (reset pagination)
@@ -377,6 +472,34 @@ export default function RegressionPage() {
         return specs.filter(s => s.name.toLowerCase().includes(searchTerm.toLowerCase()));
     }, [specs, searchTerm]);
 
+    const specsByName = useMemo(() => {
+        const map = new Map<string, AutomatedSpec>();
+        specs.forEach(spec => map.set(spec.name, spec));
+        return map;
+    }, [specs]);
+
+    const activeBrowserAuthSessions = useMemo(
+        () => browserAuthSessions.filter(isBrowserAuthSessionSelectable),
+        [browserAuthSessions]
+    );
+    const projectDefaultBrowserAuthSession = useMemo(
+        () => activeBrowserAuthSessions.find(session => session.is_default),
+        [activeBrowserAuthSessions]
+    );
+    const browserAuthSelectValue = browserAuthMode === 'session' ? `session:${browserAuthSessionId}` : browserAuthMode;
+    const requiredRefsForPendingRun = useMemo(() => {
+        const refs = new Set<string>();
+        pendingRunSpecs.forEach(specName => {
+            specsByName.get(specName)?.required_test_data_refs?.forEach(ref => refs.add(ref));
+        });
+        return Array.from(refs).sort();
+    }, [pendingRunSpecs, specsByName]);
+    const selectedRefsArray = useMemo(() => Array.from(selectedTestDataRefs).sort(), [selectedTestDataRefs]);
+    const missingRequiredRefs = useMemo(
+        () => requiredRefsForPendingRun.filter(ref => !selectedTestDataRefs.has(ref)),
+        [requiredRefsForPendingRun, selectedTestDataRefs]
+    );
+
     const toggleTagFilter = (tag: string) => {
         if (selectedTags.includes(tag)) {
             setSelectedTags(selectedTags.filter(t => t !== tag));
@@ -419,45 +542,101 @@ export default function RegressionPage() {
         setExpandedFolders(next);
     };
 
-    const runTests = async (specsToRun: string[]) => {
+    const handleBrowserAuthSelectChange = (value: string) => {
+        setRunSetupError(null);
+        if (value.startsWith('session:')) {
+            setBrowserAuthMode('session');
+            setBrowserAuthSessionId(value.slice('session:'.length));
+            return;
+        }
+        setBrowserAuthMode(value as BrowserAuthMode);
+        setBrowserAuthSessionId('');
+    };
+
+    const toggleTestDataRef = (ref: string) => {
+        const next = new Set(selectedTestDataRefs);
+        if (next.has(ref)) {
+            next.delete(ref);
+        } else {
+            next.add(ref);
+        }
+        setSelectedTestDataRefs(next);
+    };
+
+    const openRunSetup = (specsToRun: string[], label: string) => {
         if (specsToRun.length === 0) {
             alert('No tests to run');
             return;
         }
+        const selectedNames = Array.from(new Set(specsToRun));
+        setPendingRunSpecs(selectedNames);
+        setPendingRunLabel(label);
+        setSelectedTestDataRefs(prev => {
+            const next = new Set(prev);
+            selectedNames.forEach(specName => {
+                specsByName.get(specName)?.required_test_data_refs?.forEach(ref => next.add(ref));
+            });
+            return next;
+        });
+        setRunSetupError(null);
+        setRunSetupOpen(true);
+    };
 
+    const validateRunSetup = () => {
+        if (browserAuthMode === 'session' && !activeBrowserAuthSessions.some(session => session.id === browserAuthSessionId)) {
+            return 'Selected browser login session is unavailable.';
+        }
+        if (browserAuthMode === 'project_default' && !projectDefaultBrowserAuthSession) {
+            return 'Project default browser login session is unavailable.';
+        }
+        return null;
+    };
+
+    const submitRunSetup = async () => {
+        const validationError = validateRunSetup();
+        if (validationError) {
+            setRunSetupError(validationError);
+            return;
+        }
         setRunning(true);
+        setRunSetupError(null);
         try {
             const res = await fetch(`${API_BASE}/runs/bulk`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    spec_names: specsToRun,
+                    spec_names: pendingRunSpecs,
                     browser: selectedBrowser,
                     hybrid: hybridHealing,
-                    project_id: currentProject?.id
+                    project_id: currentProject?.id,
+                    test_data_refs: selectedRefsArray,
+                    ...browserAuthRequestBody(browserAuthMode, browserAuthSessionId)
                 })
             });
 
             const data = await res.json();
             if (data.batch_id) {
                 clearSelection();
+                setRunSetupOpen(false);
                 router.push(`/regression/batches/${data.batch_id}`);
             } else if (data.run_ids) {
                 clearSelection();
+                setRunSetupOpen(false);
                 router.push('/runs');
             } else if (data.detail) {
-                alert(`Error: ${data.detail}`);
+                const detail = typeof data.detail === 'string' ? data.detail : data.detail?.message || 'Failed to start regression tests';
+                setRunSetupError(detail);
             }
         } catch (e) {
             console.error('Failed to start regression tests:', e);
-            alert('Failed to start regression tests');
+            setRunSetupError('Failed to start regression tests');
         } finally {
             setRunning(false);
         }
     };
 
-    const runFiltered = () => runTests(filteredSpecs.map(s => s.name));
-    const runSelected = () => runTests(Array.from(selectedSpecs));
+    const runFiltered = () => openRunSetup(filteredSpecs.map(s => s.name), `Run All (${filteredSpecs.length})`);
+    const runSelected = () => openRunSetup(Array.from(selectedSpecs), `Run Selected (${selectedSpecs.size})`);
 
     const getStatusIcon = (status: string | null) => {
         switch (status) {
@@ -966,6 +1145,150 @@ export default function RegressionPage() {
                             Run Selected
                         </button>
                     </div>
+                </div>
+            )}
+
+            {runSetupOpen && (
+                <div
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Regression run setup"
+                    data-testid="regression-run-setup"
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        zIndex: 200,
+                        display: 'flex',
+                        justifyContent: 'flex-end',
+                        background: 'rgba(15, 23, 42, 0.48)'
+                    }}
+                    onClick={() => !running && setRunSetupOpen(false)}
+                >
+                    <aside
+                        style={{
+                            width: 'min(520px, 100vw)',
+                            height: '100%',
+                            background: 'var(--surface)',
+                            borderLeft: '1px solid var(--border)',
+                            boxShadow: '-18px 0 35px rgba(0,0,0,0.28)',
+                            display: 'flex',
+                            flexDirection: 'column'
+                        }}
+                        onClick={event => event.stopPropagation()}
+                    >
+                        <div style={{ padding: '1.25rem', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', gap: '1rem' }}>
+                            <div>
+                                <h2 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '0.25rem' }}>{pendingRunLabel || 'Run Tests'}</h2>
+                                <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                                    {pendingRunSpecs.length} tests • {selectedBrowser} • {hybridHealing ? 'extended healing' : 'standard healing'}
+                                </p>
+                            </div>
+                            <button className="btn btn-secondary" onClick={() => setRunSetupOpen(false)} disabled={running} aria-label="Close run setup">
+                                <X size={16} />
+                            </button>
+                        </div>
+
+                        <div style={{ padding: '1.25rem', overflowY: 'auto', flex: 1, display: 'grid', gap: '1.25rem' }}>
+                            <section style={{ display: 'grid', gap: '0.65rem' }}>
+                                <h3 style={{ fontSize: '0.8rem', textTransform: 'uppercase', color: 'var(--text-secondary)', letterSpacing: '0.05em' }}>Browser Login</h3>
+                                <select
+                                    aria-label="Regression browser login session"
+                                    value={browserAuthSelectValue}
+                                    onChange={event => handleBrowserAuthSelectChange(event.target.value)}
+                                    disabled={running}
+                                    className="input"
+                                >
+                                    <option value="project_default" disabled={!projectDefaultBrowserAuthSession}>
+                                        {projectDefaultBrowserAuthSession ? `Project default: ${projectDefaultBrowserAuthSession.name || projectDefaultBrowserAuthSession.id}` : 'Project default unavailable'}
+                                    </option>
+                                    <option value="none">No auth</option>
+                                    {browserAuthSessions.map(session => (
+                                        <option key={session.id} value={`session:${session.id}`} disabled={!isBrowserAuthSessionSelectable(session)}>
+                                            {browserAuthSessionLabel(session)}
+                                        </option>
+                                    ))}
+                                </select>
+                            </section>
+
+                            <section style={{ display: 'grid', gap: '0.75rem' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
+                                    <h3 style={{ fontSize: '0.8rem', textTransform: 'uppercase', color: 'var(--text-secondary)', letterSpacing: '0.05em' }}>Project Test Data</h3>
+                                    <Link href="/test-data" style={{ color: 'var(--primary)', fontSize: '0.8rem', fontWeight: 600 }}>Manage Test Data</Link>
+                                </div>
+
+                                {requiredRefsForPendingRun.length > 0 && (
+                                    <div style={{ border: '1px solid var(--warning)', background: 'var(--warning-muted)', borderRadius: 8, padding: '0.75rem', fontSize: '0.85rem' }}>
+                                        <strong style={{ display: 'block', marginBottom: '0.35rem' }}>Required by selected tests</strong>
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                                            {requiredRefsForPendingRun.map(ref => (
+                                                <button
+                                                    key={ref}
+                                                    type="button"
+                                                    onClick={() => toggleTestDataRef(ref)}
+                                                    style={{
+                                                        border: selectedTestDataRefs.has(ref) ? '1px solid var(--success)' : '1px solid var(--warning)',
+                                                        background: selectedTestDataRefs.has(ref) ? 'var(--success-muted)' : 'var(--background)',
+                                                        color: 'var(--text)',
+                                                        borderRadius: 6,
+                                                        padding: '0.25rem 0.45rem',
+                                                        fontSize: '0.78rem',
+                                                        cursor: 'pointer'
+                                                    }}
+                                                >
+                                                    {ref}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {testDataItems.length === 0 ? (
+                                    <div style={{ border: '1px dashed var(--border)', borderRadius: 8, padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                        {testDataDatasets.length === 0 ? 'No active test data datasets for this project.' : 'No active test data items for this project.'}
+                                    </div>
+                                ) : (
+                                    <div style={{ display: 'grid', gap: '0.4rem', maxHeight: 240, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8, padding: '0.5rem' }}>
+                                        {testDataItems.map(item => (
+                                            <label key={item.id} style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', padding: '0.45rem', borderRadius: 6, cursor: 'pointer' }}>
+                                                <input
+                                                    type="checkbox"
+                                                    checked={selectedTestDataRefs.has(item.ref)}
+                                                    onChange={() => toggleTestDataRef(item.ref)}
+                                                    style={{ accentColor: 'var(--primary)' }}
+                                                />
+                                                <span style={{ display: 'grid', gap: '0.1rem' }}>
+                                                    <strong style={{ fontSize: '0.85rem' }}>{item.ref}</strong>
+                                                    {item.name && <span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>{item.name}</span>}
+                                                </span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {missingRequiredRefs.length > 0 && (
+                                    <p style={{ color: 'var(--warning)', fontSize: '0.82rem', margin: 0 }}>
+                                        {missingRequiredRefs.length} required refs are not selected. The API will validate availability before queueing.
+                                    </p>
+                                )}
+                            </section>
+
+                            {runSetupError && (
+                                <div style={{ border: '1px solid var(--danger)', background: 'var(--danger-muted)', borderRadius: 8, padding: '0.75rem', color: 'var(--danger)', fontSize: '0.85rem' }}>
+                                    {runSetupError}
+                                </div>
+                            )}
+                        </div>
+
+                        <div style={{ padding: '1rem 1.25rem', borderTop: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem' }}>
+                            <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                                {selectedRefsArray.length} test-data refs selected
+                            </span>
+                            <button className="btn btn-primary" onClick={submitRunSetup} disabled={running || pendingRunSpecs.length === 0}>
+                                <Play size={16} fill="currentColor" />
+                                {running ? 'Starting...' : 'Start Run'}
+                            </button>
+                        </div>
+                    </aside>
                 </div>
             )}
 

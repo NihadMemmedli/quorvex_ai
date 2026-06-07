@@ -146,6 +146,8 @@ class BatchConfig:
     spec_names: list[str] | None = None
     triggered_by: str | None = None
     batch_name: str | None = None
+    test_data_refs: list[str] | None = None
+    test_data_refs_by_spec: dict[str, list[str]] | None = None
 
 
 @dataclass
@@ -158,21 +160,12 @@ class BatchResult:
 
 
 # ---------------------------------------------------------------------------
-# Core function
+# Core functions
 # ---------------------------------------------------------------------------
 
 
-def create_regression_batch(config: BatchConfig, session: Session) -> BatchResult:
-    """
-    Create a regression batch: discover specs, create DB records, prepare tasks.
-
-    This function does NOT start the actual test executions -- that is the
-    caller's responsibility (API creates asyncio tasks, scheduler enqueues
-    to Redis, etc.).
-
-    Raises:
-        ValueError: If no specs match the specified filters.
-    """
+def select_regression_specs(config: BatchConfig, session: Session) -> list[str]:
+    """Return the spec names that match a regression batch config."""
     # ------------------------------------------------------------------
     # 1. Determine which specs to run
     # ------------------------------------------------------------------
@@ -210,6 +203,30 @@ def create_regression_batch(config: BatchConfig, session: Session) -> BatchResul
 
     if not spec_names_to_run:
         raise ValueError("No specs match the specified filters (automated_only, tags)")
+
+    return spec_names_to_run
+
+
+def _test_data_refs_for_spec(config: BatchConfig, spec_name: str) -> list[str]:
+    by_spec = config.test_data_refs_by_spec or {}
+    refs = by_spec.get(spec_name)
+    if refs is None:
+        refs = config.test_data_refs or []
+    return [str(ref).strip() for ref in refs if str(ref).strip()]
+
+
+def create_regression_batch(config: BatchConfig, session: Session) -> BatchResult:
+    """
+    Create a regression batch: discover specs, create DB records, prepare tasks.
+
+    This function does NOT start the actual test executions -- that is the
+    caller's responsibility (API creates asyncio tasks, scheduler enqueues
+    to Redis, etc.).
+
+    Raises:
+        ValueError: If no specs match the specified filters.
+    """
+    spec_names_to_run = select_regression_specs(config, session)
 
     # ------------------------------------------------------------------
     # 2. Create the RegressionBatch record
@@ -282,6 +299,7 @@ def create_regression_batch(config: BatchConfig, session: Session) -> BatchResul
                 "batch_id": batch_id,
                 "spec_name": spec_name,
                 "project_id": config.project_id,
+                "test_data_refs": _test_data_refs_for_spec(config, spec_name),
             }
         )
         run_ids.append(run_id)

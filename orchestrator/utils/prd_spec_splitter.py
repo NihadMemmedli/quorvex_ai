@@ -97,7 +97,8 @@ class PRDSpecSplitter:
         app_overview = shared_context.get("Overview", shared_context.get("Application Overview", ""))
         shared_context_md = cls._format_shared_context_markdown(shared_context)
 
-        # Extract base URL origin for resolving relative URLs in child specs
+        # Extract parent URLs for resolving relative URLs in child specs
+        parent_target_url = cls._extract_parent_target_url(content)
         base_url_origin = cls._extract_base_url_origin(content)
 
         # Grouped mode: create one spec per group
@@ -115,6 +116,7 @@ class PRDSpecSplitter:
                     test_cases=group_tcs,
                     app_overview=app_overview,
                     source_spec=spec_path.name,
+                    parent_target_url=parent_target_url,
                     base_url_origin=base_url_origin,
                     shared_context=shared_context_md,
                 )
@@ -133,6 +135,7 @@ class PRDSpecSplitter:
                         test_case=test_case,
                         app_overview=app_overview,
                         source_spec=spec_path.name,
+                        parent_target_url=parent_target_url,
                         base_url_origin=base_url_origin,
                         shared_context=shared_context_md,
                     )
@@ -141,6 +144,7 @@ class PRDSpecSplitter:
                         test_case=test_case,
                         app_overview=app_overview,
                         source_spec=spec_path.name,
+                        parent_target_url=parent_target_url,
                         base_url_origin=base_url_origin,
                         shared_context=shared_context_md,
                     )
@@ -379,12 +383,32 @@ class PRDSpecSplitter:
         return None
 
     @classmethod
+    def _extract_parent_target_url(cls, content: str) -> str | None:
+        """Extract the most likely parent target URL from the original spec."""
+        patterns = [
+            r"\*\*(?:Target |Application |Base |Entry )?URL\*?\*?:\s*`?(https?://[^\s`]+)",
+            r"(?:Navigate to|Go to|Open)\s+`?(https?://[^\s`]+)",
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                return cls._clean_url(match.group(1))
+
+        abs_match = re.search(r"(https?://[^\s\)\"\'`>]+)", content)
+        if abs_match:
+            return cls._clean_url(abs_match.group(1))
+
+        return None
+
+    @classmethod
     def _create_grouped_spec(
         cls,
         group: dict,
         test_cases: list[dict],
         app_overview: str,
         source_spec: str,
+        parent_target_url: str | None = None,
         base_url_origin: str | None = None,
         shared_context: str = "",
     ) -> str:
@@ -426,21 +450,19 @@ Tests: {", ".join(test_ids)} ({len(test_cases)} test cases)
                         spec += f"- {pre}\n"
                     spec += "\n"
 
+                preconditions = tc.get("_preconditions", [])
                 steps = list(tc.get("_steps", []))
-                url = tc.get("_url", "")
+                url, steps = cls._normalize_testcase_navigation(
+                    test_case=tc,
+                    preconditions=preconditions,
+                    steps=steps,
+                    base_url_origin=base_url_origin,
+                    parent_target_url=parent_target_url,
+                )
 
-                # Resolve relative URL
-                if url and url.startswith("/") and base_url_origin:
-                    url = f"{base_url_origin}{url}"
-
-                # Resolve relative URLs in steps
-                if base_url_origin:
-                    steps = cls._resolve_step_urls(steps, base_url_origin)
-
-                # Add URL as first step if needed
-                if url and steps and not any(url in s for s in steps):
-                    if not any(s.lower().startswith("navigate") or s.lower().startswith("go to") for s in steps[:1]):
-                        steps = [f"Navigate to {url}"] + steps
+                if url:
+                    spec += "**Test Data**:\n"
+                    spec += f"- URL: {url}\n\n"
 
                 if steps:
                     spec += "**Steps**:\n"
@@ -463,10 +485,39 @@ Tests: {", ".join(test_ids)} ({len(test_cases)} test cases)
                     spec += "\n"
 
             else:
-                # For regex-extracted tests, include raw content
-                content = tc.get("content", "")
-                if content:
-                    spec += content + "\n\n"
+                description, preconditions, steps, expected_results = cls._parse_test_case_content(tc.get("content", ""))
+                url, steps = cls._normalize_testcase_navigation(
+                    test_case=tc,
+                    preconditions=preconditions,
+                    steps=steps,
+                    base_url_origin=base_url_origin,
+                    parent_target_url=parent_target_url,
+                )
+
+                if description:
+                    spec += f"**Description**: {description}\n\n"
+
+                if preconditions:
+                    spec += "**Preconditions**:\n"
+                    for pre in preconditions:
+                        spec += f"- {pre}\n"
+                    spec += "\n"
+
+                if url:
+                    spec += "**Test Data**:\n"
+                    spec += f"- URL: {url}\n\n"
+
+                if steps:
+                    spec += "**Steps**:\n"
+                    for i, step in enumerate(steps, 1):
+                        spec += f"{i}. {step}\n"
+                    spec += "\n"
+
+                if expected_results:
+                    spec += "**Expected Results**:\n"
+                    for result in expected_results:
+                        spec += f"- {result}\n"
+                    spec += "\n"
 
         return spec
 
@@ -476,6 +527,7 @@ Tests: {", ".join(test_ids)} ({len(test_cases)} test cases)
         test_case: dict,
         app_overview: str,
         source_spec: str,
+        parent_target_url: str | None = None,
         base_url_origin: str | None = None,
         shared_context: str = "",
     ) -> str:
@@ -490,15 +542,13 @@ Tests: {", ".join(test_ids)} ({len(test_cases)} test cases)
         steps = list(test_case.get("_steps", []))
         expected_results = test_case.get("_expected_results", [])
         selectors = test_case.get("_selectors", [])
-        url = test_case.get("_url", "")
-
-        # Resolve relative URL against base URL origin
-        if url and url.startswith("/") and base_url_origin:
-            url = f"{base_url_origin}{url}"
-
-        # Resolve relative URLs in steps
-        if base_url_origin:
-            steps = cls._resolve_step_urls(steps, base_url_origin)
+        url, steps = cls._normalize_testcase_navigation(
+            test_case=test_case,
+            preconditions=preconditions,
+            steps=steps,
+            base_url_origin=base_url_origin,
+            parent_target_url=parent_target_url,
+        )
 
         # Detect auth requirements
         requires_auth = cls._detect_auth_requirement(test_case, steps)
@@ -547,11 +597,11 @@ Category: {test_case["category"]}
 
 """
 
-        # Add URL as first step if available and not already in steps
-        if url and steps and not any(url in s for s in steps):
-            # Check if first step already has a navigation
-            if not any(s.lower().startswith("navigate") or s.lower().startswith("go to") for s in steps[:1]):
-                steps = [f"Navigate to {url}"] + steps
+        if url:
+            spec += f"""## Test Data
+- URL: {url}
+
+"""
 
         # Add steps
         spec += "## Steps\n\n"
@@ -582,6 +632,7 @@ Category: {test_case["category"]}
         test_case: dict,
         app_overview: str,
         source_spec: str,
+        parent_target_url: str | None = None,
         base_url_origin: str | None = None,
         shared_context: str = "",
     ) -> str:
@@ -594,9 +645,13 @@ Category: {test_case["category"]}
         # Parse description, preconditions, steps and expected results from content
         tc_description, tc_preconditions, steps, expected_results = cls._parse_test_case_content(test_case["content"])
 
-        # Resolve relative URLs in steps
-        if base_url_origin:
-            steps = cls._resolve_step_urls(steps, base_url_origin)
+        url, steps = cls._normalize_testcase_navigation(
+            test_case=test_case,
+            preconditions=tc_preconditions,
+            steps=steps,
+            base_url_origin=base_url_origin,
+            parent_target_url=parent_target_url,
+        )
 
         # Detect if this test requires authentication
         requires_auth = cls._detect_auth_requirement(test_case, steps)
@@ -644,6 +699,12 @@ Category: {test_case["category"]}
 
 """
 
+        if url:
+            spec += f"""## Test Data
+- URL: {url}
+
+"""
+
         # Add steps
         spec += "## Steps\n\n"
         for i, step in enumerate(steps, 1):
@@ -672,14 +733,128 @@ Category: {test_case["category"]}
         """
         resolved = []
         for step in steps:
-            # Match "Navigate to /path" or "Go to /path" with optional backticks
-            match = re.match(r"^(.*(?:Navigate to|Go to)\s+)`?(/[^\s`]*)`?(.*)$", step, re.IGNORECASE)
+            # Match "Navigate to /path", "Navigate directly to /path",
+            # "Go to /path", or "Open /path" with optional backticks.
+            match = re.match(
+                r"^(.*(?:(?:Navigate|Go)\s+(?:directly\s+)?to|Open)\s+)`?(/[^\s`]*)`?(.*)$",
+                step,
+                re.IGNORECASE,
+            )
             if match:
                 prefix, path, suffix = match.groups()
                 resolved.append(f"{prefix}{base_url_origin}{path}{suffix}")
             else:
                 resolved.append(step)
         return resolved
+
+    @classmethod
+    def _normalize_testcase_navigation(
+        cls,
+        test_case: dict,
+        preconditions: list[str],
+        steps: list[str],
+        base_url_origin: str | None,
+        parent_target_url: str | None,
+    ) -> tuple[str | None, list[str]]:
+        """
+        Resolve the standalone URL for a generated child spec and make the
+        executable steps start with absolute navigation.
+        """
+        resolved_steps = cls._resolve_step_urls(steps, base_url_origin) if base_url_origin else list(steps)
+
+        structured_url = cls._resolve_url_candidate(test_case.get("_url") or "", base_url_origin)
+        navigation_url = cls._extract_first_navigation_url(resolved_steps, base_url_origin)
+        precondition_url = cls._extract_first_relative_path(preconditions, base_url_origin)
+        content_url = cls._extract_explicit_content_url(test_case, base_url_origin)
+        step_path_url = cls._extract_first_relative_path(resolved_steps, base_url_origin)
+
+        requires_auth = cls._detect_auth_requirement(test_case, resolved_steps)
+        if structured_url:
+            url = structured_url
+        elif navigation_url:
+            url = navigation_url
+        elif requires_auth and precondition_url:
+            url = precondition_url
+        else:
+            url = content_url or precondition_url or step_path_url or cls._resolve_url_candidate(parent_target_url, base_url_origin)
+
+        if url and not cls._first_step_has_absolute_navigation(resolved_steps):
+            resolved_steps = [f"Navigate to {url}"] + resolved_steps
+
+        return url, resolved_steps
+
+    @classmethod
+    def _extract_explicit_content_url(cls, test_case: dict, base_url_origin: str | None) -> str | None:
+        content = test_case.get("content", "")
+        patterns = [
+            r"(?:^|\n)\s*(?:[-*]\s*)?\*{0,2}(?:Target\s+)?URL\*{0,2}\s*:\s*`?([^\s`]+)",
+            r"(?:^|\n)\s*(?:[-*]\s*)?\*{0,2}(?:Base|Entry)\s+URL\*{0,2}\s*:\s*`?([^\s`]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, content, re.IGNORECASE)
+            if match:
+                url = cls._resolve_url_candidate(match.group(1), base_url_origin)
+                if url:
+                    return url
+
+        return None
+
+    @classmethod
+    def _extract_first_navigation_url(cls, steps: list[str], base_url_origin: str | None) -> str | None:
+        for step in steps:
+            match = re.search(
+                r"\b(?:Navigate|Go)\s+(?:directly\s+)?to\s+`?(https?://[^\s`]+|/[^\s`]+)",
+                step,
+                re.IGNORECASE,
+            )
+            if not match:
+                match = re.search(r"\bOpen\s+`?(https?://[^\s`]+|/[^\s`]+)", step, re.IGNORECASE)
+            if match:
+                url = cls._resolve_url_candidate(match.group(1), base_url_origin)
+                if url:
+                    return url
+        return None
+
+    @classmethod
+    def _extract_first_relative_path(cls, texts: list[str], base_url_origin: str | None) -> str | None:
+        if not base_url_origin:
+            return None
+
+        for text in texts:
+            match = re.search(r"`(/[^`\s]+)`", text)
+            if match:
+                return cls._resolve_url_candidate(match.group(1), base_url_origin)
+
+        return None
+
+    @classmethod
+    def _first_step_has_absolute_navigation(cls, steps: list[str]) -> bool:
+        if not steps:
+            return False
+        first = steps[0].strip()
+        return bool(
+            re.search(
+                r"^(?:Navigate|Go)\s+(?:directly\s+)?to\s+`?https?://|^Open\s+`?https?://",
+                first,
+                re.IGNORECASE,
+            )
+        )
+
+    @classmethod
+    def _resolve_url_candidate(cls, candidate: str | None, base_url_origin: str | None) -> str | None:
+        if not candidate:
+            return None
+
+        url = cls._clean_url(str(candidate))
+        if re.match(r"^https?://", url, re.IGNORECASE):
+            return url
+        if url.startswith("/") and base_url_origin:
+            return f"{base_url_origin}{url}"
+        return None
+
+    @staticmethod
+    def _clean_url(url: str) -> str:
+        return url.strip().strip("`").rstrip(".,;:)")
 
     @classmethod
     def _detect_auth_requirement(cls, test_case: dict, steps: list[str]) -> bool:
@@ -811,7 +986,7 @@ Category: {test_case["category"]}
                 in_steps = False
                 in_expected = False
                 # Check for inline description: **Description**: Some text here
-                inline = re.sub(r"^\*\*Description\*?\*?:\s*", "", stripped)
+                inline = re.sub(r"^\*\*Description:?\*\*:?\s*", "", stripped)
                 if inline:
                     description = inline
                 continue
@@ -821,7 +996,7 @@ Category: {test_case["category"]}
                 in_steps = False
                 in_expected = False
                 # Check for inline single precondition
-                inline = re.sub(r"^\*\*Preconditions?\*?\*?:\s*", "", stripped)
+                inline = re.sub(r"^\*\*Preconditions?:?\*\*:?\s*", "", stripped)
                 if inline and not inline.startswith("-"):
                     preconditions.append(inline)
                 continue

@@ -136,9 +136,18 @@ const priorityStyles: Record<string, { bg: string; color: string }> = {
 };
 
 const rtmCategories = ['accessibility', 'authentication', 'data_display', 'error_handling', 'forms', 'navigation', 'other', 'performance', 'security'];
+const rtmCoverageFilters = ['all', 'covered', 'partial', 'uncovered'] as const;
 
 function projectQuery(projectId?: string) {
     return projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+}
+
+function initialCoverageFilter(): typeof rtmCoverageFilters[number] {
+    if (typeof window === 'undefined') return 'all';
+    const value = new URLSearchParams(window.location.search).get('coverage_status');
+    return rtmCoverageFilters.includes(value as typeof rtmCoverageFilters[number])
+        ? value as typeof rtmCoverageFilters[number]
+        : 'all';
 }
 
 function getCoverageIcon(status: string) {
@@ -214,7 +223,7 @@ export default function RtmPage() {
     } | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [debouncedSearch, setDebouncedSearch] = useState('');
-    const [coverageFilter, setCoverageFilter] = useState('all');
+    const [coverageFilter, setCoverageFilter] = useState<typeof rtmCoverageFilters[number]>(initialCoverageFilter);
     const [categoryFilter, setCategoryFilter] = useState('');
     const [priorityFilter, setPriorityFilter] = useState('');
     const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
@@ -311,6 +320,15 @@ export default function RtmPage() {
     useEffect(() => {
         refreshAll();
     }, [refreshAll]);
+
+    useEffect(() => {
+        const urlCoverageFilter = initialCoverageFilter();
+        if (urlCoverageFilter !== coverageFilter) {
+            setCoverageFilter(urlCoverageFilter);
+        }
+        // Run once after hydration so dashboard deep links initialize client state.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     useEffect(() => {
         return () => {
@@ -818,7 +836,7 @@ export default function RtmPage() {
                                     />
                                 </div>
                                 <div className="rtm-segmented" aria-label="Coverage filter">
-                                    {['all', 'covered', 'partial', 'uncovered'].map(status => (
+                                    {rtmCoverageFilters.map(status => (
                                         <button
                                             key={status}
                                             onClick={() => setCoverageFilter(status)}

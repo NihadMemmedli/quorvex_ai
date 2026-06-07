@@ -335,6 +335,49 @@ def _run_validate_only(spec_file: Path, timeout_seconds: int = 10) -> bool:
     return bool(result["ok"])
 
 
+def _prepare_try_code_test_data(pipeline, spec_file: Path, code_path: Path, run_dir: Path) -> bool:
+    """Prepare run-local project test-data fixtures before direct --try-code execution."""
+
+    try:
+        spec_content = spec_file.read_text()
+    except OSError:
+        spec_content = ""
+    try:
+        generated_code = code_path.read_text()
+    except OSError:
+        generated_code = ""
+
+    context = pipeline._resolve_test_data_execution_context(
+        spec_content,
+        generated_code=generated_code,
+    )
+    pipeline._log_test_data_resolution_context(context)
+    missing_test_data = (context or {}).get("missing") or []
+    if missing_test_data:
+        missing_refs = ", ".join(
+            f"{item.get('ref')} ({item.get('reason') or 'not_found'})"
+            for item in missing_test_data
+        )
+        error_msg = f"Missing required test data refs: {missing_refs}"
+        (run_dir / "status.txt").write_text("failed")
+        pipeline._write_pipeline_error(
+            run_dir,
+            error_msg,
+            "test_data_resolution",
+            {
+                "refs": list((context or {}).get("refs") or []),
+                "missing_test_data": missing_test_data,
+            },
+        )
+        print(f"❌ {error_msg}")
+        return False
+
+    fixture_file = pipeline._write_test_data_fixture_file(run_dir, context)
+    pipeline._apply_test_data_execution_context(context)
+    pipeline._log_test_data_fixture_context(context, fixture_file)
+    return True
+
+
 def _show_memory_stats(project_id: str = None):
     """Display memory system statistics."""
     print("=" * 60)
@@ -1438,6 +1481,12 @@ def main():
             run_dir = Path(f"runs/{run_id}")
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        # Get project_id from environment (passed by API) or CLI args
+        project_id = os.environ.get("PROJECT_ID") or args.project_id or "default"
+
+        # Run-local test data fixtures must be available before direct --try-code execution.
+        pipeline = FullNativePipeline(project_id=project_id, model_tier=args.model_tier)
+
         # Try existing code first if available
         code_path = None
         if args.try_code:
@@ -1468,13 +1517,26 @@ def main():
             }
             (run_dir / "plan.json").write_text(json.dumps(plan_data, indent=2))
 
+            if not _prepare_try_code_test_data(pipeline, spec_file, code_path, run_dir):
+                sys.exit(1)
+
             # Run existing test
             cmd = (
                 f"npx playwright test '{code_path}' --project {args.browser}"
                 f"{playwright_config_cli_arg(run_dir)}{playwright_headed_args()}"
             )
             print(f"   Executing: {cmd}")
-            result = run_command(cmd, stream_output=True, is_python=False)
+            subprocess_env = {
+                key: value
+                for key, value in os.environ.copy().items()
+                if not key.startswith("TESTDATA_")
+            }
+            result = run_command(
+                cmd,
+                stream_output=True,
+                is_python=False,
+                env={**subprocess_env, **pipeline.test_data_env_vars},
+            )
 
             if result.returncode == 0:
                 print("✅ Existing code passed! Skipping generation.")
@@ -1483,12 +1545,6 @@ def main():
             else:
                 print("⚠️ Existing code failed. Proceeding with healing...")
                 existing_test_for_healing = str(code_path)  # Store for healing-only mode
-
-        # Get project_id from environment (passed by API) or CLI args
-        project_id = os.environ.get("PROJECT_ID") or args.project_id or "default"
-
-        # Run the Full Native Pipeline
-        pipeline = FullNativePipeline(project_id=project_id, model_tier=args.model_tier)
 
         # Determine if we should heal existing code or run full pipeline
         existing_test_path = existing_test_for_healing if "existing_test_for_healing" in dir() else None

@@ -280,8 +280,11 @@ Return a JSON object with both "test_cases" and "groups":
 - Preserve the EXACT test ID format used in the document
 - Include sub-items within steps (don't lose detail)
 - If a step has numbered sub-items (like form fields), consolidate them into the step
-- Extract the URL from overview/environment section if tests don't have individual URLs
+- Every emitted test case must have a runnable URL whenever the parent spec has a target/base URL
+- Prefer a test's explicit URL or first navigation step; if missing, use relative paths in that test's preconditions/steps/test data, resolved against the parent target origin
+- Extract the URL from overview/environment section if tests don't have individual URLs or relative paths
 - IMPORTANT: If the overview/environment section contains a base URL (e.g., https://example.com), resolve ALL relative URLs to absolute
+- For authenticated tests that start from a dashboard or account precondition such as "/user/my_trips", use that deep link instead of the parent homepage fallback
 - Every test case must appear in exactly one group
 - Return ONLY the JSON, no other text"""
 
@@ -355,8 +358,11 @@ Return a JSON object with a "test_cases" array:
 - Preserve the EXACT test ID format used in the document
 - Include sub-items within steps (don't lose detail)
 - If a step has numbered sub-items (like form fields), consolidate them into the step
-- Extract the URL from overview/environment section if tests don't have individual URLs
+- Every emitted test case must have a runnable URL whenever the parent spec has a target/base URL
+- Prefer a test's explicit URL or first navigation step; if missing, use relative paths in that test's preconditions/steps/test data, resolved against the parent target origin
+- Extract the URL from overview/environment section if tests don't have individual URLs or relative paths
 - IMPORTANT: If the overview/environment section contains a base URL (e.g., https://example.com), resolve ALL relative URLs to absolute. For example, if base URL is "https://example.com" and a test navigates to "/serviceCategories", the url field should be "https://example.com/serviceCategories"
+- For authenticated tests that start from a dashboard or account precondition such as "/user/my_trips", use that deep link instead of the parent homepage fallback
 - Return ONLY the JSON, no other text"""
 
     @classmethod

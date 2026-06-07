@@ -147,7 +147,16 @@ export default function ApiTestingPage() {
                     if (j.spec_path) newSpecMap[j.spec_path] = j.job_id;
                     if (j.status === 'running') pollJobRef.current?.(j.job_id);
                 }
-                setActiveJobs(prev => ({ ...prev, ...jobMap }));
+                const serverRunningJobIds = new Set(Object.keys(jobMap));
+                setActiveJobs(prev => {
+                    const next = { ...prev };
+                    for (const [jobId, job] of Object.entries(next)) {
+                        if (job.status === 'running' && !serverRunningJobIds.has(jobId)) {
+                            delete next[jobId];
+                        }
+                    }
+                    return { ...next, ...jobMap };
+                });
                 setSpecJobMap(prev => ({ ...prev, ...newSpecMap }));
             }
         } catch { /* ignore */ }
@@ -211,17 +220,40 @@ export default function ApiTestingPage() {
                         onComplete?.();
                     }
                 }
-            } catch { clearInterval(interval); }
+            } catch {
+                missCount++;
+                if (missCount >= 5) {
+                    clearInterval(interval);
+                    setActiveJobs(prev => {
+                        const updated = { ...prev };
+                        if (updated[jobId]?.status === 'running') {
+                            updated[jobId] = { ...updated[jobId], status: 'failed', message: 'Job status could not be confirmed' };
+                        }
+                        return updated;
+                    });
+                    fetchApiSpecs(0);
+                    fetchGeneratedTests(0);
+                    fetchLatestRuns();
+                    onComplete?.();
+                }
+            }
         }, 3000);
         return () => clearInterval(interval);
     }, [fetchApiSpecs, fetchGeneratedTests, fetchLatestRuns]);
 
     pollJobRef.current = pollJob;
+    const hasRunningJobs = Object.values(activeJobs).some(j => j.status === 'running');
 
     // ========== Effects ==========
 
     useEffect(() => { fetchApiSpecs(); fetchRecentJobs(); fetchLatestRuns(); },
         [fetchApiSpecs, fetchRecentJobs, fetchLatestRuns]);
+
+    useEffect(() => {
+        if (!hasRunningJobs) return;
+        const interval = setInterval(fetchRecentJobs, 5000);
+        return () => clearInterval(interval);
+    }, [fetchRecentJobs, hasRunningJobs]);
 
     useEffect(() => {
         setGeneratedTests([]);
@@ -270,8 +302,6 @@ export default function ApiTestingPage() {
             setMessage({ type: 'error', text: 'Failed to start retry' });
         }
     }, [pollJob, fetchApiRuns]);
-
-    const hasRunningJobs = Object.values(activeJobs).some(j => j.status === 'running');
 
     // ========== Tab Styles ==========
 

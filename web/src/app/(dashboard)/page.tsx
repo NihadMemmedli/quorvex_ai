@@ -480,7 +480,7 @@ export default function Home() {
             return {
                 state: 'Watch',
                 detail: `RTM coverage is ${Math.round(rtmCoverage)}%, so important requirements may still be untested.`,
-                href: '/coverage',
+                href: '/rtm?coverage_status=uncovered',
                 actionLabel: 'Close coverage gaps',
                 tone: 'warning' as const,
                 icon: <GitBranch size={20} />,
@@ -555,11 +555,11 @@ export default function Home() {
             tone: pendingQuestions.length > 0 ? 'warning' : 'healthy',
         },
         {
-            label: 'Coverage gaps',
+            label: 'RTM gaps',
             value: hasCoverageData ? (coverageGap ? `${Math.max(0, Math.round(60 - rtmCoverage))} pts` : 'Clear') : '—',
             detail: hasCoverageData ? `RTM coverage is ${Math.round(rtmCoverage)}%` : 'RTM coverage has not been generated',
             icon: <GitBranch size={16} />,
-            href: '/coverage',
+            href: '/rtm?coverage_status=uncovered',
             tone: coverageGap ? 'warning' : 'healthy',
         },
         {
@@ -700,9 +700,9 @@ export default function Home() {
                 key: 'coverage-gap',
                 node: (
                     <TopRiskRow
-                        href="/coverage"
+                        href="/rtm?coverage_status=uncovered"
                         icon={<GitBranch size={15} />}
-                        title="Coverage gap"
+                        title="RTM gap"
                         detail={`RTM coverage is ${Math.round(rtmCoverage)}%, below the 60% threshold.`}
                     />
                 ),

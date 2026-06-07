@@ -191,6 +191,7 @@ class NativePlanner:
         login_url: str | None,
         credentials: dict[str, str] | None,
         output_path: str,
+        auth_context: dict[str, Any] | None = None,
     ) -> str:
         """Build the prompt that combines PRD context with browser exploration instructions."""
 
@@ -203,6 +204,7 @@ class NativePlanner:
 
         browser_section = ""
         if target_url:
+            auth_prompt_context = "" if credentials else self._browser_auth_prompt_context(auth_context)
             # Build login section if credentials provided
             login_section = ""
             if credentials:
@@ -247,6 +249,8 @@ Example in spec: `Enter "{{{{{username_var}}}}}" into the email field`
             browser_section = f"""
 ## Browser Exploration (REQUIRED)
 You MUST open a browser and explore the live application.
+
+{auth_prompt_context}
 
 {login_section}
 
@@ -383,6 +387,21 @@ Start the test plan with:
             rendered_prompt=prompt,
         )
         return attach_prompt_metadata(prompt, metadata)
+
+    @staticmethod
+    def _browser_auth_prompt_context(context: dict[str, Any] | None = None) -> str:
+        if not context or not context.get("storage_state_attached"):
+            return ""
+        session_name = (
+            context.get("browser_auth_session_name")
+            or context.get("browser_auth_session_id")
+            or "selected session"
+        )
+        return (
+            "## Browser Authentication Context\n"
+            f"The browser starts authenticated with saved session `{session_name}`. "
+            "Do not generate login steps unless the scenario explicitly tests login, logout, or authentication failure."
+        )
 
     @staticmethod
     def _split_tc_scope_section(
@@ -1075,6 +1094,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
         target_url: str,
         login_url: str | None = None,
         credentials: dict[str, str] | None = None,
+        auth_context: dict[str, Any] | None = None,
         output_dir: Path | None = None,
     ) -> Path:
         """
@@ -1090,6 +1110,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
             target_url: URL to explore
             login_url: Login page URL if auth required
             credentials: Dict with username/password if auth required
+            auth_context: Saved browser authentication context if the browser starts authenticated
             output_dir: Where to save the spec (defaults to specs/explorer-{timestamp})
 
         Returns:
@@ -1120,6 +1141,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
             target_url=target_url,
             login_url=login_url,
             credentials=credentials,
+            auth_context=auth_context,
             output_path=str(output_path),
         )
 

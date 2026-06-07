@@ -132,6 +132,7 @@ async def execute_test_run(payload: dict[str, Any]) -> dict[str, Any]:
             model_tier=payload.get("model_tier"),
             storage_state_path=payload.get("storage_state_path"),
             browser_auth_context=payload.get("browser_auth_context"),
+            test_data_refs=payload.get("test_data_refs"),
         )
 
     with Session(engine) as session:

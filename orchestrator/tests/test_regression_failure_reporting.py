@@ -246,6 +246,7 @@ def test_rerun_failed_creates_batch_for_failed_and_error_runs(monkeypatch):
                     project_id="default",
                     created_at=now,
                     completed_at=now,
+                    browser_auth={"test_data_refs": ["auth-users.valid-admin"]} if spec_name == failed_spec else None,
                 )
             )
         session.commit()
@@ -264,6 +265,8 @@ def test_rerun_failed_creates_batch_for_failed_and_error_runs(monkeypatch):
         assert set(data["failed_specs"]) == {failed_spec, error_spec}
         assert {task["spec_name"] for task in scheduled_tasks} == {failed_spec, error_spec}
         assert len(scheduled_tasks) == 2
+        failed_task = next(task for task in scheduled_tasks if task["spec_name"] == failed_spec)
+        assert failed_task["test_data_refs"] == ["auth-users.valid-admin"]
 
         with Session(engine) as session:
             new_batch = session.get(RegressionBatch, created_batch_id)
@@ -273,6 +276,8 @@ def test_rerun_failed_creates_batch_for_failed_and_error_runs(monkeypatch):
             new_runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == created_batch_id)).all()
             assert {run.spec_name for run in new_runs} == {failed_spec, error_spec}
             assert {run.status for run in new_runs} == {"queued"}
+            new_failed_run = next(run for run in new_runs if run.spec_name == failed_spec)
+            assert (new_failed_run.browser_auth or {}).get("test_data_refs") == ["auth-users.valid-admin"]
     finally:
         shutil.rmtree(SPECS_DIR / spec_root, ignore_errors=True)
         for run_id in created_run_ids:

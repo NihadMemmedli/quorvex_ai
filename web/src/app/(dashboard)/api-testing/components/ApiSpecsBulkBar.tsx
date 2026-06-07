@@ -82,7 +82,7 @@ export default function ApiSpecsBulkBar({
                 <Zap size={13} /> Generate All
             </button>
 
-            {/* Run All */}
+            {/* Run Generated */}
             <button
                 onClick={onBulkRun}
                 disabled={isRunning}
@@ -101,7 +101,7 @@ export default function ApiSpecsBulkBar({
                     opacity: isRunning ? 0.5 : 1,
                 }}
             >
-                <Play size={13} /> Run All
+                <Play size={13} /> Run Generated
             </button>
 
             {/* Delete */}

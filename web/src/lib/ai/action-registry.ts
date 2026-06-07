@@ -303,6 +303,10 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       target_url: args.targetUrl,
       login_url: args.loginUrl || undefined,
       credentials: args.credentials || undefined,
+      ...buildBrowserAuthControls(args),
+      test_data_refs: Array.isArray(args.testDataRefs)
+        ? args.testDataRefs
+        : (Array.isArray(args.test_data_refs) ? args.test_data_refs : undefined),
       force_regenerate: args.forceRegenerate ?? false,
     }),
   },

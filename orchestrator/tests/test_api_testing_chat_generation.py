@@ -115,7 +115,7 @@ def test_generated_tests_list_includes_summary(api_testing_client):
     client, _api_testing, tmp_path = api_testing_client
 
     tests_dir = tmp_path / "tests" / "generated" / "chat-project"
-    tests_dir.mkdir(parents=True)
+    tests_dir.mkdir(parents=True, exist_ok=True)
     (tests_dir / "demo.api.spec.ts").write_text(
         "import { test, expect } from '@playwright/test';\n\ntest('demo one', async () => {});\n",
         encoding="utf-8",
@@ -136,7 +136,7 @@ def test_generated_tests_summary_endpoint_keeps_existing_shape(api_testing_clien
     client, _api_testing, tmp_path = api_testing_client
 
     tests_dir = tmp_path / "tests" / "generated" / "chat-project"
-    tests_dir.mkdir(parents=True)
+    tests_dir.mkdir(parents=True, exist_ok=True)
     (tests_dir / "demo.api.spec.ts").write_text(
         "import { test } from '@playwright/test';\n\ntest('demo one', async () => {});\n",
         encoding="utf-8",
@@ -205,9 +205,293 @@ def test_direct_api_run_uses_run_scoped_playwright_artifacts(api_testing_client,
         "--timeout=120000",
     ]
     assert captured["env"]["PLAYWRIGHT_OUTPUT_DIR"] == str(run_dir / "test-results")
-    assert captured["env"]["PLAYWRIGHT_HTML_REPORT"] == str(run_dir / "playwright-report")
+    assert "PLAYWRIGHT_HTML_REPORT" not in captured["env"]
     assert captured["env"]["PLAYWRIGHT_JSON_OUTPUT_FILE"] == str(run_dir / "test-results.json")
     assert api_testing._api_jobs[job_id]["result"]["passed"] is True
+
+
+def test_api_specs_refresh_generated_test_metadata_without_spec_mtime_change(api_testing_client):
+    client, _api_testing, tmp_path = api_testing_client
+    spec_dir = tmp_path / "specs" / "chat-project" / "api"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "demo.md").write_text(
+        "# Test: Demo\n\n## Type: API\n## Base URL: https://httpbin.org\n\n## Steps\n1. GET /get\n",
+        encoding="utf-8",
+    )
+
+    initial = client.get("/api-testing/specs?project_id=chat-project")
+    assert initial.status_code == 200
+    assert initial.json()["items"][0]["has_generated_test"] is False
+
+    tests_dir = tmp_path / "tests" / "generated" / "chat-project"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    (tests_dir / "demo.api.spec.ts").write_text(
+        "import { test } from '@playwright/test';\n\ntest('demo one', async () => {});\n",
+        encoding="utf-8",
+    )
+
+    refreshed = client.get("/api-testing/specs?project_id=chat-project")
+    item = refreshed.json()["items"][0]
+    assert item["has_generated_test"] is True
+    assert item["generated_test_path"] == "tests/generated/chat-project/demo.api.spec.ts"
+    assert item["test_count"] == 1
+
+
+def test_bulk_run_uses_direct_generated_tests_and_reports_skips(api_testing_client, monkeypatch):
+    client, api_testing, tmp_path = api_testing_client
+    spec_dir = tmp_path / "specs" / "chat-project" / "api"
+    spec_dir.mkdir(parents=True)
+    runnable_spec = spec_dir / "demo.md"
+    runnable_spec.write_text(
+        "# Test: Demo\n\n## Type: API\n## Base URL: https://httpbin.org\n\n## Steps\n1. GET /get\n",
+        encoding="utf-8",
+    )
+    missing_test_spec = spec_dir / "needs-generation.md"
+    missing_test_spec.write_text(
+        "# Test: Needs Generation\n\n## Type: API\n## Base URL: https://httpbin.org\n\n## Steps\n1. GET /status/200\n",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests" / "generated" / "chat-project"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "demo.api.spec.ts").write_text(
+        "import { test } from '@playwright/test';\n\ntest('demo one', async () => {});\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    class ImmediateLoop:
+        def run_in_executor(self, executor, func, *args):
+            calls.append((func, args))
+
+    monkeypatch.setattr(api_testing.asyncio, "get_event_loop", lambda: ImmediateLoop())
+
+    response = client.post(
+        "/api-testing/specs/bulk-run",
+        json={
+            "project_id": "chat-project",
+            "spec_paths": [
+                "specs/chat-project/api/demo.md",
+                "specs/chat-project/api/needs-generation.md",
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "running"
+    assert len(data["job_ids"]) == 1
+    assert data["jobs"][0]["spec_path"] == "specs/chat-project/api/demo.md"
+    assert data["jobs"][0]["test_path"] == "tests/generated/chat-project/demo.api.spec.ts"
+    assert data["skipped"] == [
+        {"spec_path": "specs/chat-project/api/needs-generation.md", "reason": "needs_generation"}
+    ]
+    assert len(calls) == 1
+    func, args = calls[0]
+    assert func is api_testing._run_direct_test_sync
+    assert args[2] == "tests/generated/chat-project/demo.api.spec.ts"
+    assert args[3] == "demo.md"
+    assert args[4] == "chat-project"
+    assert args[5] is False
+
+
+def test_bulk_run_without_generated_tests_completes_with_needs_generation(api_testing_client, monkeypatch):
+    client, api_testing, tmp_path = api_testing_client
+    spec_dir = tmp_path / "specs" / "chat-project" / "api"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "needs-generation.md").write_text(
+        "# Test: Needs Generation\n\n## Type: API\n## Base URL: https://httpbin.org\n\n## Steps\n1. GET /status/200\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    class ImmediateLoop:
+        def run_in_executor(self, executor, func, *args):
+            calls.append((func, args))
+
+    monkeypatch.setattr(api_testing.asyncio, "get_event_loop", lambda: ImmediateLoop())
+
+    response = client.post(
+        "/api-testing/specs/bulk-run",
+        json={"project_id": "chat-project", "spec_paths": ["specs/chat-project/api/needs-generation.md"]},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["job_ids"] == []
+    assert data["skipped"] == [
+        {"spec_path": "specs/chat-project/api/needs-generation.md", "reason": "needs_generation"}
+    ]
+    assert calls == []
+
+
+def test_api_batch_job_reconciles_completed_children(api_testing_client):
+    client, api_testing, _tmp_path = api_testing_client
+    api_testing._api_jobs.update(
+        {
+            "child-a": {
+                "status": "completed",
+                "stage": "done",
+                "message": "Test passed",
+                "result": {"passed": True},
+                "started_at": 1.0,
+                "completed_at": 2.0,
+                "project_id": "chat-project",
+            },
+            "child-b": {
+                "status": "completed",
+                "stage": "done",
+                "message": "Test passed",
+                "result": {"passed": True},
+                "started_at": 1.0,
+                "completed_at": 2.0,
+                "project_id": "chat-project",
+            },
+            "batch-api": {
+                "status": "running",
+                "stage": "batch",
+                "message": "Batch direct run started with 2 generated test(s)",
+                "started_at": 1.0,
+                "result": {"child_job_ids": ["child-a", "child-b"]},
+                "completed_at": None,
+                "project_id": "chat-project",
+            },
+        }
+    )
+
+    running_response = client.get("/api-testing/jobs?status=running&project_id=chat-project")
+    assert running_response.status_code == 200
+    assert all(job["job_id"] != "batch-api" for job in running_response.json())
+
+    batch_response = client.get("/api-testing/jobs/batch-api")
+    assert batch_response.status_code == 200
+    data = batch_response.json()
+    assert data["status"] == "completed"
+    assert data["message"] == "Batch completed successfully with 2 job(s)."
+    assert [job["job_id"] for job in data["result"]["jobs"]] == ["child-a", "child-b"]
+
+
+def test_api_batch_job_reconciles_failed_child(api_testing_client):
+    client, api_testing, _tmp_path = api_testing_client
+    api_testing._api_jobs.update(
+        {
+            "child-pass": {
+                "status": "completed",
+                "stage": "done",
+                "message": "Test passed",
+                "started_at": 1.0,
+                "completed_at": 2.0,
+                "project_id": "chat-project",
+            },
+            "child-fail": {
+                "status": "failed",
+                "stage": "done",
+                "message": "Test failed",
+                "started_at": 1.0,
+                "completed_at": 2.0,
+                "project_id": "chat-project",
+            },
+            "batch-api": {
+                "status": "running",
+                "stage": "batch",
+                "message": "Batch direct run started with 2 generated test(s)",
+                "started_at": 1.0,
+                "result": {"child_job_ids": ["child-pass", "child-fail"]},
+                "completed_at": None,
+                "project_id": "chat-project",
+            },
+        }
+    )
+
+    response = client.get("/api-testing/jobs/batch-api")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "failed"
+    assert data["message"] == "Batch completed with 1 failed or missing job(s)."
+
+
+def test_api_batch_job_reconciles_missing_child_as_failed(api_testing_client):
+    client, api_testing, _tmp_path = api_testing_client
+    api_testing._api_jobs["batch-api"] = {
+        "status": "running",
+        "stage": "batch",
+        "message": "Batch generation started with 1 spec(s)",
+        "started_at": 1.0,
+        "result": {"child_job_ids": ["missing-child"]},
+        "completed_at": None,
+        "project_id": "chat-project",
+    }
+
+    response = client.get("/api-testing/jobs/batch-api")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "failed"
+    assert data["result"]["missing_job_ids"] == ["missing-child"]
+
+
+def test_api_batch_job_stays_running_while_child_is_active(api_testing_client):
+    client, api_testing, _tmp_path = api_testing_client
+    api_testing._api_jobs.update(
+        {
+            "child-active": {
+                "status": "running",
+                "stage": "executing",
+                "message": "Running API test...",
+                "started_at": 1.0,
+                "completed_at": None,
+                "project_id": "chat-project",
+            },
+            "batch-gen": {
+                "status": "running",
+                "stage": "batch",
+                "message": "Batch generation started with 1 spec(s)",
+                "started_at": 1.0,
+                "result": {"child_job_ids": ["child-active"]},
+                "completed_at": None,
+                "project_id": "chat-project",
+            },
+        }
+    )
+
+    response = client.get("/api-testing/jobs?status=running&project_id=chat-project")
+
+    assert response.status_code == 200
+    running_job_ids = {job["job_id"] for job in response.json()}
+    assert {"child-active", "batch-gen"} <= running_job_ids
+
+
+def test_bulk_generate_registers_child_jobs_before_worker_starts(api_testing_client, monkeypatch):
+    client, api_testing, tmp_path = api_testing_client
+    spec_dir = tmp_path / "specs" / "chat-project" / "api"
+    spec_dir.mkdir(parents=True)
+    (spec_dir / "demo.md").write_text(
+        "# Test: Demo\n\n## Type: API\n## Base URL: https://httpbin.org\n\n## Steps\n1. GET /get\n",
+        encoding="utf-8",
+    )
+
+    async def fake_generate(job_id: str, spec_path: str, project_id: str):
+        return None
+
+    monkeypatch.setattr(api_testing, "_run_generate_test", fake_generate)
+
+    response = client.post(
+        "/api-testing/specs/bulk-generate",
+        json={"project_id": "chat-project", "spec_names": ["demo.md"]},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    child_job_id = data["child_job_ids"][0]
+    assert data["status"] == "running"
+    assert api_testing._api_jobs[child_job_id]["batch_id"] == data["job_id"]
+    assert api_testing._api_jobs[child_job_id]["status"] == "running"
+
+    running_response = client.get("/api-testing/jobs?status=running&project_id=chat-project")
+    assert running_response.status_code == 200
+    running_job_ids = {job["job_id"] for job in running_response.json()}
+    assert {data["job_id"], child_job_id} <= running_job_ids
 
 
 def test_direct_api_run_classifies_infrastructure_failure_and_skips_healing(api_testing_client, monkeypatch):

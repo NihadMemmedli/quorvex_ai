@@ -740,6 +740,8 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         targetUrl: z.string().url(),
         loginUrl: z.string().url().optional(),
         credentials: z.record(z.unknown()).optional(),
+        ...browserAuthToolFields,
+        testDataRefs: z.array(z.string()).optional().describe('Optional project test data refs to include in generation context'),
         forceRegenerate: z.boolean().optional().default(false),
       }),
     }),

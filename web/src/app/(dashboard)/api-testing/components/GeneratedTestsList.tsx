@@ -204,7 +204,8 @@ export default React.memo(function GeneratedTestsList({
                     [data.job_id]: {
                         job_id: data.job_id,
                         status: 'running',
-                        message: healOnFailure ? 'Running test with healing...' : data.message,
+                        stage: 'executing',
+                        message: data.message || (healOnFailure ? 'Running API test with healing...' : 'Running API test...'),
                     },
                 }));
                 pollJob(data.job_id, () => {
