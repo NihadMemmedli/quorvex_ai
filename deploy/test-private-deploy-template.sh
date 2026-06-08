@@ -17,6 +17,7 @@ replace_placeholders() {
     s/replace-with-strong-initial-admin-password/TestAdminPassword123/;
     s/replace-with-strong-postgres-password/TestPostgresPassword123/g;
     s/replace-with-strong-minio-password/TestMinioPassword123/;
+    s/replace-with-zai-api-key/test-zai-api-key/g;
     s/replace-with-llm-api-key/test-llm-api-key/g;
     s/replace-with-light-model/test-light-model/g;
     s/replace-with-standard-model/test-standard-model/g;
@@ -76,7 +77,23 @@ log "Inspecting rendered Compose for release images and same-origin frontend mod
 
 grep -q 'ghcr.io/test-org/quorvex-ai/backend:v1.2.3' "${TMP_DIR}/rendered-compose.yml"
 grep -q 'ghcr.io/test-org/quorvex-ai/frontend:v1.2.3' "${TMP_DIR}/rendered-compose.yml"
+grep -q 'NEXT_PUBLIC_API_URL: ""' "${TMP_DIR}/rendered-compose.yml"
 grep -q 'INTERNAL_API_URL: http://backend:8001' "${TMP_DIR}/rendered-compose.yml"
+grep -q 'VNC_PUBLIC_WS_URL: wss://mytest.idda.az/websockify' "${TMP_DIR}/rendered-compose.yml"
+grep -q 'RECORDER_BROWSER_URL: ""' "${TMP_DIR}/rendered-compose.yml"
+grep -q 'HERMES_API_URL: http://hermes:8642' "${TMP_DIR}/rendered-compose.yml"
+if rg -n 'NEXT_PUBLIC_API_URL: .*(localhost|127\.0\.0\.1|host\.docker\.internal|backend:8001|http://)' "${TMP_DIR}/rendered-compose.yml"; then
+  printf 'Rendered frontend browser API URL is not company safe.\n' >&2
+  exit 1
+fi
+if rg -n 'VNC_PUBLIC_WS_URL: (""|ws://localhost|ws://127\.0\.0\.1|.*host\.docker\.internal)' "${TMP_DIR}/rendered-compose.yml"; then
+  printf 'Rendered VNC websocket URL is not company safe.\n' >&2
+  exit 1
+fi
+if rg -n 'RECORDER_BROWSER_URL: (http://localhost|http://127\.0\.0\.1|.*host\.docker\.internal|.*:6080)' "${TMP_DIR}/rendered-compose.yml"; then
+  printf 'Rendered recorder browser URL exposes a direct/local VNC endpoint.\n' >&2
+  exit 1
+fi
 if grep -q "${ROOT_DIR}/specs\\|${ROOT_DIR}/tests\\|${ROOT_DIR}/prds" "${TMP_DIR}/rendered-compose.yml"; then
   printf 'Rendered standard deployment still references public checkout data directories.\n' >&2
   exit 1

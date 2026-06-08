@@ -8,7 +8,7 @@ services:
     image: ${QUORVEX_BACKEND_IMAGE:?Set QUORVEX_BACKEND_IMAGE}
     build: !reset null
     pull_policy: always
-    ports:
+    ports: !override
       - "${BACKEND_BIND:-127.0.0.1:8001}:8001"
       - "${VNC_BIND:-127.0.0.1:6080}:6080"
     environment:
@@ -16,6 +16,7 @@ services:
       ALLOW_REGISTRATION: "false"
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Set ALLOWED_ORIGINS}
       VNC_PUBLIC_WS_URL: ${VNC_PUBLIC_WS_URL:?Set VNC_PUBLIC_WS_URL}
+      RECORDER_BROWSER_URL: ${RECORDER_BROWSER_URL:-}
     volumes:
       - ${QUORVEX_DATA_ROOT:-./data}/runs:/app/runs
       - ${QUORVEX_DATA_ROOT:-./data}/logs:/app/logs
@@ -30,7 +31,7 @@ services:
     image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
     build: !reset null
     pull_policy: always
-    ports:
+    ports: !override
       - "${BACKEND_BIND:-127.0.0.1:8001}:8001"
     environment:
       REQUIRE_AUTH: "true"
@@ -134,7 +135,7 @@ services:
     image: ${QUORVEX_FRONTEND_IMAGE:?Set QUORVEX_FRONTEND_IMAGE}
     build: !reset null
     pull_policy: always
-    ports:
+    ports: !override
       - "${FRONTEND_BIND:-127.0.0.1:3000}:3000"
     environment:
       NEXT_PUBLIC_API_URL: ${QUORVEX_PUBLIC_API_URL:-}
@@ -166,22 +167,23 @@ services:
       - ${QUORVEX_DATA_ROOT:-./data}/redis:/data
 
   minio:
-    ports:
+    ports: !override
       - "${MINIO_API_BIND:-127.0.0.1:9000}:9000"
       - "${MINIO_CONSOLE_BIND:-127.0.0.1:9001}:9001"
     volumes:
       - ${QUORVEX_DATA_ROOT:-./data}/minio:/data
 
   temporal:
-    ports:
+    ports: !override
       - "${TEMPORAL_BIND:-127.0.0.1:7233}:7233"
 
   temporal-ui:
-    ports:
+    ports: !override
       - "${TEMPORAL_UI_BIND:-127.0.0.1:8233}:8080"
 
   hermes:
-    ports:
+    container_name: ${HERMES_CONTAINER_NAME:-quorvex-hermes}
+    ports: !override
       - "${HERMES_API_BIND:-127.0.0.1:8642}:8642"
       - "${HERMES_DASHBOARD_BIND:-127.0.0.1:9119}:9119"
     volumes:
@@ -191,5 +193,5 @@ services:
       - ${QUORVEX_DATA_ROOT:-./data}/tests:/workspace/tests
 
   zap:
-    ports:
+    ports: !override
       - "${ZAP_BIND:-127.0.0.1:8090}:8090"

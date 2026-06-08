@@ -4,8 +4,10 @@ import sys
 import types
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-workflow-tests")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 if "slowapi" not in sys.modules:
     slowapi = types.ModuleType("slowapi")
@@ -15,6 +17,12 @@ if "slowapi" not in sys.modules:
     class _TestLimiter:
         def __init__(self, *args, **kwargs):
             self._storage = types.SimpleNamespace(expirations={})
+
+        def limit(self, *args, **kwargs):
+            def decorator(func):
+                return func
+
+            return decorator
 
     class _TestRateLimitExceeded(Exception):
         retry_after = 60
@@ -285,9 +293,11 @@ def test_workflow_step_catalog_exposes_dynamic_ui_metadata():
     assert custom_agent["auto_wait_defaults"]["timeout_seconds"] == 3600
     assert custom_agent["default_input"]["prompt"]
     assert "findings" in custom_agent["output_schema"]["tokens"]
+    assert "requirements" in custom_agent["output_schema"]["tokens"]
     assert any(field["control"] == "agent_definition" for field in custom_agent["ui_schema"]["fields"])
     assert "token_catalog" in custom_agent["output_schema"]
     assert any(token["path"] == "structured_report.findings" for token in custom_agent["output_schema"]["token_catalog"])
+    assert any(token["path"] == "structured_report.requirements" for token in custom_agent["output_schema"]["token_catalog"])
 
     generate_requirements = next(item for item in catalog if item["type"] == "generate_requirements")
     assert generate_requirements["default_input"]["exploration_session_id"] == ""
@@ -492,6 +502,55 @@ async def test_dispatch_steps_inherit_workflow_test_data_refs(monkeypatch):
 
     assert calls[0][1]["test_data_refs"] == ["wetravel-auth.valid-user"]
     assert calls[1][1]["test_data_refs"] == ["wetravel-auth.valid-user"]
+
+
+@pytest.mark.asyncio
+async def test_materialize_agent_report_creates_requirements_from_structured_requirements(monkeypatch):
+    calls: list[tuple[str, dict, str | None]] = []
+
+    async def fake_post_json(path: str, body: dict, *, expected_kind: str | None = None):
+        calls.append((path, body, expected_kind))
+        if path.startswith("/requirements/check-duplicate"):
+            return {"has_exact_match": False}
+        if path.startswith("/requirements?"):
+            return {"id": 42, "req_code": "REQ-042", **body}
+        raise AssertionError(f"Unexpected path: {path}")
+
+    monkeypatch.setattr("orchestrator.services.workflow_runner._post_json", fake_post_json)
+
+    result = await _dispatch_step(
+        "materialize_agent_report",
+        {"source_step": "wait_agent", "mode": "requirements", "max_items": 5, "priority_threshold": "medium"},
+        "project-1",
+        {
+            "steps": {
+                "wait_agent": {
+                    "structured_report": {
+                        "requirements": [
+                            {
+                                "id": "R-001",
+                                "title": "Checkout preserves cart state",
+                                "description": "Cart contents remain after address validation.",
+                                "priority": "high",
+                                "expected": "The cart still contains selected products.",
+                                "evidence": "Observed cart summary remained visible.",
+                            }
+                        ],
+                        "findings": [{"id": "F-001", "title": "Low priority note", "severity": "low"}],
+                        "test_ideas": [],
+                    }
+                }
+            }
+        },
+        {"handler_config": {"action": "materialize_agent_report"}},
+    )
+
+    assert result["created_requirements"][0]["req_code"] == "REQ-042"
+    create_call = next(call for call in calls if call[0].startswith("/requirements?"))
+    assert create_call[1]["title"] == "Checkout preserves cart state"
+    assert create_call[1]["source_type"] == "custom_agent_report"
+    assert create_call[1]["confidence"] == 0.72
+    assert create_call[1]["acceptance_criteria"] == ["The cart still contains selected products."]
 
 
 @pytest.mark.asyncio

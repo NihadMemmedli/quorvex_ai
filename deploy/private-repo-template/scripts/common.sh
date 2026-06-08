@@ -35,6 +35,8 @@ load_env_file() {
   QUORVEX_IMAGE_NAMESPACE="${QUORVEX_IMAGE_NAMESPACE:-ghcr.io/example-org/quorvex-ai}"
   QUORVEX_DATA_ROOT="${QUORVEX_DATA_ROOT:-${DEPLOY_ROOT}/data}"
   QUORVEX_COMPOSE_PROFILES="${QUORVEX_COMPOSE_PROFILES:-standard}"
+  OVERLAY_FILE="${QUORVEX_OVERLAY_FILE:-${OVERLAY_FILE}}"
+  REVERSE_PROXY_FILE="${QUORVEX_REVERSE_PROXY_FILE:-${DEPLOY_ROOT}/reverse-proxy/mytest.idda.az.conf}"
   PUBLIC_URL="${QUORVEX_PUBLIC_URL:-${PUBLIC_URL}}"
   BASE_COMPOSE_FILE="${QUORVEX_BASE_COMPOSE_FILE:-${QUORVEX_SOURCE_DIR}/docker-compose.prod.yml}"
   apply_llm_provider_mapping
@@ -145,7 +147,7 @@ has_real_env_value() {
   local value="${1:-}"
   [ -n "${value}" ] || return 1
   case "${value}" in
-    *replace-with*|your-*|example-*|placeholder-*)
+    *replace-with*|your-*|example-*|*example-org*|placeholder-*)
       return 1
       ;;
   esac
@@ -405,6 +407,26 @@ port_from_bind() {
   printf '%s' "${bind##*:}"
 }
 
+url_from_bind() {
+  local bind="$1"
+  local path="${2:-}"
+  local host port
+
+  port="$(port_from_bind "${bind}")"
+  if [ "${bind}" = "${port}" ]; then
+    host="127.0.0.1"
+  else
+    host="${bind%:*}"
+  fi
+  case "${host}" in
+    ""|"0.0.0.0"|"[::]"|"::")
+      host="127.0.0.1"
+      ;;
+  esac
+
+  printf 'http://%s:%s%s' "${host}" "${port}" "${path}"
+}
+
 check_port_available() {
   local label="$1"
   local bind="$2"
@@ -483,8 +505,8 @@ wait_for_url() {
 }
 
 health_checks() {
-  wait_for_url backend "${QUORVEX_BACKEND_HEALTH_URL:-http://127.0.0.1:8001/health}" "${QUORVEX_HEALTH_ATTEMPTS:-60}" 5
-  wait_for_url frontend "${QUORVEX_FRONTEND_HEALTH_URL:-http://127.0.0.1:3000}" "${QUORVEX_HEALTH_ATTEMPTS:-60}" 5
+  wait_for_url backend "${QUORVEX_BACKEND_HEALTH_URL:-$(url_from_bind "${BACKEND_BIND:-127.0.0.1:8001}" "/health")}" "${QUORVEX_HEALTH_ATTEMPTS:-60}" 5
+  wait_for_url frontend "${QUORVEX_FRONTEND_HEALTH_URL:-$(url_from_bind "${FRONTEND_BIND:-127.0.0.1:3000}")}" "${QUORVEX_HEALTH_ATTEMPTS:-60}" 5
 
   if [ "${QUORVEX_SKIP_PUBLIC_CHECK:-false}" != "true" ]; then
     wait_for_url public "${PUBLIC_URL}" "${QUORVEX_PUBLIC_HEALTH_ATTEMPTS:-24}" 5

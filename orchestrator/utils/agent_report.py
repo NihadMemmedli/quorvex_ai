@@ -33,11 +33,22 @@ After your concise human-readable summary, include exactly one fenced JSON block
       "expected": "expected result",
       "source_finding_id": "optional"
     }],
+    "requirements": [{
+      "title": "candidate requirement",
+      "description": "intended behavior inferred from observed evidence",
+      "category": "authentication|navigation|crud|validation|functional|security|performance|accessibility|other",
+      "priority": "critical|high|medium|low",
+      "acceptance_criteria": ["criterion 1", "criterion 2"],
+      "page": "/path-or-url",
+      "evidence": "specific observed evidence",
+      "confidence": 0.7
+    }],
     "evidence": [{"type": "screenshot|network|console|note|artifact", "label": "short label", "value": "path or text"}],
     "follow_up_actions": [{"label": "action label", "action": "create_spec|rerun_agent|inspect_page", "target": "id or URL"}]
   }
 }
-Use empty arrays when nothing was found. Do not invent findings that were not observed.
+Use empty arrays when nothing was found. Requirements are candidate requirements for human review; do not
+invent requirements that are not supported by observed evidence.
 """
 
 
@@ -114,6 +125,68 @@ def _normalize_report_item(
         steps = normalized.get("steps")
         normalized["steps"] = [_clean_text(step, 300) for step in _as_report_list(steps) if _clean_text(step, 300)]
         normalized["expected"] = _clean_text(normalized.get("expected") or normalized.get("expected_result") or normalized.get("assertion"))
+    return normalized
+
+
+def _normalize_requirement_confidence(value: Any) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return max(0.0, min(float(value), 1.0))
+    normalized = _clean_text(value, 20).lower()
+    if normalized == "high":
+        return 0.86
+    if normalized == "low":
+        return 0.58
+    if normalized == "medium":
+        return 0.72
+    try:
+        return max(0.0, min(float(normalized), 1.0))
+    except (TypeError, ValueError):
+        return 0.7
+
+
+def _normalize_report_requirement(
+    item: Any,
+    index: int,
+    *,
+    default_page: str = "",
+) -> dict[str, Any]:
+    if isinstance(item, dict):
+        normalized = dict(item)
+    else:
+        normalized = {"title": _clean_text(item, 180), "description": _clean_text(item)}
+
+    normalized["id"] = _clean_text(normalized.get("id") or f"R-{index:03d}", 40)
+    normalized["title"] = _clean_text(
+        normalized.get("title")
+        or normalized.get("name")
+        or normalized.get("requirement")
+        or normalized.get("description"),
+        180,
+    )
+    normalized["description"] = _clean_text(
+        normalized.get("description") or normalized.get("summary") or normalized.get("evidence"),
+        2000,
+    )
+    normalized["category"] = _clean_text(normalized.get("category") or "functional", 80).lower() or "functional"
+    priority = _clean_text(normalized.get("priority") or normalized.get("severity") or "medium", 20).lower()
+    normalized["priority"] = priority if priority in {"critical", "high", "medium", "low"} else "medium"
+    criteria = normalized.get("acceptance_criteria") or normalized.get("criteria") or normalized.get("acceptanceCriteria")
+    normalized["acceptance_criteria"] = [
+        _clean_text(criterion, 500)
+        for criterion in _as_report_list(criteria)
+        if _clean_text(criterion, 500)
+    ]
+    if not normalized["acceptance_criteria"]:
+        expected = _clean_text(normalized.get("expected") or normalized.get("expected_result"), 500)
+        if expected:
+            normalized["acceptance_criteria"] = [expected]
+    normalized["page"] = _clean_text(normalized.get("page") or normalized.get("url") or default_page, 500)
+    evidence = normalized.get("evidence")
+    if isinstance(evidence, list):
+        normalized["evidence"] = "; ".join(_clean_text(part, 300) for part in evidence if _clean_text(part, 300))
+    else:
+        normalized["evidence"] = _clean_text(evidence, 1200)
+    normalized["confidence"] = _normalize_requirement_confidence(normalized.get("confidence"))
     return normalized
 
 
@@ -227,6 +300,7 @@ def _heuristic_custom_report(output: str, config: dict[str, Any], artifacts: lis
         "pages_checked": pages,
         "findings": findings,
         "test_ideas": test_ideas,
+        "requirements": [],
         "evidence": evidence,
         "follow_up_actions": [
             {
@@ -281,6 +355,12 @@ def _normalize_custom_agent_report(
     ]
     test_ideas = [item for item in test_ideas if item.get("title")]
 
+    requirements = [
+        _normalize_report_requirement(item, idx + 1, default_page=_clean_text(config.get("url"), 500))
+        for idx, item in enumerate(_as_report_list(report.get("requirements")))
+    ]
+    requirements = [item for item in requirements if item.get("title")]
+
     evidence = []
     for idx, item in enumerate(_as_report_list(report.get("evidence")), start=1):
         if isinstance(item, dict):
@@ -324,6 +404,7 @@ def _normalize_custom_agent_report(
         "pages_checked": pages,
         "findings": findings,
         "test_ideas": test_ideas,
+        "requirements": requirements,
         "evidence": evidence,
         "follow_up_actions": follow_up_actions,
         "parse_status": "structured",

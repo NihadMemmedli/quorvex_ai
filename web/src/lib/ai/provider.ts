@@ -186,7 +186,7 @@ export function getActiveOpenAIProvider(runtime?: ChatRuntimeSettings) {
 
 export function getActiveHermesProvider(runtime?: ChatRuntimeSettings) {
   const apiKey = (runtime?.hermes_api_key || process.env.HERMES_API_KEY || 'local-hermes').trim();
-  const rawBaseURL = normalizeOpenAIBaseURL(runtime?.hermes_api_url || process.env.HERMES_API_URL || 'http://127.0.0.1:8642') || 'http://127.0.0.1:8642';
+  const rawBaseURL = normalizeOpenAIBaseURL(runtime?.hermes_api_url || process.env.HERMES_API_URL || 'http://hermes:8642') || 'http://hermes:8642';
   const baseURL = rawBaseURL.endsWith('/v1') ? rawBaseURL : `${rawBaseURL}/v1`;
   const provider = createOpenAI({
     apiKey,

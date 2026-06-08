@@ -19,16 +19,23 @@ Deploy Quorvex AI to an on-premises or private network environment with company 
 
 ## Recommended: Private Deploy Repo
 
-Keep local development in the public/source repo unchanged. `make start` still
-runs the local mounted-code stack. For production, use a separate private deploy
-repo on the server and copy the template from
-`deploy/private-repo-template/`.
-
-First setup:
+Keep local development in the public/source repo unchanged. For production, use
+a separate private deploy repo on the server. The public installer can create
+missing private deployment files from `deploy/private-repo-template/`, report
+what was missing, run bootstrap checks, and dry-run a tagged release:
 
 ```bash
-./scripts/bootstrap.sh
+GITHUB_TOKEN=... \
+QUORVEX_DEPLOY_REPO=<owner>/<private-deploy-repo> \
+QUORVEX_DOMAIN=quorvex.example.com \
+QUORVEX_VERSION=v1.2.3 \
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/NihadMemmedli/quorvex_ai/main/deploy/install-server.sh)"
 ```
+
+The command above does not start or replace containers. It validates the private
+repo and runs `./scripts/deploy.sh --dry-run v1.2.3`. To run the
+runtime-changing deployment in the same command, add
+`QUORVEX_CONFIRM_DEPLOY=true`.
 
 Normal release after the public repository tag has published GHCR images:
 
@@ -42,10 +49,9 @@ Emergency rollback:
 ./scripts/rollback.sh
 ```
 
-The private repo stores real files such as
-`env/quorvex.prod.env`, `compose/docker-compose.mytest.yml`,
-`reverse-proxy/mytest.idda.az.conf`, and `.state/current-version`. Do not commit
-those files to the public repo.
+The private repo stores real files such as `env/quorvex.prod.env`,
+`compose/docker-compose.<site>.yml`, `reverse-proxy/<domain>.conf`, and
+`.state/current-version`. Do not commit those files to the public repo.
 
 ## Step 1: Prepare Code for Internal Git
 
@@ -105,52 +111,42 @@ sudo systemctl daemon-reload
 sudo systemctl restart docker
 ```
 
-## Step 3: Clone and Configure
+## Step 3: Run The Installer Dry-Run
 
 ```bash
-git clone https://gitlab.example.com/qa/quorvex_ai.git /opt/quorvex_ai
-cd /opt/quorvex_ai
-
-# Create production environment file
-cp .env.prod.example .env.prod
+GITHUB_TOKEN=... \
+QUORVEX_DEPLOY_REPO=<owner>/<private-deploy-repo> \
+QUORVEX_DOMAIN=quorvex.example.com \
+QUORVEX_VERSION=v1.2.3 \
+QUORVEX_ACTIVE_LLM_PROVIDER=zai \
+ZAI_API_KEY=... \
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/NihadMemmedli/quorvex_ai/main/deploy/install-server.sh)"
 ```
 
-Edit `.env.prod` with production values:
+The installer clones or updates the public repo and private deploy repo, reports
+missing private files, creates missing files from templates, generates local app
+secrets if placeholders remain, runs bootstrap checks, and dry-runs the release.
+It keeps browser API URLs blank for same-origin company nginx mode.
+
+The resulting private env contains these deployment values:
 
 ```bash title=".env.prod"
-# Required secrets -- generate secure values
 QUORVEX_ACTIVE_LLM_PROVIDER=zai
-ZAI_API_KEY=<your-zai-api-key>
-# The private deploy scripts map the active provider key into the runtime
-# QUORVEX_LLM_API_KEY value. If you run Docker Compose directly from .env.prod,
-# mirror the active provider key into QUORVEX_LLM_API_KEY as well.
-JWT_SECRET_KEY=$(openssl rand -hex 32)
-POSTGRES_PASSWORD=$(openssl rand -base64 32)
-MINIO_ROOT_PASSWORD=$(openssl rand -base64 32)
-
-# Admin user (created on first startup only)
-INITIAL_ADMIN_EMAIL=admin@example.com
-INITIAL_ADMIN_PASSWORD=<strong-password>
-
-# Security
 REQUIRE_AUTH=true
 ALLOW_REGISTRATION=false
-
-# URLs -- adjust to your dedicated company subdomain
 ALLOWED_ORIGINS=https://quorvex.example.com
 TEMPORAL_CORS_ORIGINS=https://quorvex.example.com
 VNC_PUBLIC_WS_URL=wss://quorvex.example.com/websockify
-
-# Leave blank for company-nginx deployments. Browser API calls use
-# same-origin /backend-proxy, and Next.js routes to http://backend:8001.
+RECORDER_BROWSER_URL=
 QUORVEX_PUBLIC_API_URL=
 NEXT_PUBLIC_API_URL=
-
-# Corporate outbound proxy (only if outbound AI/API calls require it)
-# HTTP_PROXY=http://proxy.example.com:8080
-# HTTPS_PROXY=http://proxy.example.com:8080
+INTERNAL_API_URL=http://backend:8001
 NO_PROXY=localhost,127.0.0.1,db,redis,minio,zap,backend,frontend,temporal,hermes
 ```
+
+If provider credentials are not already stored in the private repo, pass the
+matching provider key in the installer environment. Secret values are not
+printed.
 
 ## Step 4: Configure Company Nginx
 
@@ -162,6 +158,10 @@ Required proxy routes:
 - `https://quorvex.example.com/websockify` -> `http://<app-server>:6080/websockify`
 
 The `/websockify` location must preserve WebSocket upgrade headers. Use long proxy timeouts for dashboard/backend requests and large enough upload limits for artifacts and specs.
+
+Leave `RECORDER_BROWSER_URL` blank unless company nginx also proxies
+`/vnc.html` and the noVNC assets. If that route is added, set
+`RECORDER_BROWSER_URL=https://quorvex.example.com/vnc.html?autoconnect=true&resize=scale`.
 
 ```nginx
 map $http_upgrade $connection_upgrade {
@@ -215,20 +215,14 @@ server {
 }
 ```
 
-## Step 5: Build and Start
+## Step 5: Dry-Run Or Deploy The Release
 
 ```bash
-# Validate Compose interpolation before starting
-docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.dev-override.yml --profile standard --profile security config --quiet
+# From the private deploy repo: validate only
+./scripts/deploy.sh --dry-run v1.2.3
 
-# Build images when needed
-make prod-build-no-cache
-
-# Start the app runtime behind company nginx
-make start
-
-# Manual equivalent of make start:
-docker compose --env-file .env.prod -f docker-compose.prod.yml -f docker-compose.dev-override.yml --profile standard --profile security up -d --no-build
+# From the private deploy repo: pull images, back up, and start/update services
+./scripts/deploy.sh v1.2.3
 ```
 
 Services started:
@@ -269,7 +263,7 @@ Company-workstation verification:
 2. Confirm dashboard API calls work without CORS errors
 3. Start a small browser-backed run
 4. Confirm the live browser view connects through `wss://quorvex.example.com/websockify`
-5. Check the browser console and network panel for failed `localhost`, `127.0.0.1`, or mixed-content requests
+5. Check the browser console and network panel for failed `localhost`, `127.0.0.1`, direct `:6080`, or mixed-content requests
 
 Backup verification:
 
@@ -325,6 +319,10 @@ Confirm the full deployment:
 4. Live browser view connects through the company `/websockify` proxy
 5. `make backup-full` creates a backup visible in MinIO console (port 9001)
 6. Health monitoring cron is active: `crontab -l | grep health-monitor`
+
+Do not use `docker-compose.swarm.yml`, `docker-compose.minimal.yml`, or
+`docker-compose.autopilot-stable.yml` for company deployment unless they are
+explicitly hardened for same-origin API routing and company VNC URLs.
 
 ## Related Guides
 

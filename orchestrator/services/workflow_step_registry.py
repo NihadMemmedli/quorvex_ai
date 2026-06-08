@@ -332,12 +332,14 @@ BUILTIN_STEP_TYPES: dict[str, dict[str, Any]] = {
         "handler_kind": "agent_run",
         "handler_config": {"external_kind": "agent_run"},
         "output_schema": _output_schema(
-            ["findings", "test_ideas"],
+            ["findings", "test_ideas", "requirements"],
             [
                 _token("findings", "Findings", "array", "Findings extracted from the custom agent report."),
                 _token("test_ideas", "Test Ideas", "array", "Test ideas extracted from the custom agent report."),
+                _token("requirements", "Requirements", "array", "Candidate requirements extracted from the custom agent report."),
                 _token("structured_report.findings", "Structured Findings", "array", "Findings inside the structured report."),
                 _token("structured_report.test_ideas", "Structured Test Ideas", "array", "Test ideas inside the structured report."),
+                _token("structured_report.requirements", "Structured Requirements", "array", "Candidate requirements inside the structured report."),
             ],
         ),
     },
@@ -369,13 +371,15 @@ BUILTIN_STEP_TYPES: dict[str, dict[str, Any]] = {
         "handler_kind": "wait_for_status",
         "handler_config": {},
         "output_schema": _output_schema(
-            ["result", "findings", "test_ideas"],
+            ["result", "findings", "test_ideas", "requirements"],
             [
                 _token("result", "Child Result", "object", "Raw child job status response."),
                 _token("findings", "Findings", "array", "Findings extracted from an agent child job."),
                 _token("test_ideas", "Test Ideas", "array", "Test ideas extracted from an agent child job."),
+                _token("requirements", "Requirements", "array", "Candidate requirements extracted from an agent child job."),
                 _token("structured_report.findings", "Structured Findings", "array", "Findings inside an agent structured report."),
                 _token("structured_report.test_ideas", "Structured Test Ideas", "array", "Test ideas inside an agent structured report."),
+                _token("structured_report.requirements", "Structured Requirements", "array", "Candidate requirements inside an agent structured report."),
             ],
         ),
     },

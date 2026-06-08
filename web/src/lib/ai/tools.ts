@@ -1195,7 +1195,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
     }),
 
     getAgentRunReport: tool({
-      description: 'Get the structured QA report for a custom agent run, including findings, pages checked, test ideas, evidence, and raw output.',
+      description: 'Get the structured QA report for a custom agent run, including findings, candidate requirements, pages checked, test ideas, evidence, and raw output.',
       inputSchema: z.object({
         runId: z.string().describe('The agent run ID'),
       }),
@@ -1206,11 +1206,11 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
     }),
 
     searchAgentReports: tool({
-      description: 'Search custom agent structured reports for findings, test ideas, pages, evidence, or follow-up actions.',
+      description: 'Search custom agent structured reports for findings, candidate requirements, test ideas, pages, evidence, or follow-up actions.',
       inputSchema: z.object({
         query: z.string().optional().describe('Text to search for'),
         severity: z.enum(['critical', 'high', 'medium', 'low', 'info']).optional().describe('Finding severity or test priority filter'),
-        itemType: z.enum(['finding', 'test_idea', 'page', 'evidence', 'action']).optional().describe('Structured report item type'),
+        itemType: z.enum(['finding', 'test_idea', 'requirement', 'page', 'evidence', 'action']).optional().describe('Structured report item type'),
         limit: z.number().optional().default(30),
       }),
       execute: async ({ query, severity, itemType, limit }): Promise<ToolResult> => {

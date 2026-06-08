@@ -135,7 +135,7 @@ interface SpecResult {
 }
 
 type AuthType = 'none' | 'credentials' | 'session';
-type CustomResultTab = 'overview' | 'findings' | 'test_ideas' | 'evidence' | 'raw';
+type CustomResultTab = 'overview' | 'findings' | 'test_ideas' | 'requirements' | 'evidence' | 'raw';
 type ReportSpecBrowserAuthMode = 'session' | 'project_default' | 'none';
 
 interface ReportSpecBrowserAuthSelection {
@@ -171,6 +171,21 @@ interface ReportTestIdea {
     source_finding_id?: string;
 }
 
+interface ReportRequirement {
+    id: string;
+    title: string;
+    description?: string;
+    category?: string;
+    priority?: string;
+    acceptance_criteria?: string[];
+    page?: string;
+    evidence?: string;
+    confidence?: number | string;
+    imported_requirement_id?: number;
+    imported_requirement_code?: string;
+    imported_at?: string;
+}
+
 interface ReportEvidence {
     id?: string;
     type?: string;
@@ -184,6 +199,7 @@ interface StructuredAgentReport {
     pages_checked?: ReportPage[];
     findings?: ReportFinding[];
     test_ideas?: ReportTestIdea[];
+    requirements?: ReportRequirement[];
     evidence?: ReportEvidence[];
     follow_up_actions?: { id?: string; label?: string; action?: string; target?: string }[];
     parse_status?: string;
@@ -390,6 +406,7 @@ function getStructuredReport(run: AgentRun): StructuredAgentReport {
         pages_checked: [],
         findings: [],
         test_ideas: [],
+        requirements: [],
         evidence: [],
         follow_up_actions: [],
         parse_status: 'raw',
@@ -480,22 +497,31 @@ function CustomAgentReportView({
     onTabChange,
     onAskAssistant,
     onCreateSpecFromReport,
+    onImportRequirements,
+    importingRequirementIds,
+    importError,
 }: {
     run: AgentRun;
     activeTab: CustomResultTab;
     onTabChange: (tab: CustomResultTab) => void;
     onAskAssistant: (prompt: string) => void;
     onCreateSpecFromReport: (item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test_idea') => void;
+    onImportRequirements: (itemIds?: string[]) => void;
+    importingRequirementIds: string[];
+    importError?: string | null;
 }) {
     const report = getStructuredReport(run);
     const findings = report.findings || [];
     const testIdeas = report.test_ideas || [];
+    const requirements = report.requirements || [];
+    const unimportedRequirements = requirements.filter(item => !item.imported_requirement_id && !item.imported_requirement_code);
     const pages = report.pages_checked || [];
     const evidence = report.evidence || [];
     const tabs: { key: CustomResultTab; label: string }[] = [
         { key: 'overview', label: 'Overview' },
         { key: 'findings', label: `Findings ${findings.length}` },
         { key: 'test_ideas', label: `Test Ideas ${testIdeas.length}` },
+        { key: 'requirements', label: `Requirements ${requirements.length}` },
         { key: 'evidence', label: `Evidence ${evidence.length}` },
         { key: 'raw', label: 'Raw Output' },
     ];
@@ -556,6 +582,7 @@ function CustomAgentReportView({
                             { label: 'Pages Checked', value: pages.length, icon: Eye },
                             { label: 'Findings', value: findings.length, icon: Bug },
                             { label: 'Test Ideas', value: testIdeas.length, icon: Lightbulb },
+                            { label: 'Requirements', value: requirements.length, icon: CheckCircle2 },
                             { label: 'Tool Calls', value: run.result?.tool_calls?.length || 0, icon: Wrench },
                         ].map(item => {
                             const Icon = item.icon;
@@ -638,6 +665,72 @@ function CustomAgentReportView({
                 </div>
             )}
 
+            {activeTab === 'requirements' && (
+                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                    {importError && (
+                        <div style={{ padding: '0.75rem 0.9rem', border: '1px solid var(--danger)', borderRadius: '8px', color: 'var(--danger)', background: 'var(--danger-muted)', fontSize: '0.84rem' }}>
+                            {importError}
+                        </div>
+                    )}
+                    {requirements.length > 0 && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>
+                                {unimportedRequirements.length} candidate{unimportedRequirements.length === 1 ? '' : 's'} ready for review import.
+                            </div>
+                            <ReportActionButton
+                                onClick={() => onImportRequirements()}
+                                label={importingRequirementIds.includes('__all__') ? 'Importing...' : 'Import Requirements'}
+                                icon={CheckCircle2}
+                                disabled={unimportedRequirements.length === 0 || importingRequirementIds.includes('__all__')}
+                            />
+                        </div>
+                    )}
+                    {requirements.length === 0 ? (
+                        <EmptyReportState text="No structured requirements were reported." />
+                    ) : requirements.map(requirement => {
+                        const imported = Boolean(requirement.imported_requirement_id || requirement.imported_requirement_code);
+                        const pending = importingRequirementIds.includes('__all__') || importingRequirementIds.includes(requirement.id);
+                        return (
+                            <div key={requirement.id} style={{ padding: '0.9rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.45rem' }}>
+                                    <div style={{ fontWeight: 700, fontSize: '0.92rem' }}>{requirement.id}: {requirement.title}</div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
+                                        {requirement.category && <span style={{ color: 'var(--text-secondary)', fontWeight: 700, fontSize: '0.74rem', textTransform: 'uppercase' }}>{requirement.category}</span>}
+                                        <span style={{ color: severityColor(requirement.priority), fontWeight: 800, fontSize: '0.78rem', textTransform: 'uppercase' }}>{requirement.priority || 'medium'}</span>
+                                    </div>
+                                </div>
+                                {requirement.page && <div style={{ fontSize: '0.78rem', color: 'var(--primary)', marginBottom: '0.35rem', overflowWrap: 'anywhere' }}>{requirement.page}</div>}
+                                {requirement.description && <p style={{ margin: '0 0 0.45rem', color: 'var(--text-secondary)', fontSize: '0.85rem', lineHeight: 1.5 }}>{requirement.description}</p>}
+                                {requirement.acceptance_criteria && requirement.acceptance_criteria.length > 0 && (
+                                    <ul style={{ margin: '0.35rem 0 0.55rem 1.15rem', color: 'var(--text-secondary)', fontSize: '0.84rem', lineHeight: 1.45 }}>
+                                        {requirement.acceptance_criteria.map((criterion, i) => <li key={`${requirement.id}-criterion-${i}`}>{criterion}</li>)}
+                                    </ul>
+                                )}
+                                {requirement.evidence && <p style={{ margin: '0 0 0.7rem', color: 'var(--text)', fontSize: '0.82rem', lineHeight: 1.45 }}><strong>Evidence:</strong> {requirement.evidence}</p>}
+                                {imported && (
+                                    <div style={{ marginBottom: '0.7rem', fontSize: '0.82rem', color: 'var(--success)', display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                        <CheckCircle2 size={14} />
+                                        Imported as
+                                        <a href={`/requirements${requirement.imported_requirement_id ? `?highlight=${requirement.imported_requirement_id}` : ''}`} style={{ color: 'var(--primary)', fontWeight: 700 }}>
+                                            {requirement.imported_requirement_code || `REQ-${requirement.imported_requirement_id}`}
+                                        </a>
+                                    </div>
+                                )}
+                                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                    <ReportActionButton onClick={() => onAskAssistant(`Review candidate requirement ${requirement.id} from custom agent run ${run.id}: ${requirement.title}`)} label="Use in Assistant" icon={MessageSquare} />
+                                    <ReportActionButton
+                                        onClick={() => onImportRequirements([requirement.id])}
+                                        label={pending ? 'Importing...' : imported ? 'Imported' : 'Import'}
+                                        icon={CheckCircle2}
+                                        disabled={imported || pending}
+                                    />
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+
             {activeTab === 'evidence' && (
                 <div style={{ display: 'grid', gap: '0.6rem' }}>
                     {evidence.length === 0 ? (
@@ -697,11 +790,12 @@ function EmptyReportState({ text }: { text: string }) {
     );
 }
 
-function ReportActionButton({ onClick, label, icon: Icon }: { onClick: () => void; label: string; icon: any }) {
+function ReportActionButton({ onClick, label, icon: Icon, disabled = false }: { onClick: () => void; label: string; icon: any; disabled?: boolean }) {
     return (
         <button
             onClick={onClick}
-            style={{ border: '1px solid var(--border)', background: 'var(--surface-hover)', color: 'var(--text)', borderRadius: '6px', padding: '0.38rem 0.6rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600 }}
+            disabled={disabled}
+            style={{ border: '1px solid var(--border)', background: 'var(--surface-hover)', color: disabled ? 'var(--text-secondary)' : 'var(--text)', borderRadius: '6px', padding: '0.38rem 0.6rem', cursor: disabled ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600, opacity: disabled ? 0.65 : 1 }}
         >
             <Icon size={13} /> {label}
         </button>
@@ -985,6 +1079,8 @@ export default function AgentsPage() {
     const [toolCatalog, setToolCatalog] = useState<AgentTool[]>([]);
     const [selectedDefinitionId, setSelectedDefinitionId] = useState<string>('');
     const [customResultTab, setCustomResultTab] = useState<CustomResultTab>('overview');
+    const [importingRequirementIds, setImportingRequirementIds] = useState<string[]>([]);
+    const [reportImportError, setReportImportError] = useState<string | null>(null);
     const [agentRuntime, setAgentRuntime] = useState('claude_sdk');
     const [hermesReachable, setHermesReachable] = useState(false);
     const [hermesStatusMessage, setHermesStatusMessage] = useState('');
@@ -1403,6 +1499,38 @@ export default function AgentsPage() {
             const message = e instanceof Error ? e.message : 'Please try again.';
             setFlowSpecError(message);
             setGeneratingSpec(false);
+        }
+    };
+
+    const importReportRequirements = async (itemIds?: string[]) => {
+        if (!activeRun?.id) return;
+        const selectedIds = (itemIds || []).filter(Boolean);
+        const markers = selectedIds.length > 0 ? selectedIds : ['__all__'];
+        setImportingRequirementIds(prev => Array.from(new Set([...prev, ...markers])));
+        setReportImportError(null);
+        try {
+            const params = new URLSearchParams();
+            if (currentProject?.id) params.set('project_id', currentProject.id);
+            const query = params.toString() ? `?${params}` : '';
+            const res = await fetch(`${API_BASE}/api/agents/runs/${activeRun.id}/report-requirements/import${query}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(selectedIds.length > 0 ? { item_ids: selectedIds } : { import_all: true }),
+            });
+            if (!res.ok) {
+                const error = await res.json().catch(() => ({}));
+                const detail = typeof error.detail === 'string' ? error.detail : error.detail?.message;
+                throw new Error(detail || `HTTP ${res.status}`);
+            }
+            const data = await res.json();
+            if (data.run) {
+                setActiveRun(data.run);
+                setHistory(prev => prev.map(run => run.id === data.run.id ? data.run : run));
+            }
+        } catch (e: unknown) {
+            setReportImportError(e instanceof Error ? e.message : 'Failed to import requirements.');
+        } finally {
+            setImportingRequirementIds(prev => prev.filter(id => !markers.includes(id)));
         }
     };
 
@@ -2711,6 +2839,9 @@ export default function AgentsPage() {
                                         onTabChange={setCustomResultTab}
                                         onAskAssistant={openAssistantWithPrompt}
                                         onCreateSpecFromReport={openSpecFromReportItem}
+                                        onImportRequirements={importReportRequirements}
+                                        importingRequirementIds={importingRequirementIds}
+                                        importError={reportImportError}
                                     />
                                 ) : (
                                     // Exploratory Result - User Friendly Display

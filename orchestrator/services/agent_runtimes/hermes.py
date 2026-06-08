@@ -55,7 +55,7 @@ class HermesClient:
     """Small client for the public Hermes API server runs surface."""
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None):
-        raw_url = base_url or _runtime_env_value("HERMES_API_URL", "http://127.0.0.1:8642")
+        raw_url = base_url or _runtime_env_value("HERMES_API_URL", "http://hermes:8642")
         self.base_url = raw_url.rstrip("/")
         self.api_key = api_key if api_key is not None else _runtime_env_value("HERMES_API_KEY", "")
 

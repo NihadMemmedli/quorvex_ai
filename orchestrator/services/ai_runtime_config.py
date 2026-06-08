@@ -168,7 +168,7 @@ def resolve_runtime_ai_selection(
         )
         api_key, api_key_env = _first_env(env_vars, ("QUORVEX_LLM_API_KEY", "OPENAI_API_KEY"))
     elif provider == "hermes":
-        base_url = _env_get(env_vars, "HERMES_API_URL", "http://127.0.0.1:8642")
+        base_url = _env_get(env_vars, "HERMES_API_URL", "http://hermes:8642")
         model = model_override or _env_get(env_vars, "HERMES_MODEL", DEFAULT_HERMES_MODEL)
         api_key, api_key_env = _first_env(env_vars, ("HERMES_API_KEY",), "local-hermes")
     else:

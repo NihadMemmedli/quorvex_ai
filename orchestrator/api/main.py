@@ -7212,6 +7212,11 @@ class GenerateReportItemSpecRequest(BaseModel):
     inherit_browser_auth: bool = False
 
 
+class ImportReportRequirementsRequest(BaseModel):
+    item_ids: list[str] | None = None
+    import_all: bool = False
+
+
 class GenerateFlowTestRequest(BaseModel):
     browser_auth_session_id: str | None = None
     use_project_default_browser_auth: bool = False
@@ -7545,6 +7550,60 @@ def _report_importance(value: str | None) -> float:
     if normalized == "info":
         return 0.42
     return 0.7
+
+
+def _report_requirement_confidence(value: Any) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return max(0.0, min(float(value), 1.0))
+    normalized = _clean_text(value, 20).lower()
+    if normalized == "high":
+        return 0.86
+    if normalized == "low":
+        return 0.58
+    if normalized == "medium":
+        return 0.72
+    try:
+        return max(0.0, min(float(normalized), 1.0))
+    except (TypeError, ValueError):
+        return 0.7
+
+
+def _report_requirement_acceptance_criteria(item: dict[str, Any]) -> list[str]:
+    criteria = [
+        _clean_text(criterion, 500)
+        for criterion in _as_report_list(item.get("acceptance_criteria") or item.get("criteria"))
+        if _clean_text(criterion, 500)
+    ]
+    if not criteria:
+        expected = _clean_text(item.get("expected") or item.get("expected_result"), 500)
+        if expected:
+            criteria.append(expected)
+    if not criteria and item.get("evidence"):
+        criteria.append(f"Evidence reviewed: {_clean_text(item.get('evidence'), 450)}")
+    return criteria[:10]
+
+
+def _requirement_create_body_from_report_item(item: dict[str, Any]) -> dict[str, Any]:
+    priority = _clean_text(item.get("priority") or item.get("severity") or "medium", 20).lower()
+    if priority not in {"critical", "high", "medium", "low"}:
+        priority = "medium"
+    description_parts = [
+        _clean_text(item.get("description") or item.get("summary"), 2000),
+        f"Page: {_clean_text(item.get('page') or item.get('url'), 500)}" if item.get("page") or item.get("url") else "",
+        f"Evidence: {_clean_text(item.get('evidence'), 1200)}" if item.get("evidence") else "",
+    ]
+    description = " ".join(part for part in description_parts if part).strip() or None
+    return {
+        "title": _clean_text(item.get("title") or item.get("name") or item.get("requirement"), 180),
+        "description": description,
+        "category": _clean_text(item.get("category") or "functional", 80).lower() or "functional",
+        "priority": priority,
+        "acceptance_criteria": _report_requirement_acceptance_criteria(item),
+        "truth_state": "candidate_requirement",
+        "source_type": "custom_agent_run",
+        "confidence": _report_requirement_confidence(item.get("confidence")),
+        "uncertainty_reason": "Imported from a custom agent report; agent-derived requirement requires human review.",
+    }
 
 
 def _capture_custom_agent_report_memory(
@@ -9379,7 +9438,7 @@ def search_agent_reports(
     project_id: str | None = Query(default=None),
     query: str | None = Query(default=None),
     severity: str | None = Query(default=None),
-    item_type: str | None = Query(default=None, description="finding, test_idea, page, evidence, or action"),
+    item_type: str | None = Query(default=None, description="finding, test_idea, requirement, page, evidence, or action"),
     limit: int = Query(default=50, ge=1, le=200),
     session: Session = Depends(get_session),
 ):
@@ -9404,6 +9463,7 @@ def search_agent_reports(
         collections = {
             "finding": structured.get("findings") or [],
             "test_idea": structured.get("test_ideas") or [],
+            "requirement": structured.get("requirements") or [],
             "page": structured.get("pages_checked") or [],
             "evidence": structured.get("evidence") or [],
             "action": structured.get("follow_up_actions") or [],
@@ -9432,6 +9492,127 @@ def search_agent_reports(
                 if len(results) >= limit:
                     return {"items": results, "count": len(results)}
     return {"items": results, "count": len(results)}
+
+
+@app.post("/api/agents/runs/{run_id}/report-requirements/import")
+def import_agent_report_requirements(
+    run_id: str,
+    request: ImportReportRequirementsRequest,
+    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    session: Session = Depends(get_session),
+):
+    """Import reviewed custom-agent report requirements as candidate requirements."""
+    from memory.exploration_store import get_exploration_store
+
+    run = session.get(AgentRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+    if run.agent_type != "custom":
+        raise HTTPException(status_code=400, detail="Only custom agent reports can import requirements")
+
+    result = run.result or {}
+    report = result.get("structured_report") if isinstance(result, dict) else None
+    if not isinstance(report, dict):
+        raise HTTPException(status_code=400, detail="This run does not have a stored structured report")
+
+    requirements_items = [item for item in _as_report_list(report.get("requirements")) if isinstance(item, dict)]
+    if not requirements_items:
+        raise HTTPException(status_code=400, detail="This report does not contain structured requirements")
+
+    requested_ids = {_clean_text(item_id, 80) for item_id in (request.item_ids or []) if _clean_text(item_id, 80)}
+    if not request.import_all and not requested_ids:
+        raise HTTPException(status_code=400, detail="Provide item_ids or set import_all=true")
+
+    indexed = {str(item.get("id") or ""): item for item in requirements_items if item.get("id")}
+    if request.import_all:
+        selected = requirements_items
+    else:
+        missing = sorted(item_id for item_id in requested_ids if item_id not in indexed)
+        if missing:
+            raise HTTPException(status_code=404, detail={"message": "Report requirement item not found", "missing_item_ids": missing})
+        selected = [indexed[item_id] for item_id in requested_ids]
+
+    target_project_id = run.project_id or project_id or run.config.get("project_id") or "default"
+    store = get_exploration_store(project_id=target_project_id)
+    created: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for item in selected:
+        item_id = _clean_text(item.get("id"), 80)
+        imported_id = item.get("imported_requirement_id")
+        imported_code = item.get("imported_requirement_code")
+        if imported_id or imported_code:
+            skipped.append(
+                {
+                    "item_id": item_id,
+                    "reason": "already_imported",
+                    "requirement_id": imported_id,
+                    "req_code": imported_code,
+                }
+            )
+            continue
+
+        body = _requirement_create_body_from_report_item(item)
+        if not body["title"]:
+            skipped.append({"item_id": item_id, "reason": "missing_title"})
+            continue
+
+        req_code = store.get_next_requirement_code()
+        requirement = store.store_requirement(
+            req_code=req_code,
+            title=body["title"],
+            description=body["description"],
+            category=body["category"],
+            priority=body["priority"],
+            acceptance_criteria=body["acceptance_criteria"],
+            truth_state=body["truth_state"],
+            source_type=body["source_type"],
+            confidence=body["confidence"],
+            uncertainty_reason=body["uncertainty_reason"],
+        )
+        item["imported_requirement_id"] = requirement.id
+        item["imported_requirement_code"] = requirement.req_code
+        item["imported_at"] = datetime.utcnow().isoformat()
+        created.append(
+            {
+                "item_id": item_id,
+                "id": requirement.id,
+                "req_code": requirement.req_code,
+                "title": requirement.title,
+                "project_id": target_project_id,
+            }
+        )
+
+    if not isinstance(result, dict):
+        result = {}
+    result["structured_report"] = report
+    run.result = result
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+
+    if created:
+        _record_agent_run_event(
+            run.id,
+            event_type="requirements_imported",
+            message=f"Imported {len(created)} custom-agent report requirement(s).",
+            payload={
+                "created_requirements": created,
+                "created_requirement_ids": [item["id"] for item in created],
+                "created_requirement_codes": [item["req_code"] for item in created],
+                "skipped": skipped,
+            },
+            session=session,
+        )
+
+    return {
+        "created": len(created),
+        "skipped": len(skipped),
+        "requirements": created,
+        "skipped_items": skipped,
+        "run": _serialize_agent_run(run, session),
+    }
 
 
 # ========= Enhanced Exploratory Testing Endpoints =========

@@ -455,11 +455,17 @@ def _default_name(target_url: str) -> str:
 
 
 def _recorder_browser_url() -> str | None:
-    explicit = os.getenv("RECORDER_BROWSER_URL") or os.getenv("VNC_PUBLIC_URL")
+    explicit = os.getenv("RECORDER_BROWSER_URL")
     if explicit:
-        return explicit
-    if Path("/.dockerenv").exists() or os.getenv("VNC_ENABLED", "").lower() == "true":
-        return "http://localhost:6080/vnc.html?autoconnect=true&resize=scale"
+        return explicit.strip()
+
+    public_vnc_url = os.getenv("VNC_PUBLIC_URL")
+    if public_vnc_url:
+        normalized = public_vnc_url.strip().rstrip("/")
+        if "vnc.html" in normalized:
+            return normalized
+        return f"{normalized}/vnc.html?autoconnect=true&resize=scale"
+
     return None
 
 

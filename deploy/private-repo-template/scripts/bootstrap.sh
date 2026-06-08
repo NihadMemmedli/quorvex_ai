@@ -41,7 +41,7 @@ if [ "${QUORVEX_SKIP_REGISTRY_CHECK:-false}" != "true" ]; then
 fi
 
 log "Reverse proxy template:"
-log "  ${DEPLOY_ROOT}/reverse-proxy/mytest.idda.az.conf"
+log "  ${REVERSE_PROXY_FILE}"
 log "Install it into your nginx sites-enabled path after verifying certificate paths."
 
 log "Bootstrap checks completed. Run: ./scripts/deploy.sh --dry-run v1.2.3"

@@ -104,7 +104,7 @@ class AppSettings(BaseSettings):
     # --- Agent Runtimes ---
     quorvex_agent_runtime: str = "claude_sdk"
     hermes_enabled: bool = False
-    hermes_api_url: str = "http://127.0.0.1:8642"
+    hermes_api_url: str = "http://hermes:8642"
     hermes_api_key: str = ""
     hermes_model: str = "hermes-agent"
     hermes_profile_prefix: str = "quorvex"

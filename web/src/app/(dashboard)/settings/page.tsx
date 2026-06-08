@@ -140,7 +140,7 @@ export default function SettingsPage() {
         agent_runtime: 'claude_sdk',
         assistant_runtime: 'claude_sdk',
         hermes_enabled: false,
-        hermes_api_url: 'http://127.0.0.1:8642',
+        hermes_api_url: 'http://hermes:8642',
         hermes_api_key: '',
         hermes_model: 'hermes-agent',
         hermes_sync_provider: true,
@@ -1558,7 +1558,7 @@ export default function SettingsPage() {
                                 name="hermes_api_url"
                                 value={settings.hermes_api_url}
                                 onChange={handleChange}
-                                placeholder="http://127.0.0.1:8642"
+                                placeholder="http://hermes:8642"
                                 className="input has-icon"
                             />
                         </div>

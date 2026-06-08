@@ -126,7 +126,7 @@ export function LiveBrowserView({
     const isAdmin = user?.is_superuser === true;
 
     const resolvedVncUrl = (() => {
-        if (typeof window === 'undefined') return vncUrl || 'ws://localhost:6080/websockify';
+        if (typeof window === 'undefined') return vncUrl || '/websockify';
         if (vncUrl?.startsWith('/')) {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             return `${protocol}//${window.location.host}${vncUrl}`;
