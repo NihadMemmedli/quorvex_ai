@@ -22,10 +22,23 @@ curl -fsSL https://raw.githubusercontent.com/NihadMemmedli/quorvex_ai/main/deplo
 ```
 
 Because the deploy repo is private, the server must already have `gh auth login`
-or a `GITHUB_TOKEN` with repo read access:
+or a `GITHUB_TOKEN` with repo read access. For the company test deployment,
+pass real values once to the installer so it writes them into the server-local
+private env file:
 
 ```bash
-GITHUB_TOKEN=... QUORVEX_VERSION=v1.2.3 \
+GITHUB_TOKEN=<real-github-token> \
+QUORVEX_DEPLOY_REPO=NihadMemmedli/quorvex-idda-tests \
+QUORVEX_DOMAIN=mytest.idda.az \
+QUORVEX_SITE=mytest \
+QUORVEX_VERSION=v1.2.3 \
+QUORVEX_ACTIVE_LLM_PROVIDER=zai \
+ZAI_API_KEY=<real-zai-key> \
+INITIAL_ADMIN_EMAIL=<real-admin-email> \
+INITIAL_ADMIN_PASSWORD=<real-admin-password> \
+POSTGRES_PASSWORD=<real-postgres-password> \
+MINIO_ROOT_PASSWORD=<real-minio-password> \
+JWT_SECRET_KEY=<real-64-char-or-longer-secret> \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/NihadMemmedli/quorvex_ai/main/deploy/install-server.sh)"
 ```
 
@@ -56,12 +69,24 @@ commits generated env or deployment files.
 The public repository still owns source code, local development, and tagged
 GHCR image releases. The private deployment repo owns production env files,
 compose overlays, reverse proxy config, backups, and rollback state.
+The private repo should track only safe deploy files such as scripts, compose
+overlays, reverse proxy config, README, `.gitignore`, and
+`env/quorvex.prod.env.example`; it must not track `env/quorvex.prod.env`,
+`.state/`, generated passwords, provider API keys, backups, or runtime data.
 
 For company-network deployments, keep browser-facing API URLs blank so the
 frontend uses same-origin `/backend-proxy`; set
 `VNC_PUBLIC_WS_URL=wss://<domain>/websockify`; and leave
 `RECORDER_BROWSER_URL` blank unless the company edge also proxies `/vnc.html`
 and the noVNC assets.
+
+After the installer dry-run passes, deploy from the private repo:
+
+```bash
+cd /opt/quorvex-deploy-private
+./scripts/deploy.sh --dry-run v1.2.3
+./scripts/deploy.sh v1.2.3
+```
 
 `examples/` contains smaller generic snippets. Prefer the full
 `private-repo-template/` when setting up a real production server.

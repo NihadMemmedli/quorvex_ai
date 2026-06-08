@@ -1,0 +1,25 @@
+# Server-local secrets.
+env/*
+!env/
+!env/*.example
+
+# Deployment state and runtime data.
+.state/
+data/
+backups/
+logs/
+generated-scripts/
+postgres/
+redis/
+minio/
+runs/
+specs/
+tests/
+test-results/
+prds/
+
+# Local editor, OS, and temporary files.
+.DS_Store
+*.tmp
+*.bak
+*.swp

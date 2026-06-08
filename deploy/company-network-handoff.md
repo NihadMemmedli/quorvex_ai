@@ -24,11 +24,17 @@ Use this note when continuing the company-network deployment. The intended topol
 
    ```bash
    GITHUB_TOKEN=... \
-   QUORVEX_DEPLOY_REPO=<owner>/<private-deploy-repo> \
-   QUORVEX_DOMAIN=<quorvex-company-domain> \
+   QUORVEX_DEPLOY_REPO=NihadMemmedli/quorvex-idda-tests \
+   QUORVEX_DOMAIN=mytest.idda.az \
+   QUORVEX_SITE=mytest \
    QUORVEX_VERSION=v1.2.3 \
    QUORVEX_ACTIVE_LLM_PROVIDER=zai \
    ZAI_API_KEY=... \
+   INITIAL_ADMIN_EMAIL=... \
+   INITIAL_ADMIN_PASSWORD=... \
+   POSTGRES_PASSWORD=... \
+   MINIO_ROOT_PASSWORD=... \
+   JWT_SECRET_KEY=... \
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/NihadMemmedli/quorvex_ai/main/deploy/install-server.sh)"
    ```
 

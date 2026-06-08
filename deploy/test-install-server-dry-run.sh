@@ -110,7 +110,12 @@ QUORVEX_SITE="company" \
 QUORVEX_IMAGE_NAMESPACE="ghcr.io/test-org/quorvex-ai" \
 QUORVEX_VERSION="v1.2.3" \
 QUORVEX_ACTIVE_LLM_PROVIDER="zai" \
-ZAI_API_KEY="test-zai-key" \
+ZAI_API_KEY="test-zai-key&with-symbol" \
+INITIAL_ADMIN_EMAIL="ops-admin@quorvex.test.internal" \
+INITIAL_ADMIN_PASSWORD="TestAdmin&Password123" \
+POSTGRES_PASSWORD="TestPostgresPassword123" \
+MINIO_ROOT_PASSWORD="TestMinioPassword123" \
+JWT_SECRET_KEY="test-jwt-secret-key-64-bytes-minimum-0000000000000000000000" \
 FRONTEND_BIND="127.0.0.1:${FRONTEND_PORT}" \
 BACKEND_BIND="127.0.0.1:${BACKEND_PORT}" \
 VNC_BIND="127.0.0.1:${VNC_PORT}" \
@@ -136,6 +141,8 @@ test -f "${DEPLOY_DIR}/compose/docker-compose.company.yml"
 test -f "${DEPLOY_DIR}/reverse-proxy/quorvex.test.internal.conf"
 test -x "${DEPLOY_DIR}/scripts/bootstrap.sh"
 test -x "${DEPLOY_DIR}/scripts/deploy.sh"
+test -f "${DEPLOY_DIR}/README.md"
+test -f "${DEPLOY_DIR}/.gitignore"
 
 log "Checking generated settings."
 grep -q '^QUORVEX_PUBLIC_API_URL=$' "${DEPLOY_DIR}/env/quorvex.prod.env"
@@ -145,9 +152,28 @@ grep -q '^VNC_PUBLIC_WS_URL=wss://quorvex.test.internal/websockify$' "${DEPLOY_D
 grep -q '^RECORDER_BROWSER_URL=$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^QUORVEX_OVERLAY_FILE='"${DEPLOY_DIR}"'/compose/docker-compose.company.yml$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^HERMES_CONTAINER_NAME=quorvex-test-hermes$' "${DEPLOY_DIR}/env/quorvex.prod.env"
+grep -q '^INITIAL_ADMIN_EMAIL=ops-admin@quorvex.test.internal$' "${DEPLOY_DIR}/env/quorvex.prod.env"
+grep -q '^POSTGRES_PASSWORD=TestPostgresPassword123$' "${DEPLOY_DIR}/env/quorvex.prod.env"
+grep -q '^DATABASE_URL=postgresql://quorvex:TestPostgresPassword123@db:5432/quorvex$' "${DEPLOY_DIR}/env/quorvex.prod.env"
+grep -q '^MINIO_ROOT_PASSWORD=TestMinioPassword123$' "${DEPLOY_DIR}/env/quorvex.prod.env"
+grep -q '^JWT_SECRET_KEY=test-jwt-secret-key-64-bytes-minimum-0000000000000000000000$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q 'container_name: ${HERMES_CONTAINER_NAME:-quorvex-hermes}' "${DEPLOY_DIR}/compose/docker-compose.company.yml"
 grep -q 'ports: !override' "${DEPLOY_DIR}/compose/docker-compose.company.yml"
 grep -q 'server_name quorvex.test.internal;' "${DEPLOY_DIR}/reverse-proxy/quorvex.test.internal.conf"
+
+log "Checking real secret values are sourceable and not tracked."
+(
+  set -a
+  # shellcheck disable=SC1090
+  source "${DEPLOY_DIR}/env/quorvex.prod.env"
+  set +a
+  test "${ZAI_API_KEY}" = "test-zai-key&with-symbol"
+  test "${QUORVEX_LLM_API_KEY}" = "test-zai-key&with-symbol"
+  test "${ANTHROPIC_AUTH_TOKEN}" = "test-zai-key&with-symbol"
+  test "${INITIAL_ADMIN_PASSWORD}" = "TestAdmin&Password123"
+)
+git -C "${DEPLOY_DIR}" check-ignore -q env/quorvex.prod.env
+git -C "${DEPLOY_DIR}" check-ignore -q .state/generated-secrets.txt
 
 if grep -q 'replace-with-at-least-32-random-bytes\|replace-with-strong-postgres-password\|replace-with-strong-minio-password\|replace-with-strong-initial-admin-password' "${DEPLOY_DIR}/env/quorvex.prod.env"; then
   printf 'Installer left generated-secret placeholders in private env.\n' >&2

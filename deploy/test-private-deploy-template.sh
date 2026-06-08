@@ -48,6 +48,7 @@ mv "${TMP_DIR}/reverse-proxy/mytest.idda.az.example.conf" "${TMP_DIR}/reverse-pr
 
 log "Checking shell syntax."
 bash -n "${TMP_DIR}"/scripts/*.sh
+test -f "${TMP_DIR}/.gitignore"
 
 log "Pointing copied template at this checkout."
 set_test_paths "${TMP_DIR}/env/quorvex.prod.env"
@@ -61,6 +62,14 @@ grep -q 'placeholder env value' /tmp/quorvex-template-placeholder.out
 
 log "Replacing placeholders with deterministic test values."
 replace_placeholders "${TMP_DIR}/env/quorvex.prod.env"
+
+log "Checking private env and state are ignored by Git."
+(
+  cd "${TMP_DIR}"
+  git init -q
+  git check-ignore -q env/quorvex.prod.env
+  git check-ignore -q .state/current-version
+)
 
 log "Verifying deploy dry-run renders Compose without changing services."
 (cd "${TMP_DIR}" && ./scripts/deploy.sh --dry-run v1.2.3)

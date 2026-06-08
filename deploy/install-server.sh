@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 PUBLIC_REPO="${QUORVEX_PUBLIC_REPO:-https://github.com/NihadMemmedli/quorvex_ai.git}"
-DEPLOY_REPO="${QUORVEX_DEPLOY_REPO:-NihadMemmedli/quorvex-deploy-private}"
+DEPLOY_REPO="${QUORVEX_DEPLOY_REPO:-NihadMemmedli/quorvex-idda-tests}"
 SOURCE_DIR="${QUORVEX_SOURCE_DIR:-/opt/quorvex_ai}"
 DEPLOY_DIR="${QUORVEX_DEPLOY_DIR:-/opt/quorvex-deploy-private}"
 DATA_ROOT="${QUORVEX_DATA_ROOT:-/srv/quorvex/mytest}"
@@ -49,6 +49,19 @@ random_secret() {
 
 random_admin_password() {
   printf 'Qvx-%s-Aa1!' "$(random_secret)"
+}
+
+env_assignment_value() {
+  local value="${1:-}"
+  local escaped
+
+  if [[ "${value}" =~ ^[A-Za-z0-9_./:@%+=,-]*$ ]]; then
+    printf '%s' "${value}"
+    return
+  fi
+
+  escaped="$(printf '%s' "${value}" | sed "s/'/'\\\\''/g")"
+  printf "'%s'" "${escaped}"
 }
 
 clone_or_update_public_repo() {
@@ -103,12 +116,28 @@ replace_or_append_env() {
   local key="$1"
   local value="$2"
   local file="$3"
+  local assignment_value
+  local tmp
 
-  if grep -q "^${key}=" "${file}"; then
-    sed -i.bak "s|^${key}=.*|${key}=${value}|" "${file}"
-  else
-    printf '%s=%s\n' "${key}" "${value}" >> "${file}"
-  fi
+  assignment_value="$(env_assignment_value "${value}")"
+
+  tmp="$(mktemp "${file}.tmp.XXXXXX")"
+  awk -v key="${key}" -v value="${assignment_value}" '
+    BEGIN { found = 0 }
+    $0 ~ "^" key "=" {
+      print key "=" value
+      found = 1
+      next
+    }
+    { print }
+    END {
+      if (!found) {
+        print key "=" value
+      }
+    }
+  ' "${file}" > "${tmp}"
+  cat "${tmp}" > "${file}"
+  rm -f "${tmp}"
 }
 
 copy_template_file() {
@@ -204,6 +233,22 @@ ensure_private_repo_scripts() {
   else
     log "Private Makefile present: ${DEPLOY_DIR}/Makefile"
   fi
+
+  if [ ! -f "${DEPLOY_DIR}/README.md" ]; then
+    log "Private README missing: ${DEPLOY_DIR}/README.md"
+    copy_template_file "${template_dir}/README.md" "${DEPLOY_DIR}/README.md" 644
+    log "Created private README from template: ${DEPLOY_DIR}/README.md"
+  else
+    log "Private README present: ${DEPLOY_DIR}/README.md"
+  fi
+
+  if [ ! -f "${DEPLOY_DIR}/.gitignore" ]; then
+    log "Private .gitignore missing: ${DEPLOY_DIR}/.gitignore"
+    copy_template_file "${template_dir}/.gitignore" "${DEPLOY_DIR}/.gitignore" 644
+    log "Created private .gitignore from template: ${DEPLOY_DIR}/.gitignore"
+  else
+    log "Private .gitignore present: ${DEPLOY_DIR}/.gitignore"
+  fi
 }
 
 ensure_private_compose_overlay() {
@@ -244,8 +289,14 @@ env_file_value() {
   local key="$1"
   local file="$2"
   local line
+  local value
   line="$(grep -E "^${key}=" "${file}" | tail -n 1 || true)"
-  printf '%s' "${line#*=}"
+  value="${line#*=}"
+  if [[ "${value}" == \'*\' && "${value}" == *\' ]]; then
+    value="${value:1:${#value}-2}"
+    value="$(printf '%s' "${value}" | sed "s/'\\\\''/'/g")"
+  fi
+  printf '%s' "${value}"
 }
 
 has_real_env_value() {
@@ -329,6 +380,24 @@ write_if_provided() {
   local value="${!key-}"
   if [ -n "${value}" ]; then
     replace_or_append_env "${key}" "${value}" "${file}"
+  fi
+}
+
+write_real_secret_if_provided_or_placeholder() {
+  local key="$1"
+  local placeholder="$2"
+  local file="$3"
+  local generated_value="${4:-}"
+  local value="${!key-}"
+
+  if [ -n "${value}" ]; then
+    replace_or_append_env "${key}" "${value}" "${file}"
+    return
+  fi
+
+  if grep -q "${placeholder}" "${file}"; then
+    [ -n "${generated_value}" ] || generated_value="$(random_secret)"
+    replace_or_append_env "${key}" "${generated_value}" "${file}"
   fi
 }
 
@@ -490,26 +559,28 @@ ensure_private_env() {
   replace_or_append_if_env_provided_or_placeholder "${public_url_override_key}" VNC_PUBLIC_WS_URL "$(printf '%s' "${PUBLIC_URL}" | sed 's|^https://|wss://|; s|^http://|ws://|')/websockify" "${env_file}"
   replace_or_append_if_placeholder RECORDER_BROWSER_URL "" "${env_file}"
 
-  if grep -q 'replace-with-at-least-32-random-bytes' "${env_file}"; then
-    replace_or_append_env JWT_SECRET_KEY "${JWT_SECRET_KEY:-$(random_secret)}" "${env_file}"
-  fi
-  if grep -q 'replace-with-strong-postgres-password' "${env_file}"; then
+  write_if_provided INITIAL_ADMIN_EMAIL "${env_file}"
+  write_real_secret_if_provided_or_placeholder JWT_SECRET_KEY "replace-with-at-least-32-random-bytes" "${env_file}"
+  if [ -n "${POSTGRES_PASSWORD:-}" ] || grep -q 'replace-with-strong-postgres-password' "${env_file}"; then
     local postgres_password="${POSTGRES_PASSWORD:-$(random_secret)}"
     replace_or_append_env POSTGRES_PASSWORD "${postgres_password}" "${env_file}"
     replace_or_append_env DATABASE_URL "postgresql://quorvex:${postgres_password}@db:5432/quorvex" "${env_file}"
   fi
-  if grep -q 'replace-with-strong-minio-password' "${env_file}"; then
-    replace_or_append_env MINIO_ROOT_PASSWORD "${MINIO_ROOT_PASSWORD:-$(random_secret)}" "${env_file}"
-  fi
-  if grep -q 'replace-with-strong-initial-admin-password' "${env_file}"; then
-    local admin_password="${INITIAL_ADMIN_PASSWORD:-$(random_admin_password)}"
+  write_real_secret_if_provided_or_placeholder MINIO_ROOT_PASSWORD "replace-with-strong-minio-password" "${env_file}"
+  if [ -n "${INITIAL_ADMIN_PASSWORD:-}" ] || grep -q 'replace-with-strong-initial-admin-password' "${env_file}"; then
+    local admin_password
+    admin_password="${INITIAL_ADMIN_PASSWORD:-$(random_admin_password)}"
     replace_or_append_env INITIAL_ADMIN_PASSWORD "${admin_password}" "${env_file}"
-    {
-      printf 'INITIAL_ADMIN_EMAIL=%s\n' "$(grep '^INITIAL_ADMIN_EMAIL=' "${env_file}" | cut -d= -f2-)"
-      printf 'INITIAL_ADMIN_PASSWORD=%s\n' "${admin_password}"
-    } > "${generated_file}"
-    chmod 600 "${generated_file}"
-    log "Generated initial admin password stored at ${generated_file}."
+    if [ -z "${INITIAL_ADMIN_PASSWORD:-}" ]; then
+      {
+        printf 'INITIAL_ADMIN_EMAIL=%s\n' "$(grep '^INITIAL_ADMIN_EMAIL=' "${env_file}" | cut -d= -f2-)"
+        printf 'INITIAL_ADMIN_PASSWORD=%s\n' "${admin_password}"
+      } > "${generated_file}"
+      chmod 600 "${generated_file}"
+      log "Generated initial admin password stored at ${generated_file}."
+    else
+      log "Initial admin password written to private env file."
+    fi
   fi
 
   for key in \

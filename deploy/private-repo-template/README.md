@@ -8,9 +8,10 @@ Expected one-time layout after copying:
 
 ```text
 .
+├── .gitignore
 ├── Makefile
 ├── compose/docker-compose.mytest.yml
-├── env/quorvex.prod.env
+├── env/quorvex.prod.env.example
 ├── reverse-proxy/mytest.idda.az.conf
 └── scripts/
     ├── bootstrap.sh
@@ -22,18 +23,32 @@ Expected one-time layout after copying:
 Keep the public Quorvex source checkout on the same server and point
 `QUORVEX_SOURCE_DIR` at it from `env/quorvex.prod.env`.
 
+Track only safe deploy files in this private repo: compose overlays, scripts,
+reverse proxy config, README, `.gitignore`, and
+`env/quorvex.prod.env.example`. Do not track `env/quorvex.prod.env`, `.state/`,
+generated passwords, provider API keys, backups, or runtime data.
+
 ## First Setup With The Installer
 
 ```bash
 GITHUB_TOKEN=... \
-QUORVEX_DEPLOY_REPO=<owner>/<private-deploy-repo> \
+QUORVEX_DEPLOY_REPO=NihadMemmedli/quorvex-idda-tests \
 QUORVEX_DOMAIN=mytest.idda.az \
+QUORVEX_SITE=mytest \
 QUORVEX_VERSION=v1.2.3 \
+QUORVEX_ACTIVE_LLM_PROVIDER=zai \
+ZAI_API_KEY=<real-zai-key> \
+INITIAL_ADMIN_EMAIL=<real-admin-email> \
+INITIAL_ADMIN_PASSWORD=<real-admin-password> \
+POSTGRES_PASSWORD=<real-postgres-password> \
+MINIO_ROOT_PASSWORD=<real-minio-password> \
+JWT_SECRET_KEY=<real-64-char-or-longer-secret> \
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/NihadMemmedli/quorvex_ai/main/deploy/install-server.sh)"
 ```
 
 The installer clones or updates both repos, reports missing private files,
-creates missing files from these templates, generates local app secrets when
+creates missing files from these templates, writes provided real secrets into
+the server-local private env file, generates local app secrets only when
 placeholders remain, runs `./scripts/bootstrap.sh`, and runs
 `./scripts/deploy.sh --dry-run v1.2.3`. It does not start or replace containers
 unless `QUORVEX_CONFIRM_DEPLOY=true` is passed.
@@ -58,6 +73,7 @@ assets.
 After the public repository tag has published GHCR images:
 
 ```bash
+cd /opt/quorvex-deploy-private
 ./scripts/deploy.sh --dry-run v1.2.3
 ./scripts/deploy.sh v1.2.3
 ```

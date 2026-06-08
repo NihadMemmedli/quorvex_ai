@@ -26,9 +26,17 @@ what was missing, run bootstrap checks, and dry-run a tagged release:
 
 ```bash
 GITHUB_TOKEN=... \
-QUORVEX_DEPLOY_REPO=<owner>/<private-deploy-repo> \
-QUORVEX_DOMAIN=quorvex.example.com \
+QUORVEX_DEPLOY_REPO=NihadMemmedli/quorvex-idda-tests \
+QUORVEX_DOMAIN=mytest.idda.az \
+QUORVEX_SITE=mytest \
 QUORVEX_VERSION=v1.2.3 \
+QUORVEX_ACTIVE_LLM_PROVIDER=zai \
+ZAI_API_KEY=<real-zai-key> \
+INITIAL_ADMIN_EMAIL=<real-admin-email> \
+INITIAL_ADMIN_PASSWORD=<real-admin-password> \
+POSTGRES_PASSWORD=<real-postgres-password> \
+MINIO_ROOT_PASSWORD=<real-minio-password> \
+JWT_SECRET_KEY=<real-64-char-or-longer-secret> \
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/NihadMemmedli/quorvex_ai/main/deploy/install-server.sh)"
 ```
 
@@ -49,9 +57,10 @@ Emergency rollback:
 ./scripts/rollback.sh
 ```
 
-The private repo stores real files such as `env/quorvex.prod.env`,
-`compose/docker-compose.<site>.yml`, `reverse-proxy/<domain>.conf`, and
-`.state/current-version`. Do not commit those files to the public repo.
+The private repo tracks safe deploy files only: compose overlay, scripts,
+reverse proxy config, README, `.gitignore`, and
+`env/quorvex.prod.env.example`. It must not track `env/quorvex.prod.env`,
+`.state/`, generated passwords, provider API keys, backups, or runtime data.
 
 ## Step 1: Prepare Code for Internal Git
 
@@ -115,11 +124,17 @@ sudo systemctl restart docker
 
 ```bash
 GITHUB_TOKEN=... \
-QUORVEX_DEPLOY_REPO=<owner>/<private-deploy-repo> \
-QUORVEX_DOMAIN=quorvex.example.com \
+QUORVEX_DEPLOY_REPO=NihadMemmedli/quorvex-idda-tests \
+QUORVEX_DOMAIN=mytest.idda.az \
+QUORVEX_SITE=mytest \
 QUORVEX_VERSION=v1.2.3 \
 QUORVEX_ACTIVE_LLM_PROVIDER=zai \
-ZAI_API_KEY=... \
+ZAI_API_KEY=<real-zai-key> \
+INITIAL_ADMIN_EMAIL=<real-admin-email> \
+INITIAL_ADMIN_PASSWORD=<real-admin-password> \
+POSTGRES_PASSWORD=<real-postgres-password> \
+MINIO_ROOT_PASSWORD=<real-minio-password> \
+JWT_SECRET_KEY=<real-64-char-or-longer-secret> \
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/NihadMemmedli/quorvex_ai/main/deploy/install-server.sh)"
 ```
 
