@@ -66,6 +66,7 @@ class NativeGenerator:
         model_tier: str = "tool_deep",
         project_id: str | None = None,
         env_vars: dict[str, str] | None = None,
+        cwd: Path | str | None = None,
     ):
         self.on_tool_use = on_tool_use
         self.on_progress = on_progress
@@ -76,6 +77,7 @@ class NativeGenerator:
         self.model_tier = model_tier
         self.project_id = project_id
         self.env_vars = dict(env_vars or {})
+        self.cwd = Path(cwd) if cwd else None
         # Use absolute path to project's tests directory (not relative to cwd)
         # This fixes Docker issue where cwd changes to run directory
         self.tests_dir = BASE_DIR / "tests" / "generated"
@@ -444,7 +446,7 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
 
         runner = AgentRunner(
             timeout_seconds=timeout,
-            allowed_tools=get_agent_allowed_tools("playwright-test-generator"),
+            allowed_tools=get_agent_allowed_tools("playwright-test-generator", mcp_config_dir=self.cwd),
             log_tools=True,
             on_tool_use=self.on_tool_use,
             on_progress=self.on_progress,
@@ -458,6 +460,7 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
             memory_stage="native_generator",
             inject_memory=False,
             env_vars=self.env_vars,
+            cwd=self.cwd,
         )
 
         result = await runner.run(prompt)

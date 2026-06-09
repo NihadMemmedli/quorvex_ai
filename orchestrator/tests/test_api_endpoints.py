@@ -622,6 +622,45 @@ class TestSpecEndpoints:
                         session.delete(meta)
                 session.commit()
 
+    def test_list_specs_includes_autopilot_spec_only_for_registered_project(self, client, tmp_path, monkeypatch):
+        """Autopilot specs are visible only through the project recorded in SpecMetadata."""
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import Project, SpecMetadata
+
+        project_id = f"wetravel-project-{uuid4().hex}"
+        session_id = f"autopilot_{uuid4().hex}"
+        spec_name = f"autopilot/{session_id}/checkout-flow.md"
+        specs_dir = tmp_path / "specs"
+        (specs_dir / "autopilot" / session_id).mkdir(parents=True)
+        (specs_dir / spec_name).write_text("# Checkout Flow\n", encoding="utf-8")
+        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+
+        with Session(engine) as session:
+            session.add(Project(id=project_id, name="Wetravel Project"))
+            session.add(SpecMetadata(spec_name=spec_name, project_id=project_id, tags_json="[]"))
+            session.commit()
+
+        try:
+            project_response = client.get(f"/specs/list?project_id={project_id}")
+            assert project_response.status_code == 200
+            project_names = {item["name"] for item in project_response.json()["items"]}
+            assert spec_name in project_names
+
+            default_response = client.get("/specs/list?project_id=default")
+            assert default_response.status_code == 200
+            default_names = {item["name"] for item in default_response.json()["items"]}
+            assert spec_name not in default_names
+        finally:
+            with Session(engine) as session:
+                meta = session.get(SpecMetadata, spec_name)
+                if meta:
+                    session.delete(meta)
+                project = session.get(Project, project_id)
+                if project:
+                    session.delete(project)
+                session.commit()
+
     def test_create_spec_missing_name(self, client):
         """POST /specs with missing name should return 422."""
         response = client.post("/specs", json={"content": "# Test"})

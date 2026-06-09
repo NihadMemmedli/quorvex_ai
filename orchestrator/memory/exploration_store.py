@@ -810,6 +810,7 @@ class ExplorationStore:
         source_type: str | None = None,
         confidence: float | None = None,
         uncertainty_reason: str | None = None,
+        provenance_metadata: dict[str, Any] | None = None,
     ) -> Requirement:
         """
         Store a requirement.
@@ -845,6 +846,7 @@ class ExplorationStore:
                     if source_session_id
                     else None
                 ),
+                provenance_metadata_json=json.dumps(provenance_metadata or {}),
                 acceptance_criteria_json=json.dumps(acceptance_criteria or []),
                 source_session_id=source_session_id,
                 created_at=datetime.utcnow(),
@@ -920,12 +922,20 @@ class ExplorationStore:
     def get_requirement(self, req_id: int) -> Requirement | None:
         """Get a requirement by ID."""
         with self._get_session() as db:
-            return db.get(Requirement, req_id)
+            query = select(Requirement).where(
+                Requirement.id == req_id,
+                Requirement.project_id == self.project_id,
+            )
+            return db.exec(query).first()
 
     def update_requirement(self, req_id: int, **kwargs) -> Requirement | None:
         """Update a requirement."""
         with self._get_session() as db:
-            requirement = db.get(Requirement, req_id)
+            query = select(Requirement).where(
+                Requirement.id == req_id,
+                Requirement.project_id == self.project_id,
+            )
+            requirement = db.exec(query).first()
             if requirement:
                 for key, value in kwargs.items():
                     if hasattr(requirement, key):

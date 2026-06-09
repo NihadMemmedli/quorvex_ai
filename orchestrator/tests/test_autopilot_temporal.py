@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import types
@@ -49,12 +50,17 @@ from orchestrator.api.models_db import (
     AutoPilotSession,
     AutoPilotSpecTask,
     AutoPilotTestTask,
+    Project,
+    TestDataItem as DBTestDataItem,
+    TestDataSet as DBTestDataSet,
 )
 from orchestrator.services.autopilot_activities import (
+    _build_config_from_session,
     _temporal_autopilot_execution_env,
     mark_autopilot_temporal_started,
     set_autopilot_control_status,
 )
+from orchestrator.services.browser_auth_sessions import create_browser_auth_session
 from orchestrator.services.custom_workflow_worker import get_worker_contract
 from orchestrator.services import temporal_client
 from orchestrator.services.temporal_client import TemporalUnavailableError, TemporalWorkflowStart
@@ -88,6 +94,28 @@ def _create_autopilot_session(session_id: str, status: str = "pending") -> AutoP
         session.commit()
         session.refresh(ap_session)
         return ap_session
+
+
+def _create_project(session: Session, project_id: str) -> Project:
+    project = session.get(Project, project_id)
+    if not project:
+        project = Project(id=project_id, name=f"Project {project_id}")
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+    return project
+
+
+def _test_app_with_temporal_stub(monkeypatch) -> FastAPI:
+    async def fake_start(session_id_arg: str, *, task_queue: str | None = None):
+        return TemporalWorkflowStart(workflow_id=f"autopilot-{session_id_arg}", run_id="run-123")
+
+    monkeypatch.setattr(autopilot_api, "_count_user_active_sessions", lambda user_key: 0)
+    monkeypatch.setattr(autopilot_api, "_count_user_active_sessions_db", lambda user_key: 0)
+    monkeypatch.setattr("orchestrator.services.temporal_client.start_autopilot_workflow", fake_start)
+    app = FastAPI()
+    app.include_router(autopilot_api.router)
+    return app
 
 
 def test_custom_workflow_worker_registers_autopilot_workflow_and_activities():
@@ -148,6 +176,142 @@ def test_start_autopilot_endpoint_returns_success_after_temporal_commit(monkeypa
             assert ap_session.temporal_run_id == "run-123"
     finally:
         _cleanup_session(session_id)
+
+
+def test_start_autopilot_persists_test_data_refs_and_inline_json(monkeypatch):
+    _ensure_tables()
+    project_id = f"autopilot-project-{uuid4().hex}"
+    app = _test_app_with_temporal_stub(monkeypatch)
+
+    with Session(engine) as session:
+        _create_project(session, project_id)
+        dataset = DBTestDataSet(
+            id=f"tds-{uuid4().hex}",
+            project_id=project_id,
+            key="auth-users",
+            name="Auth users",
+        )
+        session.add(dataset)
+        session.commit()
+        item = DBTestDataItem(
+            id=f"tdi-{uuid4().hex}",
+            dataset_id=dataset.id,
+            key="valid-admin",
+            name="Valid admin",
+            data_json=json.dumps({"email": "admin@example.com", "password": "secret"}),
+        )
+        session.add(item)
+        session.commit()
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/autopilot/start",
+            json={
+                "entry_urls": ["https://example.com"],
+                "project_id": project_id,
+                "test_data_refs": ["auth-users.valid-admin"],
+                "test_data": {"checkout_note": "expedite"},
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    session_id = response.json()["session_id"]
+    try:
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            assert ap_session.config["test_data_refs"] == ["auth-users.valid-admin"]
+            assert ap_session.test_data == {"checkout_note": "expedite"}
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_start_autopilot_rejects_missing_test_data_ref(monkeypatch):
+    _ensure_tables()
+    project_id = f"autopilot-project-{uuid4().hex}"
+    app = _test_app_with_temporal_stub(monkeypatch)
+    with Session(engine) as session:
+        _create_project(session, project_id)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/autopilot/start",
+            json={
+                "entry_urls": ["https://example.com"],
+                "project_id": project_id,
+                "test_data_refs": ["missing.user"],
+            },
+        )
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["missing_test_data_refs"][0]["ref"] == "missing.user"
+
+
+def test_start_autopilot_validates_and_persists_browser_auth_session(monkeypatch):
+    _ensure_tables()
+    project_id = f"autopilot-project-{uuid4().hex}"
+    app = _test_app_with_temporal_stub(monkeypatch)
+
+    with Session(engine) as session:
+        _create_project(session, project_id)
+        auth = create_browser_auth_session(
+            session,
+            project_id=project_id,
+            name="Admin session",
+            base_url="https://example.com",
+            login_url="https://example.com/login",
+            username_key="ADMIN_USER",
+            password_key="ADMIN_PASSWORD",
+            storage_state={"cookies": [], "origins": []},
+        )
+        auth_id = auth.id
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/autopilot/start",
+            json={
+                "entry_urls": ["https://example.com/app"],
+                "project_id": project_id,
+                "browser_auth_session_id": auth_id,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    session_id = response.json()["session_id"]
+    try:
+        with Session(engine) as session:
+            ap_session = session.get(AutoPilotSession, session_id)
+            assert ap_session is not None
+            assert ap_session.config["browser_auth_session_id"] == auth_id
+            assert ap_session.config["browser_auth_session_name"] == "Admin session"
+            assert ap_session.config["use_project_default_browser_auth"] is False
+    finally:
+        _cleanup_session(session_id)
+
+
+def test_temporal_config_rebuild_preserves_test_data_and_browser_auth_fields():
+    session = AutoPilotSession(id="autopilot-config-test", project_id="project-1", status="pending")
+    session.entry_urls = ["https://example.com"]
+    session.test_data = {"inline": "value"}
+    session.config = {
+        "test_data_refs": ["auth-users.valid-admin"],
+        "browser_auth_session_id": "auth-1",
+        "use_project_default_browser_auth": False,
+        "requirements_mode": "multi_agent",
+        "requirements_max_agents": 4,
+        "requirements_browser_verification": "selected",
+    }
+
+    config = _build_config_from_session(session)
+
+    assert config.test_data == {"inline": "value"}
+    assert config.test_data_refs == ["auth-users.valid-admin"]
+    assert config.browser_auth_session_id == "auth-1"
+    assert config.use_project_default_browser_auth is False
+    assert config.requirements_mode == "multi_agent"
+    assert config.requirements_max_agents == 4
+    assert config.requirements_browser_verification == "selected"
 
 
 def test_autopilot_temporal_start_activity_records_workflow_metadata():

@@ -24,6 +24,12 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from orchestrator.utils.playwright_mcp import browser_runtime_status, live_browser_display_diagnostics
+from orchestrator.services.browser_auth_sessions import (
+    BrowserAuthSessionError,
+    ensure_browser_auth_session_usable,
+    resolve_browser_auth_session_row,
+)
+from orchestrator.services.test_data_resolver import resolve_test_data_refs
 
 from .db import engine, get_session
 from .middleware.auth import get_current_user_optional
@@ -76,6 +82,9 @@ class AutoPilotStartRequest(BaseModel):
     login_url: str | None = None
     credentials: dict | None = None
     test_data: dict | None = None
+    test_data_refs: list[str] = Field(default_factory=list)
+    browser_auth_session_id: str | None = None
+    use_project_default_browser_auth: bool = False
     instructions: str | None = None
     strategy: str = Field(default="goal_directed")
     max_interactions: int = Field(default=50, ge=1, le=200)
@@ -87,6 +96,9 @@ class AutoPilotStartRequest(BaseModel):
     max_specs: int = Field(default=50, ge=1, le=200)
     parallel_generation: int = Field(default=2, ge=1, le=5)
     hybrid_healing: bool = Field(default=False)
+    requirements_mode: str = Field(default="single_agent", pattern="^(single_agent|multi_agent)$")
+    requirements_max_agents: int = Field(default=3, ge=1, le=6)
+    requirements_browser_verification: str = Field(default="off", pattern="^(off|selected)$")
 
 
 class AutoPilotSessionResponse(BaseModel):
@@ -271,6 +283,7 @@ class AutoPilotLiveResponse(BaseModel):
     run_id: str | None = None
     spec_name: str | None = None
     current_stage: str | None = None
+    activity_kind: str | None = None
     agent_task_id: str | None = None
     last_tool: str | None = None
     last_tool_label: str | None = None
@@ -283,6 +296,11 @@ class AutoPilotLiveResponse(BaseModel):
     recent_tools: list[dict[str, Any]] = Field(default_factory=list)
     artifacts: list[AutoPilotLiveArtifactResponse] = Field(default_factory=list)
     latest_image: AutoPilotLiveArtifactResponse | None = None
+    subagents: list[dict[str, Any]] = Field(default_factory=list)
+    items_total: int = 0
+    items_completed: int = 0
+    requirements_generated: int = 0
+    verification_status: str | None = None
     updated_at: str | None = None
     browser_runtime: str | None = None
     live_view_available: bool = False
@@ -554,6 +572,8 @@ def _is_stale_live_browser(ap_session: AutoPilotSession, now: datetime | None = 
     live = dict((ap_session.config or {}).get("live_browser") or {})
     if not live.get("active"):
         return False
+    if live.get("activity_kind") == "analysis":
+        return False
     if live.get("agent_task_id"):
         return False
     if find_session_processes(ap_session.id):
@@ -611,6 +631,8 @@ async def _is_stale_live_browser_async(
         return False
     live = dict((ap_session.config or {}).get("live_browser") or {})
     if not live.get("active"):
+        return False
+    if live.get("activity_kind") == "analysis":
         return False
     if find_session_processes(ap_session.id):
         return False
@@ -1073,6 +1095,7 @@ def _live_response_from_state(
         run_id=str(run_id) if run_id else None,
         spec_name=live.get("spec_name"),
         current_stage=live.get("current_stage"),
+        activity_kind=live.get("activity_kind"),
         agent_task_id=live.get("agent_task_id"),
         last_tool=live.get("last_tool"),
         last_tool_label=live.get("last_tool_label"),
@@ -1085,6 +1108,11 @@ def _live_response_from_state(
         recent_tools=list(live.get("recent_tools") or []),
         artifacts=artifacts,
         latest_image=latest_image,
+        subagents=list(live.get("subagents") or []),
+        items_total=_safe_int(live.get("items_total")),
+        items_completed=_safe_int(live.get("items_completed")),
+        requirements_generated=_safe_int(live.get("requirements_generated")),
+        verification_status=live.get("verification_status"),
         updated_at=live.get("updated_at"),
         browser_runtime=str(runtime["browser_runtime"]),
         live_view_available=bool(runtime["live_view_available"]),
@@ -1522,6 +1550,9 @@ def _build_config_from_session(ap_session) -> "AutoPilotConfig":  # noqa: F821
         login_url=ap_session.login_url,
         credentials=ap_session.credentials,
         test_data=ap_session.test_data,
+        test_data_refs=list(cfg.get("test_data_refs") or []),
+        browser_auth_session_id=cfg.get("browser_auth_session_id"),
+        use_project_default_browser_auth=bool(cfg.get("use_project_default_browser_auth", False)),
         instructions=ap_session.instructions,
         strategy=cfg.get("strategy", "goal_directed"),
         max_interactions=cfg.get("max_interactions", 50),
@@ -1533,6 +1564,9 @@ def _build_config_from_session(ap_session) -> "AutoPilotConfig":  # noqa: F821
         max_specs=cfg.get("max_specs", 50),
         parallel_generation=cfg.get("parallel_generation", 2),
         hybrid_healing=cfg.get("hybrid_healing", False),
+        requirements_mode=cfg.get("requirements_mode", "single_agent"),
+        requirements_max_agents=cfg.get("requirements_max_agents", 3),
+        requirements_browser_verification=cfg.get("requirements_browser_verification", "off"),
     )
 
 
@@ -1700,6 +1734,15 @@ async def start_autopilot(
         raise HTTPException(status_code=422, detail="At least one entry URL is required.")
     session_id = f"autopilot_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 
+    test_data_refs = [str(ref).strip() for ref in request_body.test_data_refs if str(ref).strip()]
+    browser_auth_session_id = (request_body.browser_auth_session_id or "").strip() or None
+    use_project_default_browser_auth = bool(request_body.use_project_default_browser_auth)
+    if browser_auth_session_id and use_project_default_browser_auth:
+        raise HTTPException(
+            status_code=400,
+            detail="Choose either a specific browser auth session or the project default, not both.",
+        )
+
     # Build config dict for storage
     config = {
         "strategy": request_body.strategy,
@@ -1712,12 +1755,51 @@ async def start_autopilot(
         "max_specs": request_body.max_specs,
         "parallel_generation": request_body.parallel_generation,
         "hybrid_healing": request_body.hybrid_healing,
+        "requirements_mode": request_body.requirements_mode,
+        "requirements_max_agents": request_body.requirements_max_agents,
+        "requirements_browser_verification": request_body.requirements_browser_verification,
         "has_credentials": bool(request_body.credentials),
         "has_login_url": bool(request_body.login_url),
+        "test_data_refs": test_data_refs,
+        "browser_auth_session_id": browser_auth_session_id,
+        "use_project_default_browser_auth": use_project_default_browser_auth,
     }
 
     # Create session in DB
     with Session(engine) as db:
+        if test_data_refs:
+            resolved_test_data = resolve_test_data_refs(
+                db,
+                project_id=request_body.project_id,
+                refs=test_data_refs,
+                render_as="json",
+            )
+            missing_refs = resolved_test_data.get("missing") or []
+            if missing_refs:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "message": "Selected test data refs are unavailable.",
+                        "missing_test_data_refs": missing_refs,
+                    },
+                )
+
+        if browser_auth_session_id or use_project_default_browser_auth:
+            try:
+                browser_auth_row = resolve_browser_auth_session_row(
+                    db,
+                    request_body.project_id,
+                    browser_auth_session_id=browser_auth_session_id,
+                    use_default=use_project_default_browser_auth,
+                )
+                if not browser_auth_row:
+                    raise BrowserAuthSessionError("Project default browser auth session was not found")
+                ensure_browser_auth_session_usable(browser_auth_row)
+                config["browser_auth_session_id"] = browser_auth_row.id if browser_auth_session_id else None
+                config["browser_auth_session_name"] = browser_auth_row.name
+            except BrowserAuthSessionError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         ap_session = AutoPilotSession(
             id=session_id,
             project_id=request_body.project_id,

@@ -65,6 +65,7 @@ class NativeHealer:
         owner_label: str | None = None,
         model_tier: str = "tool_deep",
         env_vars: dict[str, str] | None = None,
+        cwd: Path | str | None = None,
     ):
         self.on_tool_use = on_tool_use
         self.on_progress = on_progress
@@ -74,6 +75,7 @@ class NativeHealer:
         self.owner_label = owner_label
         self.model_tier = model_tier
         self.env_vars = dict(env_vars or {})
+        self.cwd = Path(cwd) if cwd else None
         self._last_timed_out = False
 
     async def heal_test(
@@ -398,7 +400,7 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
         try:
             runner = AgentRunner(
                 timeout_seconds=effective_timeout,
-                allowed_tools=get_agent_allowed_tools("playwright-test-healer") or [],
+                allowed_tools=get_agent_allowed_tools("playwright-test-healer", mcp_config_dir=self.cwd) or [],
                 log_tools=True,
                 on_tool_use=self.on_tool_use,
                 on_progress=self.on_progress,
@@ -412,6 +414,7 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
                 memory_stage="native_healer",
                 inject_memory=False,
                 env_vars=self.env_vars,
+                cwd=self.cwd,
             )
             result = await runner.run(prompt)
             self._last_timed_out = result.timed_out

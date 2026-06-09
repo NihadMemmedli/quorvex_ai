@@ -1644,6 +1644,7 @@ class Requirement(SQLModel, table=True):
     source_type: str = Field(default="manual", index=True)
     confidence: float = Field(default=0.9)
     uncertainty_reason: str | None = Field(default=None, sa_column=Column(Text))
+    provenance_metadata_json: str = Field(default="{}", sa_column=Column(Text))
     confirmed_by: str | None = None
     confirmed_at: datetime | None = None
     rejected_by: str | None = None
@@ -1677,6 +1678,18 @@ class Requirement(SQLModel, table=True):
     @title_embedding.setter
     def title_embedding(self, value: list[float] | None):
         self.title_embedding_json = json.dumps(value) if value else None
+
+    @property
+    def provenance_metadata(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.provenance_metadata_json or "{}")
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @provenance_metadata.setter
+    def provenance_metadata(self, value: dict[str, Any] | None):
+        self.provenance_metadata_json = json.dumps(value or {})
 
 
 class RequirementSource(SQLModel, table=True):

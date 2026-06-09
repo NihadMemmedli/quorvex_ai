@@ -45,7 +45,11 @@ if config_dir:
     os.chdir(config_dir)
 
 from utils.browser_cleanup import cleanup_orphaned_browsers
-from utils.playwright_mcp import playwright_config_cli_arg
+from utils.playwright_mcp import (
+    playwright_config_cli_arg,
+    prepare_run_playwright_config_content,
+    write_playwright_test_mcp_config,
+)
 from utils.progress_reporter import (
     extract_run_id_from_path,
     init_progress_reporter,
@@ -207,6 +211,8 @@ class FullNativePipeline:
         skip_planning: bool = False,
         existing_test_path: str | None = None,
         force_api: bool = False,
+        storage_state_path: str | None = None,
+        browser_auth_context: dict[str, Any] | None = None,
     ) -> dict:
         """
         Run the full native pipeline.
@@ -223,9 +229,15 @@ class FullNativePipeline:
         Returns:
             Dict with pipeline results
         """
+        run_dir.mkdir(parents=True, exist_ok=True)
         spec_file = Path(spec_path)
         spec_content = spec_file.read_text()
-        auth_context = self._load_browser_auth_context()
+        auth_context = browser_auth_context or self._load_browser_auth_context()
+        if storage_state_path:
+            self.prepare_run_browser_context(
+                run_dir=run_dir,
+                storage_state_path=storage_state_path,
+            )
         raw_included_spec_content = self._resolve_includes(
             spec_content, spec_path, resolve_testdata=False
         )
@@ -1468,6 +1480,48 @@ class FullNativePipeline:
             return TestResult(
                 passed=False, exit_code=-1, output=str(e), error_summary=str(e)[:100]
             )
+
+    def prepare_run_browser_context(
+        self,
+        *,
+        run_dir: Path,
+        storage_state_path: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """Prepare run-local Playwright config/MCP files for saved browser auth."""
+        run_dir.mkdir(parents=True, exist_ok=True)
+        project_root = Path(__file__).resolve().parent.parent.parent
+        playwright_config_src = project_root / "playwright.config.ts"
+        playwright_config_dst = run_dir / "playwright.config.ts"
+        if playwright_config_src.exists():
+            headless = not (
+                os.environ.get("PLAYWRIGHT_HEADLESS", "").lower() == "false"
+                or os.environ.get("HEADLESS", "").lower() == "false"
+            )
+            config_content = prepare_run_playwright_config_content(
+                playwright_config_src.read_text(),
+                base_dir=project_root,
+                run_dir=run_dir,
+                headless=headless,
+                storage_state_path=storage_state_path,
+            )
+            playwright_config_dst.write_text(config_content)
+            runtime = write_playwright_test_mcp_config(
+                run_dir=run_dir,
+                server_name="playwright-test",
+                config_path=playwright_config_dst,
+                headless=headless,
+                storage_state_path=storage_state_path,
+            )
+        else:
+            runtime = {}
+
+        self.native_planner.cwd = run_dir
+        self.native_planner.session_dir = run_dir
+        if hasattr(self.native_generator, "cwd"):
+            self.native_generator.cwd = run_dir
+        if hasattr(self.native_healer, "cwd"):
+            self.native_healer.cwd = run_dir
+        return runtime
 
     def _read_json_file(self, path: Path) -> dict[str, Any] | None:
         try:

@@ -23,6 +23,20 @@ interface Requirement {
     acceptance_criteria: string[];
 }
 
+const DEFAULT_TEMPLATE = `# Test: [Name]
+
+## Description
+[Description of what the test does]
+
+## Steps
+1. Navigate to [URL]
+2. [Action]
+3. [Assertion]
+
+## Expected Outcome
+- [Expected result]
+`;
+
 function NewSpecPageContent() {
     const router = useRouter();
     const searchParams = useSearchParams();
@@ -76,21 +90,6 @@ ${req.acceptance_criteria.map(ac => `- ${ac}`).join('\n') || '- [Expected result
 `;
     };
 
-    // Default template (when no requirement)
-    const defaultTemplate = `# Test: [Name]
-
-## Description
-[Description of what the test does]
-
-## Steps
-1. Navigate to [URL]
-2. [Action]
-3. [Assertion]
-
-## Expected Outcome
-- [Expected result]
-`;
-
     // Fetch requirement data if requirement_id is provided
     useEffect(() => {
         if (requirementId) {
@@ -120,15 +119,18 @@ ${req.acceptance_criteria.map(ac => `- ${ac}`).join('\n') || '- [Expected result
                 .catch(err => {
                     console.error('Failed to load requirement:', err);
                     // Fall back to default template
-                    setContent(defaultTemplate);
+                    setContent(DEFAULT_TEMPLATE);
                 })
                 .finally(() => setLoadingRequirement(false));
         } else {
-            setContent(defaultTemplate);
+            setContent(DEFAULT_TEMPLATE);
         }
 
         // Fetch all existing tags for autocomplete
-        fetch(`${API_BASE}/spec-metadata`)
+        const metadataProjectParam = currentProject?.id
+            ? `?project_id=${encodeURIComponent(currentProject.id)}`
+            : '';
+        fetch(`${API_BASE}/spec-metadata${metadataProjectParam}`)
             .then(res => res.json())
             .then(metadata => {
                 const tagsSet = new Set<string>();
@@ -211,7 +213,7 @@ ${req.acceptance_criteria.map(ac => `- ${ac}`).join('\n') || '- [Expected result
     // Handle clearing the linked requirement
     const handleClearRequirement = () => {
         setRequirement(null);
-        setContent(defaultTemplate);
+        setContent(DEFAULT_TEMPLATE);
         setName('');
         setTags([]);
     };
@@ -236,7 +238,7 @@ ${req.acceptance_criteria.map(ac => `- ${ac}`).join('\n') || '- [Expected result
                     await fetch(`${API_BASE}/spec-metadata/${name}`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ tags })
+                        body: JSON.stringify({ tags, project_id: currentProject?.id })
                     });
                 }
 

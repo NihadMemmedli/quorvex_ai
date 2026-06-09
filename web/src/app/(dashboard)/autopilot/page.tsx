@@ -5,7 +5,7 @@ import {
     Rocket, Play, Pause, Square, Clock, Globe, FileText, CheckCircle2,
     AlertTriangle, Loader2, ChevronRight, ArrowLeft, RefreshCw,
     MessageCircle, Zap, BarChart2, Target, List, Monitor, Image as ImageIcon,
-    Activity, ExternalLink
+    Activity, ExternalLink, X
 } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
@@ -15,6 +15,13 @@ import { PageLayout } from '@/components/ui/page-layout';
 import { EmptyState } from '@/components/ui/empty-state';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
 import { LiveBrowserView } from '@/components/LiveBrowserView';
+import { TestDataPicker } from '@/components/TestDataPicker';
+import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
+import {
+    browserAuthSessionLabel,
+    fetchProjectBrowserAuthSessions,
+    isBrowserAuthSessionSelectable,
+} from '@/lib/browser-auth-sessions';
 
 // ============ TYPES ============
 
@@ -184,6 +191,8 @@ interface AutoPilotLiveArtifact {
     modified_at: string | null;
 }
 
+type BrowserAuthMode = 'none' | 'project_default' | 'session';
+
 interface AutoPilotLiveState {
     active: boolean;
     phase: string | null;
@@ -195,6 +204,7 @@ interface AutoPilotLiveState {
     run_id: string | null;
     spec_name: string | null;
     current_stage: string | null;
+    activity_kind: string | null;
     agent_task_id: string | null;
     last_tool: string | null;
     last_tool_label: string | null;
@@ -207,6 +217,11 @@ interface AutoPilotLiveState {
     recent_tools: Array<{ name?: string; label?: string; at?: string; source?: string; artifact?: string }>;
     artifacts: AutoPilotLiveArtifact[];
     latest_image: AutoPilotLiveArtifact | null;
+    subagents: Array<{ name?: string; status?: string; surface?: string; items_total?: number; items_completed?: number; requirements?: number }>;
+    items_total: number;
+    items_completed: number;
+    requirements_generated: number;
+    verification_status: string | null;
     updated_at: string | null;
     browser_runtime: string | null;
     live_view_available: boolean;
@@ -362,6 +377,25 @@ async function fetchJsonWithTimeout<T>(url: string, timeoutMs = 15000): Promise<
     } finally {
         clearTimeout(timeout);
     }
+}
+
+function effectiveProjectId(projectId: string | null | undefined): string {
+    return projectId || 'default';
+}
+
+function specPathToName(specPath: string | null | undefined): string | null {
+    if (!specPath) return null;
+    const normalized = specPath.replace(/\\/g, '/');
+    const markerIndex = normalized.lastIndexOf('/specs/');
+    if (markerIndex >= 0) return normalized.slice(markerIndex + '/specs/'.length);
+    if (normalized.startsWith('specs/')) return normalized.slice('specs/'.length);
+    return normalized.endsWith('.md') ? normalized : null;
+}
+
+function specDetailHref(specPath: string | null | undefined): string | null {
+    const specName = specPathToName(specPath);
+    if (!specName) return null;
+    return `/specs/${specName.split('/').map(encodeURIComponent).join('/')}`;
 }
 
 function isFailedTestTask(task: TestTask): boolean {
@@ -932,6 +966,13 @@ export default function AutoPilotPage() {
     const [formPriorityThreshold, setFormPriorityThreshold] = useState('low');
     const [formParallel, setFormParallel] = useState(2);
     const [formHybridHealing, setFormHybridHealing] = useState(false);
+    const [browserAuthSessions, setBrowserAuthSessions] = useState<BrowserAuthSession[]>([]);
+    const [browserAuthMode, setBrowserAuthMode] = useState<BrowserAuthMode>('none');
+    const [selectedBrowserAuthSessionId, setSelectedBrowserAuthSessionId] = useState('');
+    const [selectedTestDataRefs, setSelectedTestDataRefs] = useState<string[]>([]);
+    const [testDataRefInput, setTestDataRefInput] = useState('');
+    const [inlineTestDataJson, setInlineTestDataJson] = useState('');
+    const [inlineTestDataError, setInlineTestDataError] = useState<string | null>(null);
 
     // Question answer state
     const [customAnswer, setCustomAnswer] = useState('');
@@ -948,6 +989,49 @@ export default function AutoPilotPage() {
         setFormUrls(prev => applyProjectDefaultUrl(prev, projectDefaultUrl, previousProjectDefaultUrlRef.current));
         previousProjectDefaultUrlRef.current = projectDefaultUrl;
     }, [projectDefaultUrl]);
+
+    useEffect(() => {
+        let cancelled = false;
+        setBrowserAuthMode('none');
+        setSelectedBrowserAuthSessionId('');
+        setSelectedTestDataRefs([]);
+        setTestDataRefInput('');
+        setInlineTestDataJson('');
+        setInlineTestDataError(null);
+        if (!currentProject?.id || projectLoading) {
+            setBrowserAuthSessions([]);
+            return;
+        }
+
+        fetchProjectBrowserAuthSessions(currentProject.id)
+            .then(sessions => {
+                if (!cancelled) setBrowserAuthSessions(sessions);
+            })
+            .catch(() => {
+                if (!cancelled) setBrowserAuthSessions([]);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [currentProject?.id, projectLoading]);
+
+    const activeBrowserAuthSessions = browserAuthSessions.filter(isBrowserAuthSessionSelectable);
+    const hasCredentialLoginInput = Boolean(formLoginUrl.trim() || formUsername.trim() || formPassword.trim());
+
+    const addTestDataRef = useCallback((value: string) => {
+        const refs = value
+            .split(/[,\n]/)
+            .map(ref => ref.trim())
+            .filter(Boolean);
+        if (!refs.length) return;
+        setSelectedTestDataRefs(prev => Array.from(new Set([...prev, ...refs])));
+        setTestDataRefInput('');
+    }, []);
+
+    const removeTestDataRef = useCallback((ref: string) => {
+        setSelectedTestDataRefs(prev => prev.filter(item => item !== ref));
+    }, []);
 
     // ============ DATA FETCHING ============
 
@@ -969,20 +1053,37 @@ export default function AutoPilotPage() {
     }, [currentProject?.id, projectLoading]);
 
     const fetchSessionDetail = useCallback(async (sessionId: string) => {
+        const selectedProjectId = effectiveProjectId(currentProject?.id);
+        const projectParam = currentProject?.id
+            ? `?project_id=${encodeURIComponent(currentProject.id)}`
+            : '';
         try {
-            const [sessionData, phasesData, questionsData, specTasksData, testTasksData, liveData] = await Promise.all([
-                fetchJsonWithTimeout<AutoPilotSession>(`${API_BASE}/autopilot/${sessionId}`),
-                fetchJsonWithTimeout<Phase[] | { phases?: Phase[] }>(`${API_BASE}/autopilot/${sessionId}/phases`),
-                fetchJsonWithTimeout<Question[] | { questions?: Question[] }>(`${API_BASE}/autopilot/${sessionId}/questions`),
-                fetchJsonWithTimeout<SpecTask[] | { tasks?: SpecTask[] }>(`${API_BASE}/autopilot/${sessionId}/spec-tasks`),
-                fetchJsonWithTimeout<TestTask[] | { tasks?: TestTask[] }>(`${API_BASE}/autopilot/${sessionId}/test-tasks`),
-                fetchJsonWithTimeout<AutoPilotLiveState>(`${API_BASE}/autopilot/${sessionId}/live`).catch(err => {
+            const sessionData = await fetchJsonWithTimeout<AutoPilotSession>(`${API_BASE}/autopilot/${sessionId}${projectParam}`);
+            if (effectiveProjectId(sessionData.project_id) !== selectedProjectId) {
+                setActiveSessionId(null);
+                setSession(null);
+                setPhases([]);
+                setQuestions([]);
+                setSpecTasks([]);
+                setTestTasks([]);
+                setLiveState(null);
+                setEvidence(null);
+                setLoadError('Auto Pilot session belongs to another project.');
+                return;
+            }
+
+            const [phasesData, questionsData, specTasksData, testTasksData, liveData] = await Promise.all([
+                fetchJsonWithTimeout<Phase[] | { phases?: Phase[] }>(`${API_BASE}/autopilot/${sessionId}/phases${projectParam}`),
+                fetchJsonWithTimeout<Question[] | { questions?: Question[] }>(`${API_BASE}/autopilot/${sessionId}/questions${projectParam}`),
+                fetchJsonWithTimeout<SpecTask[] | { tasks?: SpecTask[] }>(`${API_BASE}/autopilot/${sessionId}/spec-tasks${projectParam}`),
+                fetchJsonWithTimeout<TestTask[] | { tasks?: TestTask[] }>(`${API_BASE}/autopilot/${sessionId}/test-tasks${projectParam}`),
+                fetchJsonWithTimeout<AutoPilotLiveState>(`${API_BASE}/autopilot/${sessionId}/live${projectParam}`).catch(err => {
                     console.debug('Auto Pilot live state unavailable:', err);
                     return null;
                 }),
             ]);
             const evidenceData = ['completed', 'failed', 'cancelled'].includes(sessionData.status)
-                ? await fetchJsonWithTimeout<AutoPilotEvidence>(`${API_BASE}/autopilot/${sessionId}/evidence`).catch(err => {
+                ? await fetchJsonWithTimeout<AutoPilotEvidence>(`${API_BASE}/autopilot/${sessionId}/evidence${projectParam}`).catch(err => {
                     console.debug('Auto Pilot evidence unavailable:', err);
                     return null;
                 })
@@ -1001,7 +1102,7 @@ export default function AutoPilotPage() {
             setLoadError(err instanceof Error ? err.message : 'Failed to load Auto Pilot session details');
             setEvidence(null);
         }
-    }, []);
+    }, [currentProject?.id]);
 
     // Initial load
     useEffect(() => {
@@ -1011,6 +1112,7 @@ export default function AutoPilotPage() {
     const sessionStatus = session?.status;
 
     useEffect(() => {
+        if (projectLoading) return;
         if (typeof window === 'undefined') return;
         const params = new URLSearchParams(window.location.search);
         const sessionId = params.get('sessionId') || params.get('session');
@@ -1019,7 +1121,7 @@ export default function AutoPilotPage() {
             void fetchSessionDetail(sessionId);
         }
         urlStateReady.current = true;
-    }, [fetchSessionDetail]);
+    }, [fetchSessionDetail, projectLoading]);
 
     useEffect(() => {
         if (!urlStateReady.current || typeof window === 'undefined') return;
@@ -1032,7 +1134,7 @@ export default function AutoPilotPage() {
 
     // Polling for active session
     useEffect(() => {
-        if (!activeSessionId) return;
+        if (!activeSessionId || projectLoading) return;
 
         fetchSessionDetail(activeSessionId);
 
@@ -1042,7 +1144,7 @@ export default function AutoPilotPage() {
         const pollMs = sessionStatus === 'running' ? 3000 : 10000;
         const interval = setInterval(() => fetchSessionDetail(activeSessionId), pollMs);
         return () => clearInterval(interval);
-    }, [activeSessionId, sessionStatus, fetchSessionDetail]);
+    }, [activeSessionId, sessionStatus, fetchSessionDetail, projectLoading]);
 
     useEffect(() => {
         submittedQuestionIdsRef.current.clear();
@@ -1090,6 +1192,33 @@ export default function AutoPilotPage() {
             setError('Please enter at least one URL');
             return;
         }
+        if (browserAuthMode !== 'none' && hasCredentialLoginInput) {
+            setError('Choose either a saved browser session or credential-based login fields, not both.');
+            return;
+        }
+        if (browserAuthMode === 'session' && !selectedBrowserAuthSessionId) {
+            setError('Select an active saved browser session.');
+            return;
+        }
+        const refs = selectedTestDataRefs.map(ref => ref.trim()).filter(Boolean);
+        let inlineTestData: Record<string, any> | undefined;
+        if (inlineTestDataJson.trim()) {
+            try {
+                const parsed = JSON.parse(inlineTestDataJson);
+                if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+                    throw new Error('Inline test data must be a JSON object.');
+                }
+                inlineTestData = parsed;
+                setInlineTestDataError(null);
+            } catch (err) {
+                const message = err instanceof Error ? err.message : 'Invalid JSON';
+                setInlineTestDataError(message);
+                setError(`Inline test data JSON is invalid: ${message}`);
+                return;
+            }
+        } else {
+            setInlineTestDataError(null);
+        }
         setStarting(true);
         setError(null);
 
@@ -1107,6 +1236,13 @@ export default function AutoPilotPage() {
             if (formLoginUrl) body.login_url = formLoginUrl;
             if (formUsername) body.credentials = { username: formUsername, password: formPassword };
             if (formInstructions) body.instructions = formInstructions;
+            if (refs.length > 0) body.test_data_refs = refs;
+            if (inlineTestData) body.test_data = inlineTestData;
+            if (browserAuthMode === 'project_default') {
+                body.use_project_default_browser_auth = true;
+            } else if (browserAuthMode === 'session' && selectedBrowserAuthSessionId) {
+                body.browser_auth_session_id = selectedBrowserAuthSessionId;
+            }
 
             const res = await fetch(`${API_BASE}/autopilot/start`, {
                 method: 'POST',
@@ -1124,10 +1260,19 @@ export default function AutoPilotPage() {
                 setFormUsername('');
                 setFormPassword('');
                 setFormInstructions('');
+                setBrowserAuthMode('none');
+                setSelectedBrowserAuthSessionId('');
+                setSelectedTestDataRefs([]);
+                setTestDataRefInput('');
+                setInlineTestDataJson('');
+                setInlineTestDataError(null);
                 fetchSessions();
             } else {
                 const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-                setError(err.detail || 'Failed to start Auto Pilot');
+                const detail = typeof err.detail === 'string'
+                    ? err.detail
+                    : err.detail?.message || JSON.stringify(err.detail || {});
+                setError(detail || 'Failed to start Auto Pilot');
             }
         } catch (e) {
             setError(e instanceof Error ? e.message : 'Network error');
@@ -1577,13 +1722,18 @@ export default function AutoPilotPage() {
         if (!session || !activeSessionId) return null;
 
         const browserPhase = liveState?.phase === 'exploration' || liveState?.phase === 'test_generation';
-        const active = Boolean(liveState?.active && browserPhase && ['running', 'awaiting_input'].includes(session.status));
+        const verificationPhase = liveState?.activity_kind === 'browser_verification';
+        const analysisPhase = liveState?.activity_kind === 'analysis' || liveState?.phase === 'requirements';
+        const showBrowserDetails = browserPhase || verificationPhase;
+        const active = Boolean(liveState?.active && (showBrowserDetails || analysisPhase) && ['running', 'awaiting_input'].includes(session.status));
         const recentTools = liveState?.recent_tools || [];
         const latestImage = liveState?.latest_image;
         const title = liveState?.activity_label || (
-            browserPhase
+            showBrowserDetails
                 ? PHASE_LABELS[liveState?.phase || ''] || 'Browser activity'
-                : 'Browser idle'
+                : analysisPhase
+                    ? 'Analyzing exploration evidence'
+                    : 'Browser idle'
         );
 
         return (
@@ -1600,7 +1750,9 @@ export default function AutoPilotPage() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', minWidth: 0 }}>
                         <Monitor size={18} style={{ color: active ? dark.primary : dark.textMuted, flex: '0 0 auto' }} />
                         <div style={{ minWidth: 0 }}>
-                            <div style={{ color: dark.text, fontSize: '0.95rem', fontWeight: 800 }}>Live Browser</div>
+                            <div style={{ color: dark.text, fontSize: '0.95rem', fontWeight: 800 }}>
+                                {analysisPhase && !showBrowserDetails ? 'Phase Activity' : 'Live Browser'}
+                            </div>
                             <div style={{ color: dark.textSecondary, fontSize: '0.8rem', overflowWrap: 'anywhere' }}>
                                 {title}
                             </div>
@@ -1626,12 +1778,12 @@ export default function AutoPilotPage() {
                 }}>
                     {[
                         { label: 'Phase', value: liveState?.phase ? PHASE_LABELS[liveState.phase] || liveState.phase : '-' },
-                        { label: 'Current Tool', value: liveState?.last_tool_label || liveState?.current_stage || '-' },
-                        { label: 'Tool Calls', value: liveState?.tool_calls ?? 0 },
-                        { label: 'Browser Actions', value: liveState?.browser_tool_calls ?? liveState?.interactions ?? 0 },
-                        { label: 'Captures', value: liveState?.capture_count ?? liveState?.artifacts?.filter(a => a.type === 'image').length ?? 0 },
-                        { label: 'Runtime', value: liveState?.browser_runtime || '-' },
-                        { label: 'Live View', value: liveState?.live_view_available ? 'Available' : 'Unavailable' },
+                        { label: analysisPhase ? 'Activity' : 'Current Tool', value: liveState?.last_tool_label || liveState?.current_stage || liveState?.activity_kind || '-' },
+                        { label: analysisPhase ? 'Subagents' : 'Tool Calls', value: analysisPhase ? (liveState?.subagents?.length ?? 0) : (liveState?.tool_calls ?? 0) },
+                        { label: analysisPhase ? 'Analyzed' : 'Browser Actions', value: analysisPhase ? `${liveState?.items_completed ?? 0} / ${liveState?.items_total ?? 0}` : (liveState?.browser_tool_calls ?? liveState?.interactions ?? 0) },
+                        { label: analysisPhase ? 'Requirements' : 'Captures', value: analysisPhase ? (liveState?.requirements_generated ?? 0) : (liveState?.capture_count ?? liveState?.artifacts?.filter(a => a.type === 'image').length ?? 0) },
+                        { label: analysisPhase ? 'Verification' : 'Runtime', value: analysisPhase ? (liveState?.verification_status || 'off') : (liveState?.browser_runtime || '-') },
+                        { label: 'Live View', value: showBrowserDetails && liveState?.live_view_available ? 'Available' : 'Unavailable' },
                         { label: 'Exploration', value: liveState?.exploration_session_id || '-' },
                         { label: 'Run / Task', value: liveState?.run_id || (liveState?.test_task_id ? `Test ${liveState.test_task_id}` : '-') },
                     ].map(item => (
@@ -1653,7 +1805,7 @@ export default function AutoPilotPage() {
                     ))}
                 </div>
 
-                {browserPhase ? (
+                {showBrowserDetails ? (
                     <div style={{ padding: '1rem 1.25rem', display: 'grid', gap: '1rem' }}>
                         <LiveBrowserView
                             runId={activeSessionId}
@@ -1779,6 +1931,57 @@ export default function AutoPilotPage() {
                                     </div>
                                 )}
                             </div>
+                        </div>
+                    </div>
+                ) : analysisPhase ? (
+                    <div style={{ padding: '1rem 1.25rem', display: 'grid', gap: '1rem' }}>
+                        <div style={{ border: `1px solid ${dark.border}`, borderRadius: '8px', overflow: 'hidden' }}>
+                            <div style={{
+                                padding: '0.75rem 1rem',
+                                borderBottom: `1px solid ${dark.border}`,
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.5rem',
+                                fontWeight: 700,
+                                fontSize: '0.88rem',
+                            }}>
+                                <Activity size={15} style={{ color: dark.primary }} />
+                                Analysis Agents
+                            </div>
+                            {(liveState?.subagents || []).length > 0 ? (
+                                <div>
+                                    {(liveState?.subagents || []).map((agent, i) => (
+                                        <div
+                                            key={`${agent.name || 'agent'}-${i}`}
+                                            style={{
+                                                padding: '0.7rem 1rem',
+                                                borderBottom: i === (liveState?.subagents?.length || 0) - 1 ? 'none' : `1px solid ${dark.border}`,
+                                                display: 'grid',
+                                                gridTemplateColumns: 'minmax(0, 1fr) auto',
+                                                gap: '0.75rem',
+                                                alignItems: 'center',
+                                                fontSize: '0.84rem',
+                                            }}
+                                        >
+                                            <div style={{ minWidth: 0 }}>
+                                                <div style={{ color: dark.text, fontWeight: 700, overflowWrap: 'anywhere' }}>
+                                                    {(agent.name || 'analysis agent').replaceAll('_', ' ')}
+                                                </div>
+                                                <div style={{ color: dark.textMuted, fontSize: '0.76rem', marginTop: '0.2rem' }}>
+                                                    {agent.requirements != null
+                                                        ? `${agent.requirements} requirements drafted`
+                                                        : `${agent.items_completed ?? 0} / ${agent.items_total ?? 0} items`}
+                                                </div>
+                                            </div>
+                                            <StatusBadge status={agent.status || 'running'} />
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div style={{ padding: '1rem', color: dark.textMuted, fontSize: '0.85rem' }}>
+                                    {liveState?.message || 'Analyzing exploration evidence.'}
+                                </div>
+                            )}
                         </div>
                     </div>
                 ) : (
@@ -2344,7 +2547,7 @@ export default function AutoPilotPage() {
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.8rem' }}>
                         <thead>
                             <tr style={{ borderBottom: `1px solid ${dark.border}` }}>
-                                {['Priority', 'Requirement', 'Status', 'Spec Name'].map(h => (
+                                {['Priority', 'Requirement', 'Status', 'Spec Name', 'Actions'].map(h => (
                                     <th key={h} style={tableHeaderStyle}>
                                         {h}
                                     </th>
@@ -2389,6 +2592,26 @@ export default function AutoPilotPage() {
                                         color: dark.textMuted,
                                     }}>
                                         {task.spec_name || '-'}
+                                    </td>
+                                    <td style={{ padding: '0.6rem 1rem' }}>
+                                        {task.status === 'completed' && specDetailHref(task.spec_path) ? (
+                                            <a
+                                                href={specDetailHref(task.spec_path) || '#'}
+                                                style={{
+                                                    display: 'inline-flex',
+                                                    alignItems: 'center',
+                                                    gap: '0.25rem',
+                                                    color: dark.cyan,
+                                                    fontSize: '0.72rem',
+                                                    fontWeight: 600,
+                                                    textDecoration: 'none',
+                                                    whiteSpace: 'nowrap',
+                                                }}
+                                            >
+                                                <ExternalLink size={12} />
+                                                Open spec
+                                            </a>
+                                        ) : '-'}
                                     </td>
                                 </tr>
                             ))}
@@ -2537,8 +2760,31 @@ export default function AutoPilotPage() {
                                                 <FileText size={12} />
                                                 Details
                                             </button>
-                                        {(task.status === 'running' || task.status === 'pending') && (
-                                            <button
+                                            {task.status !== 'pending' && specDetailHref(task.spec_path) && (
+                                                <a
+                                                    href={specDetailHref(task.spec_path) || '#'}
+                                                    style={{
+                                                        padding: '0.2rem 0.5rem',
+                                                        borderRadius: '4px',
+                                                        border: `1px solid ${dark.borderStrong}`,
+                                                        background: dark.neutralSoft,
+                                                        color: dark.cyan,
+                                                        cursor: 'pointer',
+                                                        fontSize: '0.7rem',
+                                                        fontWeight: 600,
+                                                        display: 'inline-flex',
+                                                        alignItems: 'center',
+                                                        gap: '0.25rem',
+                                                        textDecoration: 'none',
+                                                        whiteSpace: 'nowrap',
+                                                    }}
+                                                >
+                                                    <ExternalLink size={12} />
+                                                    Open spec
+                                                </a>
+                                            )}
+                                            {(task.status === 'running' || task.status === 'pending') && (
+                                                <button
                                                 onClick={() => stopTestTask(task.id)}
                                                 style={{
                                                     padding: '0.2rem 0.5rem',
@@ -2769,7 +3015,10 @@ export default function AutoPilotPage() {
                         <input
                             type="text"
                             value={formLoginUrl}
-                            onChange={e => setFormLoginUrl(e.target.value)}
+                            onChange={e => {
+                                setFormLoginUrl(e.target.value);
+                                if (e.target.value.trim()) setBrowserAuthMode('none');
+                            }}
                             placeholder="https://example.com/login"
                             style={inputStyle}
                         />
@@ -2781,7 +3030,10 @@ export default function AutoPilotPage() {
                             <input
                                 type="text"
                                 value={formUsername}
-                                onChange={e => setFormUsername(e.target.value)}
+                                onChange={e => {
+                                    setFormUsername(e.target.value);
+                                    if (e.target.value.trim()) setBrowserAuthMode('none');
+                                }}
                                 placeholder="user@example.com"
                                 style={inputStyle}
                             />
@@ -2791,12 +3043,57 @@ export default function AutoPilotPage() {
                             <input
                                 type="password"
                                 value={formPassword}
-                                onChange={e => setFormPassword(e.target.value)}
+                                onChange={e => {
+                                    setFormPassword(e.target.value);
+                                    if (e.target.value.trim()) setBrowserAuthMode('none');
+                                }}
                                 placeholder="Password"
                                 style={inputStyle}
                             />
                         </div>
                     </div>
+
+                    <div>
+                        <label style={labelStyle}>Saved Browser Session</label>
+                        <select
+                            value={browserAuthMode}
+                            data-testid="autopilot-browser-auth-mode"
+                            onChange={e => {
+                                const next = e.target.value as BrowserAuthMode;
+                                setBrowserAuthMode(next);
+                                if (next !== 'session') setSelectedBrowserAuthSessionId('');
+                                if (next !== 'none') {
+                                    setFormLoginUrl('');
+                                    setFormUsername('');
+                                    setFormPassword('');
+                                }
+                            }}
+                            style={selectStyle}
+                        >
+                            <option value="none">No saved session</option>
+                            <option value="project_default">Project default session</option>
+                            <option value="session">Specific saved session</option>
+                        </select>
+                    </div>
+
+                    {browserAuthMode === 'session' && (
+                        <div>
+                            <label style={labelStyle}>Browser Session</label>
+                            <select
+                                value={selectedBrowserAuthSessionId}
+                                data-testid="autopilot-browser-auth-session"
+                                onChange={e => setSelectedBrowserAuthSessionId(e.target.value)}
+                                style={selectStyle}
+                            >
+                                <option value="">Select active session</option>
+                                {activeBrowserAuthSessions.map(authSession => (
+                                    <option key={authSession.id} value={authSession.id}>
+                                        {browserAuthSessionLabel(authSession)}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
 
                     <div>
                         <label style={labelStyle}>Instructions (optional)</label>
@@ -2865,6 +3162,92 @@ export default function AutoPilotPage() {
                             <option value="medium">Medium and above</option>
                             <option value="low">All priorities</option>
                         </select>
+                    </div>
+
+                    <div>
+                        <label style={labelStyle}>Test Data Refs</label>
+                        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                            <input
+                                type="text"
+                                value={testDataRefInput}
+                                data-testid="autopilot-test-data-ref-input"
+                                onChange={e => setTestDataRefInput(e.target.value)}
+                                onKeyDown={e => {
+                                    if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        addTestDataRef(testDataRefInput);
+                                    }
+                                }}
+                                onBlur={() => addTestDataRef(testDataRefInput)}
+                                placeholder="dataset.item"
+                                style={inputStyle}
+                            />
+                        </div>
+                        {selectedTestDataRefs.length > 0 && (
+                            <div
+                                data-testid="autopilot-test-data-ref-chips"
+                                style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginTop: '0.5rem' }}
+                            >
+                                {selectedTestDataRefs.map(ref => (
+                                    <button
+                                        key={ref}
+                                        type="button"
+                                        onClick={() => removeTestDataRef(ref)}
+                                        style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '0.3rem',
+                                            border: `1px solid ${dark.borderStrong}`,
+                                            borderRadius: '999px',
+                                            background: dark.panelAlt,
+                                            color: dark.textSecondary,
+                                            padding: '0.25rem 0.5rem',
+                                            fontSize: '0.75rem',
+                                            cursor: 'pointer',
+                                        }}
+                                    >
+                                        {ref}
+                                        <X size={12} />
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                        <div style={{ marginTop: '0.5rem' }}>
+                            <TestDataPicker
+                                projectId={currentProject?.id}
+                                mode="ref"
+                                compact
+                                insertLabel="Add"
+                                editLabel="Edit"
+                                onInsert={addTestDataRef}
+                            />
+                        </div>
+                    </div>
+
+                    <div>
+                        <label style={labelStyle}>Inline JSON Test Data</label>
+                        <textarea
+                            value={inlineTestDataJson}
+                            data-testid="autopilot-inline-test-data-json"
+                            onChange={e => {
+                                setInlineTestDataJson(e.target.value);
+                                if (inlineTestDataError) setInlineTestDataError(null);
+                            }}
+                            placeholder={'{\n  "email": "user@example.com"\n}'}
+                            rows={4}
+                            style={{
+                                ...inputStyle,
+                                resize: 'vertical',
+                                fontFamily: 'monospace',
+                                fontSize: '0.78rem',
+                                border: inlineTestDataError ? `1px solid ${dark.danger}` : inputStyle.border,
+                            }}
+                        />
+                        {inlineTestDataError && (
+                            <div style={{ marginTop: '0.35rem', color: dark.danger, fontSize: '0.75rem' }}>
+                                {inlineTestDataError}
+                            </div>
+                        )}
                     </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '0.25rem' }}>

@@ -56,6 +56,20 @@ class GeneratedRequirement:
     source_flows: list[str] = field(default_factory=list)
     source_elements: list[str] = field(default_factory=list)
     source_api_endpoints: list[str] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    confidence: float = 0.7
+    uncertainty_reason: str | None = None
+
+
+@dataclass
+class RequirementsGenerationTelemetry:
+    """Progress metadata for visible requirements analysis phases."""
+
+    mode: str = "single_agent"
+    subagents: list[dict[str, Any]] = field(default_factory=list)
+    evidence_packets: int = 0
+    requirements_generated: int = 0
+    verification_status: str = "off"
 
 
 @dataclass
@@ -69,6 +83,7 @@ class RequirementsGenerationResult:
     total_requirements: int
     by_category: dict[str, int]
     by_priority: dict[str, int]
+    telemetry: RequirementsGenerationTelemetry = field(default_factory=RequirementsGenerationTelemetry)
 
 
 class RequirementsGenerator:
@@ -90,7 +105,13 @@ class RequirementsGenerator:
         self.store = get_exploration_store(project_id=project_id)
 
     async def generate_from_exploration(
-        self, exploration_session_id: str
+        self,
+        exploration_session_id: str,
+        *,
+        mode: str = "single_agent",
+        max_agents: int = 3,
+        browser_verification: str = "off",
+        progress_callback: Any | None = None,
     ) -> RequirementsGenerationResult:
         """
         Generate requirements from an exploration session.
@@ -137,24 +158,68 @@ class RequirementsGenerator:
             api_endpoints=api_endpoints,
         )
 
+        mode = mode if mode in {"single_agent", "multi_agent"} else "single_agent"
+        browser_verification = (
+            browser_verification if browser_verification in {"off", "selected"} else "off"
+        )
+        max_agents = max(1, min(int(max_agents or 3), 6))
+        telemetry = RequirementsGenerationTelemetry(
+            mode=mode,
+            verification_status=browser_verification,
+        )
+
+        async def emit_progress(message: str, **patch: Any) -> None:
+            for key, value in patch.items():
+                if hasattr(telemetry, key):
+                    setattr(telemetry, key, value)
+            if progress_callback:
+                maybe_result = progress_callback(
+                    {
+                        "message": message,
+                        "mode": telemetry.mode,
+                        "subagents": telemetry.subagents,
+                        "items_total": telemetry.evidence_packets,
+                        "requirements_generated": telemetry.requirements_generated,
+                        "verification_status": telemetry.verification_status,
+                    }
+                )
+                if asyncio.iscoroutine(maybe_result):
+                    await maybe_result
+
         # Generate requirements using AI
         logger.info("Generating requirements with AI analysis...")
+        await emit_progress("Analyzing exploration evidence")
 
         try:
-            requirements = await self._generate_requirements_with_ai(
-                exploration_summary
-            )
+            if mode == "multi_agent":
+                requirements, telemetry = await self._generate_requirements_multi_agent(
+                    exploration_summary,
+                    max_agents=max_agents,
+                    browser_verification=browser_verification,
+                    telemetry=telemetry,
+                    progress_callback=emit_progress,
+                )
+            else:
+                requirements = await self._generate_requirements_with_ai(
+                    exploration_summary
+                )
+                telemetry.requirements_generated = len(requirements)
         except Exception as exc:
             logger.warning(
                 f"AI requirements generation failed, using flow-based fallback: {exc}"
             )
             requirements = self._generate_fallback_requirements(exploration_summary)
+            telemetry.subagents = [
+                {"name": "fallback", "status": "completed", "items_completed": len(requirements)}
+            ]
+            telemetry.requirements_generated = len(requirements)
 
         if not requirements:
             logger.warning(
                 "AI requirements generation returned 0 requirements, using flow-based fallback"
             )
             requirements = self._generate_fallback_requirements(exploration_summary)
+            telemetry.requirements_generated = len(requirements)
         elif self._requirements_are_sparse(requirements, exploration_summary):
             logger.info(
                 "AI generated sparse requirements for broad exploration; augmenting from page/flow evidence"
@@ -162,6 +227,7 @@ class RequirementsGenerator:
             requirements = self._augment_sparse_requirements(
                 requirements, exploration_summary
             )
+            telemetry.requirements_generated = len(requirements)
 
         self._assign_requirement_codes(requirements)
 
@@ -178,6 +244,16 @@ class RequirementsGenerator:
                 priority=req.priority,
                 acceptance_criteria=req.acceptance_criteria,
                 source_session_id=exploration_session_id,
+                confidence=req.confidence,
+                uncertainty_reason=req.uncertainty_reason,
+                provenance_metadata={
+                    "generation_mode": telemetry.mode,
+                    "browser_verification": telemetry.verification_status,
+                    "evidence_refs": req.evidence_refs,
+                    "source_flows": req.source_flows,
+                    "source_elements": req.source_elements,
+                    "source_api_endpoints": req.source_api_endpoints,
+                },
             )
             stored_requirements.append(stored)
 
@@ -234,6 +310,7 @@ class RequirementsGenerator:
             total_requirements=len(requirements),
             by_category=by_category,
             by_priority=by_priority,
+            telemetry=telemetry,
         )
 
         logger.info("Requirements Generation Complete!")
@@ -573,6 +650,371 @@ Generate the requirements now:
 
         return requirements
 
+    async def _generate_requirements_multi_agent(
+        self,
+        exploration_summary: dict[str, Any],
+        *,
+        max_agents: int,
+        browser_verification: str,
+        telemetry: RequirementsGenerationTelemetry,
+        progress_callback: Any,
+    ) -> tuple[list[GeneratedRequirement], RequirementsGenerationTelemetry]:
+        """Generate requirements through evidence curation, specialists, and critic."""
+        packets = self._curate_evidence_packets(exploration_summary)
+        telemetry.evidence_packets = len(packets)
+        telemetry.subagents = [
+            {"name": "evidence_curator", "status": "completed", "items_completed": len(packets)}
+        ]
+        await progress_callback(
+            "Curated exploration evidence packets",
+            evidence_packets=len(packets),
+            subagents=telemetry.subagents,
+        )
+
+        if not packets:
+            return [], telemetry
+
+        selected_packets = packets
+        specialist_status = [
+            {
+                "name": f"{packet['category']}_analyst",
+                "status": "running",
+                "surface": packet["category"],
+                "items_total": 1,
+                "items_completed": 0,
+            }
+            for packet in selected_packets
+        ]
+        telemetry.subagents = [telemetry.subagents[0], *specialist_status]
+        await progress_callback("Specialist analysts drafting requirements", subagents=telemetry.subagents)
+
+        semaphore = asyncio.Semaphore(max_agents)
+
+        async def run_with_limit(packet: dict[str, Any]) -> list[GeneratedRequirement]:
+            async with semaphore:
+                return await self._run_requirement_specialist(packet, exploration_summary)
+
+        tasks = [run_with_limit(packet) for packet in selected_packets]
+        specialist_results = await asyncio.gather(*tasks, return_exceptions=True)
+        candidates: list[GeneratedRequirement] = []
+        completed_status: list[dict[str, Any]] = [telemetry.subagents[0]]
+        for packet, result in zip(selected_packets, specialist_results, strict=False):
+            status = {
+                "name": f"{packet['category']}_analyst",
+                "surface": packet["category"],
+                "items_total": 1,
+                "items_completed": 1,
+            }
+            if isinstance(result, Exception):
+                logger.warning("Requirement specialist failed for %s: %s", packet["category"], result)
+                status["status"] = "failed"
+            else:
+                status["status"] = "completed"
+                status["requirements"] = len(result)
+                candidates.extend(result)
+            completed_status.append(status)
+        telemetry.subagents = completed_status
+        telemetry.requirements_generated = len(candidates)
+        await progress_callback(
+            "Specialist analysis complete",
+            subagents=telemetry.subagents,
+            requirements_generated=len(candidates),
+        )
+
+        if browser_verification == "selected":
+            telemetry.verification_status = "selected_pending"
+            await progress_callback("Selecting ambiguous requirements for browser verification")
+            candidates = await self._verify_selected_requirements(candidates, exploration_summary)
+            telemetry.verification_status = "selected_completed"
+        else:
+            telemetry.verification_status = "off"
+
+        telemetry.subagents = [
+            *telemetry.subagents,
+            {"name": "critic_verifier", "status": "running", "items_total": len(candidates), "items_completed": 0},
+        ]
+        await progress_callback("Critic verifying support and deduplicating candidates", subagents=telemetry.subagents)
+        requirements = await self._critic_synthesize_requirements(candidates, packets)
+        telemetry.subagents[-1] = {
+            "name": "critic_verifier",
+            "status": "completed",
+            "items_total": len(candidates),
+            "items_completed": len(candidates),
+            "requirements": len(requirements),
+        }
+        telemetry.subagents.append(
+            {"name": "synthesizer", "status": "completed", "requirements": len(requirements)}
+        )
+        telemetry.requirements_generated = len(requirements)
+        await progress_callback(
+            "Requirements synthesis complete",
+            subagents=telemetry.subagents,
+            requirements_generated=len(requirements),
+            verification_status=telemetry.verification_status,
+        )
+        return requirements, telemetry
+
+    def _curate_evidence_packets(
+        self, exploration_summary: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Compact exploration evidence by surface/category for specialist prompts."""
+        packets_by_category: dict[str, dict[str, Any]] = {}
+
+        def packet(category: str) -> dict[str, Any]:
+            normalized = category if category in {
+                "authentication",
+                "authorization",
+                "navigation",
+                "crud",
+                "form_submission",
+                "search",
+                "display",
+                "integration",
+                "error_handling",
+                "other",
+            } else "other"
+            return packets_by_category.setdefault(
+                normalized,
+                {
+                    "id": f"evidence:{normalized}",
+                    "category": normalized,
+                    "entry_url": exploration_summary.get("entry_url"),
+                    "pages": [],
+                    "flows": [],
+                    "transitions": [],
+                    "api_endpoints": [],
+                    "quality": exploration_summary.get("quality") or {},
+                },
+            )
+
+        for flow in exploration_summary.get("flows", []) or []:
+            if not isinstance(flow, dict):
+                continue
+            category = str(flow.get("category") or "navigation")
+            packet(category)["flows"].append(flow)
+
+        for page in exploration_summary.get("pages", []) or []:
+            if not isinstance(page, dict):
+                continue
+            derived = self._flow_from_page(page)
+            category = str((derived or {}).get("category") or "display")
+            packet(category)["pages"].append(page)
+
+        for transition in exploration_summary.get("transitions", []) or []:
+            if not isinstance(transition, dict):
+                continue
+            transition_type = str(transition.get("transition_type") or "")
+            category = "error_handling" if transition_type == "error" else "navigation"
+            packet(category)["transitions"].append(transition)
+
+        for endpoint in exploration_summary.get("api_endpoints", []) or []:
+            if not isinstance(endpoint, dict):
+                continue
+            packet("integration")["api_endpoints"].append(endpoint)
+
+        packets = list(packets_by_category.values())
+        for item in packets:
+            item["evidence_refs"] = self._packet_evidence_refs(item)
+            item["counts"] = {
+                "pages": len(item["pages"]),
+                "flows": len(item["flows"]),
+                "transitions": len(item["transitions"]),
+                "api_endpoints": len(item["api_endpoints"]),
+            }
+        return sorted(
+            packets,
+            key=lambda item: (
+                -sum(item["counts"].values()),
+                item["category"],
+            ),
+        )
+
+    @staticmethod
+    def _packet_evidence_refs(packet: dict[str, Any]) -> list[str]:
+        refs: list[str] = []
+        for idx, flow in enumerate(packet.get("flows") or [], 1):
+            name = flow.get("name") or f"flow-{idx}"
+            refs.append(f"{packet['id']}:flow:{name}")
+        for idx, page in enumerate(packet.get("pages") or [], 1):
+            refs.append(f"{packet['id']}:page:{page.get('url') or idx}")
+        for idx, endpoint in enumerate(packet.get("api_endpoints") or [], 1):
+            method = endpoint.get("method") or "HTTP"
+            refs.append(f"{packet['id']}:api:{method} {endpoint.get('url') or idx}")
+        for idx, transition in enumerate(packet.get("transitions") or [], 1):
+            refs.append(f"{packet['id']}:transition:{transition.get('sequence') or idx}")
+        return refs[:20]
+
+    async def _run_requirement_specialist(
+        self,
+        packet: dict[str, Any],
+        exploration_summary: dict[str, Any],
+    ) -> list[GeneratedRequirement]:
+        prompt = f"""You are a specialist requirements analyst for the {packet['category']} surface.
+
+Draft only requirements directly supported by this evidence packet. Do not infer business intent beyond observed pages, flows, transitions, and API calls.
+
+Entry URL: {exploration_summary.get("entry_url", "unknown")}
+Evidence packet:
+```json
+{json.dumps(packet, indent=2)}
+```
+
+Return JSON only:
+{{
+  "requirements": [
+    {{
+      "title": "Short capability title",
+      "description": "The system shall ...",
+      "category": "{packet['category']}",
+      "priority": "critical|high|medium|low",
+      "acceptance_criteria": ["Observable criterion"],
+      "source_flows": ["Flow name from packet"],
+      "source_elements": ["Observed element name"],
+      "source_api_endpoints": ["Observed endpoint URL"],
+      "evidence_refs": ["Evidence refs from packet"],
+      "confidence": 0.0,
+      "uncertainty_reason": "Why this is uncertain, or null"
+    }}
+  ]
+}}
+"""
+        from utils.agent_runner import AgentRunner
+
+        runner = AgentRunner(
+            timeout_seconds=240,
+            allowed_tools=[],
+            log_tools=False,
+            model_tier="deep",
+        )
+        result = await runner.run(prompt)
+        if not result.success:
+            raise RuntimeError(result.error or "specialist analysis failed")
+        requirements = self._parse_requirements_response(result.output or "")
+        fallback_refs = packet.get("evidence_refs") or [packet.get("id", "evidence")]
+        for req in requirements:
+            if not req.category:
+                req.category = packet["category"]
+            if not req.evidence_refs:
+                req.evidence_refs = fallback_refs[:5]
+            req.confidence = self._bounded_confidence(req.confidence)
+            if req.confidence < 0.75 and not req.uncertainty_reason:
+                req.uncertainty_reason = "Supported by limited exploration evidence and awaiting review."
+        return requirements
+
+    async def _critic_synthesize_requirements(
+        self,
+        candidates: list[GeneratedRequirement],
+        packets: list[dict[str, Any]],
+    ) -> list[GeneratedRequirement]:
+        """Remove unsupported or duplicate candidates and keep the existing JSON shape."""
+        supported_refs = {
+            ref
+            for packet in packets
+            for ref in packet.get("evidence_refs", [])
+        }
+        supported_refs.add("browser_verification:selected")
+        deduped: list[GeneratedRequirement] = []
+        seen: set[str] = set()
+        for req in candidates:
+            title_key = self._normalize_title(req.title)
+            if not title_key or title_key in seen:
+                continue
+            has_named_source = bool(req.source_flows or req.source_api_endpoints or req.source_elements)
+            has_supported_ref = bool(set(req.evidence_refs or []) & supported_refs)
+            if not has_named_source and not has_supported_ref:
+                continue
+            seen.add(title_key)
+            req.evidence_refs = [ref for ref in req.evidence_refs if ref in supported_refs][:10]
+            if not req.evidence_refs and supported_refs:
+                req.confidence = min(req.confidence, 0.65)
+                req.uncertainty_reason = req.uncertainty_reason or (
+                    "Requirement is linked to named sources but lacks packet-level evidence refs."
+                )
+            req.confidence = self._bounded_confidence(req.confidence)
+            deduped.append(req)
+        return deduped
+
+    async def _verify_selected_requirements(
+        self,
+        candidates: list[GeneratedRequirement],
+        exploration_summary: dict[str, Any],
+    ) -> list[GeneratedRequirement]:
+        """Optionally ask a browser-enabled verifier to check selected uncertain claims."""
+        selected = [
+            req
+            for req in candidates
+            if req.priority in {"critical", "high"} or req.confidence < 0.7
+        ][:3]
+        if not selected:
+            return candidates
+
+        prompt = f"""Verify whether these requirement claims are visible from the app entry point.
+
+Use browser tools only for the selected claims. Return JSON with title, verified boolean, confidence, and note.
+
+Entry URL: {exploration_summary.get("entry_url", "unknown")}
+Claims:
+```json
+{json.dumps([req.__dict__ for req in selected], indent=2, default=str)}
+```
+"""
+        try:
+            from utils.agent_runner import AgentRunner
+
+            runner = AgentRunner(
+                timeout_seconds=180,
+                allowed_tools=[
+                    "mcp__playwright-test__browser_navigate",
+                    "mcp__playwright-test__browser_snapshot",
+                    "mcp__playwright-test__browser_close",
+                ],
+                log_tools=True,
+                model_tier="tool",
+            )
+            result = await runner.run(prompt)
+            if not result.success or not result.output:
+                return candidates
+            verification = self._parse_verification_response(result.output)
+        except Exception as exc:
+            logger.warning("Selected browser verification failed: %s", exc)
+            return candidates
+
+        by_title = {self._normalize_title(item.get("title")): item for item in verification}
+        for req in candidates:
+            item = by_title.get(self._normalize_title(req.title))
+            if not item:
+                continue
+            if item.get("verified") is True:
+                req.confidence = max(req.confidence, self._bounded_confidence(item.get("confidence", 0.85)))
+                req.evidence_refs = list(dict.fromkeys([*req.evidence_refs, "browser_verification:selected"]))
+            elif item.get("verified") is False:
+                req.confidence = min(req.confidence, self._bounded_confidence(item.get("confidence", 0.45)))
+                req.uncertainty_reason = str(item.get("note") or "Selected browser verification did not confirm this claim.")
+        return candidates
+
+    @staticmethod
+    def _parse_verification_response(response_text: str) -> list[dict[str, Any]]:
+        from utils.json_utils import extract_json_from_markdown
+
+        try:
+            data = extract_json_from_markdown(response_text)
+        except Exception:
+            return []
+        if isinstance(data, dict):
+            items = data.get("verifications") or data.get("results") or []
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = []
+        return [item for item in items if isinstance(item, dict)]
+
+    @staticmethod
+    def _bounded_confidence(value: Any) -> float:
+        try:
+            return max(0.0, min(float(value), 1.0))
+        except (TypeError, ValueError):
+            return 0.7
+
     def _assign_requirement_codes(
         self, requirements: list[GeneratedRequirement]
     ) -> None:
@@ -680,6 +1122,16 @@ Generate the requirements now:
                     source_flows=[name],
                     source_elements=self._source_elements(flow.get("steps", [])),
                     source_api_endpoints=source_endpoints,
+                    evidence_refs=[
+                        ref
+                        for ref in (
+                            f"flow:{name}",
+                            f"page:{flow.get('start_url') or flow.get('startUrl') or ''}",
+                        )
+                        if ref and not ref.endswith(":")
+                    ],
+                    confidence=0.65,
+                    uncertainty_reason="Generated deterministically from exploration evidence and awaiting human confirmation.",
                 )
             )
 
@@ -1148,6 +1600,9 @@ Generate the requirements now:
                 source_flows=req_data.get("source_flows", []),
                 source_elements=req_data.get("source_elements", []),
                 source_api_endpoints=req_data.get("source_api_endpoints", []),
+                evidence_refs=req_data.get("evidence_refs", []),
+                confidence=self._bounded_confidence(req_data.get("confidence", 0.7)),
+                uncertainty_reason=req_data.get("uncertainty_reason"),
             )
             requirements.append(req)
 

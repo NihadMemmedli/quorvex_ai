@@ -18,6 +18,7 @@ sys.modules.setdefault("memory", memory_stub)
 sys.modules.setdefault("memory.exploration_store", exploration_store_stub)
 
 from orchestrator.workflows.requirements_generator import (
+    GeneratedRequirement as _GeneratedRequirement,
     RequirementsGenerator as _RequirementsGenerator,
 )
 from orchestrator.workflows.autopilot_pipeline import (
@@ -239,6 +240,86 @@ def test_requirement_code_assignment_is_sequential():
     generator._assign_requirement_codes(requirements)
 
     assert [req.req_code for req in requirements] == ["REQ-007", "REQ-008"]
+
+
+def test_requirements_parser_preserves_confidence_uncertainty_and_evidence_refs():
+    generator = object.__new__(_RequirementsGenerator)
+
+    requirements = generator._parse_requirements_response(
+        """
+```json
+{
+  "requirements": [
+    {
+      "title": "User Login",
+      "description": "The system shall support login.",
+      "category": "authentication",
+      "priority": "high",
+      "acceptance_criteria": ["Login form is available"],
+      "source_flows": ["User Login"],
+      "evidence_refs": ["evidence:authentication:flow:User Login"],
+      "confidence": 0.82,
+      "uncertainty_reason": "Credentials were not available."
+    }
+  ]
+}
+```
+"""
+    )
+
+    assert len(requirements) == 1
+    assert requirements[0].confidence == 0.82
+    assert requirements[0].uncertainty_reason == "Credentials were not available."
+    assert requirements[0].evidence_refs == ["evidence:authentication:flow:User Login"]
+
+
+@pytest.mark.asyncio
+async def test_requirements_critic_rejects_unsupported_and_dedupes_candidates():
+    generator = object.__new__(_RequirementsGenerator)
+    packets = [
+        {
+            "id": "evidence:authentication",
+            "category": "authentication",
+            "evidence_refs": ["evidence:authentication:flow:User Login"],
+        }
+    ]
+    candidates = [
+        _GeneratedRequirement(
+            req_code="REQ-001",
+            title="User Login",
+            description="The system shall support login.",
+            category="authentication",
+            priority="high",
+            acceptance_criteria=["Login form is available"],
+            source_flows=["User Login"],
+            evidence_refs=["evidence:authentication:flow:User Login"],
+            confidence=0.8,
+        ),
+        _GeneratedRequirement(
+            req_code="REQ-002",
+            title="User Login",
+            description="Duplicate.",
+            category="authentication",
+            priority="high",
+            acceptance_criteria=["Duplicate"],
+            source_flows=["User Login"],
+            evidence_refs=["evidence:authentication:flow:User Login"],
+            confidence=0.8,
+        ),
+        _GeneratedRequirement(
+            req_code="REQ-003",
+            title="Invented Checkout",
+            description="Unsupported.",
+            category="crud",
+            priority="high",
+            acceptance_criteria=["Checkout succeeds"],
+            confidence=0.9,
+        ),
+    ]
+
+    requirements = await generator._critic_synthesize_requirements(candidates, packets)
+
+    assert [req.title for req in requirements] == ["User Login"]
 
 
 def test_requirements_fallback_creates_entry_page_requirement_without_flows():
@@ -670,6 +751,76 @@ def test_autopilot_unique_spec_filenames_include_task_id(monkeypatch, tmp_path):
     assert first_path != second_path
     assert first_path.name.endswith("-101.md")
     assert second_path.name.endswith("-102.md")
+
+
+def test_autopilot_generated_spec_registers_project_metadata(monkeypatch):
+    from sqlmodel import Session, SQLModel, select
+
+    from orchestrator.api.db import _run_migrations, engine
+    from orchestrator.api.models_db import Project, SpecMetadata
+
+    SQLModel.metadata.create_all(engine, checkfirst=True)
+    _run_migrations()
+
+    session_id = f"autopilot_unit_{datetime.utcnow().timestamp():.0f}".replace(".", "_")
+    project_id = "wetravel-project"
+    specs_dir = PROJECT_ROOT / "specs" / "autopilot" / session_id
+    spec_path = None
+    created_project = False
+
+    with Session(engine) as db:
+        if not db.get(Project, project_id):
+            db.add(Project(id=project_id, name="Wetravel"))
+            db.commit()
+            created_project = True
+
+    pipeline = object.__new__(_AutoPilotPipeline)
+    pipeline.session_id = session_id
+    pipeline._get_session_exploration_ids = lambda: []
+    pipeline._get_test_idea_for_task = lambda *_args, **_kwargs: None
+
+    class Store:
+        def get_requirements(self):
+            return []
+
+    monkeypatch.setattr(
+        "orchestrator.memory.exploration_store.get_exploration_store",
+        lambda **_kwargs: Store(),
+    )
+
+    class Config:
+        project_id = "wetravel-project"
+        entry_urls = ["https://example.com"]
+
+    try:
+        specs_dir.mkdir(parents=True, exist_ok=True)
+        task = SimpleNamespace(id=301, requirement_id=None, requirement_title="Wetravel booking checkout")
+        spec_path = pipeline._generate_spec_from_task(task, specs_dir, Config())
+
+        assert spec_path.exists()
+        relative_name = f"autopilot/{session_id}/{spec_path.name}"
+
+        with Session(engine) as db:
+            metadata = db.exec(select(SpecMetadata).where(SpecMetadata.spec_name == relative_name)).first()
+            assert metadata is not None
+            assert metadata.project_id == "wetravel-project"
+            assert metadata.tags == []
+            assert metadata.last_modified is not None
+    finally:
+        if spec_path:
+            spec_path.unlink(missing_ok=True)
+        try:
+            specs_dir.rmdir()
+        except OSError:
+            pass
+        with Session(engine) as db:
+            for row in db.exec(select(SpecMetadata).where(SpecMetadata.spec_name.like(f"autopilot/{session_id}/%"))).all():
+                db.delete(row)
+            if created_project:
+                project = db.get(Project, project_id)
+                if project:
+                    db.delete(project)
+            db.commit()
 
 
 def test_autopilot_expected_spec_tasks_deduplicates_requirement_titles():

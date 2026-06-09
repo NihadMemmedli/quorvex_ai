@@ -19,6 +19,9 @@ async def execute_domain_job(payload: dict[str, Any]) -> dict[str, Any]:
             job_id,
             str(payload["project_id"]),
             str(payload["session_id"]),
+            str(payload.get("mode") or "single_agent"),
+            int(payload.get("max_agents") or 3),
+            str(payload.get("browser_verification") or "off"),
         )
     elif job_type == "requirements_bulk_generate":
         from orchestrator.api.requirements import _run_bulk_spec_generation

@@ -65,6 +65,15 @@ interface AgentRun {
     agent_task_id?: string | null;
 }
 
+function specPathToName(specPath: string | null | undefined): string | null {
+    if (!specPath) return null;
+    const normalized = specPath.replace(/\\/g, '/');
+    const markerIndex = normalized.lastIndexOf('/specs/');
+    if (markerIndex >= 0) return normalized.slice(markerIndex + '/specs/'.length);
+    if (normalized.startsWith('specs/')) return normalized.slice('specs/'.length);
+    return normalized.endsWith('.md') ? normalized : null;
+}
+
 export default function GenerateSpecModal({
     requirement,
     onClose,
@@ -352,14 +361,15 @@ export default function GenerateSpecModal({
         if (!result) return;
 
         try {
-            // Save the edited content to the spec file
-            const res = await fetch(`${API_BASE}/specs`, {
+            const specName = specPathToName(result.spec_path) || result.spec_name;
+            const encodedSpecName = specName.split('/').map(encodeURIComponent).join('/');
+            const projectParam = currentProject?.id
+                ? `?project_id=${encodeURIComponent(currentProject.id)}`
+                : '';
+            const res = await fetch(`${API_BASE}/specs/${encodedSpecName}${projectParam}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    path: result.spec_path,
-                    content: editedContent
-                })
+                body: JSON.stringify({ content: editedContent })
             });
 
             if (res.ok) {

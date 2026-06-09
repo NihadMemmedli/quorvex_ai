@@ -80,6 +80,8 @@ class ExplorationConfig:
     focus_areas: list[str] = field(default_factory=list)  # Areas to prioritize
     additional_instructions: str | None = None  # Custom instructions for AI
     model_tier: str = "tool_deep"
+    storage_state_path: str | None = None
+    browser_auth_context: dict[str, Any] | None = None
 
 
 @dataclass
@@ -261,6 +263,8 @@ class AppExplorer:
         logger.info(f"   Max Depth: {config.max_depth}")
         if config.credentials:
             logger.info("   Authentication: Enabled")
+        if config.storage_state_path:
+            logger.info("   Saved browser auth: Enabled")
         logger.info("")
 
         # Save config
@@ -274,6 +278,7 @@ class AppExplorer:
             "login_url": config.login_url,
             "exclude_patterns": config.exclude_patterns,
             "focus_areas": config.focus_areas,
+            "has_saved_browser_auth": bool(config.storage_state_path),
         }
         (session_dir / "config.json").write_text(json.dumps(config_data, indent=2))
 
@@ -627,6 +632,19 @@ Before exploring, you MUST log in first:
 When recording credentials in output, use placeholders:
 - Username: `{{{{LOGIN_USERNAME}}}}`
 - Password: `{{{{LOGIN_PASSWORD}}}}`
+"""
+        elif config.browser_auth_context and config.browser_auth_context.get("storage_state_attached"):
+            session_name = (
+                config.browser_auth_context.get("browser_auth_session_name")
+                or config.browser_auth_context.get("browser_auth_session_id")
+                or "selected session"
+            )
+            auth_section = f"""
+## Authentication Context
+
+The browser starts authenticated with saved session `{session_name}`. Begin exploration from the target URL and verify that authenticated areas are available before mapping flows.
+
+Do not log out unless explicitly instructed.
 """
 
         # Build focus areas section
@@ -1018,7 +1036,11 @@ When stopping, output any missing flow records you can infer from observed page 
         # Use a schema-correct Playwright MCP package. Older 0.0.28 builds expose
         # connected MCP servers with invalid/empty tool schemas, which makes
         # Claude silently lose access to browser tools.
-        runtime = write_playwright_mcp_config(run_dir=session_dir, server_name="playwright-test")
+        runtime = write_playwright_mcp_config(
+            run_dir=session_dir,
+            server_name="playwright-test",
+            storage_state_path=config.storage_state_path,
+        )
         logger.info(
             "   Created MCP config (runtime=%s, live=%s, command=%s): %s",
             runtime["browser_runtime"],

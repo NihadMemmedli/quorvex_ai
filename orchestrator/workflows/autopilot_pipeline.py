@@ -34,6 +34,7 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -109,6 +110,9 @@ class AutoPilotConfig:
     login_url: str | None = None
     credentials: dict[str, str] | None = None
     test_data: dict[str, Any] | None = None
+    test_data_refs: list[str] | None = None
+    browser_auth_session_id: str | None = None
+    use_project_default_browser_auth: bool = False
     instructions: str | None = None
 
     # Exploration settings
@@ -124,6 +128,44 @@ class AutoPilotConfig:
     max_specs: int = 50  # Max specs to generate
     parallel_generation: int = 2  # Concurrent test generations
     hybrid_healing: bool = False  # Use hybrid healing mode
+    requirements_mode: str = "single_agent"
+    requirements_max_agents: int = 3
+    requirements_browser_verification: str = "off"
+
+
+@contextmanager
+def _temporary_env(overrides: dict[str, str | None]):
+    previous_values = {name: os.environ.get(name) for name in overrides}
+    try:
+        for name, value in overrides.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        yield
+    finally:
+        for name, previous_value in previous_values.items():
+            if previous_value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = previous_value
+
+
+def _has_browser_auth_selection(config: AutoPilotConfig) -> bool:
+    return bool(
+        (config.browser_auth_session_id or "").strip()
+        or config.use_project_default_browser_auth
+    )
+
+
+def _is_login_specific_spec(spec_name: str, spec_content: str) -> bool:
+    haystack = f"{spec_name}\n{spec_content[:1000]}".lower()
+    return bool(
+        re.search(
+            r"\b(log\s*in|login|sign\s*in|signin|sign-in|logout|log\s*out|sign\s*out)\b",
+            haystack,
+        )
+    )
 
 
 class AutoPilotPipeline:
@@ -286,11 +328,28 @@ class AutoPilotPipeline:
 
             # Update current phase
             self._update_session_field("current_phase", phase_name)
-            if phase_name not in ("exploration", "test_generation"):
+            if phase_name == "requirements":
+                self._update_live_browser_state(
+                    {
+                        "active": True,
+                        "phase": phase_name,
+                        "activity_kind": "analysis",
+                        "activity_label": "Requirements Analysis",
+                        "status": "running",
+                        "message": "Analyzing exploration evidence",
+                        "subagents": [],
+                        "items_total": 0,
+                        "items_completed": 0,
+                        "requirements_generated": 0,
+                        "verification_status": getattr(config, "requirements_browser_verification", "off"),
+                    }
+                )
+            elif phase_name not in ("exploration", "test_generation"):
                 self._update_live_browser_state(
                     {
                         "active": False,
                         "phase": phase_name,
+                        "activity_kind": "idle",
                         "activity_label": phase_name.replace("_", " ").title(),
                         "status": "idle",
                         "message": "Current phase does not use the live browser",
@@ -583,6 +642,13 @@ class AutoPilotPipeline:
         from orchestrator.workflows.app_explorer import AppExplorer, ExplorationConfig
 
         additional_instructions = config.instructions
+        test_data_instructions = self._build_exploration_test_data_instructions(config)
+        if test_data_instructions:
+            additional_instructions = (
+                f"{additional_instructions}\n\n{test_data_instructions}"
+                if additional_instructions
+                else test_data_instructions
+            )
         if pass_label != "initial":
             retry_instructions = self._coverage_retry_instructions(pass_label)
             additional_instructions = (
@@ -710,6 +776,12 @@ class AutoPilotPipeline:
                 owner_id=self.session_id,
                 owner_label=f"AutoPilot {self.session_id}",
             )
+            storage_state_path, browser_auth_context = self._resolve_browser_auth_for_run_dir(
+                config,
+                run_dir=explorer.output_dir / explore_session_id,
+            )
+            explore_config.storage_state_path = storage_state_path
+            explore_config.browser_auth_context = browser_auth_context
             result = await explorer.explore(explore_config, explore_session_id)
             self._store_exploration_results(
                 explore_session_id, result, config.project_id
@@ -725,6 +797,85 @@ class AutoPilotPipeline:
                     or "Explorer did not produce verified browser exploration records"
                 )
             return result
+
+    def _build_exploration_test_data_instructions(self, config: AutoPilotConfig) -> str:
+        sections: list[str] = []
+        refs = [str(ref).strip() for ref in (config.test_data_refs or []) if str(ref).strip()]
+        if refs:
+            try:
+                from orchestrator.api.db import engine
+                from orchestrator.services.test_data_resolver import resolve_test_data_execution_context
+
+                with Session(engine) as db:
+                    context = resolve_test_data_execution_context(
+                        db,
+                        project_id=config.project_id or "default",
+                        refs=refs,
+                    )
+                prompt = str(context.get("prompt_markdown") or "").strip()
+                if prompt:
+                    sections.append(prompt)
+            except Exception as exc:
+                logger.warning("Unable to resolve AutoPilot exploration test data refs: %s", exc)
+                sections.append(
+                    "## Project Test Data\n"
+                    f"Requested refs: {', '.join(refs)}\n"
+                    "The refs could not be resolved at exploration time; continue without inventing values."
+                )
+
+        inline_data = config.test_data if isinstance(config.test_data, dict) else {}
+        if inline_data:
+            sections.append(
+                "## Inline Test Data\n"
+                "Use these ad hoc values when exploring forms or workflows:\n"
+                f"```json\n{json.dumps(inline_data, indent=2, sort_keys=True)}\n```"
+            )
+        return "\n\n".join(sections)
+
+    def _resolve_browser_auth_for_run_dir(
+        self,
+        config: AutoPilotConfig,
+        *,
+        run_dir: Path,
+    ) -> tuple[str | None, dict[str, Any]]:
+        intent: dict[str, Any] = {
+            "mode": "project_default"
+            if config.use_project_default_browser_auth
+            else ("session" if (config.browser_auth_session_id or "").strip() else "none"),
+            "requested_browser_auth_session_id": (config.browser_auth_session_id or "").strip() or None,
+            "browser_auth_session_id": None,
+            "browser_auth_session_name": None,
+            "use_project_default_browser_auth": bool(config.use_project_default_browser_auth),
+            "project_default_used": False,
+            "storage_state_attached": False,
+        }
+        if not _has_browser_auth_selection(config):
+            return None, intent
+        try:
+            from orchestrator.api.db import engine
+            from orchestrator.services.browser_auth_sessions import resolve_browser_auth_for_run
+
+            with Session(engine) as db:
+                resolved = resolve_browser_auth_for_run(
+                    db,
+                    config.project_id or "default",
+                    run_dir=run_dir,
+                    browser_auth_session_id=(config.browser_auth_session_id or "").strip() or None,
+                    use_default=bool(config.use_project_default_browser_auth),
+                )
+            if not resolved:
+                return None, intent
+            intent.update(
+                {
+                    "browser_auth_session_id": resolved.session_id,
+                    "browser_auth_session_name": resolved.session_name,
+                    "project_default_used": bool(config.use_project_default_browser_auth),
+                    "storage_state_attached": True,
+                }
+            )
+            return str(resolved.storage_state_path), intent
+        except Exception as exc:
+            raise RuntimeError(f"Unable to attach browser auth session: {exc}") from exc
 
     def _coverage_retry_instructions(self, pass_label: str) -> str:
         """Extra instructions used when the first exploration pass was too sparse."""
@@ -841,6 +992,29 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
         generator = RequirementsGenerator(project_id=config.project_id)
         all_requirements = []
 
+        def on_requirements_progress(progress: dict[str, Any]) -> None:
+            subagents = list(progress.get("subagents") or [])
+            completed = sum(1 for item in subagents if item.get("status") in {"completed", "failed"})
+            self._update_live_browser_state(
+                {
+                    "active": True,
+                    "phase": "requirements",
+                    "activity_kind": (
+                        "browser_verification"
+                        if str(progress.get("verification_status") or "").startswith("selected_")
+                        else "analysis"
+                    ),
+                    "activity_label": "Requirements Analysis",
+                    "status": "running",
+                    "message": progress.get("message") or "Analyzing exploration evidence",
+                    "subagents": subagents,
+                    "items_total": progress.get("items_total") or len(subagents),
+                    "items_completed": completed,
+                    "requirements_generated": progress.get("requirements_generated", len(all_requirements)),
+                    "verification_status": progress.get("verification_status") or config.requirements_browser_verification,
+                }
+            )
+
         for idx, explore_id in enumerate(exploration_ids):
             if self._cancelled.is_set():
                 break
@@ -853,8 +1027,24 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
             )
 
             try:
-                result = await generator.generate_from_exploration(explore_id)
+                result = await generator.generate_from_exploration(
+                    explore_id,
+                    mode=config.requirements_mode,
+                    max_agents=config.requirements_max_agents,
+                    browser_verification=config.requirements_browser_verification,
+                    progress_callback=on_requirements_progress,
+                )
                 all_requirements.extend(result.requirements)
+                on_requirements_progress(
+                    {
+                        "message": f"Generated {len(all_requirements)} requirements",
+                        "mode": result.telemetry.mode,
+                        "subagents": result.telemetry.subagents,
+                        "items_total": result.telemetry.evidence_packets,
+                        "requirements_generated": len(all_requirements),
+                        "verification_status": result.telemetry.verification_status,
+                    }
+                )
                 logger.info(
                     f"Generated {result.total_requirements} requirements from exploration {explore_id}"
                 )
@@ -870,6 +1060,18 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
             "Requirements generation complete",
             items_total=len(exploration_ids),
             items_completed=len(exploration_ids),
+        )
+        self._update_live_browser_state(
+            {
+                "active": False,
+                "phase": "requirements",
+                "activity_kind": "analysis",
+                "activity_label": "Requirements Analysis",
+                "status": "completed",
+                "message": "Requirements generation complete",
+                "requirements_generated": len(all_requirements),
+                "verification_status": config.requirements_browser_verification,
+            }
         )
 
         # Ask question about generated requirements if reactive_mode
@@ -1262,6 +1464,40 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                     # Create run directory
                     run_dir = Path("runs") / run_id
                     run_dir.mkdir(parents=True, exist_ok=True)
+                    requested_auth_config = copy.copy(config)
+                    auth_conflict_warning = None
+                    try:
+                        spec_content = Path(spec_path).read_text()
+                    except Exception:
+                        spec_content = ""
+                    if _has_browser_auth_selection(config) and _is_login_specific_spec(
+                        spec_name,
+                        spec_content,
+                    ):
+                        auth_conflict_warning = (
+                            "Selected browser auth was ignored because this spec appears to test login/logout."
+                        )
+                        requested_auth_config.browser_auth_session_id = None
+                        requested_auth_config.use_project_default_browser_auth = False
+                    storage_state_path, browser_auth_context = self._resolve_browser_auth_for_run_dir(
+                        requested_auth_config,
+                        run_dir=run_dir,
+                    )
+                    if auth_conflict_warning:
+                        browser_auth_context["auth_conflict_warning"] = auth_conflict_warning
+                        browser_auth_context["requested_browser_auth_session_id"] = (
+                            config.browser_auth_session_id or ""
+                        )
+                        browser_auth_context["use_project_default_browser_auth"] = bool(
+                            config.use_project_default_browser_auth
+                        )
+                    test_data_refs = [
+                        str(ref).strip()
+                        for ref in (config.test_data_refs or [])
+                        if str(ref).strip()
+                    ]
+                    if test_data_refs:
+                        browser_auth_context["test_data_refs"] = test_data_refs
 
                     def on_task_enqueued(task_id: str) -> None:
                         self._update_live_browser_state(
@@ -1329,20 +1565,36 @@ The previous pass found many pages but too few meaningful flows. Optimize this p
                         owner_label=f"AutoPilot {self.session_id}",
                     )
                     try:
-                        if generation_mode == "conservative_smoke":
-                            result = self._run_conservative_test_generation(
-                                pipeline=pipeline,
-                                spec_path=spec_path,
-                                run_dir=run_dir,
-                                browser="chromium",
-                            )
-                        else:
-                            result = await pipeline.run(
-                                spec_path=spec_path,
-                                run_dir=run_dir,
-                                browser="chromium",
-                                hybrid_healing=config.hybrid_healing,
-                            )
+                        env_overrides = {
+                            "QUORVEX_TEST_DATA_REFS": json.dumps(test_data_refs)
+                            if test_data_refs
+                            else None,
+                            "QUORVEX_BROWSER_AUTH_CONTEXT": json.dumps(browser_auth_context)
+                            if browser_auth_context
+                            else None,
+                        }
+                        with _temporary_env(env_overrides):
+                            if generation_mode == "conservative_smoke":
+                                if storage_state_path:
+                                    pipeline.prepare_run_browser_context(
+                                        run_dir=run_dir,
+                                        storage_state_path=storage_state_path,
+                                    )
+                                result = self._run_conservative_test_generation(
+                                    pipeline=pipeline,
+                                    spec_path=spec_path,
+                                    run_dir=run_dir,
+                                    browser="chromium",
+                                )
+                            else:
+                                result = await pipeline.run(
+                                    spec_path=spec_path,
+                                    run_dir=run_dir,
+                                    browser="chromium",
+                                    hybrid_healing=config.hybrid_healing,
+                                    storage_state_path=storage_state_path,
+                                    browser_auth_context=browser_auth_context,
+                                )
 
                         success = result.get("success", False)
                         test_path = result.get("test_path")
@@ -2950,8 +3202,37 @@ test.describe({suite}, () => {{
             raise ValueError(
                 f"Generated spec for '{title}' collapsed richer source evidence into a smoke check"
             )
+        self._register_generated_spec_metadata(spec_path, config.project_id)
         logger.info(f"Generated spec: {spec_path}")
         return spec_path
+
+    def _register_generated_spec_metadata(self, spec_path: Path, project_id: str) -> None:
+        """Associate an AutoPilot-generated spec file with the active project."""
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import SpecMetadata
+
+        specs_base_dir = Path(__file__).resolve().parents[2] / "specs"
+        try:
+            relative_name = str(spec_path.resolve().relative_to(specs_base_dir.resolve()))
+        except ValueError:
+            logger.debug("Skipping SpecMetadata registration for non-repo spec path: %s", spec_path)
+            return
+
+        now = datetime.utcnow()
+        with Session(engine) as db:
+            metadata = db.get(SpecMetadata, relative_name)
+            if metadata is None:
+                metadata = SpecMetadata(
+                    spec_name=relative_name,
+                    project_id=project_id,
+                    tags_json="[]",
+                    last_modified=now,
+                )
+            else:
+                metadata.project_id = project_id
+                metadata.last_modified = now
+            db.add(metadata)
+            db.commit()
 
     def _source_has_richer_e2e_evidence(
         self, idea: dict[str, Any] | None, flow_steps: list[str] | None

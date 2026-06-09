@@ -23,6 +23,7 @@ from orchestrator.api.models_db import (  # noqa: E402
     AutonomousTestProposal,
     Project,
     Requirement,
+    RtmEntry,
 )
 from orchestrator.api.requirements import (  # noqa: E402
     _requirement_confidence,
@@ -90,6 +91,76 @@ def test_requirement_truth_contract_separates_candidate_and_confirmed_requiremen
 
     assert _requirement_truth_state(manual) == "manual_requirement"
     assert _requirement_source_type(manual) == "manual_entry"
+
+
+def test_requirement_crud_returns_404_for_cross_project_access():
+    SQLModel.metadata.create_all(engine, checkfirst=True)
+    _run_migrations()
+    app = FastAPI()
+    app.include_router(requirements_api.router)
+
+    owner_project_id = f"owner-project-{uuid4().hex}"
+    other_project_id = f"other-project-{uuid4().hex}"
+    requirement_id = None
+    rtm_entry_id = None
+    with Session(engine) as session:
+        session.add(Project(id=owner_project_id, name="Owner Project"))
+        session.add(Project(id=other_project_id, name="Other Project"))
+        requirement = Requirement(
+            project_id=owner_project_id,
+            req_code=f"REQ-ISO-{uuid4().hex[:8]}",
+            title="Owner-only checkout behavior",
+            description="Must not be visible from other projects.",
+            category="checkout",
+            priority="high",
+            status="draft",
+        )
+        session.add(requirement)
+        session.commit()
+        session.refresh(requirement)
+        rtm_entry = RtmEntry(
+            project_id=owner_project_id,
+            requirement_id=requirement.id,
+            test_spec_name="owner-only.md",
+            test_spec_path="specs/owner-only.md",
+            mapping_type="full",
+        )
+        session.add(rtm_entry)
+        session.commit()
+        session.refresh(rtm_entry)
+        requirement_id = requirement.id
+        rtm_entry_id = rtm_entry.id
+
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            get_response = client.get(f"/requirements/{requirement_id}?project_id={other_project_id}")
+            put_response = client.put(
+                f"/requirements/{requirement_id}?project_id={other_project_id}",
+                json={"title": "Cross-project overwrite"},
+            )
+            delete_response = client.delete(f"/requirements/{requirement_id}?project_id={other_project_id}")
+
+        assert get_response.status_code == 404
+        assert put_response.status_code == 404
+        assert delete_response.status_code == 404
+
+        with Session(engine) as session:
+            requirement = session.get(Requirement, requirement_id)
+            assert requirement is not None
+            assert requirement.project_id == owner_project_id
+            assert requirement.title == "Owner-only checkout behavior"
+            assert session.get(RtmEntry, rtm_entry_id) is not None
+    finally:
+        with Session(engine) as session:
+            if rtm_entry_id is not None and (rtm_entry := session.get(RtmEntry, rtm_entry_id)):
+                session.delete(rtm_entry)
+            if requirement_id is not None and (requirement := session.get(Requirement, requirement_id)):
+                session.delete(requirement)
+            for project_id in (owner_project_id, other_project_id):
+                project = session.get(Project, project_id)
+                if project:
+                    session.delete(project)
+            session.commit()
 
 
 def test_requirement_truth_decisions_are_durable():

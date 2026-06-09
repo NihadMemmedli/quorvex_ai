@@ -1153,6 +1153,9 @@ def _run_migrations():
             if "canonical_key" not in req_columns:
                 conn.execute(text("ALTER TABLE requirements ADD COLUMN canonical_key VARCHAR"))
                 logger.info("Added column: requirements.canonical_key")
+            if "provenance_metadata_json" not in req_columns:
+                conn.execute(text("ALTER TABLE requirements ADD COLUMN provenance_metadata_json TEXT DEFAULT '{}'"))
+                logger.info("Added column: requirements.provenance_metadata_json")
             requirement_timestamp_type = "TIMESTAMP" if db_type == "postgresql" else "DATETIME"
             requirement_truth_columns = {
                 "truth_state": "VARCHAR NOT NULL DEFAULT 'candidate_requirement'",

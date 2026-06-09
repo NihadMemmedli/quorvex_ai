@@ -62,6 +62,9 @@ def _build_config_from_session(session: AutoPilotSession) -> AutoPilotConfig:
         login_url=session.login_url,
         credentials=session.credentials,
         test_data=session.test_data,
+        test_data_refs=list(cfg.get("test_data_refs") or []),
+        browser_auth_session_id=cfg.get("browser_auth_session_id"),
+        use_project_default_browser_auth=bool(cfg.get("use_project_default_browser_auth", False)),
         instructions=session.instructions,
         strategy=cfg.get("strategy", "goal_directed"),
         max_interactions=cfg.get("max_interactions", 50),
@@ -73,6 +76,9 @@ def _build_config_from_session(session: AutoPilotSession) -> AutoPilotConfig:
         max_specs=cfg.get("max_specs", 50),
         parallel_generation=cfg.get("parallel_generation", 2),
         hybrid_healing=cfg.get("hybrid_healing", False),
+        requirements_mode=cfg.get("requirements_mode", "single_agent"),
+        requirements_max_agents=cfg.get("requirements_max_agents", 3),
+        requirements_browser_verification=cfg.get("requirements_browser_verification", "off"),
     )
 
 

@@ -155,6 +155,9 @@ class GenerateRequirementsRequest(BaseModel):
     """Request to generate requirements from exploration."""
 
     exploration_session_id: str
+    mode: str = Field(default="single_agent", pattern="^(single_agent|multi_agent)$")
+    max_agents: int = Field(default=3, ge=1, le=6)
+    browser_verification: str = Field(default="off", pattern="^(off|selected)$")
 
 
 class GenerateRequirementsResponse(BaseModel):
@@ -479,7 +482,7 @@ async def _prepare_requirement_spec_generation(
     planner_session_dir: Path | None = None,
     prepare_mcp: bool = False,
 ) -> RequirementSpecGenerationContext:
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.api.db import get_session
     from utils.string_utils import slugify
 
@@ -656,7 +659,7 @@ async def _execute_requirement_spec_generation(
     job_id: str | None = None,
     agent_run_id: str | None = None,
 ) -> GenerateSpecFromRequirementResponse:
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.api.db import get_session
     from orchestrator.api.models_db import AgentRun, SpecMetadata as DBSpecMetadata
     from orchestrator.utils.playwright_mcp import browser_runtime_status
@@ -964,7 +967,7 @@ async def list_requirements(
     Returns:
         Paginated response with items, total count, and pagination metadata
     """
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
 
     store = get_exploration_store(project_id=project_id)
 
@@ -995,7 +998,7 @@ async def find_duplicates(
     Returns groups of requirements that appear to be duplicates,
     with a suggested canonical requirement and merged acceptance criteria.
     """
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
     from services.requirement_dedup import get_deduplication_service
 
     store = get_exploration_store(project_id=project_id)
@@ -1057,7 +1060,7 @@ async def find_duplicates(
 @router.get("/categories/list")
 async def list_categories(project_id: str = Query(default="default")):
     """List all requirement categories in use."""
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
 
     store = get_exploration_store(project_id=project_id)
 
@@ -1075,7 +1078,7 @@ async def list_categories(project_id: str = Query(default="default")):
 @router.get("/stats")
 async def get_requirements_stats(project_id: str = Query(default="default")):
     """Get requirements statistics."""
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
 
     store = get_exploration_store(project_id=project_id)
 
@@ -1183,7 +1186,7 @@ async def check_requirements_health():
 @router.get("/{req_id}", response_model=RequirementResponse)
 async def get_requirement(req_id: int, project_id: str = Query(default="default")):
     """Get a specific requirement by ID."""
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
 
     store = get_exploration_store(project_id=project_id)
 
@@ -1197,7 +1200,7 @@ async def get_requirement(req_id: int, project_id: str = Query(default="default"
 @router.post("", response_model=RequirementResponse)
 async def create_requirement(request: RequirementCreate, project_id: str = Query(default="default")):
     """Create a new requirement manually."""
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
 
     store = get_exploration_store(project_id=project_id)
 
@@ -1235,7 +1238,7 @@ class BulkCreateResponse(BaseModel):
 @router.post("/bulk", response_model=BulkCreateResponse)
 async def bulk_create_requirements(request: BulkRequirementCreate, project_id: str = Query(default="default")):
     """Bulk create multiple requirements in a single request."""
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
 
     store = get_exploration_store(project_id=project_id)
 
@@ -1262,7 +1265,7 @@ async def bulk_create_requirements(request: BulkRequirementCreate, project_id: s
 @router.put("/{req_id}", response_model=RequirementResponse)
 async def update_requirement(req_id: int, request: RequirementUpdate, project_id: str = Query(default="default")):
     """Update an existing requirement."""
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
 
     store = get_exploration_store(project_id=project_id)
 
@@ -1536,11 +1539,16 @@ async def delete_requirement(req_id: int, project_id: str = Query(default="defau
 
     with next(get_session()) as db:
         requirement = db.get(Requirement, req_id)
-        if not requirement:
+        if not requirement or requirement.project_id != project_id:
             raise HTTPException(status_code=404, detail="Requirement not found")
 
         # Delete related RTM entries
-        rtm_entries = db.exec(select(RtmEntry).where(RtmEntry.requirement_id == req_id)).all()
+        rtm_entries = db.exec(
+            select(RtmEntry).where(
+                RtmEntry.requirement_id == req_id,
+                RtmEntry.project_id == project_id,
+            )
+        ).all()
         for entry in rtm_entries:
             db.delete(entry)
 
@@ -1559,7 +1567,14 @@ async def delete_requirement(req_id: int, project_id: str = Query(default="defau
     return {"status": "deleted", "requirement_id": req_id}
 
 
-async def _run_requirements_generation(job_id: str, project_id: str, session_id: str):
+async def _run_requirements_generation(
+    job_id: str,
+    project_id: str,
+    session_id: str,
+    mode: str = "single_agent",
+    max_agents: int = 3,
+    browser_verification: str = "off",
+):
     """Background task for requirements generation."""
     import traceback
 
@@ -1581,12 +1596,17 @@ async def _run_requirements_generation(job_id: str, project_id: str, session_id:
 
     try:
         generator = RequirementsGenerator(project_id=project_id)
-        result = await generator.generate_from_exploration(exploration_session_id=session_id)
+        result = await generator.generate_from_exploration(
+            exploration_session_id=session_id,
+            mode=mode,
+            max_agents=max_agents,
+            browser_verification=browser_verification,
+        )
 
         logger.info(f"Requirements generation completed: {result.total_requirements} requirements generated")
 
         # Build response data
-        from memory.exploration_store import get_exploration_store
+        from orchestrator.memory.exploration_store import get_exploration_store
 
         store = get_exploration_store(project_id=project_id)
         requirements = store.get_requirements()
@@ -1616,6 +1636,14 @@ async def _run_requirements_generation(job_id: str, project_id: str, session_id:
                 for r in requirements
             ],
         }
+        if mode != "single_agent" or browser_verification != "off":
+            result_payload["generation"] = {
+                "mode": result.telemetry.mode,
+                "subagents": result.telemetry.subagents,
+                "items_total": result.telemetry.evidence_packets,
+                "requirements_generated": result.telemetry.requirements_generated,
+                "verification_status": result.telemetry.verification_status,
+            }
         job_state["status"] = "completed"
         job_state["completed_at"] = time.time()
         job_state["result"] = result_payload
@@ -1650,12 +1678,21 @@ async def generate_requirements(
         job_id=job_id,
         job_type="requirements_generate",
         project_id=project_id,
-        payload={"project_id": project_id, "session_id": request.exploration_session_id},
+        payload={
+            "project_id": project_id,
+            "session_id": request.exploration_session_id,
+            "mode": request.mode,
+            "max_agents": request.max_agents,
+            "browser_verification": request.browser_verification,
+        },
     )
     _req_gen_jobs[job_id] = {
         "status": "queued",
         "project_id": project_id,
         "session_id": request.exploration_session_id,
+        "mode": request.mode,
+        "max_agents": request.max_agents,
+        "browser_verification": request.browser_verification,
         "created_at": time.time(),
     }
 
@@ -1670,7 +1707,13 @@ async def generate_requirements(
         temporal = await start_domain_job_workflow(
             "requirements_generate",
             job_id,
-            {"project_id": project_id, "session_id": request.exploration_session_id},
+            {
+                "project_id": project_id,
+                "session_id": request.exploration_session_id,
+                "mode": request.mode,
+                "max_agents": request.max_agents,
+                "browser_verification": request.browser_verification,
+            },
         )
         _req_gen_jobs[job_id]["temporal_workflow_id"] = temporal.workflow_id
         _req_gen_jobs[job_id]["temporal_run_id"] = temporal.run_id
@@ -1767,7 +1810,7 @@ async def _run_bulk_spec_generation(
 
     from api.db import get_session
     from api.models_db import RtmEntry
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.services.domain_jobs import update_domain_job
 
     job_state = _bulk_gen_jobs.setdefault(
@@ -2026,7 +2069,7 @@ async def check_duplicate(request: CheckDuplicateRequest, project_id: str = Quer
     Returns exact matches and semantically similar requirements to help
     prevent duplicate creation.
     """
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
     from services.requirement_dedup import get_deduplication_service
 
     store = get_exploration_store(project_id=project_id)
@@ -2179,7 +2222,7 @@ async def get_spec_status(req_id: int, project_id: str = Query(default="default"
     """
     from sqlmodel import select
 
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.api.db import get_session
     from orchestrator.api.models_db import RtmEntry
 
@@ -2227,7 +2270,7 @@ async def start_generate_spec_job(
     project_id: str = Query(default="default"),
 ):
     """Start async browser-backed spec generation for the RTM/requirements modal."""
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.api.db import get_session
     from orchestrator.api.models_db import AgentRun
     from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
@@ -2388,7 +2431,7 @@ async def generate_spec_from_requirement(
     /requirements/{req_id}/generate-spec-jobs for live browser visibility.
     """
     try:
-        from memory.exploration_store import get_exploration_store
+        from orchestrator.memory.exploration_store import get_exploration_store
 
         store = get_exploration_store(project_id=project_id)
         requirement = store.get_requirement(req_id)
