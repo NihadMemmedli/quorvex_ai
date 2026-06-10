@@ -123,8 +123,10 @@ jobs:
 
           if [ "$suite" = "auto" ] && [ "$EVENT_NAME" = "pull_request" ]; then
             git diff --name-only "$BASE_SHA" "$HEAD_SHA" > /tmp/changed-files.txt || git diff --name-only HEAD^ HEAD > /tmp/changed-files.txt
-            if grep -Eq '^(Dockerfile|docker-compose|package-lock.json|package.json|pyproject.toml|requirements|requirements\.|orchestrator/requirements|playwright\.config\.ts|\.github/workflows/)' /tmp/changed-files.txt; then
+            if grep -Eq '^(Dockerfile|docker-compose|package-lock.json|package.json|pyproject.toml|requirements|requirements\.|orchestrator/requirements|\.github/workflows/)' /tmp/changed-files.txt; then
               suite="all-safe"
+            elif grep -Eq '^playwright\.config\.ts$' /tmp/changed-files.txt; then
+              suite="playwright-generated"
             elif grep -Eq '^(orchestrator/|alembic\.ini)' /tmp/changed-files.txt; then
               suite="python-unit"
             elif grep -Eq '^web/' /tmp/changed-files.txt; then
@@ -212,7 +214,7 @@ jobs:
 
   playwright-tests:
     needs: select-suite
-    if: contains(fromJSON('["playwright-generated","playwright-e2e","all-safe"]'), needs.select-suite.outputs.suite)
+    if: contains(fromJSON('["playwright-generated","playwright-e2e"]'), needs.select-suite.outputs.suite)
     runs-on: ubuntu-latest
     env:
       SELECTED_SUITE: ${{ needs.select-suite.outputs.suite }}

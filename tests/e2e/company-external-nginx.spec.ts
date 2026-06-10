@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test';
 
 test.describe('company external nginx deployment', () => {
+  test.skip(process.env.PLAYWRIGHT_COMPANY_EDGE_SMOKE !== 'true', 'Company edge smoke requires the rehearsal nginx proxy.');
+
   test('keeps browser traffic same-origin and proxies live browser websocket', async ({ page, baseURL }) => {
     test.skip(!baseURL, 'BASE_URL must point at the company-nginx rehearsal URL.');
 

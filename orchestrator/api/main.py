@@ -140,6 +140,7 @@ logger = get_logger(__name__)
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SPECS_DIR = BASE_DIR / "specs"
 RUNS_DIR = BASE_DIR / "runs"
+RUNS_DIR.mkdir(parents=True, exist_ok=True)
 METADATA_FILE = SPECS_DIR / "spec-metadata.json"
 RUN_BROWSER_METADATA_FILE = "browser-runtime.json"
 RUN_SEED_SPEC_RELATIVE_PATH = Path("tests") / "seed.spec.ts"

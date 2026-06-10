@@ -168,6 +168,7 @@ run_smoke() {
   (
     cd "${ROOT_DIR}"
     BASE_URL="${base_url}" \
+    PLAYWRIGHT_COMPANY_EDGE_SMOKE=true \
     PLAYWRIGHT_IGNORE_HTTPS_ERRORS=true \
     PLAYWRIGHT_HOST_RESOLVER_RULES="MAP ${HOST} 127.0.0.1" \
     PLAYWRIGHT_WORKERS=1 \
