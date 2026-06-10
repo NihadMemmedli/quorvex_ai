@@ -275,7 +275,7 @@ def _chat_completions_url(base_url: str) -> str:
 def _write_hermes_provider_bundle(active: dict[str, str], env_vars: dict[str, str]) -> dict[str, str]:
     """Write a Hermes home bundle that mirrors Quorvex's active model provider."""
     provider = _infer_hermes_provider(active["llm_provider"], active["base_url"])
-    model_name = active["model_name"] or "glm-5.1"
+    model_name = active.get("standard_model") or active["model_name"] or "glm-5.1"
     api_key = active["api_key"]
     base_url = (active["base_url"] or "").rstrip("/")
     config_dir = _hermes_config_dir()
@@ -388,7 +388,7 @@ def _active_settings_from_env(env_vars: dict[str, str] | None = None) -> dict[st
     tiers = model_tiers(env_vars)
     base_url = selection.base_url or DEFAULT_ANTHROPIC_BASE_URL
     model_name = selection.model
-    provider_label = env_vars.get("QUORVEX_LLM_PROVIDER") or os.environ.get("QUORVEX_LLM_PROVIDER") or ""
+    provider_label = env_vars.get("QUORVEX_LLM_PROVIDER") or ""
     if provider_label in {"anthropic_compatible", "openai_compatible"}:
         provider_label = _infer_provider(base_url)
     if selection.provider == "anthropic_compatible":
@@ -599,7 +599,11 @@ def _coerce_session(session: Any) -> tuple[Session, bool]:
 
 def _active_settings(env_vars: dict[str, str] | None = None, session: Session | None = None) -> dict[str, str]:
     """Return active AI settings, preferring DB-backed Settings over env bootstrap."""
-    return _active_settings_from_env(env_vars if env_vars is not None else runtime_env_vars(session))
+    if env_vars is not None:
+        return _active_settings_from_env(env_vars)
+    if session is None:
+        return _active_settings_from_env(_read_env_file())
+    return _active_settings_from_env(runtime_env_vars(session))
 
 
 def _apply_runtime_settings(env_vars: dict[str, str], new_api_key: str | None = None):
@@ -817,6 +821,7 @@ def _update_settings(new_settings: Settings, session: Session):
         env_vars = _settings_to_env_vars(runtime_settings)
 
     _save_db_runtime_settings(session, runtime_settings)
+    _write_env_file(env_vars)
     _apply_runtime_settings(env_vars, new_api_key=new_api_key)
 
     settings_response = _settings_response(env_vars)

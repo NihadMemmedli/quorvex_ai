@@ -1,5 +1,7 @@
 # YouTube MCP Production
 
+![Quorvex command center used as dashboard footage for YouTube episodes](../assets/ui/command-center.png)
+
 This guide sets up a Codex-controlled YouTube production workflow for Quorvex episodes. It uses official MCP servers where available and repo-local FastMCP wrappers for YouTube upload safety and OBS recording control.
 
 The default mode is dry run. No upload, scheduling, thumbnail update, metadata update, OBS recording start, scene switch, or OBS stop happens unless the user explicitly approves the action and the command passes the matching confirmation flags.

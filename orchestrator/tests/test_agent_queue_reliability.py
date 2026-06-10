@@ -3,7 +3,7 @@ import json
 import sys
 import threading
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -18,6 +18,8 @@ from orchestrator.services.agent_queue import AgentQueue, AgentTask, AgentTaskSt
 from orchestrator.services.agent_worker import AgentWorker, BrowserObservationRecorder, _event_tool_uses
 from orchestrator.utils.agent_runner import AgentRunner
 from orchestrator.utils import browser_cleanup
+
+UTC = timezone.utc
 
 
 class _MemoryPipeline:

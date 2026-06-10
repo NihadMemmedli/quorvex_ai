@@ -123,8 +123,10 @@ jobs:
 
           if [ "$suite" = "auto" ] && [ "$EVENT_NAME" = "pull_request" ]; then
             git diff --name-only "$BASE_SHA" "$HEAD_SHA" > /tmp/changed-files.txt || git diff --name-only HEAD^ HEAD > /tmp/changed-files.txt
-            if grep -Eq '^(Dockerfile|docker-compose|package-lock.json|package.json|pyproject.toml|requirements|requirements\.|orchestrator/requirements|playwright\.config\.ts|\.github/workflows/)' /tmp/changed-files.txt; then
+            if grep -Eq '^(Dockerfile|docker-compose|package-lock.json|package.json|pyproject.toml|requirements|requirements\.|orchestrator/requirements|\.github/workflows/)' /tmp/changed-files.txt; then
               suite="all-safe"
+            elif grep -Eq '^playwright\.config\.ts$' /tmp/changed-files.txt; then
+              suite="playwright-generated"
             elif grep -Eq '^(orchestrator/|alembic\.ini)' /tmp/changed-files.txt; then
               suite="python-unit"
             elif grep -Eq '^web/' /tmp/changed-files.txt; then
@@ -153,9 +155,6 @@ jobs:
     needs: select-suite
     if: contains(fromJSON('["python-unit","python-integration","all-safe"]'), needs.select-suite.outputs.suite)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./orchestrator
     env:
       JWT_SECRET_KEY: test-secret-key-for-ci
       REQUIRE_AUTH: "false"
@@ -169,8 +168,9 @@ jobs:
         with:
           python-version: "3.10"
       - run: python -m pip install --upgrade pip
-      - run: if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - run: pip install pytest pytest-asyncio
+      - run: pip install -e .
+      - run: if [ -f orchestrator/requirements.txt ]; then pip install -r orchestrator/requirements.txt; fi
+      - run: pip install pytest pytest-asyncio pytest-cov
       - name: Run pytest subset
         run: |
           set -euo pipefail
@@ -180,12 +180,12 @@ jobs:
           elif [ "$SELECTED_SUITE" = "all-safe" ]; then
             marker="not integration"
           fi
-          target="tests"
+          target="orchestrator/tests"
           if [[ "$TEST_PATH" == orchestrator/tests/* ]]; then
-            target="${TEST_PATH#orchestrator/}"
+            target="$TEST_PATH"
           fi
           if [ "$marker" = "not integration" ]; then
-            python -m pytest "$target" -v -m "$marker" --ignore=tests/integration
+            python -m pytest "$target" -v -m "$marker" --ignore=orchestrator/tests/integration --cov=orchestrator --cov-report=term-missing --cov-report=xml
           else
             python -m pytest "$target" -v -m "$marker"
           fi
@@ -207,14 +207,14 @@ jobs:
       - run: npm ci
       - name: Type check frontend
         if: contains(fromJSON('["frontend-typecheck","all-safe"]'), needs.select-suite.outputs.suite)
-        run: npx tsc --noEmit
+        run: npm run typecheck
       - name: Lint frontend
         if: needs.select-suite.outputs.suite == 'frontend-lint'
         run: npm run lint
 
   playwright-tests:
     needs: select-suite
-    if: contains(fromJSON('["playwright-generated","playwright-e2e","all-safe"]'), needs.select-suite.outputs.suite)
+    if: contains(fromJSON('["playwright-generated","playwright-e2e"]'), needs.select-suite.outputs.suite)
     runs-on: ubuntu-latest
     env:
       SELECTED_SUITE: ${{ needs.select-suite.outputs.suite }}

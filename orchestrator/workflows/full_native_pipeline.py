@@ -1440,7 +1440,7 @@ class FullNativePipeline:
                 capture_output=True,
                 text=True,
                 timeout=600,  # 10 minutes to allow for multiple tests in a file
-                env={**subprocess_env, **self.test_data_env_vars},
+                env={**subprocess_env, **getattr(self, "test_data_env_vars", {})},
             )
 
             output = result.stdout + result.stderr

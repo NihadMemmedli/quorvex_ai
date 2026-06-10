@@ -1,4 +1,5 @@
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -89,7 +90,18 @@ def test_checked_in_spec_metadata_covers_all_specs():
     metadata_file = specs_dir / "spec-metadata.json"
 
     metadata = json.loads(metadata_file.read_text())
-    spec_files = {str(path.relative_to(specs_dir)) for path in specs_dir.glob("**/*.md")}
+    tracked_specs = subprocess.run(
+        ["git", "ls-files", "specs/*.md", "specs/**/*.md"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    spec_files = {
+        str(Path(path).relative_to("specs"))
+        for path in tracked_specs.stdout.splitlines()
+        if path.endswith(".md")
+    }
 
     assert set(metadata) == spec_files
 

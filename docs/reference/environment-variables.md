@@ -334,6 +334,54 @@ These variables are read by source code paths but are usually set by Docker Comp
 | `WEB_BASE_URL` | -- | No | Web base URL fallback for generated links |
 | `WORKER_ID` | generated | No | Generic queue worker identifier |
 
+## Additional Runtime Variables
+
+These variables are used by specialized workflows, browser-auth helpers, generated test-data bindings, and CI/runtime adapters.
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `AGENT_BROWSER_SLOT_TIMEOUT_SECONDS` | feature default | No | Browser slot wait timeout for agent-run subprocesses |
+| `AGENT_WORKER_DISABLE_LIVE_BROWSER` | `false` | No | Disable live-browser session attachment in agent workers |
+| `API_KEY` | -- | No | Generic API key placeholder accepted by generated specs and test data |
+| `API_PASS` | -- | No | Generic API password placeholder accepted by generated specs and test data |
+| `API_USER` | -- | No | Generic API username placeholder accepted by generated specs and test data |
+| `BROWSER_AUTH_LOGIN_URL` | -- | No | Login URL used by browser auth session capture |
+| `BROWSER_AUTH_OUTPUT_PATH` | -- | No | Output path for captured browser storage state |
+| `BROWSER_AUTH_PASSWORD` | -- | No | Password used by browser auth session capture |
+| `BROWSER_AUTH_PASSWORD_SELECTOR` | -- | No | Password field selector used by browser auth session capture |
+| `BROWSER_AUTH_SESSIONS_DIR` | app data default | No | Directory for browser auth session artifacts |
+| `BROWSER_AUTH_SUBMIT_SELECTOR` | -- | No | Submit selector used by browser auth session capture |
+| `BROWSER_AUTH_SUCCESS_URL_PATTERN` | -- | No | Success URL pattern used to confirm browser auth capture |
+| `BROWSER_AUTH_USERNAME` | -- | No | Username used by browser auth session capture |
+| `BROWSER_AUTH_USERNAME_CONTINUE_SELECTOR` | -- | No | Optional selector for username-first login flows |
+| `BROWSER_AUTH_USERNAME_SELECTOR` | -- | No | Username field selector used by browser auth session capture |
+| `BROWSER_HOST_INTERNAL` | -- | No | Internal browser host used by containerized browser workers |
+| `BROWSER_SLOT_PARENT_OWNER_TYPE` | -- | No | Parent owner type metadata for browser slot leases |
+| `BROWSER_SLOT_PARENT_RUN_ID` | -- | No | Parent run metadata for browser slot leases |
+| `NO_PROXY` | -- | No | Proxy bypass list inherited by subprocesses |
+| `OPENAPI_IMPORT_CODEGEN_CONCURRENCY` | feature default | No | Concurrent code-generation workers for OpenAPI import |
+| `OPENAPI_IMPORT_EXECUTION_CONCURRENCY` | feature default | No | Concurrent execution workers for OpenAPI import |
+| `OPENAPI_IMPORT_EXECUTION_TIMEOUT` | feature default | No | Execution timeout for OpenAPI import checks |
+| `PLANNER_REPAIR_TIMEOUT_SECONDS` | feature default | No | Timeout for planner repair passes |
+| `PLAYWRIGHT_BROWSERS_PATH` | Playwright default | No | Browser binary path used by Playwright |
+| `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` | auto-detected | No | Chromium executable override |
+| `PLAYWRIGHT_MCP_EXECUTABLE_PATH` | auto-detected | No | Playwright MCP executable override |
+| `PLAYWRIGHT_WEB_HOST` | `0.0.0.0` | No | Host used by Playwright-managed web server |
+| `PRD_QUEUE_STALE_GRACE_SECONDS` | feature default | No | Grace period before PRD queue items are considered stale |
+| `QUORVEX_BROWSER_AUTH_CONTEXT` | -- | No | Browser auth context ID/path passed to generated runs |
+| `QUORVEX_EMBEDDING_API_KEY` | -- | No | Embedding API key override |
+| `QUORVEX_EMBEDDING_BASE_URL` | -- | No | Embedding API base URL override |
+| `QUORVEX_OPENAI_MODEL` | provider default | No | OpenAI-compatible model override used by selected integrations |
+| `QUORVEX_RUN_MODEL_TIER` | `standard` | No | Model tier selected for a run |
+| `QUORVEX_SETTINGS_ENV_FILE` | app default | No | Settings env file path used for runtime provider persistence |
+| `QUORVEX_TEST_DATA_REFS` | -- | No | Serialized test-data references passed to run subprocesses |
+| `QUORVEX_TEST_DB_PATH` | -- | No | SQLite test database path override |
+| `TEMPORAL_CORS_ORIGINS` | -- | No | CORS origins for Temporal-facing services |
+| `TESTDATA_` | -- | No | Prefix for resolved test-data values exposed to subprocesses |
+| `TESTDATA_WETRAVEL_AUTH_VALID_USER_PASSWORD` | -- | Demo only | Seeded WeTravel demo password test data |
+| `TESTDATA_WETRAVEL_AUTH_VALID_USER_USERNAME` | -- | Demo only | Seeded WeTravel demo username test data |
+| `TEST_RUN_STARTUP_IMPORT_RETRIES` | feature default | No | Import retry count for test-run subprocess startup |
+
 ## Headless Mode Resolution
 
 The `orchestrator/load_env.py` module resolves the headless setting automatically:

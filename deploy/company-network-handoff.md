@@ -92,15 +92,36 @@ Run from the private deploy repo before startup:
 ./scripts/deploy.sh --dry-run v1.2.3
 ```
 
+Run from the public checkout when a tagged release should become deployable:
+
+```bash
+make release-preflight VERSION=v1.2.3
+```
+
+Without company server access, rehearse the external-nginx path locally:
+
+```bash
+make start
+make deploy-check
+make company-rehearsal
+```
+
 Start or update runtime only after dry-run passes:
 
 ```bash
 ./scripts/deploy.sh v1.2.3
 ```
 
+For normal tagged server updates from the public checkout:
+
+```bash
+make server-upgrade VERSION=v1.2.3
+```
+
 App-server checks:
 
 ```bash
+make deploy-check
 curl -f http://localhost:3000
 curl -f http://localhost:8001/health
 ```

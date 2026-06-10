@@ -23,6 +23,7 @@ build/
 
 # Generated specs, requirements, recordings, and tests
 /specs/*
+!/specs/spec-metadata.json
 !/specs/examples/
 !/specs/examples/**
 !/specs/templates/

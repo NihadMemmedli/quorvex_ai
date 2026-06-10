@@ -236,6 +236,9 @@ server {
 # From the private deploy repo: validate only
 ./scripts/deploy.sh --dry-run v1.2.3
 
+# From the public checkout: verify exact tagged release images and dry-run
+make release-preflight VERSION=v1.2.3
+
 # From the private deploy repo: pull images, back up, and start/update services
 ./scripts/deploy.sh v1.2.3
 ```
@@ -266,11 +269,29 @@ Services started:
 # Runtime readiness
 make agent-runtime-ready
 
+# Full app-server deployment check
+make deploy-check
+
 # App-server checks
 curl -sf http://localhost:3000
 curl -sf http://localhost:8001/health
 curl -sf http://localhost:8001/health/storage
 ```
+
+When company server access is not available, rehearse the external-nginx path
+locally from the public checkout:
+
+```bash
+make start
+make company-rehearsal
+```
+
+The rehearsal starts the external-nginx app runtime if needed, runs a temporary
+local nginx container with self-signed TLS, opens the app through a fake
+company hostname, verifies `/backend-proxy/health`, and verifies the
+`/websockify` WebSocket upgrade path. It does not replace the final
+company-workstation validation because real DNS, certificates, firewall rules,
+and company nginx config still live outside the repo.
 
 Company-workstation verification:
 
@@ -312,17 +333,22 @@ chmod +x scripts/health-monitor.sh
 
 ```bash
 cd /opt/quorvex_ai
-git pull origin main
-make upgrade    # Backup -> rebuild -> migrate -> restart -> verify
+git pull --ff-only
+make release-preflight VERSION=v1.2.3
+make server-upgrade VERSION=v1.2.3
 ```
 
 Rollback if needed:
 
 ```bash
-make db-downgrade
-git checkout <previous-commit>
-make prod-build && make prod-up
+cd /opt/quorvex-deploy-private
+./scripts/rollback.sh
 ```
+
+For schema-changing releases, confirm the migration is rollback-safe before
+deploying. If it is not rollback-safe, capture the exact backup timestamp from
+the pre-deploy backup and treat restore as the recovery path instead of a pure
+image rollback.
 
 ## Verification
 
