@@ -47,6 +47,7 @@ make run SPEC=specs/your-test.md
 | `--capabilities-file` | path | -- | Path to an Appium capabilities JSON file |
 | `--mobile-smoke` | flag | `false` | Run the built-in mobile smoke flow for the spec |
 | `--project-id` | string | derived from spec folder | Project ID for memory system isolation |
+| `--model-tier` | `light` / `standard` / `deep` / `tool_deep` / `chat` | `standard` | Model tier used by native agent stages |
 | `--no-memory` | flag | `false` | Disable memory system for this run |
 | `--run-dir` | path | `runs/TIMESTAMP/` | Specific directory to store run artifacts |
 | `--try-code` | path | -- | Path to existing generated code to try before regenerating |

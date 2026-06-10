@@ -4059,7 +4059,7 @@ def _augment_active_browser_metadata(metadata: dict[str, Any], status: str | Non
     diagnostics = _live_browser_display_diagnostics()
     metadata = dict(metadata)
     metadata["display_diagnostics"] = diagnostics
-    if diagnostics.get("browser_window_count") in (0, None):
+    if diagnostics.get("browser_window_count") in (0, None) and not metadata.get("runtime_message"):
         metadata["runtime_message"] = "VNC is connected; waiting for Playwright to launch a visible browser window."
     return metadata
 

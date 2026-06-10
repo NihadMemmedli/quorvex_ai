@@ -88,11 +88,17 @@ Equivalent Makefile commands:
 
 ```bash
 make bootstrap
+make release-preflight VERSION=v1.2.3
 make deploy VERSION=v1.2.3
+make deploy-check
 make rollback
 make status
 make logs
 ```
+
+`make release-preflight` verifies that all expected GHCR images for the tag are
+available and then runs the private deploy dry-run. `make deploy-check` calls
+the public checkout's deployment checker using this repo's private env file.
 
 The scripts never publish to YouTube, mutate GitHub releases, or create public
 cloud resources. They only manage the server-local Docker Compose deployment.

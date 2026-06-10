@@ -48,6 +48,7 @@ Backend API: `http://localhost:8001` | Frontend: `http://localhost:3000`
 | Analytics | `/analytics` | Cross-feature aggregated analytics |
 | Templates | `/templates` | Manage reusable template files |
 | New Template | `/templates/new` | Create a reusable template file |
+| Test Data | `/test-data` | Manage reusable test-data datasets and resolved sensitive fields |
 | Workflow | `/workflow` | Build and run custom workflow definitions |
 | Recordings | `/recordings` | Record browser sessions and import generated code |
 | PR Advisor | `/pr-advisor` | Review pull request quality signals and recommendations |

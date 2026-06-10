@@ -155,7 +155,7 @@ class TestPhase1CoverageTracking:
 
     def test_coverage_tracker(self):
         """Test element coverage tracker"""
-        from coverage import CoverageTracker
+        from orchestrator.coverage import CoverageTracker
 
         tracker = CoverageTracker()
 
@@ -188,7 +188,7 @@ class TestPhase1CoverageTracking:
 
     def test_playwright_coverage_class(self):
         """Test PlaywrightCoverage helper class"""
-        from coverage import PlaywrightCoverage
+        from orchestrator.coverage import PlaywrightCoverage
 
         # Test coverage script generation
         start_script = PlaywrightCoverage.setup_coverage_script()
@@ -205,7 +205,7 @@ class TestPhase1CoverageTracking:
 
     def test_merge_coverage_reports(self):
         """Test merging multiple coverage reports"""
-        from coverage import merge_coverage_reports
+        from orchestrator.coverage import merge_coverage_reports
 
         report1 = {
             "coverage_summary": {

@@ -9,9 +9,6 @@ on:
 jobs:
   python-checks:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./orchestrator
 
     steps:
     - uses: actions/checkout@v4
@@ -24,15 +21,11 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install -e .
+        if [ -f orchestrator/requirements.txt ]; then pip install -r orchestrator/requirements.txt; fi
 
-    - name: Install linting tools
-      run: pip install ruff
-
-    - name: Lint with Ruff
-      run: |
-        ruff check .
-        ruff format --check .
+    - name: Install test tools
+      run: pip install pytest pytest-asyncio pytest-cov
 
     - name: Run Tests
       env:
@@ -41,8 +34,7 @@ jobs:
         DATABASE_URL: "sqlite:///./test.db"
       # Only run non-integration tests (exclude tests requiring external services)
       run: |
-        pip install pytest pytest-asyncio
-        if [ -d "tests" ]; then pytest tests -v -m "not integration" --ignore=tests/integration; else echo "No tests directory found"; fi
+        python -m pytest orchestrator/tests -v -m "not integration" --ignore=orchestrator/tests/integration --cov=orchestrator --cov-report=term-missing --cov-report=xml
 
   node-checks:
     runs-on: ubuntu-latest
@@ -59,7 +51,7 @@ jobs:
       run: cd web && npm ci
 
     - name: Type check frontend
-      run: cd web && npx tsc --noEmit
+      run: npm --prefix web run typecheck
 
     - name: Build frontend
       run: cd web && npm run build

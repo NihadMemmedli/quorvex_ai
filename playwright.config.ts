@@ -9,6 +9,8 @@ const playwrightHeadless = process.env.PLAYWRIGHT_HEADLESS?.toLowerCase();
 const genericHeadless = process.env.HEADLESS?.toLowerCase();
 const runHeaded = playwrightHeadless === 'false' || genericHeadless === 'false';
 const configuredWorkers = parseInt(process.env.PLAYWRIGHT_WORKERS || '4', 10);
+const ignoreHTTPSErrors = process.env.PLAYWRIGHT_IGNORE_HTTPS_ERRORS === 'true';
+const chromiumHostResolverRules = process.env.PLAYWRIGHT_HOST_RESOLVER_RULES;
 
 /**
  * Playwright Test Configuration
@@ -26,6 +28,7 @@ export default defineConfig({
   use: {
     baseURL: process.env.BASE_URL || undefined,
     headless: runHeaded ? false : undefined,
+    ignoreHTTPSErrors,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'on',
@@ -34,7 +37,12 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
+      use: {
+        ...devices['Desktop Chrome'],
+        launchOptions: {
+          args: chromiumHostResolverRules ? [`--host-resolver-rules=${chromiumHostResolverRules}`] : [],
+        },
+      },
     },
     {
       name: 'firefox',

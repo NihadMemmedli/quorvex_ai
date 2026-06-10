@@ -199,11 +199,12 @@ class NativeGenerator:
                 credentials[username_var] = execution_credentials["username"]
             if execution_credentials.get("password"):
                 credentials[password_var] = execution_credentials["password"]
-        if self.env_vars:
+        env_vars = getattr(self, "env_vars", {})
+        if env_vars:
             credentials.update(
                 {
                     key: value
-                    for key, value in self.env_vars.items()
+                    for key, value in env_vars.items()
                     if key.startswith("TESTDATA_")
                 }
             )

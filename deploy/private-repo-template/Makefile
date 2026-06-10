@@ -1,4 +1,4 @@
-.PHONY: bootstrap deploy deploy-dry-run rollback doctor status logs config pull
+.PHONY: bootstrap deploy deploy-dry-run deploy-check release-preflight rollback doctor status logs config pull
 
 VERSION ?=
 
@@ -40,3 +40,16 @@ pull:
 		exit 2; \
 	fi
 	@./scripts/deploy.sh --pull-only "$(VERSION)"
+
+deploy-check:
+	@set -a; . env/quorvex.prod.env; set +a; \
+	python3 "$${QUORVEX_SOURCE_DIR:-/opt/quorvex_ai}/scripts/deploy_check.py" --env-file env/quorvex.prod.env
+
+release-preflight:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "Usage: make release-preflight VERSION=v1.2.3"; \
+		exit 2; \
+	fi
+	@set -a; . env/quorvex.prod.env; set +a; \
+	QUORVEX_DEPLOY_DIR="$$(pwd)" QUORVEX_PREFLIGHT_REQUIRE_PRIVATE_DEPLOY=true \
+	bash "$${QUORVEX_SOURCE_DIR:-/opt/quorvex_ai}/deploy/release-preflight.sh" "$(VERSION)"

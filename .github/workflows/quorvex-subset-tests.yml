@@ -153,9 +153,6 @@ jobs:
     needs: select-suite
     if: contains(fromJSON('["python-unit","python-integration","all-safe"]'), needs.select-suite.outputs.suite)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./orchestrator
     env:
       JWT_SECRET_KEY: test-secret-key-for-ci
       REQUIRE_AUTH: "false"
@@ -169,8 +166,9 @@ jobs:
         with:
           python-version: "3.10"
       - run: python -m pip install --upgrade pip
-      - run: if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - run: pip install pytest pytest-asyncio
+      - run: pip install -e .
+      - run: if [ -f orchestrator/requirements.txt ]; then pip install -r orchestrator/requirements.txt; fi
+      - run: pip install pytest pytest-asyncio pytest-cov
       - name: Run pytest subset
         run: |
           set -euo pipefail
@@ -180,12 +178,12 @@ jobs:
           elif [ "$SELECTED_SUITE" = "all-safe" ]; then
             marker="not integration"
           fi
-          target="tests"
+          target="orchestrator/tests"
           if [[ "$TEST_PATH" == orchestrator/tests/* ]]; then
-            target="${TEST_PATH#orchestrator/}"
+            target="$TEST_PATH"
           fi
           if [ "$marker" = "not integration" ]; then
-            python -m pytest "$target" -v -m "$marker" --ignore=tests/integration
+            python -m pytest "$target" -v -m "$marker" --ignore=orchestrator/tests/integration --cov=orchestrator --cov-report=term-missing --cov-report=xml
           else
             python -m pytest "$target" -v -m "$marker"
           fi
@@ -207,7 +205,7 @@ jobs:
       - run: npm ci
       - name: Type check frontend
         if: contains(fromJSON('["frontend-typecheck","all-safe"]'), needs.select-suite.outputs.suite)
-        run: npx tsc --noEmit
+        run: npm run typecheck
       - name: Lint frontend
         if: needs.select-suite.outputs.suite == 'frontend-lint'
         run: npm run lint

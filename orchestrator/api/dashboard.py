@@ -823,16 +823,21 @@ def get_dashboard_stats(
             timestamp = 0
             date_str = "Unknown"
 
-            # Parse timestamp from directory name
-            try:
-                # Handle both formats: "2026-01-08_12-47-09" and "2026-01-08_00-06-45_spec_name.md"
-                time_part = "_".join(run_id.split("_")[:2])
-                dt = datetime.strptime(time_part, "%Y-%m-%d_%H-%M-%S")
-                timestamp = dt.timestamp()
-                date_str = dt.strftime("%Y-%m-%d")
-            except ValueError:
-                timestamp = os.path.getmtime(run_path)
-                date_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+            db_run = db_runs_cache.get(run_id)
+            if db_run and db_run.created_at:
+                timestamp = db_run.created_at.timestamp()
+                date_str = db_run.created_at.strftime("%Y-%m-%d")
+            else:
+                # Parse timestamp from directory name
+                try:
+                    # Handle both formats: "2026-01-08_12-47-09" and "2026-01-08_00-06-45_spec_name.md"
+                    time_part = "_".join(run_id.split("_")[:2])
+                    dt = datetime.strptime(time_part, "%Y-%m-%d_%H-%M-%S")
+                    timestamp = dt.timestamp()
+                    date_str = dt.strftime("%Y-%m-%d")
+                except ValueError:
+                    timestamp = os.path.getmtime(run_path)
+                    date_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
 
             # Apply period filter
             if period_start and timestamp < period_start:

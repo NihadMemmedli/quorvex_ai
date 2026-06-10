@@ -7,7 +7,7 @@
         swarm-up swarm-down swarm-scale swarm-status \
         k8s-deploy k8s-delete k8s-status k8s-scale k8s-logs \
         db-migrate db-upgrade db-downgrade db-history db-stamp db-demo-seed youtube-demo-seed \
-        docker-prune volume-sizes db-vacuum health-check upgrade deps-lock \
+        docker-prune volume-sizes db-vacuum health-check deploy-check company-rehearsal release-preflight server-upgrade upgrade deps-lock \
         load-test agent-runtime-ready agent-temporal-smoke-up agent-temporal-smoke agent-temporal-smoke-logs \
         k6-workers-up k6-workers-down k6-workers-scale k6-workers-logs k6-workers-status \
         zap-up zap-down zap-status zap-logs \
@@ -24,6 +24,8 @@ help:
 	@echo "    make setup          - Install dependencies and setup environment"
 	@echo "    make setup-skills   - Install Playwright skill dependencies"
 	@echo "    make start          - Start app runtime for external-nginx deployment"
+	@echo "    make deploy-check   - Verify local external-nginx runtime readiness"
+	@echo "    make company-rehearsal - Simulate company nginx and run browser proxy smoke"
 	@echo "    make stop           - Stop the dashboard stack and local dev processes"
 	@echo "    make restart        - Restart the dashboard stack"
 	@echo "    make dev            - Start the UI and Backend server (development)"
@@ -114,6 +116,8 @@ help:
 	@echo "    make youtube-demo-seed - Seed Quorvex Demo Shop YouTube walkthrough data"
 	@echo ""
 	@echo "  Maintenance:"
+	@echo "    make release-preflight VERSION=v1.2.3 - Verify tagged images and deploy dry-run"
+	@echo "    make server-upgrade VERSION=v1.2.3    - Run preflight, deploy, and post-check on server"
 	@echo "    make upgrade          - Full upgrade procedure (backup, pull, migrate, restart)"
 	@echo "    make health-check     - Hit all health endpoints and report status"
 	@echo "    make docker-prune     - Remove dangling images, stopped containers, build cache"
@@ -242,6 +246,26 @@ agent-runtime-ready:
 	@python scripts/check_agent_runtime_ready.py \
 		--api-base "$${QUORVEX_PUBLIC_API_URL:-http://localhost:8001}" \
 		--timeout "$${STARTUP_TIMEOUT_SECONDS:-180}"
+
+deploy-check:
+	@python3 scripts/deploy_check.py
+
+company-rehearsal:
+	@bash deploy/rehearse-company-external-nginx.sh
+
+release-preflight:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "Usage: make release-preflight VERSION=v1.2.3"; \
+		exit 2; \
+	fi
+	@bash deploy/release-preflight.sh "$(VERSION)"
+
+server-upgrade:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "Usage: make server-upgrade VERSION=v1.2.3"; \
+		exit 2; \
+	fi
+	@bash deploy/server-upgrade.sh "$(VERSION)"
 
 # ==========================================
 # DOCKER
@@ -1020,9 +1044,29 @@ format:
 
 test:
 	@echo "Running Python tests..."
-	cd orchestrator && python -m pytest tests/ -v
+	python -m pytest orchestrator/tests -v
 	@echo ""
 	@echo "All tests passed!"
+
+backend-unit:
+	@python -m pytest orchestrator/tests -m "not integration"
+
+backend-integration:
+	@python -m pytest orchestrator/tests -m "integration"
+
+frontend-static:
+	@npm --prefix web run lint
+	@npm --prefix web run typecheck
+	@npm --prefix web run build
+
+frontend-unit:
+	@npm --prefix web run test
+
+playwright-e2e:
+	@npx playwright test tests/e2e --project=$${PLAYWRIGHT_PROJECT:-chromium}
+
+playwright-generated:
+	@npx playwright test tests/generated --project=$${PLAYWRIGHT_PROJECT:-chromium}
 
 autonomous-soak:
 	@echo "Running autonomous product-UI soak..."

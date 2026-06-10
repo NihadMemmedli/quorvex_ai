@@ -1,0 +1,19 @@
+{
+  "examples/hello-world.md": {
+    "tags": [
+      "example",
+      "smoke"
+    ]
+  },
+  "templates/api-test-template.md": {
+    "tags": [
+      "template",
+      "api"
+    ]
+  },
+  "templates/my-template.md": {
+    "tags": [
+      "template"
+    ]
+  }
+}

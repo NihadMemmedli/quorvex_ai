@@ -1425,6 +1425,44 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/workflows/temporal/health` | `orchestrator/api/workflows.py` |
 | POST | `/workflows/validate` | `orchestrator/api/workflows.py` |
 
+## Additional Public API Routes
+
+These routes are included in the generated public-route drift check and are grouped here when they do not yet have a richer narrative section above.
+
+| Method | Path | Source |
+|--------|------|--------|
+| GET | `/api/prd/generation/{generation_id}/events` | `orchestrator/api/prd.py` |
+| GET | `/api/prd/generation/{generation_id}/events/stream` | `orchestrator/api/prd.py` |
+| POST | `/api/prd/{prd_project_id}/import-requirements` | `orchestrator/api/prd.py` |
+| POST | `/api/agents/runs/{run_id}/report-items/{item_id}/generate-spec` | `orchestrator/api/main.py` |
+| POST | `/api/agents/runs/{run_id}/report-requirements/import` | `orchestrator/api/main.py` |
+| GET | `/autonomous/{project_id}/missions/{mission_id}/artifacts` | `orchestrator/api/autonomous.py` |
+| POST | `/autopilot/recover-orphans` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/temporal/health` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/{session_id}/evidence` | `orchestrator/api/autopilot.py` |
+| GET | `/autopilot/{session_id}/temporal` | `orchestrator/api/autopilot.py` |
+| GET | `/projects/{project_id}/browser-auth-sessions` | `orchestrator/api/browser_auth_sessions.py` |
+| POST | `/projects/{project_id}/browser-auth-sessions` | `orchestrator/api/browser_auth_sessions.py` |
+| DELETE | `/projects/{project_id}/browser-auth-sessions/{session_id}` | `orchestrator/api/browser_auth_sessions.py` |
+| PATCH | `/projects/{project_id}/browser-auth-sessions/{session_id}/default` | `orchestrator/api/browser_auth_sessions.py` |
+| POST | `/projects/{project_id}/browser-auth-sessions/{session_id}/refresh` | `orchestrator/api/browser_auth_sessions.py` |
+| POST | `/projects/{project_id}/browser-auth-sessions/{session_id}/validate` | `orchestrator/api/browser_auth_sessions.py` |
+| GET | `/requirements/generate-spec-jobs/{job_id}` | `orchestrator/api/requirements.py` |
+| POST | `/requirements/{req_id}/generate-spec-jobs` | `orchestrator/api/requirements.py` |
+| GET | `/settings/runtime-chat` | `orchestrator/api/settings.py` |
+| POST | `/settings/test-hermes` | `orchestrator/api/settings.py` |
+| GET | `/test-data/datasets` | `orchestrator/api/test_data.py` |
+| POST | `/test-data/datasets` | `orchestrator/api/test_data.py` |
+| GET | `/test-data/datasets/{dataset_id}` | `orchestrator/api/test_data.py` |
+| PUT | `/test-data/datasets/{dataset_id}` | `orchestrator/api/test_data.py` |
+| DELETE | `/test-data/datasets/{dataset_id}` | `orchestrator/api/test_data.py` |
+| GET | `/test-data/datasets/{dataset_id}/items` | `orchestrator/api/test_data.py` |
+| POST | `/test-data/datasets/{dataset_id}/items` | `orchestrator/api/test_data.py` |
+| PUT | `/test-data/datasets/{dataset_id}/items/{item_id}` | `orchestrator/api/test_data.py` |
+| DELETE | `/test-data/datasets/{dataset_id}/items/{item_id}` | `orchestrator/api/test_data.py` |
+| POST | `/test-data/resolve` | `orchestrator/api/test_data.py` |
+| POST | `/test-data/resolve/spec` | `orchestrator/api/test_data.py` |
+
 ## Related
 
 - [API Overview](api-overview.md)

@@ -1426,12 +1426,13 @@ class TestAISettings:
             error = None
 
         class FakeRunner:
-            def __init__(self, timeout_seconds, allowed_tools, log_tools):
+            def __init__(self, timeout_seconds, allowed_tools, log_tools, model_tier=None):
                 runner_calls.append(
                     {
                         "timeout_seconds": timeout_seconds,
                         "allowed_tools": allowed_tools,
                         "log_tools": log_tools,
+                        "model_tier": model_tier,
                     }
                 )
 
@@ -1449,6 +1450,7 @@ class TestAISettings:
         assert data["model_name"] == "claude-sonnet-4-6"
         assert data["message"] == "Claude Code connection successful."
         assert runner_calls[0]["allowed_tools"] == []
+        assert runner_calls[0]["model_tier"] == "chat"
         assert runner_calls[1]["timeout_override"] == 30
 
     def test_get_settings_prefers_active_agent_model_over_sonnet_default(self, client, tmp_path, monkeypatch):

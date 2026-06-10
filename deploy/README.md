@@ -88,5 +88,30 @@ cd /opt/quorvex-deploy-private
 ./scripts/deploy.sh v1.2.3
 ```
 
+For local or server-side confidence checks around the external-nginx runtime:
+
+```bash
+# Start the same app runtime that company nginx proxies to.
+make start
+
+# Verify backend, frontend, storage/backup health, same-origin proxy, and agent readiness.
+make deploy-check
+
+# Without company server access, simulate company nginx locally with HTTPS and /websockify.
+make company-rehearsal
+```
+
+Before updating a real server to a tagged release, make the exact release tag a
+hard gate:
+
+```bash
+make release-preflight VERSION=v1.2.3
+make server-upgrade VERSION=v1.2.3
+```
+
+`release-preflight` verifies all tagged GHCR images exist and runs the private
+deploy dry-run when the private deploy repo is available. `server-upgrade` runs
+preflight, deploys through the private repo, and then runs post-deploy checks.
+
 `examples/` contains smaller generic snippets. Prefer the full
 `private-repo-template/` when setting up a real production server.
