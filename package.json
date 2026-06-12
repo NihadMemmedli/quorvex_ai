@@ -32,7 +32,7 @@
   "license": "MIT",
   "type": "commonjs",
   "devDependencies": {
-    "@playwright/test": "1.57.0",
+    "@playwright/test": "1.60.0",
     "@types/node": "^25.6.0",
     "appium": "^3.4.2",
     "appium-mcp": "^1.73.0",
