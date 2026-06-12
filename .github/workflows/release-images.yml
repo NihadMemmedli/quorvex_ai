@@ -86,7 +86,7 @@ jobs:
 
       - name: Build and push targeted image
         if: ${{ matrix.target != '' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
@@ -101,7 +101,7 @@ jobs:
 
       - name: Build and push image
         if: ${{ matrix.target == '' }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
