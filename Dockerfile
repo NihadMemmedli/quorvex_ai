@@ -24,6 +24,7 @@ RUN apt-get update && \
         # VNC stack for live browser view
         xvfb \
         x11vnc \
+        x11-utils \
         fluxbox \
         supervisor \
         git \
@@ -138,6 +139,8 @@ COPY --chown=agent:agent scripts/load/ /app/scripts/load/
 
 # Copy supervisor configuration for VNC mode
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY scripts/vnc/ /usr/local/bin/vnc/
+RUN chmod +x /usr/local/bin/vnc/*.sh
 
 # Install Playwright skill dependencies (if skill mode is used)
 RUN if [ -d "/app/.claude/skills/playwright" ]; then \

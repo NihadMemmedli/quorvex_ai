@@ -8,16 +8,19 @@ This is the default pipeline that uses:
 """
 
 import asyncio
+import difflib
+import hashlib
 import json
 import logging
 import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,7 @@ from utils.progress_reporter import (
     report_progress,
 )
 from utils.spec_detector import SpecDetector, SpecType
+from utils.test_results_parser import categorize_error
 from workflows.agentic_quality import (
     FailureTriageAgent,
     StabilityVerifier,
@@ -158,6 +162,25 @@ class FullNativePipeline:
         self.failure_triage_agent = FailureTriageAgent()
         self.stability_verifier = StabilityVerifier()
 
+    def _configure_run_agent_env(self, run_dir: Path) -> None:
+        """Attach per-run artifact paths to all native agent env copies."""
+        cost_log = str(run_dir / "agent_costs.jsonl")
+        test_data_env_vars = getattr(self, "test_data_env_vars", None)
+        if not isinstance(test_data_env_vars, dict):
+            test_data_env_vars = {}
+            self.test_data_env_vars = test_data_env_vars
+        test_data_env_vars["AGENT_COST_LOG"] = cost_log
+        for agent in (
+            getattr(self, "native_planner", None),
+            getattr(self, "native_generator", None),
+            getattr(self, "native_healer", None),
+        ):
+            if agent is None:
+                continue
+            env_vars = getattr(agent, "env_vars", None)
+            if isinstance(env_vars, dict):
+                env_vars["AGENT_COST_LOG"] = cost_log
+
     def _load_project_credentials(self):
         """Load project credentials into os.environ.
 
@@ -230,6 +253,7 @@ class FullNativePipeline:
             Dict with pipeline results
         """
         run_dir.mkdir(parents=True, exist_ok=True)
+        self._configure_run_agent_env(run_dir)
         spec_file = Path(spec_path)
         spec_content = spec_file.read_text()
         auth_context = browser_auth_context or self._load_browser_auth_context()
@@ -539,6 +563,7 @@ class FullNativePipeline:
                 error_msg = "Native generator failed to create test file"
                 (run_dir / "status.txt").write_text("error")
                 self._write_pipeline_error(run_dir, error_msg, "generation")
+                self._publish_agentic_summary(run_dir)
                 self._attribute_memory_outcome(
                     stage="native_generator",
                     success=False,
@@ -559,6 +584,7 @@ class FullNativePipeline:
                     self._write_pipeline_error(
                         run_dir, error_msg, "generation_validation"
                     )
+                    self._publish_agentic_summary(run_dir)
                     return {
                         "success": False,
                         "error": error_msg,
@@ -628,6 +654,7 @@ class FullNativePipeline:
                 )
                 if stability_result:
                     return stability_result
+                self._record_passing_selectors(test_path)
                 (run_dir / "status.txt").write_text("passed")
                 self._publish_agentic_summary(run_dir)
                 return {
@@ -704,6 +731,7 @@ class FullNativePipeline:
             cleanup_orphaned_browsers()
             (run_dir / "status.txt").write_text("error")
             self._write_pipeline_error(run_dir, str(e), "exception")
+            self._publish_agentic_summary(run_dir)
             return {"success": False, "error": str(e), "stage": "exception"}
 
     async def _run_native_planner(
@@ -898,6 +926,7 @@ class FullNativePipeline:
                     "Make one targeted hardening pass for timing, selector durability, and deterministic assertions."
                 ),
                 memory_run_id=getattr(self, "_memory_run_id", None),
+                browser=browser,
             )
         except HealerTimeoutError:
             logger.error("Flake-hardening healer timed out; keeping stability failure")
@@ -1045,6 +1074,233 @@ class FullNativePipeline:
         except Exception as exc:
             logger.debug("Memory outcome attribution skipped: %s", exc)
 
+    def _record_passing_selectors(self, test_path: Path) -> None:
+        """Persist selectors from a stability-verified passing test to memory."""
+        try:
+            from orchestrator.memory.selector_writeback import record_passing_test_selectors
+
+            record_passing_test_selectors(
+                test_path,
+                project_id=self.project_id,
+                run_id=getattr(self, "_memory_run_id", None),
+            )
+        except Exception as exc:
+            logger.debug("Selector write-back skipped: %s", exc)
+
+    @staticmethod
+    def _content_hash(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+    @staticmethod
+    def _diff_stat(before: str, after: str) -> str:
+        added = removed = 0
+        for line in difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm=""):
+            if line.startswith("+") and not line.startswith("+++"):
+                added += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                removed += 1
+        return f"+{added} -{removed}"
+
+    @staticmethod
+    def _diff_counts(before: str, after: str) -> tuple[int, int]:
+        added = removed = 0
+        for line in difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm=""):
+            if line.startswith("+") and not line.startswith("+++"):
+                added += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                removed += 1
+        return added, removed
+
+    @staticmethod
+    def _normalized_tool_name(tool_name: str | None) -> str:
+        name = str(tool_name or "")
+        return name.split("__")[-1] if "__" in name else name
+
+    @classmethod
+    def _normalize_tool_calls(cls, tool_calls: list[Any] | None) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for call in tool_calls or []:
+            if isinstance(call, str):
+                name = call
+                item: dict[str, Any] = {"name": call}
+            elif isinstance(call, dict):
+                name = str(call.get("name") or "")
+                item = dict(call)
+            else:
+                name = str(getattr(call, "name", "") or "")
+                item = {
+                    "name": name,
+                    "timestamp": getattr(call, "timestamp", None),
+                    "duration_ms": getattr(call, "duration_ms", None),
+                    "success": getattr(call, "success", True),
+                    "error": getattr(call, "error", None),
+                }
+            if not name:
+                continue
+            item["name"] = name
+            item["tool"] = cls._normalized_tool_name(name)
+            normalized.append(item)
+        return normalized
+
+    @staticmethod
+    def _extract_healer_output_field(output: str | None, field: str) -> str | None:
+        if not output:
+            return None
+        pattern = rf"(?im)^\s*{re.escape(field)}\s*:\s*(.+)$"
+        match = re.search(pattern, output)
+        return match.group(1).strip()[:500] if match else None
+
+    @staticmethod
+    def _assertion_count(content: str) -> int:
+        return len(re.findall(r"\bexpect\s*\(|\bassert\.", content or ""))
+
+    @staticmethod
+    def _is_assertion_removal_allowed(content_after: str) -> bool:
+        return bool(re.search(r"\btest\.fixme\s*\(", content_after or ""))
+
+    @staticmethod
+    def _guardrail_category(category: str | None) -> str:
+        value = str(category or "").lower()
+        if value in {"selector_changed", "selector"}:
+            return "selector"
+        if value in {"timeout", "timing"}:
+            return "timing"
+        if value in {"auth", "test_data", "server_error", "product_bug", "connectivity", "not_found"}:
+            return value
+        return value or "unknown"
+
+    def _evaluate_healer_guardrails(
+        self,
+        *,
+        content_before: str,
+        content_after: str,
+        tool_calls: list[dict[str, Any]],
+        error_category: str | None,
+    ) -> dict[str, Any]:
+        tools = [str(call.get("tool") or self._normalized_tool_name(call.get("name"))) for call in tool_calls]
+        tool_set = set(tools)
+        changed = content_before != content_after
+        missing: list[str] = []
+        category = self._guardrail_category(error_category)
+
+        if not changed:
+            missing.append("non_noop_edit")
+        if changed and "test_run" not in tool_set:
+            missing.append("test_run")
+        if changed and tools and tools[0] != "test_run":
+            missing.append("first_tool_test_run")
+        if changed and category in {"selector", "timing"} and not (
+            {"browser_snapshot", "browser_generate_locator"} & tool_set
+        ):
+            missing.append("browser_snapshot_or_browser_generate_locator")
+        if changed and category in {"auth", "test_data", "server_error", "product_bug", "connectivity", "not_found"} and not (
+            {"browser_network_requests", "browser_console_messages"} & tool_set
+        ):
+            missing.append("browser_network_requests_or_browser_console_messages")
+
+        assertion_removed = self._assertion_count(content_after) < self._assertion_count(content_before)
+        fixme_explicit = self._is_assertion_removal_allowed(content_after)
+        if assertion_removed and not fixme_explicit:
+            missing.append("assertion_preservation_or_explicit_test_fixme")
+
+        added, removed = self._diff_counts(content_before, content_after)
+        before_lines = max(len(content_before.splitlines()), 1)
+        broad_rewrite = (added + removed) > max(80, int(before_lines * 0.4))
+        evidence_tools = [
+            tool
+            for tool in tools
+            if tool
+            in {
+                "test_run",
+                "browser_resume",
+                "browser_snapshot",
+                "browser_generate_locator",
+                "browser_network_requests",
+                "browser_console_messages",
+            }
+        ]
+        status = "failed" if missing else "requires_stability" if broad_rewrite else "passed"
+        return {
+            "guardrail_status": status,
+            "missing_required_tools": missing,
+            "first_tool": tools[0] if tools else None,
+            "mcp_evidence_tools_used": evidence_tools,
+            "used_failure_state_tool": bool({"browser_resume", "browser_snapshot"} & tool_set),
+            "assertion_removed": assertion_removed,
+            "test_fixme_explicit": fixme_explicit,
+            "broad_rewrite": broad_rewrite,
+        }
+
+    def _emit_healer_event(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        level: str = "info",
+    ) -> None:
+        run_id = getattr(self, "owner_id", None)
+        if not run_id:
+            return
+        try:
+            from orchestrator.services.agent_run_events import create_agent_run_event
+
+            create_agent_run_event(
+                run_id=str(run_id),
+                project_id=getattr(self, "project_id", None),
+                event_type=event_type,
+                message=message,
+                level=level,
+                payload=payload or {},
+            )
+        except Exception as exc:
+            logger.debug("Could not emit healer agent run event %s: %s", event_type, exc)
+
+    def _record_healing_attempt(
+        self, run_dir: Path, test_path: Path, records: list[dict], record: dict
+    ) -> None:
+        records.append(record)
+        try:
+            (run_dir / "healing_attempts.json").write_text(
+                json.dumps({"test_file": str(test_path), "attempts": records}, indent=2)
+            )
+        except OSError as exc:
+            logger.debug("Could not write healing_attempts.json: %s", exc)
+
+    @staticmethod
+    def _build_attempt_context(records: list[dict]) -> str | None:
+        """Condense prior healing attempts into a short prompt section so the
+        healer does not repeat a fix strategy that already failed."""
+        if not records:
+            return None
+        lines = []
+        for rec in records:
+            changed = (
+                f"changed the test file ({rec.get('diff_stat', '?')})"
+                if rec.get("changed")
+                else "made no file change"
+            )
+            outcome = (
+                "test passed"
+                if rec.get("passed_after")
+                else f"still failed [{rec.get('error_category', 'unknown')}]"
+            )
+            lines.append(f"Attempt {rec.get('attempt')}: {changed}; {outcome}.")
+        last = records[-1]
+        if last.get("healer_summary"):
+            lines.append(f"Most recent healer summary: {last['healer_summary']}")
+        failed = [r for r in records if not r.get("passed_after")]
+        if (
+            len(failed) >= 2
+            and failed[-1].get("error_category") == failed[-2].get("error_category")
+        ):
+            lines.append(
+                "The same failure category occurred twice. Do NOT retry the same fix strategy - "
+                "change approach (e.g., re-snapshot the page and regenerate the locator instead of "
+                "editing the old one)."
+            )
+        return "\n".join(lines)[:1500]
+
     async def _native_healing(
         self,
         test_path: Path,
@@ -1062,6 +1318,14 @@ class FullNativePipeline:
             test_path=test_path, run_dir=run_dir, result=result
         )
         diagnosis_context = self.failure_triage_agent.condensed_context(diagnosis)
+        failure_metadata = self._extract_failed_test_metadata(
+            self._read_json_file(run_dir / "test-results.json"), test_path
+        )
+        current_error_category = (
+            (diagnosis or {}).get("category")
+            or categorize_error(result.error_summary or result.output[-2000:])
+        )
+        attempt_records: list[dict] = []
 
         for attempt in range(1, max_attempts + 1):
             logger.info(f"Healing attempt {attempt}/{max_attempts}...")
@@ -1070,8 +1334,25 @@ class FullNativePipeline:
                 f"Native healing attempt {attempt}/{max_attempts}...",
                 healing_attempt=attempt,
             )
+            self._emit_healer_event(
+                "healer_attempt_started",
+                f"Native healer attempt {attempt}/{max_attempts} started.",
+                payload={
+                    "attempt": attempt,
+                    "test_file": str(test_path),
+                    "browser": browser,
+                    "failed_test": failure_metadata,
+                    "error_category": current_error_category,
+                },
+            )
 
             try:
+                content_before = ""
+                try:
+                    content_before = test_path.read_text()
+                except OSError:
+                    pass
+
                 fixed_code = await self.native_healer.heal_test(
                     str(test_path),
                     error_log,
@@ -1080,13 +1361,168 @@ class FullNativePipeline:
                     ),
                     diagnosis_context=diagnosis_context,
                     memory_run_id=getattr(self, "_memory_run_id", None),
+                    attempt_context=self._build_attempt_context(attempt_records),
+                    attempt_number=attempt,
+                    browser=browser,
+                    failure_metadata=failure_metadata,
                 )
 
+                content_after = fixed_code if fixed_code else content_before
+                tool_calls = self._normalize_tool_calls(
+                    getattr(self.native_healer, "last_tool_calls", []) or []
+                )
+                for tool_call in tool_calls:
+                    self._emit_healer_event(
+                        "healer_tool_call",
+                        f"Healer used {tool_call.get('tool') or tool_call.get('name')}.",
+                        payload={
+                            "attempt": attempt,
+                            "tool": tool_call.get("tool"),
+                            "name": tool_call.get("name"),
+                            "success": tool_call.get("success", True),
+                        },
+                    )
+                guardrail = (
+                    self._evaluate_healer_guardrails(
+                        content_before=content_before,
+                        content_after=content_after,
+                        tool_calls=tool_calls,
+                        error_category=current_error_category,
+                    )
+                    if fixed_code
+                    else {
+                        "guardrail_status": "not_applicable",
+                        "missing_required_tools": [],
+                        "first_tool": tool_calls[0].get("tool") if tool_calls else None,
+                        "mcp_evidence_tools_used": [
+                            call.get("tool")
+                            for call in tool_calls
+                            if call.get("tool")
+                            in {
+                                "test_run",
+                                "browser_resume",
+                                "browser_snapshot",
+                                "browser_generate_locator",
+                                "browser_network_requests",
+                                "browser_console_messages",
+                            }
+                        ],
+                        "used_failure_state_tool": any(
+                            call.get("tool") in {"browser_resume", "browser_snapshot"}
+                            for call in tool_calls
+                        ),
+                    }
+                )
+                evidence_path = self._write_failure_evidence_packet(
+                    run_dir=run_dir,
+                    test_path=test_path,
+                    result=result,
+                    browser=browser,
+                    attempt=attempt,
+                    failure_metadata=failure_metadata,
+                    tool_calls=tool_calls,
+                    guardrail=guardrail,
+                )
+                if guardrail.get("used_failure_state_tool"):
+                    self._emit_healer_event(
+                        "healer_failure_state_captured",
+                        "Healer captured failed browser state evidence.",
+                        payload={
+                            "attempt": attempt,
+                            "evidence_tools": guardrail.get("mcp_evidence_tools_used", []),
+                            "failure_evidence_packet": evidence_path,
+                        },
+                    )
+                attempt_record = {
+                    "attempt": attempt,
+                    "timestamp": datetime.now().isoformat(),
+                    "content_hash_before": self._content_hash(content_before),
+                    "content_hash_after": self._content_hash(content_after),
+                    "changed": content_after != content_before,
+                    "diff_stat": self._diff_stat(content_before, content_after),
+                    "healer_summary": (
+                        getattr(self.native_healer, "last_agent_output", "") or ""
+                    )[-500:],
+                    "tool_calls": tool_calls,
+                    "first_tool": guardrail.get("first_tool"),
+                    "mcp_evidence_tools_used": guardrail.get("mcp_evidence_tools_used", []),
+                    "used_failure_state_tool": guardrail.get("used_failure_state_tool", False),
+                    "missing_required_tools": guardrail.get("missing_required_tools", []),
+                    "strategy": self._extract_healer_output_field(
+                        getattr(self.native_healer, "last_agent_output", "") or "", "strategy"
+                    ),
+                    "root_cause": self._extract_healer_output_field(
+                        getattr(self.native_healer, "last_agent_output", "") or "", "root_cause"
+                    )
+                    or (diagnosis or {}).get("root_cause"),
+                    "changed_selectors": NativeHealer._selector_delta(content_before, content_after),
+                    "guardrail_status": guardrail.get("guardrail_status"),
+                    "assertion_removed": guardrail.get("assertion_removed", False),
+                    "broad_rewrite": guardrail.get("broad_rewrite", False),
+                    "failure_evidence_packet": evidence_path,
+                }
+
+                if guardrail.get("guardrail_status") == "failed":
+                    if content_after != content_before:
+                        try:
+                            test_path.write_text(content_before)
+                            attempt_record["reverted"] = True
+                        except OSError as exc:
+                            attempt_record["revert_error"] = str(exc)[:300]
+                    missing = ", ".join(guardrail.get("missing_required_tools", []))
+                    attempt_record.update(
+                        {
+                            "error_category": "guardrail_failed",
+                            "error_summary": f"Healer edit rejected by evidence guardrail: {missing}"[:500],
+                            "passed_after": False,
+                        }
+                    )
+                    self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
+                    self._emit_healer_event(
+                        "healer_guardrail_failed",
+                        "Healer edit rejected by evidence guardrail.",
+                        level="warning",
+                        payload={
+                            "attempt": attempt,
+                            "missing_required_tools": guardrail.get("missing_required_tools", []),
+                            "failure_evidence_packet": evidence_path,
+                        },
+                    )
+                    error_log = (
+                        "## Previous Healer Edit Rejected By Guardrail\n\n"
+                        f"Missing required evidence: {missing or 'unknown'}\n\n"
+                        + self._build_structured_failure_context(
+                            test_path=test_path,
+                            run_dir=run_dir,
+                            result=result,
+                        )
+                    )
+                    continue
+
                 if fixed_code:
+                    if content_after != content_before:
+                        self._emit_healer_event(
+                            "healer_edit_applied",
+                            "Healer edit accepted for verification.",
+                            payload={
+                                "attempt": attempt,
+                                "diff_stat": attempt_record.get("diff_stat"),
+                                "guardrail_status": attempt_record.get("guardrail_status"),
+                            },
+                        )
                     logger.info("Re-running healed test...")
                     result = self._run_test(str(test_path), str(run_dir), browser)
 
                     if result.passed:
+                        attempt_record.update(
+                            {"error_category": "passed", "error_summary": "", "passed_after": True}
+                        )
+                        self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
+                        self._emit_healer_event(
+                            "healer_verification_passed",
+                            f"Healed test passed after attempt {attempt}.",
+                            payload={"attempt": attempt, "test_file": str(test_path), "browser": browser},
+                        )
                         logger.info(f"Healed Test PASSED (after {attempt} attempt(s))!")
                         stability_result = await self._verify_stability_or_harden(
                             test_path=test_path,
@@ -1097,6 +1533,7 @@ class FullNativePipeline:
                         )
                         if stability_result:
                             return stability_result
+                        self._record_passing_selectors(test_path)
                         (run_dir / "status.txt").write_text("passed")
 
                         validation_result = {
@@ -1119,23 +1556,82 @@ class FullNativePipeline:
                             "stage": "healed",
                         }
                     else:
-                        error_log = self._build_structured_failure_context(
-                            test_path=test_path,
-                            run_dir=run_dir,
-                            result=result,
+                        failure_text = result.error_summary or result.output[-2000:]
+                        attempt_record.update(
+                            {
+                                "error_category": categorize_error(failure_text),
+                                "error_summary": failure_text[:500],
+                                "passed_after": False,
+                            }
                         )
+                        self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
+                        self._emit_healer_event(
+                            "healer_verification_failed",
+                            "Healer edit did not pass authoritative rerun.",
+                            level="warning",
+                            payload={
+                                "attempt": attempt,
+                                "error_category": attempt_record.get("error_category"),
+                                "error_summary": attempt_record.get("error_summary"),
+                            },
+                        )
+                        error_log = "## Failure After Previous Heal Attempt\n\n" + (
+                            self._build_structured_failure_context(
+                                test_path=test_path,
+                                run_dir=run_dir,
+                                result=result,
+                            )
+                        )
+                        failure_metadata = self._extract_failed_test_metadata(
+                            self._read_json_file(run_dir / "test-results.json"), test_path
+                        )
+                        current_error_category = categorize_error(failure_text)
                         if attempt < max_attempts:
                             logger.warning("Test still failing, trying again...")
                 else:
+                    attempt_record.update(
+                        {
+                            "error_category": "no_fix_produced",
+                            "error_summary": "Healer returned no code",
+                            "passed_after": False,
+                        }
+                    )
+                    self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
                     logger.warning("Healer returned no code")
 
             except HealerTimeoutError:
+                self._record_healing_attempt(
+                    run_dir,
+                    test_path,
+                    attempt_records,
+                    {
+                        "attempt": attempt,
+                        "timestamp": datetime.now().isoformat(),
+                        "error_category": "healer_timeout",
+                        "error_summary": "Healer agent timed out",
+                        "changed": False,
+                        "passed_after": False,
+                    },
+                )
                 logger.error(
-                    f"Healer timed out on attempt {attempt}/{max_attempts} — stopping retries"
+                    f"Healer timed out on attempt {attempt}/{max_attempts} - stopping retries"
                 )
                 break
 
             except Exception as e:
+                self._record_healing_attempt(
+                    run_dir,
+                    test_path,
+                    attempt_records,
+                    {
+                        "attempt": attempt,
+                        "timestamp": datetime.now().isoformat(),
+                        "error_category": "healer_error",
+                        "error_summary": str(e)[:500],
+                        "changed": False,
+                        "passed_after": False,
+                    },
+                )
                 logger.warning(f"Healing error: {e}")
 
         logger.error(f"Native healing exhausted after {max_attempts} attempts")
@@ -1585,12 +2081,147 @@ class FullNativePipeline:
             "errors": errors[:5],
         }
 
+    def _extract_failed_test_metadata(self, data: dict[str, Any] | None, fallback_file: Path | None = None) -> dict[str, Any]:
+        """Extract the first failed Playwright test with enough detail for scoped healer reruns."""
+        if not data:
+            return {}
+
+        failures: list[dict[str, Any]] = []
+
+        def error_message(error: Any) -> str:
+            if isinstance(error, dict):
+                return str(error.get("message") or error.get("value") or error.get("stack") or "")
+            return str(error or "")
+
+        def visit_suite(suite: dict[str, Any], parent_titles: list[str]) -> None:
+            suite_title = suite.get("title")
+            titles = parent_titles + ([str(suite_title)] if suite_title else [])
+            for spec in suite.get("specs") or []:
+                if not isinstance(spec, dict):
+                    continue
+                spec_title = str(spec.get("title") or "Unknown test")
+                full_title = " > ".join(titles + [spec_title]) if titles else spec_title
+                spec_file = spec.get("file") or (str(fallback_file) if fallback_file else None)
+                for test_entry in spec.get("tests") or []:
+                    if not isinstance(test_entry, dict):
+                        continue
+                    results = [r for r in (test_entry.get("results") or []) if isinstance(r, dict)]
+                    if not results:
+                        continue
+                    final = results[-1]
+                    status = str(final.get("status") or "").lower()
+                    if status not in {"failed", "timedout", "interrupted", "unexpected"}:
+                        continue
+                    errors = []
+                    if final.get("error"):
+                        errors.append(error_message(final.get("error")))
+                    for item in final.get("errors") or []:
+                        errors.append(error_message(item))
+                    primary_error = next((item for item in errors if item), "")
+                    failures.append(
+                        {
+                            "title": spec_title,
+                            "full_title": full_title,
+                            "file": spec_file,
+                            "project": test_entry.get("projectName") or test_entry.get("projectId"),
+                            "retry": final.get("retry", len(results) - 1),
+                            "status": status,
+                            "primary_error": primary_error.splitlines()[0][:500] if primary_error else "",
+                            "location": {
+                                "line": spec.get("line"),
+                                "column": spec.get("column"),
+                            },
+                        }
+                    )
+            for child in suite.get("suites") or []:
+                if isinstance(child, dict):
+                    visit_suite(child, titles)
+
+        for suite in data.get("suites") or []:
+            if isinstance(suite, dict):
+                visit_suite(suite, [])
+
+        return failures[0] if failures else {}
+
+    def _failure_evidence_packet(
+        self,
+        *,
+        test_path: Path,
+        run_dir: Path,
+        result: TestResult,
+        browser: str,
+        attempt: int,
+        failure_metadata: dict[str, Any] | None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        guardrail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        json_results = self._read_json_file(run_dir / "test-results.json")
+        metadata = failure_metadata or self._extract_failed_test_metadata(json_results, test_path)
+        error_contexts = []
+        for path in sorted((run_dir / "test-results").glob("**/error-context.md"))[:3]:
+            if path.exists():
+                error_contexts.append({"path": str(path), "excerpt": path.read_text(errors="ignore")[:2000]})
+        normalized_tool_calls = self._normalize_tool_calls(tool_calls)
+        return {
+            "schema_version": 1,
+            "attempt": attempt,
+            "created_at": datetime.now().isoformat(),
+            "test_file": str(test_path),
+            "browser": browser,
+            "failed_test": metadata,
+            "exit_code": result.exit_code,
+            "error_summary": result.error_summary,
+            "code_frame": self._extract_code_frame(test_path, result.output),
+            "attachments": self._collect_playwright_attachments(run_dir, json_results)[:20],
+            "error_contexts": error_contexts,
+            "stdout_stderr_tail": (result.output or "")[-6000:],
+            "mcp_evidence": {
+                "tool_calls": normalized_tool_calls,
+                "first_tool": (guardrail or {}).get("first_tool"),
+                "evidence_tools_used": (guardrail or {}).get("mcp_evidence_tools_used", []),
+                "used_failure_state_tool": (guardrail or {}).get("used_failure_state_tool", False),
+                "missing_required_tools": (guardrail or {}).get("missing_required_tools", []),
+            },
+        }
+
+    def _write_failure_evidence_packet(
+        self,
+        *,
+        run_dir: Path,
+        test_path: Path,
+        result: TestResult,
+        browser: str,
+        attempt: int,
+        failure_metadata: dict[str, Any] | None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        guardrail: dict[str, Any] | None = None,
+    ) -> str | None:
+        packet = self._failure_evidence_packet(
+            test_path=test_path,
+            run_dir=run_dir,
+            result=result,
+            browser=browser,
+            attempt=attempt,
+            failure_metadata=failure_metadata,
+            tool_calls=tool_calls,
+            guardrail=guardrail,
+        )
+        path = run_dir / f"failure_evidence_packet_attempt_{attempt}.json"
+        try:
+            path.write_text(json.dumps(packet, indent=2))
+            (run_dir / "failure_evidence_packet.json").write_text(json.dumps(packet, indent=2))
+            return str(path)
+        except OSError as exc:
+            logger.debug("Could not write failure evidence packet: %s", exc)
+            return None
+
     def _build_structured_failure_context(
         self, *, test_path: Path, run_dir: Path, result: TestResult
     ) -> str:
         """Build compact healer context from Playwright JSON, output tails, code frame, and attachments."""
         json_results = self._read_json_file(run_dir / "test-results.json")
         summary = self._summarize_playwright_json(json_results) if json_results else {}
+        failed_test = self._extract_failed_test_metadata(json_results, test_path)
         attachments = self._collect_playwright_attachments(run_dir, json_results)
         code_frame = self._extract_code_frame(test_path, result.output)
         error_contexts = [
@@ -1620,6 +2251,8 @@ class FullNativePipeline:
                     indent=2,
                 )
             )
+        if failed_test:
+            sections.append("Failed test metadata: " + json.dumps(failed_test, indent=2))
         if code_frame:
             sections.append(f"Code frame:\n```typescript\n{code_frame}\n```")
         if attachments:

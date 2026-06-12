@@ -267,6 +267,10 @@ def _run_migrations():
                     conn.execute(text("ALTER TABLE testrun ADD COLUMN agentic_summary JSON"))
                 logger.info("Added column: testrun.agentic_summary")
 
+            if "total_cost_usd" not in existing_columns:
+                conn.execute(text("ALTER TABLE testrun ADD COLUMN total_cost_usd FLOAT"))
+                logger.info("Added column: testrun.total_cost_usd")
+
             if "browser_auth" not in existing_columns:
                 if db_type == "postgresql":
                     conn.execute(text("ALTER TABLE testrun ADD COLUMN browser_auth JSONB"))

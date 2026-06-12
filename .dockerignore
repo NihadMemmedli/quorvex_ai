@@ -72,3 +72,6 @@ temp/
 
 # Claude/AI config (keep .claude/ for agent prompts and skills)
 # .claude/
+.claude/settings.local.json
+.claude/settings.json
+.claude/memory/

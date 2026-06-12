@@ -55,6 +55,7 @@ from orchestrator.ai.validation import (
 )
 from utils.agent_runner import AgentRunner, get_default_timeout
 from utils.agent_tool_allowlists import get_agent_allowed_tools
+from utils.claude_config import copy_claude_project_config
 from utils.json_utils import extract_json_from_markdown
 from utils.playwright_mcp import (
     build_playwright_mcp_server_config,
@@ -1049,14 +1050,9 @@ When stopping, output any missing flow records you can infer from observed page 
             runtime["mcp_config_path"],
         )
 
-        # Copy .claude/ agents directory for isolation
-        import shutil
-
+        # Copy .claude/ agent artifacts for isolation without local settings.
         project_root = Path(__file__).resolve().parent.parent.parent
-        claude_src = project_root / ".claude"
-        claude_dst = session_dir / ".claude"
-        if claude_src.exists() and not claude_dst.exists():
-            shutil.copytree(claude_src, claude_dst, dirs_exist_ok=True)
+        copy_claude_project_config(project_root / ".claude", session_dir / ".claude")
 
         # Change CWD to session_dir so the SDK finds our .mcp.json
         original_cwd = os.getcwd()

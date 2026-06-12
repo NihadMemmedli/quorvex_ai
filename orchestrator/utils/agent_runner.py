@@ -20,7 +20,7 @@ import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -735,14 +735,17 @@ class AgentRunner:
         ):
             logger.info(f"Using agent queue for execution (timeout={timeout}s)")
             queued_result = await self._run_via_queue(prompt, timeout)
+            self._append_cost_log(queued_result)
             self._capture_agent_memory(original_prompt, queued_result)
             return queued_result
 
         if query is None:
-            return AgentResult(
+            unavailable_result = AgentResult(
                 success=False,
                 error="claude_agent_sdk not available",
             )
+            self._append_cost_log(unavailable_result)
+            return unavailable_result
         result_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         messages_received = 0
@@ -1155,8 +1158,33 @@ class AgentRunner:
         if self.session_dir and agent_result and not debug_output_saved:
             self._save_debug_output(agent_result.output, agent_result.tool_calls, agent_result.messages_received)
 
+        self._append_cost_log(agent_result)
         self._capture_agent_memory(original_prompt, agent_result)
         return agent_result
+
+    def _append_cost_log(self, result: AgentResult | None) -> None:
+        """Best-effort per-agent cost telemetry for pipeline run artifacts."""
+        if result is None:
+            return
+        path_value = self.env_vars.get("AGENT_COST_LOG") or os.environ.get("AGENT_COST_LOG")
+        if not path_value:
+            return
+        try:
+            path = Path(path_value)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "stage": self.memory_stage,
+                "agent_type": self.memory_agent_type,
+                "cost_usd": result.total_cost_usd,
+                "tool_calls": len(result.tool_calls),
+                "duration_seconds": result.duration_seconds,
+                "timed_out": result.timed_out,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        except Exception as exc:
+            logger.debug("Agent cost log append skipped: %s", exc)
 
     def _agent_memory_project_id(self) -> str | None:
         return self.memory_project_id or os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID")

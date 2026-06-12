@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shlex
+import socket
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -234,6 +235,9 @@ def live_browser_display_diagnostics() -> dict[str, Any]:
     """Report process/window evidence for the currently configured VNC display."""
     diagnostics: dict[str, Any] = {
         "display": os.environ.get("DISPLAY"),
+        "vnc_server_host": "localhost",
+        "vnc_server_port": 5900,
+        "vnc_server_available": False,
         "browser_process_count": 0,
         "browser_window_count": None,
         "browser_process_seen": False,
@@ -256,6 +260,12 @@ def live_browser_display_diagnostics() -> dict[str, Any]:
         diagnostics["browser_process_seen"] = len(lines) > 0
     except Exception as exc:
         diagnostics["process_probe_error"] = str(exc)
+
+    try:
+        with socket.create_connection(("localhost", 5900), timeout=1):
+            diagnostics["vnc_server_available"] = True
+    except OSError as exc:
+        diagnostics["vnc_server_error"] = str(exc)
 
     if os.environ.get("DISPLAY"):
         try:

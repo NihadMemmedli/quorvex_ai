@@ -1,3 +1,4 @@
+import re
 import sys
 from pathlib import Path
 
@@ -5,6 +6,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.agents.base_agent import BaseAgent
 from orchestrator.utils.agent_tool_allowlists import AGENT_TOOL_PROFILES, get_agent_allowed_tools
+
+
+def _agent_profile_name(agent_file: Path) -> str:
+    text = agent_file.read_text()
+    match = re.match(r"^---\n(?P<frontmatter>.*?)\n---\n", text, re.DOTALL)
+    if not match:
+        return agent_file.stem
+    name_match = re.search(r"^name:\s*(?P<name>[^\n]+?)\s*$", match.group("frontmatter"), re.MULTILINE)
+    return name_match.group("name").strip("\"'") if name_match else agent_file.stem
 
 
 def _write_mcp_config(tmp_path: Path, server_name: str) -> None:
@@ -93,6 +103,36 @@ def test_known_profiles_do_not_grant_wildcards(tmp_path, monkeypatch):
         tools = get_agent_allowed_tools(profile_name)
         assert "*" not in tools
         assert not any(tool == "mcp__*__*" for tool in tools)
+
+
+def test_pr5_static_analysis_profiles_are_least_privilege(tmp_path, monkeypatch):
+    _write_mcp_config(tmp_path, "playwright-test")
+    monkeypatch.chdir(tmp_path)
+
+    read_only_profiles = [
+        "security-analyzer",
+        "bug-report-generator",
+        "database-analyzer",
+        "load-test-analyzer",
+        "test-coverage-analyzer",
+    ]
+    for profile_name in read_only_profiles:
+        assert get_agent_allowed_tools(profile_name) == ["Glob", "Grep", "Read", "LS"]
+
+    assert get_agent_allowed_tools("load-test-generator") == ["Glob", "Grep", "Read", "LS", "Write"]
+
+
+def test_all_claude_agent_files_have_tool_profiles():
+    root = Path(__file__).resolve().parents[2]
+    agent_files = sorted(root.joinpath(".claude", "agents").glob("*.md"))
+
+    missing = [
+        _agent_profile_name(agent_file)
+        for agent_file in agent_files
+        if _agent_profile_name(agent_file) not in AGENT_TOOL_PROFILES
+    ]
+
+    assert missing == []
 
 
 def test_base_agent_known_profile_uses_explicit_tools(tmp_path, monkeypatch):

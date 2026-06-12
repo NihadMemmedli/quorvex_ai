@@ -6,13 +6,14 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, Session, create_engine, select
+from sqlmodel import Session, SQLModel, create_engine, select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.workflows.agentic_quality import (
     FailureTriageAgent,
     StabilityVerifier,
+    build_agentic_summary,
     normalize_failure_diagnosis,
     normalize_stability_report,
     normalize_test_critic,
@@ -45,6 +46,63 @@ def test_artifact_normalizers_fallback_to_valid_shapes():
     assert stability["status"] == "flaky"
     assert stability["passed_runs"] == 1
     assert stability["failed_runs"] == 1
+
+
+def test_build_agentic_summary_includes_costs_and_stage_outcomes(tmp_path: Path):
+    (tmp_path / "plan.json").write_text("{}")
+    (tmp_path / "export.json").write_text("{}")
+    (tmp_path / "status.txt").write_text("passed")
+    (tmp_path / "validation.json").write_text(
+        json.dumps({"status": "success", "iterations": 1})
+    )
+    (tmp_path / "healing_attempts.json").write_text(
+        json.dumps(
+            {
+                "attempts": [
+                    {
+                        "attempt": 1,
+                        "passed_after": True,
+                    }
+                ]
+            }
+        )
+    )
+    (tmp_path / "agent_costs.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "stage": "native_generator",
+                        "agent_type": "NativeGenerator",
+                        "cost_usd": 0.12,
+                        "tool_calls": 3,
+                        "duration_seconds": 10.5,
+                        "timed_out": False,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "stage": "native_healer",
+                        "agent_type": "NativeHealer",
+                        "cost_usd": 0.03,
+                        "tool_calls": 2,
+                        "duration_seconds": 4,
+                        "timed_out": False,
+                    }
+                ),
+            ]
+        )
+    )
+
+    summary = build_agentic_summary(tmp_path)
+
+    assert summary["costs"]["total_usd"] == 0.15
+    assert summary["costs"]["by_stage"]["native_generator"]["tool_calls"] == 3
+    assert summary["stage_outcomes"]["planned"] is True
+    assert summary["stage_outcomes"]["generated"] is True
+    assert summary["stage_outcomes"]["first_run_passed"] is False
+    assert summary["stage_outcomes"]["healed"] is True
+    assert summary["stage_outcomes"]["healing_attempts"] == 1
 
 
 def test_failure_triage_keeps_broad_server_text_advisory(tmp_path: Path):
@@ -133,6 +191,12 @@ class _FakeGenerator:
 
 
 class _FakeHealer:
+    last_tool_calls = [
+        {"name": "mcp__playwright-test__test_run"},
+        {"name": "mcp__playwright-test__browser_snapshot"},
+        {"name": "mcp__playwright-test__browser_network_requests"},
+    ]
+
     async def heal_test(self, test_file, error_log=None, timeout_seconds=None, diagnosis_context=None, **kwargs):
         Path(test_file).write_text(
             "import { test, expect } from '@playwright/test';\n"

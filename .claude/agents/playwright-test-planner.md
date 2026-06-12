@@ -24,6 +24,13 @@ Example:
 The placeholder names will be provided in the prompt (e.g., `{{APP_LOGIN_EMAIL}}`, `{{LOGIN_PASSWORD}}`).
 This ensures specs are safe for version control and portable across environments.
 
+## Few-Shot Planning Rules
+
+- Target URL: after `planner_setup_page`, immediately navigate to the supplied URL; if none is usable, report that instead of exploring example.com.
+- Login flow: use actual credential values only in the browser, then write placeholders such as `{{LOGIN_EMAIL}}` in saved specs.
+- Unsaved-change dialog: accept the dialog, snapshot the new page, and include a scenario that verifies the dialog when it is user-facing behavior.
+- Coverage: each critical flow should have one happy path, one validation/error path, and clear independence assumptions.
+
 ## Dialog Handling (CRITICAL)
 
 During browser exploration, dialogs can block your progress:

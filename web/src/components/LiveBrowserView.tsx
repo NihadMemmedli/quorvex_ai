@@ -37,6 +37,10 @@ interface AgentArtifact {
 }
 
 interface BrowserDisplayDiagnostics {
+    vnc_server_available?: boolean | null;
+    vnc_server_error?: string | null;
+    vnc_server_host?: string | null;
+    vnc_server_port?: number | null;
     browser_process_count?: number | null;
     browser_window_count?: number | null;
     browser_process_seen?: boolean | null;
@@ -88,6 +92,21 @@ function canvasHasVisibleFrame(container: HTMLDivElement | null): boolean {
     }
 }
 
+export function resolveLiveBrowserVncUrl(vncUrl?: string | null, locationLike?: Pick<Location, 'protocol' | 'host' | 'hostname'>): string {
+    const currentLocation = locationLike ?? (typeof window !== 'undefined' ? window.location : null);
+    if (!currentLocation) return vncUrl || '/websockify';
+
+    const protocol = currentLocation.protocol === 'https:' ? 'wss:' : 'ws:';
+    if (vncUrl?.startsWith('/')) {
+        return `${protocol}//${currentLocation.host}${vncUrl}`;
+    }
+    if (vncUrl) return vncUrl;
+    if (currentLocation.hostname !== 'localhost' && currentLocation.hostname !== '127.0.0.1') {
+        return `${protocol}//${currentLocation.host}/websockify`;
+    }
+    return `${protocol}//${currentLocation.hostname}:6080/websockify`;
+}
+
 export function LiveBrowserView({
     runId,
     isActive,
@@ -125,19 +144,7 @@ export function LiveBrowserView({
     // Only admins can see VNC
     const isAdmin = user?.is_superuser === true;
 
-    const resolvedVncUrl = (() => {
-        if (typeof window === 'undefined') return vncUrl || '/websockify';
-        if (vncUrl?.startsWith('/')) {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            return `${protocol}//${window.location.host}${vncUrl}`;
-        }
-        if (vncUrl) return vncUrl;
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        if (window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
-            return `${protocol}//${window.location.host}/websockify`;
-        }
-        return `${protocol}//${window.location.hostname}:6080/websockify`;
-    })();
+    const resolvedVncUrl = resolveLiveBrowserVncUrl(vncUrl);
     const effectiveArtifacts = providedArtifacts ?? artifacts;
     const fallbackImage = providedLatestImage ?? latestImageArtifact(effectiveArtifacts);
     const preferQueryArtifactPreview = typeof window !== 'undefined'
@@ -149,12 +156,13 @@ export function LiveBrowserView({
     const browserWindowCount = displayDiagnostics?.browser_window_count ?? null;
     const browserProcessSeen = displayDiagnostics?.browser_process_seen ?? browserProcessCount > 0;
     const browserWindowSeen = displayDiagnostics?.browser_window_seen ?? (browserWindowCount ?? 0) > 0;
-    const hasNoBrowserWindow = browserWindowCount === 0;
+    const vncServerUnavailable = canUseLiveView && displayDiagnostics?.vnc_server_available === false;
+    const hasNoBrowserWindow = !vncServerUnavailable && browserWindowCount === 0;
     const liveCanvasMounted = isConnected && !forceArtifactPreview;
     const liveStreamVisible = liveCanvasMounted && liveReady && browserActive;
     const desktopConnected = liveCanvasMounted && liveReady && !browserActive;
-    const browserStarting = liveBrowserRequested && browserProcessSeen && !browserWindowSeen;
-    const noBrowserWindow = liveBrowserRequested && browserActivitySeen && !browserProcessSeen && !browserWindowSeen;
+    const browserStarting = !vncServerUnavailable && liveBrowserRequested && browserProcessSeen && !browserWindowSeen;
+    const noBrowserWindow = !vncServerUnavailable && liveBrowserRequested && browserActivitySeen && !browserProcessSeen && !browserWindowSeen;
     const isProviderRetry = Boolean(pendingMessage && /rate limit|rate-limited|retry/i.test(pendingMessage));
     const showingFallbackCapture = forceArtifactPreview
         || Boolean(fallbackImage && !isConnected)
@@ -163,6 +171,8 @@ export function LiveBrowserView({
         ? 'PRD-only'
         : browserActive && liveStreamVisible
             ? 'Connected'
+            : vncServerUnavailable
+                ? 'VNC unavailable'
             : fallbackImage && !isConnected
                 ? 'Latest capture'
                 : browserStarting
@@ -178,18 +188,22 @@ export function LiveBrowserView({
                                     : isConnected
                                         ? 'Desktop connected'
                                         : 'Disconnected';
-    const unavailableTitle = canUseLiveView
-        ? 'Live Browser Standby'
-        : liveBrowserRequested
-            ? 'Live Browser Unavailable'
-            : 'PRD-only Generation';
-    const unavailableMessage = pendingMessage || (
-        canUseLiveView
-            ? 'The agent can continue to publish screenshots and recordings while the live stream initializes.'
+    const unavailableTitle = vncServerUnavailable
+        ? 'VNC Server Unavailable'
+        : canUseLiveView
+            ? 'Live Browser Standby'
             : liveBrowserRequested
-                ? 'Live browser validation was requested, but a visible browser stream is not available in this runtime.'
-                : 'This run was generated from PRD context only. Add a Target URL before generation to enable live browser validation.'
-    );
+                ? 'Live Browser Unavailable'
+                : 'PRD-only Generation';
+    const unavailableMessage = vncServerUnavailable
+        ? pendingMessage || 'The WebSocket bridge is reachable, but the backend VNC server on port 5900 is not accepting connections.'
+        : pendingMessage || (
+            canUseLiveView
+                ? 'The agent can continue to publish screenshots and recordings while the live stream initializes.'
+                : liveBrowserRequested
+                    ? 'Live browser validation was requested, but a visible browser stream is not available in this runtime.'
+                    : 'This run was generated from PRD context only. Add a Target URL before generation to enable live browser validation.'
+        );
     const statusColor = statusLabel === 'Connected'
         ? 'var(--success)'
         : statusLabel === 'Latest capture' || statusLabel === 'PRD-only' || statusLabel === 'Desktop connected'
@@ -301,6 +315,13 @@ export function LiveBrowserView({
         if (forceArtifactPreview) {
             setVncAvailable(false);
             setIsLoading(false);
+            return;
+        }
+
+        if (vncServerUnavailable) {
+            setVncAvailable(false);
+            setIsLoading(false);
+            setError(null);
             return;
         }
 
@@ -421,7 +442,7 @@ export function LiveBrowserView({
             setError('Failed to connect to browser view');
             setIsLoading(false);
         }
-    }, [isAdmin, isActive, canUseLiveView, resolvedVncUrl, checkVncAvailability, forceArtifactPreview]);
+    }, [isAdmin, isActive, canUseLiveView, resolvedVncUrl, checkVncAvailability, forceArtifactPreview, vncServerUnavailable]);
 
     // Connect when component mounts and isActive changes
     useEffect(() => {
@@ -857,19 +878,23 @@ export function LiveBrowserView({
                             <h3 style={{ color: 'var(--text-primary)', marginBottom: '0.5rem', fontSize: '1.1rem' }}>
                                 {fallbackImage
                                     ? 'Browser Evidence Available'
-                                    : !liveViewAvailable
+                                    : vncServerUnavailable
                                         ? unavailableTitle
-                                        : hasNoBrowserWindow
-                                            ? 'No Browser Window Detected'
-                                        : isProviderRetry
-                                            ? 'Waiting on Provider'
-                                            : unavailableTitle}
+                                        : !liveViewAvailable
+                                            ? unavailableTitle
+                                            : hasNoBrowserWindow
+                                                ? 'No Browser Window Detected'
+                                                : isProviderRetry
+                                                    ? 'Waiting on Provider'
+                                                    : unavailableTitle}
                             </h3>
                             {!fallbackImage && (
                                 <p style={{ fontSize: '0.9rem', lineHeight: 1.6 }}>
-                                    {hasNoBrowserWindow && canUseLiveView
-                                        ? pendingMessage || 'The VNC display is connected, but no browser window was detected yet.'
-                                        : unavailableMessage}
+                                    {vncServerUnavailable
+                                        ? unavailableMessage
+                                        : hasNoBrowserWindow && canUseLiveView
+                                            ? pendingMessage || 'The VNC display is connected, but no browser window was detected yet.'
+                                            : unavailableMessage}
                                 </p>
                             )}
                         </div>

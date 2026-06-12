@@ -1284,13 +1284,24 @@ def _run_api_test_sync(job_id: str, spec_path: str, project_id: str):
         if status_file.exists():
             final_status = status_file.read_text().strip()
 
-        # Parse log for healing info
+        # Prefer artifact-backed healing info; fall back to legacy log inference.
         log_content = ""
         if log_file.exists():
             log_content = log_file.read_text(errors="replace")
-
-        healed = "healed" in log_content.lower() or "healing attempt" in log_content.lower()
-        healing_attempts = log_content.lower().count("healing attempt")
+        healing_artifact = None
+        healing_artifact_path = run_dir_path / "healing_attempts.json"
+        if healing_artifact_path.exists():
+            try:
+                healing_artifact = json.loads(healing_artifact_path.read_text(errors="replace"))
+            except Exception:
+                healing_artifact = None
+        if isinstance(healing_artifact, dict) and isinstance(healing_artifact.get("attempts"), list):
+            attempts = healing_artifact.get("attempts") or []
+            healing_attempts = len(attempts)
+            healed = any(bool(item.get("passed_after")) for item in attempts if isinstance(item, dict))
+        else:
+            healed = "healed" in log_content.lower() or "healing attempt" in log_content.lower()
+            healing_attempts = log_content.lower().count("healing attempt")
 
         # Parse structured test results
         first_failure = None
@@ -2524,10 +2535,17 @@ async def get_api_run_detail(run_id: str, session: Session = Depends(get_session
         except Exception:
             pass
 
-    # Read healing history
+    # Read healing history / attempts. Native browser runs write healing_attempts.json;
+    # older direct API healing writes healing_history.json.
     healing_history = None
+    attempts_path = run_dir / "healing_attempts.json"
     history_path = run_dir / "healing_history.json"
-    if history_path.exists():
+    if attempts_path.exists():
+        try:
+            healing_history = json.loads(attempts_path.read_text(errors="replace"))
+        except Exception:
+            pass
+    elif history_path.exists():
         try:
             healing_history = json.loads(history_path.read_text(errors="replace"))
         except Exception:

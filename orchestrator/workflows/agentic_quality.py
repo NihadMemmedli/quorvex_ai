@@ -43,6 +43,103 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     return None
 
 
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        if not path.exists():
+            return rows
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            value = json.loads(line)
+            if isinstance(value, dict):
+                rows.append(value)
+    except Exception as exc:
+        logger.warning(f"Could not read agentic JSONL artifact {path}: {exc}")
+    return rows
+
+
+def _read_text(path: Path) -> str:
+    try:
+        if path.exists():
+            return path.read_text().strip()
+    except Exception as exc:
+        logger.warning(f"Could not read agentic artifact {path}: {exc}")
+    return ""
+
+
+def _summarize_costs(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    by_stage: dict[str, dict[str, Any]] = {}
+    total_usd = 0.0
+    saw_cost = False
+    for row in rows:
+        stage = str(row.get("stage") or "unknown")
+        stage_summary = by_stage.setdefault(
+            stage,
+            {
+                "cost_usd": 0.0,
+                "tool_calls": 0,
+                "duration_seconds": 0.0,
+                "runs": 0,
+                "timed_out": 0,
+            },
+        )
+        cost = row.get("cost_usd")
+        if cost is not None:
+            try:
+                cost_value = float(cost)
+                stage_summary["cost_usd"] += cost_value
+                total_usd += cost_value
+                saw_cost = True
+            except (TypeError, ValueError):
+                pass
+        try:
+            stage_summary["tool_calls"] += int(row.get("tool_calls") or 0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            stage_summary["duration_seconds"] += float(row.get("duration_seconds") or 0)
+        except (TypeError, ValueError):
+            pass
+        stage_summary["runs"] += 1
+        if row.get("timed_out"):
+            stage_summary["timed_out"] += 1
+
+    return {
+        "total_usd": round(total_usd, 6) if saw_cost else None,
+        "by_stage": {
+            stage: {
+                **summary,
+                "cost_usd": round(float(summary["cost_usd"]), 6),
+                "duration_seconds": round(float(summary["duration_seconds"]), 3),
+            }
+            for stage, summary in by_stage.items()
+        },
+    }
+
+
+def _stage_outcomes(run_dir: Path, validation: dict[str, Any], healing_attempts: dict[str, Any]) -> dict[str, Any]:
+    status = _read_text(run_dir / "status.txt")
+    attempts = healing_attempts.get("attempts") if isinstance(healing_attempts, dict) else []
+    attempts = attempts if isinstance(attempts, list) else []
+    validation_status = validation.get("status")
+    validation_iterations = validation.get("iterations")
+    try:
+        iteration_count = int(validation_iterations or 0)
+    except (TypeError, ValueError):
+        iteration_count = 0
+
+    return {
+        "planned": (run_dir / "plan.json").exists(),
+        "generated": (run_dir / "export.json").exists() or bool(validation.get("testFile")),
+        "first_run_passed": validation_status == "success" and iteration_count == 0 and not attempts,
+        "healed": any(bool(item.get("passed_after")) for item in attempts) or iteration_count > 0,
+        "healing_attempts": len(attempts),
+        "status": status or None,
+    }
+
+
 def normalize_test_design(data: dict[str, Any] | None = None) -> dict[str, Any]:
     data = data or {}
     flake_risk = str(data.get("flake_risk") or "medium").lower()
@@ -389,6 +486,9 @@ def build_agentic_summary(run_dir: Path) -> dict[str, Any]:
     critic = _read_json(run_dir / "test_critic.json") or {}
     diagnosis = _read_json(run_dir / "failure_diagnosis.json") or {}
     stability = _read_json(run_dir / "stability_report.json") or {}
+    validation = _read_json(run_dir / "validation.json") or {}
+    healing_attempts = _read_json(run_dir / "healing_attempts.json") or {}
+    cost_rows = _read_jsonl(run_dir / "agent_costs.jsonl")
     issues = critic.get("issues") or []
 
     return {
@@ -415,4 +515,6 @@ def build_agentic_summary(run_dir: Path) -> dict[str, Any]:
             "passed_runs": stability.get("passed_runs"),
             "failed_runs": stability.get("failed_runs"),
         },
+        "costs": _summarize_costs(cost_rows),
+        "stage_outcomes": _stage_outcomes(run_dir, validation, healing_attempts),
     }

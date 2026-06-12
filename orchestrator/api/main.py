@@ -55,6 +55,7 @@ from utils.agent_report import (
     _clean_text,
 )
 from utils.agent_tool_allowlists import get_agent_allowed_tools
+from utils.claude_config import copy_claude_project_config
 from utils.project_utils import derive_project_id_from_url
 from utils.playwright_mcp import (
     browser_live_worker_enabled,
@@ -859,6 +860,51 @@ async def _compose_test_run_log_payload(run_db: DBTestRun, run_dir: Path) -> dic
     test_data_text = _format_test_data_section(run_dir, pipeline_error) if run_dir.exists() else None
     if test_data_text:
         sections.append({"source": "test_data", "title": "Test Data", "content": test_data_text})
+
+    healing_attempts = _read_json_if_exists(run_dir / "healing_attempts.json") if run_dir.exists() else None
+    if healing_attempts:
+        diagnostics["healing_attempts"] = healing_attempts
+        compact_attempts = []
+        for attempt in (healing_attempts.get("attempts") or [])[:5]:
+            if not isinstance(attempt, dict):
+                continue
+            compact_attempts.append(
+                {
+                    "attempt": attempt.get("attempt"),
+                    "passed_after": attempt.get("passed_after"),
+                    "error_category": attempt.get("error_category"),
+                    "guardrail_status": attempt.get("guardrail_status"),
+                    "first_tool": attempt.get("first_tool"),
+                    "mcp_evidence_tools_used": attempt.get("mcp_evidence_tools_used"),
+                    "missing_required_tools": attempt.get("missing_required_tools"),
+                }
+            )
+        sections.append(
+            {
+                "source": "healing_attempts.json",
+                "title": "Healing Attempts",
+                "content": json.dumps({"attempts": compact_attempts}, indent=2),
+            }
+        )
+
+    failure_evidence = _read_json_if_exists(run_dir / "failure_evidence_packet.json") if run_dir.exists() else None
+    if failure_evidence:
+        diagnostics["failure_evidence"] = failure_evidence
+        sections.append(
+            {
+                "source": "failure_evidence_packet.json",
+                "title": "Latest Failure Evidence",
+                "content": json.dumps(
+                    {
+                        "attempt": failure_evidence.get("attempt"),
+                        "failed_test": failure_evidence.get("failed_test"),
+                        "mcp_evidence": failure_evidence.get("mcp_evidence"),
+                        "error_summary": failure_evidence.get("error_summary"),
+                    },
+                    indent=2,
+                ),
+            }
+        )
 
     execution_log = _read_text_if_exists(run_dir / "execution.log") if run_dir.exists() else None
     if execution_log:
@@ -4060,7 +4106,9 @@ def _augment_active_browser_metadata(metadata: dict[str, Any], status: str | Non
     diagnostics = _live_browser_display_diagnostics()
     metadata = dict(metadata)
     metadata["display_diagnostics"] = diagnostics
-    if diagnostics.get("browser_window_count") in (0, None) and not metadata.get("runtime_message"):
+    if diagnostics.get("vnc_server_available") is False:
+        metadata["runtime_message"] = "VNC server is unavailable inside the backend container."
+    elif diagnostics.get("browser_window_count") in (0, None) and not metadata.get("runtime_message"):
         metadata["runtime_message"] = "VNC is connected; waiting for Playwright to launch a visible browser window."
     return metadata
 
@@ -4112,6 +4160,7 @@ async def get_run(
             "live_view_available": bool(browser_metadata.get("live_view_available")),
             "runtime_message": browser_metadata.get("runtime_message"),
             "vnc_url": browser_metadata.get("vnc_url"),
+            "display_diagnostics": browser_metadata.get("display_diagnostics"),
             "note": "Files missing",
         }
         payload.update(await _compose_test_run_log_payload(run_db, run_dir))
@@ -4173,6 +4222,12 @@ async def get_run(
                     data["generated_code"] = test_path.read_text()
     if validation_file.exists():
         data["validation"] = json.loads(validation_file.read_text())
+    healing_attempts_file = run_dir / "healing_attempts.json"
+    if healing_attempts_file.exists():
+        data["healing_attempts"] = json.loads(healing_attempts_file.read_text())
+    failure_evidence_file = run_dir / "failure_evidence_packet.json"
+    if failure_evidence_file.exists():
+        data["failure_evidence"] = json.loads(failure_evidence_file.read_text())
 
     # Compute effective status considering validation result
     effective_status = "unknown"
@@ -4199,10 +4254,16 @@ async def get_run(
     data.update(await _compose_test_run_log_payload(run_db, run_dir))
 
     artifacts = []
+    diagnostic_artifacts = []
     for f in run_dir.glob("**/*"):
-        if f.is_file() and f.suffix.lower() in [".png", ".jpg", ".jpeg", ".webm", ".mp4"]:
+        if not f.is_file():
+            continue
+        try:
+            rel_path = f.relative_to(RUNS_DIR)
+        except ValueError:
+            continue
+        if f.suffix.lower() in [".png", ".jpg", ".jpeg", ".webm", ".mp4"]:
             try:
-                rel_path = f.relative_to(RUNS_DIR)
                 artifacts.append(
                     {
                         "name": f.name,
@@ -4211,9 +4272,27 @@ async def get_run(
                         "modified_at": datetime.utcfromtimestamp(f.stat().st_mtime).isoformat(),
                     }
                 )
-            except ValueError:
+            except OSError:
+                continue
+        elif f.name in {
+            "healing_attempts.json",
+            "validation.json",
+            "agentic_summary.json",
+            "failure_evidence_packet.json",
+        } or f.name.startswith("failure_evidence_packet_attempt_") or f.name == "error-context.md":
+            try:
+                diagnostic_artifacts.append(
+                    {
+                        "name": f.name,
+                        "path": f"/artifacts/{rel_path}",
+                        "type": "json" if f.suffix.lower() == ".json" else "text",
+                        "modified_at": datetime.utcfromtimestamp(f.stat().st_mtime).isoformat(),
+                    }
+                )
+            except OSError:
                 continue
     data["artifacts"] = artifacts
+    data["diagnostic_artifacts"] = diagnostic_artifacts
 
     report_index = run_dir / "report" / "index.html"
     if report_index.exists():
@@ -4299,6 +4378,11 @@ def update_run_agentic_summary(id: str, update: AgenticSummaryUpdate, session: S
         raise HTTPException(status_code=404, detail="Run not found")
 
     run.agentic_summary = update.summary
+    total_cost = (update.summary.get("costs") or {}).get("total_usd")
+    try:
+        run.total_cost_usd = float(total_cost) if total_cost is not None else None
+    except (TypeError, ValueError):
+        run.total_cost_usd = None
     session.add(run)
     session.commit()
 
@@ -5255,12 +5339,9 @@ def execute_run_task(
     run_dir_path = Path(run_dir)
     _write_run_browser_metadata(run_dir_path, _build_run_browser_metadata(headless=headless, phase="executing"))
 
-    # Copy .claude/ agents directory to run directory for isolation
-    # This ensures agent configs are local to each run
-    claude_src = BASE_DIR / ".claude"
-    claude_dst = run_dir_path / ".claude"
-    if claude_src.exists() and not claude_dst.exists():
-        shutil.copytree(claude_src, claude_dst, dirs_exist_ok=True)
+    # Copy reusable .claude/ project artifacts into the run sandbox.
+    # Local settings stay in the project config and are not copied per run.
+    copy_claude_project_config(BASE_DIR / ".claude", run_dir_path / ".claude")
 
     # Copy Playwright config to run directory with absolute paths
     # The workflow scripts change to CLAUDE_CONFIG_DIR for MCP config isolation,
@@ -5677,10 +5758,7 @@ def execute_mobile_run_task(
     run_mcp_config_path.write_text(json.dumps(build_appium_mcp_config(config), indent=2))
     logger.info(f"Created Appium MCP config for mobile run {run_id}")
 
-    claude_src = BASE_DIR / ".claude"
-    claude_dst = run_dir_path / ".claude"
-    if claude_src.exists() and not claude_dst.exists():
-        shutil.copytree(claude_src, claude_dst, dirs_exist_ok=True)
+    copy_claude_project_config(BASE_DIR / ".claude", run_dir_path / ".claude")
 
     cmd = [
         sys.executable,

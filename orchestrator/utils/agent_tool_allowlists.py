@@ -146,6 +146,17 @@ AGENT_TOOL_PROFILES: dict[str, AgentToolProfile] = {
     "test-validator": AgentToolProfile(("Read", "Write", "Bash"), TEST_VALIDATOR_MCP_TOOLS),
     "test-operator": AgentToolProfile((), TEST_OPERATOR_MCP_TOOLS),
     "playwright-skill-executor": AgentToolProfile(("Read", "Write", "Bash", "Glob", "Grep"), ()),
+    "api-test-generator": AgentToolProfile(("Glob", "Grep", "Read", "LS", "Write"), ()),
+    "bug-report-generator": AgentToolProfile(("Glob", "Grep", "Read", "LS"), ()),
+    "database-analyzer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), ()),
+    "llm-evaluator": AgentToolProfile((), ()),
+    "load-test-analyzer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), ()),
+    "load-test-generator": AgentToolProfile(("Glob", "Grep", "Read", "LS", "Write"), ()),
+    "security-analyzer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), ()),
+    "test-agent": AgentToolProfile(("Read",), ()),
+    "test-coverage-analyzer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), ()),
+    "test-exporter": AgentToolProfile(("Write",), ()),
+    "test-planner": AgentToolProfile(("Read",), ()),
     "text-analysis": AgentToolProfile((), ()),
     # Autonomous mission roles are intentionally proposal-only. They can inspect
     # project/app state but repository writes happen only through approval APIs.

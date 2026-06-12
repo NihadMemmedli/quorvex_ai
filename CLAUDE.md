@@ -169,6 +169,10 @@ All backend code uses `logging.getLogger(__name__)`. Configuration in `orchestra
 - `AGENT_TIMEOUT_SECONDS` - Default timeout for all agents (default: `1800`)
 - `EXPLORATION_TIMEOUT_SECONDS`, `PLANNER_TIMEOUT_SECONDS`, `GENERATOR_TIMEOUT_SECONDS` - Per-agent overrides
 
+**Agent Budgets**:
+- `HEALER_MAX_BUDGET_USD` - Optional Claude Code spend cap for native healer runs (unset = no cap)
+- `GENERATOR_MAX_BUDGET_USD` - Optional Claude Code spend cap for native generator runs (unset = no cap)
+
 **MinIO Storage** (production):
 - `MINIO_ENDPOINT`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`
 - `MINIO_BUCKET` (backups), `MINIO_BUCKET_ARTIFACTS` (archived artifacts)

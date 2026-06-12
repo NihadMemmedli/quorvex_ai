@@ -11,10 +11,19 @@ import asyncio
 import logging
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _optional_env_float(name: str) -> float | None:
+    value = os.environ.get(name)
+    if not value:
+        return None
+    return float(value)
+
 
 # Add orchestrator to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -390,9 +399,9 @@ Do not write `process.env.TESTDATA_*` in generated code.
         if os.environ.get("MEMORY_ENABLED", "true").lower() != "true" or not project_id:
             return ""
         try:
+            from orchestrator.memory.agent_memory import get_agent_memory_service
             from orchestrator.memory.context_builder import MemoryContextBuilder
             from orchestrator.memory.telemetry import record_memory_injection
-            from orchestrator.memory.agent_memory import get_agent_memory_service
 
             builder = MemoryContextBuilder(service=get_agent_memory_service())
             bundle = builder.build_bundle(
@@ -456,6 +465,7 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
             owner_id=self.owner_id,
             owner_label=self.owner_label,
             model_tier=self.model_tier,
+            max_budget_usd=_optional_env_float("GENERATOR_MAX_BUDGET_USD"),
             memory_agent_type="NativeGenerator",
             memory_source_type="spec",
             memory_stage="native_generator",
