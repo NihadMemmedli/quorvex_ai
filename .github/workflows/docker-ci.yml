@@ -20,12 +20,19 @@ jobs:
         run: docker build -t quorvex-ai .
 
       - name: Run Smoke Test (Self-Healing)
-        if: ${{ secrets.ANTHROPIC_AUTH_TOKEN != '' }}
         env:
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
-          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL || 'https://api.anthropic.com' }}
-          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ secrets.ANTHROPIC_DEFAULT_SONNET_MODEL || 'claude-sonnet-4-20250514' }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ secrets.ANTHROPIC_DEFAULT_SONNET_MODEL }}
         run: |
+          if [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
+            echo "ANTHROPIC_AUTH_TOKEN is not configured; skipping Docker smoke test."
+            exit 0
+          fi
+
+          export ANTHROPIC_BASE_URL="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+          export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-claude-sonnet-4-20250514}"
+
           mkdir -p runs
           docker run --rm \
             -e ANTHROPIC_AUTH_TOKEN \

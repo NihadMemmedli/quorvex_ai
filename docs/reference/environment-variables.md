@@ -111,6 +111,7 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 |----------|---------|----------|-------------|
 | `QUORVEX_AGENT_RUNTIME` | `claude_sdk` | No | Default runtime for agent runs. Supported values: `claude_sdk`, `hermes` |
 | `QUORVEX_ASSISTANT_RUNTIME` | `QUORVEX_AGENT_RUNTIME` | No | Optional dashboard assistant runtime override. Supported values: `claude_sdk`, `openai`, `hermes` |
+| `AGENT_COST_LOG` | -- | No | Optional JSONL path for appending agent usage and cost records during native pipeline runs |
 | `HERMES_ENABLED` | `false` | No | Enables dispatching selected Quorvex agent runs to Hermes |
 | `HERMES_API_URL` | `http://127.0.0.1:8642` | No | Hermes API server base URL |
 | `HERMES_API_KEY` | -- | No | Bearer token for the Hermes API server |
@@ -159,6 +160,7 @@ Settings can manage backend agent runtime and dashboard assistant runtime separa
 | `MEMORY_COLLECTION_PREFIX` | `test_automation` | No | Prefix for ChromaDB collection names |
 | `MEMORY_CONSOLIDATION_LLM` | `false` | No | Enable optional LLM extraction for agent memory consolidation |
 | `MEMORY_CONSOLIDATION_MODEL` | `OPENAI_MODEL_ID` or `gpt-4o-mini` | No | Model used when LLM memory consolidation is enabled |
+| `MEMORY_SELECTOR_WRITEBACK` | `true` | No | Enable best-effort writeback of selector repair decisions into project memory |
 | `COVERAGE_ENABLED` | `true` | No | Enable coverage analysis |
 | `COVERAGE_THRESHOLD` | `0.8` | No | Target coverage threshold (0.0-1.0) |
 
