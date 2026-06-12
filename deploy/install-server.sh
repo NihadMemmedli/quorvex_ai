@@ -15,6 +15,16 @@ SITE="${QUORVEX_SITE:-mytest}"
 PUBLIC_URL="${QUORVEX_PUBLIC_URL:-https://${DOMAIN}}"
 SYNC_PRIVATE_SCRIPTS="${QUORVEX_SYNC_PRIVATE_SCRIPTS:-true}"
 
+usage() {
+  cat <<'EOF'
+Usage: install-server.sh [--dry-run|--deploy] [--no-sync-scripts]
+
+Environment variables configure repositories, paths, domain, secrets, and
+release version. --deploy is equivalent to QUORVEX_CONFIRM_DEPLOY=true.
+--dry-run is the default unless QUORVEX_CONFIRM_DEPLOY=true is already set.
+EOF
+}
+
 log() {
   printf '[quorvex-install] %s\n' "$*"
 }
@@ -26,6 +36,30 @@ die() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --deploy)
+        CONFIRM_DEPLOY=true
+        ;;
+      --dry-run)
+        CONFIRM_DEPLOY=false
+        ;;
+      --no-sync-scripts)
+        SYNC_PRIVATE_SCRIPTS=false
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "Unknown argument: $1"
+        ;;
+    esac
+    shift
+  done
 }
 
 sudo_cmd() {
@@ -335,6 +369,25 @@ replace_or_append_if_env_provided_or_placeholder() {
   fi
 }
 
+replace_or_append_if_env_provided_placeholder_or_default() {
+  local env_key="$1"
+  local target_key="$2"
+  local value="$3"
+  local default_value="$4"
+  local file="$5"
+  local current
+
+  if [ -n "${!env_key+x}" ]; then
+    replace_or_append_env "${target_key}" "${value}" "${file}"
+    return
+  fi
+
+  current="$(env_file_value "${target_key}" "${file}")"
+  if [ "${current}" = "${default_value}" ] || ! has_real_env_value "${current}"; then
+    replace_or_append_env "${target_key}" "${value}" "${file}"
+  fi
+}
+
 normalize_llm_provider() {
   local provider="${1:-zai}"
   provider="$(printf '%s' "${provider}" | tr '[:upper:]' '[:lower:]')"
@@ -545,6 +598,10 @@ ensure_private_env() {
 
   replace_or_append_if_env_provided_or_placeholder QUORVEX_SOURCE_DIR QUORVEX_SOURCE_DIR "${SOURCE_DIR}" "${env_file}"
   replace_or_append_if_env_provided_or_placeholder QUORVEX_DATA_ROOT QUORVEX_DATA_ROOT "${DATA_ROOT}" "${env_file}"
+  replace_or_append_if_env_provided_placeholder_or_default QUORVEX_PRIVATE_CONTENT_DIR QUORVEX_PRIVATE_CONTENT_DIR "${DEPLOY_DIR}" "/opt/quorvex-deploy-private" "${env_file}"
+  replace_or_append_if_env_provided_placeholder_or_default SPECS_DIR SPECS_DIR "${DEPLOY_DIR}/specs" "/opt/quorvex-deploy-private/specs" "${env_file}"
+  replace_or_append_if_env_provided_placeholder_or_default TESTS_DIR TESTS_DIR "${DEPLOY_DIR}/tests" "/opt/quorvex-deploy-private/tests" "${env_file}"
+  replace_or_append_if_env_provided_placeholder_or_default PRDS_DIR PRDS_DIR "${DEPLOY_DIR}/prds" "/opt/quorvex-deploy-private/prds" "${env_file}"
   replace_or_append_if_env_provided_or_placeholder QUORVEX_IMAGE_NAMESPACE QUORVEX_IMAGE_NAMESPACE "${IMAGE_NAMESPACE}" "${env_file}"
   if [ -z "${QUORVEX_PUBLIC_URL+x}" ] && [ -n "${QUORVEX_DOMAIN+x}" ]; then
     public_url_override_key="QUORVEX_DOMAIN"
@@ -610,6 +667,8 @@ ensure_private_deploy_files() {
 }
 
 main() {
+  parse_args "$@"
+
   require_command git
   require_command curl
   require_command docker

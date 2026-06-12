@@ -7,7 +7,7 @@
         swarm-up swarm-down swarm-scale swarm-status \
         k8s-deploy k8s-delete k8s-status k8s-scale k8s-logs \
         db-migrate db-upgrade db-downgrade db-history db-stamp db-demo-seed youtube-demo-seed \
-        docker-prune volume-sizes db-vacuum health-check deploy-check company-rehearsal release-preflight server-upgrade upgrade deps-lock \
+        docker-prune volume-sizes db-vacuum health-check deploy-check company-rehearsal release-preflight server-upgrade release-to-server upgrade deps-lock \
         load-test agent-runtime-ready agent-temporal-smoke-up agent-temporal-smoke agent-temporal-smoke-logs \
         k6-workers-up k6-workers-down k6-workers-scale k6-workers-logs k6-workers-status \
         zap-up zap-down zap-status zap-logs \
@@ -118,6 +118,7 @@ help:
 	@echo "  Maintenance:"
 	@echo "    make release-preflight VERSION=v1.2.3 - Verify tagged images and deploy dry-run"
 	@echo "    make server-upgrade VERSION=v1.2.3    - Run preflight, deploy, and post-check on server"
+	@echo "    make release-to-server VERSION=v1.2.3 - Push release tag and run server upgrade over SSH"
 	@echo "    make upgrade          - Full upgrade procedure (backup, pull, migrate, restart)"
 	@echo "    make health-check     - Hit all health endpoints and report status"
 	@echo "    make docker-prune     - Remove dangling images, stopped containers, build cache"
@@ -266,6 +267,13 @@ server-upgrade:
 		exit 2; \
 	fi
 	@bash deploy/server-upgrade.sh "$(VERSION)"
+
+release-to-server:
+	@if [ -z "$(VERSION)" ]; then \
+		echo "Usage: make release-to-server VERSION=v1.2.3 QUORVEX_SERVER_HOST=user@host"; \
+		exit 2; \
+	fi
+	@VERSION="$(VERSION)" bash scripts/release_to_server.sh --deploy
 
 # ==========================================
 # DOCKER

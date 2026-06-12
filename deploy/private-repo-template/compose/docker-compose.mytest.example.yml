@@ -12,6 +12,9 @@ services:
       - "${BACKEND_BIND:-127.0.0.1:8001}:8001"
       - "${VNC_BIND:-127.0.0.1:6080}:6080"
     environment:
+      HOME: /home/agent
+      USER: agent
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /ms-playwright/chromium-1200/chrome-linux64/chrome
       REQUIRE_AUTH: "true"
       ALLOW_REGISTRATION: "false"
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Set ALLOWED_ORIGINS}
@@ -22,9 +25,9 @@ services:
       - ${QUORVEX_DATA_ROOT:-./data}/logs:/app/logs
       - ${QUORVEX_DATA_ROOT:-./data}/app-data:/app/data
       - ${QUORVEX_DATA_ROOT:-./data}/test-results:/app/test-results
-      - ${QUORVEX_DATA_ROOT:-./data}/specs:/app/specs
-      - ${QUORVEX_DATA_ROOT:-./data}/prds:/app/prds
-      - ${QUORVEX_DATA_ROOT:-./data}/tests:/app/tests
+      - ${SPECS_DIR:?Set SPECS_DIR}:/app/specs
+      - ${PRDS_DIR:?Set PRDS_DIR}:/app/prds
+      - ${TESTS_DIR:?Set TESTS_DIR}:/app/tests
       - ${QUORVEX_DATA_ROOT:-./data}/generated-scripts:/app/scripts
 
   backend-slim:
@@ -42,9 +45,9 @@ services:
       - ${QUORVEX_DATA_ROOT:-./data}/logs:/app/logs
       - ${QUORVEX_DATA_ROOT:-./data}/app-data:/app/data
       - ${QUORVEX_DATA_ROOT:-./data}/test-results:/app/test-results
-      - ${QUORVEX_DATA_ROOT:-./data}/specs:/app/specs
-      - ${QUORVEX_DATA_ROOT:-./data}/prds:/app/prds
-      - ${QUORVEX_DATA_ROOT:-./data}/tests:/app/tests
+      - ${SPECS_DIR:?Set SPECS_DIR}:/app/specs
+      - ${PRDS_DIR:?Set PRDS_DIR}:/app/prds
+      - ${TESTS_DIR:?Set TESTS_DIR}:/app/tests
 
   agent-worker:
     image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
@@ -55,9 +58,9 @@ services:
       - ${QUORVEX_DATA_ROOT:-./data}/logs:/app/logs
       - ${QUORVEX_DATA_ROOT:-./data}/app-data:/app/data
       - ${QUORVEX_DATA_ROOT:-./data}/test-results:/app/test-results
-      - ${QUORVEX_DATA_ROOT:-./data}/specs:/app/specs
-      - ${QUORVEX_DATA_ROOT:-./data}/prds:/app/prds
-      - ${QUORVEX_DATA_ROOT:-./data}/tests:/app/tests
+      - ${SPECS_DIR:?Set SPECS_DIR}:/app/specs
+      - ${PRDS_DIR:?Set PRDS_DIR}:/app/prds
+      - ${TESTS_DIR:?Set TESTS_DIR}:/app/tests
 
   autonomous-mission-worker:
     image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
@@ -68,9 +71,9 @@ services:
       - ${QUORVEX_DATA_ROOT:-./data}/logs:/app/logs
       - ${QUORVEX_DATA_ROOT:-./data}/app-data:/app/data
       - ${QUORVEX_DATA_ROOT:-./data}/test-results:/app/test-results
-      - ${QUORVEX_DATA_ROOT:-./data}/specs:/app/specs
-      - ${QUORVEX_DATA_ROOT:-./data}/prds:/app/prds
-      - ${QUORVEX_DATA_ROOT:-./data}/tests:/app/tests
+      - ${SPECS_DIR:?Set SPECS_DIR}:/app/specs
+      - ${PRDS_DIR:?Set PRDS_DIR}:/app/prds
+      - ${TESTS_DIR:?Set TESTS_DIR}:/app/tests
 
   custom-workflow-worker:
     image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
@@ -81,9 +84,9 @@ services:
       - ${QUORVEX_DATA_ROOT:-./data}/logs:/app/logs
       - ${QUORVEX_DATA_ROOT:-./data}/app-data:/app/data
       - ${QUORVEX_DATA_ROOT:-./data}/test-results:/app/test-results
-      - ${QUORVEX_DATA_ROOT:-./data}/specs:/app/specs
-      - ${QUORVEX_DATA_ROOT:-./data}/prds:/app/prds
-      - ${QUORVEX_DATA_ROOT:-./data}/tests:/app/tests
+      - ${SPECS_DIR:?Set SPECS_DIR}:/app/specs
+      - ${PRDS_DIR:?Set PRDS_DIR}:/app/prds
+      - ${TESTS_DIR:?Set TESTS_DIR}:/app/tests
 
   backup-scheduler:
     image: ${QUORVEX_BACKEND_SLIM_IMAGE:?Set QUORVEX_BACKEND_SLIM_IMAGE}
@@ -92,9 +95,9 @@ services:
     volumes:
       - ${QUORVEX_SOURCE_DIR:?Set QUORVEX_SOURCE_DIR}/scripts/full_backup.sh:/scripts/full_backup.sh:ro
       - ${QUORVEX_DATA_ROOT:-./data}/backups:/backups
-      - ${QUORVEX_DATA_ROOT:-./data}/specs:/app/specs:ro
-      - ${QUORVEX_DATA_ROOT:-./data}/prds:/app/prds:ro
-      - ${QUORVEX_DATA_ROOT:-./data}/tests:/app/tests:ro
+      - ${SPECS_DIR:?Set SPECS_DIR}:/app/specs:ro
+      - ${PRDS_DIR:?Set PRDS_DIR}:/app/prds:ro
+      - ${TESTS_DIR:?Set TESTS_DIR}:/app/tests:ro
       - ${QUORVEX_DATA_ROOT:-./data}/app-data:/app/data:ro
       - ${QUORVEX_DATA_ROOT:-./data}/runs:/app/runs
       - ${QUORVEX_DATA_ROOT:-./data}/test-results:/app/test-results:ro
@@ -104,9 +107,9 @@ services:
     volumes:
       - ${QUORVEX_SOURCE_DIR:?Set QUORVEX_SOURCE_DIR}/scripts/full_backup.sh:/scripts/full_backup.sh:ro
       - ${QUORVEX_DATA_ROOT:-./data}/backups:/backups
-      - ${QUORVEX_DATA_ROOT:-./data}/specs:/app/specs:ro
-      - ${QUORVEX_DATA_ROOT:-./data}/tests:/app/tests:ro
-      - ${QUORVEX_DATA_ROOT:-./data}/prds:/app/prds:ro
+      - ${SPECS_DIR:?Set SPECS_DIR}:/app/specs:ro
+      - ${TESTS_DIR:?Set TESTS_DIR}:/app/tests:ro
+      - ${PRDS_DIR:?Set PRDS_DIR}:/app/prds:ro
       - ${QUORVEX_DATA_ROOT:-./data}/app-data:/app/data:ro
       - ${QUORVEX_DATA_ROOT:-./data}/runs:/app/runs:ro
       - ${QUORVEX_DATA_ROOT:-./data}/test-results:/app/test-results:ro
@@ -116,9 +119,9 @@ services:
     volumes:
       - ${QUORVEX_SOURCE_DIR:?Set QUORVEX_SOURCE_DIR}/scripts/restore.sh:/scripts/restore.sh:ro
       - ${QUORVEX_DATA_ROOT:-./data}/backups:/backups
-      - ${QUORVEX_DATA_ROOT:-./data}/specs:/app/specs
-      - ${QUORVEX_DATA_ROOT:-./data}/tests:/app/tests
-      - ${QUORVEX_DATA_ROOT:-./data}/prds:/app/prds
+      - ${SPECS_DIR:?Set SPECS_DIR}:/app/specs
+      - ${TESTS_DIR:?Set TESTS_DIR}:/app/tests
+      - ${PRDS_DIR:?Set PRDS_DIR}:/app/prds
       - ${QUORVEX_DATA_ROOT:-./data}/app-data:/app/data
       - ${QUORVEX_DATA_ROOT:-./data}/runs:/app/runs
       - ${QUORVEX_DATA_ROOT:-./data}/test-results:/app/test-results
@@ -146,8 +149,8 @@ services:
     build: !reset null
     pull_policy: always
     volumes:
-      - ${QUORVEX_DATA_ROOT:-./data}/tests:/app/tests:ro
-      - ${QUORVEX_DATA_ROOT:-./data}/specs:/app/specs:ro
+      - ${TESTS_DIR:?Set TESTS_DIR}:/app/tests:ro
+      - ${SPECS_DIR:?Set SPECS_DIR}:/app/specs:ro
       - ${QUORVEX_DATA_ROOT:-./data}/test-results:/app/test-results
 
   k6-workers:
@@ -189,8 +192,8 @@ services:
     volumes:
       - ${QUORVEX_DATA_ROOT:-./data}/app-data:/opt/data
       - ${QUORVEX_DATA_ROOT:-./data}/runs:/workspace/runs
-      - ${QUORVEX_DATA_ROOT:-./data}/specs:/workspace/specs
-      - ${QUORVEX_DATA_ROOT:-./data}/tests:/workspace/tests
+      - ${SPECS_DIR:?Set SPECS_DIR}:/workspace/specs
+      - ${TESTS_DIR:?Set TESTS_DIR}:/workspace/tests
 
   zap:
     ports: !override

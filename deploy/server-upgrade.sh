@@ -46,7 +46,9 @@ main() {
   before="$(current_version || true)"
 
   log "Preflighting ${VERSION}."
-  QUORVEX_PREFLIGHT_REQUIRE_PRIVATE_DEPLOY=true bash "${ROOT_DIR}/deploy/release-preflight.sh" "${VERSION}"
+  QUORVEX_PREFLIGHT_REQUIRE_PRIVATE_DEPLOY=true \
+    QUORVEX_PREFLIGHT_PULL="${QUORVEX_PREFLIGHT_PULL:-true}" \
+    bash "${ROOT_DIR}/deploy/release-preflight.sh" "${VERSION}"
 
   log "Deploying ${VERSION} with private deploy script."
   (cd "${DEPLOY_DIR}" && ./scripts/deploy.sh "${VERSION}")

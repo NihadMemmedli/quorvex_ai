@@ -94,6 +94,8 @@ pdf/
 
 # Generated Data and DB
 prds/
+!deploy/private-repo-template/prds/
+!deploy/private-repo-template/prds/**
 test.db
 test.db-shm
 test.db-wal

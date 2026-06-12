@@ -154,6 +154,70 @@ def test_write_playwright_mcp_config_includes_caps_and_redacts_secrets(tmp_path,
     assert str(secrets) not in runtime["mcp_args"]
 
 
+def test_resolve_playwright_chromium_executable_finds_chrome_linux64(tmp_path, monkeypatch):
+    from orchestrator.utils.playwright_mcp import resolve_playwright_chromium_executable
+
+    chromium = tmp_path / "ms-playwright" / "chromium-9999" / "chrome-linux64" / "chrome"
+    chromium.parent.mkdir(parents=True)
+    chromium.write_text("#!/bin/sh\n")
+
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "ms-playwright"))
+    monkeypatch.delenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_MCP_EXECUTABLE_PATH", raising=False)
+
+    assert resolve_playwright_chromium_executable() == chromium
+
+
+def test_resolve_playwright_chromium_executable_skips_inaccessible_home_cache(tmp_path, monkeypatch):
+    from orchestrator.utils import playwright_mcp
+
+    browser_root = tmp_path / "ms-playwright"
+    chromium = browser_root / "chromium-9999" / "chrome-linux64" / "chrome"
+    chromium.parent.mkdir(parents=True)
+    chromium.write_text("#!/bin/sh\n")
+    inaccessible = tmp_path / "inaccessible" / ".cache" / "ms-playwright"
+
+    original_exists = playwright_mcp.Path.exists
+
+    def exists_with_inaccessible_cache(path):
+        if path == inaccessible:
+            raise PermissionError(str(path))
+        return original_exists(path)
+
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(browser_root))
+    monkeypatch.delenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_MCP_EXECUTABLE_PATH", raising=False)
+    monkeypatch.setattr(playwright_mcp.Path, "home", lambda: tmp_path / "inaccessible")
+    monkeypatch.setattr(playwright_mcp.Path, "exists", exists_with_inaccessible_cache)
+
+    assert playwright_mcp.resolve_playwright_chromium_executable() == chromium
+
+
+def test_browser_runtime_status_handles_inaccessible_home_cache(tmp_path, monkeypatch):
+    from orchestrator.utils import playwright_mcp
+
+    inaccessible = tmp_path / "inaccessible" / ".cache" / "ms-playwright"
+    original_exists = playwright_mcp.Path.exists
+
+    def exists_with_inaccessible_cache(path):
+        if path == inaccessible:
+            raise PermissionError(str(path))
+        if path == playwright_mcp.Path("/ms-playwright"):
+            return False
+        return original_exists(path)
+
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", raising=False)
+    monkeypatch.delenv("PLAYWRIGHT_MCP_EXECUTABLE_PATH", raising=False)
+    monkeypatch.setattr(playwright_mcp.Path, "home", lambda: tmp_path / "inaccessible")
+    monkeypatch.setattr(playwright_mcp.Path, "exists", exists_with_inaccessible_cache)
+
+    status = playwright_mcp.browser_runtime_status()
+
+    assert status["browser_runtime"] == "unavailable"
+    assert status["browser_executable"] is None
+
+
 def test_write_playwright_test_mcp_config_injects_storage_state(tmp_path, monkeypatch):
     from orchestrator.utils.playwright_mcp import write_playwright_test_mcp_config
 

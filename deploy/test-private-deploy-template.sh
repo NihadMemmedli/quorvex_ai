@@ -32,6 +32,10 @@ set_test_paths() {
     s|QUORVEX_SOURCE_DIR=/opt/quorvex_ai|QUORVEX_SOURCE_DIR='"${ROOT_DIR}"'|;
     s|QUORVEX_IMAGE_NAMESPACE=ghcr.io/example-org/quorvex-ai|QUORVEX_IMAGE_NAMESPACE=ghcr.io/test-org/quorvex-ai|;
     s|QUORVEX_DATA_ROOT=/srv/quorvex/mytest|QUORVEX_DATA_ROOT='"${TMP_DIR}"'/data|;
+    s|QUORVEX_PRIVATE_CONTENT_DIR=/opt/quorvex-deploy-private|QUORVEX_PRIVATE_CONTENT_DIR='"${TMP_DIR}"'|;
+    s|SPECS_DIR=/opt/quorvex-deploy-private/specs|SPECS_DIR='"${TMP_DIR}"'/specs|;
+    s|TESTS_DIR=/opt/quorvex-deploy-private/tests|TESTS_DIR='"${TMP_DIR}"'/tests|;
+    s|PRDS_DIR=/opt/quorvex-deploy-private/prds|PRDS_DIR='"${TMP_DIR}"'/prds|;
     s|COMPOSE_PROJECT_NAME=quorvex-mytest|COMPOSE_PROJECT_NAME=quorvex-template-test|;
   ' "${env_file}"
   {
@@ -69,6 +73,9 @@ log "Checking private env and state are ignored by Git."
   git init -q
   git check-ignore -q env/quorvex.prod.env
   git check-ignore -q .state/current-version
+  ! git check-ignore -q specs/company-login.md
+  ! git check-ignore -q tests/company/login.spec.ts
+  ! git check-ignore -q prds/company-login.md
 )
 
 log "Verifying deploy dry-run renders Compose without changing services."
@@ -91,6 +98,9 @@ grep -q 'INTERNAL_API_URL: http://backend:8001' "${TMP_DIR}/rendered-compose.yml
 grep -q 'VNC_PUBLIC_WS_URL: wss://mytest.idda.az/websockify' "${TMP_DIR}/rendered-compose.yml"
 grep -q 'RECORDER_BROWSER_URL: ""' "${TMP_DIR}/rendered-compose.yml"
 grep -q 'HERMES_API_URL: http://hermes:8642' "${TMP_DIR}/rendered-compose.yml"
+grep -q "source: ${TMP_DIR}/specs" "${TMP_DIR}/rendered-compose.yml"
+grep -q "source: ${TMP_DIR}/tests" "${TMP_DIR}/rendered-compose.yml"
+grep -q "source: ${TMP_DIR}/prds" "${TMP_DIR}/rendered-compose.yml"
 if rg -n 'NEXT_PUBLIC_API_URL: .*(localhost|127\.0\.0\.1|host\.docker\.internal|backend:8001|http://)' "${TMP_DIR}/rendered-compose.yml"; then
   printf 'Rendered frontend browser API URL is not company safe.\n' >&2
   exit 1

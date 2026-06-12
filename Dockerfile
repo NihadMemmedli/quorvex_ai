@@ -168,6 +168,8 @@ RUN mkdir -p /app/logs /app/runs /app/data /app/specs /app/prds /app/tests /app/
 
 # Set python path
 ENV PYTHONPATH=/app
+ENV HOME=/home/agent
+ENV USER=agent
 
 # ============================================
 # Stage 2: Backend API server (for production)

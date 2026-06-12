@@ -17,6 +17,8 @@ ENV BROWSER_WORKERS_ENABLED=true
 ENV PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=300000
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV TEMPORAL_BROWSER_WORKFLOW_TASK_QUEUE=quorvex-browser-workflows
+ENV HOME=/home/agent
+ENV USER=agent
 
 # Install system dependencies
 # - Node.js for MCP server communication

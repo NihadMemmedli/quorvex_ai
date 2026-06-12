@@ -67,9 +67,31 @@ make docker-up       # Start all services
 make docker-down     # Stop all services
 ```
 
-## Production Deployment (Docker Compose)
+## Production Deployment
 
-Production uses `docker-compose.prod.yml` with an `.env.prod` configuration file.
+The recommended production path is the private deploy repository plus tagged
+GHCR release images. Code stays in the public checkout, while production
+secrets, compose overlays, reverse proxy config, company specs/tests/fixtures,
+PRDs, backups, and rollback state stay in the private repo.
+
+From local development:
+
+```bash
+git status
+VERSION=v1.2.3 QUORVEX_SERVER_HOST=user@production-host make release-to-server
+```
+
+The release command pushes the public branch and tag, waits for GHCR images,
+then SSHes into the server and runs `make server-upgrade VERSION=v1.2.3`.
+On the server, `server-upgrade` runs preflight, pulls release images, deploys
+through `/opt/quorvex-deploy-private`, and runs post-deploy checks.
+
+For first server setup, use the installer documented in `deploy/README.md`.
+
+## Local Production-Like Compose
+
+For local or prototype validation, `docker-compose.prod.yml` can still run with
+an `.env.prod` configuration file.
 
 ### Prerequisites
 

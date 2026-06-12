@@ -34,6 +34,13 @@ pick_port() {
 FRONTEND_PORT="$(pick_port)"
 BACKEND_PORT="$(pick_port)"
 VNC_PORT="$(pick_port)"
+MINIO_API_PORT="$(pick_port)"
+MINIO_CONSOLE_PORT="$(pick_port)"
+TEMPORAL_PORT="$(pick_port)"
+TEMPORAL_UI_PORT="$(pick_port)"
+HERMES_API_PORT="$(pick_port)"
+HERMES_DASHBOARD_PORT="$(pick_port)"
+ZAP_PORT="$(pick_port)"
 
 make_git_repo() {
   local dir="$1"
@@ -119,6 +126,13 @@ JWT_SECRET_KEY="test-jwt-secret-key-64-bytes-minimum-0000000000000000000000" \
 FRONTEND_BIND="127.0.0.1:${FRONTEND_PORT}" \
 BACKEND_BIND="127.0.0.1:${BACKEND_PORT}" \
 VNC_BIND="127.0.0.1:${VNC_PORT}" \
+MINIO_API_BIND="127.0.0.1:${MINIO_API_PORT}" \
+MINIO_CONSOLE_BIND="127.0.0.1:${MINIO_CONSOLE_PORT}" \
+TEMPORAL_BIND="127.0.0.1:${TEMPORAL_PORT}" \
+TEMPORAL_UI_BIND="127.0.0.1:${TEMPORAL_UI_PORT}" \
+HERMES_API_BIND="127.0.0.1:${HERMES_API_PORT}" \
+HERMES_DASHBOARD_BIND="127.0.0.1:${HERMES_DASHBOARD_PORT}" \
+ZAP_BIND="127.0.0.1:${ZAP_PORT}" \
 HERMES_CONTAINER_NAME="quorvex-test-hermes" \
 QUORVEX_MIN_FREE_GB=0 \
 QUORVEX_SKIP_REGISTRY_CHECK=true \
@@ -151,6 +165,10 @@ grep -q '^INTERNAL_API_URL=http://backend:8001$' "${DEPLOY_DIR}/env/quorvex.prod
 grep -q '^VNC_PUBLIC_WS_URL=wss://quorvex.test.internal/websockify$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^RECORDER_BROWSER_URL=$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^QUORVEX_OVERLAY_FILE='"${DEPLOY_DIR}"'/compose/docker-compose.company.yml$' "${DEPLOY_DIR}/env/quorvex.prod.env"
+grep -q '^QUORVEX_PRIVATE_CONTENT_DIR='"${DEPLOY_DIR}"'$' "${DEPLOY_DIR}/env/quorvex.prod.env"
+grep -q '^SPECS_DIR='"${DEPLOY_DIR}"'/specs$' "${DEPLOY_DIR}/env/quorvex.prod.env"
+grep -q '^TESTS_DIR='"${DEPLOY_DIR}"'/tests$' "${DEPLOY_DIR}/env/quorvex.prod.env"
+grep -q '^PRDS_DIR='"${DEPLOY_DIR}"'/prds$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^HERMES_CONTAINER_NAME=quorvex-test-hermes$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^INITIAL_ADMIN_EMAIL=ops-admin@quorvex.test.internal$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^POSTGRES_PASSWORD=TestPostgresPassword123$' "${DEPLOY_DIR}/env/quorvex.prod.env"
@@ -174,6 +192,9 @@ log "Checking real secret values are sourceable and not tracked."
 )
 git -C "${DEPLOY_DIR}" check-ignore -q env/quorvex.prod.env
 git -C "${DEPLOY_DIR}" check-ignore -q .state/generated-secrets.txt
+! git -C "${DEPLOY_DIR}" check-ignore -q specs/company-login.md
+! git -C "${DEPLOY_DIR}" check-ignore -q tests/company/login.spec.ts
+! git -C "${DEPLOY_DIR}" check-ignore -q prds/company-login.md
 
 if grep -q 'replace-with-at-least-32-random-bytes\|replace-with-strong-postgres-password\|replace-with-strong-minio-password\|replace-with-strong-initial-admin-password' "${DEPLOY_DIR}/env/quorvex.prod.env"; then
   printf 'Installer left generated-secret placeholders in private env.\n' >&2
