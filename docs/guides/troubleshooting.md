@@ -185,7 +185,7 @@ python orchestrator/cli.py --explore https://example.com --max-interactions 100 
 ```bash
 docker compose up -d db
 # or
-make prod-up
+make start
 ```
 
 **Fix** (SQLite fallback):

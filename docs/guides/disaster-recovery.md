@@ -64,7 +64,7 @@ make db-upgrade
 ### Step 5: Start Application
 
 ```bash
-make prod-up
+make start
 make health-check
 ```
 
@@ -91,7 +91,7 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml --profile restore
 ### Step 3: Restart Services
 
 ```bash
-make prod-up
+make start
 make health-check
 ```
 

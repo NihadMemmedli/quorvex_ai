@@ -10,7 +10,7 @@ In this tutorial, you will create an API test spec, import it into Quorvex AI, g
 ## Prerequisites
 
 - Quorvex AI installed and configured (complete [Your First Test in 10 Minutes](./getting-started.md) first)
-- The dashboard running (`make dev` or `make prod-dev` for Docker)
+- The dashboard running (`make dev`)
 
 !!! note
     API tests use Playwright's HTTP request library, not browser automation. No Playwright MCP server or browser instance is needed.
@@ -26,7 +26,7 @@ make dev
 Open `http://localhost:3000` in your browser. You should see the Quorvex AI dashboard.
 
 !!! tip
-    If you are using Docker, run `make prod-dev` instead. This starts the full production stack (backend, frontend, PostgreSQL) with local code mounting so changes auto-reload.
+    `make dev` starts the full Docker development stack with local code mounting and frontend hot reload.
 
 ## Step 2: Navigate to API Testing
 

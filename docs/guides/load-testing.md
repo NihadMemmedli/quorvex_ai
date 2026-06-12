@@ -20,7 +20,7 @@ The load testing framework provides:
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - [K6](https://k6.io/docs/get-started/installation/) installed (for local execution)
 - Docker (for distributed worker execution)
 - A target application/API to load test

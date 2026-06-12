@@ -22,12 +22,12 @@ For the most stable local setup, run:
 make autopilot-stable-up
 ```
 
-This mode disables backend reload, uses headless browser execution, lowers local agent concurrency, and expects Docker Desktop to have at least 12 GB of memory available.
+This mode is currently unsupported while the Compose stack is rebuilt.
 
-For day-to-day development with hot reload, use:
+For day-to-day development, use:
 
 ```bash
-make prod-dev
+make dev
 ```
 
 ## Run an AutoPilot Session

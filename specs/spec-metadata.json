@@ -1,4 +1,35 @@
 {
+  "benchmark/cart-total-and-tax.md": {
+    "tags": [
+      "benchmark",
+      "cart"
+    ]
+  },
+  "benchmark/checkout-address-state.md": {
+    "tags": [
+      "benchmark",
+      "checkout"
+    ]
+  },
+  "benchmark/checkout-payment-validation.md": {
+    "tags": [
+      "benchmark",
+      "checkout",
+      "payment"
+    ]
+  },
+  "benchmark/discount-code-guardrails.md": {
+    "tags": [
+      "benchmark",
+      "discount"
+    ]
+  },
+  "benchmark/order-confirmation.md": {
+    "tags": [
+      "benchmark",
+      "order"
+    ]
+  },
   "examples/hello-world.md": {
     "tags": [
       "example",

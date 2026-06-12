@@ -199,10 +199,10 @@ The **Smart Check** system skips regeneration when valid code already exists, re
 
 | Setup | Best for | Database | Command |
 |---|---|---|---|
-| Minimal Docker | Fast first trial on smaller machines | SQLite | `docker compose -f docker-compose.minimal.yml up -d` |
-| Full Docker dev | Complete self-hosted evaluation with dashboard, queues, storage, VNC, and security scanning | PostgreSQL | `make prod-dev` |
-| Local native | Contributors and backend/frontend development | PostgreSQL if Docker is running, otherwise SQLite | `make setup && make dev` |
-| Production | Hardened single-host deployment | PostgreSQL | `make prod-up` |
+| Full Docker dev | Main local development path with dashboard, queues, storage, VNC, and frontend hot reload | PostgreSQL | `make dev` |
+| Company/server runtime | App runtime for company-managed DNS/TLS/nginx | PostgreSQL | `make start` |
+| Minimal Docker | Legacy quick trial path; local-only and unsupported for company deployment | SQLite | `docker compose -f docker-compose.minimal.yml up -d` |
+| Repo-managed nginx | Legacy single-host path; not used for company deployment | PostgreSQL | `QUORVEX_ENABLE_REPO_NGINX=1 make prod-up` |
 
 ### Prerequisites
 
@@ -226,13 +226,13 @@ cp .env.prod.example .env.prod
 # Optional: confirm local and production env files are readable
 make check-env
 
-# 3. Start all services (backend, frontend, PostgreSQL, Redis, MinIO, VNC)
-make prod-dev
+# 3. Start all services for local full-stack development
+make dev
 
 # 4. Open http://localhost:3000
 ```
 
-> **Local setup without Docker?** Run `make setup` then `make dev`. See the [Getting Started tutorial](https://nihadmemmedli.github.io/quorvex_ai/tutorials/getting-started/) for both paths.
+> `make start` is the company/server runtime command for deployments where company DNS/TLS/nginx proxies to Compose. It does not start the repo-managed nginx or ZAP containers.
 
 ### Your First Test
 
@@ -386,25 +386,26 @@ For the complete list of environment variables, see the [Environment Variables R
 cp .env.prod.example .env.prod
 # Edit .env.prod, then validate it
 make check-env
-make prod-dev
+make dev
 ```
 
 - All services in Docker containers (backend, frontend, PostgreSQL, Redis, MinIO, VNC)
-- Local `./orchestrator` and `./web/src` mounted for hot-reload
+- Local `./orchestrator` and `./web/src` mounted; frontend hot reload is enabled, backend reload is disabled in Docker
 - Backend API on http://localhost:8001, frontend on http://localhost:3000, API docs on http://localhost:8001/docs
 - VNC browser view on http://localhost:6080 and MinIO console on http://localhost:9001
 
-### Local Mode
+### Company/Server Runtime
 
 ```bash
-make setup   # One-time: Python venv, Node deps, Playwright browsers
-# Edit .env, then validate it
+cp .env.prod.example .env.prod
+# Edit .env.prod for the server/company environment, then validate it
 make check-env
-make dev     # Start backend + frontend natively
+make start
 ```
 
-- Starts PostgreSQL via Docker if available, falls back to SQLite
-- Hot-reload enabled for backend and frontend
+- Starts the production-shaped Compose app runtime for company-managed nginx
+- Does not start the repo-managed nginx container
+- Leaves ZAP/security tooling opt-in via `make zap-up`
 
 ### CLI Mode (No dashboard)
 
@@ -525,16 +526,16 @@ First run captures a baseline. Subsequent runs compare against it, highlighting 
 
 ```bash
 # Docker mode (recommended)
-make prod-dev         # Start all services with local code mounting
+make dev              # Start all services with local code mounting
+make start            # Start company/server external-nginx runtime
 make prod-restart     # Restart backend (picks up code changes)
 make prod-logs        # Tail production logs
 make prod-status      # Show status of all services
 make prod-down        # Stop all services
 make prod-build       # Rebuild Docker images
 
-# Local mode
+# Setup
 make setup            # One-time setup (venv, deps, browsers, database)
-make dev              # Start backend + frontend natively
 make stop             # Stop local services
 
 # Common

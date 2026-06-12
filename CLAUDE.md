@@ -62,7 +62,7 @@ make db-upgrade                   # Run pending migrations
 make db-downgrade                 # Roll back one migration
 
 # Production maintenance
-make upgrade            # Full upgrade (backup, pull, migrate, restart)
+make server-upgrade VERSION=v1.2.3 # Server upgrade through release/private deploy flow
 make health-check       # Hit all health endpoints
 make docker-prune       # Remove dangling images and build cache
 
@@ -71,8 +71,9 @@ make lint       # Ruff check (Python) + next lint (frontend)
 make format     # Ruff format (Python)
 make test       # Run all Python tests (cd orchestrator && pytest tests/ -v)
 
-# Production development (Docker: backend :8001 + frontend :3000 + PostgreSQL)
-make prod-dev   # Start prod with local code mounted (no rebuild needed)
+# Docker development and server runtime
+make dev        # Start full Docker dev stack with local code mounted
+make start      # Start company/server external-nginx runtime
 make prod-restart # Restart backend (picks up code changes)
 make prod-logs  # Tail production logs
 make prod-status # Show status of all services
@@ -722,5 +723,5 @@ Next.js 16 (App Router), React 19, Tailwind CSS v4, Radix UI primitives, Monaco 
 | Registration disabled | Set `ALLOW_REGISTRATION=true` in `.env` |
 | ZAP not reachable | Start with: `docker compose --profile security up -d zap` |
 | Nuclei not found | Install nuclei binary or use Docker security profile |
-| `make prod-dev` backend won't start | Check `docker logs` for migration errors; `_run_migrations()` in `db.py` uses PostgreSQL syntax — SQLite booleans (`DEFAULT 0`) fail in PostgreSQL (`DEFAULT FALSE`) |
+| `make dev` backend won't start | Check `docker logs` for migration errors; `_run_migrations()` in `db.py` uses PostgreSQL syntax — SQLite booleans (`DEFAULT 0`) fail in PostgreSQL (`DEFAULT FALSE`) |
 | Backend crash loop on startup | Usually a migration issue — check `alembic_version` table and `db.py:_run_migrations()` legacy migrations |

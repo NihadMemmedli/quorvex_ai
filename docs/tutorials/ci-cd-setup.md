@@ -174,7 +174,7 @@ make dev
 ```
 
 !!! tip
-    Docker users should run `make prod-dev` instead of `make dev`.
+    `make dev` is the supported Docker development command.
 
 ### Step 2: Open CI/CD Settings
 

@@ -22,7 +22,7 @@ Additionally, **passive mode** lets functional Playwright tests proxy through ZA
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - For Nuclei scans: `nuclei` binary installed ([installation guide](https://docs.projectdiscovery.io/tools/nuclei/install))
 - For ZAP scans: ZAP daemon running via Docker
 - A target application to scan

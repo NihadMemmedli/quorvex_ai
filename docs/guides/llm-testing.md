@@ -23,7 +23,7 @@ The LLM testing framework provides:
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - At least one LLM provider API key (OpenAI, Anthropic, or any OpenAI-compatible API)
 
 ## Step-by-Step Usage

@@ -9,7 +9,7 @@ Use AI-powered exploration to discover application flows, generate structured re
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - A target web application with a URL accessible from the server
 - AI credentials configured in `.env`
 - For authenticated exploration: login credentials stored in `.env`

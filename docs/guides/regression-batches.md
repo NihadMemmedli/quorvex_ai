@@ -9,7 +9,7 @@ Group multiple test specs into batches for regression testing, track results, an
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - At least one test spec in your project
 - Tests previously generated (the pipeline runs during batch execution)
 

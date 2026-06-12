@@ -9,7 +9,7 @@ Set up cron-based schedules for recurring test execution, with execution history
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - At least one test spec or regression batch configured
 - PostgreSQL database (schedules are persisted via SQLAlchemy job store)
 

@@ -19,7 +19,7 @@ Launch the services:
 === "Docker (Recommended)"
 
     ```bash
-    make prod-dev
+    make dev
     ```
 
     This starts all services in Docker containers with your local code mounted:
@@ -245,7 +245,7 @@ When you are done, stop the services:
 
 In this tutorial, you:
 
-- Started the Quorvex AI dashboard using Docker (`make prod-dev`) with PostgreSQL, Redis, MinIO, and VNC running as services -- or locally with `make dev`
+- Started the Quorvex AI dashboard using Docker (`make dev`) with PostgreSQL, Redis, MinIO, and VNC running as services
 - Navigated the sidebar to understand the page structure
 - Explored the Specs page for managing test specifications
 - Viewed test execution history on the Runs page

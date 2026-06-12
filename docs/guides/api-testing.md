@@ -21,7 +21,7 @@ Unlike UI testing, API tests use Playwright's HTTP request capabilities (not a b
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - An API endpoint to test (or an OpenAPI/Swagger spec file)
 - AI credentials configured in `.env`
 

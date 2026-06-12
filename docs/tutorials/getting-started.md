@@ -60,19 +60,19 @@ quorvex_ai/
     Edit `.env.prod` and set the required AI credentials (see [Step 3](#step-3-configure-your-api-key) below), then start all services:
 
     ```bash
-    make prod-dev
+    make dev
     ```
 
     This starts:
 
-    - **Backend API** on `http://localhost:8001` (auto-reload enabled)
+    - **Backend API** on `http://localhost:8001` (source mounted; reload disabled in Docker)
     - **Frontend dashboard** on `http://localhost:3000`
     - **PostgreSQL** database
     - **Redis** for job queuing and rate limiting
     - **MinIO** object storage (console at `http://localhost:9001`)
     - **VNC** browser view at `http://localhost:6080`
 
-    Your local `./orchestrator` and `./web/src` directories are mounted, so code changes apply automatically.
+    Your local `./orchestrator` and `./web/src` directories are mounted. Frontend changes hot reload automatically.
 
     !!! tip
         Run `make check-env` after editing `.env.prod`, then `make prod-status` after startup to verify the stack.
@@ -351,8 +351,9 @@ If you used the Docker setup, these commands help you manage the environment:
 
 | Command | Description |
 |---------|-------------|
-| `make prod-dev` | Start with local code mounting (dev mode) |
-| `make prod-up` | Start production services |
+| `make dev` | Start full Docker development with local code mounting |
+| `make start` | Start company/server external-nginx runtime |
+| `make prod-dev` | Compatibility alias for `make dev` |
 | `make prod-restart` | Restart backend (picks up code changes) |
 | `make prod-logs` | Tail all service logs |
 | `make prod-status` | Show status of all services |
@@ -363,7 +364,7 @@ If you used the Docker setup, these commands help you manage the environment:
 
 In this tutorial, you:
 
-- Installed Quorvex AI using Docker (`make prod-dev`) or locally (`make setup`)
+- Installed Quorvex AI using Docker (`make dev`)
 - Configured API credentials in `.env.prod` (Docker) or `.env` (local)
 - Wrote a test spec in plain English markdown
 - Ran the Pipeline to generate a Playwright test

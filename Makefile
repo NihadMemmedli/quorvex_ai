@@ -1,4 +1,4 @@
-.PHONY: setup setup-skills start restart dev run clean help docker-up docker-down docker-build check-env logs stop \
+.PHONY: setup setup-skills start restart dev run run-skill clean help docker-up docker-down docker-build check-env logs stop \
         autopilot-stable-up autopilot-stable-down autopilot-dev-up autopilot-status autopilot-logs \
         prod prod-up prod-down prod-down-safe prod-restart prod-logs prod-build prod-build-no-cache prod-status prod-dev prod-dev-build prod-env-bootstrap \
         backup backup-full backup-status restore-list restore restore-from-minio \
@@ -9,7 +9,7 @@
         db-migrate db-upgrade db-downgrade db-history db-stamp db-demo-seed youtube-demo-seed \
         docker-prune volume-sizes db-vacuum health-check deploy-check company-rehearsal release-preflight server-upgrade release-to-server upgrade deps-lock \
         load-test agent-runtime-ready agent-temporal-smoke-up agent-temporal-smoke agent-temporal-smoke-logs \
-        k6-workers-up k6-workers-down k6-workers-scale k6-workers-logs k6-workers-status \
+        k6-workers-up k6-workers-down k6-workers-scale k6-workers-logs k6-workers-status dev-k6-workers-up dev-k6-workers-down dev-k6-workers-logs \
         zap-up zap-down zap-status zap-logs \
         lint format test autonomous-soak \
         docs-check docs-visual-check docs-visual-capture docs-serve docs-build docs-deploy \
@@ -23,24 +23,25 @@ help:
 	@echo "  Setup & Run:"
 	@echo "    make setup          - Install dependencies and setup environment"
 	@echo "    make setup-skills   - Install Playwright skill dependencies"
-	@echo "    make start          - Start app runtime for external-nginx deployment"
+	@echo "    make dev            - Start full Docker dev stack with local code mounts"
+	@echo "    make start          - Start company/server runtime for external-nginx deployment"
+	@echo "    make stop           - Stop local dev and server-runtime Compose stacks"
+	@echo "    make restart        - Restart the company/server runtime"
+	@echo "    make logs           - Tail backend and frontend logs"
 	@echo "    make deploy-check   - Verify local external-nginx runtime readiness"
 	@echo "    make company-rehearsal - Simulate company nginx and run browser proxy smoke"
-	@echo "    make stop           - Stop the dashboard stack and local dev processes"
-	@echo "    make restart        - Restart the dashboard stack"
-	@echo "    make dev            - Start the UI and Backend server (development)"
 	@echo "    make run SPEC=...   - Run a specific test spec"
 	@echo "    make run-skill S=.. - Run a Playwright skill script"
 	@echo ""
-	@echo "  Docker (dev):"
-	@echo "    make docker-up      - Start all services via Docker Compose"
+	@echo "  Docker (legacy/local-only):"
+	@echo "    make docker-up      - Unsupported legacy docker-compose.yml path"
 	@echo "    make docker-down    - Stop all Docker services"
 	@echo "    make docker-build   - Rebuild Docker images"
 	@echo ""
-	@echo "  Docker (prod):"
-	@echo "    make prod           - Start production services"
-	@echo "    make prod-up        - Start production services"
-	@echo "    make prod-dev       - Start app runtime with local code and security scanners"
+	@echo "  Docker (advanced/compatibility):"
+	@echo "    make prod           - Legacy repo-managed nginx path (guarded)"
+	@echo "    make prod-up        - Legacy repo-managed nginx path (guarded)"
+	@echo "    make prod-dev       - Compatibility alias for make dev"
 	@echo "    make prod-down      - Stop production services"
 	@echo "    make prod-down-safe - Stop with backup first (recommended)"
 	@echo "    make prod-restart   - Restart app services (picks up mounted code changes)"
@@ -49,8 +50,8 @@ help:
 	@echo "    make prod-build-no-cache - Rebuild without cache (force fresh)"
 	@echo "    make prod-status    - Show status of all services"
 	@echo ""
-	@echo "  Auto Pilot local runtime:"
-	@echo "    make autopilot-stable-up   - Start stable local Auto Pilot stack"
+	@echo "  Auto Pilot local runtime (experimental):"
+	@echo "    make autopilot-stable-up   - Unsupported pending Compose rebuild"
 	@echo "    make autopilot-stable-down - Stop stable local Auto Pilot stack"
 	@echo "    make autopilot-dev-up      - Start Auto Pilot dev stack with hot reload"
 	@echo "    make autopilot-status      - Show Auto Pilot stack status and memory"
@@ -93,14 +94,14 @@ help:
 	@echo "    make zap-status         - Check ZAP scanner status"
 	@echo "    make zap-logs           - View ZAP logs"
 	@echo ""
-	@echo "  Docker Swarm (Enterprise):"
-	@echo "    make swarm-up       - Deploy to Docker Swarm"
+	@echo "  Docker Swarm (unsupported):"
+	@echo "    make swarm-up       - Unsupported experimental path"
 	@echo "    make swarm-down     - Stop Swarm stack"
 	@echo "    make swarm-scale N=8 - Scale Swarm workers"
 	@echo "    make swarm-status   - Check Swarm status"
 	@echo ""
-	@echo "  Kubernetes (Enterprise):"
-	@echo "    make k8s-deploy     - Deploy to Kubernetes"
+	@echo "  Kubernetes (unsupported):"
+	@echo "    make k8s-deploy     - Unsupported experimental path"
 	@echo "    make k8s-delete     - Delete Kubernetes deployment"
 	@echo "    make k8s-status     - Check Kubernetes status"
 	@echo "    make k8s-scale N=8  - Scale Kubernetes workers"
@@ -119,7 +120,7 @@ help:
 	@echo "    make release-preflight VERSION=v1.2.3 - Verify tagged images and deploy dry-run"
 	@echo "    make server-upgrade VERSION=v1.2.3    - Run preflight, deploy, and post-check on server"
 	@echo "    make release-to-server VERSION=v1.2.3 - Push release tag and run server upgrade over SSH"
-	@echo "    make upgrade          - Full upgrade procedure (backup, pull, migrate, restart)"
+	@echo "    make upgrade          - Unsupported legacy upgrade path; use release/server-upgrade"
 	@echo "    make health-check     - Hit all health endpoints and report status"
 	@echo "    make docker-prune     - Remove dangling images, stopped containers, build cache"
 	@echo "    make volume-sizes     - Show sizes of all Docker volumes"
@@ -199,17 +200,57 @@ PROD_COMPOSE = docker compose --env-file .env.prod -f docker-compose.prod.yml
 APP_COMPOSE = $(PROD_COMPOSE) -f docker-compose.dev-override.yml
 AUTOPILOT_STABLE_COMPOSE = $(PROD_COMPOSE) -f docker-compose.autopilot-stable.yml
 BUILDX_CONFIG ?= /tmp/quorvex-buildx
+RUNTIME_PROFILES = --profile standard
+STOP_PROFILES = --profile standard --profile nginx --profile backup-scheduler --profile workers --profile k6-workers --profile security
 
 start:
-	@$(MAKE) prod-dev
+	@$(MAKE) prod-env-bootstrap
+	@echo "Starting company/server runtime for external-nginx deployment..."
+	@echo ""
+	@echo "Company nginx should proxy the public subdomain to frontend :3000 and /websockify to backend :6080."
+	@echo "This target does not start the repo-managed nginx or ZAP security scanner containers."
+	@echo ""
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(PROD_COMPOSE) $(RUNTIME_PROFILES) up -d --build db redis minio hermes
+	@python3 scripts/reconcile_prod_postgres.py
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(PROD_COMPOSE) $(RUNTIME_PROFILES) up -d --build
+	@$(MAKE) agent-runtime-ready
+	@echo ""
+	@echo "External-nginx runtime started:"
+	@echo "  Dashboard:     http://localhost:3000 (proxy target)"
+	@echo "  API:           http://localhost:8001 (private health/admin target)"
+	@echo "  API Docs:      http://localhost:8001/docs"
+	@echo "  VNC WebSocket: http://localhost:6080/websockify (proxy target)"
+	@echo "  MinIO Console: http://localhost:9001"
+	@echo ""
+	@echo "Use the company URL for browser validation; direct localhost ports are server-local checks."
+	@echo "View logs: make logs"
 
 restart:
-	@echo "Restarting dashboard stack..."
+	@echo "Restarting company/server runtime..."
 	@$(MAKE) stop
 	@$(MAKE) start
 
 dev:
-	@./start-ui.sh
+	@$(MAKE) prod-env-bootstrap
+	@echo "Starting full Docker development stack with local code mounts..."
+	@echo ""
+	@echo "This target uses the production-shaped app stack plus docker-compose.dev-override.yml."
+	@echo "Frontend hot reload is enabled. Backend source is mounted, but uvicorn reload is disabled in Docker."
+	@echo "ZAP/security scanning is opt-in: run 'make zap-up' when needed."
+	@echo ""
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) $(RUNTIME_PROFILES) up -d --build db redis minio hermes
+	@python3 scripts/reconcile_prod_postgres.py
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) $(RUNTIME_PROFILES) up -d --build
+	@$(MAKE) agent-runtime-ready
+	@echo ""
+	@echo "Docker dev stack started:"
+	@echo "  Dashboard:     http://localhost:3000"
+	@echo "  API:           http://localhost:8001"
+	@echo "  API Docs:      http://localhost:8001/docs"
+	@echo "  VNC WebSocket: http://localhost:6080/websockify"
+	@echo "  MinIO Console: http://localhost:9001"
+	@echo ""
+	@echo "View logs: make logs"
 
 run:
 	@if [ -z "$(SPEC)" ]; then \
@@ -280,15 +321,9 @@ release-to-server:
 # ==========================================
 
 docker-up:
-	@echo "Starting all services via Docker Compose..."
-	@$(DOCKER_COMPOSE) up -d
-	@echo ""
-	@echo "Services starting..."
-	@echo "  Dashboard: http://localhost:3000"
-	@echo "  API:       http://localhost:8001"
-	@echo "  API Docs:  http://localhost:8001/docs"
-	@echo ""
-	@echo "View logs: $(DOCKER_COMPOSE) logs -f"
+	@echo "docker-compose.yml is a legacy local-only path and is not supported for current app runtime work."
+	@echo "Use 'make dev' for local full-stack Docker development or 'make start' for company/server external-nginx runtime."
+	@exit 2
 
 docker-down:
 	@echo "Stopping all Docker services..."
@@ -298,7 +333,7 @@ docker-down:
 docker-build:
 	@echo "Rebuilding Docker images..."
 	@$(DOCKER_COMPOSE) build --no-cache
-	@echo "Images rebuilt. Run 'make docker-up' to start."
+	@echo "Images rebuilt. Use 'make dev' or 'make start' for supported runtime paths."
 
 # Dev K6 workers (uses docker-compose.yml with volume-mounted code)
 dev-k6-workers-up:
@@ -321,6 +356,11 @@ dev-k6-workers-logs:
 # ==========================================
 
 prod-up:
+	@if [ "$(QUORVEX_ENABLE_REPO_NGINX)" != "1" ]; then \
+		echo "prod-up starts the legacy repo-managed nginx path and is not part of company/server deployment."; \
+		echo "Use 'make start' for external-nginx runtime, or rerun with QUORVEX_ENABLE_REPO_NGINX=1 if you explicitly need repo nginx."; \
+		exit 2; \
+	fi
 	@echo "Starting production services (standard mode with VNC + nginx)..."
 	@$(PROD_COMPOSE) --profile standard --profile nginx --profile backup-scheduler up -d
 	@echo ""
@@ -337,32 +377,12 @@ prod-up:
 prod: prod-up
 
 prod-dev:
-	@$(MAKE) prod-env-bootstrap
-	@echo "Starting external-nginx app runtime with LOCAL CODE MOUNTING and security scanners..."
-	@echo ""
-	@echo "Company nginx should proxy the public subdomain to frontend :3000 and /websockify to backend :6080."
-	@echo "This target does not start the repo-managed nginx container."
-	@echo ""
-	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) --profile standard --profile security up -d --build db redis minio zap hermes
-	@python3 scripts/reconcile_prod_postgres.py
-	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) --profile standard --profile security up -d --build
-	@$(MAKE) agent-runtime-ready
-	@echo ""
-	@echo "External-nginx runtime started:"
-	@echo "  Dashboard:     http://localhost:3000 (proxy target)"
-	@echo "  API:           http://localhost:8001 (private health/admin target)"
-	@echo "  API Docs:      http://localhost:8001/docs"
-	@echo "  VNC WebSocket: http://localhost:6080/websockify (proxy target)"
-	@echo "  MinIO Console: http://localhost:9001"
-	@echo "  ZAP API:       http://localhost:$${ZAP_PORT:-8090}"
-	@echo ""
-	@echo "Use the company URL for browser validation; direct localhost ports are server-local checks."
-	@echo "Security Testing full scans are available after ZAP health is ready."
-	@echo "View logs: make prod-logs"
+	@echo "prod-dev is a compatibility alias. Use 'make dev' for the supported local Docker development workflow."
+	@$(MAKE) dev
 
 prod-dev-build:
 	@echo "Rebuilding production development images..."
-	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) --profile standard --profile security build --progress=plain
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) $(RUNTIME_PROFILES) build --progress=plain
 
 prod-env-bootstrap:
 	@echo "Bootstrapping production environment..."
@@ -370,7 +390,8 @@ prod-env-bootstrap:
 
 prod-down:
 	@echo "Stopping production services gracefully..."
-	@$(PROD_COMPOSE) --profile standard --profile nginx --profile backup-scheduler --profile workers --profile k6-workers down --remove-orphans --timeout 30
+	@-$(APP_COMPOSE) $(STOP_PROFILES) down --remove-orphans --timeout 30 2>/dev/null || true
+	@-$(PROD_COMPOSE) $(STOP_PROFILES) down --remove-orphans --timeout 30 2>/dev/null || true
 	@echo "Production services stopped."
 
 prod-down-safe:
@@ -378,18 +399,19 @@ prod-down-safe:
 	@echo "Step 1: Running backup before shutdown..."
 	@$(PROD_COMPOSE) --profile backup-full run --rm backup-full 2>/dev/null || echo "Backup skipped (service not available)"
 	@echo "Step 2: Stopping services gracefully (30s timeout)..."
-	@$(PROD_COMPOSE) --profile standard --profile nginx --profile backup-scheduler --profile workers --profile k6-workers down --remove-orphans --timeout 30
+	@-$(APP_COMPOSE) $(STOP_PROFILES) down --remove-orphans --timeout 30 2>/dev/null || true
+	@-$(PROD_COMPOSE) $(STOP_PROFILES) down --remove-orphans --timeout 30 2>/dev/null || true
 	@echo "Step 3: Verifying shutdown..."
 	@docker ps --filter "name=quorvex" --format "{{.Names}}" | grep -q . && echo "WARNING: Some containers still running!" || echo "All containers stopped."
 	@echo "=== Safe shutdown complete ==="
 
 prod-restart:
 	@echo "Restarting app services (picking up mounted code changes)..."
-	@$(APP_COMPOSE) --profile standard restart backend frontend || $(PROD_COMPOSE) --profile workers restart backend-slim frontend
+	@$(APP_COMPOSE) $(RUNTIME_PROFILES) restart backend frontend || $(PROD_COMPOSE) $(RUNTIME_PROFILES) restart backend frontend
 	@echo "App services restarted."
 
 prod-logs:
-	@$(PROD_COMPOSE) logs -f backend frontend autonomous-mission-worker custom-workflow-worker
+	@$(PROD_COMPOSE) $(RUNTIME_PROFILES) logs -f backend frontend autonomous-mission-worker custom-workflow-worker
 
 prod-build:
 	@if [ ! -f ".env.prod" ]; then \
@@ -421,24 +443,9 @@ prod-status:
 # ==========================================
 
 autopilot-stable-up:
-	@if [ ! -f ".env.prod" ]; then \
-		echo "No .env.prod file found. Creating from .env.prod.example..."; \
-		cp .env.prod.example .env.prod; \
-		echo "Created .env.prod — edit it with your API credentials."; \
-		echo ""; \
-	fi
-	@echo "Starting stable local Auto Pilot stack..."
-	@echo ""
-	@echo "Docker Desktop memory: set at least 12GB, recommended 16GB."
-	@echo "This mode disables backend reload, uses headed browser execution for live view, raises frontend memory to 4G, and lowers local agent concurrency."
-	@echo ""
-	@mkdir -p $(BUILDX_CONFIG)
-	@BUILDX_CONFIG=$(BUILDX_CONFIG) $(AUTOPILOT_STABLE_COMPOSE) --profile standard up -d --build
-	@echo ""
-	@echo "Stable Auto Pilot mode started:"
-	@echo "  Dashboard: http://localhost:3000"
-	@echo "  API:       http://localhost:8001"
-	@echo "  Health:    make autopilot-status"
+	@echo "autopilot-stable-up is currently unsupported: docker-compose.autopilot-stable.yml references browser-runtime without a valid base service."
+	@echo "Use 'make dev' for local Auto Pilot development until this stack is rebuilt."
+	@exit 2
 
 autopilot-stable-down:
 	@echo "Stopping stable local Auto Pilot stack..."
@@ -447,7 +454,7 @@ autopilot-stable-down:
 
 autopilot-dev-up:
 	@echo "Starting Auto Pilot dev stack with hot reload..."
-	@$(MAKE) prod-dev
+	@$(MAKE) dev
 
 autopilot-status:
 	@echo "Auto Pilot service status:"
@@ -650,17 +657,16 @@ check-env:
 	fi
 
 logs:
-	@if [ -f "api.log" ] || [ -f "web.log" ]; then \
-		tail -f api.log web.log 2>/dev/null || echo "No logs found. Start services with 'make dev' first."; \
-	else \
-		echo "No logs found. Start services with 'make dev' first."; \
-	fi
+	@$(APP_COMPOSE) $(RUNTIME_PROFILES) logs -f backend frontend 2>/dev/null || \
+		$(PROD_COMPOSE) $(RUNTIME_PROFILES) logs -f backend frontend 2>/dev/null || \
+		tail -f api.log web.log 2>/dev/null || \
+		echo "No logs found. Start services with 'make dev' or 'make start' first."
 
 stop:
 	@echo "Stopping services gracefully..."
 	@# Stop Docker stacks first so Docker-owned port forwarders are not killed directly.
-	@-$(APP_COMPOSE) --profile standard --profile nginx --profile backup-scheduler --profile workers --profile k6-workers --profile security down --remove-orphans --timeout 30 2>/dev/null || true
-	@-$(PROD_COMPOSE) --profile standard --profile nginx --profile backup-scheduler --profile workers --profile k6-workers --profile security down --remove-orphans --timeout 30 2>/dev/null || true
+	@-$(APP_COMPOSE) $(STOP_PROFILES) down --remove-orphans --timeout 30 2>/dev/null || true
+	@-$(PROD_COMPOSE) $(STOP_PROFILES) down --remove-orphans --timeout 30 2>/dev/null || true
 	@-$(DOCKER_COMPOSE) --profile redis --profile k6-workers down --remove-orphans --timeout 30 2>/dev/null || true
 	@# Then stop any remaining local processes started by start-ui.sh.
 	@-lsof -ti :8001 | xargs kill -15 2>/dev/null || true
@@ -831,19 +837,9 @@ zap-logs:
 # ==========================================
 
 swarm-up:
-	@echo "Deploying to Docker Swarm..."
-	@if ! docker info 2>/dev/null | grep -q "Swarm: active"; then \
-		echo "Initializing Docker Swarm..."; \
-		docker swarm init 2>/dev/null || echo "Swarm already initialized or failed"; \
-	fi
-	@echo ""
-	@docker stack deploy -c docker-compose.swarm.yml quorvex
-	@echo ""
-	@echo "Swarm deployment started."
-	@echo ""
-	@echo "View status:  make swarm-status"
-	@echo "Scale:        make swarm-scale N=8"
-	@echo "View logs:    docker service logs quorvex_backend -f"
+	@echo "Docker Swarm deployment is currently unsupported and not company-deployment safe."
+	@echo "Use 'make start' for server runtime or 'make dev' for local Docker development."
+	@exit 2
 
 swarm-down:
 	@echo "Removing Swarm stack..."
@@ -853,23 +849,12 @@ swarm-down:
 	@echo "Note: Swarm mode is still active. Run 'docker swarm leave --force' to disable."
 
 swarm-scale:
-	@if [ -z "$(N)" ]; then \
-		echo "Error: N (number of workers) argument is required."; \
-		echo "Usage: make swarm-scale N=8"; \
-		exit 1; \
-	fi
-	@echo "Scaling Swarm browser workers to $(N)..."
-	@docker service scale quorvex_browser-workers=$(N)
-	@echo ""
-	@make swarm-status
+	@echo "Docker Swarm scaling is currently unsupported."
+	@exit 2
 
 swarm-status:
-	@echo "=== Docker Swarm Status ==="
-	@echo ""
-	@docker stack services quorvex 2>/dev/null || echo "Stack not deployed. Run 'make swarm-up' first."
-	@echo ""
-	@echo "Browser worker tasks:"
-	@docker service ps quorvex_browser-workers --format "table {{.Name}}\t{{.CurrentState}}\t{{.Node}}" 2>/dev/null || echo "  No workers running"
+	@echo "Docker Swarm runtime is currently unsupported."
+	@docker stack services quorvex 2>/dev/null || true
 
 # ==========================================
 # KUBERNETES (Enterprise - Auto-scaling)
@@ -879,26 +864,9 @@ swarm-status:
 K8S_NAMESPACE ?= quorvex
 
 k8s-deploy:
-	@echo "Deploying to Kubernetes..."
-	@echo ""
-	@echo "Checking prerequisites..."
-	@kubectl version --client > /dev/null 2>&1 || (echo "Error: kubectl not found" && exit 1)
-	@echo "  + kubectl found"
-	@echo ""
-	@if [ -f "k8s/secrets.local.yaml" ]; then \
-		echo "Applying local Kubernetes secrets..."; \
-		kubectl apply -f k8s/secrets.local.yaml; \
-	elif [ -f "k8s/secrets.yaml" ]; then \
-		echo "WARNING: k8s/secrets.local.yaml not found!"; \
-		echo "Copy k8s/secrets.yaml to k8s/secrets.local.yaml and fill in values."; \
-		echo ""; \
-		read -p "Continue with template secrets? (yes/no): " confirm && [ "$$confirm" = "yes" ] || exit 1; \
-		kubectl apply -f k8s/secrets.yaml; \
-	fi
-	@echo "Applying Kubernetes manifests..."
-	@kubectl apply -k k8s/
-	@echo ""
-	@echo "Deployment started. View status: make k8s-status"
+	@echo "Kubernetes deployment is currently unsupported and not company-deployment safe."
+	@echo "Use 'make start' for server runtime or 'make dev' for local Docker development."
+	@exit 2
 
 k8s-delete:
 	@echo "Deleting Kubernetes deployment..."
@@ -923,17 +891,8 @@ k8s-status:
 	@kubectl get ingress -n $(K8S_NAMESPACE) 2>/dev/null || true
 
 k8s-scale:
-	@if [ -z "$(N)" ]; then \
-		echo "Error: N (number of workers) argument is required."; \
-		echo "Usage: make k8s-scale N=8"; \
-		exit 1; \
-	fi
-	@echo "Scaling Kubernetes browser workers to $(N)..."
-	@kubectl scale deployment browser-workers -n $(K8S_NAMESPACE) --replicas=$(N)
-	@echo ""
-	@echo "Note: HPA may override this if CPU/memory thresholds are breached."
-	@echo ""
-	@kubectl get pods -n $(K8S_NAMESPACE) -l app=browser-worker
+	@echo "Kubernetes scaling is currently unsupported."
+	@exit 2
 
 k8s-logs:
 	@echo "Tailing Kubernetes logs (Ctrl+C to stop)..."
@@ -1259,34 +1218,6 @@ deps-lock:
 	@echo "  diff <(sort requirements.lock | grep '==') <(sort requirements.freeze)"
 
 upgrade:
-	@echo "=== Production Upgrade Procedure ==="
-	@echo ""
-	@echo "Step 1/6: Pre-flight checks..."
-	@curl -sf http://localhost:8001/health >/dev/null 2>&1 || { echo "WARNING: Backend not running. Starting fresh deployment."; }
-	@echo ""
-	@echo "Step 2/6: Full backup before upgrade..."
-	@$(PROD_COMPOSE) --profile backup-full run --rm backup-full 2>/dev/null || echo "  Backup skipped (services not running)"
-	@echo ""
-	@echo "Step 3/6: Pulling latest code..."
-	@git pull
-	@echo ""
-	@echo "Step 4/6: Rebuilding images..."
-	@$(PROD_COMPOSE) --profile standard --profile nginx build
-	@echo ""
-	@echo "Step 5/6: Running database migrations..."
-	@$(PROD_COMPOSE) --profile standard --profile nginx run --rm backend sh -c "cd /app && python -c 'from orchestrator.api.db import init_db; init_db()'" 2>/dev/null || echo "  Migration will run on startup"
-	@echo ""
-	@echo "Step 6/6: Restarting services..."
-	@$(PROD_COMPOSE) --profile standard --profile nginx up -d
-	@echo ""
-	@echo "Waiting for services to become healthy..."
-	@sleep 10
-	@make health-check
-	@echo ""
-	@echo "=== Upgrade complete ==="
-	@echo ""
-	@echo "If something went wrong:"
-	@echo "  1. make db-downgrade     (roll back migration)"
-	@echo "  2. git checkout <tag>    (revert code)"
-	@echo "  3. make prod-build       (rebuild old images)"
-	@echo "  4. make prod-up          (restart with old code)"
+	@echo "make upgrade is a legacy in-place path and is currently unsupported."
+	@echo "Use 'make server-upgrade VERSION=v1.2.3' for server updates or 'make release-to-server VERSION=v1.2.3' from local development."
+	@exit 2

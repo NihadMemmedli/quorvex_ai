@@ -17,30 +17,32 @@ Choose a deployment mode and configure it for your environment, from local devel
 
 | Mode | Use Case | Command | Scaling |
 |------|----------|---------|---------|
-| Local dev | Solo developer | `make dev` | Single instance |
-| Minimal Docker | Quick demo, low-resource machine | `docker compose -f docker-compose.minimal.yml up -d` | Single instance |
-| Docker dev | Team/reproducible | `make docker-up` | Single instance |
-| Production (Standard) | Small team, VNC | `make prod-up` | 1 backend + browsers |
+| Docker dev | Main local full-stack development | `make dev` | Single instance |
+| Company/server runtime | Company-managed DNS/TLS/nginx in front of Compose | `make start` | Single instance |
+| Minimal Docker | Legacy quick demo, local-only | `docker compose -f docker-compose.minimal.yml up -d` | Single instance |
+| Repo-managed nginx | Legacy single-host path, guarded | `QUORVEX_ENABLE_REPO_NGINX=1 make prod-up` | 1 backend + browsers |
 | Production (Workers) | Medium team | `make workers-up` | N browser containers |
-| Docker Swarm | Enterprise, simpler | `make swarm-up` | Overlay networking |
-| Kubernetes | Enterprise, auto-scale | `make k8s-deploy` | HPA auto-scaling |
+| Docker Swarm | Unsupported experimental path | `make swarm-up` | Overlay networking |
+| Kubernetes | Unsupported experimental path | `make k8s-deploy` | HPA auto-scaling |
 
-## Local Development
+## Docker Development
 
-The simplest development mode. It runs the backend and frontend as local processes. If Docker is available, `make dev` starts a PostgreSQL container; otherwise it falls back to SQLite.
+The main development mode runs the production-shaped Compose stack with local
+code mounts. The frontend runs in Next.js development mode with hot reload.
+Backend source is mounted, but backend reload is disabled in Docker to avoid
+bind-mount import races.
 
 ```bash
-make setup    # One-time: venv, deps, browsers
 make check-env
-make dev      # Start backend (port 8001) + frontend (port 3000)
+make dev      # Start full Docker stack
 ```
 
-`make dev` executes `start-ui.sh`, which:
+`make dev` starts:
 
-1. Kills any existing processes on ports 8001 and 3000
-2. Starts a PostgreSQL container if Docker is available (falls back to SQLite)
-3. Launches the FastAPI backend with `uvicorn --reload`
-4. Launches the Next.js frontend with `npm run dev`
+1. PostgreSQL, Redis, MinIO, Temporal, Hermes, backend, frontend, and VNC/websockify
+2. Local `orchestrator/` and `web/src/` mounts
+3. Frontend hot reload through `npm run dev`
+4. No repo-managed nginx and no ZAP unless `make zap-up` is run
 
 Services:
 
@@ -50,21 +52,20 @@ Services:
 | Backend API | http://localhost:8001 |
 | API Docs (Swagger) | http://localhost:8001/docs |
 
-Logs are written to `api.log` and `web.log` in the project root.
-
 ```bash
 make stop     # Stop all services
 make logs     # Tail backend + frontend logs
 ```
 
-## Docker Development
+## Legacy Compose Paths
 
-Run all services in containers using `docker-compose.yml`.
+`docker-compose.yml`, `docker-compose.minimal.yml`, Swarm, and Kubernetes files
+are retained for reference or local experiments, but they are not the supported
+runtime path for current development or company deployment.
 
 ```bash
-make docker-build    # Build images
-make docker-up       # Start all services
-make docker-down     # Stop all services
+make dev      # Supported local full-stack Docker path
+make start    # Supported company/server runtime path
 ```
 
 ## Production Deployment
@@ -128,12 +129,15 @@ Validate the file before startup:
 make check-env
 ```
 
-### Standard Mode (with VNC)
+### Company/Server Runtime
 
-Runs a single backend container with Playwright browsers and VNC streaming. Best for small teams that need live browser observation.
+Runs the external-nginx app runtime: a single backend container with Playwright
+browsers and VNC/websockify, plus frontend, database, queue, storage, Temporal,
+and Hermes. Company DNS/TLS/nginx proxies to frontend port 3000 and
+`/websockify` on port 6080.
 
 ```bash
-make prod-up
+make start
 ```
 
 Services started:
@@ -162,10 +166,11 @@ Resource allocation: 24 GB memory limit, 8 CPUs, 2 GB shared memory.
 Mount local source code into production containers for faster iteration without rebuilding:
 
 ```bash
-make prod-dev
+make dev
 ```
 
-Changes to `orchestrator/` auto-reload via `uvicorn --reload`. Changes to `web/src/` auto-reload via Next.js.
+Changes to `web/src/` hot reload via Next.js. Backend source is mounted, but
+backend reload is disabled in the Docker override.
 
 ### Workers Mode (Isolated Browsers)
 
@@ -201,7 +206,8 @@ Each worker container has:
 ### Production Commands Reference
 
 ```bash
-make prod-up              # Start standard mode
+make start                # Start company/server external-nginx runtime
+make dev                  # Start local full-stack Docker development
 make prod-down            # Stop services (30s graceful timeout)
 make prod-down-safe       # Backup first, then stop
 make prod-restart         # Restart backend only (picks up code changes)
@@ -214,24 +220,23 @@ make prod-status          # Service status + health check
 ### Upgrading Production
 
 ```bash
-make upgrade
+make server-upgrade VERSION=v1.2.3
 ```
 
-This runs a 6-step procedure:
+Server upgrades should use the release/private-deploy flow rather than the old
+in-place `make upgrade` target:
 
-1. Pre-flight health check
-2. Full backup (DB + specs + tests + PRDs)
-3. `git pull` latest code
-4. Rebuild Docker images
-5. Run database migrations
-6. Restart services and verify health
+1. Run release preflight and private deploy dry-run
+2. Pull the tagged images
+3. Deploy through the private deployment repository
+4. Run post-deploy health checks
 
 Rollback if something goes wrong:
 
 ```bash
 make db-downgrade              # Roll back migration
 git checkout <previous-tag>    # Revert code
-make prod-build && make prod-up  # Rebuild and restart
+make prod-build && make start   # Rebuild and restart external-nginx runtime
 ```
 
 ## Backup and Recovery
@@ -441,14 +446,16 @@ Migrations are stored in `orchestrator/migrations/versions/` and managed by Alem
 
 ## Reverse Proxy with Nginx
 
-The production stack starts the nginx profile by default through `make prod-up`. The checked-in nginx config is an HTTP reverse proxy on port 80. Terminate TLS at an external load balancer, ingress controller, or update `nginx/nginx.conf` with `listen 443 ssl` and certificate directives before relying on container-local TLS.
+Company deployments use company DNS/TLS/nginx in front of `make start`; the
+repo-managed nginx profile is not part of that path. Company nginx proxies `/`
+to frontend port 3000 and `/websockify` to backend port 6080.
 
-To start the same profiles manually:
-   ```bash
-   docker compose --env-file .env.prod -f docker-compose.prod.yml --profile standard --profile nginx --profile backup-scheduler up -d
-   ```
+The guarded legacy repo-managed nginx target is available only when explicitly
+requested:
 
-Nginx proxies to the backend and frontend. Port 443 is exposed by Compose for custom TLS configs, but the default config does not enable TLS.
+```bash
+QUORVEX_ENABLE_REPO_NGINX=1 make prod-up
+```
 
 ## Health Checks
 

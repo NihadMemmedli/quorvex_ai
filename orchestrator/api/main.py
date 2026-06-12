@@ -4102,6 +4102,10 @@ def _augment_active_browser_metadata(metadata: dict[str, Any], status: str | Non
         return metadata
     if not metadata.get("live_view_available") or metadata.get("headless") is True:
         return metadata
+    if metadata.get("browser_runtime") == "temporal_vnc_worker":
+        # Execution is delegated to a live browser worker; local display
+        # diagnostics describe the backend container and would be misleading.
+        return metadata
 
     diagnostics = _live_browser_display_diagnostics()
     metadata = dict(metadata)

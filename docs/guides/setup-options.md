@@ -11,10 +11,10 @@ Choose the smallest setup that matches what you need to prove. You can move from
 
 | Path | Use when | Database | Main command | Trade-off |
 |------|----------|----------|--------------|-----------|
-| Minimal Docker | You want a quick demo on a laptop or small VM | SQLite | `docker compose -f docker-compose.minimal.yml up -d` | No Redis, MinIO, VNC, or distributed workers |
-| Full Docker dev | You want the dashboard, queues, storage, VNC, and scanners locally | PostgreSQL | `make prod-dev` | More RAM and disk usage |
-| Local native dev | You are changing backend or frontend code | SQLite or PostgreSQL | `make setup && make dev` | More host dependency setup |
-| Production single host | You are running Quorvex for a team | PostgreSQL | `make prod-up` | Requires real secrets, backups, and operational care |
+| Full Docker dev | You want the dashboard, queues, storage, VNC, and frontend hot reload locally | PostgreSQL | `make dev` | More RAM and disk usage |
+| Company/server runtime | You are running behind company DNS/TLS/nginx | PostgreSQL | `make start` | Requires real secrets, backups, and operational care |
+| Minimal Docker | Legacy quick demo on a laptop or small VM | SQLite | `docker compose -f docker-compose.minimal.yml up -d` | Local-only and unsupported for company deployment |
+| Repo-managed nginx | Legacy single-host path | PostgreSQL | `QUORVEX_ENABLE_REPO_NGINX=1 make prod-up` | Guarded; not used for company deployment |
 | Browser worker mode | You need more isolated or concurrent browser execution | PostgreSQL | `make workers-up` | More containers to monitor |
 | Kubernetes | You need enterprise scheduling, scaling, and cluster operations | PostgreSQL | `make k8s-deploy` | Requires Kubernetes ownership |
 
@@ -33,7 +33,7 @@ Use **Production single host** for the first real team deployment. Move to brows
 | Path | Required |
 |------|----------|
 | Minimal Docker | Docker Compose v2, `.env` with `ANTHROPIC_AUTH_TOKEN` |
-| Full Docker dev | Docker Compose v2, 8 GB+ available Docker memory. `make prod-dev` can create `.env.prod` from `.env.prod.example` for local evaluation; edit it with your provider token before real use. |
+| Full Docker dev | Docker Compose v2, 8 GB+ available Docker memory. `make dev` can create `.env.prod` from `.env.prod.example` for local evaluation; edit it with your provider token before real use. |
 | Local native dev | Python 3.10+, Node.js 20+, Playwright browsers, optional Docker for PostgreSQL |
 | Production single host | Docker Compose v2, `.env.prod` with rotated secrets, backup location, TLS or trusted network |
 | Kubernetes | `kubectl`, cluster storage classes, ingress/TLS plan, namespace permissions |

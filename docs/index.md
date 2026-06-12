@@ -82,10 +82,10 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
 
 | Setup | Best for | Command |
 |-------|----------|---------|
-| Minimal Docker | Fast demo on smaller machines with SQLite | `docker compose -f docker-compose.minimal.yml up -d` |
-| Full Docker dev | Self-hosted evaluation with dashboard, queues, storage, VNC, and security scanning | `make prod-dev` |
-| Local dev | Contributor workflow with native backend/frontend processes | `make setup && make dev` |
-| Production | Hardened single-host deployment | `make prod-up` |
+| Full Docker dev | Main local workflow with dashboard, queues, storage, VNC, and frontend hot reload | `make dev` |
+| Company/server runtime | App runtime for company-managed DNS/TLS/nginx | `make start` |
+| Minimal Docker | Legacy local-only demo on smaller machines with SQLite | `docker compose -f docker-compose.minimal.yml up -d` |
+| Repo-managed nginx | Legacy single-host path | `QUORVEX_ENABLE_REPO_NGINX=1 make prod-up` |
 
 === "Minimal Docker (Recommended)"
 
@@ -107,7 +107,7 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
     cd quorvex_ai
     cp .env.prod.example .env.prod
     # Edit .env.prod with your AI provider token
-    make prod-dev
+    make dev
     ```
 
     Open [http://localhost:3000](http://localhost:3000) for the dashboard.
@@ -131,7 +131,7 @@ The same foundation powers AutoPilot, PRD-to-tests, API generation, specialized 
     ```
 
 !!! tip
-    `make prod-dev` starts the full Docker stack with local code mounting. See the [Getting Started](tutorials/getting-started.md) tutorial for the full walkthrough.
+    `make dev` starts the full Docker stack with local code mounting and frontend hot reload. See the [Getting Started](tutorials/getting-started.md) tutorial for the full walkthrough.
 
 ![Quorvex AI Dashboard](assets/dashboard-screenshot.png)
 

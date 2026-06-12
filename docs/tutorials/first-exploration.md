@@ -10,7 +10,7 @@ In this tutorial, you will use Quorvex AI's exploration agent to autonomously di
 ## Prerequisites
 
 - Quorvex AI installed and configured (complete [Your First Test in 10 Minutes](./getting-started.md) first)
-- The dashboard running (`make dev` or `make prod-dev` for Docker)
+- The dashboard running (`make dev`)
 
 ## What is AI Exploration?
 

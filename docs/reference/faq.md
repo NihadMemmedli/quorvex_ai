@@ -89,7 +89,7 @@ Use credential placeholders in specs (`{{VARIABLE_NAME}}`), define values in `.e
 | Registration disabled | Set `ALLOW_REGISTRATION=true` in `.env` |
 | ZAP not reachable | Start with: `docker compose --profile security up -d zap` |
 | Nuclei not found | Install nuclei binary or use Docker security profile |
-| `make prod-dev` backend won't start | Check `docker logs` for migration errors |
+| `make dev` backend won't start | Check `docker logs` for migration errors |
 | "No target URL found in spec" | Spec must contain a URL (e.g., "Navigate to https://...") |
 | Test keeps failing after healing | Use `--hybrid` for more healing iterations |
 | Exploration stops early | Increase `--max-interactions` (default: 50) |

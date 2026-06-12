@@ -9,7 +9,7 @@ Convert a PDF Product Requirements Document into test specifications and product
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - A PDF PRD document describing product features
 - AI credentials configured in `.env`
 - Optional: a live target URL for the application described in the PRD

@@ -5,13 +5,15 @@
 <p class="caption">Quorvex dashboard overview running on the deployed platform.</p>
 
 
-Quorvex AI supports three deployment modes of increasing scale: local development, Docker Compose, and Kubernetes. This document explains the trade-offs behind each topology and why the infrastructure is structured the way it is.
+Quorvex AI's supported Compose paths are local Docker development and
+company/server runtime behind external nginx. Legacy Kubernetes and Swarm files
+remain in the repo, but they are not the supported deployment path.
 
 ## Deployment Spectrum
 
 ```mermaid
 graph LR
-    LOCAL["Local Dev<br/>make dev"] --> DOCKER["Docker Compose<br/>make prod-up"]
+    LOCAL["Docker Dev<br/>make dev"] --> DOCKER["Server Runtime<br/>make start"]
     DOCKER --> K8S["Kubernetes<br/>make k8s-deploy"]
 
     LOCAL ---|"Solo dev<br/>SQLite<br/>Native browsers"| LOCAL
@@ -21,8 +23,8 @@ graph LR
 
 | Mode | Database | Browser Execution | Scaling | Setup Effort |
 |------|----------|-------------------|---------|-------------|
-| Local | SQLite | Native process | None | `make setup` |
-| Docker Compose | PostgreSQL | Container (single or workers) | Manual | `make prod-up` |
+| Docker dev | PostgreSQL | Container | None | `make dev` |
+| Server runtime | PostgreSQL | Container (single or workers) | Manual | `make start` |
 | Kubernetes | PostgreSQL | HPA-managed pods | Automatic | `make k8s-deploy` |
 
 ## Why Docker Compose for Teams

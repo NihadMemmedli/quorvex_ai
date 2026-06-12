@@ -20,7 +20,7 @@ The database testing framework provides:
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - A PostgreSQL database to test (with read access at minimum)
 - AI credentials configured in `.env`
 

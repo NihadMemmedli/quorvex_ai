@@ -9,7 +9,7 @@ Enable authentication, create users, assign project roles, and configure role-ba
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - `JWT_SECRET_KEY` set in `.env` or `.env.prod` (required for token signing)
 - Admin access to the server or `.env` configuration
 

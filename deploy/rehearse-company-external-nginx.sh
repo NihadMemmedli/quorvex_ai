@@ -15,6 +15,7 @@ START_APP="${QUORVEX_REHEARSAL_START_APP:-true}"
 KEEP_NGINX="${QUORVEX_REHEARSAL_KEEP_NGINX:-false}"
 TMP_DIR="${QUORVEX_REHEARSAL_TMP_DIR:-$(mktemp -d /tmp/quorvex-company-rehearsal.XXXXXX)}"
 ENV_FILE="${QUORVEX_REHEARSAL_ENV_FILE:-${QUORVEX_ENV_FILE:-${ROOT_DIR}/.env.prod}}"
+DEPLOY_CHECK_ENV_FILE=""
 
 log() {
   printf '[company-rehearsal] %s\n' "$*"
@@ -67,6 +68,27 @@ ensure_app_runtime() {
   (cd "${ROOT_DIR}" && make start)
   wait_for_url frontend "${FRONTEND_URL}" 60
   wait_for_url backend "${BACKEND_URL}/health" 60
+}
+
+prepare_deploy_check_env() {
+  local source="${ENV_FILE}"
+  local target="${TMP_DIR}/rehearsal.env"
+
+  if [ -f "${source}" ]; then
+    cp "${source}" "${target}"
+  else
+    : > "${target}"
+  fi
+
+  if grep -q '^VNC_PUBLIC_WS_URL=' "${target}"; then
+    if ! grep -q '^VNC_PUBLIC_WS_URL=.' "${target}"; then
+      sed -i.bak "s|^VNC_PUBLIC_WS_URL=.*|VNC_PUBLIC_WS_URL=wss://${HOST}/websockify|" "${target}"
+    fi
+  else
+    printf '\nVNC_PUBLIC_WS_URL=wss://%s/websockify\n' "${HOST}" >> "${target}"
+  fi
+
+  DEPLOY_CHECK_ENV_FILE="${target}"
 }
 
 write_nginx_config() {
@@ -185,7 +207,8 @@ main() {
   require_command npx
 
   ensure_app_runtime
-  python3 "${ROOT_DIR}/scripts/deploy_check.py" --env-file "${ENV_FILE}"
+  prepare_deploy_check_env
+  python3 "${ROOT_DIR}/scripts/deploy_check.py" --env-file "${DEPLOY_CHECK_ENV_FILE}"
   write_nginx_config
   start_nginx
   run_smoke

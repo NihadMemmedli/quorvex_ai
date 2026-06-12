@@ -9,7 +9,7 @@ Connect Quorvex AI with external tools for test case management, issue tracking,
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - For TestRail: a TestRail account with API access enabled
 - For Jira: a Jira Cloud or Server instance with API token
 - For CI/CD: a GitHub or GitLab repository

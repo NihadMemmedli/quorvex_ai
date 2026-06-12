@@ -42,8 +42,10 @@ RUN python - <<'PY'
 import json
 import os
 import platform
+import shutil
 import stat
 import tempfile
+import time
 import urllib.request
 import zipfile
 
@@ -52,8 +54,37 @@ arch = arch_map.get(platform.machine())
 if not arch:
     raise SystemExit(f"Unsupported architecture for nuclei install: {platform.machine()}")
 
-with urllib.request.urlopen("https://api.github.com/repos/projectdiscovery/nuclei/releases/latest", timeout=30) as response:
-    release = json.load(response)
+def fetch_json(url, retries=5):
+    request = urllib.request.Request(url, headers={"User-Agent": "quorvex-docker-build"})
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                return json.load(response)
+        except Exception:
+            if attempt == retries:
+                raise
+            time.sleep(2 * attempt)
+
+def download(url, target_path, expected_size=None, retries=5):
+    request = urllib.request.Request(url, headers={"User-Agent": "quorvex-docker-build"})
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response, open(target_path, "wb") as output:
+                shutil.copyfileobj(response, output, length=1024 * 1024)
+            actual_size = os.path.getsize(target_path)
+            if expected_size and actual_size != expected_size:
+                raise RuntimeError(f"incomplete download: got {actual_size} out of {expected_size} bytes")
+            return
+        except Exception:
+            try:
+                os.remove(target_path)
+            except FileNotFoundError:
+                pass
+            if attempt == retries:
+                raise
+            time.sleep(2 * attempt)
+
+release = fetch_json("https://api.github.com/repos/projectdiscovery/nuclei/releases/latest")
 
 asset = next(
     (
@@ -68,8 +99,11 @@ if not asset:
 
 with tempfile.TemporaryDirectory() as tmpdir:
     archive_path = os.path.join(tmpdir, asset["name"])
-    urllib.request.urlretrieve(asset["browser_download_url"], archive_path)
+    download(asset["browser_download_url"], archive_path, asset.get("size"))
     with zipfile.ZipFile(archive_path) as archive:
+        corrupt_member = archive.testzip()
+        if corrupt_member:
+            raise RuntimeError(f"Corrupt nuclei archive member: {corrupt_member}")
         archive.extract("nuclei", tmpdir)
     target = "/usr/local/bin/nuclei"
     os.replace(os.path.join(tmpdir, "nuclei"), target)

@@ -9,7 +9,7 @@ Store, use, and rotate test credentials without exposing secrets in spec files o
 
 ## Prerequisites
 
-- Quorvex AI installed and running (`make dev` or `make prod-dev`)
+- Quorvex AI installed and running (`make dev`)
 - Access to the `.env` file (CLI mode) or the dashboard Settings page (web mode)
 - `JWT_SECRET_KEY` set in `.env` (required for credential encryption)
 

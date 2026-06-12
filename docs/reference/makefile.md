@@ -13,9 +13,9 @@ Complete reference for all `make` targets in Quorvex AI.
 |---------|-------------|---------------|---------|
 | `make setup` | Install Python venv, Node deps, Playwright browsers, database | -- | `make setup` |
 | `make setup-skills` | Install Playwright skill dependencies (npm + Chromium) | `.claude/skills/playwright` directory | `make setup-skills` |
-| `make start` | Start the app runtime for external-nginx deployment via `make prod-dev` | Docker, `.env.prod`, company nginx | `make start` |
-| `make restart` | Stop and restart the dashboard stack | Docker, `.env.prod` | `make restart` |
-| `make dev` | Start backend API (port 8001) + frontend (port 3000) | `make setup` | `make dev` |
+| `make dev` | Start the full Docker development stack with local code mounts and frontend hot reload | Docker, `.env.prod` | `make dev` |
+| `make start` | Start the company/server app runtime for external-nginx deployment | Docker, `.env.prod`, company nginx | `make start` |
+| `make restart` | Stop and restart the company/server runtime | Docker, `.env.prod` | `make restart` |
 | `make run SPEC=...` | Run a specific test spec via CLI (native pipeline) | `make setup`, venv | `make run SPEC=specs/login.md` |
 | `make run-skill S=...` | Run a Playwright skill script | `make setup-skills`, venv | `make run-skill S=path/to/script.js` |
 | `make load-test SPEC=...` | Generate and run K6 load test from spec | venv, k6 installed | `make load-test SPEC=specs/load/api-test.md` |
@@ -27,7 +27,7 @@ Complete reference for all `make` targets in Quorvex AI.
 
 | Command | Description | Prerequisites | Example |
 |---------|-------------|---------------|---------|
-| `make docker-up` | Start all services via Docker Compose | Docker, Docker Compose | `make docker-up` |
+| `make docker-up` | Unsupported legacy `docker-compose.yml` path; use `make dev` or `make start` | Docker, Docker Compose | `make docker-up` |
 | `make docker-down` | Stop all Docker services | Docker | `make docker-down` |
 | `make docker-build` | Rebuild Docker images (no cache) | Docker | `make docker-build` |
 | `make dev-k6-workers-up` | Start dev K6 workers (volume-mounted code) | Docker | `make dev-k6-workers-up` |
@@ -38,9 +38,9 @@ Complete reference for all `make` targets in Quorvex AI.
 
 | Command | Description | Prerequisites | Example |
 |---------|-------------|---------------|---------|
-| `make prod-up` | Start production services (standard + VNC + nginx) | Docker, `.env.prod` | `make prod-up` |
-| `make prod` | Alias for `make prod-up` | Docker, `.env.prod` | `make prod` |
-| `make prod-dev` | Start the app runtime with local code mounting and security scanners; does not start repo nginx | Docker, `.env.prod` | `make prod-dev` |
+| `make prod-up` | Guarded legacy repo-managed nginx path; not used for company/server deployment | Docker, `.env.prod`, `QUORVEX_ENABLE_REPO_NGINX=1` | `QUORVEX_ENABLE_REPO_NGINX=1 make prod-up` |
+| `make prod` | Alias for guarded `make prod-up` | Docker, `.env.prod` | `QUORVEX_ENABLE_REPO_NGINX=1 make prod` |
+| `make prod-dev` | Compatibility alias for `make dev` | Docker, `.env.prod` | `make prod-dev` |
 | `make prod-down` | Stop production services (30s graceful timeout) | Docker | `make prod-down` |
 | `make prod-down-safe` | Stop with backup first | Docker | `make prod-down-safe` |
 | `make prod-restart` | Restart backend (picks up code changes) | Docker | `make prod-restart` |
@@ -51,11 +51,11 @@ Complete reference for all `make` targets in Quorvex AI.
 
 ### Production Services
 
-`make prod-up` starts:
+`make start` starts the external-nginx app runtime:
 
 | Service | Port | Description |
 |---------|------|-------------|
-| Dashboard | 3000 (direct), 80 (nginx) | Next.js frontend |
+| Dashboard | 3000 (direct/proxy target) | Next.js frontend |
 | API | 8001 | FastAPI backend |
 | API Docs | 8001/docs | Swagger UI |
 | PostgreSQL | internal, host depends on compose file | Primary production database |
@@ -73,9 +73,9 @@ Complete reference for all `make` targets in Quorvex AI.
 
 | Command | Description | Prerequisites | Example |
 |---------|-------------|---------------|---------|
-| `make autopilot-stable-up` | Start the stable local Auto Pilot stack with lower concurrency and no backend reload | Docker, `.env.prod`, 12 GB+ Docker memory | `make autopilot-stable-up` |
+| `make autopilot-stable-up` | Unsupported pending Compose rebuild | Docker, `.env.prod`, 12 GB+ Docker memory | `make autopilot-stable-up` |
 | `make autopilot-stable-down` | Stop the stable Auto Pilot stack | Docker | `make autopilot-stable-down` |
-| `make autopilot-dev-up` | Start Auto Pilot in dev mode via `make prod-dev` | Docker, `.env.prod` | `make autopilot-dev-up` |
+| `make autopilot-dev-up` | Start Auto Pilot in dev mode via `make dev` | Docker, `.env.prod` | `make autopilot-dev-up` |
 | `make autopilot-status` | Show service status, container memory, and backend health | Docker | `make autopilot-status` |
 | `make autopilot-logs` | Tail Auto Pilot backend and frontend logs | Docker | `make autopilot-logs` |
 
@@ -83,21 +83,21 @@ Complete reference for all `make` targets in Quorvex AI.
 
 | Command | Description | Prerequisites | Example |
 |---------|-------------|---------------|---------|
-| `make backup` | Database-only backup | `make prod-up` | `make backup` |
-| `make backup-full` | Full backup (DB + specs + tests + PRDs + ChromaDB) | `make prod-up` | `make backup-full` |
-| `make backup-status` | Show backup status and history | `make prod-up` | `make backup-status` |
-| `make restore-list` | List available backups | `make prod-up` | `make restore-list` |
-| `make restore TS=...` | Restore from specific timestamp | `make prod-up` | `make restore TS=20240115_143022` |
-| `make restore-from-minio TS=...` | Download and restore from MinIO | `make prod-up`, MinIO | `make restore-from-minio TS=20240115_143022` |
+| `make backup` | Database-only backup | `make start` | `make backup` |
+| `make backup-full` | Full backup (DB + specs + tests + PRDs + ChromaDB) | `make start` | `make backup-full` |
+| `make backup-status` | Show backup status and history | `make start` | `make backup-status` |
+| `make restore-list` | List available backups | `make start` | `make restore-list` |
+| `make restore TS=...` | Restore from specific timestamp | `make start` | `make restore TS=20240115_143022` |
+| `make restore-from-minio TS=...` | Download and restore from MinIO | `make start`, MinIO | `make restore-from-minio TS=20240115_143022` |
 
 ## Storage Management
 
 | Command | Description | Prerequisites | Example |
 |---------|-------------|---------------|---------|
-| `make storage-health` | Check storage health (DB, MinIO, local) | `make prod-up` | `make storage-health` |
-| `make archival` | Run artifact archival (30-day retention) | `make prod-up` | `make archival` |
-| `make archival-dry-run` | Preview archival without changes | `make prod-up` | `make archival-dry-run` |
-| `make minio-console` | Open MinIO console in browser | `make prod-up` | `make minio-console` |
+| `make storage-health` | Check storage health (DB, MinIO, local) | `make start` | `make storage-health` |
+| `make archival` | Run artifact archival (30-day retention) | `make start` | `make archival` |
+| `make archival-dry-run` | Preview archival without changes | `make start` | `make archival-dry-run` |
+| `make minio-console` | Open MinIO console in browser | `make start` | `make minio-console` |
 
 ## Browser Workers
 
@@ -203,23 +203,20 @@ Default namespace: `K8S_NAMESPACE=quorvex` (overridable).
 
 | Command | Description | Prerequisites | Example |
 |---------|-------------|---------------|---------|
-| `make upgrade` | Full upgrade: backup, pull, migrate, rebuild, restart | Docker, `.env.prod` | `make upgrade` |
+| `make upgrade` | Unsupported legacy in-place upgrade path; use release/server upgrade targets | Docker, `.env.prod` | `make upgrade` |
 | `make health-check` | Hit all health endpoints and report status | Services running | `make health-check` |
 | `make docker-prune` | Remove dangling images, stopped containers, build cache | Docker | `make docker-prune` |
 | `make volume-sizes` | Show sizes of all Docker volumes | Docker | `make volume-sizes` |
 | `make db-vacuum` | Run VACUUM ANALYZE on PostgreSQL | Docker, PostgreSQL | `make db-vacuum` |
 | `make deps-lock` | Capture current venv versions to requirements.freeze | venv | `make deps-lock` |
 
-### Upgrade Procedure (`make upgrade`)
+### Upgrade Procedure
 
-| Step | Action |
-|------|--------|
-| 1 | Pre-flight health check |
-| 2 | Full backup |
-| 3 | `git pull` latest code |
-| 4 | Rebuild images |
-| 5 | Run database migrations |
-| 6 | Restart services and verify health |
+Use `make server-upgrade VERSION=v1.2.3` on a server or
+`make release-to-server VERSION=v1.2.3 QUORVEX_SERVER_HOST=user@host` from
+local development. The old `make upgrade` in-place flow is intentionally
+guarded because it mixed local Git mutation, repo-managed nginx, and production
+runtime changes.
 
 ## Utilities
 
