@@ -45,7 +45,7 @@
     "@playwright/mcp": "^0.0.76",
     "playwright": "1.57.0",
     "playwright-core": "1.57.0",
-    "undici-types": "^7.16.0"
+    "undici-types": "^8.3.0"
   },
   "repository": {
     "type": "git",
