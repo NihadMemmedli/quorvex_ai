@@ -42,6 +42,41 @@ def test_write_playwright_test_mcp_config_uses_run_config_and_vnc_env(tmp_path, 
     assert runtime["mcp_env"]["CI"] == ""
 
 
+def test_live_browser_display_diagnostics_reports_vnc_server_availability(monkeypatch):
+    from orchestrator.utils import playwright_mcp
+
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(playwright_mcp.socket, "create_connection", lambda *_args, **_kwargs: FakeSocket())
+
+    diagnostics = playwright_mcp.live_browser_display_diagnostics()
+
+    assert diagnostics["vnc_server_host"] == "localhost"
+    assert diagnostics["vnc_server_port"] == 5900
+    assert diagnostics["vnc_server_available"] is True
+
+
+def test_live_browser_display_diagnostics_reports_vnc_server_error(monkeypatch):
+    from orchestrator.utils import playwright_mcp
+
+    def raise_connection_error(*_args, **_kwargs):
+        raise OSError("connection refused")
+
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(playwright_mcp.socket, "create_connection", raise_connection_error)
+
+    diagnostics = playwright_mcp.live_browser_display_diagnostics()
+
+    assert diagnostics["vnc_server_available"] is False
+    assert "connection refused" in diagnostics["vnc_server_error"]
+
+
 def test_write_playwright_test_mcp_config_preserves_headless_mode(tmp_path, monkeypatch):
     from orchestrator.utils.playwright_mcp import write_playwright_test_mcp_config
 

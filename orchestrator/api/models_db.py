@@ -56,6 +56,7 @@ class TestRun(SQLModel, table=True):
 
     # Compact summary of agentic QA artifacts. Full artifacts stay in run directory.
     agentic_summary: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    total_cost_usd: float | None = None
 
     # Browser auth intent/resolution for audit, rerun inheritance, and diagnostics.
     browser_auth: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))

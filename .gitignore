@@ -26,6 +26,8 @@ build/
 !/specs/spec-metadata.json
 !/specs/examples/
 !/specs/examples/**
+!/specs/benchmark/
+!/specs/benchmark/**
 !/specs/templates/
 !/specs/templates/**
 /tests/apps/

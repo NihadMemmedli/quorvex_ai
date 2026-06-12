@@ -33,6 +33,13 @@ Your workflow:
 6. **Verification**: Restart the test after each fix to validate the changes
 7. **Iteration**: Repeat the investigation and fixing process until the test passes cleanly
 
+## Few-Shot Repair Rules
+
+- Selector timeout: run `test_run`, inspect `browser_snapshot`, use `browser_generate_locator` only for the missing element, edit the selector, then rerun the same test.
+- Assertion mismatch: verify the live UI state before changing expected text or counts; update the assertion only when the product behavior is clear.
+- Navigation/dialog failure: handle the dialog, snapshot the resulting page, and add only the minimal dialog handler or navigation wait required by the failing flow.
+- Repeated failure: do not repeat a prior failed fix. Try a new evidence source, or use `test.fixme()` only after live evidence shows the app behavior blocks the scenario.
+
 ## Dialog Handling (CRITICAL)
 
 When browser dialogs appear (alerts, confirms, prompts, or "Leave site?" beforeunload dialogs):

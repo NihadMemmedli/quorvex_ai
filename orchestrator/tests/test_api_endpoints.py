@@ -388,6 +388,7 @@ class TestAgentDefinitionEndpoints:
             "critic": {"issue_count": 2},
             "diagnosis": {"category": "timing", "heal_allowed": True},
             "stability": {"status": "stable", "total_runs": 2},
+            "costs": {"total_usd": 0.42, "by_stage": {"native_generator": {"cost_usd": 0.42}}},
         }
 
         with Session(engine) as session:
@@ -410,6 +411,9 @@ class TestAgentDefinitionEndpoints:
             detail_response = client.get(f"/runs/{run_id}")
             assert detail_response.status_code == 200
             assert detail_response.json()["agentic_summary"]["stability"]["status"] == "stable"
+            with Session(engine) as session:
+                persisted = session.get(DBTestRun, run_id)
+                assert persisted.total_cost_usd == 0.42
         finally:
             with Session(engine) as session:
                 run = session.get(DBTestRun, run_id)

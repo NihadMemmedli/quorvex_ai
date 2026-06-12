@@ -13,8 +13,9 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,22 @@ class HealerTimeoutError(Exception):
     """Raised when the healer agent times out."""
 
     pass
+
+
+def truncate_middle(text: str, head: int = 4500, tail: int = 4500) -> str:
+    """Keep the head and tail of long text; structured failure context puts the
+    Playwright summary first and the stdout tail last, so both must survive."""
+    if len(text) <= head + tail:
+        return text
+    omitted = len(text) - head - tail
+    return f"{text[:head]}\n... [truncated {omitted} chars] ...\n{text[-tail:]}"
+
+
+def _optional_env_float(name: str) -> float | None:
+    value = os.environ.get(name)
+    if not value:
+        return None
+    return float(value)
 
 
 # Add orchestrator to path
@@ -77,6 +94,8 @@ class NativeHealer:
         self.env_vars = dict(env_vars or {})
         self.cwd = Path(cwd) if cwd else None
         self._last_timed_out = False
+        self.last_agent_output: str | None = None
+        self.last_tool_calls: list[dict[str, Any]] = []
 
     async def heal_test(
         self,
@@ -85,6 +104,10 @@ class NativeHealer:
         timeout_seconds: int | None = None,
         diagnosis_context: str | None = None,
         memory_run_id: str | None = None,
+        attempt_context: str | None = None,
+        attempt_number: int | None = None,
+        browser: str | None = None,
+        failure_metadata: dict[str, Any] | None = None,
     ) -> str | None:
         """
         Attempt to heal a failing test.
@@ -92,6 +115,8 @@ class NativeHealer:
         Args:
             test_file: Path to the failing test file
             error_log: Optional error output from previous run
+            attempt_context: Condensed history of prior healing attempts
+            attempt_number: 1-based index of this healing attempt
 
         Returns:
             Fixed test content or None if healing failed
@@ -111,11 +136,16 @@ class NativeHealer:
             error_log=error_log,
             diagnosis_context=diagnosis_context,
             memory_run_id=memory_run_id,
+            attempt_context=attempt_context,
+            attempt_number=attempt_number,
+            browser=browser,
+            failure_metadata=failure_metadata,
         )
 
         # Invoke the Healer Agent
         logger.info("Invoking Playwright Healer Agent...")
         result = await self._query_healer_agent(prompt, timeout_seconds=timeout_seconds)
+        self.last_agent_output = result
 
         if self._last_timed_out:
             raise HealerTimeoutError(f"Healer timed out after {timeout_seconds or 'default'}s")
@@ -129,6 +159,8 @@ class NativeHealer:
                 error_log=error_log,
                 diagnosis_context=diagnosis_context,
                 healer_output=result,
+                content_before=test_content,
+                content_after=new_content,
             )
             return new_content
 
@@ -143,6 +175,8 @@ class NativeHealer:
                     error_log=error_log,
                     diagnosis_context=diagnosis_context,
                     healer_output=result,
+                    content_before=test_content,
+                    content_after=fixed_code,
                 )
                 return fixed_code
 
@@ -156,6 +190,10 @@ class NativeHealer:
         error_log: str | None,
         diagnosis_context: str | None = None,
         memory_run_id: str | None = None,
+        attempt_context: str | None = None,
+        attempt_number: int | None = None,
+        browser: str | None = None,
+        failure_metadata: dict[str, Any] | None = None,
     ) -> str:
         """Build prompt for the playwright-test-healer agent."""
 
@@ -164,8 +202,17 @@ class NativeHealer:
             error_section = f"""
 ## Previous Error Output
 ```
-{error_log[:5000]}
+{truncate_middle(error_log)}
 ```
+"""
+
+        attempt_section = ""
+        if attempt_number:
+            attempt_section = f"\nThis is healing attempt {attempt_number} of 3.\n"
+        if attempt_context:
+            attempt_section += f"""
+## Prior Healing Attempts (do not repeat failed fixes)
+{attempt_context}
 """
 
         diagnosis_section = ""
@@ -175,6 +222,17 @@ class NativeHealer:
 Use this diagnosis to focus your investigation. If your live debugging contradicts it, prefer the live evidence and explain the correction in your final response.
 
 {diagnosis_context}
+"""
+
+        failure_metadata = failure_metadata or {}
+        failed_title = failure_metadata.get("title") or failure_metadata.get("full_title")
+        failure_section = f"""
+## Failed Test Target
+- Browser/project: `{browser or failure_metadata.get("project") or "unknown"}`
+- File: `{failure_metadata.get("file") or test_file}`
+- Title: `{failed_title or "unknown"}`
+- Retry: `{failure_metadata.get("retry", "unknown")}`
+- Primary error: `{failure_metadata.get("primary_error") or "unknown"}`
 """
 
         test_data_section = ""
@@ -210,27 +268,28 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 {test_content}
 ```
 
+{attempt_section}
 {error_section}
 {diagnosis_section}
+{failure_section}
 {test_data_section}
 {memory_section}
 
 ## Your Workflow
 
-1. **Run the test**: Use `test_run` to execute the test and see current failures
-2. **Analyze the error**: Parse the error output from `test_run` (error message, stack trace, failed assertions)
-3. **Deep investigation** (if error is unclear): Use diagnostic tools:
-   - `browser_snapshot` to see the current page state and available elements
-   - `browser_console_messages` to check for JavaScript errors
-   - `browser_network_requests` to verify API calls
-   - `browser_generate_locator` to find correct selectors
-4. **Diagnose**: Determine the root cause:
+1. **Reproduce the exact failed state first**: Your first MCP tool call must be `test_run`, scoped to this file, browser/project `{browser or "the failed project"}`, and title `{failed_title or "the failed title"}` when the tool supports a title/grep filter.
+2. **Capture failure-state evidence before editing**: After the failing `test_run`, use `browser_resume` if it is available. If it is not available or cannot attach to the failed browser state, use `browser_snapshot`.
+3. **Use category-specific evidence before editing**:
+   - Selector or timing failures: use `browser_snapshot` or `browser_generate_locator` before changing selectors, waits, or assertions.
+   - Authentication, test-data, API, or server failures: use `browser_network_requests` or `browser_console_messages` before changing setup, data, navigation, or assertions.
+4. **Analyze the error**: Parse the error output from `test_run` (error message, stack trace, failed assertions) and compare it to the browser evidence.
+5. **Diagnose**: Determine the root cause:
    - Element selectors that may have changed
    - Timing and synchronization issues
    - Assertion failures
    - Data dependencies
-5. **Fix the code**: Use `Edit` or `MultiEdit` to update the test
-6. **Verify**: Run the test again to confirm the fix
+6. **Fix the code**: Use `Edit` or `MultiEdit` to update the test only after the evidence above is captured.
+7. **Verify**: Run the test again with `test_run` to confirm the fix.
 
 ## Dialog Handling (CRITICAL)
 When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dialogs):
@@ -243,6 +302,8 @@ When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dia
 - Be systematic - fix one error at a time
 - Prefer robust, maintainable solutions
 - Use Playwright best practices
+- Preserve test intent. Do not remove assertions to make the test pass. If the behavior is genuinely not testable, use an explicit `test.fixme()` with a reason.
+- In your final response, include `strategy: ...`, `root_cause: ...`, and `changed_selectors: ...`.
 - If a test cannot be fixed, mark it with `test.fixme()` and explain why
 - Never use deprecated APIs like `waitForNetworkIdle`
 
@@ -250,11 +311,11 @@ When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dia
 After you have finished verifying the fix (or determined the test cannot be fixed),
 call `browser_close` to close the browser before finishing.
 
-Start by running the test to see the current state.
+Start with the exact scoped `test_run`.
 """
         metadata = build_prompt_metadata(
             prompt_id="native_healer.playwright",
-            version="2026-05-30.1",
+            version="2026-06-11.1",
             stage="test_healing",
             schema_name="playwright_healing.v1",
             rendered_prompt=prompt,
@@ -339,6 +400,8 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
         error_log: str | None,
         diagnosis_context: str | None,
         healer_output: str | None,
+        content_before: str | None = None,
+        content_after: str | None = None,
     ) -> None:
         project_id = os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID")
         if os.environ.get("MEMORY_ENABLED", "true").lower() != "true" or not project_id:
@@ -370,6 +433,20 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
                 agent_type="NativeHealer",
                 review_required=True,
             )
+            selector_delta = self._selector_delta(content_before, content_after)
+            if selector_delta:
+                service.create_memory(
+                    kind="agent_lesson",
+                    content=f"Selector fix in {Path(test_file).name}: {selector_delta}"[:1200],
+                    project_id=project_id,
+                    confidence=0.8,
+                    importance=0.7,
+                    tags=["healer", "selector_fix"],
+                    source_type="native_healer",
+                    source_id=test_file,
+                    agent_type="NativeHealer",
+                    review_required=True,
+                )
             # Also let the consolidator extract any explicit lessons from the agent output.
             # Run the deterministic path synchronously by using existing heuristics directly.
             for memory in service.extract_candidates(healer_output or "", agent_type="NativeHealer"):
@@ -387,11 +464,38 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
         except Exception as exc:
             logger.debug("Healer memory capture skipped: %s", exc)
 
+    @staticmethod
+    def _selector_delta(content_before: str | None, content_after: str | None) -> str | None:
+        """Describe selector changes between pre- and post-heal test content."""
+        if not content_before or not content_after:
+            return None
+        try:
+            from orchestrator.memory.selector_writeback import extract_selectors
+
+            before = {s["playwright_selector"] for s in extract_selectors(content_before)}
+            after = {s["playwright_selector"] for s in extract_selectors(content_after)}
+            removed = sorted(before - after)
+            added = sorted(after - before)
+            if not removed and not added:
+                return None
+            parts = []
+            if removed and added:
+                parts.append(f"{', '.join(removed[:3])} -> {', '.join(added[:3])}")
+            elif added:
+                parts.append(f"added {', '.join(added[:3])}")
+            else:
+                parts.append(f"removed {', '.join(removed[:3])}")
+            return "; ".join(parts)
+        except Exception as exc:
+            logger.debug("Selector delta extraction skipped: %s", exc)
+            return None
+
     async def _query_healer_agent(self, prompt: str, timeout_seconds: int | None = None) -> str:
         """
         Query the Playwright Healer agent using the unified AgentRunner.
         """
         self._last_timed_out = False
+        self.last_tool_calls = []
 
         effective_timeout = timeout_seconds or int(
             os.environ.get("HEALER_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))
@@ -409,6 +513,7 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
                 owner_id=self.owner_id,
                 owner_label=self.owner_label,
                 model_tier=self.model_tier,
+                max_budget_usd=_optional_env_float("HEALER_MAX_BUDGET_USD"),
                 memory_agent_type="NativeHealer",
                 memory_source_type="test_file",
                 memory_stage="native_healer",
@@ -418,6 +523,7 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
             )
             result = await runner.run(prompt)
             self._last_timed_out = result.timed_out
+            self.last_tool_calls = self._serialize_tool_calls(result.tool_calls)
 
             logger.info(
                 f"Healer stats: {result.messages_received} messages, "
@@ -433,6 +539,7 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
         except asyncio.TimeoutError:
             logger.warning(f"Healer agent timed out after {effective_timeout}s")
             self._last_timed_out = True
+            self.last_tool_calls = []
             return ""
         except Exception as exc:
             error_str = str(exc).lower()
@@ -441,6 +548,67 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
                 return ""
             logger.error(f"Healer agent error: {exc}")
             raise
+
+    @staticmethod
+    def _serialize_tool_calls(tool_calls: list[Any] | None) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        for call in tool_calls or []:
+            if isinstance(call, str):
+                serialized.append({"name": call})
+                continue
+            name = getattr(call, "name", None)
+            if not name:
+                continue
+            timestamp = getattr(call, "timestamp", None)
+            serialized.append(
+                {
+                    "name": str(name),
+                    "timestamp": timestamp.isoformat() if hasattr(timestamp, "isoformat") else None,
+                    "duration_ms": getattr(call, "duration_ms", None),
+                    "success": getattr(call, "success", True),
+                    "error": getattr(call, "error", None),
+                    "input": NativeHealer._redact_tool_input(getattr(call, "input", None)),
+                }
+            )
+        return serialized
+
+    @staticmethod
+    def _redact_tool_input(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
+        sensitive_parts = (
+            "password",
+            "passwd",
+            "secret",
+            "token",
+            "api_key",
+            "apikey",
+            "authorization",
+            "auth",
+            "credential",
+            "private_key",
+        )
+        if key and any(part in key.lower() for part in sensitive_parts):
+            return "[REDACTED]"
+        if depth > 4:
+            return "[TRUNCATED_DEPTH]"
+        if isinstance(value, str):
+            return value if len(value) <= 1000 else value[:1000] + f"...[truncated {len(value) - 1000} chars]"
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        if isinstance(value, dict):
+            items = list(value.items())
+            redacted = {
+                str(item_key): NativeHealer._redact_tool_input(item_value, key=str(item_key), depth=depth + 1)
+                for item_key, item_value in items[:25]
+            }
+            if len(items) > 25:
+                redacted["__truncated_keys"] = len(items) - 25
+            return redacted
+        if isinstance(value, list):
+            redacted_list = [NativeHealer._redact_tool_input(item, key=key, depth=depth + 1) for item in value[:25]]
+            if len(value) > 25:
+                redacted_list.append(f"[truncated {len(value) - 25} items]")
+            return redacted_list
+        return str(value)[:1000]
 
     def _extract_code(self, text: str) -> str | None:
         """Extract TypeScript code from markdown response."""
