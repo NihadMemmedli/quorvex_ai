@@ -12,6 +12,9 @@ services:
       - "${BACKEND_BIND:-127.0.0.1:8001}:8001"
       - "${VNC_BIND:-127.0.0.1:6080}:6080"
     environment:
+      HOME: /home/agent
+      USER: agent
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /ms-playwright/chromium-1200/chrome-linux64/chrome
       REQUIRE_AUTH: "true"
       ALLOW_REGISTRATION: "false"
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Set ALLOWED_ORIGINS}

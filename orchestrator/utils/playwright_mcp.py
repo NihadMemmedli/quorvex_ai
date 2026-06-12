@@ -80,18 +80,34 @@ def resolve_playwright_chromium_executable() -> Path | None:
         path = Path(override)
         return path if path.exists() else None
 
+    try:
+        home_cache_root = Path.home() / ".cache" / "ms-playwright"
+    except RuntimeError:
+        home_cache_root = None
+
     roots = [
         Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"]) if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") else None,
         Path("/ms-playwright"),
-        Path.home() / ".cache" / "ms-playwright",
+        home_cache_root,
     ]
     candidates: list[Path] = []
     for root in roots:
-        if not root or not root.exists():
+        try:
+            if not root or not root.exists():
+                continue
+            candidates.extend(root.glob("chromium-*/chrome-linux/chrome"))
+            candidates.extend(root.glob("chromium-*/chrome-linux64/chrome"))
+            candidates.extend(root.glob("chrome-*/chrome-linux/chrome"))
+            candidates.extend(root.glob("chrome-*/chrome-linux64/chrome"))
+        except OSError:
             continue
-        candidates.extend(root.glob("chromium-*/chrome-linux/chrome"))
-        candidates.extend(root.glob("chrome-*/chrome-linux/chrome"))
-    existing = [candidate for candidate in candidates if candidate.exists()]
+    existing: list[Path] = []
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                existing.append(candidate)
+        except OSError:
+            continue
     if not existing:
         return None
     return sorted(existing, key=lambda path: path.parent.parent.name, reverse=True)[0]
