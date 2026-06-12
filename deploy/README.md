@@ -68,11 +68,12 @@ commits generated env or deployment files.
 
 The public repository still owns source code, local development, and tagged
 GHCR image releases. The private deployment repo owns production env files,
-compose overlays, reverse proxy config, backups, and rollback state.
-The private repo should track only safe deploy files such as scripts, compose
-overlays, reverse proxy config, README, `.gitignore`, and
-`env/quorvex.prod.env.example`; it must not track `env/quorvex.prod.env`,
-`.state/`, generated passwords, provider API keys, backups, or runtime data.
+compose overlays, reverse proxy config, company specs/tests/fixtures/PRDs,
+backups, and rollback state. The private repo should track only safe files such
+as scripts, compose overlays, reverse proxy config, README, `.gitignore`,
+`env/quorvex.prod.env.example`, `specs/`, `tests/`, `fixtures/`, and `prds/`;
+it must not track `env/quorvex.prod.env`, `.state/`, generated passwords,
+provider API keys, backups, test results, or runtime data.
 
 For company-network deployments, keep browser-facing API URLs blank so the
 frontend uses same-origin `/backend-proxy`; set
@@ -109,9 +110,17 @@ make release-preflight VERSION=v1.2.3
 make server-upgrade VERSION=v1.2.3
 ```
 
-`release-preflight` verifies all tagged GHCR images exist and runs the private
-deploy dry-run when the private deploy repo is available. `server-upgrade` runs
-preflight, deploys through the private repo, and then runs post-deploy checks.
+From a local development machine, the preferred production handoff is:
+
+```bash
+VERSION=v1.2.3 QUORVEX_SERVER_HOST=user@production-host make release-to-server
+```
+
+That command pushes the public branch and release tag, waits for GHCR images,
+then runs `make server-upgrade` over SSH on the production server. On the
+server, `release-preflight` verifies all tagged GHCR images exist and runs the
+private deploy dry-run; `server-upgrade` also pulls the images before it deploys
+through the private repo and runs post-deploy checks.
 
 `examples/` contains smaller generic snippets. Prefer the full
 `private-repo-template/` when setting up a real production server.

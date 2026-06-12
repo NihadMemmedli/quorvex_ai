@@ -34,11 +34,18 @@ load_env_file() {
   QUORVEX_SOURCE_DIR="${QUORVEX_SOURCE_DIR:-/opt/quorvex_ai}"
   QUORVEX_IMAGE_NAMESPACE="${QUORVEX_IMAGE_NAMESPACE:-ghcr.io/example-org/quorvex-ai}"
   QUORVEX_DATA_ROOT="${QUORVEX_DATA_ROOT:-${DEPLOY_ROOT}/data}"
+  QUORVEX_PRIVATE_CONTENT_DIR="${QUORVEX_PRIVATE_CONTENT_DIR:-${DEPLOY_ROOT}}"
+  SPECS_DIR="${SPECS_DIR:-${QUORVEX_PRIVATE_CONTENT_DIR}/specs}"
+  TESTS_DIR="${TESTS_DIR:-${QUORVEX_PRIVATE_CONTENT_DIR}/tests}"
+  PRDS_DIR="${PRDS_DIR:-${QUORVEX_PRIVATE_CONTENT_DIR}/prds}"
   QUORVEX_COMPOSE_PROFILES="${QUORVEX_COMPOSE_PROFILES:-standard}"
   OVERLAY_FILE="${QUORVEX_OVERLAY_FILE:-${OVERLAY_FILE}}"
   REVERSE_PROXY_FILE="${QUORVEX_REVERSE_PROXY_FILE:-${DEPLOY_ROOT}/reverse-proxy/mytest.idda.az.conf}"
   PUBLIC_URL="${QUORVEX_PUBLIC_URL:-${PUBLIC_URL}}"
   BASE_COMPOSE_FILE="${QUORVEX_BASE_COMPOSE_FILE:-${QUORVEX_SOURCE_DIR}/docker-compose.prod.yml}"
+  export QUORVEX_SOURCE_DIR QUORVEX_IMAGE_NAMESPACE QUORVEX_DATA_ROOT
+  export QUORVEX_PRIVATE_CONTENT_DIR SPECS_DIR TESTS_DIR PRDS_DIR
+  export QUORVEX_COMPOSE_PROFILES OVERLAY_FILE REVERSE_PROXY_FILE PUBLIC_URL BASE_COMPOSE_FILE
   apply_llm_provider_mapping
 }
 
@@ -127,6 +134,10 @@ required_env_keys() {
     QUORVEX_SOURCE_DIR \
     QUORVEX_IMAGE_NAMESPACE \
     QUORVEX_DATA_ROOT \
+    QUORVEX_PRIVATE_CONTENT_DIR \
+    SPECS_DIR \
+    TESTS_DIR \
+    PRDS_DIR \
     QUORVEX_PUBLIC_URL \
     ALLOWED_ORIGINS \
     VNC_PUBLIC_WS_URL \
@@ -393,12 +404,12 @@ create_data_dirs() {
     "${QUORVEX_DATA_ROOT}/logs" \
     "${QUORVEX_DATA_ROOT}/minio" \
     "${QUORVEX_DATA_ROOT}/postgres" \
-    "${QUORVEX_DATA_ROOT}/prds" \
     "${QUORVEX_DATA_ROOT}/redis" \
     "${QUORVEX_DATA_ROOT}/runs" \
-    "${QUORVEX_DATA_ROOT}/specs" \
     "${QUORVEX_DATA_ROOT}/test-results" \
-    "${QUORVEX_DATA_ROOT}/tests" \
+    "${SPECS_DIR}" \
+    "${TESTS_DIR}" \
+    "${PRDS_DIR}" \
     "${STATE_DIR}"
 }
 
@@ -451,6 +462,13 @@ check_required_ports_available() {
   check_port_available frontend "${FRONTEND_BIND:-127.0.0.1:3000}" || failures=$((failures + 1))
   check_port_available backend "${BACKEND_BIND:-127.0.0.1:8001}" || failures=$((failures + 1))
   check_port_available websockify "${VNC_BIND:-127.0.0.1:6080}" || failures=$((failures + 1))
+  check_port_available minio-api "${MINIO_API_BIND:-127.0.0.1:9000}" || failures=$((failures + 1))
+  check_port_available minio-console "${MINIO_CONSOLE_BIND:-127.0.0.1:9001}" || failures=$((failures + 1))
+  check_port_available temporal "${TEMPORAL_BIND:-127.0.0.1:7233}" || failures=$((failures + 1))
+  check_port_available temporal-ui "${TEMPORAL_UI_BIND:-127.0.0.1:8233}" || failures=$((failures + 1))
+  check_port_available hermes-api "${HERMES_API_BIND:-127.0.0.1:8642}" || failures=$((failures + 1))
+  check_port_available hermes-dashboard "${HERMES_DASHBOARD_BIND:-127.0.0.1:9119}" || failures=$((failures + 1))
+  check_port_available zap "${ZAP_BIND:-127.0.0.1:8090}" || failures=$((failures + 1))
   [ "${failures}" -eq 0 ] || die "Required app ports are already in use."
 }
 

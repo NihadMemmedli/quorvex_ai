@@ -13,10 +13,10 @@ postgres/
 redis/
 minio/
 runs/
-specs/
-tests/
 test-results/
-prds/
+
+# Company specs, tests, fixtures, and PRDs are intentionally tracked in this
+# private repo. Runtime results stay ignored above.
 
 # Local editor, OS, and temporary files.
 .DS_Store
