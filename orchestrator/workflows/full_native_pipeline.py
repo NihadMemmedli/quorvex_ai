@@ -48,6 +48,15 @@ if config_dir:
     os.chdir(config_dir)
 
 from utils.browser_cleanup import cleanup_orphaned_browsers
+from utils.agent_runner import AgentRunner
+from orchestrator.services.handoff_manifest import (
+    init_manifest,
+    load_manifest,
+    record_artifact,
+    record_consumption,
+    record_stage,
+    validate_artifact,
+)
 from utils.playwright_mcp import (
     playwright_config_cli_arg,
     prepare_run_playwright_config_content,
@@ -60,18 +69,20 @@ from utils.progress_reporter import (
 )
 from utils.spec_detector import SpecDetector, SpecType
 from utils.test_results_parser import categorize_error
+from utils.text_utils import truncate_middle
 from workflows.agentic_quality import (
     FailureTriageAgent,
     StabilityVerifier,
     TestCriticAgent,
     TestDesignAgent,
     build_agentic_summary,
+    extract_plan_selectors,
 )
 from workflows.native_api_generator import NativeApiGenerator
 from workflows.native_api_healer import NativeApiHealer
 from workflows.native_generator import NativeGenerator
 from workflows.native_healer import HealerTimeoutError, NativeHealer
-from workflows.native_planner import NativePlanner
+from workflows.native_planner import NativePlanner, SpecGenerationError
 from workflows.ralph_validator import RalphValidator
 
 
@@ -161,6 +172,10 @@ class FullNativePipeline:
         self.test_critic_agent = TestCriticAgent()
         self.failure_triage_agent = FailureTriageAgent()
         self.stability_verifier = StabilityVerifier()
+        self.generated_preflight_list_enabled = (
+            os.environ.get("QUORVEX_GENERATED_PREFLIGHT_LIST", "1").lower()
+            not in {"0", "false", "no"}
+        )
 
     def _configure_run_agent_env(self, run_dir: Path) -> None:
         """Attach per-run artifact paths to all native agent env copies."""
@@ -253,15 +268,26 @@ class FullNativePipeline:
             Dict with pipeline results
         """
         run_dir.mkdir(parents=True, exist_ok=True)
+        handoff_manifest_path = init_manifest(run_dir, pipeline_type="browser")
+        record_stage(
+            handoff_manifest_path,
+            "pipeline",
+            status="running",
+            metadata={
+                "browser": browser,
+                "skip_planning": skip_planning,
+                "existing_test_path": existing_test_path,
+                "force_api": force_api,
+            },
+        )
         self._configure_run_agent_env(run_dir)
         spec_file = Path(spec_path)
         spec_content = spec_file.read_text()
         auth_context = browser_auth_context or self._load_browser_auth_context()
-        if storage_state_path:
-            self.prepare_run_browser_context(
-                run_dir=run_dir,
-                storage_state_path=storage_state_path,
-            )
+        self.prepare_run_browser_context(
+            run_dir=run_dir,
+            storage_state_path=storage_state_path,
+        )
         raw_included_spec_content = self._resolve_includes(
             spec_content, spec_path, resolve_testdata=False
         )
@@ -299,6 +325,11 @@ class FullNativePipeline:
                     "missing_test_data": missing_test_data,
                 },
             )
+            self._write_run_metrics(
+                run_dir,
+                credential_resolution_status="missing",
+                failure_category="test_data",
+            )
             return {
                 "success": False,
                 "error": error_msg,
@@ -308,6 +339,10 @@ class FullNativePipeline:
         fixture_file = self._write_test_data_fixture_file(run_dir, test_data_context)
         self._apply_test_data_execution_context(test_data_context)
         self._log_test_data_fixture_context(test_data_context, fixture_file)
+        self._write_run_metrics(
+            run_dir,
+            credential_resolution_status="resolved" if (test_data_context or {}).get("refs") else "not_required",
+        )
 
         # Extract URL from spec (resolves @include directives first)
         target_url = self._extract_url(spec_content, spec_path)
@@ -356,6 +391,26 @@ class FullNativePipeline:
         # Save both original and resolved spec to run dir
         (run_dir / "spec.md").write_text(spec_content)
         (run_dir / "spec_resolved.md").write_text(resolved_spec_content)
+        record_artifact(
+            handoff_manifest_path,
+            "source_spec",
+            run_dir / "spec.md",
+            kind="markdown_spec",
+            producer_stage="pipeline",
+            required=True,
+            consumers=["planner", "generator", "api_generator"],
+            validation_status="valid",
+        )
+        record_artifact(
+            handoff_manifest_path,
+            "resolved_spec",
+            run_dir / "spec_resolved.md",
+            kind="markdown_spec",
+            producer_stage="pipeline",
+            required=True,
+            consumers=["planner", "generator", "api_generator"],
+            validation_status="valid",
+        )
 
         # Extract credentials before @testdata directives are rendered into masked markdown.
         credentials = (
@@ -384,6 +439,7 @@ class FullNativePipeline:
                 target_url=target_url,
                 hybrid_healing=hybrid_healing,
                 max_iterations=max_iterations,
+                handoff_manifest_path=handoff_manifest_path,
             )
 
         # --- MIXED TEST PIPELINE ---
@@ -485,6 +541,8 @@ class FullNativePipeline:
                         browser=browser,
                         result=result,
                         diagnosis=diagnosis,
+                        plan_path=None,
+                        handoff_manifest_path=handoff_manifest_path,
                     )
             except Exception as e:
                 error_msg = f"Healing-only pipeline crashed: {e}"
@@ -502,30 +560,184 @@ class FullNativePipeline:
 
             # Stage 1: Native Planning with browser exploration
             plan_path: Path | None = None
+            planner_draft_script_path: Path | None = None
             if not skip_planning:
                 logger.info("Stage 1: Native Planning (browser exploration)...")
                 report_progress("planning", "Exploring application structure...")
+                record_stage(
+                    handoff_manifest_path,
+                    "planner",
+                    status="running",
+                    metadata={"target_url": target_url, "login_url": login_url},
+                )
+                record_consumption(
+                    handoff_manifest_path,
+                    "planner",
+                    "resolved_spec",
+                    status="used",
+                    metadata={"path": str(run_dir / "spec_resolved.md")},
+                )
 
                 # Use resolved spec for planning so planner sees included templates
                 resolved_spec_path = run_dir / "spec_resolved.md"
-                plan_path = await self._run_native_planner(
-                    spec_path=str(resolved_spec_path),
-                    run_dir=run_dir,
-                    target_url=target_url,
-                    login_url=login_url,
-                    credentials=credentials,
-                    auth_context=auth_context,
-                )
+                try:
+                    plan_path = await self._run_native_planner(
+                        spec_path=str(resolved_spec_path),
+                        run_dir=run_dir,
+                        target_url=target_url,
+                        login_url=login_url,
+                        credentials=credentials,
+                        auth_context=auth_context,
+                    )
+                except SpecGenerationError as exc:
+                    error_msg = str(exc)
+                    logger.error("Native planner failed validation: %s", error_msg)
+                    (run_dir / "status.txt").write_text("error")
+                    self._write_pipeline_error(
+                        run_dir,
+                        error_msg,
+                        "planning",
+                        {"planner_diagnostics": exc.diagnostics},
+                    )
+                    record_stage(
+                        handoff_manifest_path,
+                        "planner",
+                        status="failed",
+                        failure_reason=error_msg,
+                        metadata={"diagnostics": exc.diagnostics},
+                    )
+                    self._write_run_metrics(
+                        run_dir,
+                        planner_success=False,
+                        failure_category="planner_validation",
+                    )
+                    self._publish_agentic_summary(run_dir)
+                    cleanup_orphaned_browsers()
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "stage": "planning",
+                        "planner_diagnostics": exc.diagnostics,
+                    }
 
                 if plan_path and plan_path.exists():
                     logger.info(f"Plan created: {plan_path}")
+                    try:
+                        plan_text = plan_path.read_text()
+                    except OSError:
+                        plan_text = ""
+                    run_plan_md_path = run_dir / "plan.md"
+                    if plan_text:
+                        run_plan_md_path.write_text(plan_text)
+                    record_artifact(
+                        handoff_manifest_path,
+                        "planner_plan",
+                        run_plan_md_path if run_plan_md_path.exists() else plan_path,
+                        kind="planner_markdown_plan",
+                        producer_stage="planner",
+                        required=True,
+                        consumers=["generator", "healer"],
+                        validation_status="valid",
+                        metadata={"source_path": str(plan_path)},
+                    )
+                    raw_draft_path = getattr(
+                        self.native_planner, "last_draft_script_path", None
+                    )
+                    if raw_draft_path:
+                        candidate_draft_path = Path(raw_draft_path)
+                        if candidate_draft_path.exists():
+                            planner_draft_script_path = candidate_draft_path
+                            logger.info(
+                                "Planner draft script created: %s",
+                                planner_draft_script_path,
+                            )
+                            record_artifact(
+                                handoff_manifest_path,
+                                "planner_draft_script",
+                                planner_draft_script_path,
+                                kind="planner_draft_playwright",
+                                producer_stage="planner",
+                                required=True,
+                                consumers=["generator", "healer"],
+                                validation_status="valid",
+                            )
+                    planner_selectors = []
+                    planner_selectors = extract_plan_selectors(plan_text, limit=30) if plan_text else []
+                    evidence_summary_path = run_dir / "planner_evidence_summary.json"
+                    evidence_summary_path.write_text(
+                        json.dumps(
+                            {
+                                "plan_path": str(run_plan_md_path if run_plan_md_path.exists() else plan_path),
+                                "source_plan_path": str(plan_path),
+                                "planner_draft_script_path": str(planner_draft_script_path)
+                                if planner_draft_script_path
+                                else None,
+                                "selector_count": len(planner_selectors),
+                                "selectors": planner_selectors,
+                            },
+                            indent=2,
+                        )
+                    )
+                    record_artifact(
+                        handoff_manifest_path,
+                        "planner_evidence_summary",
+                        evidence_summary_path,
+                        kind="planner_evidence_summary",
+                        producer_stage="planner",
+                        required=False,
+                        consumers=["generator", "healer", "reporting"],
+                        validation_status="valid",
+                    )
+                    record_stage(
+                        handoff_manifest_path,
+                        "planner",
+                        status="ready",
+                        metadata={
+                            "plan_path": str(run_plan_md_path if run_plan_md_path.exists() else plan_path),
+                            "source_plan_path": str(plan_path),
+                            "planner_draft_script_path": str(planner_draft_script_path)
+                            if planner_draft_script_path
+                            else None,
+                            "selector_count": len(planner_selectors),
+                        },
+                    )
+                    self._emit_handoff_event(
+                        "planner_handoff_ready",
+                        "Planner handoff artifacts are ready.",
+                        payload={
+                            "artifacts": self._manifest_artifact_payload(
+                                handoff_manifest_path,
+                                [
+                                    "planner_plan",
+                                    "planner_draft_script",
+                                    "planner_evidence_summary",
+                                ],
+                            ),
+                            "selector_count": len(planner_selectors),
+                        },
+                    )
+                    self._write_run_metrics(run_dir, planner_success=True)
                 else:
                     logger.warning(
                         "Planner didn't create a structured plan, continuing with original spec"
                     )
+                    record_stage(
+                        handoff_manifest_path,
+                        "planner",
+                        status="skipped_or_missing",
+                        failure_reason="planner did not create a structured plan",
+                    )
+                    self._write_run_metrics(run_dir, planner_success=False)
+            else:
+                record_stage(
+                    handoff_manifest_path,
+                    "planner",
+                    status="skipped",
+                    metadata={"reason": "skip_planning"},
+                )
 
-                # Safety-net: clean up any orphaned browsers from planner stage
-                cleanup_orphaned_browsers()
+            # Safety-net: clean up any orphaned browsers from planner stage
+            cleanup_orphaned_browsers()
 
             logger.info("Agentic quality: analyzing test design...")
             report_progress("planning", "Analyzing test design and flake risk...")
@@ -542,6 +754,42 @@ class FullNativePipeline:
             # Stage 2: Native Generation with live browser
             logger.info("Stage 2: Native Generation (live browser)...")
             report_progress("generating", "Creating test code with live browser...")
+            if not plan_path:
+                record_artifact(
+                    handoff_manifest_path,
+                    "planner_plan",
+                    run_dir / "plan.md",
+                    kind="planner_markdown_plan",
+                    producer_stage="planner",
+                    required=False,
+                    consumers=["generator", "healer"],
+                    validation_status="optional_missing",
+                    failure_reason="planning was skipped or did not produce a plan",
+                )
+            if not planner_draft_script_path:
+                record_artifact(
+                    handoff_manifest_path,
+                    "planner_draft_script",
+                    run_dir / "plan.draft.spec.ts",
+                    kind="planner_draft_playwright",
+                    producer_stage="planner",
+                    required=False,
+                    consumers=["generator", "healer"],
+                    validation_status="optional_missing",
+                    failure_reason="planning was skipped or did not produce a draft script",
+                )
+            record_stage(
+                handoff_manifest_path,
+                "generator",
+                status="running",
+                metadata={
+                    "target_url": target_url,
+                    "plan_path": str(plan_path) if plan_path else None,
+                    "planner_draft_script_path": str(planner_draft_script_path)
+                    if planner_draft_script_path
+                    else None,
+                },
+            )
 
             # Use resolved spec for generation so all included content is visible
             # But keep the original spec name for the output file
@@ -557,12 +805,23 @@ class FullNativePipeline:
                 memory_run_id=getattr(self, "_memory_run_id", None),
                 auth_context=auth_context,
                 execution_credentials=credentials,
+                plan_path=plan_path,
+                planner_draft_script_path=planner_draft_script_path,
+                handoff_manifest_path=handoff_manifest_path,
             )
 
             if not test_path or not test_path.exists():
                 error_msg = "Native generator failed to create test file"
                 (run_dir / "status.txt").write_text("error")
                 self._write_pipeline_error(run_dir, error_msg, "generation")
+                record_stage(
+                    handoff_manifest_path,
+                    "generator",
+                    status="failed",
+                    failure_reason=error_msg,
+                    metadata=getattr(self.native_generator, "last_handoff_consumption", {}),
+                )
+                self._write_run_metrics(run_dir, generation_success=False)
                 self._publish_agentic_summary(run_dir)
                 self._attribute_memory_outcome(
                     stage="native_generator",
@@ -574,31 +833,133 @@ class FullNativePipeline:
                 )
                 return {"success": False, "error": error_msg, "stage": "generation"}
 
-            # Validate generated test content
-            try:
-                gen_content = test_path.read_text()
-                if len(gen_content.strip()) < 100:
-                    error_msg = f"Generated test file is too small ({len(gen_content)} chars) - likely incomplete generation"
-                    logger.error(error_msg)
-                    (run_dir / "status.txt").write_text("error")
-                    self._write_pipeline_error(
-                        run_dir, error_msg, "generation_validation"
+            generation_repair_metadata: dict[str, Any] = {}
+            validation_error = self._validate_generated_test_file(
+                test_path=test_path,
+                run_dir=run_dir,
+                browser=browser,
+                test_type="browser",
+            )
+            record_artifact(
+                handoff_manifest_path,
+                "generated_test",
+                test_path,
+                kind="playwright_test",
+                producer_stage="generator",
+                required=True,
+                consumers=["test_run", "healer", "reporting"],
+                validation_status="pending_validation",
+                metadata=getattr(self.native_generator, "last_handoff_consumption", {}),
+            )
+            validation_status = validate_artifact(
+                handoff_manifest_path,
+                "generated_test",
+                validator=lambda _path: (validation_error is None, validation_error),
+            )
+            if validation_error:
+                generation_repair_metadata = await self._attempt_generation_format_repair(
+                    test_path=test_path,
+                    run_dir=run_dir,
+                    browser=browser,
+                    test_type="browser",
+                    original_validation_error=validation_error,
+                    spec_content=resolved_spec_content,
+                    spec_path=resolved_spec_path,
+                    target_url=target_url,
+                    plan_path=plan_path,
+                    planner_draft_script_path=planner_draft_script_path,
+                )
+                if generation_repair_metadata.get("generation_repair_accepted"):
+                    record_artifact(
+                        handoff_manifest_path,
+                        "generated_test",
+                        test_path,
+                        kind="playwright_test",
+                        producer_stage="generator",
+                        required=True,
+                        consumers=["test_run", "healer", "reporting"],
+                        validation_status="pending_validation",
+                        metadata={
+                            **getattr(self.native_generator, "last_handoff_consumption", {}),
+                            **generation_repair_metadata,
+                        },
                     )
-                    self._publish_agentic_summary(run_dir)
-                    return {
-                        "success": False,
-                        "error": error_msg,
-                        "stage": "generation_validation",
-                    }
-                if "test(" not in gen_content and "test.describe" not in gen_content:
-                    logger.warning(
-                        "Generated test file may be invalid - missing test() or test.describe markers. "
-                        "Proceeding to execution (healer may fix it)."
+                    validation_error = self._validate_generated_test_file(
+                        test_path=test_path,
+                        run_dir=run_dir,
+                        browser=browser,
+                        test_type="browser",
                     )
-            except Exception as val_err:
-                logger.warning(f"Could not validate generated test: {val_err}")
+                    validation_status = validate_artifact(
+                        handoff_manifest_path,
+                        "generated_test",
+                        validator=lambda _path: (validation_error is None, validation_error),
+                    )
+
+            if validation_error:
+                logger.error(validation_error)
+                (run_dir / "status.txt").write_text("error")
+                self._write_pipeline_error(
+                    run_dir,
+                    validation_error,
+                    "generation_validation",
+                    generation_repair_metadata,
+                )
+                self._write_run_metrics(
+                    run_dir,
+                    generation_success=False,
+                    failure_category="generation_validation",
+                    **generation_repair_metadata,
+                )
+                record_stage(
+                    handoff_manifest_path,
+                    "generator",
+                    status="failed",
+                    failure_reason=validation_error,
+                    metadata={
+                        **getattr(self.native_generator, "last_handoff_consumption", {}),
+                        "validation": validation_status,
+                    **generation_repair_metadata,
+                },
+            )
+                self._publish_agentic_summary(run_dir)
+                return {
+                    "success": False,
+                    "error": validation_error,
+                    "stage": "generation_validation",
+                    **generation_repair_metadata,
+                }
 
             logger.info(f"Test generated: {test_path}")
+            record_stage(
+                handoff_manifest_path,
+                "generator",
+                status="ready",
+                metadata={
+                    **getattr(self.native_generator, "last_handoff_consumption", {}),
+                    "test_path": str(test_path),
+                    "validation": validation_status,
+                    **generation_repair_metadata,
+                },
+            )
+            self._emit_handoff_event(
+                "generator_handoff_consumed",
+                "Generator consumed planner handoff context.",
+                payload={
+                    "artifacts": self._manifest_artifact_payload(
+                        handoff_manifest_path,
+                        ["planner_plan", "planner_draft_script", "generated_test"],
+                    ),
+                    "consumption": getattr(self.native_generator, "last_handoff_consumption", {}),
+                    "validation": validation_status,
+                    "repair": generation_repair_metadata,
+                },
+            )
+            self._write_run_metrics(
+                run_dir,
+                generation_success=True,
+                **generation_repair_metadata,
+            )
             self._attribute_memory_outcome(
                 stage="native_generator",
                 success=True,
@@ -631,11 +992,37 @@ class FullNativePipeline:
             # Stage 3: Run test
             logger.info("Stage 3: Running test...")
             report_progress("testing", "Running generated test...")
+            record_stage(
+                handoff_manifest_path,
+                "test_run",
+                status="running",
+                metadata={"browser": browser, "test_path": str(test_path)},
+            )
+            record_consumption(
+                handoff_manifest_path,
+                "test_run",
+                "generated_test",
+                status="used",
+                metadata={"path": str(test_path)},
+            )
 
             result = self._run_test(str(test_path), str(run_dir), browser)
 
             if result.passed:
                 logger.info("Test PASSED on first run!")
+                record_stage(
+                    handoff_manifest_path,
+                    "test_run",
+                    status="passed",
+                    metadata={"exit_code": result.exit_code},
+                )
+                self._write_run_metrics(
+                    run_dir,
+                    initial_run_passed=True,
+                    healing_started=False,
+                    healing_attempts=0,
+                    heal_rescued=False,
+                )
                 self._attribute_memory_outcome(
                     stage="native_generator",
                     success=True,
@@ -653,9 +1040,11 @@ class FullNativePipeline:
                     attempts=0,
                 )
                 if stability_result:
+                    self._write_run_metrics(run_dir, stable_first_pass=False)
                     return stability_result
                 self._record_passing_selectors(test_path)
                 (run_dir / "status.txt").write_text("passed")
+                self._write_run_metrics(run_dir, stable_first_pass=True)
                 self._publish_agentic_summary(run_dir)
                 return {
                     "success": True,
@@ -665,6 +1054,36 @@ class FullNativePipeline:
                 }
 
             logger.error(f"Test FAILED: {result.error_summary}")
+            failure_category = categorize_error(result.error_summary or result.output[-2000:])
+            record_stage(
+                handoff_manifest_path,
+                "test_run",
+                status="failed",
+                failure_reason=result.error_summary or result.output[-500:],
+                metadata={
+                    "exit_code": result.exit_code,
+                    "failure_category": failure_category,
+                },
+            )
+            self._emit_handoff_event(
+                "test_run_handoff_failed",
+                "Generated test failed and is ready for healer handoff.",
+                level="warning",
+                payload={
+                    "artifacts": self._manifest_artifact_payload(
+                        handoff_manifest_path,
+                        ["generated_test", "planner_plan", "planner_draft_script"],
+                    ),
+                    "failure_category": failure_category,
+                    "error_summary": result.error_summary,
+                },
+            )
+            self._write_run_metrics(
+                run_dir,
+                initial_run_passed=False,
+                stable_first_pass=False,
+                failure_category=failure_category,
+            )
             self._attribute_memory_outcome(
                 stage="native_generator",
                 success=False,
@@ -711,6 +1130,8 @@ class FullNativePipeline:
                     browser=browser,
                     result=result,
                     diagnosis=diagnosis,
+                    plan_path=plan_path,
+                    handoff_manifest_path=handoff_manifest_path,
                 )
 
             # Safety-net: clean up any orphaned browsers from healing stage
@@ -791,12 +1212,20 @@ class FullNativePipeline:
                     "specFilePath": str(spec_file.absolute()),
                     "targetUrl": target_url,
                     "generatedPlanPath": str(plan_path),
+                    "handoffManifestPath": str(run_dir / "handoff_manifest.json"),
+                    "plannerDraftScriptPath": (
+                        str(getattr(self.native_planner, "last_draft_script_path", ""))
+                        if getattr(self.native_planner, "last_draft_script_path", None)
+                        else None
+                    ),
                     "steps": [],  # Will be populated from the generated plan
                 }
                 (run_dir / "plan.json").write_text(json.dumps(plan_data, indent=2))
 
             return plan_path
 
+        except SpecGenerationError:
+            raise
         except Exception as e:
             logger.warning(f"Native planner error: {e}")
             return None
@@ -810,6 +1239,9 @@ class FullNativePipeline:
         memory_run_id: str | None = None,
         auth_context: dict[str, Any] | None = None,
         execution_credentials: dict[str, str] | None = None,
+        plan_path: Path | None = None,
+        planner_draft_script_path: Path | None = None,
+        handoff_manifest_path: Path | None = None,
     ) -> Path | None:
         """Run native generator to create test code.
 
@@ -819,6 +1251,27 @@ class FullNativePipeline:
             output_name: Override for output test file name (without extension)
         """
         try:
+            if handoff_manifest_path:
+                if plan_path:
+                    record_consumption(
+                        handoff_manifest_path,
+                        "generator",
+                        "planner_plan",
+                        status="used" if plan_path.exists() else "missing",
+                        reason=None if plan_path.exists() else "plan path does not exist",
+                        metadata={"path": str(plan_path)},
+                    )
+                if planner_draft_script_path:
+                    record_consumption(
+                        handoff_manifest_path,
+                        "generator",
+                        "planner_draft_script",
+                        status="used" if planner_draft_script_path.exists() else "missing",
+                        reason=None
+                        if planner_draft_script_path.exists()
+                        else "draft script path does not exist",
+                        metadata={"path": str(planner_draft_script_path)},
+                    )
             test_path = await self.native_generator.generate_test(
                 spec_path=spec_path,
                 target_url=target_url,
@@ -827,6 +1280,9 @@ class FullNativePipeline:
                 memory_run_id=memory_run_id,
                 auth_context=auth_context,
                 execution_credentials=execution_credentials,
+                plan_path=plan_path,
+                planner_draft_script_path=planner_draft_script_path,
+                handoff_manifest_path=handoff_manifest_path,
             )
             return test_path
         except Exception as e:
@@ -856,6 +1312,384 @@ class FullNativePipeline:
         )
         self._publish_agentic_summary(run_dir)
         return diagnosis
+
+    def _write_run_metrics(self, run_dir: Path, **updates: Any) -> dict[str, Any]:
+        """Merge canonical first-pass/healing metrics into run_metrics.json."""
+        path = run_dir / "run_metrics.json"
+        metrics: dict[str, Any] = {}
+        try:
+            if path.exists():
+                loaded = json.loads(path.read_text())
+                if isinstance(loaded, dict):
+                    metrics.update(loaded)
+        except Exception as exc:
+            logger.debug(f"Could not read run_metrics.json: {exc}")
+
+        metrics.setdefault("schema_version", "1.0")
+        metrics.setdefault("initial_run_passed", None)
+        metrics.setdefault("stable_first_pass", None)
+        metrics.setdefault("healing_started", False)
+        metrics.setdefault("healing_attempts", 0)
+        metrics.setdefault("heal_rescued", False)
+        metrics.setdefault("generation_success", None)
+        metrics.setdefault("planner_success", None)
+        metrics.setdefault("credential_resolution_status", "unknown")
+        metrics.setdefault("failure_category", None)
+        metrics.setdefault("cost_usd", None)
+        metrics.setdefault("wall_time_seconds", None)
+        metrics.update({key: value for key, value in updates.items() if value is not None})
+        metrics["updated_at"] = datetime.now().isoformat()
+
+        try:
+            path.write_text(json.dumps(metrics, indent=2))
+        except OSError as exc:
+            logger.debug(f"Could not write run_metrics.json: {exc}")
+        return metrics
+
+    def _validate_generated_test_file(
+        self,
+        *,
+        test_path: Path,
+        run_dir: Path,
+        browser: str,
+        test_type: str,
+    ) -> str | None:
+        """Deterministically reject malformed generated Playwright files before execution."""
+        try:
+            content = test_path.read_text()
+        except OSError as exc:
+            return f"Generated test file could not be read: {exc}"
+
+        stripped = content.strip()
+        if len(stripped) < 100:
+            return f"Generated test file is too small ({len(stripped)} chars) - likely incomplete generation"
+        if "```" in stripped:
+            return "Generated test file contains markdown fences or narrative output"
+        if not self._has_supported_playwright_test_import(stripped):
+            return "Generated test file is missing @playwright/test import or project test-data fixture import"
+        if "test(" not in stripped and "test.describe" not in stripped:
+            return "Generated test file is missing test() or test.describe()"
+        if "expect(" not in stripped and "test.fixme" not in stripped:
+            return "Generated test file has no Playwright assertions or explicit test.fixme()"
+        if test_type == "api" and " request " not in stripped and "{ request" not in stripped:
+            return "Generated API test does not use the Playwright request fixture"
+
+        if not getattr(self, "generated_preflight_list_enabled", False):
+            return None
+
+        try:
+            cmd = (
+                f"npx playwright test --list '{test_path}' --project {browser}"
+                f"{playwright_config_cli_arg(str(run_dir))}"
+            )
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={
+                    **{
+                        key: value
+                        for key, value in os.environ.copy().items()
+                        if not key.startswith("TESTDATA_")
+                    },
+                    **getattr(self, "test_data_env_vars", {}),
+                },
+            )
+            if result.returncode != 0:
+                output = (result.stdout + result.stderr).strip()
+                return f"Generated test failed Playwright list preflight: {output[:1000]}"
+        except subprocess.TimeoutExpired:
+            return "Generated test Playwright list preflight timed out"
+        except Exception as exc:
+            return f"Generated test Playwright list preflight failed: {exc}"
+        return None
+
+    @staticmethod
+    def _has_supported_playwright_test_import(content: str) -> bool:
+        if "@playwright/test" in content:
+            return True
+
+        for match in re.finditer(
+            r"import\s*\{(?P<names>[^}]+)\}\s*from\s*['\"](?P<source>[^'\"]+)['\"]",
+            content,
+        ):
+            names = match.group("names")
+            source = match.group("source").replace("\\", "/")
+            if (
+                source.endswith("fixtures/test-data")
+                and re.search(r"\btest\b", names)
+                and re.search(r"\bexpect\b", names)
+                and ("testData" in content or "QUORVEX_TEST_DATA_FILE" in content)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _should_attempt_generation_format_repair(validation_error: str | None) -> bool:
+        if not validation_error:
+            return False
+        lowered = validation_error.lower()
+        if "too small" in lowered or "could not be read" in lowered:
+            return False
+        repairable_markers = (
+            "missing @playwright/test import",
+            "missing @playwright/test import or project test-data fixture import",
+            "markdown fences",
+            "missing test()",
+            "missing test.describe",
+            "no playwright assertions",
+            "request fixture",
+        )
+        return any(marker in lowered for marker in repairable_markers)
+
+    @staticmethod
+    def _full_content_hash(content: str) -> str:
+        return hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()
+
+    @staticmethod
+    def _redact_sensitive_text(content: str) -> str:
+        patterns = (
+            r"(?i)\b(bearer)\s+[A-Za-z0-9._~+/=-]+",
+            r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization|credential)\b(\s*[:=]\s*)([^\s,;`]+)",
+        )
+        redacted = content or ""
+        for pattern in patterns:
+            redacted = re.sub(
+                pattern,
+                lambda match: f"{match.group(1)}{match.group(2) if len(match.groups()) > 1 else ' '}[REDACTED]",
+                redacted,
+            )
+        return redacted
+
+    @classmethod
+    def _content_preview(cls, content: str, limit: int = 2000) -> str:
+        normalized = cls._redact_sensitive_text(content).replace("\x00", " ").strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[:limit] + f"\n...[truncated {len(normalized) - limit} chars]"
+
+    def _write_generation_repair_artifact(self, run_dir: Path, metadata: dict[str, Any]) -> Path | None:
+        try:
+            artifact = {
+                key: value
+                for key, value in metadata.items()
+                if not key.startswith("_")
+            }
+            path = run_dir / "generation_repair_attempt.json"
+            path.write_text(json.dumps(artifact, indent=2))
+            return path
+        except OSError as exc:
+            logger.debug("Could not write generation repair artifact: %s", exc)
+            return None
+
+    def _safe_fixture_context_summary(self) -> dict[str, Any]:
+        context = getattr(self, "test_data_execution_context", {}) or {}
+        return {
+            "refs": list(context.get("refs") or []),
+            "missing": list(context.get("missing") or []),
+            "runtime_fixture_file": context.get("runtime_fixture_file"),
+            "fixture_env_injected": bool(getattr(self, "test_data_env_vars", {}).get("QUORVEX_TEST_DATA_FILE")),
+        }
+
+    def _build_generation_repair_prompt(
+        self,
+        *,
+        generated_code: str,
+        original_validation_error: str,
+        spec_content: str,
+        spec_path: Path | str,
+        target_url: str,
+        plan_path: Path | None,
+        planner_draft_script_path: Path | None,
+        test_path: Path,
+    ) -> str:
+        plan_content = ""
+        if plan_path and plan_path.exists():
+            try:
+                plan_content = plan_path.read_text()
+            except OSError:
+                plan_content = ""
+
+        draft_content = ""
+        if planner_draft_script_path and planner_draft_script_path.exists():
+            try:
+                draft_content = planner_draft_script_path.read_text()
+            except OSError:
+                draft_content = ""
+
+        fixture_context = self._safe_fixture_context_summary()
+        return f"""You are a bounded Playwright TypeScript formatter/repair agent.
+
+Repair the generated test file so it passes deterministic structural validation.
+Do not browse, inspect files, call tools, or change scenario intent.
+Return TypeScript only: no markdown fences, no commentary, no prose.
+Keep the same destination file path: {test_path}
+
+Original validation error:
+{original_validation_error}
+
+Target URL:
+{target_url}
+
+Source spec ({spec_path}):
+```markdown
+{truncate_middle(self._redact_sensitive_text(spec_content), head=8000, tail=8000)}
+```
+
+Fixture context:
+```json
+{json.dumps(fixture_context, indent=2, sort_keys=True)}
+```
+
+Planner plan:
+```markdown
+{truncate_middle(self._redact_sensitive_text(plan_content), head=6000, tail=6000)}
+```
+
+Planner draft script:
+```typescript
+{truncate_middle(self._redact_sensitive_text(draft_content), head=6000, tail=6000)}
+```
+
+Current generated file:
+```typescript
+{truncate_middle(self._redact_sensitive_text(generated_code), head=12000, tail=12000)}
+```
+
+Requirements:
+- Import `test` and `expect` from `@playwright/test`, unless the code uses project test data.
+- If the code uses project test data, import `test` and `expect` from the existing fixture helper path already present in the file or from `../fixtures/test-data`.
+- Use `testData.get(...)` or `testData.field(...)` for project test data. Never write `process.env.TESTDATA_*`.
+- Include at least one `test(...)` or `test.describe(...)`.
+- Include Playwright assertions with `expect(...)` unless the test is explicitly `test.fixme(...)`.
+- Preserve the user-visible flow and selectors from the current generated file, planner plan, and draft script.
+"""
+
+    async def _query_generation_repair_agent(self, prompt: str):
+        timeout = int(os.environ.get("GENERATION_REPAIR_TIMEOUT_SECONDS", "180"))
+        raw_budget = os.environ.get("GENERATION_REPAIR_TOKEN_BUDGET", "12000")
+        try:
+            token_budget = max(1000, int(raw_budget))
+        except ValueError:
+            token_budget = 12000
+        runner = AgentRunner(
+            timeout_seconds=timeout,
+            allowed_tools=[],
+            tools=[],
+            log_tools=False,
+            cwd=getattr(getattr(self, "native_generator", None), "cwd", None),
+            owner_type=self.owner_type,
+            owner_id=self.owner_id,
+            owner_label=self.owner_label,
+            requires_live_browser=False,
+            model_tier=self.model_tier,
+            task_budget={"total": token_budget},
+            inject_memory=False,
+            capture_memory=False,
+            env_vars=getattr(self, "test_data_env_vars", {}),
+        )
+        return await runner.run(prompt)
+
+    async def _attempt_generation_format_repair(
+        self,
+        *,
+        test_path: Path,
+        run_dir: Path,
+        browser: str,
+        test_type: str,
+        original_validation_error: str,
+        spec_content: str,
+        spec_path: Path | str,
+        target_url: str,
+        plan_path: Path | None,
+        planner_draft_script_path: Path | None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "generation_repair_attempted": False,
+            "generation_repair_accepted": False,
+            "original_validation_error": original_validation_error,
+        }
+        try:
+            current_code = test_path.read_text()
+        except OSError as exc:
+            metadata["generation_repair_error"] = f"could not read generated file: {exc}"
+            self._write_generation_repair_artifact(run_dir, metadata)
+            return metadata
+
+        metadata.update(
+            {
+                "generated_file_hash_before_repair": self._full_content_hash(current_code),
+                "generated_file_preview_before_repair": self._content_preview(current_code),
+            }
+        )
+
+        if not self._should_attempt_generation_format_repair(original_validation_error):
+            metadata["generation_repair_skipped_reason"] = "validation_error_not_repairable_by_format_repair"
+            self._write_generation_repair_artifact(run_dir, metadata)
+            return metadata
+
+        metadata["generation_repair_attempted"] = True
+        prompt = self._build_generation_repair_prompt(
+            generated_code=current_code,
+            original_validation_error=original_validation_error,
+            spec_content=spec_content,
+            spec_path=spec_path,
+            target_url=target_url,
+            plan_path=plan_path,
+            planner_draft_script_path=planner_draft_script_path,
+            test_path=test_path,
+        )
+
+        try:
+            repair_result = await self._query_generation_repair_agent(prompt)
+        except Exception as exc:
+            metadata["generation_repair_error"] = str(exc)
+            self._write_generation_repair_artifact(run_dir, metadata)
+            return metadata
+
+        repaired_output = str(getattr(repair_result, "output", "") or "")
+        repaired_code = object.__new__(NativeGenerator)._extract_code(repaired_output)
+        if repaired_code is None:
+            candidate = repaired_output.strip()
+            metadata["generation_repair_validation_error"] = (
+                "repair output did not contain a valid Playwright TypeScript test"
+            )
+            metadata["repaired_output"] = {
+                "length": len(candidate),
+                "hash": self._full_content_hash(candidate) if candidate else None,
+                "preview": self._content_preview(candidate),
+            }
+            self._write_generation_repair_artifact(run_dir, metadata)
+            return metadata
+
+        test_path.write_text(repaired_code.rstrip() + "\n")
+        repair_validation_error = self._validate_generated_test_file(
+            test_path=test_path,
+            run_dir=run_dir,
+            browser=browser,
+            test_type=test_type,
+        )
+        repaired_hash = self._full_content_hash(test_path.read_text())
+        metadata["repaired_file_hash"] = repaired_hash
+        metadata["generation_repaired_file_hash"] = repaired_hash
+        metadata["repaired_output"] = {
+            "length": len(repaired_code),
+            "hash": repaired_hash,
+            "preview": self._content_preview(repaired_code),
+        }
+        if repair_validation_error:
+            metadata["generation_repair_validation_error"] = repair_validation_error
+            test_path.write_text(current_code)
+            metadata["generation_repair_reverted"] = True
+            self._write_generation_repair_artifact(run_dir, metadata)
+            return metadata
+
+        metadata["generation_repair_accepted"] = True
+        artifact_path = self._write_generation_repair_artifact(run_dir, metadata)
+        metadata["generation_repair_artifact_path"] = str(artifact_path) if artifact_path else None
+        return metadata
 
     def _run_stability_gate(
         self, *, test_path: Path, run_dir: Path, browser: str
@@ -939,12 +1773,26 @@ class FullNativePipeline:
 
         if not fixed_code:
             logger.warning("Flake-hardening healer returned no changes")
+            self._write_run_metrics(
+                run_dir,
+                stable_first_pass=False,
+                healing_started=True,
+                healing_attempts=attempts + 1,
+                heal_rescued=False,
+            )
             stability_result["attempts"] = attempts
             return stability_result
 
         rerun = self._run_test(str(test_path), str(run_dir), browser)
         if not rerun.passed:
             logger.warning("Flake-hardening changes did not pass the immediate rerun")
+            self._write_run_metrics(
+                run_dir,
+                stable_first_pass=False,
+                healing_started=True,
+                healing_attempts=attempts + 1,
+                heal_rescued=False,
+            )
             stability_result["attempts"] = attempts + 1
             return stability_result
 
@@ -952,10 +1800,24 @@ class FullNativePipeline:
             test_path=test_path, run_dir=run_dir, browser=browser
         )
         if second_stability_result:
+            self._write_run_metrics(
+                run_dir,
+                stable_first_pass=False,
+                healing_started=True,
+                healing_attempts=attempts + 1,
+                heal_rescued=False,
+            )
             second_stability_result["attempts"] = attempts + 1
             return second_stability_result
 
         (run_dir / "status.txt").write_text("passed")
+        self._write_run_metrics(
+            run_dir,
+            stable_first_pass=False,
+            healing_started=True,
+            healing_attempts=attempts + 1,
+            heal_rescued=True,
+        )
         validation_result = {
             "status": "success",
             "mode": "native_healer_stability_hardening",
@@ -1176,12 +2038,17 @@ class FullNativePipeline:
         content_after: str,
         tool_calls: list[dict[str, Any]],
         error_category: str | None,
+        failure_metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         tools = [str(call.get("tool") or self._normalized_tool_name(call.get("name"))) for call in tool_calls]
         tool_set = set(tools)
         changed = content_before != content_after
         missing: list[str] = []
         category = self._guardrail_category(error_category)
+        scoped_test_run = self._scoped_test_run_status(
+            tool_calls=tool_calls,
+            failure_metadata=failure_metadata or {},
+        )
 
         if not changed:
             missing.append("non_noop_edit")
@@ -1189,6 +2056,8 @@ class FullNativePipeline:
             missing.append("test_run")
         if changed and tools and tools[0] != "test_run":
             missing.append("first_tool_test_run")
+        if changed and scoped_test_run["required"] and not scoped_test_run["scoped"]:
+            missing.append("scoped_test_run")
         if changed and category in {"selector", "timing"} and not (
             {"browser_snapshot", "browser_generate_locator"} & tool_set
         ):
@@ -1224,8 +2093,93 @@ class FullNativePipeline:
             "guardrail_status": status,
             "missing_required_tools": missing,
             "first_tool": tools[0] if tools else None,
+            "scoped_test_run": scoped_test_run,
             "mcp_evidence_tools_used": evidence_tools,
             "used_failure_state_tool": bool({"browser_resume", "browser_snapshot"} & tool_set),
+            "assertion_removed": assertion_removed,
+            "test_fixme_explicit": fixme_explicit,
+            "broad_rewrite": broad_rewrite,
+        }
+
+    def _scoped_test_run_status(
+        self,
+        *,
+        tool_calls: list[dict[str, Any]],
+        failure_metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        required_values = {
+            "file": failure_metadata.get("file"),
+            "project": failure_metadata.get("project"),
+            "title": failure_metadata.get("title") or failure_metadata.get("full_title"),
+        }
+        required_values = {key: str(value) for key, value in required_values.items() if value}
+        if not required_values:
+            return {"required": False, "scoped": True, "missing": []}
+
+        test_run_call = next(
+            (
+                call
+                for call in tool_calls
+                if self._normalized_tool_name(call.get("tool") or call.get("name")) == "test_run"
+            ),
+            None,
+        )
+        if not test_run_call:
+            return {"required": True, "scoped": False, "missing": sorted(required_values)}
+
+        call_input = test_run_call.get("input") or test_run_call.get("arguments") or {}
+        missing = [
+            key
+            for key, value in required_values.items()
+            if not self._tool_input_contains(call_input, value)
+        ]
+        return {"required": True, "scoped": not missing, "missing": missing}
+
+    @classmethod
+    def _tool_input_contains(cls, value: Any, expected: str) -> bool:
+        expected_lower = expected.lower()
+        expected_name = Path(expected).name.lower()
+        if isinstance(value, str):
+            lower = value.lower()
+            return expected_lower in lower or expected_name in lower
+        if isinstance(value, dict):
+            return any(cls._tool_input_contains(item, expected) for item in value.values())
+        if isinstance(value, list):
+            return any(cls._tool_input_contains(item, expected) for item in value)
+        return expected_lower in str(value).lower()
+
+    def _evaluate_api_healer_guardrails(
+        self,
+        *,
+        content_before: str,
+        content_after: str,
+    ) -> dict[str, Any]:
+        """Reject API healer edits that weaken assertions or broadly rewrite intent."""
+        missing: list[str] = []
+        changed = content_before != content_after
+        if not changed:
+            missing.append("non_noop_edit")
+        if "@playwright/test" not in content_after:
+            missing.append("playwright_import")
+        if "test(" not in content_after and "test.describe" not in content_after:
+            missing.append("playwright_test")
+        if "expect(" not in content_after and "test.fixme" not in content_after:
+            missing.append("assertion_or_explicit_test_fixme")
+
+        assertion_removed = self._assertion_count(content_after) < self._assertion_count(content_before)
+        fixme_explicit = self._is_assertion_removal_allowed(content_after)
+        if assertion_removed and not fixme_explicit:
+            missing.append("assertion_preservation_or_explicit_test_fixme")
+
+        added, removed = self._diff_counts(content_before, content_after)
+        before_lines = max(len(content_before.splitlines()), 1)
+        broad_rewrite = (added + removed) > max(80, int(before_lines * 0.4))
+        if broad_rewrite and "test.fixme" not in content_after:
+            missing.append("no_broad_rewrite_without_fixme")
+
+        return {
+            "guardrail_status": "failed" if missing else "passed",
+            "missing_required_tools": missing,
             "assertion_removed": assertion_removed,
             "test_fixme_explicit": fixme_explicit,
             "broad_rewrite": broad_rewrite,
@@ -1255,6 +2209,109 @@ class FullNativePipeline:
             )
         except Exception as exc:
             logger.debug("Could not emit healer agent run event %s: %s", event_type, exc)
+
+    def _emit_handoff_event(
+        self,
+        event_type: str,
+        message: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        level: str = "info",
+    ) -> None:
+        run_id = getattr(self, "owner_id", None)
+        if not run_id:
+            return
+        try:
+            from orchestrator.services.agent_run_events import create_agent_run_event
+
+            create_agent_run_event(
+                run_id=str(run_id),
+                project_id=getattr(self, "project_id", None),
+                event_type=event_type,
+                message=message,
+                level=level,
+                payload=payload or {},
+            )
+        except Exception as exc:
+            logger.debug("Could not emit handoff agent run event %s: %s", event_type, exc)
+
+    @staticmethod
+    def _manifest_artifact_payload(manifest_file: Path, artifact_ids: list[str]) -> dict[str, Any]:
+        manifest = load_manifest(manifest_file)
+        artifacts = manifest.get("artifacts") if isinstance(manifest, dict) else {}
+        payload: dict[str, Any] = {}
+        if not isinstance(artifacts, dict):
+            return payload
+        for artifact_id in artifact_ids:
+            item = artifacts.get(artifact_id)
+            if not isinstance(item, dict):
+                continue
+            payload[artifact_id] = {
+                "path": item.get("path"),
+                "hash": item.get("hash") or item.get("current_hash"),
+                "validation_status": item.get("validation_status"),
+                "required": item.get("required"),
+                "failure_reason": item.get("failure_reason"),
+            }
+        return payload
+
+    def _build_healer_handoff_context(
+        self,
+        *,
+        manifest_file: Path | None,
+        planner_draft_script_path: Path | None = None,
+        limit: int = 6000,
+    ) -> str:
+        lines: list[str] = []
+        if manifest_file and manifest_file.exists():
+            manifest = load_manifest(manifest_file)
+            artifacts = manifest.get("artifacts") if isinstance(manifest, dict) else {}
+            stages = manifest.get("stages") if isinstance(manifest, dict) else {}
+            if isinstance(artifacts, dict):
+                lines.append("## Handoff Manifest Context")
+                for artifact_id in ("planner_plan", "planner_draft_script", "generated_test"):
+                    artifact = artifacts.get(artifact_id)
+                    if not isinstance(artifact, dict):
+                        continue
+                    lines.append(
+                        "- "
+                        f"{artifact_id}: status={artifact.get('validation_status') or 'unknown'} "
+                        f"hash={artifact.get('hash') or artifact.get('current_hash') or 'unknown'} "
+                        f"path={artifact.get('path')}"
+                    )
+            generator = stages.get("generator") if isinstance(stages, dict) else {}
+            if isinstance(generator, dict) and generator.get("artifacts_consumed"):
+                lines.append("Generator consumed artifacts:")
+                for artifact_id, item in generator.get("artifacts_consumed", {}).items():
+                    if isinstance(item, dict):
+                        lines.append(
+                            f"- {artifact_id}: {item.get('status')}"
+                            + (f" ({item.get('reason')})" if item.get("reason") else "")
+                        )
+
+            draft_artifact = artifacts.get("planner_draft_script") if isinstance(artifacts, dict) else None
+            if not planner_draft_script_path and isinstance(draft_artifact, dict) and draft_artifact.get("path"):
+                planner_draft_script_path = Path(str(draft_artifact["path"]))
+
+        if planner_draft_script_path and planner_draft_script_path.exists():
+            try:
+                draft = planner_draft_script_path.read_text()
+                head = min(limit // 2, len(draft))
+                tail = max(limit - head, 0)
+                lines.extend(
+                    [
+                        "",
+                        "## Planner Draft Script Context",
+                        "Use this only as selector and wait-strategy evidence. Prefer the current failed browser state when it differs.",
+                        "```typescript",
+                        truncate_middle(draft, head=head, tail=tail),
+                        "```",
+                    ]
+                )
+            except OSError as exc:
+                lines.append(f"Planner draft script could not be read: {exc}")
+
+        return "\n".join(lines).strip()
 
     def _record_healing_attempt(
         self, run_dir: Path, test_path: Path, records: list[dict], record: dict
@@ -1308,6 +2365,8 @@ class FullNativePipeline:
         browser: str,
         result: TestResult,
         diagnosis: dict | None = None,
+        plan_path: Path | None = None,
+        handoff_manifest_path: Path | None = None,
     ) -> dict:
         """Native healing: up to 3 attempts with test_run and diagnostic tools."""
         logger.info("Stage 4: Native Healing (up to 3 attempts)...")
@@ -1317,6 +2376,24 @@ class FullNativePipeline:
         error_log = self._build_structured_failure_context(
             test_path=test_path, run_dir=run_dir, result=result
         )
+        if plan_path and plan_path.exists():
+            try:
+                plan_text = plan_path.read_text()
+                plan_selectors = extract_plan_selectors(plan_text, limit=15)
+                if plan_selectors:
+                    selector_excerpt = "\n".join(plan_selectors)
+                    error_log = (
+                        "## Planner-Verified Selectors (from live exploration before generation)\n"
+                        f"{selector_excerpt}\n\n"
+                        f"{error_log}"
+                    )
+            except OSError as exc:
+                logger.warning(f"Could not read planner artifact {plan_path}: {exc}")
+        healer_handoff_context = self._build_healer_handoff_context(
+            manifest_file=handoff_manifest_path,
+        )
+        if healer_handoff_context:
+            error_log = f"{healer_handoff_context}\n\n{error_log}"
         diagnosis_context = self.failure_triage_agent.condensed_context(diagnosis)
         failure_metadata = self._extract_failed_test_metadata(
             self._read_json_file(run_dir / "test-results.json"), test_path
@@ -1326,6 +2403,36 @@ class FullNativePipeline:
             or categorize_error(result.error_summary or result.output[-2000:])
         )
         attempt_records: list[dict] = []
+        if handoff_manifest_path:
+            record_stage(
+                handoff_manifest_path,
+                "healer",
+                status="ready",
+                metadata={
+                    "browser": browser,
+                    "failure_category": current_error_category,
+                    "failed_test": failure_metadata,
+                },
+            )
+            record_consumption(
+                handoff_manifest_path,
+                "healer",
+                "generated_test",
+                status="used" if test_path.exists() else "missing",
+                metadata={"path": str(test_path)},
+            )
+            self._emit_handoff_event(
+                "healer_handoff_ready",
+                "Healer handoff context is ready.",
+                payload={
+                    "artifacts": self._manifest_artifact_payload(
+                        handoff_manifest_path,
+                        ["planner_plan", "planner_draft_script", "generated_test"],
+                    ),
+                    "failure_category": current_error_category,
+                    "failed_test": failure_metadata,
+                },
+            )
 
         for attempt in range(1, max_attempts + 1):
             logger.info(f"Healing attempt {attempt}/{max_attempts}...")
@@ -1388,6 +2495,7 @@ class FullNativePipeline:
                         content_after=content_after,
                         tool_calls=tool_calls,
                         error_category=current_error_category,
+                        failure_metadata=failure_metadata,
                     )
                     if fixed_code
                     else {
@@ -1411,6 +2519,7 @@ class FullNativePipeline:
                             call.get("tool") in {"browser_resume", "browser_snapshot"}
                             for call in tool_calls
                         ),
+                        "scoped_test_run": {"required": False, "scoped": True, "missing": []},
                     }
                 )
                 evidence_path = self._write_failure_evidence_packet(
@@ -1448,6 +2557,7 @@ class FullNativePipeline:
                     "mcp_evidence_tools_used": guardrail.get("mcp_evidence_tools_used", []),
                     "used_failure_state_tool": guardrail.get("used_failure_state_tool", False),
                     "missing_required_tools": guardrail.get("missing_required_tools", []),
+                    "scoped_test_run": guardrail.get("scoped_test_run"),
                     "strategy": self._extract_healer_output_field(
                         getattr(self.native_healer, "last_agent_output", "") or "", "strategy"
                     ),
@@ -1491,6 +2601,8 @@ class FullNativePipeline:
                     error_log = (
                         "## Previous Healer Edit Rejected By Guardrail\n\n"
                         f"Missing required evidence: {missing or 'unknown'}\n\n"
+                        "If `scoped_test_run` is listed, rerun the exact failed file, browser/project, "
+                        "and title/grep from the Failed Test Target before editing.\n\n"
                         + self._build_structured_failure_context(
                             test_path=test_path,
                             run_dir=run_dir,
@@ -1518,6 +2630,12 @@ class FullNativePipeline:
                             {"error_category": "passed", "error_summary": "", "passed_after": True}
                         )
                         self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
+                        self._write_run_metrics(
+                            run_dir,
+                            healing_started=True,
+                            healing_attempts=attempt,
+                            heal_rescued=True,
+                        )
                         self._emit_healer_event(
                             "healer_verification_passed",
                             f"Healed test passed after attempt {attempt}.",
@@ -1636,6 +2754,12 @@ class FullNativePipeline:
 
         logger.error(f"Native healing exhausted after {max_attempts} attempts")
         (run_dir / "status.txt").write_text("failed")
+        self._write_run_metrics(
+            run_dir,
+            healing_started=True,
+            healing_attempts=max_attempts,
+            heal_rescued=False,
+        )
 
         validation_result = {
             "status": "failed",
@@ -1666,6 +2790,7 @@ class FullNativePipeline:
         target_url: str | None,
         hybrid_healing: bool = False,
         max_iterations: int = 20,
+        handoff_manifest_path: Path | None = None,
     ) -> dict:
         """
         Run the API-specific pipeline.
@@ -1674,6 +2799,24 @@ class FullNativePipeline:
         Uses lighter healing loop without browser MCP tools.
         """
         spec_file = Path(spec_path)
+        handoff_manifest_path = handoff_manifest_path or init_manifest(run_dir, pipeline_type="api")
+        if spec_file.exists():
+            record_artifact(
+                handoff_manifest_path,
+                "resolved_spec",
+                spec_file,
+                kind="markdown_spec",
+                producer_stage="pipeline",
+                required=True,
+                consumers=["api_generator"],
+                validation_status="valid",
+            )
+        record_stage(
+            handoff_manifest_path,
+            "api_generator",
+            status="running",
+            metadata={"target_url": target_url},
+        )
 
         logger.info("=" * 80)
         logger.info("API TEST PIPELINE")
@@ -1697,12 +2840,21 @@ class FullNativePipeline:
                 spec_path=spec_path,
                 target_url=target_url,
                 output_name=original_spec_name,
+                handoff_manifest_path=handoff_manifest_path,
             )
 
             if not test_path or not test_path.exists():
                 error_msg = "API generator failed to create test file"
                 (run_dir / "status.txt").write_text("error")
                 self._write_pipeline_error(run_dir, error_msg, "api_generation")
+                record_stage(
+                    handoff_manifest_path,
+                    "api_generator",
+                    status="failed",
+                    failure_reason=error_msg,
+                    metadata=getattr(self.api_generator, "last_handoff_consumption", {}),
+                )
+                self._write_run_metrics(run_dir, generation_success=False)
                 return {
                     "success": False,
                     "error": error_msg,
@@ -1710,7 +2862,85 @@ class FullNativePipeline:
                     "test_type": "api",
                 }
 
+            validation_error = self._validate_generated_test_file(
+                test_path=test_path,
+                run_dir=run_dir,
+                browser=browser,
+                test_type="api",
+            )
+            record_artifact(
+                handoff_manifest_path,
+                "generated_api_test",
+                test_path,
+                kind="playwright_api_test",
+                producer_stage="api_generator",
+                required=True,
+                consumers=["test_run", "api_healer", "reporting"],
+                validation_status="pending_validation",
+                metadata=getattr(self.api_generator, "last_handoff_consumption", {}),
+            )
+            validation_status = validate_artifact(
+                handoff_manifest_path,
+                "generated_api_test",
+                validator=lambda _path: (validation_error is None, validation_error),
+            )
+            if validation_error:
+                logger.error(validation_error)
+                (run_dir / "status.txt").write_text("error")
+                self._write_pipeline_error(
+                    run_dir, validation_error, "api_generation_validation"
+                )
+                self._write_run_metrics(
+                    run_dir,
+                    generation_success=False,
+                    failure_category="api_generation_validation",
+                )
+                record_stage(
+                    handoff_manifest_path,
+                    "api_generator",
+                    status="failed",
+                    failure_reason=validation_error,
+                    metadata={
+                        **getattr(self.api_generator, "last_handoff_consumption", {}),
+                        "validation": validation_status,
+                    },
+                )
+                return {
+                    "success": False,
+                    "error": validation_error,
+                    "stage": "api_generation_validation",
+                    "test_type": "api",
+                }
+
             logger.info(f"API test generated: {test_path}")
+            record_stage(
+                handoff_manifest_path,
+                "api_generator",
+                status="ready",
+                metadata={
+                    **getattr(self.api_generator, "last_handoff_consumption", {}),
+                    "test_path": str(test_path),
+                    "validation": validation_status,
+                },
+            )
+            self._emit_handoff_event(
+                "generator_handoff_consumed",
+                "API generator consumed spec handoff context.",
+                payload={
+                    "artifacts": self._manifest_artifact_payload(
+                        handoff_manifest_path,
+                        ["resolved_spec", "generated_api_test"],
+                    ),
+                    "consumption": getattr(self.api_generator, "last_handoff_consumption", {}),
+                    "test_type": "api",
+                    "validation": validation_status,
+                },
+            )
+            self._write_run_metrics(
+                run_dir,
+                planner_success=True,
+                generation_success=True,
+            )
 
             # Create export.json for dashboard
             export_data = {
@@ -1725,12 +2955,39 @@ class FullNativePipeline:
             # Stage 2: Run test
             logger.info("Stage 2: Running API test...")
             report_progress("testing", "Running API test...")
+            record_stage(
+                handoff_manifest_path,
+                "test_run",
+                status="running",
+                metadata={"browser": browser, "test_path": str(test_path), "test_type": "api"},
+            )
+            record_consumption(
+                handoff_manifest_path,
+                "test_run",
+                "generated_api_test",
+                status="used",
+                metadata={"path": str(test_path)},
+            )
 
             result = self._run_test(str(test_path), str(run_dir), browser)
 
             if result.passed:
                 logger.info("API test PASSED on first run!")
                 (run_dir / "status.txt").write_text("passed")
+                record_stage(
+                    handoff_manifest_path,
+                    "test_run",
+                    status="passed",
+                    metadata={"exit_code": result.exit_code, "test_type": "api"},
+                )
+                self._write_run_metrics(
+                    run_dir,
+                    initial_run_passed=True,
+                    stable_first_pass=True,
+                    healing_started=False,
+                    healing_attempts=0,
+                    heal_rescued=False,
+                )
                 return {
                     "success": True,
                     "test_path": str(test_path),
@@ -1740,6 +2997,38 @@ class FullNativePipeline:
                 }
 
             logger.error(f"API test FAILED: {result.error_summary}")
+            api_failure_category = categorize_error(result.error_summary or result.output[-2000:])
+            record_stage(
+                handoff_manifest_path,
+                "test_run",
+                status="failed",
+                failure_reason=result.error_summary or result.output[-500:],
+                metadata={
+                    "exit_code": result.exit_code,
+                    "failure_category": api_failure_category,
+                    "test_type": "api",
+                },
+            )
+            self._emit_handoff_event(
+                "test_run_handoff_failed",
+                "Generated API test failed and is ready for healer handoff.",
+                level="warning",
+                payload={
+                    "artifacts": self._manifest_artifact_payload(
+                        handoff_manifest_path,
+                        ["generated_api_test", "resolved_spec"],
+                    ),
+                    "failure_category": api_failure_category,
+                    "error_summary": result.error_summary,
+                    "test_type": "api",
+                },
+            )
+            self._write_run_metrics(
+                run_dir,
+                initial_run_passed=False,
+                stable_first_pass=False,
+                failure_category=api_failure_category,
+            )
 
             # Stage 3: API Healing
             logger.info("Stage 3: API Test Healing (up to 3 attempts)...")
@@ -1751,6 +3040,32 @@ class FullNativePipeline:
             error_log = self._build_structured_failure_context(
                 test_path=test_path, run_dir=run_dir, result=result
             )
+            attempt_records: list[dict[str, Any]] = []
+            record_stage(
+                handoff_manifest_path,
+                "api_healer",
+                status="ready",
+                metadata={"failure_category": api_failure_category, "test_path": str(test_path)},
+            )
+            record_consumption(
+                handoff_manifest_path,
+                "api_healer",
+                "generated_api_test",
+                status="used",
+                metadata={"path": str(test_path)},
+            )
+            self._emit_handoff_event(
+                "healer_handoff_ready",
+                "API healer handoff context is ready.",
+                payload={
+                    "artifacts": self._manifest_artifact_payload(
+                        handoff_manifest_path,
+                        ["generated_api_test", "resolved_spec"],
+                    ),
+                    "failure_category": api_failure_category,
+                    "test_type": "api",
+                },
+            )
 
             for attempt in range(1, max_heal_attempts + 1):
                 logger.info(f"Healing attempt {attempt}/{max_heal_attempts}...")
@@ -1761,6 +3076,10 @@ class FullNativePipeline:
                 )
 
                 try:
+                    try:
+                        content_before = test_path.read_text()
+                    except OSError:
+                        content_before = ""
                     fixed_code = await self.api_healer.heal_test(
                         str(test_path),
                         error_log,
@@ -1769,6 +3088,44 @@ class FullNativePipeline:
                     )
 
                     if fixed_code:
+                        content_after = fixed_code
+                        guardrail = self._evaluate_api_healer_guardrails(
+                            content_before=content_before,
+                            content_after=content_after,
+                        )
+                        attempt_record = {
+                            "attempt": attempt,
+                            "timestamp": datetime.now().isoformat(),
+                            "content_hash_before": self._content_hash(content_before),
+                            "content_hash_after": self._content_hash(content_after),
+                            "changed": content_after != content_before,
+                            "diff_stat": self._diff_stat(content_before, content_after),
+                            "guardrail_status": guardrail.get("guardrail_status"),
+                            "missing_required_tools": guardrail.get("missing_required_tools", []),
+                            "assertion_removed": guardrail.get("assertion_removed", False),
+                            "broad_rewrite": guardrail.get("broad_rewrite", False),
+                        }
+                        if guardrail.get("guardrail_status") == "failed":
+                            try:
+                                test_path.write_text(content_before)
+                                attempt_record["reverted"] = True
+                            except OSError as exc:
+                                attempt_record["revert_error"] = str(exc)[:300]
+                            attempt_record.update(
+                                {
+                                    "error_category": "guardrail_failed",
+                                    "error_summary": "API healer edit rejected by guardrail",
+                                    "passed_after": False,
+                                }
+                            )
+                            self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
+                            error_log = (
+                                "## Previous API Healer Edit Rejected By Guardrail\n\n"
+                                f"Missing required evidence: {', '.join(guardrail.get('missing_required_tools', []))}\n\n"
+                                + error_log
+                            )
+                            continue
+
                         logger.info("Re-running healed API test...")
                         result = self._run_test(str(test_path), str(run_dir), browser)
 
@@ -1777,6 +3134,16 @@ class FullNativePipeline:
                                 f"Healed API test PASSED (after {attempt} attempt(s))!"
                             )
                             (run_dir / "status.txt").write_text("passed")
+                            attempt_record.update(
+                                {"error_category": "passed", "error_summary": "", "passed_after": True}
+                            )
+                            self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
+                            self._write_run_metrics(
+                                run_dir,
+                                healing_started=True,
+                                healing_attempts=attempt,
+                                heal_rescued=True,
+                            )
 
                             validation_result = {
                                 "status": "success",
@@ -1799,6 +3166,15 @@ class FullNativePipeline:
                                 "test_type": "api",
                             }
                         else:
+                            failure_text = result.error_summary or result.output[-2000:]
+                            attempt_record.update(
+                                {
+                                    "error_category": categorize_error(failure_text),
+                                    "error_summary": failure_text[:500],
+                                    "passed_after": False,
+                                }
+                            )
+                            self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
                             error_log = self._build_structured_failure_context(
                                 test_path=test_path,
                                 run_dir=run_dir,
@@ -1809,13 +3185,45 @@ class FullNativePipeline:
                                     "API test still failing, trying again..."
                                 )
                     else:
+                        self._record_healing_attempt(
+                            run_dir,
+                            test_path,
+                            attempt_records,
+                            {
+                                "attempt": attempt,
+                                "timestamp": datetime.now().isoformat(),
+                                "changed": False,
+                                "error_category": "no_fix_produced",
+                                "error_summary": "API healer returned no code",
+                                "passed_after": False,
+                            },
+                        )
                         logger.warning("Healer returned no code")
 
                 except Exception as e:
+                    self._record_healing_attempt(
+                        run_dir,
+                        test_path,
+                        attempt_records,
+                        {
+                            "attempt": attempt,
+                            "timestamp": datetime.now().isoformat(),
+                            "changed": False,
+                            "error_category": "healer_error",
+                            "error_summary": str(e)[:500],
+                            "passed_after": False,
+                        },
+                    )
                     logger.warning(f"Healing error: {e}")
 
             logger.error(f"API healing exhausted after {max_heal_attempts} attempts")
             (run_dir / "status.txt").write_text("failed")
+            self._write_run_metrics(
+                run_dir,
+                healing_started=True,
+                healing_attempts=max_heal_attempts,
+                heal_rescued=False,
+            )
 
             validation_result = {
                 "status": "failed",
@@ -1985,6 +3393,10 @@ class FullNativePipeline:
     ) -> dict[str, Any]:
         """Prepare run-local Playwright config/MCP files for saved browser auth."""
         run_dir.mkdir(parents=True, exist_ok=True)
+        if storage_state_path is None:
+            candidate = run_dir / "browser-auth-storage-state.json"
+            if candidate.exists():
+                storage_state_path = candidate
         project_root = Path(__file__).resolve().parent.parent.parent
         playwright_config_src = project_root / "playwright.config.ts"
         playwright_config_dst = run_dir / "playwright.config.ts"
@@ -2011,12 +3423,16 @@ class FullNativePipeline:
         else:
             runtime = {}
 
-        self.native_planner.cwd = run_dir
-        self.native_planner.session_dir = run_dir
-        if hasattr(self.native_generator, "cwd"):
-            self.native_generator.cwd = run_dir
-        if hasattr(self.native_healer, "cwd"):
-            self.native_healer.cwd = run_dir
+        native_planner = getattr(self, "native_planner", None)
+        if native_planner is not None:
+            native_planner.cwd = run_dir
+            native_planner.session_dir = run_dir
+        native_generator = getattr(self, "native_generator", None)
+        if native_generator is not None:
+            native_generator.cwd = run_dir
+        native_healer = getattr(self, "native_healer", None)
+        if native_healer is not None:
+            native_healer.cwd = run_dir
         return runtime
 
     def _read_json_file(self, path: Path) -> dict[str, Any] | None:

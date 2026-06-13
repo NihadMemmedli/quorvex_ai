@@ -240,6 +240,7 @@ class BaseAgent:
         Known agents get an explicit availability/approval list. Unknown legacy
         agents retain wildcard access to avoid changing behavior silently.
         """
+        mcp_config_dir = Path(self.agent_cwd) if self.agent_cwd else None
         if self.allowed_tools is not None:
             tools = self.tools
             if tools is None and "*" not in self.allowed_tools:
@@ -247,11 +248,35 @@ class BaseAgent:
             return {"allowed_tools": self.allowed_tools, "tools": tools}
 
         profile_name = self.agent_tool_profile or self.__class__.__name__
-        profile_config = get_agent_tool_config(profile_name)
+        profile_config = get_agent_tool_config(profile_name, mcp_config_dir=mcp_config_dir)
         if profile_config:
             return profile_config
 
         return {"allowed_tools": ["*"], "tools": self.tools}
+
+    def _requires_live_browser_worker(self, tool_config: dict[str, Any]) -> bool:
+        """Return whether queued execution must run on a live browser worker."""
+        if self.owner_type == "exploration_session":
+            return True
+        if self.owner_type == "agent_run" and (
+            self.agent_tool_profile == "app-explorer" or self.__class__.__name__ == "ExploratoryAgent"
+        ):
+            return True
+
+        tool_values: list[Any] = []
+        for key in ("allowed_tools", "tools"):
+            value = tool_config.get(key)
+            if isinstance(value, list):
+                tool_values.extend(value)
+            elif isinstance(value, dict):
+                tool_values.extend(value.keys())
+
+        return any(
+            isinstance(tool, str)
+            and tool.startswith("mcp__")
+            and "__browser_" in tool
+            for tool in tool_values
+        )
 
     def _resolved_permission_mode(self) -> str:
         tool_config = self._resolved_tool_config()
@@ -597,6 +622,7 @@ echo "done" > {done_file}
                 owner_type=self.owner_type,
                 owner_id=self.owner_id,
                 owner_label=self.owner_label,
+                requires_live_browser=self._requires_live_browser_worker(tool_config),
             )
 
             logger.info(f"[QUEUE] Task enqueued: {task_id}, waiting for result...")

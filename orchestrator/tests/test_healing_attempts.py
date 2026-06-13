@@ -10,6 +10,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-healing-attempts")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.workflows.full_native_pipeline import FullNativePipeline, TestResult
+from orchestrator.services.handoff_manifest import init_manifest, record_artifact
 
 
 def _bare_pipeline() -> FullNativePipeline:
@@ -81,6 +82,8 @@ async def test_native_healing_writes_attempt_history(tmp_path, monkeypatch):
     run_dir.mkdir()
     test_path = tmp_path / "foo.spec.ts"
     test_path.write_text("test('v1', async ({ page }) => {});")
+    plan_path = tmp_path / "planner.md"
+    plan_path.write_text("- await page.getByRole('button', { name: 'Save' }).click();")
 
     heal_calls: list[dict] = []
     run_results = [
@@ -117,7 +120,13 @@ async def test_native_healing_writes_attempt_history(tmp_path, monkeypatch):
     pipeline._publish_agentic_summary = lambda run_dir: None
 
     initial_result = TestResult(passed=False, exit_code=1, output="boom", error_summary="locator timeout")
-    outcome = await pipeline._native_healing(test_path, run_dir, "chromium", initial_result)
+    outcome = await pipeline._native_healing(
+        test_path,
+        run_dir,
+        "chromium",
+        initial_result,
+        plan_path=plan_path,
+    )
 
     assert outcome["success"] is True
     assert outcome["attempts"] == 2
@@ -133,9 +142,80 @@ async def test_native_healing_writes_attempt_history(tmp_path, monkeypatch):
     # First heal has no prior context; second heal sees attempt 1 and the delta-framed error log
     assert heal_calls[0]["attempt_context"] is None
     assert heal_calls[0]["attempt_number"] == 1
+    assert heal_calls[0]["error_log"].startswith("## Planner-Verified Selectors")
+    assert "getByRole('button', { name: 'Save' })" in heal_calls[0]["error_log"]
     assert "Attempt 1" in heal_calls[1]["attempt_context"]
     assert heal_calls[1]["attempt_number"] == 2
     assert heal_calls[1]["error_log"].startswith("## Failure After Previous Heal Attempt")
+
+
+@pytest.mark.asyncio
+async def test_native_healing_includes_manifest_draft_context(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.workflows.full_native_pipeline.report_progress",
+        lambda *args, **kwargs: None,
+    )
+    pipeline = _bare_pipeline()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    manifest_path = init_manifest(run_dir)
+    test_path = tmp_path / "foo.spec.ts"
+    test_path.write_text("test('v1', async ({ page }) => {});")
+    draft_path = run_dir / "plan.draft.spec.ts"
+    draft_path.write_text(
+        "import { test, expect } from '@playwright/test';\n"
+        "test('draft', async ({ page }) => {\n"
+        "  await expect(page.getByRole('button', { name: 'Save' })).toBeVisible();\n"
+        "});\n"
+    )
+    record_artifact(
+        manifest_path,
+        "planner_draft_script",
+        draft_path,
+        kind="planner_draft_playwright",
+        producer_stage="planner",
+    )
+
+    heal_calls: list[dict] = []
+
+    class FakeHealer:
+        last_agent_output = "strategy: use draft selector"
+        last_tool_calls = [
+            {"name": "mcp__playwright-test__test_run"},
+            {"name": "mcp__playwright-test__browser_snapshot"},
+        ]
+
+        async def heal_test(self, test_file, error_log, **kwargs):
+            heal_calls.append({"error_log": error_log, **kwargs})
+            content = "test('v2', async ({ page }) => {});"
+            Path(test_file).write_text(content)
+            return content
+
+    class FakeTriage:
+        def condensed_context(self, diagnosis):
+            return None
+
+    pipeline.native_healer = FakeHealer()
+    pipeline.failure_triage_agent = FakeTriage()
+    pipeline._run_test = lambda *args, **kwargs: TestResult(passed=True, exit_code=0, output="ok")
+    pipeline._build_structured_failure_context = lambda **kwargs: "STRUCTURED-CONTEXT"
+    pipeline._verify_stability_or_harden = lambda **kwargs: None
+    pipeline._publish_agentic_summary = lambda run_dir: None
+    async def _no_stability(**kwargs):
+        return None
+    pipeline._verify_stability_or_harden = _no_stability
+
+    outcome = await pipeline._native_healing(
+        test_path,
+        run_dir,
+        "chromium",
+        TestResult(passed=False, exit_code=1, output="boom", error_summary="locator timeout"),
+        handoff_manifest_path=manifest_path,
+    )
+
+    assert outcome["success"] is True
+    assert "## Planner Draft Script Context" in heal_calls[0]["error_log"]
+    assert "getByRole('button', { name: 'Save' })" in heal_calls[0]["error_log"]
 
 
 def test_selector_guardrail_requires_test_run_and_snapshot_or_locator():
@@ -171,6 +251,51 @@ def test_selector_guardrail_requires_test_run_and_snapshot_or_locator():
         error_category="selector",
     )
     assert ok["guardrail_status"] == "passed"
+
+
+def test_selector_guardrail_requires_scoped_test_run_when_metadata_exists():
+    pipeline = _bare_pipeline()
+    before = "test('can submit form', async ({ page }) => { await expect(page.locator('#old')).toBeVisible(); });"
+    after = before.replace("#old", "#new")
+    metadata = {
+        "file": "tests/generated/foo.spec.ts",
+        "project": "chromium",
+        "title": "can submit form",
+    }
+
+    unscoped = pipeline._evaluate_healer_guardrails(
+        content_before=before,
+        content_after=after,
+        tool_calls=[
+            {"name": "mcp__playwright-test__test_run", "tool": "test_run", "input": {"file": "tests/generated/foo.spec.ts"}},
+            {"name": "mcp__playwright-test__browser_snapshot", "tool": "browser_snapshot"},
+        ],
+        error_category="selector",
+        failure_metadata=metadata,
+    )
+    assert unscoped["guardrail_status"] == "failed"
+    assert "scoped_test_run" in unscoped["missing_required_tools"]
+    assert set(unscoped["scoped_test_run"]["missing"]) == {"project", "title"}
+
+    scoped = pipeline._evaluate_healer_guardrails(
+        content_before=before,
+        content_after=after,
+        tool_calls=[
+            {
+                "name": "mcp__playwright-test__test_run",
+                "tool": "test_run",
+                "input": {
+                    "file": "tests/generated/foo.spec.ts",
+                    "project": "chromium",
+                    "grep": "can submit form",
+                },
+            },
+            {"name": "mcp__playwright-test__browser_snapshot", "tool": "browser_snapshot"},
+        ],
+        error_category="selector",
+        failure_metadata=metadata,
+    )
+    assert scoped["guardrail_status"] == "passed"
 
 
 def test_auth_data_server_guardrail_requires_network_or_console():

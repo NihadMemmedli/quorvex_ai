@@ -37,7 +37,13 @@ from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt
 from orchestrator.memory import get_memory_manager
 from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
-from orchestrator.utils.string_utils import slugify
+from orchestrator.utils.string_utils import clean_extracted_url, slugify
+
+try:
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+except ImportError:  # pragma: no cover - SDK optional in unit tests
+    PermissionResultAllow = None
+    PermissionResultDeny = None
 
 
 class SpecGenerationError(Exception):
@@ -85,6 +91,7 @@ class NativePlanner:
         self.session_dir = Path(session_dir) if session_dir else None
         self.cwd = Path(cwd) if cwd else self.session_dir
         self.env_vars = dict(env_vars or {})
+        self.last_draft_script_path: Path | None = None
         self.memory_manager = get_memory_manager(project_id=project_id)
         # Use absolute path relative to project root (up from orchestrator/workflows/native_planner.py)
         self.specs_dir = Path(__file__).resolve().parent.parent.parent / "specs"
@@ -148,37 +155,11 @@ class NativePlanner:
         if target_url:
             logger.info(f"   Target URL: {target_url}")
 
-        agent_result = await self._query_planner_agent(prompt, target_url=target_url)
-        if target_url:
-            self._validate_live_plan_tool_sequence(agent_result, target_url)
-
-        # 4. Check if spec was saved by the agent directly to disk or as a run artifact.
-        saved_plan_path = self._recover_saved_plan(output_path)
-        if saved_plan_path:
-            logger.info(f"Spec saved by agent: {saved_plan_path}")
-            return saved_plan_path
-
-        # 5. Extract the actual plan content from agent tool calls or output
-        plan_content = self._extract_plan_content(agent_result)
-        if plan_content:
-            logger.info(f"Saving extracted plan as spec: {output_path}")
-            output_path.write_text(plan_content)
-            return output_path
-
-        repaired_plan_path = await self._attempt_repair_plan(
+        return await self._run_planner_with_retry(
             subject_type="feature",
             subject_name=feature_name,
-            agent_result=agent_result,
-            expected_output_path=output_path,
-        )
-        if repaired_plan_path:
-            return repaired_plan_path
-
-        logger.error(f"Agent produced no usable output for feature: {feature_name}")
-        raise self._build_no_output_error(
-            subject_type="feature",
-            subject_name=feature_name,
-            agent_result=agent_result,
+            prompt=prompt,
+            target_url=target_url,
             expected_output_path=output_path,
         )
 
@@ -277,8 +258,9 @@ Do not call `planner_save_plan` until after those three actions have happened in
 
 ## Dialog Handling (CRITICAL)
 When navigating between pages or away from forms/editors, "Leave site?" dialogs may appear:
-- Use `browser_handle_dialog` with `accept: true` IMMEDIATELY when any dialog appears
-- After handling a dialog, take a `browser_snapshot` to verify page state
+- Use `browser_handle_dialog` with `accept: true` IMMEDIATELY to accept Leave and continue navigation
+- Treat unsaved changes and beforeunload prompts as "Leave site?" dialogs unless the user explicitly asked you to preserve draft data
+- After handling a dialog, call `browser_snapshot` or `browser_take_screenshot` to verify page state
 - Document any dialogs encountered (they indicate user flows that need testing)
 """
         else:
@@ -294,8 +276,10 @@ Do not use browser tools or repository inspection tools for this PRD-only plan.
 ## Save the Plan
 After creating the test plan:
 1. Save it using `planner_save_plan` tool to: **{output_path}**
-2. ALSO output the COMPLETE test plan as text in your response (not just a summary)
-3. Call `browser_close` to close the browser before finishing
+2. Include a `## Draft Playwright Script` section in the saved markdown plan
+3. In that section, include one fenced `typescript` code block with a draft Playwright test script
+4. ALSO output the COMPLETE test plan as text in your response (not just a summary)
+5. Call `browser_close` to close the browser before finishing
 """
         else:
             save_section = f"""
@@ -303,6 +287,7 @@ After creating the test plan:
 Return the COMPLETE test plan as markdown in your final response.
 The system will write your final markdown to: **{output_path}**
 Do not call `planner_save_plan` or `browser_close`.
+Include a `## Draft Playwright Script` section with one fenced `typescript` code block.
 """
 
         if split_tc_section:
@@ -317,6 +302,10 @@ Return exactly one independently runnable TC section for "{feature_name}":
 - `**Steps:**` numbered action steps with ACTUAL SELECTORS if discovered
 - `**Expected Result:**` concrete assertions or observable outcomes
 - `**Test Data:**` preserve required placeholders, URLs, and `@testdata` refs
+
+Then add:
+- `## Draft Playwright Script`
+- one fenced `typescript` code block containing draft Playwright code for that TC
 """
             critical_scope = (
                 "**CRITICAL**: Preserve exactly one scenario. Do NOT add extra "
@@ -345,6 +334,10 @@ Return a split-ready plan with TC-XXX sections. Every TC must be independently r
 - `**Steps:**` numbered action steps with ACTUAL SELECTORS if discovered
 - `**Expected Result:**` concrete assertions or observable outcomes
 - `**Test Data:**` optional placeholders and URLs
+
+Then add:
+- `## Draft Playwright Script`
+- one fenced `typescript` code block containing a draft Playwright test file that covers the TC sections
 """.format(feature_name=feature_name)
             critical_scope = (
                 "**CRITICAL**: Your final text response MUST contain the full test "
@@ -371,6 +364,13 @@ The following requirements were extracted from the Product Requirements Document
 - If evidence is thin, generate conservative page/journey checks: reachability, no blocking errors, accessibility basics, responsive rendering, and stable navigation.
 - Use observed selectors, text, URLs, and API endpoints when available.
 - Mark auth or data needs in Preconditions instead of hardcoding secrets.
+
+## Draft Script Rules
+- The draft script is required. It is a handoff artifact for the generator agent.
+- Use Playwright locators and assertions based on what you observed, for example `page.getByRole(...)` and `await expect(...).toBeVisible()`.
+- Add durable waits after navigations or async actions with `await expect(page).toHaveURL(...)`, `await page.waitForURL(...)`, web-first assertions, or `page.waitForResponse(...)` when API evidence supports it.
+- Do not use `page.waitForTimeout()` or arbitrary sleeps.
+- Keep credential values as `process.env.VAR_NAME!` or project test-data fixture placeholders; never hardcode secrets.
 
 {save_section}
 
@@ -467,6 +467,9 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
             requires_live_browser=bool(target_url),
             model_tier=self.model_tier,
             env_vars=self.env_vars,
+            tool_permission_guard=self._build_live_plan_permission_guard(target_url)
+            if target_url
+            else None,
         )
 
         result = await runner.run(prompt)
@@ -487,17 +490,233 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
         return result
 
     @staticmethod
-    def _normalize_url_for_prompt(target_url: str | None) -> str | None:
-        if not target_url:
+    def _planner_max_attempts() -> int:
+        raw_value = os.environ.get("PLANNER_MAX_ATTEMPTS", "2")
+        try:
+            return max(1, int(raw_value))
+        except ValueError:
+            return 2
+
+    async def _run_planner_with_retry(
+        self,
+        *,
+        subject_type: str,
+        subject_name: str,
+        prompt: str,
+        target_url: str | None,
+        expected_output_path: Path,
+    ) -> Path:
+        max_attempts = self._planner_max_attempts()
+        current_prompt = prompt
+        last_error: SpecGenerationError | None = None
+        self.last_draft_script_path = None
+        require_draft_script = bool(target_url)
+
+        for attempt_number in range(1, max_attempts + 1):
+            if attempt_number > 1:
+                logger.info(
+                    "Retrying planner for %s '%s' after rejected attempt %s/%s",
+                    subject_type,
+                    subject_name,
+                    attempt_number - 1,
+                    max_attempts,
+                )
+
+            agent_result = await self._query_planner_agent(
+                current_prompt, target_url=target_url
+            )
+            try:
+                if target_url:
+                    self._validate_live_plan_tool_sequence(agent_result, target_url)
+
+                saved_plan_path = self._recover_saved_plan(expected_output_path)
+                if saved_plan_path:
+                    logger.info(f"Spec saved by agent: {saved_plan_path}")
+                    return self._finalize_plan_artifact(
+                        plan_path=saved_plan_path,
+                        expected_output_path=expected_output_path,
+                        require_draft_script=require_draft_script,
+                    )
+
+                plan_content = self._extract_plan_content(agent_result)
+                if plan_content:
+                    logger.info(f"Saving extracted plan as spec: {expected_output_path}")
+                    expected_output_path.write_text(plan_content)
+                    return self._finalize_plan_artifact(
+                        plan_path=expected_output_path,
+                        expected_output_path=expected_output_path,
+                        require_draft_script=require_draft_script,
+                    )
+
+                repaired_plan_path = await self._attempt_repair_plan(
+                    subject_type=subject_type,
+                    subject_name=subject_name,
+                    agent_result=agent_result,
+                    expected_output_path=expected_output_path,
+                )
+                if repaired_plan_path:
+                    return self._finalize_plan_artifact(
+                        plan_path=repaired_plan_path,
+                        expected_output_path=expected_output_path,
+                        require_draft_script=require_draft_script,
+                    )
+
+                logger.error(
+                    "Agent produced no usable output for %s: %s",
+                    subject_type,
+                    subject_name,
+                )
+                raise self._build_no_output_error(
+                    subject_type=subject_type,
+                    subject_name=subject_name,
+                    agent_result=agent_result,
+                    expected_output_path=expected_output_path,
+                )
+            except SpecGenerationError as exc:
+                last_error = exc
+                if exc.diagnostics.get("planner_repair_attempted"):
+                    raise
+                if attempt_number >= max_attempts:
+                    raise
+                self._discard_rejected_plan_artifact(expected_output_path)
+                current_prompt = self._build_planner_retry_prompt(
+                    original_prompt=prompt,
+                    subject_type=subject_type,
+                    subject_name=subject_name,
+                    error=exc,
+                    target_url=target_url,
+                    expected_output_path=expected_output_path,
+                )
+
+        if last_error:
+            raise last_error
+        raise SpecGenerationError(
+            f"Failed to generate spec for {subject_type} '{subject_name}'."
+        )
+
+    @staticmethod
+    def _discard_rejected_plan_artifact(expected_output_path: Path) -> None:
+        try:
+            if expected_output_path.exists() and expected_output_path.is_file():
+                expected_output_path.unlink()
+            draft_path = NativePlanner._draft_script_path_for_plan(expected_output_path)
+            if draft_path.exists() and draft_path.is_file():
+                draft_path.unlink()
+        except OSError as exc:
+            logger.debug(
+                "Could not discard rejected planner artifact %s: %s",
+                expected_output_path,
+                exc,
+            )
+
+    def _build_planner_retry_prompt(
+        self,
+        *,
+        original_prompt: str,
+        subject_type: str,
+        subject_name: str,
+        error: SpecGenerationError,
+        target_url: str | None,
+        expected_output_path: Path,
+    ) -> str:
+        diagnostics = self._redact_sensitive_text(
+            json.dumps(error.diagnostics, indent=2, sort_keys=True, default=str)
+        )
+        target_instruction = ""
+        if target_url:
+            target_instruction = (
+                "\nFor the retry, start fresh with browser exploration. You must call "
+                "`planner_setup_page`, then `browser_navigate` to the exact Target URL "
+                f"`{target_url}`, then `browser_snapshot` before calling `planner_save_plan`."
+            )
+        return f"""You are retrying a rejected Playwright planner attempt.
+
+The previous attempt for {subject_type} "{subject_name}" was rejected and must not be reused.
+
+Rejection:
+{self._redact_sensitive_text(str(error))}
+
+Diagnostics:
+```json
+{diagnostics}
+```
+{target_instruction}
+
+Write a valid markdown test plan to `{expected_output_path}` with this exact schema:
+- `# Test Plan: {subject_name}`
+- One or more `### TC-XXX: <scenario>` sections
+- Each TC must include `**Description:**`, `**Preconditions:**`, `**Steps:**` with numbered steps, and `**Expected Result:**`
+- Include `## Draft Playwright Script` with one fenced `typescript` code block containing draft Playwright code
+- The draft code must use web-first assertions/durable waits and must not use `page.waitForTimeout()`
+- Use placeholders for credentials; do not include secrets.
+
+Original task follows. Obey it, but correct the failure above.
+
+---
+
+{original_prompt}
+"""
+
+    def _build_live_plan_permission_guard(self, target_url: str | None):
+        if not target_url or PermissionResultAllow is None or PermissionResultDeny is None:
             return None
-        stripped = target_url.strip()
-        return stripped or None
+
+        expected = self._canonical_url(target_url)
+        state = {
+            "setup_seen": False,
+            "target_navigation_seen": False,
+            "snapshot_after_navigation_seen": False,
+        }
+
+        async def guard(
+            tool_name: str,
+            tool_input: dict[str, Any],
+            _context: Any,
+        ):
+            short_name = tool_name.split("__")[-1] if "__" in tool_name else tool_name
+
+            if short_name == "planner_save_plan":
+                missing = []
+                if not state["setup_seen"]:
+                    missing.append("call `planner_setup_page`")
+                if not state["target_navigation_seen"]:
+                    missing.append(f"call `browser_navigate` to `{target_url}`")
+                if not state["snapshot_after_navigation_seen"]:
+                    missing.append("call `browser_snapshot` after target navigation")
+                if missing:
+                    return PermissionResultDeny(
+                        message=(
+                            "planner_save_plan is blocked until the live-browser "
+                            f"planning contract is satisfied. Required next actions: {', '.join(missing)}."
+                        )
+                    )
+                return PermissionResultAllow()
+
+            if short_name == "planner_setup_page":
+                state["setup_seen"] = True
+            elif short_name == "browser_navigate":
+                actual = self._canonical_url(
+                    tool_input.get("url")
+                    or tool_input.get("target_url")
+                    or tool_input.get("targetUrl")
+                )
+                if actual == expected:
+                    state["target_navigation_seen"] = True
+                    state["snapshot_after_navigation_seen"] = False
+            elif short_name == "browser_snapshot" and state["target_navigation_seen"]:
+                state["snapshot_after_navigation_seen"] = True
+
+            return PermissionResultAllow()
+
+        return guard
+
+    @staticmethod
+    def _normalize_url_for_prompt(target_url: str | None) -> str | None:
+        return clean_extracted_url(target_url)
 
     @staticmethod
     def _canonical_url(value: str | None) -> str | None:
-        if not value:
-            return None
-        value = value.strip()
+        value = clean_extracted_url(value)
         if not value:
             return None
         try:
@@ -611,7 +830,175 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
             value = tool_input.get(key)
             if isinstance(value, str) and value.strip():
                 return value
+        rendered = NativePlanner._render_structured_plan_payload(tool_input)
+        if rendered:
+            return rendered
         return None
+
+    @staticmethod
+    def _render_structured_plan_payload(tool_input: dict[str, Any]) -> str | None:
+        suites = tool_input.get("suites")
+        if not isinstance(suites, list) or not suites:
+            return None
+
+        raw_name = str(tool_input.get("name") or "Generated Plan").strip()
+        if raw_name.lower().startswith("test plan:"):
+            title = raw_name
+        else:
+            title = f"Test Plan: {raw_name}"
+
+        lines = [f"# {title}", ""]
+        overview = str(tool_input.get("overview") or "").strip()
+        if overview:
+            lines.extend(["## Application Overview", "", overview, ""])
+
+        tc_number = 1
+        for suite in suites:
+            if not isinstance(suite, dict):
+                continue
+            tests = suite.get("tests")
+            if not isinstance(tests, list):
+                continue
+            for test_case in tests:
+                if not isinstance(test_case, dict):
+                    continue
+                name = str(test_case.get("name") or f"Scenario {tc_number}").strip()
+                steps = [
+                    str(step).strip()
+                    for step in (test_case.get("steps") or [])
+                    if str(step).strip()
+                ]
+                expected_results = [
+                    str(result).strip()
+                    for result in (test_case.get("expectedResults") or [])
+                    if str(result).strip()
+                ]
+                lines.extend(
+                    [
+                        f"### TC-{tc_number:03d}: {name}",
+                        f"**Description:** {name}",
+                        "**Preconditions:** Start from the state established by the source spec and planner seed.",
+                        "**Steps:**",
+                    ]
+                )
+                if steps:
+                    lines.extend(f"{idx}. {step}" for idx, step in enumerate(steps, start=1))
+                else:
+                    lines.append("1. Execute the scenario described by the planner.")
+                expected = " ".join(expected_results) if expected_results else "The planned outcome is visible and stable."
+                lines.extend(["**Expected Result:** " + expected, ""])
+                tc_number += 1
+
+        if tc_number == 1:
+            return None
+
+        draft_script = NativePlanner._extract_draft_script(overview)
+        if draft_script and "## Draft Playwright Script" not in "\n".join(lines):
+            lines.extend(
+                [
+                    "## Draft Playwright Script",
+                    "```typescript",
+                    draft_script,
+                    "```",
+                    "",
+                ]
+            )
+
+        return "\n".join(lines).strip() + "\n"
+
+    @staticmethod
+    def _draft_script_path_for_plan(plan_path: Path) -> Path:
+        return plan_path.with_suffix(".draft.spec.ts")
+
+    @staticmethod
+    def _extract_draft_script(content: str) -> str | None:
+        heading = re.search(
+            r"(?im)^#{2,3}\s+Draft\s+(?:Playwright\s+)?(?:Test\s+)?Script\s*$",
+            content,
+        )
+        search_region = content[heading.end() :] if heading else content
+        match = re.search(
+            r"```(?:typescript|ts)\s*\n(.*?)```",
+            search_region,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            return None
+        return match.group(1).strip()
+
+    @staticmethod
+    def _validate_draft_script(script: str) -> tuple[bool, str | None]:
+        if not script or not script.strip():
+            return False, "empty draft script"
+        if "page.waitForTimeout" in script:
+            return False, "draft script uses page.waitForTimeout()"
+        if "```" in script:
+            return False, "draft script contains markdown fences"
+        if "test(" not in script and "test.describe" not in script:
+            return False, "draft script is missing Playwright test()"
+        if "page." not in script:
+            return False, "draft script is missing page interactions/assertions"
+        if "expect(" not in script:
+            return False, "draft script is missing Playwright expect() assertions"
+        return True, None
+
+    def _finalize_plan_artifact(
+        self,
+        *,
+        plan_path: Path,
+        expected_output_path: Path,
+        require_draft_script: bool,
+    ) -> Path:
+        try:
+            content = plan_path.read_text()
+        except OSError as exc:
+            raise SpecGenerationError(
+                f"Accepted planner artifact could not be read: {plan_path}",
+                diagnostics={
+                    "expected_output_path": str(expected_output_path),
+                    "generated_plan_path": str(plan_path),
+                    "planner_draft_script_observed": False,
+                    "planner_draft_script_error": str(exc),
+                },
+            ) from exc
+
+        draft_script = self._extract_draft_script(content)
+        if not draft_script:
+            if require_draft_script:
+                raise SpecGenerationError(
+                    "Live-browser planner produced a valid markdown plan but did not include a required Draft Playwright Script section.",
+                    diagnostics={
+                        "expected_output_path": str(expected_output_path),
+                        "generated_plan_path": str(plan_path),
+                        "planner_draft_script_observed": False,
+                        "planner_draft_script_validation_failure": "missing Draft Playwright Script fenced TypeScript block",
+                    },
+                )
+            self.last_draft_script_path = None
+            return plan_path
+
+        valid, reason = self._validate_draft_script(draft_script)
+        if not valid:
+            if require_draft_script:
+                raise SpecGenerationError(
+                    f"Live-browser planner produced an invalid Draft Playwright Script: {reason}.",
+                    diagnostics={
+                        "expected_output_path": str(expected_output_path),
+                        "generated_plan_path": str(plan_path),
+                        "planner_draft_script_observed": True,
+                        "planner_draft_script_validation_failure": reason,
+                    },
+                )
+            logger.warning("Ignoring invalid optional planner draft script in %s: %s", plan_path, reason)
+            self.last_draft_script_path = None
+            return plan_path
+
+        draft_path = self._draft_script_path_for_plan(expected_output_path)
+        draft_path.parent.mkdir(parents=True, exist_ok=True)
+        draft_path.write_text(draft_script.rstrip() + "\n")
+        self.last_draft_script_path = draft_path
+        logger.info("Planner draft script saved: %s", draft_path)
+        return plan_path
 
     @classmethod
     def _validate_test_plan_schema(cls, content: str) -> tuple[bool, str | None]:
@@ -891,6 +1278,8 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
             "**Steps:** numbered action steps",
             "**Expected Result:**",
             "Optional: **Test Data:**",
+            "## Draft Playwright Script",
+            "One fenced `typescript` code block with draft Playwright code using web-first assertions and no `page.waitForTimeout()`.",
             "",
             "Return only the markdown plan.",
         ]
@@ -1149,37 +1538,11 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
         logger.info(f"Invoking Playwright Planner Agent for flow: {flow_title}")
         logger.info(f"   Target URL: {target_url}")
 
-        agent_result = await self._query_planner_agent(prompt, target_url=target_url)
-        if target_url:
-            self._validate_live_plan_tool_sequence(agent_result, target_url)
-
-        # Check if spec was saved by the agent directly to disk or as a run artifact.
-        saved_plan_path = self._recover_saved_plan(output_path)
-        if saved_plan_path:
-            logger.info(f"Spec saved by agent: {saved_plan_path}")
-            return saved_plan_path
-
-        # Extract the actual plan content from agent tool calls or output
-        plan_content = self._extract_plan_content(agent_result)
-        if plan_content:
-            logger.info(f"Saving extracted plan as spec: {output_path}")
-            output_path.write_text(plan_content)
-            return output_path
-
-        repaired_plan_path = await self._attempt_repair_plan(
+        return await self._run_planner_with_retry(
             subject_type="flow",
             subject_name=flow_title,
-            agent_result=agent_result,
-            expected_output_path=output_path,
-        )
-        if repaired_plan_path:
-            return repaired_plan_path
-
-        logger.error(f"Agent produced no usable output for flow: {flow_title}")
-        raise self._build_no_output_error(
-            subject_type="flow",
-            subject_name=flow_title,
-            agent_result=agent_result,
+            prompt=prompt,
+            target_url=target_url,
             expected_output_path=output_path,
         )
 

@@ -339,6 +339,50 @@ def test_agent_runner_uses_parent_test_run_as_queue_owner(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_agent_runner_adds_browser_dialog_policy_before_queue_enqueue(monkeypatch):
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    captured: dict[str, str] = {}
+
+    class _CompletedTask:
+        telemetry = {"tool_calls": 0, "text_blocks": 1}
+
+    class _FakeQueue:
+        async def connect(self):
+            return None
+
+        async def get_metrics(self):
+            return {"workers_alive": 1, "queue_length": 0, "running": 0}
+
+        async def enqueue_task(self, *, prompt, **_kwargs):
+            captured["prompt"] = prompt
+            return "task-dialog"
+
+        async def wait_for_result(self, *_args, **_kwargs):
+            return "Queued browser run completed with enough detail to pass validation."
+
+        async def get_task(self, task_id):
+            assert task_id == "task-dialog"
+            return _CompletedTask()
+
+    monkeypatch.setattr(agent_runner_module, "AGENT_QUEUE_AVAILABLE", True)
+    monkeypatch.setattr(agent_runner_module, "should_use_agent_queue", lambda: True)
+    monkeypatch.setattr(agent_runner_module, "get_agent_queue", lambda: _FakeQueue())
+
+    runner = AgentRunner(
+        allowed_tools=["browser_dialog"],
+        inject_memory=False,
+        capture_memory=False,
+    )
+    result = await runner.run("browse")
+
+    assert result.success is True
+    assert "## Browser Dialog Recovery" in captured["prompt"]
+    assert "Leave site?" in captured["prompt"]
+    assert "`accept: true`" in captured["prompt"]
+
+
+@pytest.mark.asyncio
 async def test_agent_worker_reuses_active_parent_test_run_slot():
     worker = AgentWorker.__new__(AgentWorker)
     task = AgentTask(

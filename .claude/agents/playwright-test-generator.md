@@ -80,6 +80,13 @@ page.on('dialog', async dialog => {
   - Includes a comment with the step text before each step execution. Do not duplicate comments if step requires
     multiple actions.
   - Always use best practices from the log when generating tests.
+  - If the planner provided a `## Draft Playwright Script` section, consume it as a starting scaffold: preserve useful
+    selectors, flows, comments, and assertions after verifying them with browser tools.
+  - The draft script is not final code. Repair stale selectors, convert credential placeholders to `process.env.VAR!`
+    or fixture test data access, and apply wait best practices before writing the test.
+  - Never copy `page.waitForTimeout()` or arbitrary sleeps from the draft. Replace them with Playwright auto-waiting,
+    web-first assertions such as `await expect(locator).toBeVisible()`, durable URL waits, visible success states,
+    or specific `page.waitForResponse(...)` waits.
 
    <example-generation>
    For following plan:

@@ -28,6 +28,7 @@ from orchestrator.services.ai_runtime_config import (
     RuntimeModelTier,
     apply_runtime_env_aliases,
 )
+from orchestrator.utils.browser_dialog_policy import append_browser_dialog_recovery_policy
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -331,6 +332,7 @@ class AgentRunner:
         include_hook_events: bool = False,
         log_tools: bool = True,
         on_tool_use: Callable[[str, dict], None] | None = None,
+        tool_permission_guard: Callable[[str, dict[str, Any], Any], Any] | None = None,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
         session_dir: Path | None = None,
         on_task_enqueued: Callable[[str], None] | None = None,
@@ -353,6 +355,9 @@ class AgentRunner:
         model_tier: RuntimeModelTier | None = None,
         reasoning_budget: int | None = None,
         env_vars: dict[str, str] | None = None,
+        trace_id: str | None = None,
+        trace_prompt_hash: str | None = None,
+        trace_agent_run_id: str | None = None,
     ):
         """
         Initialize the agent runner.
@@ -371,6 +376,7 @@ class AgentRunner:
             include_hook_events: Include hook lifecycle events in the SDK stream
             log_tools: Whether to log tool invocations to console
             on_tool_use: Optional callback when a tool is used
+            tool_permission_guard: Optional SDK permission callback for denying tool use before execution.
             on_progress: Optional callback receiving live progress snapshots
             session_dir: Optional directory to save debug output
             on_task_enqueued: Optional callback fired with task_id when queued (for progress tracking)
@@ -394,6 +400,9 @@ class AgentRunner:
             model_tier: Optional canonical model tier for this run.
             reasoning_budget: Optional provider reasoning budget for compatible models.
             env_vars: Explicit environment variables to expose to direct and queued execution.
+            trace_id: Optional deep trace ID for agent observability.
+            trace_prompt_hash: Optional upstream prompt hash.
+            trace_agent_run_id: AgentRun ID to link trace records and memory injection telemetry.
         """
         self.timeout_seconds = timeout_seconds
         self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
@@ -406,6 +415,7 @@ class AgentRunner:
         self.include_hook_events = include_hook_events
         self.log_tools = log_tools
         self.on_tool_use = on_tool_use
+        self.tool_permission_guard = tool_permission_guard
         self.on_progress = on_progress
         self.session_dir = session_dir
         self.on_task_enqueued = on_task_enqueued
@@ -428,7 +438,11 @@ class AgentRunner:
         self.model_tier = model_tier if model_tier in {"light", "standard", "deep", "tool_deep", "chat", "embedding"} else self._infer_model_tier()
         self.reasoning_budget = reasoning_budget
         self.env_vars = {str(key): str(value) for key, value in (env_vars or {}).items() if key and value is not None}
+        self.trace_id = trace_id
+        self.trace_prompt_hash = trace_prompt_hash
+        self.trace_agent_run_id = trace_agent_run_id or owner_id
         self._last_memory_injected = False
+        self._last_memory_context = ""
 
     def _effective_tools(self) -> list[str] | dict[str, str] | None:
         """Build the SDK/CLI tool availability set.
@@ -491,6 +505,7 @@ class AgentRunner:
                 "source_id": self.memory_source_id,
             },
             "requires_live_browser": self.requires_live_browser,
+            "tool_permission_guard": bool(self.tool_permission_guard),
             "prompt": {
                 "provided": prompt is not None,
                 "hash": prompt_hash,
@@ -583,6 +598,8 @@ class AgentRunner:
             kwargs["include_hook_events"] = True
         if self.model:
             kwargs["model"] = self.model
+        if self.tool_permission_guard and self._claude_options_accepts("can_use_tool"):
+            kwargs["can_use_tool"] = self.tool_permission_guard
 
         if self._should_attach_mcp_config(self.cwd):
             kwargs["mcp_servers"] = (self.cwd or Path.cwd()) / ".mcp.json"
@@ -718,6 +735,13 @@ class AgentRunner:
         self._validate_mcp_config_for_allowed_tools(self.cwd)
         original_prompt = prompt
         self._last_memory_injected = False
+        self._last_memory_context = ""
+        prompt = append_browser_dialog_recovery_policy(
+            prompt,
+            self.allowed_tools,
+            self._effective_tools(),
+            disallowed_tools=self.disallowed_tools,
+        )
         prompt = self._augment_prompt_with_agent_memory(prompt)
         try:
             from orchestrator.ai.prompt_registry import attach_delivered_prompt_metadata
@@ -725,6 +749,25 @@ class AgentRunner:
             prompt = attach_delivered_prompt_metadata(prompt, memory_injected=self._last_memory_injected)
         except Exception as exc:
             logger.debug("Delivered prompt metadata skipped: %s", exc)
+        if self.trace_agent_run_id:
+            try:
+                from orchestrator.services.agent_trace import ensure_trace_snapshot
+
+                snapshot = ensure_trace_snapshot(
+                    run_id=self.trace_agent_run_id,
+                    prompt=prompt,
+                    memory_context=self._last_memory_context or None,
+                    runtime="claude_sdk",
+                    model=self.model,
+                    model_tier=self.model_tier,
+                    allowed_tools=self.allowed_tools,
+                    runtime_diagnostics=self.diagnostics(prompt=prompt),
+                )
+                if snapshot:
+                    self.trace_id = snapshot.id
+                    self.trace_prompt_hash = snapshot.prompt_hash or _sha256_text(prompt)
+            except Exception as exc:
+                logger.debug("Agent trace prompt snapshot skipped: %s", exc)
 
         # First, try agent queue if Redis is available
         # This offloads execution to a separate worker process outside uvicorn
@@ -1191,6 +1234,7 @@ class AgentRunner:
 
     def _augment_prompt_with_agent_memory(self, prompt: str) -> str:
         self._last_memory_injected = False
+        self._last_memory_context = ""
         if not self.inject_memory or os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
             return prompt
         project_id = self._agent_memory_project_id()
@@ -1211,9 +1255,43 @@ class AgentRunner:
             context = builder.format_prompt_context(bundle, token_budget=1200)
             if not context:
                 return prompt
+            self._last_memory_context = context
             bundle_dict = bundle.to_dict()
             unified = bundle_dict.get("unified") or {}
             ranking = unified.get("ranking") or {}
+            prompt_hash = _sha256_text(prompt)
+            span_id = None
+            if self.trace_agent_run_id:
+                try:
+                    from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span
+
+                    snapshot = ensure_trace_snapshot(
+                        run_id=self.trace_agent_run_id,
+                        prompt=prompt,
+                        memory_context=context,
+                        runtime="claude_sdk",
+                        model=self.model,
+                        model_tier=self.model_tier,
+                        allowed_tools=self.allowed_tools,
+                    )
+                    if snapshot:
+                        self.trace_id = snapshot.id
+                    span = record_trace_span(
+                        run_id=self.trace_agent_run_id,
+                        trace_id=self.trace_id,
+                        span_type="memory_injection",
+                        name="Memory injection",
+                        message="Agent memory context injected into prompt.",
+                        payload={
+                            "prompt_hash": prompt_hash,
+                            "selected_items": ranking.get("selected_items", []),
+                            "score_summary": ranking.get("score_summary", {}),
+                            "context_characters": len(context),
+                        },
+                    )
+                    span_id = span.id if span else None
+                except Exception as exc:
+                    logger.debug("Agent trace memory span skipped: %s", exc)
             record_memory_injection(
                 project_id=project_id,
                 actor_type="agent",
@@ -1227,6 +1305,10 @@ class AgentRunner:
                     "agent_type": self.memory_agent_type,
                     "owner_type": self.owner_type,
                     "owner_id": self.owner_id,
+                    "agent_run_id": self.trace_agent_run_id,
+                    "trace_id": self.trace_id,
+                    "span_id": span_id,
+                    "prompt_hash": prompt_hash,
                     **({"run_id": self.memory_source_id} if self.memory_source_id else {}),
                     "empty_recall": not bool(ranking.get("selected_items")),
                     "memory_score_summary": ranking.get("score_summary", {}),

@@ -7324,6 +7324,32 @@ def _agent_run_summary(run: AgentRun) -> str | None:
     return result.get("summary") if isinstance(result, dict) else None
 
 
+def _exploratory_result_is_zero_evidence_failure(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    action_trace = result.get("action_trace") if isinstance(result.get("action_trace"), list) else []
+    flows = result.get("discovered_flows") if isinstance(result.get("discovered_flows"), list) else []
+    flow_summaries = (
+        result.get("discovered_flow_summaries")
+        if isinstance(result.get("discovered_flow_summaries"), list)
+        else []
+    )
+    try:
+        total_flows = int(result.get("total_flows_discovered") or 0)
+    except (TypeError, ValueError):
+        total_flows = 0
+    return bool(
+        result.get("failure_reason") == "zero_evidence_parse_fallback"
+        or (
+            result.get("parsing_failed")
+            and not action_trace
+            and not flows
+            and not flow_summaries
+            and total_flows == 0
+        )
+    )
+
+
 def _filter_agent_run_project(run: AgentRun, project_id: str | None) -> None:
     if not project_id:
         return
@@ -8424,6 +8450,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             result = {}
             if runtime_name == "hermes" and agent_type in {"exploratory", "writer", "spec-synthesis"}:
                 from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
+                from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span, record_tool_result_spans
 
                 test_data_refs = config.get("test_data_refs") if isinstance(config.get("test_data_refs"), list) else []
                 test_data_context = _resolve_agent_execution_test_data_context(
@@ -8438,8 +8465,20 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         "If you delegate work to subagents, copy the relevant test-data ref names and plaintext values needed for execution "
                         "into each delegated prompt. Subagents do not automatically inherit this full parent context."
                     )
+                trace_snapshot = ensure_trace_snapshot(
+                    run_id=run_id,
+                    prompt=prompt,
+                    context=test_data_context.get("prompt_markdown"),
+                    runtime=runtime_name,
+                    model=config.get("model"),
+                    model_tier=config.get("model_tier") or "tool_deep",
+                    allowed_tools=config.get("allowed_tools") or ["*"],
+                    test_data_refs=test_data_refs,
+                    runtime_diagnostics={"runtime": runtime_name, "agent_type": agent_type},
+                )
 
                 def _on_runtime_task_enqueued(task_id: str) -> None:
+                    ensure_trace_snapshot(run_id=run_id, agent_task_id=task_id, runtime=runtime_name)
                     _update_agent_run_progress(
                         run_id,
                         {
@@ -8452,6 +8491,15 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     )
 
                 def _on_runtime_progress(progress: dict[str, Any]) -> None:
+                    record_trace_span(
+                        run_id=run_id,
+                        trace_id=trace_snapshot.id if trace_snapshot else None,
+                        span_type="provider_event",
+                        name=str(progress.get("hermes_event_type") or progress.get("phase") or "runtime progress"),
+                        message=str(progress.get("message") or "Hermes runtime progress."),
+                        tool_name=str(progress.get("last_tool")) if progress.get("last_tool") else None,
+                        payload={"progress": progress, "runtime": runtime_name},
+                    )
                     _update_agent_run_progress(
                         run_id,
                         {
@@ -8493,6 +8541,9 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         agent_name=agent_type,
                         hermes_conversation=run_id,
                         metadata={"agent_type": agent_type, "run_id": run_id},
+                        trace_id=trace_snapshot.id if trace_snapshot else None,
+                        prompt_hash=trace_snapshot.prompt_hash if trace_snapshot else None,
+                        agent_run_id=run_id,
                         env_vars=None,
                         is_cancelled=_agent_run_cancelled,
                         on_task_enqueued=_on_runtime_task_enqueued,
@@ -8502,6 +8553,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 )
                 if agent_result.cancelled:
                     raise asyncio.CancelledError("Agent run cancelled")
+                record_tool_result_spans(run_id, agent_result.tool_calls)
                 result = {
                     "summary": (agent_result.output or agent_result.error or "")[:500],
                     "output": agent_result.output,
@@ -8632,6 +8684,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 result = await agent.run(config)
             elif agent_type == "custom":
                 from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
+                from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span, record_tool_result_spans
 
                 allowed_tools = config.get("allowed_tools") or []
                 run_dir = None
@@ -8703,8 +8756,26 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         "If you delegate work to subagents, copy the relevant test-data ref names and plaintext values needed for execution into each delegated prompt. Subagents do not automatically inherit this full parent context."
                     )
                 prompt_parts.extend(["", "Task:", task_prompt])
+                final_prompt = "\n".join(prompt_parts)
+                trace_snapshot = ensure_trace_snapshot(
+                    run_id=run_id,
+                    prompt=final_prompt,
+                    context=markdown,
+                    runtime=runtime_name,
+                    model=config.get("model"),
+                    model_tier=config.get("model_tier") or "tool_deep",
+                    allowed_tools=allowed_tools,
+                    test_data_refs=test_data_refs,
+                    runtime_diagnostics={
+                        "runtime": runtime_name,
+                        "agent_type": "custom",
+                        "has_browser_tools": has_browser_tools,
+                        "force_direct_execution": force_direct_execution,
+                    },
+                )
 
                 def _on_custom_task_enqueued(task_id: str) -> None:
+                    ensure_trace_snapshot(run_id=run_id, agent_task_id=task_id, runtime=runtime_name)
                     queued_message = "Hermes run started" if runtime_name == "hermes" else "Agent task queued for worker"
                     runtime_metadata = runtime if has_browser_tools else {}
                     runtime_message = runtime_metadata.get(
@@ -8755,6 +8826,15 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
 
                 def _on_custom_progress(progress: dict[str, Any]) -> None:
                     last_tool = progress.get("last_tool")
+                    record_trace_span(
+                        run_id=run_id,
+                        trace_id=trace_snapshot.id if trace_snapshot else None,
+                        span_type="provider_event",
+                        name=str(progress.get("hermes_event_type") or progress.get("phase") or "runtime progress"),
+                        message=str(progress.get("message") or "Agent runtime progress."),
+                        tool_name=str(last_tool) if last_tool else None,
+                        payload={"progress": progress, "runtime": runtime_name},
+                    )
                     _update_agent_run_progress(
                         run_id,
                         {
@@ -8797,14 +8877,18 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         "agent_definition_id": config.get("agent_definition_id"),
                         "run_id": run_id,
                     },
+                    trace_id=trace_snapshot.id if trace_snapshot else None,
+                    prompt_hash=trace_snapshot.prompt_hash if trace_snapshot else None,
+                    agent_run_id=run_id,
                     env_vars=None,
                     is_cancelled=_agent_run_cancelled,
                 )
                 if not await _wait_if_agent_run_paused(run_id):
                     return
-                agent_result = await runtime_adapter.run("\n".join(prompt_parts), runtime_context)
+                agent_result = await runtime_adapter.run(final_prompt, runtime_context)
                 if agent_result.cancelled:
                     raise asyncio.CancelledError("Agent run cancelled")
+                record_tool_result_spans(run_id, agent_result.tool_calls)
                 artifacts = _collect_agent_run_artifacts(run_id)
                 structured_report = _build_custom_agent_structured_report(
                     agent_result.output or "",
@@ -8864,15 +8948,34 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             with Session(engine) as session:
                 run = session.get(AgentRun, run_id)
                 if run and run.status not in AGENT_TERMINAL_STATUSES:
-                    run.status = "completed"
+                    exploratory_zero_evidence_failed = (
+                        agent_type == "exploratory" and _exploratory_result_is_zero_evidence_failure(result)
+                    )
+                    run.status = "failed" if exploratory_zero_evidence_failed else "completed"
                     run.completed_at = datetime.utcnow()
                     run.result = result
+                    if exploratory_zero_evidence_failed:
+                        run.progress = {
+                            **(run.progress or {}),
+                            "phase": "failed",
+                            "status": "failed",
+                            "message": result.get(
+                                "summary",
+                                "Exploration completed but result parsing failed and no structured data recovered.",
+                            ),
+                            "updated_at": datetime.utcnow().isoformat(),
+                        }
                     session.add(run)
                     session.commit()
                     _record_agent_run_event(
                         run_id,
-                        event_type="complete",
-                        message="Agent run completed.",
+                        event_type="error" if exploratory_zero_evidence_failed else "complete",
+                        level="error" if exploratory_zero_evidence_failed else "info",
+                        message=(
+                            "Exploratory agent run failed: result parsing failed and no structured data recovered."
+                            if exploratory_zero_evidence_failed
+                            else "Agent run completed."
+                        ),
                         payload={"status": run.status, "summary": _agent_run_summary(run)},
                         agent_task_id=run.agent_task_id,
                         session=session,
@@ -9360,6 +9463,84 @@ async def stream_agent_run_events_api(
             await asyncio.sleep(1.0)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@app.get("/api/agents/runs/{id}/trace")
+async def get_agent_run_trace_api(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    session: Session = Depends(get_session),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+
+    from orchestrator.services.agent_trace import trace_bundle_for_run
+
+    return await trace_bundle_for_run(run=run, session=session)
+
+
+@app.get("/api/agents/runs/{id}/trace/spans")
+def list_agent_run_trace_spans_api(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    trace_id: str | None = Query(default=None),
+    span_type: str | None = Query(default=None),
+    level: str | None = Query(default=None),
+    tool: str | None = Query(default=None),
+    q: str | None = Query(default=None),
+    after_sequence: int = Query(default=0, ge=0),
+    before_sequence: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=200, ge=1, le=500),
+    session: Session = Depends(get_session),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+
+    from orchestrator.services.agent_trace import list_trace_spans, serialize_span
+
+    spans = list_trace_spans(
+        run_id=run.id,
+        trace_id=trace_id,
+        span_type=span_type,
+        level=level,
+        tool=tool,
+        q=q,
+        after_sequence=after_sequence,
+        before_sequence=before_sequence,
+        limit=limit,
+        session=session,
+    )
+    return [serialize_span(span) for span in spans]
+
+
+@app.get("/api/agents/runs/{id}/trace/export")
+async def export_agent_run_trace_api(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    session: Session = Depends(get_session),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+
+    from orchestrator.services.agent_trace import trace_bundle_for_run
+
+    bundle = await trace_bundle_for_run(run=run, session=session)
+    response = JSONResponse(
+        {
+            "schema": "quorvex.agent_trace_export.v1",
+            "exported_at": datetime.utcnow().isoformat(),
+            "run": _serialize_agent_run(run, session),
+            **bundle,
+        }
+    )
+    response.headers["Content-Disposition"] = f'attachment; filename="agent-trace-{run.id}.json"'
+    return response
 
 
 @app.get("/api/agents/temporal/health")

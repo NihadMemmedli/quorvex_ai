@@ -46,8 +46,13 @@ from orchestrator.ai.prompt_registry import (
     attach_prompt_metadata,
     build_prompt_metadata,
 )
+from orchestrator.services.handoff_manifest import (
+    record_artifact,
+    record_consumption,
+)
 from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
+from orchestrator.utils.text_utils import truncate_middle
 
 
 class NativeGenerator:
@@ -87,6 +92,7 @@ class NativeGenerator:
         self.project_id = project_id
         self.env_vars = dict(env_vars or {})
         self.cwd = Path(cwd) if cwd else None
+        self.last_handoff_consumption: dict[str, Any] = {}
         # Use absolute path to project's tests directory (not relative to cwd)
         # This fixes Docker issue where cwd changes to run directory
         self.tests_dir = BASE_DIR / "tests" / "generated"
@@ -101,6 +107,9 @@ class NativeGenerator:
         memory_run_id: str | None = None,
         auth_context: dict[str, Any] | None = None,
         execution_credentials: dict[str, str] | None = None,
+        plan_path: Path | None = None,
+        planner_draft_script_path: Path | None = None,
+        handoff_manifest_path: Path | None = None,
     ) -> Path:
         """
         Generate a Playwright test from a markdown spec.
@@ -132,6 +141,62 @@ class NativeGenerator:
         logger.info(f"Generating test from: {spec_path}")
         logger.info(f"   Output: {output_path}")
 
+        handoff_consumption: dict[str, Any] = {
+            "received_planner_plan": bool(plan_path),
+            "received_planner_draft_script": bool(planner_draft_script_path),
+            "planner_plan_status": "not_provided",
+            "planner_draft_script_status": "not_provided",
+        }
+
+        plan_content = None
+        if plan_path and plan_path.exists():
+            try:
+                plan_content = plan_path.read_text()
+                handoff_consumption["planner_plan_status"] = "used"
+            except OSError as exc:
+                logger.warning(f"Could not read planner artifact {plan_path}: {exc}")
+                handoff_consumption["planner_plan_status"] = "rejected"
+                handoff_consumption["planner_plan_reason"] = str(exc)
+        elif plan_path:
+            handoff_consumption["planner_plan_status"] = "missing"
+            handoff_consumption["planner_plan_reason"] = "plan path does not exist"
+
+        planner_draft_script_content = None
+        if planner_draft_script_path and planner_draft_script_path.exists():
+            try:
+                planner_draft_script_content = planner_draft_script_path.read_text()
+                handoff_consumption["planner_draft_script_status"] = "used"
+            except OSError as exc:
+                logger.warning(
+                    f"Could not read planner draft script {planner_draft_script_path}: {exc}"
+                )
+                handoff_consumption["planner_draft_script_status"] = "rejected"
+                handoff_consumption["planner_draft_script_reason"] = str(exc)
+        elif planner_draft_script_path:
+            handoff_consumption["planner_draft_script_status"] = "missing"
+            handoff_consumption["planner_draft_script_reason"] = "draft script path does not exist"
+
+        if handoff_manifest_path:
+            if plan_path:
+                record_consumption(
+                    handoff_manifest_path,
+                    "generator",
+                    "planner_plan",
+                    status=handoff_consumption["planner_plan_status"],
+                    reason=handoff_consumption.get("planner_plan_reason"),
+                    metadata={"path": str(plan_path)},
+                )
+            if planner_draft_script_path:
+                record_consumption(
+                    handoff_manifest_path,
+                    "generator",
+                    "planner_draft_script",
+                    status=handoff_consumption["planner_draft_script_status"],
+                    reason=handoff_consumption.get("planner_draft_script_reason"),
+                    metadata={"path": str(planner_draft_script_path)},
+                )
+        self.last_handoff_consumption = handoff_consumption
+
         # Build prompt in the format expected by playwright-test-generator agent
         prompt = self._build_generator_prompt(
             spec_path=spec_path,
@@ -143,6 +208,8 @@ class NativeGenerator:
             memory_run_id=memory_run_id,
             auth_context=auth_context,
             execution_credentials=execution_credentials,
+            plan_content=plan_content,
+            planner_draft_script_content=planner_draft_script_content,
         )
 
         # Invoke the Generator Agent
@@ -152,16 +219,89 @@ class NativeGenerator:
         # Check if the agent created the file
         if output_path.exists():
             logger.info(f"Test generated: {output_path}")
+            if handoff_manifest_path:
+                record_artifact(
+                    handoff_manifest_path,
+                    "generated_test",
+                    output_path,
+                    kind="playwright_test",
+                    producer_stage="generator",
+                    required=True,
+                    consumers=["test_run", "healer"],
+                    validation_status="valid",
+                    metadata=handoff_consumption,
+                )
             return output_path
 
         # Fallback: If agent returned code but didn't write it
-        if result and ("test(" in result or "test.describe" in result):
+        fixed_code = self._extract_code(result or "")
+        if fixed_code:
             logger.info(f"Saving generated code to: {output_path}")
-            output_path.write_text(result)
+            output_path.write_text(fixed_code)
+            if handoff_manifest_path:
+                record_artifact(
+                    handoff_manifest_path,
+                    "generated_test",
+                    output_path,
+                    kind="playwright_test",
+                    producer_stage="generator",
+                    required=True,
+                    consumers=["test_run", "healer"],
+                    validation_status="valid",
+                    metadata={**handoff_consumption, "source": "agent_response_fallback"},
+                )
             return output_path
 
         logger.warning(f"Generator finished but test file not found at: {output_path}")
         return output_path
+
+    def _extract_code(self, text: str) -> str | None:
+        """Extract only TypeScript test code from an agent response."""
+        import re
+
+        patterns = [
+            r"```typescript\n(.*?)```",
+            r"```ts\n(.*?)```",
+            r"```\n(.*?)```",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.DOTALL)
+            if not match:
+                continue
+            code = match.group(1).strip()
+            if self._looks_like_playwright_test(code):
+                return code
+
+        stripped = text.strip()
+        if stripped.startswith("import") and self._looks_like_playwright_test(stripped):
+            return stripped
+        return None
+
+    @staticmethod
+    def _looks_like_playwright_test(code: str) -> bool:
+        import re
+
+        def has_fixture_helper_import() -> bool:
+            for match in re.finditer(
+                r"import\s*\{(?P<names>[^}]+)\}\s*from\s*['\"](?P<source>[^'\"]+)['\"]",
+                code,
+            ):
+                names = match.group("names")
+                source = match.group("source").replace("\\", "/")
+                if (
+                    source.endswith("fixtures/test-data")
+                    and re.search(r"\btest\b", names)
+                    and re.search(r"\bexpect\b", names)
+                    and ("testData" in code or "QUORVEX_TEST_DATA_FILE" in code)
+                ):
+                    return True
+            return False
+
+        return (
+            ("test(" in code or "test.describe" in code)
+            and ("@playwright/test" in code or has_fixture_helper_import())
+            and "```" not in code
+        )
 
     def _extract_credential_placeholders(self, spec_content: str) -> dict:
         """Extract {{VAR}} placeholders from spec and resolve their values."""
@@ -188,6 +328,8 @@ class NativeGenerator:
         memory_run_id: str | None = None,
         auth_context: dict[str, Any] | None = None,
         execution_credentials: dict[str, str] | None = None,
+        plan_content: str | None = None,
+        planner_draft_script_content: str | None = None,
     ) -> str:
         """Build prompt matching the playwright-test-generator agent format."""
 
@@ -252,6 +394,59 @@ Use this design guidance to reduce flaky output. Treat it as advisory context fr
 {design_context}
 """
 
+        plan_section = ""
+        if plan_content:
+            try:
+                plan_context_chars = int(os.environ.get("GENERATOR_PLAN_CONTEXT_CHARS", "8000"))
+            except ValueError:
+                logger.warning("Invalid GENERATOR_PLAN_CONTEXT_CHARS; using default 8000")
+                plan_context_chars = 8000
+            plan_context_chars = max(plan_context_chars, 0)
+            if plan_context_chars:
+                head = plan_context_chars // 2
+                tail = plan_context_chars - head
+                plan_section = f"""
+
+## Verified Test Plan (selectors discovered on the live app by the planner)
+The planner explored the live application and verified these steps/selectors.
+Prefer these selectors over guessing, but verify with browser_snapshot before
+relying on them - the page may have changed since planning.
+
+{truncate_middle(plan_content, head=head, tail=tail)}
+"""
+
+        draft_script_section = ""
+        if planner_draft_script_content:
+            try:
+                draft_context_chars = int(
+                    os.environ.get("GENERATOR_DRAFT_SCRIPT_CONTEXT_CHARS", "10000")
+                )
+            except ValueError:
+                logger.warning("Invalid GENERATOR_DRAFT_SCRIPT_CONTEXT_CHARS; using default 10000")
+                draft_context_chars = 10000
+            draft_context_chars = max(draft_context_chars, 0)
+            if draft_context_chars:
+                head = draft_context_chars // 2
+                tail = draft_context_chars - head
+                draft_script_section = f"""
+
+## Planner Draft Script
+The planner generated this draft Playwright script after live exploration.
+Use it as starting code and selector evidence only. You must still validate the
+steps with `generator_setup_page`, browser tools, and `generator_read_log`, then
+write the final test with `generator_write_test`.
+
+Keep or improve its wait strategy: no `page.waitForTimeout()`, use web-first
+assertions such as `await expect(locator).toBeVisible()`, durable navigation
+waits such as `await expect(page).toHaveURL(...)` or `await page.waitForURL(...)`,
+and durable async waits such as visible result text, success toasts, list-count
+changes, completed status, or `page.waitForResponse(...)` when appropriate.
+
+```typescript
+{truncate_middle(planner_draft_script_content, head=head, tail=tail)}
+```
+"""
+
         auth_section = ""
         if auth_context and auth_context.get("storage_state_attached"):
             session_name = (
@@ -288,6 +483,8 @@ Context: User wants to generate automated tests from the following test plan.
 {spec_content}
 </spec-content>
 {design_section}
+{plan_section}
+{draft_script_section}
 {auth_section}
 {memory_section}
 
@@ -305,9 +502,9 @@ For each test case in the spec:
 
 ## Dialog Handling (CRITICAL)
 When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dialogs):
-- Use `browser_handle_dialog` with `accept: true` IMMEDIATELY
-- For "Leave site?" dialogs: Always accept to continue navigation
-- After handling a dialog, take a `browser_snapshot` to verify page state
+- Use `browser_handle_dialog` with `accept: true` IMMEDIATELY to accept Leave and continue navigation
+- Treat unsaved changes and beforeunload prompts as "Leave site?" dialogs unless the user explicitly asked you to preserve draft data
+- After handling a dialog, call `browser_snapshot` or `browser_take_screenshot` to verify page state
 - In generated code, include dialog handler for forms/editors:
   ```typescript
   page.on('dialog', async dialog => await dialog.accept());
@@ -326,6 +523,16 @@ When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dia
 - Follow best practices from the seed file
 - **CRITICAL**: Never write `process.env.TESTDATA_*` in generated code. Use `testData.get('<canonical-ref>')` or `testData.field('<canonical-ref>', '<path>')` for project test data.
 - For non-TESTDATA legacy credentials with `{{{{VAR_NAME}}}}` placeholders, use `process.env.VAR_NAME!` in code (NOT hardcoded values)
+
+## Robust Synchronization Requirements
+
+- Do not use `page.waitForTimeout()` or hand-written sleeps.
+- Prefer Playwright auto-waiting plus web-first assertions such as `await expect(locator).toBeVisible()`, `toHaveText()`, `toContainText()`, `toHaveURL()`, `toHaveValue()`, `toBeEnabled()`, and `toHaveCount()`.
+- After actions that trigger navigation, wait for the durable destination with `await expect(page).toHaveURL(...)` or `await page.waitForURL(...)`.
+- After actions that trigger async saves, uploads, searches, or list refreshes, wait for the durable result: a success toast, changed row/list count, visible record text, completed status, or the specific API response with `page.waitForResponse(...)`.
+- Wait for loading indicators to become hidden only when they are part of the verified page behavior; do not wait for generic network idle unless the page has no better durable signal.
+- If a control is disabled until data loads or validation completes, assert `await expect(control).toBeEnabled()` before interacting.
+- Keep assertions tied to user-visible outcomes from the spec or verified plan; do not replace missing assertions with generic `body` visibility.
 
 ## Cleanup (IMPORTANT)
 After writing the test file, call `browser_close` to close the browser before finishing.

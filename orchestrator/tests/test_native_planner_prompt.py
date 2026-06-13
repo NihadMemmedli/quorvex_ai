@@ -21,9 +21,20 @@ def test_planner_prompt_instructs_seed_file_for_setup():
 
     assert 'planner_setup_page` with `seedFile: "tests/seed.spec.ts"`' in prompt
     assert "https://example.test/checkout" in prompt
+    assert "## Draft Playwright Script" in prompt
+    assert "Do not use `page.waitForTimeout()`" in prompt
+    assert "await expect(...).toBeVisible()" in prompt
 
 
 def test_planner_agent_definition_requires_seed_file():
     content = (Path(__file__).resolve().parents[2] / ".claude" / "agents" / "playwright-test-planner.md").read_text()
 
     assert 'planner_setup_page` tool once with `seedFile: "tests/seed.spec.ts"`' in content
+
+
+def test_planner_agent_definition_requires_draft_playwright_script():
+    content = (Path(__file__).resolve().parents[2] / ".claude" / "agents" / "playwright-test-planner.md").read_text()
+
+    assert "## Draft Playwright Script" in content
+    assert "Use Playwright web-first assertions" in content
+    assert "Do not include `page.waitForTimeout()`" in content

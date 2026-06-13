@@ -26,15 +26,6 @@ class HealerTimeoutError(Exception):
     pass
 
 
-def truncate_middle(text: str, head: int = 4500, tail: int = 4500) -> str:
-    """Keep the head and tail of long text; structured failure context puts the
-    Playwright summary first and the stdout tail last, so both must survive."""
-    if len(text) <= head + tail:
-        return text
-    omitted = len(text) - head - tail
-    return f"{text[:head]}\n... [truncated {omitted} chars] ...\n{text[-tail:]}"
-
-
 def _optional_env_float(name: str) -> float | None:
     value = os.environ.get(name)
     if not value:
@@ -58,6 +49,7 @@ if config_dir:
 from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
 from orchestrator.utils.agent_runner import AgentRunner
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
+from orchestrator.utils.text_utils import truncate_middle
 
 
 class NativeHealer:
@@ -293,9 +285,9 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 
 ## Dialog Handling (CRITICAL)
 When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dialogs):
-- Use `browser_handle_dialog` with `accept: true` IMMEDIATELY
-- For "Leave site?" dialogs: Always accept to continue navigation
-- After handling a dialog, take a `browser_snapshot` to verify page state
+- Use `browser_handle_dialog` with `accept: true` IMMEDIATELY to accept Leave and continue navigation
+- Treat unsaved changes and beforeunload prompts as "Leave site?" dialogs unless the user explicitly asked you to preserve draft data
+- After handling a dialog, call `browser_snapshot` or `browser_take_screenshot` to verify page state
 
 ## Key Principles
 

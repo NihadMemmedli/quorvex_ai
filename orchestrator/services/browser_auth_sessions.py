@@ -547,6 +547,7 @@ Rules:
 - Navigate to the login URL, complete the login naturally, and support email-first or multi-step login flows.
 - Treat selector settings as optional hints only. Prefer the live snapshot and accessible element refs.
 - If a Cloudflare, Turnstile, CAPTCHA, "verify you are human", "checking your browser", or other anti-bot/security challenge appears, stop immediately and report: security challenge detected.
+- If a "Leave site?", unsaved changes, or beforeunload dialog appears, immediately call `browser_handle_dialog` with `accept: true`, then call `browser_snapshot` or `browser_take_screenshot` to verify page state. Preserve draft data only if the user explicitly requested it.
 - Save storage state only after login has clearly succeeded.
 - If the page reaches the success URL or otherwise shows the signed-in destination, call browser_storage_state immediately. Do not wait for ads, analytics, videos, or other background network requests to finish.
 - Treat the initial page as usable once the login controls are visible; do not wait for full page load, network idle, ads, analytics, videos, or marketing resources.

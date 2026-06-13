@@ -974,6 +974,8 @@ def test_explorer_prompt_is_goal_bounded_not_queue_exhaustive():
     assert "Target Flow Records" in prompt
     assert "Do not attempt to crawl every link" in prompt
     assert "Stop and emit final summary" in prompt
+    assert "Leave site?" in prompt
+    assert "`accept: true`" in prompt
     assert "You MUST visit every URL" not in prompt
     assert "UNVISITED_QUEUE is empty" not in prompt
 
@@ -1434,6 +1436,33 @@ def test_agent_runner_attaches_strict_local_mcp_config(tmp_path, monkeypatch):
         assert kwargs["strict_mcp_config"] is True
     else:
         assert kwargs["extra_args"]["strict-mcp-config"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_adds_browser_dialog_policy_to_direct_prompt(monkeypatch):
+    captured: dict[str, str] = {}
+
+    async def fake_query(*, prompt, options):
+        captured["prompt"] = prompt
+        yield {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}}
+
+    monkeypatch.setattr(_agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(_agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(_agent_runner_module, "AGENT_QUEUE_AVAILABLE", False)
+
+    runner = _AgentRunner(
+        allowed_tools=["browser_dialog"],
+        log_tools=False,
+        inject_memory=False,
+        capture_memory=False,
+    )
+
+    result = await runner.run("browse")
+
+    assert result.success is True
+    assert "## Browser Dialog Recovery" in captured["prompt"]
+    assert "Leave site?" in captured["prompt"]
+    assert "`accept: true`" in captured["prompt"]
 
 
 @pytest.mark.asyncio

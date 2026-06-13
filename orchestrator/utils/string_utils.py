@@ -16,3 +16,12 @@ def slugify(value: str, allow_unicode: bool = False) -> str:
         value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
     value = re.sub(r"[^\w\s-]", "", value.lower())
     return re.sub(r"[-\s]+", "-", value).strip("-_")
+
+
+def clean_extracted_url(value: str | None) -> str | None:
+    """Clean URL text captured from markdown or prose."""
+    if value is None:
+        return None
+    cleaned = str(value).strip().strip("`'\"")
+    cleaned = cleaned.rstrip("`'\".,;:)>")
+    return cleaned or None

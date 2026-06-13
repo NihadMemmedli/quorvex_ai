@@ -202,6 +202,116 @@ class AgentRunEvent(SQLModel, table=True):
         self.payload_json = json.dumps(value)
 
 
+class AgentTraceSnapshot(SQLModel, table=True):
+    """Immutable redacted context snapshot for one agent execution attempt."""
+
+    __tablename__ = "agent_trace_snapshots"
+    __table_args__ = (
+        Index("ix_agent_trace_snapshots_run_created", "run_id", "created_at"),
+        Index("ix_agent_trace_snapshots_project_created", "project_id", "created_at"),
+        Index("ix_agent_trace_snapshots_agent_task", "agent_task_id"),
+        UniqueConstraint("run_id", "attempt", name="uq_agent_trace_snapshots_run_attempt"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: f"atrace-{uuid.uuid4().hex[:12]}", primary_key=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    run_id: str = Field(foreign_key="agentrun.id", index=True)
+    agent_task_id: str | None = Field(default=None, index=True)
+    attempt: int = Field(default=1, index=True)
+    runtime: str = Field(default="claude_sdk", index=True)
+    model: str | None = None
+    model_tier: str | None = None
+    allowed_tools_json: str = Field(default="[]", sa_column=Column(Text))
+    prompt_hash: str | None = Field(default=None, index=True)
+    context_hash: str | None = Field(default=None, index=True)
+    memory_block_hash: str | None = Field(default=None, index=True)
+    prompt_preview: str = Field(default="", sa_column=Column(Text))
+    memory_preview: str = Field(default="", sa_column=Column(Text))
+    prompt_artifact_path: str | None = None
+    context_artifact_path: str | None = None
+    test_data_refs_json: str = Field(default="[]", sa_column=Column(Text))
+    runtime_diagnostics: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    updated_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+    @property
+    def allowed_tools(self) -> list[str]:
+        try:
+            value = json.loads(self.allowed_tools_json or "[]")
+            return [str(item) for item in value] if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @allowed_tools.setter
+    def allowed_tools(self, value: list[str]):
+        self.allowed_tools_json = json.dumps([str(item) for item in value if item is not None])
+
+    @property
+    def test_data_refs(self) -> list[str]:
+        try:
+            value = json.loads(self.test_data_refs_json or "[]")
+            return [str(item) for item in value] if isinstance(value, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    @test_data_refs.setter
+    def test_data_refs(self, value: list[str]):
+        self.test_data_refs_json = json.dumps([str(item) for item in value if item is not None])
+
+
+class AgentTraceSpan(SQLModel, table=True):
+    """Ordered span-style trace record linked to compact agent run events."""
+
+    __tablename__ = "agent_trace_spans"
+    __table_args__ = (
+        Index("ix_agent_trace_spans_trace_sequence", "trace_id", "sequence"),
+        Index("ix_agent_trace_spans_run_created", "run_id", "created_at"),
+        Index("ix_agent_trace_spans_project_created", "project_id", "created_at"),
+        Index("ix_agent_trace_spans_type_created", "span_type", "created_at"),
+        Index("ix_agent_trace_spans_tool", "tool_name"),
+        Index("ix_agent_trace_spans_agent_event", "agent_run_event_id"),
+        {"extend_existing": True},
+    )
+
+    id: str = Field(default_factory=lambda: f"atspan-{uuid.uuid4().hex[:12]}", primary_key=True)
+    trace_id: str = Field(foreign_key="agent_trace_snapshots.id", index=True)
+    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    run_id: str = Field(foreign_key="agentrun.id", index=True)
+    parent_span_id: str | None = Field(default=None, foreign_key="agent_trace_spans.id", index=True)
+    agent_run_event_id: str | None = Field(default=None, foreign_key="agent_run_events.id", index=True)
+    autonomous_mission_id: str | None = Field(default=None, index=True)
+    autonomous_work_item_id: str | None = Field(default=None, index=True)
+    sequence: int = Field(index=True)
+    span_type: str = Field(index=True)
+    name: str = Field(default="", index=True)
+    level: str = Field(default="info", index=True)
+    message: str = Field(default="", sa_column=Column(Text))
+    tool_name: str | None = Field(default=None, index=True)
+    success: bool | None = None
+    duration_ms: float | None = None
+    content_hash: str | None = Field(default=None, index=True)
+    input_preview: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    output_preview: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    artifact_path: str | None = None
+    payload_json: str = Field(default="{}", sa_column=Column(Text))
+    started_at: datetime | None = Field(default=None, index=True)
+    ended_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.payload_json or "{}")
+            return value if isinstance(value, dict) else {"value": value}
+        except json.JSONDecodeError:
+            return {}
+
+    @payload.setter
+    def payload(self, value: dict[str, Any]):
+        self.payload_json = json.dumps(value)
+
+
 class DomainJob(SQLModel, table=True):
     """Durable status record for Temporal-managed domain background jobs."""
 

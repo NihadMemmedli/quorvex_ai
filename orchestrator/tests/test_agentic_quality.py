@@ -13,12 +13,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from orchestrator.workflows.agentic_quality import (
     FailureTriageAgent,
     StabilityVerifier,
+    TestDesignAgent,
     build_agentic_summary,
+    extract_plan_selectors,
     normalize_failure_diagnosis,
     normalize_stability_report,
     normalize_test_critic,
     normalize_test_design,
 )
+from orchestrator.utils.agent_runner import AgentResult
 
 memory_stub = types.ModuleType("orchestrator.memory")
 memory_stub.get_memory_manager = lambda *args, **kwargs: None
@@ -46,6 +49,51 @@ def test_artifact_normalizers_fallback_to_valid_shapes():
     assert stability["status"] == "flaky"
     assert stability["passed_runs"] == 1
     assert stability["failed_runs"] == 1
+
+
+def test_extract_plan_selectors_strips_markdown_dedupes_and_limits():
+    plan_text = """
+- await page.getByRole('button', { name: 'Save' }).click();
+* await page.getByLabel('Email').fill('user@example.test');
+1. await page.getByRole('button', { name: 'Save' }).click();
+> await page.locator('[data-testid="toast"]').isVisible();
+- No selector on this line
+"""
+
+    assert extract_plan_selectors(plan_text, limit=2) == [
+        "await page.getByRole('button', { name: 'Save' }).click();",
+        "await page.getByLabel('Email').fill('user@example.test');",
+    ]
+
+
+def test_extract_plan_selectors_returns_empty_without_matches():
+    assert extract_plan_selectors("No browser locators here") == []
+
+
+def test_test_design_agent_uses_plan_selectors_and_oracles(tmp_path: Path):
+    plan_path = tmp_path / "planner.md"
+    plan_path.write_text(
+        "\n".join(
+            [
+                "- await page.getByRole('button', { name: 'Save' }).click();",
+                "- Verify the saved toast is visible",
+            ]
+        )
+    )
+
+    design = TestDesignAgent().analyze(
+        spec_content="# Save flow\nNavigate to https://example.test",
+        target_url="https://example.test",
+        credentials=None,
+        plan_path=plan_path,
+        run_dir=tmp_path,
+    )
+
+    assert any(
+        "getByRole('button', { name: 'Save' })" in guidance
+        for guidance in design["selector_guidance"]
+    )
+    assert "Verify the saved toast is visible" in design["success_oracles"]
 
 
 def test_build_agentic_summary_includes_costs_and_stage_outcomes(tmp_path: Path):
@@ -179,6 +227,190 @@ def test_run_test_uses_playwright_json_as_primary_result(monkeypatch, tmp_path: 
     assert result.error_summary == ""
 
 
+def test_validate_generated_test_file_rejects_markdown(tmp_path: Path):
+    pipeline = object.__new__(FullNativePipeline)
+    pipeline.generated_preflight_list_enabled = False
+    test_path = tmp_path / "bad.spec.ts"
+    test_path.write_text(
+        "```typescript\n"
+        "import { test, expect } from '@playwright/test';\n"
+        "test('x', async ({ page }) => { await expect(page).toHaveURL(/.*/); });\n"
+        "```"
+    )
+
+    error = pipeline._validate_generated_test_file(
+        test_path=test_path,
+        run_dir=tmp_path,
+        browser="chromium",
+        test_type="browser",
+    )
+
+    assert "markdown fences" in error
+
+
+def test_validate_generated_api_test_requires_request_fixture(tmp_path: Path):
+    pipeline = object.__new__(FullNativePipeline)
+    pipeline.generated_preflight_list_enabled = False
+    test_path = tmp_path / "bad.api.spec.ts"
+    test_path.write_text(
+        "import { test, expect } from '@playwright/test';\n"
+        "test('x', async ({ page }) => { await expect(page).toHaveURL(/.*/); });\n"
+    )
+
+    error = pipeline._validate_generated_test_file(
+        test_path=test_path,
+        run_dir=tmp_path,
+        browser="chromium",
+        test_type="api",
+    )
+
+    assert "request fixture" in error
+
+
+def test_validate_generated_test_file_accepts_project_fixture_import(tmp_path: Path):
+    pipeline = object.__new__(FullNativePipeline)
+    pipeline.generated_preflight_list_enabled = False
+    test_path = tmp_path / "fixture.spec.ts"
+    test_path.write_text(
+        "import { expect, test } from '../fixtures/test-data';\n"
+        "test('uses fixture', async ({ page, testData }) => {\n"
+        "  const user = testData.get<{ email: string }>('auth.valid-user');\n"
+        "  await page.getByLabel('Email').fill(user.email);\n"
+        "  await expect(page.getByRole('button', { name: /submit/i })).toBeVisible();\n"
+        "});\n"
+    )
+
+    error = pipeline._validate_generated_test_file(
+        test_path=test_path,
+        run_dir=tmp_path,
+        browser="chromium",
+        test_type="browser",
+    )
+
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_generation_format_repair_accepts_valid_repaired_code(tmp_path: Path, monkeypatch):
+    pipeline = object.__new__(FullNativePipeline)
+    pipeline.generated_preflight_list_enabled = False
+    pipeline.test_data_execution_context = {}
+    pipeline.test_data_env_vars = {}
+    pipeline.owner_type = None
+    pipeline.owner_id = None
+    pipeline.owner_label = None
+    pipeline.model_tier = "tool_deep"
+    pipeline.native_generator = types.SimpleNamespace(cwd=tmp_path)
+    test_path = tmp_path / "generated.spec.ts"
+    test_path.write_text(
+        "```typescript\n"
+        "import { test, expect } from '@playwright/test';\n"
+        "test('x', async ({ page }) => { await expect(page).toHaveURL(/.*/); });\n"
+        "```"
+    )
+
+    async def fake_repair(_prompt: str):
+        return AgentResult(
+            success=True,
+            output=(
+                "import { test, expect } from '@playwright/test';\n"
+                "test('x', async ({ page }) => {\n"
+                "  await page.goto('https://example.test');\n"
+                "  await expect(page).toHaveURL(/example/);\n"
+                "});\n"
+            ),
+        )
+
+    monkeypatch.setattr(pipeline, "_query_generation_repair_agent", fake_repair)
+
+    metadata = await pipeline._attempt_generation_format_repair(
+        test_path=test_path,
+        run_dir=tmp_path,
+        browser="chromium",
+        test_type="browser",
+        original_validation_error="Generated test file contains markdown fences or narrative output",
+        spec_content="# Test\nNavigate to https://example.test",
+        spec_path=tmp_path / "spec.md",
+        target_url="https://example.test",
+        plan_path=None,
+        planner_draft_script_path=None,
+    )
+
+    assert metadata["generation_repair_attempted"] is True
+    assert metadata["generation_repair_accepted"] is True
+    assert metadata["original_validation_error"].startswith("Generated test file")
+    assert len(metadata["repaired_file_hash"]) == 64
+    assert "```" not in test_path.read_text()
+    assert json.loads((tmp_path / "generation_repair_attempt.json").read_text())[
+        "generation_repair_accepted"
+    ] is True
+
+
+@pytest.mark.asyncio
+async def test_generation_format_repair_failure_keeps_original_file(tmp_path: Path, monkeypatch):
+    pipeline = object.__new__(FullNativePipeline)
+    pipeline.generated_preflight_list_enabled = False
+    pipeline.test_data_execution_context = {}
+    pipeline.test_data_env_vars = {}
+    pipeline.owner_type = None
+    pipeline.owner_id = None
+    pipeline.owner_label = None
+    pipeline.model_tier = "tool_deep"
+    pipeline.native_generator = types.SimpleNamespace(cwd=tmp_path)
+    test_path = tmp_path / "generated.spec.ts"
+    original = (
+        "```typescript\n"
+        "import { test, expect } from '@playwright/test';\n"
+        "test('x', async ({ page }) => { await expect(page).toHaveURL(/.*/); });\n"
+        "```"
+    )
+    test_path.write_text(original)
+
+    async def fake_repair(_prompt: str):
+        return AgentResult(success=True, output="I cannot repair this.")
+
+    monkeypatch.setattr(pipeline, "_query_generation_repair_agent", fake_repair)
+
+    metadata = await pipeline._attempt_generation_format_repair(
+        test_path=test_path,
+        run_dir=tmp_path,
+        browser="chromium",
+        test_type="browser",
+        original_validation_error="Generated test file contains markdown fences or narrative output",
+        spec_content="# Test\nNavigate to https://example.test",
+        spec_path=tmp_path / "spec.md",
+        target_url="https://example.test",
+        plan_path=None,
+        planner_draft_script_path=None,
+    )
+
+    assert metadata["generation_repair_attempted"] is True
+    assert metadata["generation_repair_accepted"] is False
+    assert metadata["original_validation_error"].startswith("Generated test file")
+    assert "generation_repair_validation_error" in metadata
+    assert test_path.read_text() == original
+
+
+def test_prepare_run_browser_context_detects_run_local_storage_state(tmp_path: Path):
+    pipeline = object.__new__(FullNativePipeline)
+
+    class Agent:
+        pass
+
+    pipeline.native_planner = Agent()
+    pipeline.native_generator = Agent()
+    pipeline.native_healer = Agent()
+    storage = tmp_path / "browser-auth-storage-state.json"
+    storage.write_text("{}")
+
+    pipeline.prepare_run_browser_context(run_dir=tmp_path)
+
+    config = tmp_path / "playwright.config.ts"
+    if config.exists():
+        assert "browser-auth-storage-state.json" in config.read_text()
+    assert pipeline.native_healer.cwd == tmp_path
+
+
 class _FakeGenerator:
     async def generate_test(self, spec_path, target_url=None, output_name=None, design_context=None, **kwargs):
         path = Path(spec_path).parent / f"{output_name or 'generated'}.spec.ts"
@@ -187,6 +419,21 @@ class _FakeGenerator:
             "test('generated', async ({ page }) => { await expect(page).toHaveURL(/.*/); });\n"
         )
         self.design_context = design_context
+        self.kwargs = kwargs
+        return path
+
+
+class _FakeInvalidGenerator:
+    async def generate_test(self, spec_path, target_url=None, output_name=None, design_context=None, **kwargs):
+        path = Path(spec_path).parent / f"{output_name or 'generated'}.spec.ts"
+        path.write_text(
+            "```typescript\n"
+            "import { test, expect } from '@playwright/test';\n"
+            "test('generated', async ({ page }) => { await expect(page).toHaveURL(/.*/); });\n"
+            "```"
+        )
+        self.design_context = design_context
+        self.kwargs = kwargs
         return path
 
 
@@ -234,6 +481,122 @@ def _pipeline_with_results(results: list[PipelineTestResult], tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_api_pipeline_records_handoff_manifest(tmp_path: Path):
+    spec = tmp_path / "api.md"
+    spec.write_text("# API\nBase URL: https://example.test\nGET /health\nVerify response status is 200")
+    run_dir = tmp_path / "api-run"
+    run_dir.mkdir()
+
+    class FakeApiGenerator:
+        last_handoff_consumption = {"received_spec": True, "spec_status": "used"}
+
+        async def generate_test(self, spec_path, target_url=None, output_name=None, handoff_manifest_path=None):
+            path = tmp_path / f"{output_name or 'api'}.api.spec.ts"
+            path.write_text(
+                "import { test, expect } from '@playwright/test';\n"
+                "test('api', async ({ request }) => { const response = await request.get('/health'); expect(response.status()).toBe(200); });\n"
+            )
+            return path
+
+    pipeline = object.__new__(FullNativePipeline)
+    pipeline.project_id = "default"
+    pipeline.api_generator = FakeApiGenerator()
+    pipeline.api_healer = None
+    pipeline.generated_preflight_list_enabled = False
+    pipeline._run_test = lambda *_args, **_kwargs: PipelineTestResult(
+        passed=True, exit_code=0, output="1 passed"
+    )
+
+    result = await pipeline._run_api_pipeline(
+        spec_path=str(spec),
+        spec_content=spec.read_text(),
+        run_dir=run_dir,
+        browser="chromium",
+        target_url="https://example.test",
+    )
+
+    manifest = json.loads((run_dir / "handoff_manifest.json").read_text())
+    assert result["success"] is True
+    assert manifest["stages"]["api_generator"]["status"] == "ready"
+    assert manifest["stages"]["test_run"]["status"] == "passed"
+    assert manifest["artifacts"]["generated_api_test"]["kind"] == "playwright_api_test"
+    assert len(manifest["artifacts"]["generated_api_test"]["hash"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_run_native_generator_forwards_plan_path(tmp_path: Path):
+    pipeline = object.__new__(FullNativePipeline)
+    pipeline.native_generator = _FakeGenerator()
+    spec_path = tmp_path / "spec.md"
+    spec_path.write_text("# Test\nNavigate to https://example.test")
+    plan_path = tmp_path / "plan.md"
+    plan_path.write_text("await page.getByRole('button', { name: 'Save' }).click();")
+    draft_script_path = tmp_path / "plan.draft.spec.ts"
+    draft_script_path.write_text(
+        "import { test, expect } from '@playwright/test';\n"
+        "test('draft', async ({ page }) => { await expect(page.getByRole('button', { name: 'Save' })).toBeVisible(); });\n"
+    )
+
+    output = await pipeline._run_native_generator(
+        spec_path=str(spec_path),
+        target_url="https://example.test",
+        output_name="generated",
+        plan_path=plan_path,
+        planner_draft_script_path=draft_script_path,
+    )
+
+    assert output == tmp_path / "generated.spec.ts"
+    assert pipeline.native_generator.kwargs["plan_path"] == plan_path
+    assert pipeline.native_generator.kwargs["planner_draft_script_path"] == draft_script_path
+
+
+@pytest.mark.asyncio
+async def test_pipeline_aborts_when_native_planner_validation_fails(monkeypatch, tmp_path: Path):
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Test\nNavigate to https://example.test/checkout\n1. Verify checkout")
+    run_dir = tmp_path / "run"
+
+    class FailingPlanner:
+        env_vars = {}
+
+        async def generate_spec_from_flow_context(self, **_kwargs):
+            raise full_native_pipeline.SpecGenerationError(
+                "Live-browser planner saved a plan before navigating to the Target URL and capturing a snapshot.",
+                diagnostics={
+                    "target_navigation_observed": False,
+                    "planner_save_plan_observed": True,
+                },
+            )
+
+    class ExplodingGenerator:
+        env_vars = {}
+        called = False
+
+        async def generate_test(self, **_kwargs):
+            self.called = True
+            raise AssertionError("generator should not run after planner validation failure")
+
+    monkeypatch.setattr(full_native_pipeline, "cleanup_orphaned_browsers", lambda: None)
+    pipeline = FullNativePipeline(project_id="")
+    pipeline.native_planner = FailingPlanner()
+    pipeline.native_generator = ExplodingGenerator()
+
+    result = await pipeline.run(str(spec), run_dir, skip_planning=False)
+
+    assert result["success"] is False
+    assert result["stage"] == "planning"
+    assert result["planner_diagnostics"]["target_navigation_observed"] is False
+    assert pipeline.native_generator.called is False
+    assert (run_dir / "status.txt").read_text() == "error"
+    error_payload = json.loads((run_dir / "pipeline_error.json").read_text())
+    assert error_payload["stage"] == "planning"
+    assert error_payload["planner_diagnostics"]["planner_save_plan_observed"] is True
+    metrics = json.loads((run_dir / "run_metrics.json").read_text())
+    assert metrics["planner_success"] is False
+    assert metrics["failure_category"] == "planner_validation"
+
+
+@pytest.mark.asyncio
 async def test_pipeline_passes_and_stability_passes(tmp_path: Path):
     spec = tmp_path / "spec.md"
     spec.write_text("# Test\nNavigate to https://example.com\n1. Verify page is visible")
@@ -255,6 +618,128 @@ async def test_pipeline_passes_and_stability_passes(tmp_path: Path):
     assert (run_dir / "test_design.json").exists()
     assert (run_dir / "test_critic.json").exists()
     assert json.loads((run_dir / "stability_report.json").read_text())["status"] == "stable"
+    metrics = json.loads((run_dir / "run_metrics.json").read_text())
+    assert metrics["initial_run_passed"] is True
+    assert metrics["stable_first_pass"] is True
+    manifest = json.loads((run_dir / "handoff_manifest.json").read_text())
+    assert manifest["stages"]["planner"]["status"] == "skipped"
+    assert manifest["artifacts"]["planner_plan"]["validation_status"] == "optional_missing"
+    assert manifest["artifacts"]["planner_draft_script"]["validation_status"] == "optional_missing"
+    assert manifest["stages"]["generator"]["status"] == "ready"
+    assert len(manifest["artifacts"]["generated_test"]["hash"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_pipeline_repairs_generation_validation_and_continues(tmp_path: Path, monkeypatch):
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Test\nNavigate to https://example.com\n1. Verify page is visible")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    pipeline = _pipeline_with_results(
+        [
+            PipelineTestResult(passed=True, exit_code=0, output="1 passed"),
+            PipelineTestResult(passed=True, exit_code=0, output="1 passed"),
+            PipelineTestResult(passed=True, exit_code=0, output="1 passed"),
+        ],
+        tmp_path,
+    )
+    pipeline.native_generator = _FakeInvalidGenerator()
+
+    async def fake_repair(_prompt: str):
+        return AgentResult(
+            success=True,
+            output=(
+                "import { test, expect } from '@playwright/test';\n"
+                "test('generated', async ({ page }) => {\n"
+                "  await page.goto('https://example.com');\n"
+                "  await expect(page).toHaveURL(/example/);\n"
+                "});\n"
+            ),
+        )
+
+    monkeypatch.setattr(pipeline, "_query_generation_repair_agent", fake_repair)
+
+    result = await pipeline.run(str(spec), run_dir, skip_planning=True)
+
+    assert result["success"] is True
+    assert result["stage"] == "completed"
+    metrics = json.loads((run_dir / "run_metrics.json").read_text())
+    assert metrics["generation_repair_attempted"] is True
+    assert metrics["generation_repair_accepted"] is True
+    assert "markdown fences" in metrics["original_validation_error"]
+    manifest = json.loads((run_dir / "handoff_manifest.json").read_text())
+    assert manifest["stages"]["generator"]["metadata"]["generation_repair_accepted"] is True
+    assert manifest["artifacts"]["generated_test"]["validation_status"] == "valid"
+    assert (run_dir / "export.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_planned_pipeline_records_and_consumes_planner_draft(tmp_path: Path):
+    spec = tmp_path / "spec.md"
+    spec.write_text("# Test\nNavigate to https://example.com\n1. Click Save")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    class FakePlanner:
+        env_vars = {}
+        last_draft_script_path = None
+        cwd = None
+        session_dir = None
+
+        async def generate_spec_from_flow_context(self, output_dir, **_kwargs):
+            plan_path = Path(output_dir) / "planner-output.md"
+            plan_path.write_text(
+                "# Test Plan: Save\n\n"
+                "### TC-001: Save record\n"
+                "**Description:** User saves a record.\n"
+                "**Preconditions:** User can access the page.\n"
+                "**Steps:**\n"
+                "1. Click `page.getByRole('button', { name: 'Save' })`.\n"
+                "**Expected Result:** Save confirmation appears.\n"
+                "\n## Draft Playwright Script\n"
+                "```typescript\n"
+                "import { test, expect } from '@playwright/test';\n"
+                "test('save record', async ({ page }) => {\n"
+                "  await expect(page.getByRole('button', { name: 'Save' })).toBeVisible();\n"
+                "});\n"
+                "```\n"
+            )
+            draft_path = Path(output_dir) / "planner-output.draft.spec.ts"
+            draft_path.write_text(
+                "import { test, expect } from '@playwright/test';\n"
+                "test('save record', async ({ page }) => {\n"
+                "  await expect(page.getByRole('button', { name: 'Save' })).toBeVisible();\n"
+                "});\n"
+            )
+            self.last_draft_script_path = draft_path
+            return plan_path
+
+    pipeline = _pipeline_with_results(
+        [
+            PipelineTestResult(passed=True, exit_code=0, output="1 passed"),
+            PipelineTestResult(passed=True, exit_code=0, output="1 passed"),
+            PipelineTestResult(passed=True, exit_code=0, output="1 passed"),
+        ],
+        tmp_path,
+    )
+    pipeline.native_planner = FakePlanner()
+
+    result = await pipeline.run(str(spec), run_dir, skip_planning=False)
+
+    manifest = json.loads((run_dir / "handoff_manifest.json").read_text())
+    plan_json = json.loads((run_dir / "plan.json").read_text())
+    consumed = manifest["stages"]["generator"]["artifacts_consumed"]
+    assert result["success"] is True
+    assert (run_dir / "plan.md").exists()
+    assert plan_json["plannerDraftScriptPath"].endswith("planner-output.draft.spec.ts")
+    assert plan_json["handoffManifestPath"].endswith("handoff_manifest.json")
+    assert manifest["artifacts"]["planner_plan"]["path"] == str(run_dir / "plan.md")
+    assert manifest["artifacts"]["planner_draft_script"]["validation_status"] == "valid"
+    assert consumed["planner_plan"]["status"] == "used"
+    assert consumed["planner_draft_script"]["status"] == "used"
+    assert pipeline.native_generator.kwargs["planner_draft_script_path"] == Path(
+        plan_json["plannerDraftScriptPath"]
+    )
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from orchestrator.utils.playwright_mcp import playwright_config_cli_arg
+from orchestrator.utils.string_utils import clean_extracted_url
 
 
 def playwright_headed_args() -> str:
@@ -93,15 +94,15 @@ def print_output(result: subprocess.CompletedProcess):
 
 INCLUDE_PATTERN = re.compile(r'@include\s+"([^"]+)"')
 URL_PATTERNS = [
-    r'Navigate to\s+(https?://[^\s\'"]+)',
-    r'Go to\s+(https?://[^\s\'"]+)',
-    r'Open\s+(https?://[^\s\'"]+)',
-    r'##\s+Base\s+URL:\s*(https?://[^\s\'"]+)',
-    r'Base\s+URL:\s*(https?://[^\s\'"]+)',
-    r'URL:\s*(https?://[^\s\'"]+)',
-    r'Target URL:\s*(https?://[^\s\'"]+)',
-    r'(?:POST|GET|PUT|PATCH|DELETE)\s+(https?://[^\s\'"]+)',
-    r'(https?://[^\s\'"]+)',
+    r"Navigate to\s+`?(https?://[^\s'\"`]+)",
+    r"Go to\s+`?(https?://[^\s'\"`]+)",
+    r"Open\s+`?(https?://[^\s'\"`]+)",
+    r"##\s+Base\s+URL:\s*`?(https?://[^\s'\"`]+)",
+    r"Base\s+URL:\s*`?(https?://[^\s'\"`]+)",
+    r"URL:\s*`?(https?://[^\s'\"`]+)",
+    r"Target URL:\s*`?(https?://[^\s'\"`]+)",
+    r"(?:POST|GET|PUT|PATCH|DELETE)\s+`?(https?://[^\s'\"`]+)",
+    r"`?(https?://[^\s'\"`]+)",
 ]
 
 
@@ -179,7 +180,7 @@ def _extract_target_url(spec_content: str) -> str | None:
     for pattern in URL_PATTERNS:
         match = re.search(pattern, spec_content, re.IGNORECASE)
         if match:
-            return match.group(1).rstrip(".")
+            return clean_extracted_url(match.group(1))
     return None
 
 

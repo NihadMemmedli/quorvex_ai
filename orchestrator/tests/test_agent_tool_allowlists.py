@@ -2,8 +2,11 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from orchestrator.agents import base_agent as base_agent_module
 from orchestrator.agents.base_agent import BaseAgent
 from orchestrator.utils.agent_tool_allowlists import AGENT_TOOL_PROFILES, get_agent_allowed_tools
 
@@ -52,6 +55,9 @@ def test_agent_allowlist_uses_root_playwright_prefix(tmp_path, monkeypatch):
     assert {"Glob", "Grep", "Read", "LS"} <= set(tools)
     assert "mcp__playwright__browser_snapshot" in tools
     assert "mcp__playwright__browser_network_requests" in tools
+    assert "mcp__playwright__browser_start_video" in tools
+    assert "mcp__playwright__browser_stop_video" in tools
+    assert "mcp__playwright__browser_video_chapter" in tools
 
 
 def test_agent_allowlist_can_use_run_local_mcp_config(tmp_path, monkeypatch):
@@ -147,6 +153,57 @@ def test_base_agent_known_profile_uses_explicit_tools(tmp_path, monkeypatch):
     assert config["allowed_tools"] == config["tools"]
     assert "mcp__playwright-test__test_run" in config["allowed_tools"]
     assert "*" not in config["allowed_tools"]
+
+
+def test_base_agent_known_profile_uses_run_local_mcp_config(tmp_path, monkeypatch):
+    root_dir = tmp_path / "root"
+    run_dir = tmp_path / "run"
+    root_dir.mkdir()
+    run_dir.mkdir()
+    _write_mcp_config(root_dir, "playwright")
+    _write_mcp_config(run_dir, "playwright-test")
+    monkeypatch.chdir(root_dir)
+
+    agent = BaseAgent()
+    agent.agent_tool_profile = "app-explorer"
+    agent.agent_cwd = str(run_dir)
+
+    config = agent._resolved_tool_config()
+
+    assert "mcp__playwright-test__browser_navigate" in config["allowed_tools"]
+    assert "mcp__playwright__browser_navigate" not in config["allowed_tools"]
+
+
+@pytest.mark.asyncio
+async def test_base_agent_queue_marks_explorer_browser_tasks_live(tmp_path, monkeypatch):
+    _write_mcp_config(tmp_path, "playwright")
+    captured: dict = {}
+
+    class FakeQueue:
+        async def connect(self):
+            return None
+
+        async def get_metrics(self):
+            return {"workers_alive": 1, "queue_length": 0, "running": 0}
+
+        async def enqueue_task(self, **kwargs):
+            captured.update(kwargs)
+            return "agent-task-live"
+
+        async def wait_for_result(self, task_id, timeout, poll_interval, on_progress):
+            return "{}"
+
+    monkeypatch.setattr(base_agent_module, "get_agent_queue", lambda: FakeQueue())
+
+    agent = BaseAgent()
+    agent.agent_tool_profile = "app-explorer"
+    agent.agent_cwd = str(tmp_path)
+
+    await agent._query_agent_via_queue("explore", timeout_seconds=30)
+
+    assert captured["requires_live_browser"] is True
+    assert "mcp__playwright__browser_navigate" in captured["allowed_tools"]
+    assert captured["cwd"] == str(tmp_path)
 
 
 def test_base_agent_unknown_profile_keeps_legacy_fallback():

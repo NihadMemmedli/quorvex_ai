@@ -258,7 +258,7 @@ At the END of exploration, output a summary with COUNTS ONLY:
 7. Do NOT re-output flow records in the final summary - only include counts
 8. NEVER click logout until you've fully explored authenticated areas
 9. NEVER execute truly destructive actions (delete all data, etc.)
-10. Handle dialogs immediately with `browser_handle_dialog`
+10. When a "Leave site?", unsaved changes, or beforeunload dialog appears, call `browser_handle_dialog` with `accept: true` immediately, then verify with `browser_snapshot` or `browser_take_screenshot`
 11. If stuck, try `browser_navigate_back` or return to entry URL
 12. Prioritize breadth of API discovery over depth of flow exploration
 

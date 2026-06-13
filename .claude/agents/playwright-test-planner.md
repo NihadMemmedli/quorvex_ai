@@ -79,7 +79,18 @@ You will:
    - Assumptions about starting state (always assume blank/fresh state)
    - Success criteria and failure conditions
 
-5. **Create Documentation**
+5. **Draft Playwright Script**
+
+   Include a `## Draft Playwright Script` section in the saved plan. This section must provide a concise TypeScript
+   scaffold for the generator to refine:
+   - Use the exact selectors and user-visible outcomes discovered during browser exploration
+   - Include one `test.describe` block and representative `test(...)` cases matching the planned scenarios
+   - Use Playwright web-first assertions and durable waits such as `await expect(locator).toBeVisible()`,
+     `await expect(page).toHaveURL(...)`, or `await page.waitForResponse(...)`
+   - Do not include `page.waitForTimeout()` or arbitrary sleeps
+   - Keep credentials as placeholders such as `{{LOGIN_EMAIL}}`, never plaintext values
+
+6. **Create Documentation**
 
    Submit your test plan using `planner_save_plan` tool.
 

@@ -1680,11 +1680,48 @@ def _run_direct_test_sync(
             # Save healing history
             if healing_history:
                 try:
+                    attempts = [
+                        {
+                            "attempt": item.get("attempt"),
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "changed": bool(item.get("code_changed")),
+                            "error_category": "passed" if item.get("result") == "passed" else str(item.get("result") or "failed"),
+                            "error_summary": str(item.get("error_before") or "")[:500],
+                            "passed_after": item.get("result") == "passed",
+                        }
+                        for item in healing_history
+                    ]
+                    (run_dir_path / "healing_attempts.json").write_text(
+                        json.dumps({"test_file": test_path, "attempts": attempts}, indent=2)
+                    )
                     (run_dir_path / "healing_history.json").write_text(json.dumps(healing_history, indent=2))
                 except Exception:
                     pass
 
         healed = passed and healing_attempts > 0
+        try:
+            (run_dir_path / "run_metrics.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "initial_run_passed": initial_passed,
+                        "stable_first_pass": initial_passed and passed and healing_attempts == 0,
+                        "healing_started": healing_attempts > 0 or bool(healing_history),
+                        "healing_attempts": healing_attempts,
+                        "heal_rescued": healed,
+                        "generation_success": True,
+                        "planner_success": True,
+                        "credential_resolution_status": "unknown",
+                        "failure_category": failure_category,
+                        "cost_usd": None,
+                        "wall_time_seconds": None,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    },
+                    indent=2,
+                )
+            )
+        except Exception:
+            pass
 
         _api_jobs[job_id].update(
             {

@@ -84,6 +84,36 @@ def test_parse_run_artifacts_detects_heal_rescue_from_attempt_history(tmp_path):
     assert row["validation_status"] == "success"
 
 
+def test_parse_run_artifacts_prefers_run_metrics_for_first_pass(tmp_path):
+    spec = tmp_path / "checkout.md"
+    spec.write_text("# Checkout\n", encoding="utf-8")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "status.txt").write_text("passed", encoding="utf-8")
+    _write_json(
+        run_dir / "run_metrics.json",
+        {
+            "initial_run_passed": True,
+            "stable_first_pass": False,
+            "healing_started": True,
+            "healing_attempts": 1,
+            "heal_rescued": True,
+            "generation_success": True,
+            "planner_success": True,
+            "failure_category": "timing",
+        },
+    )
+
+    row = parse_run_artifacts(spec, run_dir)
+
+    assert row["first_pass"] is True
+    assert row["stable_first_pass"] is False
+    assert row["healing_started"] is True
+    assert row["heal_attempts"] == 1
+    assert row["generation_success"] is True
+    assert row["failure_category"] == "timing"
+
+
 def test_parse_run_artifacts_marks_generation_failure_from_pipeline_error(tmp_path):
     spec = tmp_path / "broken.md"
     spec.write_text("# Broken\n", encoding="utf-8")
@@ -111,6 +141,7 @@ def test_aggregate_rows_computes_requested_rates_cost_and_wall_time():
             "planner_success": True,
             "generation_success": True,
             "first_pass": True,
+            "stable_first_pass": True,
             "healing_started": False,
             "heal_rescued": False,
             "heal_attempts": 0,
@@ -122,6 +153,7 @@ def test_aggregate_rows_computes_requested_rates_cost_and_wall_time():
             "planner_success": True,
             "generation_success": True,
             "first_pass": False,
+            "stable_first_pass": False,
             "healing_started": True,
             "heal_rescued": True,
             "heal_attempts": 2,
@@ -133,6 +165,7 @@ def test_aggregate_rows_computes_requested_rates_cost_and_wall_time():
             "planner_success": None,
             "generation_success": False,
             "first_pass": False,
+            "stable_first_pass": False,
             "healing_started": True,
             "heal_rescued": False,
             "heal_attempts": 3,
@@ -148,6 +181,7 @@ def test_aggregate_rows_computes_requested_rates_cost_and_wall_time():
     assert aggregates["planner_success_rate"] == 1.0
     assert aggregates["generation_success_rate"] == 0.6667
     assert aggregates["first_pass_rate"] == 0.3333
+    assert aggregates["stable_first_pass_rate"] == 0.3333
     assert aggregates["heal_rescue_rate"] == 0.5
     assert aggregates["mean_heal_attempts"] == 1.6667
     assert aggregates["total_cost_usd"] == 0.6
@@ -182,6 +216,7 @@ def test_build_report_adds_compare_deltas(tmp_path):
                 "planner_success": True,
                 "generation_success": True,
                 "first_pass": True,
+                "stable_first_pass": True,
                 "healing_started": False,
                 "heal_rescued": False,
                 "heal_attempts": 0,

@@ -21,6 +21,8 @@ from .models_db import (  # noqa: F401
     AgentMemory,
     AgentRun,
     AgentRunEvent,
+    AgentTraceSnapshot,
+    AgentTraceSpan,
     AgentToolDefinition,
     ApplicationMap,
     ArchiveJob,

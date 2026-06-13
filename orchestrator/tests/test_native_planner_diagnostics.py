@@ -22,12 +22,36 @@ VALID_PLAN = """# Test Plan: Checkout
 2. Fill required shipping details.
 3. Submit payment.
 **Expected Result:** The order confirmation appears.
+
+## Draft Playwright Script
+```typescript
+import { test, expect } from '@playwright/test';
+
+test('complete checkout', async ({ page }) => {
+  await page.goto('https://example.test/checkout');
+  await expect(page.getByRole('heading', { name: /checkout/i })).toBeVisible();
+  await page.getByRole('button', { name: /pay/i }).click();
+  await expect(page.getByText(/order confirmation/i)).toBeVisible();
+});
+```
 """
 
 INVALID_PLAN_WITH_EVIDENCE = """# Test Plan: Checkout
 
 ### TC-001: Complete checkout
 The checkout button was seen after cart review. The user can submit payment and see confirmation.
+"""
+
+VALID_PLAN_WITHOUT_DRAFT = """# Test Plan: Checkout
+
+### TC-001: Complete checkout
+**Description:** User completes checkout.
+**Preconditions:** User has items in the cart.
+**Steps:**
+1. Navigate to the checkout page.
+2. Fill required shipping details.
+3. Submit payment.
+**Expected Result:** The order confirmation appears.
 """
 
 
@@ -43,6 +67,7 @@ def _planner(tmp_path: Path) -> NativePlanner:
     planner.model_tier = "tool_deep"
     planner.session_dir = tmp_path / "run"
     planner.cwd = planner.session_dir
+    planner.last_draft_script_path = None
     planner.specs_dir = tmp_path / "specs"
     planner.specs_dir.mkdir(parents=True)
     planner.session_dir.mkdir(parents=True)
@@ -61,6 +86,24 @@ def _patch_agent(monkeypatch: pytest.MonkeyPatch, planner: NativePlanner, result
         return result
 
     monkeypatch.setattr(planner, "_query_planner_agent", fake_query)
+
+
+def _patch_agent_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+    planner: NativePlanner,
+    results: list[AgentResult],
+) -> list[str]:
+    prompts: list[str] = []
+    remaining = list(results)
+
+    async def fake_query(prompt: str, target_url: str | None = None) -> AgentResult:
+        prompts.append(prompt)
+        if not remaining:
+            raise AssertionError("planner queried more times than expected")
+        return remaining.pop(0)
+
+    monkeypatch.setattr(planner, "_query_planner_agent", fake_query)
+    return prompts
 
 
 def _patch_repair_agent(monkeypatch: pytest.MonkeyPatch, planner: NativePlanner, result: AgentResult) -> None:
@@ -346,6 +389,54 @@ def test_extract_plan_content_requires_required_schema_fields():
     assert NativePlanner._extract_plan_content(result) is None
 
 
+def test_extract_plan_content_renders_structured_planner_save_plan_payload():
+    result = AgentResult(
+        success=True,
+        output="",
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright-test__planner_save_plan",
+                timestamp=datetime.now(),
+                input={
+                    "name": "Test Plan: Checkout",
+                    "fileName": "/tmp/checkout.md",
+                    "overview": (
+                        "Checkout page observed.\n\n"
+                        "## Draft Playwright Script\n"
+                        "```typescript\n"
+                        "import { test, expect } from '@playwright/test';\n"
+                        "test('checkout', async ({ page }) => {\n"
+                        "  await expect(page.getByRole('button', { name: /pay/i })).toBeVisible();\n"
+                        "});\n"
+                        "```"
+                    ),
+                    "suites": [
+                        {
+                            "name": "Checkout",
+                            "seedFile": "tests/seed.spec.ts",
+                            "tests": [
+                                {
+                                    "name": "Complete checkout",
+                                    "file": "tests/generated/checkout.spec.ts",
+                                    "steps": ["Click Pay"],
+                                    "expectedResults": ["Confirmation appears"],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+        ],
+    )
+
+    content = NativePlanner._extract_plan_content(result)
+
+    assert content is not None
+    assert "### TC-001: Complete checkout" in content
+    assert "## Draft Playwright Script" in content
+    assert NativePlanner._is_valid_test_plan(content)
+
+
 def test_repair_evidence_preview_redacts_sensitive_text(tmp_path):
     planner = _planner(tmp_path)
     expected = planner.specs_dir / "prd-project" / "checkout.md"
@@ -451,3 +542,252 @@ def test_live_plan_accepted_after_setup_target_navigation_snapshot_and_save():
     )
 
     NativePlanner._validate_live_plan_tool_sequence(result, "https://example.test/checkout")
+
+
+def test_live_plan_validation_cleans_markdown_target_url():
+    result = AgentResult(
+        success=True,
+        output=VALID_PLAN,
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright-test__planner_setup_page",
+                timestamp=datetime.now(),
+                input={"seedFile": "tests/seed.spec.ts"},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__browser_navigate",
+                timestamp=datetime.now(),
+                input={"url": "https://example.test/checkout?view=List"},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__browser_snapshot",
+                timestamp=datetime.now(),
+                input={},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__planner_save_plan",
+                timestamp=datetime.now(),
+                input={"content": VALID_PLAN},
+            ),
+        ],
+    )
+
+    NativePlanner._validate_live_plan_tool_sequence(result, "https://example.test/checkout?view=List`")
+
+
+def test_live_plan_rejected_when_saved_before_snapshot_after_navigation():
+    result = AgentResult(
+        success=True,
+        output=VALID_PLAN,
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright-test__planner_setup_page",
+                timestamp=datetime.now(),
+                input={"seedFile": "tests/seed.spec.ts"},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__browser_navigate",
+                timestamp=datetime.now(),
+                input={"url": "https://example.test/checkout"},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__planner_save_plan",
+                timestamp=datetime.now(),
+                input={"content": VALID_PLAN},
+            ),
+        ],
+    )
+
+    with pytest.raises(SpecGenerationError) as exc_info:
+        NativePlanner._validate_live_plan_tool_sequence(result, "https://example.test/checkout")
+
+    assert "before navigating" in str(exc_info.value)
+    assert exc_info.value.diagnostics["target_navigation_observed"] is True
+    assert exc_info.value.diagnostics["browser_snapshot_after_navigation_observed"] is False
+
+
+def test_finalize_live_plan_writes_planner_draft_script(tmp_path):
+    planner = _planner(tmp_path)
+    plan_path = tmp_path / "run" / "checkout.md"
+    plan_path.write_text(VALID_PLAN)
+
+    output = planner._finalize_plan_artifact(
+        plan_path=plan_path,
+        expected_output_path=plan_path,
+        require_draft_script=True,
+    )
+
+    draft_path = plan_path.with_suffix(".draft.spec.ts")
+    assert output == plan_path
+    assert planner.last_draft_script_path == draft_path
+    assert draft_path.exists()
+    assert "test('complete checkout'" in draft_path.read_text()
+
+
+def test_finalize_live_plan_rejects_missing_draft_script(tmp_path):
+    planner = _planner(tmp_path)
+    plan_path = tmp_path / "run" / "checkout.md"
+    plan_path.write_text(VALID_PLAN_WITHOUT_DRAFT)
+
+    with pytest.raises(SpecGenerationError) as exc_info:
+        planner._finalize_plan_artifact(
+            plan_path=plan_path,
+            expected_output_path=plan_path,
+            require_draft_script=True,
+        )
+
+    assert "Draft Playwright Script" in str(exc_info.value)
+    assert exc_info.value.diagnostics["planner_draft_script_observed"] is False
+
+
+@pytest.mark.asyncio
+async def test_live_plan_permission_guard_blocks_save_until_contract(tmp_path):
+    planner = _planner(tmp_path)
+    guard = planner._build_live_plan_permission_guard("https://example.test/checkout")
+    if guard is None:
+        pytest.skip("claude_agent_sdk permission result classes unavailable")
+
+    denied = await guard("mcp__playwright-test__planner_save_plan", {}, None)
+    assert denied.behavior == "deny"
+    assert "planner_setup_page" in denied.message
+
+    await guard(
+        "mcp__playwright-test__planner_setup_page",
+        {"seedFile": "tests/seed.spec.ts"},
+        None,
+    )
+    await guard(
+        "mcp__playwright-test__browser_navigate",
+        {"url": "https://example.test/checkout"},
+        None,
+    )
+    denied_before_snapshot = await guard(
+        "mcp__playwright-test__planner_save_plan",
+        {"content": VALID_PLAN},
+        None,
+    )
+    assert denied_before_snapshot.behavior == "deny"
+    assert "browser_snapshot" in denied_before_snapshot.message
+
+    await guard("mcp__playwright-test__browser_snapshot", {}, None)
+    allowed = await guard(
+        "mcp__playwright-test__planner_save_plan",
+        {"content": VALID_PLAN},
+        None,
+    )
+    assert allowed.behavior == "allow"
+
+
+@pytest.mark.asyncio
+async def test_live_plan_retries_after_contract_failure(tmp_path, monkeypatch):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
+    first = AgentResult(
+        success=True,
+        output=VALID_PLAN,
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright-test__planner_setup_page",
+                timestamp=datetime.now(),
+                input={"seedFile": "tests/seed.spec.ts"},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__planner_save_plan",
+                timestamp=datetime.now(),
+                input={"content": VALID_PLAN},
+            ),
+        ],
+    )
+    second = AgentResult(
+        success=True,
+        output=VALID_PLAN,
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright-test__planner_setup_page",
+                timestamp=datetime.now(),
+                input={"seedFile": "tests/seed.spec.ts"},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__browser_navigate",
+                timestamp=datetime.now(),
+                input={"url": "https://example.test/checkout"},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__browser_snapshot",
+                timestamp=datetime.now(),
+                input={},
+            ),
+            ToolCall(
+                name="mcp__playwright-test__planner_save_plan",
+                timestamp=datetime.now(),
+                input={"content": VALID_PLAN},
+            ),
+        ],
+    )
+    prompts = _patch_agent_sequence(monkeypatch, planner, [first, second])
+
+    path = await planner.generate_spec_from_flow_context(
+        flow_title="Checkout",
+        flow_context="Checkout flow",
+        target_url="https://example.test/checkout",
+        output_dir=tmp_path / "run",
+    )
+
+    assert path.read_text().strip() == VALID_PLAN.strip()
+    assert len(prompts) == 2
+    assert "previous attempt" in prompts[1].lower()
+    assert "planner_setup_page" in prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_unstructured_plan_retries_after_repair_fails(tmp_path, monkeypatch):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
+    first = AgentResult(
+        success=True,
+        output="I explored the page but did not create a structured plan.",
+        tool_calls=[],
+    )
+    second = AgentResult(success=True, output=VALID_PLAN, tool_calls=[])
+    prompts = _patch_agent_sequence(monkeypatch, planner, [first, second])
+
+    async def fake_repair(**_kwargs):
+        return None
+
+    monkeypatch.setattr(planner, "_attempt_repair_plan", fake_repair)
+
+    path = await planner.generate_spec_for_feature("Checkout", "prd-project")
+
+    assert path.read_text().strip() == VALID_PLAN.strip()
+    assert len(prompts) == 2
+    assert "valid markdown test plan" in prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_live_plan_repeated_contract_failure_raises_after_retry(tmp_path, monkeypatch):
+    planner = _planner(tmp_path)
+    monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
+    invalid = AgentResult(
+        success=True,
+        output=VALID_PLAN,
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright-test__planner_save_plan",
+                timestamp=datetime.now(),
+                input={"content": VALID_PLAN},
+            )
+        ],
+    )
+    prompts = _patch_agent_sequence(monkeypatch, planner, [invalid, invalid])
+
+    with pytest.raises(SpecGenerationError) as exc_info:
+        await planner.generate_spec_from_flow_context(
+            flow_title="Checkout",
+            flow_context="Checkout flow",
+            target_url="https://example.test/checkout",
+            output_dir=tmp_path / "run",
+        )
+
+    assert len(prompts) == 2
+    assert "before navigating" in str(exc_info.value)
+    assert exc_info.value.diagnostics["target_navigation_observed"] is False

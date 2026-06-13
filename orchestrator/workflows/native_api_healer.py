@@ -175,7 +175,7 @@ class NativeApiHealer:
    - Variable reference error (undefined variable from previous test)
 
 2. **Fix the code** - Apply targeted fixes:
-   - Adjust status code assertions to match actual API behavior
+   - Adjust status code assertions only when the original spec/contract or structured response evidence proves the generated expectation was wrong
    - Fix request body structure to match API schema
    - Add missing auth headers
    - Fix endpoint URLs/paths
@@ -191,6 +191,8 @@ class NativeApiHealer:
 - Fix one error at a time - don't change things that aren't broken
 - Prefer minimal, targeted fixes over rewrites
 - Keep the test structure and intent from the original spec
+- Do not weaken or delete assertions simply to make the test pass
+- If the API behavior contradicts the spec, preserve the spec intent and use `test.fixme()` with a clear reason instead of accepting the product behavior as correct
 - Use Playwright best practices for API testing
 - If a test cannot be fixed (e.g., endpoint doesn't exist), mark with `test.fixme()`
 

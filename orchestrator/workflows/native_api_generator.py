@@ -32,6 +32,8 @@ if config_dir:
     os.chdir(config_dir)
 
 from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
+from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
+from orchestrator.services.handoff_manifest import record_artifact, record_consumption
 
 
 class NativeApiGenerator:
@@ -53,6 +55,7 @@ class NativeApiGenerator:
 
     def __init__(self, project_id: str = "default"):
         self.project_id = project_id
+        self.last_handoff_consumption: dict = {}
         if project_id and project_id != "default":
             self.tests_dir = BASE_DIR / "tests" / "generated" / project_id
         else:
@@ -60,7 +63,11 @@ class NativeApiGenerator:
         self.tests_dir.mkdir(parents=True, exist_ok=True)
 
     async def generate_test(
-        self, spec_path: str, target_url: str | None = None, output_name: str | None = None
+        self,
+        spec_path: str,
+        target_url: str | None = None,
+        output_name: str | None = None,
+        handoff_manifest_path: Path | None = None,
     ) -> Path:
         """
         Generate a Playwright API test from a markdown spec.
@@ -79,6 +86,20 @@ class NativeApiGenerator:
 
         spec_content = spec_path_obj.read_text()
         spec_name = output_name if output_name else spec_path_obj.stem
+        self.last_handoff_consumption = {
+            "received_spec": True,
+            "spec_status": "used",
+            "planner_plan_status": "not_applicable",
+            "planner_draft_script_status": "not_applicable",
+        }
+        if handoff_manifest_path:
+            record_consumption(
+                handoff_manifest_path,
+                "api_generator",
+                "resolved_spec",
+                status="used",
+                metadata={"path": str(spec_path_obj)},
+            )
 
         # Determine output path
         output_path = self.tests_dir / f"{spec_name}.api.spec.ts"
@@ -112,6 +133,18 @@ class NativeApiGenerator:
             content = output_path.read_text()
             if "test(" in content or "test.describe" in content:
                 logger.info(f"API test generated: {output_path}")
+                if handoff_manifest_path:
+                    record_artifact(
+                        handoff_manifest_path,
+                        "generated_api_test",
+                        output_path,
+                        kind="playwright_api_test",
+                        producer_stage="api_generator",
+                        required=True,
+                        consumers=["test_run", "api_healer"],
+                        validation_status="valid",
+                        metadata=self.last_handoff_consumption,
+                    )
                 return output_path
 
         # Fallback: Extract code from agent response and write it
@@ -120,6 +153,18 @@ class NativeApiGenerator:
             if code:
                 logger.info(f"Saving generated API test code to: {output_path}")
                 output_path.write_text(code)
+                if handoff_manifest_path:
+                    record_artifact(
+                        handoff_manifest_path,
+                        "generated_api_test",
+                        output_path,
+                        kind="playwright_api_test",
+                        producer_stage="api_generator",
+                        required=True,
+                        consumers=["test_run", "api_healer"],
+                        validation_status="valid",
+                        metadata={**self.last_handoff_consumption, "source": "agent_response_fallback"},
+                    )
                 return output_path
 
         logger.warning(f"Generator finished but test file not found at: {output_path}")
@@ -263,7 +308,14 @@ Write the generated test file to: {output_path}
 
 Return ONLY the TypeScript code inside a ```typescript code block.
 """
-        return prompt
+        metadata = build_prompt_metadata(
+            prompt_id="native_api_generator.playwright",
+            version="2026-06-13.1",
+            stage="api_test_generation",
+            schema_name="playwright_api_test_file.v1",
+            rendered_prompt=prompt,
+        )
+        return attach_prompt_metadata(prompt, metadata)
 
     async def _query_agent(self, prompt: str) -> str:
         """Query the API Test Generator agent using AgentRunner."""

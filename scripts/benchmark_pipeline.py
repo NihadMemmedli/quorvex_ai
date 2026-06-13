@@ -20,6 +20,7 @@ ARTIFACT_NAMES = (
     "validation.json",
     "agentic_summary.json",
     "healing_attempts.json",
+    "run_metrics.json",
 )
 VALIDATION_FALLBACKS = (
     "validation.json",
@@ -152,6 +153,7 @@ def parse_run_artifacts(
     validation, validation_file = _load_validation(run_dir)
     agentic_summary = _read_json(run_dir / "agentic_summary.json")
     healing = _read_json(run_dir / "healing_attempts.json")
+    run_metrics = _read_json(run_dir / "run_metrics.json")
     pipeline_error = _read_json(run_dir / "pipeline_error.json")
 
     attempts = healing.get("attempts", []) if isinstance(healing, dict) else []
@@ -167,9 +169,25 @@ def parse_run_artifacts(
             heal_attempts = max(heal_attempts, validation_iterations)
 
     passed = status_text == "passed" or validation_status == "success"
-    healed = heal_attempts > 0
-    first_pass = passed and not healed
-    heal_rescued = passed and healed
+    metrics = run_metrics if isinstance(run_metrics, dict) else {}
+    if isinstance(metrics.get("healing_attempts"), (int, float)):
+        heal_attempts = max(heal_attempts, int(metrics["healing_attempts"]))
+    healed = bool(metrics.get("healing_started")) if "healing_started" in metrics else heal_attempts > 0
+    first_pass = (
+        bool(metrics["initial_run_passed"])
+        if isinstance(metrics.get("initial_run_passed"), bool)
+        else passed and not healed
+    )
+    stable_first_pass = (
+        bool(metrics["stable_first_pass"])
+        if isinstance(metrics.get("stable_first_pass"), bool)
+        else first_pass
+    )
+    heal_rescued = (
+        bool(metrics["heal_rescued"])
+        if isinstance(metrics.get("heal_rescued"), bool)
+        else passed and healed
+    )
 
     artifact_presence = {name: (run_dir / name).exists() for name in ARTIFACT_NAMES}
     relative_spec = str(spec_path)
@@ -190,6 +208,7 @@ def parse_run_artifacts(
         "planner_success": _infer_planner_success(run_dir, pipeline_error if isinstance(pipeline_error, dict) else None),
         "generation_success": _infer_generation_success(run_dir, pipeline_error if isinstance(pipeline_error, dict) else None),
         "first_pass": first_pass,
+        "stable_first_pass": stable_first_pass,
         "healing_started": healed,
         "heal_rescued": heal_rescued,
         "heal_attempts": heal_attempts,
@@ -199,6 +218,12 @@ def parse_run_artifacts(
         "cost_usd": _infer_cost_usd(run_dir, agentic_summary if isinstance(agentic_summary, dict) else None),
         "artifacts": artifact_presence,
     }
+    if isinstance(metrics.get("generation_success"), bool):
+        row["generation_success"] = metrics["generation_success"]
+    if isinstance(metrics.get("planner_success"), bool):
+        row["planner_success"] = metrics["planner_success"]
+    if isinstance(metrics.get("failure_category"), str):
+        row["failure_category"] = metrics["failure_category"]
 
     if isinstance(agentic_summary, dict):
         row["agentic"] = {
@@ -240,6 +265,9 @@ def aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "planner_success_rate": _rate(rows, "planner_success"),
         "generation_success_rate": _rate(rows, "generation_success"),
         "first_pass_rate": round(sum(1 for row in rows if row.get("first_pass")) / total_specs, 4)
+        if total_specs
+        else None,
+        "stable_first_pass_rate": round(sum(1 for row in rows if row.get("stable_first_pass")) / total_specs, 4)
         if total_specs
         else None,
         "healing_started_count": len(healing_rows),

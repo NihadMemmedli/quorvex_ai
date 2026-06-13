@@ -25,7 +25,7 @@ const Input = React.forwardRef<HTMLInputElement, InputProps>(
                     paddingRight: '12px',
                     paddingTop: '8px',
                     paddingBottom: '8px',
-                    transition: 'all 0.2s var(--ease-smooth)',
+                    transition: 'background-color 0.2s var(--ease-smooth), border-color 0.2s var(--ease-smooth), color 0.2s var(--ease-smooth), box-shadow 0.2s var(--ease-smooth)',
                     outline: 'none',
                     ...style,
                 }}

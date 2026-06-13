@@ -40,8 +40,11 @@ EXPLORER_MCP_TOOLS: tuple[str, ...] = (
     "browser_press_key",
     "browser_select_option",
     "browser_snapshot",
+    "browser_start_video",
+    "browser_stop_video",
     "browser_take_screenshot",
     "browser_type",
+    "browser_video_chapter",
     "browser_wait_for",
 )
 

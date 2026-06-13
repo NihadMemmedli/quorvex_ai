@@ -278,9 +278,9 @@ CRITICAL INSTRUCTIONS - MUST FOLLOW:
 1. **REUSED SELECTORS**: {reused_instruction if reused_context else "None provided."}
 2. Use `browser_evaluate`, `browser_snapshot`, or role/text selectors for validation.
 3. **DIALOG HANDLING**: When browser dialogs appear (alerts, confirms, "Leave site?" beforeunload):
-   - Use `browser_handle_dialog` with `accept: true` IMMEDIATELY
-   - For "Leave site?" dialogs: Always accept to continue navigation
-   - After handling, take a snapshot to verify page state
+   - Use `browser_handle_dialog` with `accept: true` IMMEDIATELY to accept Leave and continue navigation
+   - Treat unsaved changes and beforeunload prompts as "Leave site?" dialogs unless the user explicitly asked you to preserve draft data
+   - After handling, call `browser_snapshot` or `browser_take_screenshot` to verify page state
 4. **SELF-CORRECTION**: If a step fails (e.g. timeout, selector not found):
    a. DO NOT FAIL IMMEDIATELY.
    b. Use `browser_snapshot` or text content to analyze the page.

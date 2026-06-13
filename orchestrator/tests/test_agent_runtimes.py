@@ -24,6 +24,21 @@ def test_runtime_resolver_returns_hermes_adapter():
     assert isinstance(get_agent_runtime("hermes"), HermesRuntime)
 
 
+def test_hermes_payload_adds_browser_dialog_policy_to_instructions():
+    payload = HermesRuntime(client=object())._run_payload(
+        "inspect app",
+        AgentRuntimeContext(
+            allowed_tools=["browser_dialog"],
+            metadata={"instructions": "Base instructions."},
+        ),
+    )
+
+    assert payload["instructions"].startswith("Base instructions.")
+    assert "## Browser Dialog Recovery" in payload["instructions"]
+    assert "Leave site?" in payload["instructions"]
+    assert "`accept: true`" in payload["instructions"]
+
+
 @pytest.mark.asyncio
 async def test_claude_runtime_passes_env_vars_to_agent_runner(monkeypatch):
     captured = {}

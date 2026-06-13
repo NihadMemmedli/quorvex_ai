@@ -213,6 +213,30 @@ def test_agent_runner_uses_resolved_model_in_claude_options(monkeypatch):
     assert runner._claude_options_kwargs()["model"] == "tool-model"
 
 
+def test_browser_dialog_policy_applies_only_when_dialog_tool_available():
+    from orchestrator.utils.browser_dialog_policy import (
+        append_browser_dialog_recovery_policy,
+        browser_dialog_recovery_policy_for_tools,
+    )
+
+    policy = browser_dialog_recovery_policy_for_tools(
+        ["mcp__playwright-test__browser_handle_dialog"]
+    )
+
+    assert "Leave site?" in policy
+    assert "`accept: true`" in policy
+    assert browser_dialog_recovery_policy_for_tools(["Read", "Grep"]) == ""
+
+    prompt = append_browser_dialog_recovery_policy("Browse the app.", ["browser_dialog"])
+    assert prompt.count("## Browser Dialog Recovery") == 1
+    assert (
+        append_browser_dialog_recovery_policy(prompt, ["browser_dialog"]).count(
+            "## Browser Dialog Recovery"
+        )
+        == 1
+    )
+
+
 def test_agent_runner_diagnostics_reports_runtime_and_memory(monkeypatch):
     from orchestrator.utils.agent_runner import AgentRunner
 

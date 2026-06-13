@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime
@@ -13,6 +14,8 @@ from sqlmodel import Session, col, select
 
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import AgentRun, AgentRunEvent
+
+logger = logging.getLogger(__name__)
 
 MAX_MESSAGE_CHARS = 4000
 MAX_PAYLOAD_JSON_CHARS = 12000
@@ -108,6 +111,13 @@ def create_agent_run_event(
         db.add(event)
         db.commit()
         db.refresh(event)
+        try:
+            from orchestrator.services.agent_trace import record_span_for_event
+
+            record_span_for_event(event, session=db)
+            db.refresh(event)
+        except Exception as exc:
+            logger.debug("Failed to record trace span for agent event %s: %s", event.id, exc)
         return event
     finally:
         if should_close:

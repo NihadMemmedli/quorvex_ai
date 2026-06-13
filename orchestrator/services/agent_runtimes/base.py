@@ -64,6 +64,9 @@ class AgentRuntimeContext:
     hermes_profile: str | None = None
     hermes_conversation: str | None = None
     metadata: dict[str, Any] | None = None
+    trace_id: str | None = None
+    prompt_hash: str | None = None
+    agent_run_id: str | None = None
     on_task_enqueued: Callable[[str], None] | None = None
     on_tool_use: Callable[[str, dict[str, Any]], None] | None = None
     on_progress: Callable[[dict[str, Any]], None] | None = None

@@ -973,7 +973,10 @@ async def run_exploration_session(session_id: str, request_body: ExplorationStar
                 )
             elif parsing_failed and flows_count == 0 and len(action_trace) == 0:
                 final_status = "failed"
-                error_msg = "Exploration completed but result parsing failed and no structured data recovered."
+                error_msg = (
+                    ea_result.get("summary")
+                    or "Exploration completed but result parsing failed and no structured data recovered."
+                )
             else:
                 final_status = "completed"
                 error_msg = None
@@ -1342,7 +1345,10 @@ async def start_exploration(
                         )
                 elif parsing_failed and flows_count == 0 and len(action_trace) == 0:
                     final_status = "failed"
-                    error_msg = "Exploration completed but result parsing failed and no structured data recovered."
+                    error_msg = (
+                        ea_result.get("summary")
+                        or "Exploration completed but result parsing failed and no structured data recovered."
+                    )
                 else:
                     final_status = "completed"
                     error_msg = None

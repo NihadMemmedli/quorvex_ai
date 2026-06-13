@@ -564,7 +564,7 @@ Begin exploration now!"""
 5. Do NOT re-output flow records in the final summary - only include counts
 6. NEVER click logout until you've fully explored authenticated areas
 7. NEVER execute truly destructive actions (delete all data, etc.)
-8. Handle dialogs immediately with `browser_handle_dialog`
+8. When a "Leave site?", unsaved changes, or beforeunload dialog appears, call `browser_handle_dialog` with `accept: true` immediately, then verify with `browser_snapshot` or `browser_take_screenshot`
 9. If stuck, try `browser_navigate_back` or return to entry URL
 
 Begin exploration now!"""

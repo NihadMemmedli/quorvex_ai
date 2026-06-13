@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from orchestrator.utils.agent_runner import AgentResult, ToolCall
+from orchestrator.utils.browser_dialog_policy import append_browser_dialog_recovery_policy
 
 from .base import AgentRuntime, AgentRuntimeContext
 
@@ -360,6 +361,12 @@ class HermesRuntime(AgentRuntime):
             **(context.metadata or {}),
         }
         instructions = _extract_text(context.metadata.get("instructions")) if context.metadata else ""
+        instructions = append_browser_dialog_recovery_policy(
+            instructions,
+            context.allowed_tools,
+            context.tools,
+            disallowed_tools=context.disallowed_tools,
+        )
         model = context.model or _runtime_env_value("HERMES_MODEL", "hermes-agent")
         conversation = context.hermes_conversation or context.owner_id or context.memory_source_id
         payload: dict[str, Any] = {

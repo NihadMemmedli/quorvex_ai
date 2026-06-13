@@ -359,10 +359,11 @@ IMPORTANT EXPLORATION RULES:
    - EDGE CASES: Empty fields, special chars, boundary values
 3. Track every action for test spec generation
 4. Be thorough but efficient - don't waste time on repetitive actions
-5. CRITICAL: JAVASCRIPT ALERT HANDLING
+5. CRITICAL: BROWSER DIALOG HANDLING
+   - When a "Leave site?", unsaved changes, or beforeunload dialog appears, use browser_handle_dialog with accept: true immediately to accept Leave and continue navigation
    - Use browser_handle_dialog tool immediately for alerts/confirms/prompts
-   - Accept alerts, test confirm/dismiss, handle prompts
-   - Take snapshot after handling
+   - After handling any dialog, call browser_snapshot or browser_take_screenshot to verify page state
+   - Preserve draft data only if the user explicitly requested it
 
 CONSTRAINTS:
 - action_trace: MAX 30 entries (significant actions only)
@@ -397,6 +398,9 @@ Step 7: Return JSON summary when done"""
         action_trace = []
         parsing_failed = False
         error_details = None
+        raw_output_preview = ""
+        browser_tool_evidence = False
+        zero_evidence_failure = False
 
         try:
             parsed_data = extract_json_from_markdown(result)
@@ -410,11 +414,25 @@ Step 7: Return JSON summary when done"""
             parsing_failed = True
             error_details = str(e)
             result_str = str(result)
+            raw_output_preview = result_str[:500]
 
             print(f"⚠️ Result parsing failed: {e}")
 
             # Enhanced Regex Fallback
             import re
+
+            browser_tool_pattern = (
+                r"(mcp__[^_\s]+__browser_|"
+                r"browser_(?:navigate|click|type|snapshot|take_screenshot|wait_for|evaluate|"
+                r"start_video|stop_video|video_chapter))"
+            )
+            browser_tool_evidence = bool(
+                re.search(
+                    browser_tool_pattern,
+                    result_str,
+                    re.IGNORECASE,
+                )
+            )
 
             action_patterns = [
                 r'(Navigate|Click|Fill|Select|Check|Uncheck|Assert|Hover|Drag|Visit|Go)\s+(?:to|on|in|with)?\s+["\']?([^"\':\n]+)["\']?',
@@ -464,14 +482,6 @@ Step 7: Return JSON summary when done"""
                             "is_new_discovery": False,
                         }
                     )
-
-            # Check for specific keywords to estimate stats if regex failing
-            if not action_trace:
-                # Last resort: try to estimate from text content
-                nav_count = len(re.findall(r"navigate", result_str, re.IGNORECASE))
-                form_count = len(re.findall(r"form|input|submit", result_str, re.IGNORECASE))
-                if nav_count > 0:
-                    action_trace.append({"step": 1, "action": "navigate", "target": "inferred", "outcome": "ok"})
 
             # Deduplicate actions based on action+target signature
             unique_trace = []
@@ -523,6 +533,9 @@ Step 7: Return JSON summary when done"""
                     }
                 ]
 
+        if parsing_failed and not action_trace and not discovered_flows and not browser_tool_evidence:
+            zero_evidence_failure = True
+
         # Use parsed coverage if valid, otherwise calculate from trace
         if not parsing_failed and "coverage" in parsed_data:
             coverage = parsed_data["coverage"]
@@ -550,7 +563,9 @@ Step 7: Return JSON summary when done"""
             }
 
         # --- PERSISTENCE TO MEMORY ---
-        if memory_manager is None:
+        if zero_evidence_failure:
+            print("⚠️ Memory persistence skipped because exploration produced no recoverable evidence")
+        elif memory_manager is None:
             print("ℹ️ Memory persistence skipped (MEMORY_ENABLED=false or OPENAI_API_KEY not set)")
         else:
             try:
@@ -688,11 +703,26 @@ Step 7: Return JSON summary when done"""
         if parsing_failed:
             response_data.update(
                 {
-                    "summary": "Exploration completed. Result parsing required fallback.",
-                    "preview": f"{result_str[:200]}..." if "result_str" in locals() else "",
+                    "summary": (
+                        "Exploration failed: result parsing failed and no browser actions, flows, or tool evidence "
+                        "were recovered."
+                        if zero_evidence_failure
+                        else "Exploration completed. Result parsing required fallback."
+                    ),
+                    "preview": f"{raw_output_preview[:200]}..." if raw_output_preview else "",
+                    "raw_output_preview": raw_output_preview,
+                    "error_details": error_details,
                     "parsing_failed": True,
                 }
             )
+            if zero_evidence_failure:
+                response_data.update(
+                    {
+                        "status": "failed",
+                        "exploration_failed": True,
+                        "failure_reason": "zero_evidence_parse_fallback",
+                    }
+                )
 
         # Save flows to file and generate summaries
         if run_id:

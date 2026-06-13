@@ -1,20 +1,108 @@
 'use client';
-import { useState, useEffect, useMemo, useRef } from 'react';
-import { Bot, FileText, Play, Pause, Terminal, ChevronRight, CheckCircle2, AlertTriangle, Loader2, Clock, RotateCcw, Lock, Globe, Settings, Download, List, Sparkles, Zap, ArrowRight, Info, X, RefreshCw, Scissors, ExternalLink, Plus, Save, Trash2, Wrench, MessageSquare, Bug, Lightbulb, Eye, Video as VideoIcon, Monitor, Image as ImageIcon } from 'lucide-react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import Link from 'next/link';
+import Bot from 'lucide-react/dist/esm/icons/bot';
+import FileText from 'lucide-react/dist/esm/icons/file-text';
+import Play from 'lucide-react/dist/esm/icons/play';
+import Pause from 'lucide-react/dist/esm/icons/pause';
+import Terminal from 'lucide-react/dist/esm/icons/terminal';
+import ChevronRight from 'lucide-react/dist/esm/icons/chevron-right';
+import CheckCircle2 from 'lucide-react/dist/esm/icons/check-circle-2';
+import AlertTriangle from 'lucide-react/dist/esm/icons/alert-triangle';
+import Loader2 from 'lucide-react/dist/esm/icons/loader-2';
+import Clock from 'lucide-react/dist/esm/icons/clock';
+import RotateCcw from 'lucide-react/dist/esm/icons/rotate-ccw';
+import Lock from 'lucide-react/dist/esm/icons/lock';
+import Globe from 'lucide-react/dist/esm/icons/globe';
+import Settings from 'lucide-react/dist/esm/icons/settings';
+import Download from 'lucide-react/dist/esm/icons/download';
+import List from 'lucide-react/dist/esm/icons/list';
+import Sparkles from 'lucide-react/dist/esm/icons/sparkles';
+import Zap from 'lucide-react/dist/esm/icons/zap';
+import ArrowRight from 'lucide-react/dist/esm/icons/arrow-right';
+import Info from 'lucide-react/dist/esm/icons/info';
+import X from 'lucide-react/dist/esm/icons/x';
+import RefreshCw from 'lucide-react/dist/esm/icons/refresh-cw';
+import Scissors from 'lucide-react/dist/esm/icons/scissors';
+import ExternalLink from 'lucide-react/dist/esm/icons/external-link';
+import Plus from 'lucide-react/dist/esm/icons/plus';
+import Save from 'lucide-react/dist/esm/icons/save';
+import Trash2 from 'lucide-react/dist/esm/icons/trash-2';
+import Wrench from 'lucide-react/dist/esm/icons/wrench';
+import MessageSquare from 'lucide-react/dist/esm/icons/message-square';
+import Bug from 'lucide-react/dist/esm/icons/bug';
+import Lightbulb from 'lucide-react/dist/esm/icons/lightbulb';
+import Eye from 'lucide-react/dist/esm/icons/eye';
+import VideoIcon from 'lucide-react/dist/esm/icons/video';
+import Monitor from 'lucide-react/dist/esm/icons/monitor';
+import ImageIcon from 'lucide-react/dist/esm/icons/image';
+import Copy from 'lucide-react/dist/esm/icons/copy';
+import Search from 'lucide-react/dist/esm/icons/search';
+import Database from 'lucide-react/dist/esm/icons/database';
+import Cpu from 'lucide-react/dist/esm/icons/cpu';
+import PackageOpen from 'lucide-react/dist/esm/icons/package-open';
+import MoreHorizontal from 'lucide-react/dist/esm/icons/more-horizontal';
+import Archive from 'lucide-react/dist/esm/icons/archive';
+import SlidersHorizontal from 'lucide-react/dist/esm/icons/sliders-horizontal';
+import ChevronDown from 'lucide-react/dist/esm/icons/chevron-down';
 import ReactMarkdown from 'react-markdown';
+import { toast } from 'sonner';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
 import { useJobPoller } from '@/hooks/useJobPoller';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Label } from '@/components/ui/label';
+import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { LiveBrowserView } from '@/components/LiveBrowserView';
 import { TestDataPicker } from '@/components/TestDataPicker';
+import { StatusBadge } from '@/components/shared/StatusBadge';
 import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
 import {
     browserAuthSessionLabel,
     fetchProjectBrowserAuthSessions,
     isBrowserAuthSessionSelectable,
 } from '@/lib/browser-auth-sessions';
+import {
+    applyAgentWorkspaceQueryPatch,
+    filterAgentHistoryRuns,
+    getAgentHistoryCounts,
+    parseAgentWorkspaceQuery,
+    validateAgentRunInput,
+    type AgentHistoryStatusFilter,
+    type AgentHistoryTypeFilter,
+    type AgentTraceTab,
+    type AgentWorkspaceMode,
+    type AgentWorkspaceView,
+    type ReportReviewFilter,
+    type ReportSearchTypeFilter,
+} from './agents-workspace-state';
 
 interface AgentRun {
     id: string;
@@ -99,6 +187,61 @@ interface AgentRunEvent {
     agent_task_id?: string | null;
 }
 
+interface AgentTraceSnapshot {
+    id: string;
+    trace_id: string;
+    run_id: string;
+    agent_task_id?: string | null;
+    attempt: number;
+    runtime: string;
+    model?: string | null;
+    model_tier?: string | null;
+    allowed_tools: string[];
+    prompt_hash?: string | null;
+    context_hash?: string | null;
+    memory_block_hash?: string | null;
+    prompt_preview?: string;
+    memory_preview?: string;
+    prompt_artifact_path?: string | null;
+    context_artifact_path?: string | null;
+    test_data_refs: string[];
+    runtime_diagnostics?: Record<string, any>;
+    created_at: string;
+    updated_at: string;
+}
+
+interface AgentTraceSpan {
+    id: string;
+    trace_id: string;
+    sequence: number;
+    span_type: string;
+    name: string;
+    level: string;
+    message: string;
+    tool_name?: string | null;
+    success?: boolean | null;
+    duration_ms?: number | null;
+    content_hash?: string | null;
+    input_preview?: any;
+    output_preview?: any;
+    artifact_path?: string | null;
+    payload?: Record<string, any>;
+    agent_run_event_id?: string | null;
+    created_at: string;
+    started_at?: string | null;
+    ended_at?: string | null;
+}
+
+interface AgentTraceBundle {
+    snapshot?: AgentTraceSnapshot | null;
+    spans: AgentTraceSpan[];
+    events: AgentRunEvent[];
+    memory_injections: Array<Record<string, any>>;
+    artifacts: AgentArtifact[];
+    temporal?: AgentRunTemporal | null;
+    correlation?: Record<string, any>;
+}
+
 interface AgentTool {
     id: string;
     label: string;
@@ -137,6 +280,24 @@ interface SpecResult {
 type AuthType = 'none' | 'credentials' | 'session';
 type CustomResultTab = 'overview' | 'findings' | 'test_ideas' | 'requirements' | 'evidence' | 'raw';
 type ReportSpecBrowserAuthMode = 'session' | 'project_default' | 'none';
+type TraceTab = AgentTraceTab;
+
+const AGENT_HISTORY_STATUS_FILTER_LABELS: Record<AgentHistoryStatusFilter, string> = {
+    all: 'All',
+    active: 'Active',
+    completed: 'Completed',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
+    paused: 'Paused',
+};
+
+const AGENT_HISTORY_TYPE_FILTER_LABELS: Record<AgentHistoryTypeFilter, string> = {
+    all: 'All',
+    exploratory: 'Explorer',
+    custom: 'Custom',
+    writer: 'Writer',
+    spec_generation: 'Spec runs',
+};
 
 interface ReportSpecBrowserAuthSelection {
     mode: ReportSpecBrowserAuthMode;
@@ -203,6 +364,38 @@ interface StructuredAgentReport {
     evidence?: ReportEvidence[];
     follow_up_actions?: { id?: string; label?: string; action?: string; target?: string }[];
     parse_status?: string;
+}
+
+interface AgentQueueStatus {
+    mode?: string;
+    active?: number;
+    queued?: number;
+    max?: number;
+    available?: number;
+    workers_alive?: number;
+    worker_processes_alive?: number;
+    workers_busy?: number;
+    workers_idle?: number;
+    running_task_heartbeats_alive?: number;
+    capacity_state?: string;
+    stale_running?: number;
+    oldest_queued_age_seconds?: number | null;
+    orphaned_tasks?: number;
+    background_tasks?: number;
+    linked_tasks?: number;
+    worker_health?: Record<string, any>;
+    browser_pool?: Record<string, any>;
+    pool_status?: Record<string, any>;
+    temporal?: Record<string, any>;
+    running_tasks?: Array<Record<string, any>>;
+}
+
+interface AgentReportSearchItem {
+    run_id: string;
+    agent_name?: string;
+    created_at?: string;
+    type: 'finding' | 'test_idea' | 'requirement' | 'page' | 'evidence' | 'action' | string;
+    item: Record<string, any>;
 }
 
 function formatToolName(toolName?: string) {
@@ -375,9 +568,11 @@ function AgentRunCapturePanel({
                             style={{
                                 width: '100%',
                                 display: 'block',
+                                aspectRatio: '16 / 9',
+                                objectFit: 'contain',
                                 borderRadius: '8px',
                                 border: '1px solid var(--border)',
-                                background: 'var(--background)'
+                                background: '#000'
                             }}
                         />
                     </div>
@@ -419,6 +614,31 @@ function severityColor(value?: string) {
     if (normalized === 'medium') return 'var(--warning)';
     if (normalized === 'low') return 'var(--primary)';
     return 'var(--text-secondary)';
+}
+
+function reportItemReviewState(item: Record<string, any>, kind: 'finding' | 'test_idea' | 'requirement' | string): ReportReviewFilter {
+    if (item.imported_requirement_id || item.imported_requirement_code || item.imported_at) return 'imported';
+    if (item.spec_id || item.spec_file || item.generated_spec || item.spec_created_at || item.created_spec_id) return 'spec_created';
+    const urgency = String(item.severity || item.priority || '').toLowerCase();
+    if (kind === 'finding' || ['critical', 'high'].includes(urgency)) return 'needs_action';
+    return 'unreviewed';
+}
+
+function reportItemSeverity(item: Record<string, any>) {
+    return String(item.severity || item.priority || 'info').toLowerCase();
+}
+
+function formatQueueAge(seconds?: number | null) {
+    if (!seconds || seconds < 1) return 'None';
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+    return `${Math.round(seconds / 3600)}h`;
+}
+
+function queueStateLabel(queue?: AgentQueueStatus | null) {
+    if (!queue) return 'Unknown';
+    const state = queue.capacity_state || queue.mode || 'available';
+    return state.replace(/_/g, ' ');
 }
 
 function reportStatusColor(value?: string) {
@@ -500,6 +720,10 @@ function CustomAgentReportView({
     onImportRequirements,
     importingRequirementIds,
     importError,
+    reportStatusFilter,
+    onReportStatusFilterChange,
+    reportSeverityFilter,
+    onReportSeverityFilterChange,
 }: {
     run: AgentRun;
     activeTab: CustomResultTab;
@@ -509,11 +733,27 @@ function CustomAgentReportView({
     onImportRequirements: (itemIds?: string[]) => void;
     importingRequirementIds: string[];
     importError?: string | null;
+    reportStatusFilter: ReportReviewFilter;
+    onReportStatusFilterChange: (value: ReportReviewFilter) => void;
+    reportSeverityFilter: string;
+    onReportSeverityFilterChange: (value: string) => void;
 }) {
     const report = getStructuredReport(run);
     const findings = report.findings || [];
     const testIdeas = report.test_ideas || [];
     const requirements = report.requirements || [];
+    const filteredFindings = findings.filter(item => (
+        (reportStatusFilter === 'all' || reportItemReviewState(item as unknown as Record<string, any>, 'finding') === reportStatusFilter) &&
+        (reportSeverityFilter === 'all' || reportItemSeverity(item as unknown as Record<string, any>) === reportSeverityFilter)
+    ));
+    const filteredTestIdeas = testIdeas.filter(item => (
+        (reportStatusFilter === 'all' || reportItemReviewState(item as unknown as Record<string, any>, 'test_idea') === reportStatusFilter) &&
+        (reportSeverityFilter === 'all' || reportItemSeverity(item as unknown as Record<string, any>) === reportSeverityFilter)
+    ));
+    const filteredRequirements = requirements.filter(item => (
+        (reportStatusFilter === 'all' || reportItemReviewState(item as unknown as Record<string, any>, 'requirement') === reportStatusFilter) &&
+        (reportSeverityFilter === 'all' || reportItemSeverity(item as unknown as Record<string, any>) === reportSeverityFilter)
+    ));
     const unimportedRequirements = requirements.filter(item => !item.imported_requirement_id && !item.imported_requirement_code);
     const pages = report.pages_checked || [];
     const evidence = report.evidence || [];
@@ -526,6 +766,23 @@ function CustomAgentReportView({
         { key: 'raw', label: 'Raw Output' },
     ];
     const basePrompt = `Analyze custom agent run ${run.id} (${run.config?.agent_name || 'Custom Agent'}). Focus on findings, test ideas, and useful follow-up actions.`;
+    const selectedTabIndex = tabs.findIndex(tab => tab.key === activeTab);
+    const handleReportTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+        if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const lastIndex = tabs.length - 1;
+        const nextIndex = event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+            ? lastIndex
+            : event.key === 'ArrowRight' || event.key === 'ArrowDown'
+            ? (selectedTabIndex + 1) % tabs.length
+            : (selectedTabIndex - 1 + tabs.length) % tabs.length;
+        onTabChange(tabs[nextIndex].key);
+        window.requestAnimationFrame(() => {
+            document.getElementById(`agents-report-tab-${tabs[nextIndex].key}`)?.focus();
+        });
+    };
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -554,10 +811,17 @@ function CustomAgentReportView({
                 )}
             </div>
 
-            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', borderBottom: '1px solid var(--border)', paddingBottom: '0.6rem' }}>
+            <div role="tablist" aria-label="Report sections" style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', borderBottom: '1px solid var(--border)', paddingBottom: '0.6rem' }}>
                 {tabs.map(tab => (
                     <button
                         key={tab.key}
+                        id={`agents-report-tab-${tab.key}`}
+                        type="button"
+                        role="tab"
+                        aria-selected={activeTab === tab.key}
+                        aria-controls={`agents-report-panel-${tab.key}`}
+                        tabIndex={activeTab === tab.key ? 0 : -1}
+                        onKeyDown={handleReportTabKeyDown}
                         onClick={() => onTabChange(tab.key)}
                         style={{
                             border: '1px solid var(--border)',
@@ -575,8 +839,42 @@ function CustomAgentReportView({
                 ))}
             </div>
 
+            {activeTab !== 'overview' && activeTab !== 'raw' && activeTab !== 'evidence' && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.65rem', padding: '0.75rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--surface-hover)' }}>
+                    <label style={{ display: 'grid', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 700 }}>
+                        Review state
+                        <select
+                            value={reportStatusFilter}
+                            onChange={event => onReportStatusFilterChange(event.target.value as ReportReviewFilter)}
+                            style={{ minHeight: 36, borderRadius: '6px', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', padding: '0.4rem 0.55rem' }}
+                        >
+                            <option value="all">All review states</option>
+                            <option value="needs_action">Needs action</option>
+                            <option value="unreviewed">Unreviewed</option>
+                            <option value="imported">Imported</option>
+                            <option value="spec_created">Spec created</option>
+                        </select>
+                    </label>
+                    <label style={{ display: 'grid', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 700 }}>
+                        Severity or priority
+                        <select
+                            value={reportSeverityFilter}
+                            onChange={event => onReportSeverityFilterChange(event.target.value)}
+                            style={{ minHeight: 36, borderRadius: '6px', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', padding: '0.4rem 0.55rem' }}
+                        >
+                            <option value="all">All severities</option>
+                            <option value="critical">Critical</option>
+                            <option value="high">High</option>
+                            <option value="medium">Medium</option>
+                            <option value="low">Low</option>
+                            <option value="info">Info</option>
+                        </select>
+                    </label>
+                </div>
+            )}
+
             {activeTab === 'overview' && (
-                <div style={{ display: 'grid', gap: '1rem' }}>
+                <div id="agents-report-panel-overview" role="tabpanel" aria-labelledby="agents-report-tab-overview" style={{ display: 'grid', gap: '1rem' }}>
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '0.75rem' }}>
                         {[
                             { label: 'Pages Checked', value: pages.length, icon: Eye },
@@ -617,10 +915,10 @@ function CustomAgentReportView({
             )}
 
             {activeTab === 'findings' && (
-                <div style={{ display: 'grid', gap: '0.75rem' }}>
-                    {findings.length === 0 ? (
+                <div id="agents-report-panel-findings" role="tabpanel" aria-labelledby="agents-report-tab-findings" style={{ display: 'grid', gap: '0.75rem' }}>
+                    {filteredFindings.length === 0 ? (
                         <EmptyReportState text="No structured findings were reported." />
-                    ) : findings.map(finding => (
+                    ) : filteredFindings.map(finding => (
                         <div key={finding.id} style={{ padding: '0.9rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.45rem' }}>
                                 <div style={{ fontWeight: 700, fontSize: '0.92rem' }}>{finding.id}: {finding.title}</div>
@@ -640,10 +938,10 @@ function CustomAgentReportView({
             )}
 
             {activeTab === 'test_ideas' && (
-                <div style={{ display: 'grid', gap: '0.75rem' }}>
-                    {testIdeas.length === 0 ? (
+                <div id="agents-report-panel-test_ideas" role="tabpanel" aria-labelledby="agents-report-tab-test_ideas" style={{ display: 'grid', gap: '0.75rem' }}>
+                    {filteredTestIdeas.length === 0 ? (
                         <EmptyReportState text="No structured test ideas were reported." />
-                    ) : testIdeas.map(idea => (
+                    ) : filteredTestIdeas.map(idea => (
                         <div key={idea.id} style={{ padding: '0.9rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '0.45rem' }}>
                                 <div style={{ fontWeight: 700, fontSize: '0.92rem' }}>{idea.id}: {idea.title}</div>
@@ -666,7 +964,7 @@ function CustomAgentReportView({
             )}
 
             {activeTab === 'requirements' && (
-                <div style={{ display: 'grid', gap: '0.75rem' }}>
+                <div id="agents-report-panel-requirements" role="tabpanel" aria-labelledby="agents-report-tab-requirements" style={{ display: 'grid', gap: '0.75rem' }}>
                     {importError && (
                         <div style={{ padding: '0.75rem 0.9rem', border: '1px solid var(--danger)', borderRadius: '8px', color: 'var(--danger)', background: 'var(--danger-muted)', fontSize: '0.84rem' }}>
                             {importError}
@@ -685,9 +983,9 @@ function CustomAgentReportView({
                             />
                         </div>
                     )}
-                    {requirements.length === 0 ? (
+                    {filteredRequirements.length === 0 ? (
                         <EmptyReportState text="No structured requirements were reported." />
-                    ) : requirements.map(requirement => {
+                    ) : filteredRequirements.map(requirement => {
                         const imported = Boolean(requirement.imported_requirement_id || requirement.imported_requirement_code);
                         const pending = importingRequirementIds.includes('__all__') || importingRequirementIds.includes(requirement.id);
                         return (
@@ -711,9 +1009,9 @@ function CustomAgentReportView({
                                     <div style={{ marginBottom: '0.7rem', fontSize: '0.82rem', color: 'var(--success)', display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
                                         <CheckCircle2 size={14} />
                                         Imported as
-                                        <a href={`/requirements${requirement.imported_requirement_id ? `?highlight=${requirement.imported_requirement_id}` : ''}`} style={{ color: 'var(--primary)', fontWeight: 700 }}>
+                                        <Link href={`/requirements${requirement.imported_requirement_id ? `?highlight=${requirement.imported_requirement_id}` : ''}`} style={{ color: 'var(--primary)', fontWeight: 700 }}>
                                             {requirement.imported_requirement_code || `REQ-${requirement.imported_requirement_id}`}
-                                        </a>
+                                        </Link>
                                     </div>
                                 )}
                                 <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
@@ -732,7 +1030,7 @@ function CustomAgentReportView({
             )}
 
             {activeTab === 'evidence' && (
-                <div style={{ display: 'grid', gap: '0.6rem' }}>
+                <div id="agents-report-panel-evidence" role="tabpanel" aria-labelledby="agents-report-tab-evidence" style={{ display: 'grid', gap: '0.6rem' }}>
                     {evidence.length === 0 ? (
                         <EmptyReportState text="No structured evidence was reported." />
                     ) : evidence.map((item, i) => (
@@ -754,7 +1052,7 @@ function CustomAgentReportView({
             )}
 
             {activeTab === 'raw' && (
-                <div style={{ display: 'grid', gap: '1rem' }}>
+                <div id="agents-report-panel-raw" role="tabpanel" aria-labelledby="agents-report-tab-raw" style={{ display: 'grid', gap: '1rem' }}>
                     <div style={{ background: '#111827', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
                         <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.84rem', color: '#e5e7eb', margin: 0 }}>
                             {run.result?.output || JSON.stringify(run.result, null, 2)}
@@ -802,11 +1100,101 @@ function ReportActionButton({ onClick, label, icon: Icon, disabled = false }: { 
     );
 }
 
-function AgentRunObservabilityPanel({ run, events }: { run: AgentRun; events: AgentRunEvent[] }) {
+function TraceJsonBlock({ title, value }: { title: string; value: any }) {
+    if (value === undefined || value === null || value === '') return null;
+    return (
+        <details style={{ border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--surface-hover)', overflow: 'hidden' }}>
+            <summary style={{ cursor: 'pointer', padding: '0.55rem 0.7rem', fontWeight: 700, fontSize: '0.78rem' }}>{title}</summary>
+            <pre style={{ margin: 0, padding: '0.7rem', borderTop: '1px solid var(--border)', overflowX: 'auto', whiteSpace: 'pre-wrap', fontSize: '0.74rem', lineHeight: 1.45, color: 'var(--text-secondary)' }}>
+                {typeof value === 'string' ? value : JSON.stringify(value, null, 2)}
+            </pre>
+        </details>
+    );
+}
+
+function TracePill({ label, value }: { label: string; value: any }) {
+    if (value === undefined || value === null || value === '') return null;
+    return (
+        <span style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center', padding: '0.32rem 0.48rem', border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--surface-hover)', fontSize: '0.75rem', maxWidth: '100%' }}>
+            <strong style={{ color: 'var(--text-secondary)' }}>{label}</strong>
+            <span style={{ overflowWrap: 'anywhere' }}>{String(value)}</span>
+        </span>
+    );
+}
+
+function AgentRunObservabilityPanel({
+    run,
+    events,
+    trace,
+    traceLoading = false,
+    traceSearch = '',
+    onTraceSearch,
+    traceSpanType = '',
+    onTraceSpanType,
+    onExportTrace,
+    activeTraceTab = 'timeline',
+    onTraceTabChange,
+}: {
+    run: AgentRun;
+    events: AgentRunEvent[];
+    trace?: AgentTraceBundle | null;
+    traceLoading?: boolean;
+    traceSearch?: string;
+    onTraceSearch?: (value: string) => void;
+    traceSpanType?: string;
+    onTraceSpanType?: (value: string) => void;
+    onExportTrace?: () => void;
+    activeTraceTab?: TraceTab;
+    onTraceTabChange?: (value: TraceTab) => void;
+}) {
     const health = run.health || {};
     const temporal = run.temporal || {};
-    const recentEvents = events.slice(-8).reverse();
+    const [internalTraceTab, setInternalTraceTab] = useState<TraceTab>(activeTraceTab);
+    const selectedTraceTab = onTraceTabChange ? activeTraceTab : internalTraceTab;
+    const changeTraceTab = (tab: TraceTab) => {
+        if (onTraceTabChange) onTraceTabChange(tab);
+        else setInternalTraceTab(tab);
+    };
+    const traceSpans = trace?.spans || [];
+    const searchableTraceSpans = useMemo(() => traceSpans.map(span => ({
+        span,
+        searchText: [
+            span.name,
+            span.message,
+            span.span_type,
+            span.tool_name,
+            span.content_hash,
+            span.payload ? JSON.stringify(span.payload) : '',
+            span.input_preview ? JSON.stringify(span.input_preview) : '',
+            span.output_preview ? JSON.stringify(span.output_preview) : '',
+        ].join(' ').toLowerCase(),
+    })), [traceSpans]);
+    const filteredSpans = useMemo(() => searchableTraceSpans.filter(({ span, searchText }) => {
+        if (traceSpanType && span.span_type !== traceSpanType) return false;
+        if (!traceSearch.trim()) return true;
+        const query = traceSearch.toLowerCase();
+        return searchText.includes(query);
+    }).map(item => item.span), [searchableTraceSpans, traceSearch, traceSpanType]);
+    const recentEvents = events.slice(-12).reverse();
+    const visibleSpans = filteredSpans.slice(-80).reverse();
+    const toolSpans = filteredSpans.filter(span => span.span_type === 'tool_call' || span.span_type === 'tool_result');
+    const spanTypes = Array.from(new Set(traceSpans.map(span => span.span_type))).sort();
     const logArtifacts = sortArtifactsByModifiedAt((run.artifacts || []).filter(artifact => artifact.type === 'log'));
+    const traceArtifacts = trace?.artifacts || [];
+    const snapshot = trace?.snapshot;
+    const memoryInjections = trace?.memory_injections || [];
+    const traceTabs: Array<{ key: TraceTab; label: string; icon: any }> = [
+        { key: 'timeline', label: 'Timeline', icon: Clock },
+        { key: 'context', label: 'Context', icon: FileText },
+        { key: 'tools', label: 'Tools', icon: Wrench },
+        { key: 'memory', label: 'Memory', icon: Database },
+        { key: 'runtime', label: 'Runtime', icon: Cpu },
+        { key: 'artifacts', label: 'Artifacts', icon: PackageOpen },
+    ];
+    const copyText = (value: string | null | undefined) => {
+        if (!value || typeof navigator === 'undefined') return;
+        void navigator.clipboard?.writeText(value);
+    };
 
     return (
         <div style={{ display: 'grid', gap: '0.75rem' }}>
@@ -884,34 +1272,173 @@ function AgentRunObservabilityPanel({ run, events }: { run: AgentRun; events: Ag
             )}
 
             <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden', background: 'var(--background)' }}>
-                <div style={{ padding: '0.65rem 0.85rem', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'center' }}>
-                    <h4 style={{ margin: 0, fontSize: '0.86rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                        <Clock size={14} /> Timeline
-                    </h4>
-                    {health.latest_heartbeat_at && (
-                        <span style={{ color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
-                            Updated {new Date(health.latest_heartbeat_at).toLocaleTimeString()}
-                        </span>
+                <div style={{ padding: '0.65rem 0.85rem', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                        {traceTabs.map(tab => {
+                            const Icon = tab.icon;
+                            return (
+                                <button key={tab.key} type="button" onClick={() => changeTraceTab(tab.key)} style={{ border: '1px solid var(--border)', background: selectedTraceTab === tab.key ? 'var(--primary-glow)' : 'var(--surface-hover)', color: selectedTraceTab === tab.key ? 'var(--primary)' : 'var(--text)', borderRadius: '6px', padding: '0.38rem 0.55rem', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '0.32rem', fontSize: '0.76rem', fontWeight: 700 }}>
+                                    <Icon size={13} /> {tab.label}
+                                </button>
+                            );
+                        })}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
+                        {traceLoading && <Loader2 size={14} className="spin" style={{ color: 'var(--primary)' }} />}
+                        {onExportTrace && (
+                            <button type="button" onClick={onExportTrace} title="Export redacted trace" style={{ border: '1px solid var(--border)', background: 'var(--surface-hover)', color: 'var(--text)', borderRadius: '6px', padding: '0.38rem 0.55rem', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '0.32rem', fontSize: '0.76rem', fontWeight: 700 }}>
+                                <Download size={13} /> Export
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                <div style={{ padding: '0.75rem', display: 'grid', gap: '0.65rem' }}>
+                    {(selectedTraceTab === 'timeline' || selectedTraceTab === 'tools') && (
+                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                            <div style={{ position: 'relative', flex: '1 1 220px' }}>
+                                <Search size={13} style={{ position: 'absolute', left: '0.55rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
+                                <label htmlFor={`agent-trace-search-${run.id}`} className="agents-visually-hidden">Search trace events and spans</label>
+                                <input id={`agent-trace-search-${run.id}`} aria-label="Search trace events and spans" value={traceSearch} onChange={event => onTraceSearch?.(event.target.value)} placeholder="Search trace" style={{ width: '100%', padding: '0.42rem 0.55rem 0.42rem 1.8rem', borderRadius: '6px', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', fontSize: '0.78rem' }} />
+                            </div>
+                            <label htmlFor={`agent-trace-span-type-${run.id}`} className="agents-visually-hidden">Filter trace by span type</label>
+                            <select id={`agent-trace-span-type-${run.id}`} aria-label="Filter trace by span type" value={traceSpanType} onChange={event => onTraceSpanType?.(event.target.value)} style={{ padding: '0.42rem 0.55rem', borderRadius: '6px', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', fontSize: '0.78rem' }}>
+                                <option value="">All spans</option>
+                                {spanTypes.map(type => <option key={type} value={type}>{type.replace(/_/g, ' ')}</option>)}
+                            </select>
+                        </div>
+                    )}
+
+                    {selectedTraceTab === 'timeline' && (
+                        traceSpans.length > 0 ? (
+                            <div style={{ display: 'grid', gap: '0.45rem' }}>
+                                {visibleSpans.map(span => (
+                                    <details key={span.id} style={{ border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--surface-hover)', overflow: 'hidden' }}>
+                                        <summary style={{ cursor: 'pointer', padding: '0.58rem 0.7rem', display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: '0.6rem', alignItems: 'center', fontSize: '0.8rem' }}>
+                                            <span style={{ color: span.level === 'error' ? 'var(--danger)' : span.level === 'warning' ? 'var(--warning)' : 'var(--primary)', fontWeight: 800 }}>#{span.sequence}</span>
+                                            <span style={{ minWidth: 0 }}>
+                                                <strong style={{ textTransform: 'capitalize' }}>{span.name || span.span_type.replace(/_/g, ' ')}</strong>
+                                                <span style={{ color: 'var(--text-secondary)' }}> · {span.span_type.replace(/_/g, ' ')}</span>
+                                                {span.tool_name && <span style={{ color: 'var(--text-secondary)' }}> · {formatToolName(span.tool_name)}</span>}
+                                            </span>
+                                            <span style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{new Date(span.created_at).toLocaleTimeString()}</span>
+                                        </summary>
+                                        <div style={{ padding: '0 0.7rem 0.7rem', display: 'grid', gap: '0.45rem' }}>
+                                            {span.message && <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', overflowWrap: 'anywhere' }}>{span.message}</div>}
+                                            <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                                                <TracePill label="duration" value={span.duration_ms != null ? `${Math.round(span.duration_ms)}ms` : null} />
+                                                <TracePill label="hash" value={span.content_hash?.slice(0, 16)} />
+                                                <TracePill label="event" value={span.agent_run_event_id} />
+                                            </div>
+                                            <TraceJsonBlock title="Input preview" value={span.input_preview} />
+                                            <TraceJsonBlock title="Output preview" value={span.output_preview} />
+                                            <TraceJsonBlock title="Payload" value={span.payload} />
+                                        </div>
+                                    </details>
+                                ))}
+                            </div>
+                        ) : recentEvents.length > 0 ? (
+                            <div style={{ display: 'grid' }}>
+                                {recentEvents.map((event, index) => (
+                                    <div key={event.id} style={{ padding: '0.6rem 0', borderBottom: index === recentEvents.length - 1 ? 'none' : '1px solid var(--border)', display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: '0.6rem', alignItems: 'start', fontSize: '0.8rem' }}>
+                                        <span style={{ color: event.level === 'error' ? 'var(--danger)' : event.level === 'warning' ? 'var(--warning)' : 'var(--primary)', fontWeight: 800 }}>#{event.sequence}</span>
+                                        <div style={{ minWidth: 0 }}>
+                                            <div style={{ fontWeight: 700, textTransform: 'capitalize' }}>{event.event_type.replace(/_/g, ' ')}</div>
+                                            <div style={{ color: 'var(--text-secondary)', overflowWrap: 'anywhere', marginTop: '0.15rem' }}>{event.message}</div>
+                                        </div>
+                                        <span style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{new Date(event.created_at).toLocaleTimeString()}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No durable events have been recorded yet.</div>
+                        )
+                    )}
+
+                    {selectedTraceTab === 'context' && (
+                        <div style={{ display: 'grid', gap: '0.65rem' }}>
+                            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                <TracePill label="trace" value={snapshot?.trace_id} />
+                                <TracePill label="prompt" value={snapshot?.prompt_hash?.slice(0, 20)} />
+                                <TracePill label="context" value={snapshot?.context_hash?.slice(0, 20)} />
+                                <TracePill label="memory" value={snapshot?.memory_block_hash?.slice(0, 20)} />
+                            </div>
+                            {snapshot?.trace_id && <button type="button" onClick={() => copyText(snapshot.trace_id)} style={{ justifySelf: 'start', border: '1px solid var(--border)', background: 'var(--surface-hover)', color: 'var(--text)', borderRadius: '6px', padding: '0.38rem 0.55rem', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '0.32rem', fontSize: '0.76rem', fontWeight: 700 }}><Copy size={13} /> Copy trace ID</button>}
+                            <TraceJsonBlock title="Prompt preview" value={snapshot?.prompt_preview || 'No prompt snapshot captured yet.'} />
+                            <TraceJsonBlock title="Memory/context preview" value={snapshot?.memory_preview} />
+                            <TraceJsonBlock title="Allowed tools" value={snapshot?.allowed_tools || []} />
+                            <TraceJsonBlock title="Test data refs" value={snapshot?.test_data_refs || []} />
+                            {(snapshot?.prompt_artifact_path || snapshot?.context_artifact_path) && (
+                                <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                    {snapshot.prompt_artifact_path && <a href={`${API_BASE}${snapshot.prompt_artifact_path}`} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontWeight: 700, fontSize: '0.78rem', textDecoration: 'none' }}>Open redacted prompt</a>}
+                                    {snapshot.context_artifact_path && <a href={`${API_BASE}${snapshot.context_artifact_path}`} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontWeight: 700, fontSize: '0.78rem', textDecoration: 'none' }}>Open redacted context</a>}
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {selectedTraceTab === 'tools' && (
+                        <div style={{ display: 'grid', gap: '0.45rem' }}>
+                            {toolSpans.length > 0 ? toolSpans.slice(-80).reverse().map(span => (
+                                <details key={span.id} style={{ border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--surface-hover)', overflow: 'hidden' }}>
+                                    <summary style={{ cursor: 'pointer', padding: '0.58rem 0.7rem', display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', fontSize: '0.8rem' }}>
+                                        <strong>{formatToolName(span.tool_name || span.name)}</strong>
+                                        <span style={{ color: span.success === false ? 'var(--danger)' : 'var(--text-secondary)' }}>{span.duration_ms != null ? `${Math.round(span.duration_ms)}ms` : span.span_type}</span>
+                                    </summary>
+                                    <div style={{ padding: '0 0.7rem 0.7rem', display: 'grid', gap: '0.45rem' }}>
+                                        {span.message && <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem' }}>{span.message}</div>}
+                                        <TraceJsonBlock title="Input" value={span.input_preview} />
+                                        <TraceJsonBlock title="Output" value={span.output_preview} />
+                                        <TraceJsonBlock title="Raw span" value={span} />
+                                    </div>
+                                </details>
+                            )) : <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No tool trace spans have been recorded yet.</div>}
+                        </div>
+                    )}
+
+                    {selectedTraceTab === 'memory' && (
+                        <div style={{ display: 'grid', gap: '0.5rem' }}>
+                            {memoryInjections.length > 0 ? memoryInjections.map(item => (
+                                <details key={item.id} style={{ border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--surface-hover)', overflow: 'hidden' }}>
+                                    <summary style={{ cursor: 'pointer', padding: '0.58rem 0.7rem', display: 'flex', justifyContent: 'space-between', gap: '0.75rem', fontSize: '0.8rem' }}>
+                                        <strong>{item.stage || 'memory injection'}</strong>
+                                        <span style={{ color: 'var(--text-secondary)' }}>{(item.memory_ids || []).length} memories</span>
+                                    </summary>
+                                    <div style={{ padding: '0 0.7rem 0.7rem', display: 'grid', gap: '0.45rem' }}>
+                                        <TraceJsonBlock title="Context preview" value={item.context_preview} />
+                                        <TraceJsonBlock title="Memory IDs" value={item.memory_ids || []} />
+                                        <TraceJsonBlock title="Telemetry" value={item.extra_data || {}} />
+                                    </div>
+                                </details>
+                            )) : <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No linked memory injections were found for this run.</div>}
+                        </div>
+                    )}
+
+                    {selectedTraceTab === 'runtime' && (
+                        <div style={{ display: 'grid', gap: '0.65rem' }}>
+                            <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                                <TracePill label="runtime" value={snapshot?.runtime || run.runtime} />
+                                <TracePill label="model" value={snapshot?.model} />
+                                <TracePill label="tier" value={snapshot?.model_tier} />
+                                <TracePill label="task" value={run.agent_task_id} />
+                                <TracePill label="workflow" value={run.temporal_workflow_id} />
+                            </div>
+                            <TraceJsonBlock title="Runtime diagnostics" value={snapshot?.runtime_diagnostics || {}} />
+                            <TraceJsonBlock title="Temporal summary" value={trace?.temporal || temporal || {}} />
+                            <TraceJsonBlock title="Correlation IDs" value={trace?.correlation || { run_id: run.id, agent_task_id: run.agent_task_id, temporal_workflow_id: run.temporal_workflow_id }} />
+                        </div>
+                    )}
+
+                    {selectedTraceTab === 'artifacts' && (
+                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                            {[...traceArtifacts, ...logArtifacts].length > 0 ? [...traceArtifacts, ...logArtifacts].map(artifact => (
+                                <a key={`${artifact.type}-${artifact.path}`} href={getArtifactUrl(artifact)} target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.38rem 0.6rem', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--primary)', textDecoration: 'none', fontSize: '0.78rem', fontWeight: 600 }}>
+                                    <FileText size={13} /> {artifact.name}
+                                </a>
+                            )) : <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No trace artifacts are available yet.</div>}
+                        </div>
                     )}
                 </div>
-                {recentEvents.length > 0 ? (
-                    <div style={{ display: 'grid' }}>
-                        {recentEvents.map((event, index) => (
-                            <div key={event.id} style={{ padding: '0.6rem 0.85rem', borderBottom: index === recentEvents.length - 1 ? 'none' : '1px solid var(--border)', display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: '0.6rem', alignItems: 'start', fontSize: '0.8rem' }}>
-                                <span style={{ color: event.level === 'error' ? 'var(--danger)' : event.level === 'warning' ? 'var(--warning)' : 'var(--primary)', fontWeight: 800 }}>#{event.sequence}</span>
-                                <div style={{ minWidth: 0 }}>
-                                    <div style={{ fontWeight: 700, textTransform: 'capitalize' }}>{event.event_type.replace(/_/g, ' ')}</div>
-                                    <div style={{ color: 'var(--text-secondary)', overflowWrap: 'anywhere', marginTop: '0.15rem' }}>{event.message}</div>
-                                </div>
-                                <span style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{new Date(event.created_at).toLocaleTimeString()}</span>
-                            </div>
-                        ))}
-                    </div>
-                ) : (
-                    <div style={{ padding: '0.9rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                        No durable events have been recorded yet.
-                    </div>
-                )}
             </div>
 
             {logArtifacts.length > 0 && (
@@ -992,7 +1519,7 @@ function SpecGenerationRunPanel({ run, events }: { run: AgentRun; events: AgentR
                         {latestImage.modified_at && <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{new Date(latestImage.modified_at).toLocaleTimeString()}</span>}
                     </div>
                     <a href={getArtifactUrl(latestImage)} target="_blank" rel="noreferrer" style={{ display: 'block' }}>
-                        <img src={getArtifactUrl(latestImage)} alt="Latest spec generation screenshot" style={{ width: '100%', display: 'block', maxHeight: '420px', objectFit: 'contain', background: '#000' }} />
+                        <img src={getArtifactUrl(latestImage)} alt="Latest spec generation screenshot" style={{ width: '100%', display: 'block', aspectRatio: '16 / 9', maxHeight: '420px', objectFit: 'contain', background: '#000' }} />
                     </a>
                 </div>
             )}
@@ -1030,9 +1557,189 @@ function SpecGenerationRunPanel({ run, events }: { run: AgentRun; events: AgentR
     );
 }
 
+function QueueStatusPanel({
+    queue,
+    loading,
+    error,
+    onRefresh,
+}: {
+    queue: AgentQueueStatus | null;
+    loading: boolean;
+    error: string | null;
+    onRefresh: () => void;
+}) {
+    const stale = queue?.stale_running ?? 0;
+    const orphaned = queue?.orphaned_tasks ?? 0;
+    const workerCount = queue?.workers_alive ?? queue?.worker_processes_alive ?? 0;
+    const browserPool = queue?.browser_pool || {};
+    const browserMax = Number(browserPool.max_browsers ?? queue?.max ?? 0);
+    const browserRunning = Number(browserPool.running ?? queue?.pool_status?.total_running ?? 0);
+    const browserAvailable = Number(browserPool.available ?? queue?.available ?? Math.max(0, browserMax - browserRunning));
+    const warnings = [
+        stale > 0 ? `${stale} stale running task${stale === 1 ? '' : 's'}` : '',
+        orphaned > 0 ? `${orphaned} orphaned task${orphaned === 1 ? '' : 's'}` : '',
+        (queue?.active || queue?.queued || 0) > 0 && workerCount === 0 ? 'No live workers for active queue work' : '',
+    ].filter(Boolean);
+
+    return (
+        <div className="card" style={{ padding: '1rem', display: 'grid', gap: '1rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', flexWrap: 'wrap' }}>
+                <div>
+                    <h2 style={{ margin: 0, fontSize: '1rem', fontWeight: 800 }}>Queue Capacity</h2>
+                    <p style={{ margin: '0.25rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                        {queue ? `${queue.mode || 'agent'} mode · ${queueStateLabel(queue)}` : 'Queue status has not loaded yet.'}
+                    </p>
+                </div>
+                <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
+                    {loading ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />} Refresh
+                </Button>
+            </div>
+            {error && (
+                <Alert variant="destructive">
+                    <AlertTriangle size={16} />
+                    <AlertDescription>{error}</AlertDescription>
+                </Alert>
+            )}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.75rem' }}>
+                {[
+                    ['Active runs', queue?.active ?? 0],
+                    ['Queued runs', queue?.queued ?? 0],
+                    ['Workers alive', workerCount],
+                    ['Workers idle', queue?.workers_idle ?? 0],
+                    ['Browser slots', browserMax ? `${browserRunning}/${browserMax}` : `${browserRunning}`],
+                    ['Available slots', browserAvailable],
+                    ['Oldest queued', formatQueueAge(queue?.oldest_queued_age_seconds)],
+                    ['Health', warnings.length ? 'Watch' : 'Stable'],
+                ].map(([label, value]) => (
+                    <div key={label} style={{ padding: '0.9rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--surface-hover)', minWidth: 0 }}>
+                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.72rem', textTransform: 'uppercase', fontWeight: 800, marginBottom: '0.35rem' }}>{label}</div>
+                        <div style={{ fontWeight: 850, fontSize: '1.1rem', overflowWrap: 'anywhere', color: label === 'Health' && warnings.length ? 'var(--warning)' : 'var(--text)' }}>{String(value)}</div>
+                    </div>
+                ))}
+            </div>
+            {warnings.length > 0 && (
+                <div style={{ padding: '0.85rem', border: '1px solid rgba(245, 158, 11, 0.35)', borderRadius: '8px', background: 'rgba(245, 158, 11, 0.12)', color: 'var(--warning)', display: 'grid', gap: '0.35rem', fontSize: '0.85rem', fontWeight: 700 }}>
+                    {warnings.map(item => <div key={item}>{item}</div>)}
+                </div>
+            )}
+            {(queue?.running_tasks || []).length > 0 && (
+                <div style={{ border: '1px solid var(--border)', borderRadius: '8px', overflow: 'hidden' }}>
+                    <div style={{ padding: '0.75rem 0.9rem', borderBottom: '1px solid var(--border)', fontWeight: 800 }}>Running tasks</div>
+                    {(queue?.running_tasks || []).slice(0, 8).map((task, index) => (
+                        <div key={String(task.id || index)} style={{ padding: '0.65rem 0.9rem', borderBottom: index === Math.min((queue?.running_tasks || []).length, 8) - 1 ? 'none' : '1px solid var(--border)', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '0.75rem', fontSize: '0.82rem' }}>
+                            <span style={{ overflowWrap: 'anywhere' }}>
+                                {String(task.agent_type || task.operation_type || 'agent task')}
+                                {task.id ? ` · ${String(task.id)}` : ''}
+                            </span>
+                            <span style={{ color: task.orphaned ? 'var(--warning)' : 'var(--text-secondary)', fontWeight: 700 }}>{String(task.status || 'running')}</span>
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function ReportsSearchWorkspace({
+    query,
+    onQueryChange,
+    type,
+    onTypeChange,
+    severity,
+    onSeverityChange,
+    loading,
+    results,
+    onRefresh,
+}: {
+    query: string;
+    onQueryChange: (value: string) => void;
+    type: ReportSearchTypeFilter;
+    onTypeChange: (value: ReportSearchTypeFilter) => void;
+    severity: string;
+    onSeverityChange: (value: string) => void;
+    loading: boolean;
+    results: AgentReportSearchItem[];
+    onRefresh: () => void;
+}) {
+    return (
+        <div className="card" style={{ padding: '1rem', display: 'grid', gap: '1rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', flexWrap: 'wrap' }}>
+                <div>
+                    <h2 style={{ margin: 0, fontSize: '1rem', fontWeight: 800 }}>Search Reports</h2>
+                    <p style={{ margin: '0.25rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Findings, test ideas, requirements, evidence, and checked pages.</p>
+                </div>
+                <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
+                    {loading ? <Loader2 className="spin" size={14} /> : <Search size={14} />} Search
+                </Button>
+            </div>
+            <div className="agents-report-search-grid">
+                <label style={{ display: 'grid', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 700 }}>
+                    Search reports
+                    <Input value={query} onChange={event => onQueryChange(event.target.value)} placeholder="Checkout, REQ, selector, URL" />
+                </label>
+                <label style={{ display: 'grid', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 700 }}>
+                    Type
+                    <select value={type} onChange={event => onTypeChange(event.target.value as ReportSearchTypeFilter)} style={{ minHeight: 40, borderRadius: 'var(--radius)', border: '1px solid var(--border)', background: 'var(--background-raised)', color: 'var(--text)', padding: '0.5rem' }}>
+                        <option value="all">All types</option>
+                        <option value="finding">Findings</option>
+                        <option value="test_idea">Test ideas</option>
+                        <option value="requirement">Requirements</option>
+                        <option value="page">Pages checked</option>
+                        <option value="evidence">Evidence</option>
+                        <option value="action">Actions</option>
+                    </select>
+                </label>
+                <label style={{ display: 'grid', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 700 }}>
+                    Severity
+                    <select value={severity} onChange={event => onSeverityChange(event.target.value)} style={{ minHeight: 40, borderRadius: 'var(--radius)', border: '1px solid var(--border)', background: 'var(--background-raised)', color: 'var(--text)', padding: '0.5rem' }}>
+                        <option value="all">All</option>
+                        <option value="critical">Critical</option>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                    </select>
+                </label>
+            </div>
+            <div style={{ display: 'grid', gap: '0.65rem' }}>
+                {loading ? (
+                    <div style={{ padding: '2rem', color: 'var(--text-secondary)', textAlign: 'center' }}><Loader2 className="spin" size={18} /> Searching reports...</div>
+                ) : results.length === 0 ? (
+                    <EmptyReportState text="No report items match the current search." />
+                ) : results.map(result => {
+                    const item = result.item || {};
+                    const title = item.title || item.label || item.url || item.id || result.type;
+                    const state = reportItemReviewState(item, result.type);
+                    return (
+                        <div key={`${result.run_id}-${result.type}-${item.id || title}`} style={{ padding: '0.9rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--background)', display: 'grid', gap: '0.45rem' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', flexWrap: 'wrap' }}>
+                                <strong style={{ overflowWrap: 'anywhere' }}>{title}</strong>
+                                <span style={{ color: severityColor(item.severity || item.priority), fontWeight: 800, textTransform: 'uppercase', fontSize: '0.76rem' }}>{item.severity || item.priority || state}</span>
+                            </div>
+                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+                                <span>{result.type.replace(/_/g, ' ')}</span>
+                                <span>{result.agent_name || 'Custom Agent'}</span>
+                                {result.created_at && <span>{new Date(result.created_at).toLocaleString()}</span>}
+                            </div>
+                            {(item.description || item.evidence || item.value) && (
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.84rem', lineHeight: 1.45, overflowWrap: 'anywhere' }}>{item.description || item.evidence || item.value}</div>
+                            )}
+                            <div>
+                                <Link href={`/agents?runId=${encodeURIComponent(result.run_id)}&view=reports&resultTab=${result.type === 'test_idea' ? 'test_ideas' : result.type === 'requirement' ? 'requirements' : result.type === 'evidence' ? 'evidence' : 'findings'}`} style={{ color: 'var(--primary)', fontWeight: 700, fontSize: '0.82rem' }}>
+                                    Open report
+                                </Link>
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
 export default function AgentsPage() {
     const { currentProject } = useProject();
-    const [selectedAgent, setSelectedAgent] = useState<'exploratory' | 'writer' | 'custom'>('exploratory');
+    const [workspaceView, setWorkspaceView] = useState<AgentWorkspaceView>('run');
+    const [selectedAgent, setSelectedAgent] = useState<AgentWorkspaceMode>('exploratory');
 
     // Basic config
     const [url, setUrl] = useState('');
@@ -1053,7 +1760,14 @@ export default function AgentsPage() {
     const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
     const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
     const [agentEvents, setAgentEvents] = useState<AgentRunEvent[]>([]);
+    const [agentTrace, setAgentTrace] = useState<AgentTraceBundle | null>(null);
+    const [traceLoading, setTraceLoading] = useState(false);
+    const [traceSearch, setTraceSearch] = useState('');
+    const [traceSpanType, setTraceSpanType] = useState('');
     const [specResult, setSpecResult] = useState<SpecResult | null>(null);
+    const [historySearch, setHistorySearch] = useState('');
+    const [historyStatusFilter, setHistoryStatusFilter] = useState<AgentHistoryStatusFilter>('all');
+    const [historyTypeFilter, setHistoryTypeFilter] = useState<AgentHistoryTypeFilter>('all');
 
     // UI state
     const [isStarting, setIsStarting] = useState(false);
@@ -1079,6 +1793,26 @@ export default function AgentsPage() {
     const [toolCatalog, setToolCatalog] = useState<AgentTool[]>([]);
     const [selectedDefinitionId, setSelectedDefinitionId] = useState<string>('');
     const [customResultTab, setCustomResultTab] = useState<CustomResultTab>('overview');
+    const [traceTab, setTraceTab] = useState<TraceTab>('timeline');
+    const [reportStatusFilter, setReportStatusFilter] = useState<ReportReviewFilter>('all');
+    const [reportSeverityFilter, setReportSeverityFilter] = useState('all');
+    const [reportSearchQuery, setReportSearchQuery] = useState('');
+    const [reportSearchType, setReportSearchType] = useState<ReportSearchTypeFilter>('all');
+    const [reportSearchSeverity, setReportSearchSeverity] = useState('all');
+    const [reportSearchResults, setReportSearchResults] = useState<AgentReportSearchItem[]>([]);
+    const [reportSearchLoading, setReportSearchLoading] = useState(false);
+    const [queueStatus, setQueueStatus] = useState<AgentQueueStatus | null>(null);
+    const [queueLoading, setQueueLoading] = useState(false);
+    const [queueError, setQueueError] = useState<string | null>(null);
+    const [runFormError, setRunFormError] = useState<string | null>(null);
+    const [definitionFormError, setDefinitionFormError] = useState<string | null>(null);
+    const [workspaceStatus, setWorkspaceStatus] = useState('');
+    const [historyOpen, setHistoryOpen] = useState(true);
+    const [setupOpen, setSetupOpen] = useState(true);
+    const [openDefinitionMenuId, setOpenDefinitionMenuId] = useState<string | null>(null);
+    const [archiveCandidate, setArchiveCandidate] = useState<AgentDefinition | null>(null);
+    const [cancelRunDialogOpen, setCancelRunDialogOpen] = useState(false);
+    const [returnToAfterSave, setReturnToAfterSave] = useState('');
     const [importingRequirementIds, setImportingRequirementIds] = useState<string[]>([]);
     const [reportImportError, setReportImportError] = useState<string | null>(null);
     const [agentRuntime, setAgentRuntime] = useState('claude_sdk');
@@ -1097,6 +1831,9 @@ export default function AgentsPage() {
         test_data_refs: '',
     });
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
+    const agentEventSourceRef = useRef<EventSource | null>(null);
+    const agentEventReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const agentEventsRef = useRef<AgentRunEvent[]>([]);
     const activeBrowserAuthSessions = useMemo(
         () => sessions.filter(isBrowserAuthSessionSelectable),
         [sessions]
@@ -1105,6 +1842,84 @@ export default function AgentsPage() {
         () => activeBrowserAuthSessions.find(item => item.is_default),
         [activeBrowserAuthSessions]
     );
+
+    const updateWorkspaceQuery = useCallback((patch: Parameters<typeof applyAgentWorkspaceQueryPatch>[1]) => {
+        if (typeof window === 'undefined') return;
+        const nextParams = applyAgentWorkspaceQueryPatch(new URLSearchParams(window.location.search), patch);
+        const query = nextParams.toString();
+        const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}`;
+        window.history.replaceState(null, '', nextUrl);
+    }, []);
+
+    const selectRun = useCallback((runId: string | null) => {
+        setSelectedRunId(runId);
+        updateWorkspaceQuery({ runId });
+    }, [updateWorkspaceQuery]);
+
+    const selectWorkspaceView = useCallback((view: AgentWorkspaceView) => {
+        setWorkspaceView(view);
+        updateWorkspaceQuery({ view });
+    }, [updateWorkspaceQuery]);
+
+    const selectAgentMode = useCallback((mode: AgentWorkspaceMode) => {
+        setSelectedAgent(mode);
+        updateWorkspaceQuery({ agent: mode });
+    }, [updateWorkspaceQuery]);
+
+    const selectDefinition = useCallback((definitionId: string) => {
+        setSelectedDefinitionId(definitionId);
+        updateWorkspaceQuery({ definitionId });
+    }, [updateWorkspaceQuery]);
+
+    const selectCustomResultTab = useCallback((tab: CustomResultTab) => {
+        setCustomResultTab(tab);
+        updateWorkspaceQuery({ resultTab: tab });
+    }, [updateWorkspaceQuery]);
+
+    const selectTraceTab = useCallback((tab: TraceTab) => {
+        setTraceTab(tab);
+        updateWorkspaceQuery({ traceTab: tab });
+    }, [updateWorkspaceQuery]);
+
+    const updateReportStatusFilter = useCallback((value: ReportReviewFilter) => {
+        setReportStatusFilter(value);
+        updateWorkspaceQuery({ reportStatus: value });
+    }, [updateWorkspaceQuery]);
+
+    const updateReportSeverityFilter = useCallback((value: string) => {
+        setReportSeverityFilter(value);
+        updateWorkspaceQuery({ reportSeverity: value });
+    }, [updateWorkspaceQuery]);
+
+    const updateReportSearchQuery = useCallback((value: string) => {
+        setReportSearchQuery(value);
+        updateWorkspaceQuery({ reportQ: value });
+    }, [updateWorkspaceQuery]);
+
+    const updateReportSearchType = useCallback((value: ReportSearchTypeFilter) => {
+        setReportSearchType(value);
+        updateWorkspaceQuery({ reportType: value });
+    }, [updateWorkspaceQuery]);
+
+    const updateReportSearchSeverity = useCallback((value: string) => {
+        setReportSearchSeverity(value);
+        updateWorkspaceQuery({ reportSeverity: value });
+    }, [updateWorkspaceQuery]);
+
+    const updateHistorySearch = useCallback((value: string) => {
+        setHistorySearch(value);
+        updateWorkspaceQuery({ q: value });
+    }, [updateWorkspaceQuery]);
+
+    const updateHistoryStatusFilter = useCallback((value: AgentHistoryStatusFilter) => {
+        setHistoryStatusFilter(value);
+        updateWorkspaceQuery({ status: value });
+    }, [updateWorkspaceQuery]);
+
+    const updateHistoryTypeFilter = useCallback((value: AgentHistoryTypeFilter) => {
+        setHistoryTypeFilter(value);
+        updateWorkspaceQuery({ type: value });
+    }, [updateWorkspaceQuery]);
 
     const fetchRuntimeSettings = async () => {
         try {
@@ -1172,22 +1987,101 @@ export default function AgentsPage() {
         } catch (e) { console.error("Failed to fetch agent definitions", e); }
     };
 
+    const fetchQueueStatus = async () => {
+        setQueueLoading(true);
+        setQueueError(null);
+        try {
+            const res = await fetch(`${API_BASE}/api/agents/queue-status`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            setQueueStatus(await res.json());
+        } catch (e: unknown) {
+            const message = e instanceof Error ? e.message : 'Failed to fetch queue status.';
+            setQueueError(message);
+        } finally {
+            setQueueLoading(false);
+        }
+    };
+
+    const fetchReportSearch = async () => {
+        setReportSearchLoading(true);
+        try {
+            const params = new URLSearchParams({ limit: '50' });
+            if (currentProject?.id) params.set('project_id', currentProject.id);
+            if (reportSearchQuery.trim()) params.set('query', reportSearchQuery.trim());
+            if (reportSearchType !== 'all') params.set('item_type', reportSearchType);
+            if (reportSearchSeverity !== 'all') params.set('severity', reportSearchSeverity);
+            const res = await fetch(`${API_BASE}/api/agents/reports/search?${params}`);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            setReportSearchResults(Array.isArray(data.items) ? data.items : []);
+        } catch (e) {
+            console.error('Failed to search agent reports', e);
+            setReportSearchResults([]);
+        } finally {
+            setReportSearchLoading(false);
+        }
+    };
+
     useEffect(() => {
         fetchHistory();
         fetchSessions();
         fetchToolCatalog();
         fetchAgentDefinitions();
         fetchRuntimeSettings();
+        fetchQueueStatus();
         if (typeof window !== 'undefined') {
-            const runId = new URLSearchParams(window.location.search).get('runId');
-            if (runId) setSelectedRunId(runId);
+            const queryState = parseAgentWorkspaceQuery(new URLSearchParams(window.location.search));
+            setWorkspaceView(queryState.view);
+            if (queryState.runId) setSelectedRunId(queryState.runId);
+            setSelectedAgent(queryState.agent);
+            setSelectedDefinitionId(queryState.definitionId);
+            setReturnToAfterSave(queryState.returnTo);
+            if (queryState.create) {
+                setBuilderOpen(true);
+            }
+            setCustomResultTab(queryState.resultTab);
+            setTraceTab(queryState.traceTab);
+            setReportStatusFilter(queryState.reportStatus);
+            setReportSeverityFilter(queryState.reportSeverity);
+            setReportSearchQuery(queryState.reportQ);
+            setReportSearchSeverity(queryState.reportSeverity);
+            setReportSearchType(queryState.reportType);
+            setHistoryStatusFilter(queryState.status);
+            setHistoryTypeFilter(queryState.type);
+            setHistorySearch(queryState.q);
         }
-        return () => { if (pollInterval.current) clearInterval(pollInterval.current); }
+        return () => {
+            if (pollInterval.current) clearInterval(pollInterval.current);
+            agentEventSourceRef.current?.close();
+            if (agentEventReconnectTimerRef.current) clearTimeout(agentEventReconnectTimerRef.current);
+        }
     }, [currentProject?.id]);  // Re-fetch when project changes
 
     useEffect(() => {
+        if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('resultTab')) return;
         setCustomResultTab('overview');
     }, [activeRun?.id]);
+
+    useEffect(() => {
+        if (workspaceView !== 'reports') return;
+        const timer = window.setTimeout(() => {
+            void fetchReportSearch();
+        }, 200);
+        return () => window.clearTimeout(timer);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [workspaceView, currentProject?.id, reportSearchQuery, reportSearchType, reportSearchSeverity]);
+
+    useEffect(() => {
+        if (workspaceView !== 'queue') return;
+        void fetchQueueStatus();
+        const interval = window.setInterval(() => void fetchQueueStatus(), 5000);
+        return () => window.clearInterval(interval);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [workspaceView]);
+
+    useEffect(() => {
+        agentEventsRef.current = agentEvents;
+    }, [agentEvents]);
 
     const openAssistantWithPrompt = (prompt: string) => {
         window.dispatchEvent(new CustomEvent('open-ai-assistant'));
@@ -1204,6 +2098,7 @@ export default function AgentsPage() {
                 const data = await res.json();
                 setActiveRun(data);
                 fetchAgentEvents(id);
+                fetchAgentTrace(id);
 
                 // If actively running, keep polling
                 if (LIVE_AGENT_STATUSES.has(data.status)) {
@@ -1221,6 +2116,7 @@ export default function AgentsPage() {
                                 const finalData = await finalRes.json();
                                 setActiveRun(finalData);
                                 fetchAgentEvents(id);
+                                fetchAgentTrace(id);
                             }
                             fetchHistory(); // Refresh list to update status
                         }, 500);
@@ -1232,15 +2128,41 @@ export default function AgentsPage() {
         }
     };
 
-    const fetchAgentEvents = async (id: string) => {
+    const mergeAgentEvents = (incoming: AgentRunEvent[]) => {
+        setAgentEvents(prev => {
+            const bySequence = new Map<number, AgentRunEvent>();
+            [...prev, ...incoming].forEach(item => bySequence.set(item.sequence, item));
+            return [...bySequence.values()].sort((a, b) => a.sequence - b.sequence);
+        });
+    };
+
+    const fetchAgentEvents = async (id: string, afterSequence = 0) => {
         try {
-            const res = await fetch(`${API_BASE}/api/agents/runs/${id}/events?limit=100`);
+            const res = await fetch(`${API_BASE}/api/agents/runs/${id}/events?limit=200&after_sequence=${afterSequence}`);
             if (res.ok) {
                 const data = await res.json();
-                setAgentEvents(Array.isArray(data) ? data : []);
+                if (Array.isArray(data)) {
+                    if (afterSequence > 0) mergeAgentEvents(data);
+                    else setAgentEvents(data);
+                }
             }
         } catch (e) {
             console.error("Failed to fetch agent events", e);
+        }
+    };
+
+    const fetchAgentTrace = async (id: string) => {
+        setTraceLoading(true);
+        try {
+            const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
+            const res = await fetch(`${API_BASE}/api/agents/runs/${id}/trace${projectQuery}`);
+            if (res.ok) {
+                setAgentTrace(await res.json());
+            }
+        } catch (e) {
+            console.error("Failed to fetch agent trace", e);
+        } finally {
+            setTraceLoading(false);
         }
     };
 
@@ -1303,11 +2225,11 @@ export default function AgentsPage() {
                 setFlowModalOpen(true);
             } else {
                 const error = await res.json();
-                alert(`Failed to load flow details: ${error.detail || 'Unknown error'}`);
+                toast.error(`Failed to load flow details: ${error.detail || 'Unknown error'}`);
             }
         } catch (e) {
             console.error("Failed to fetch flow details", e);
-            alert("Failed to load flow details. Please try again.");
+            toast.error("Failed to load flow details. Please try again.");
         } finally {
             setLoadingFlowDetails(false);
         }
@@ -1574,13 +2496,15 @@ export default function AgentsPage() {
             if (res.ok) {
                 const data = await res.json();
                 setSplitResult(data);
+                setWorkspaceStatus(`Split spec into ${data.count} files.`);
+                toast.success('Spec split into individual tests');
             } else {
                 const error = await res.json();
-                alert(`Failed to split spec: ${error.detail || 'Unknown error'}`);
+                toast.error(`Failed to split spec: ${error.detail || 'Unknown error'}`);
             }
         } catch (e) {
             console.error("Failed to split spec", e);
-            alert("Failed to split spec. Please try again.");
+            toast.error("Failed to split spec. Please try again.");
         } finally {
             setSplittingSpec(false);
         }
@@ -1592,6 +2516,9 @@ export default function AgentsPage() {
             setActiveRun(null);
             setSpecResult(null);
             setAgentEvents([]);
+            setAgentTrace(null);
+            setTraceSearch('');
+            setTraceSpanType('');
             return;
         }
 
@@ -1611,6 +2538,66 @@ export default function AgentsPage() {
             if (pollInterval.current) clearInterval(pollInterval.current);
         };
     }, [selectedRunId]);
+
+    useEffect(() => {
+        if (!selectedRunId || !activeRun || !LIVE_AGENT_STATUSES.has(activeRun.status)) return;
+        let cancelled = false;
+        let attempts = 0;
+
+        const backfillEvents = async () => {
+            const lastSequence = agentEventsRef.current.reduce((max, item) => Math.max(max, item.sequence), 0);
+            await fetchAgentEvents(selectedRunId, lastSequence);
+            await fetchAgentTrace(selectedRunId);
+        };
+
+        const scheduleReconnect = () => {
+            if (cancelled) return;
+            if (agentEventReconnectTimerRef.current) clearTimeout(agentEventReconnectTimerRef.current);
+            attempts += 1;
+            const delay = Math.min(15000, 750 * Math.pow(2, Math.min(attempts, 5)));
+            agentEventReconnectTimerRef.current = setTimeout(async () => {
+                agentEventReconnectTimerRef.current = null;
+                await backfillEvents();
+                connect();
+            }, delay);
+        };
+
+        const connect = () => {
+            if (cancelled || agentEventSourceRef.current) return;
+            const lastSequence = agentEventsRef.current.reduce((max, item) => Math.max(max, item.sequence), 0);
+            const projectQuery = currentProject?.id ? `&project_id=${encodeURIComponent(currentProject.id)}` : '';
+            const source = new EventSource(`${API_BASE}/api/agents/runs/${selectedRunId}/events/stream?after_sequence=${lastSequence}${projectQuery}`);
+            agentEventSourceRef.current = source;
+            source.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    attempts = 0;
+                    mergeAgentEvents([data]);
+                    void fetchAgentTrace(selectedRunId);
+                } catch {
+                    source.close();
+                    agentEventSourceRef.current = null;
+                    scheduleReconnect();
+                }
+            };
+            source.onerror = () => {
+                source.close();
+                agentEventSourceRef.current = null;
+                scheduleReconnect();
+            };
+        };
+
+        void backfillEvents();
+        connect();
+        return () => {
+            cancelled = true;
+            if (agentEventReconnectTimerRef.current) clearTimeout(agentEventReconnectTimerRef.current);
+            agentEventReconnectTimerRef.current = null;
+            agentEventSourceRef.current?.close();
+            agentEventSourceRef.current = null;
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedRunId, activeRun?.status, currentProject?.id]);
 
 
     const selectedDefinition = agentDefinitions.find(agent => agent.id === selectedDefinitionId);
@@ -1648,6 +2635,20 @@ export default function AgentsPage() {
         setBuilderOpen(true);
     };
 
+    const editDefinitionFromMenu = (definition: AgentDefinition, event?: Event) => {
+        event?.preventDefault();
+        event?.stopPropagation();
+        setOpenDefinitionMenuId(null);
+        editDefinition(definition);
+    };
+
+    const archiveDefinitionFromMenu = (definition: AgentDefinition, event?: Event) => {
+        event?.preventDefault();
+        event?.stopPropagation();
+        setOpenDefinitionMenuId(null);
+        setArchiveCandidate(definition);
+    };
+
     const toggleDefinitionTool = (toolId: string) => {
         setDefinitionForm(prev => ({
             ...prev,
@@ -1669,16 +2670,17 @@ export default function AgentsPage() {
     };
 
     const saveDefinition = async () => {
+        setDefinitionFormError(null);
         if (!definitionForm.name.trim()) {
-            alert('Agent name is required');
+            setDefinitionFormError('Agent name is required.');
             return;
         }
         if (!definitionForm.system_prompt.trim()) {
-            alert('System prompt is required');
+            setDefinitionFormError('System prompt is required.');
             return;
         }
         if (definitionForm.tool_ids.length === 0) {
-            alert('Select at least one tool');
+            setDefinitionFormError('Select at least one tool.');
             return;
         }
 
@@ -1708,18 +2710,23 @@ export default function AgentsPage() {
             }
             const saved = await res.json();
             await fetchAgentDefinitions();
-            setSelectedDefinitionId(saved.id);
-            setSelectedAgent('custom');
+            selectDefinition(saved.id);
+            selectAgentMode('custom');
+            setWorkspaceView(returnToAfterSave ? 'library' : 'run');
+            updateWorkspaceQuery({ create: false, view: returnToAfterSave ? 'library' : 'run' });
             setBuilderOpen(false);
+            setWorkspaceStatus(`Saved ${saved.name || 'custom agent'}.`);
+            toast.success('Custom agent saved');
         } catch (e: any) {
-            alert(e.message || 'Failed to save agent');
+            const message = e.message || 'Failed to save agent';
+            setDefinitionFormError(message);
+            toast.error(message);
         } finally {
             setSavingDefinition(false);
         }
     };
 
     const archiveDefinition = async (definition: AgentDefinition) => {
-        if (!confirm(`Archive "${definition.name}"? Existing run history will remain.`)) return;
         try {
             const res = await fetch(`${API_BASE}/api/agents/definitions/${definition.id}${currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : ''}`, {
                 method: 'DELETE',
@@ -1729,27 +2736,35 @@ export default function AgentsPage() {
                 throw new Error(err.detail || 'Failed to archive agent');
             }
             await fetchAgentDefinitions();
-            if (selectedDefinitionId === definition.id) setSelectedDefinitionId('');
+            if (selectedDefinitionId === definition.id) selectDefinition('');
+            setWorkspaceStatus(`Archived ${definition.name}.`);
+            toast.success('Custom agent archived');
         } catch (e: any) {
-            alert(e.message || 'Failed to archive agent');
+            const message = e.message || 'Failed to archive agent';
+            toast.error(message);
         }
     };
 
     const handleRun = async () => {
-        if (selectedAgent === 'custom' && !selectedDefinitionId) {
-            alert("Select or create a custom agent first");
-            return;
-        }
-        if (selectedAgent !== 'custom' && !url) {
-            alert("URL is required");
+        const validationError = validateAgentRunInput({
+            selectedAgent,
+            selectedDefinitionId,
+            url,
+            authType,
+            sessionId,
+            testData,
+        });
+        setRunFormError(validationError);
+        if (validationError) {
             return;
         }
 
         setIsStarting(true);
+        setWorkspaceStatus('Starting agent run...');
         try {
             const selectedBrowserAuthSessionId = selectedAgent !== 'writer' && authType === 'session' ? sessionId.trim() : '';
             if (selectedAgent !== 'writer' && authType === 'session' && !selectedBrowserAuthSessionId) {
-                alert("Select a browser login session");
+                setRunFormError('Select a browser login session.');
                 setIsStarting(false);
                 return;
             }
@@ -1757,7 +2772,7 @@ export default function AgentsPage() {
                 ? sessions.find(session => session.id === selectedBrowserAuthSessionId)
                 : undefined;
             if (selectedBrowserAuthSessionId && (!selectedBrowserAuthSession || !isBrowserAuthSessionSelectable(selectedBrowserAuthSession))) {
-                alert("Select an active browser login session");
+                setRunFormError('Select an active browser login session.');
                 setIsStarting(false);
                 return;
             }
@@ -1781,7 +2796,7 @@ export default function AgentsPage() {
                 try {
                     testDataObj = JSON.parse(testData);
                 } catch (e) {
-                    alert("Invalid JSON in test data");
+                    setRunFormError('Test data must be valid JSON.');
                     setIsStarting(false);
                     return;
                 }
@@ -1860,10 +2875,14 @@ export default function AgentsPage() {
             const data = await res.json();
             // Refresh history but select the new run
             await fetchHistory();
-            setSelectedRunId(data.run_id);
+            selectRun(data.run_id);
+            setWorkspaceStatus('Agent run started.');
+            toast.success('Agent run started');
 
         } catch (e: any) {
-            alert(e.message);
+            const message = e.message || 'Failed to start agent run.';
+            setRunFormError(message);
+            toast.error(message);
         } finally {
             setIsStarting(false);
         }
@@ -1883,21 +2902,29 @@ export default function AgentsPage() {
             }
             setActiveRun(data);
             await fetchHistory();
+            setWorkspaceStatus(`Run ${action} request sent.`);
+            toast.success(`Run ${action} request sent`);
         } catch (e: any) {
-            alert(e.message || `Failed to ${action} agent run`);
+            toast.error(e.message || `Failed to ${action} agent run`);
         } finally {
             setRunControlPending(null);
         }
     };
 
+    const exportAgentTrace = () => {
+        if (!activeRun) return;
+        const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
+        window.open(`${API_BASE}/api/agents/runs/${activeRun.id}/trace/export${projectQuery}`, '_blank', 'noopener,noreferrer');
+    };
+
     const handleSynthesize = async () => {
         if (!selectedRunId || !activeRun || activeRun.agent_type !== 'exploratory') {
-            alert("Please select a completed exploratory run");
+            toast.error("Please select a completed exploratory run");
             return;
         }
 
         if (activeRun.status !== 'completed') {
-            alert("Please wait for the exploration to complete");
+            toast.error("Please wait for the exploration to complete");
             return;
         }
 
@@ -1921,13 +2948,20 @@ export default function AgentsPage() {
             }, 2000);
 
         } catch (e: any) {
-            alert(e.message);
+            toast.error(e.message || 'Spec synthesis failed');
             setIsSynthesizing(false);
         }
     };
 
+    const dateFormatter = useMemo(() => new Intl.DateTimeFormat(undefined, {
+        hour: 'numeric',
+        minute: 'numeric',
+        day: 'numeric',
+        month: 'short',
+    }), []);
+
     const formatDate = (iso: string) => {
-        return new Date(iso).toLocaleString('en-US', { hour: 'numeric', minute: 'numeric', day: 'numeric', month: 'short' });
+        return dateFormatter.format(new Date(iso));
     };
 
     const flowSpecLatestImage = sortArtifactsByModifiedAt((flowSpecAgentRun?.artifacts || []).filter(artifact => artifact.type === 'image'))[0];
@@ -1943,85 +2977,495 @@ export default function AgentsPage() {
         flowSpecAgentRun?.progress?.browser_auth_failure ||
         flowSpecAgentRun?.result?.browser_auth_failure
     );
+    const historyCounts = useMemo(() => getAgentHistoryCounts(history), [history]);
+    const filteredHistory = useMemo(
+        () => filterAgentHistoryRuns(history, {
+            q: historySearch,
+            status: historyStatusFilter,
+            type: historyTypeFilter,
+        }),
+        [history, historySearch, historyStatusFilter, historyTypeFilter]
+    );
+    const queueWarnings = useMemo(() => {
+        const stale = queueStatus?.stale_running ?? 0;
+        const orphaned = queueStatus?.orphaned_tasks ?? 0;
+        const noWorkers = (queueStatus?.active || queueStatus?.queued || 0) > 0 && (queueStatus?.workers_alive ?? queueStatus?.worker_processes_alive ?? 0) === 0;
+        return {
+            stale,
+            orphaned,
+            noWorkers,
+            degraded: stale > 0 || orphaned > 0 || noWorkers,
+        };
+    }, [queueStatus]);
+    const selectedDefinitionToolLabels = useMemo(() => {
+        if (!selectedDefinition) return [];
+        return selectedDefinition.tool_ids.map(toolId => toolCatalog.find(tool => tool.id === toolId)?.label || toolId);
+    }, [selectedDefinition, toolCatalog]);
+    const runPlanRows = useMemo(() => {
+        const authMode = selectedAgent === 'writer'
+            ? 'N/A'
+            : authType === 'session'
+            ? (sessions.find(session => session.id === sessionId)?.name || sessionId || 'Session required')
+            : authType === 'credentials'
+            ? `Credentials via ${authCredentials.loginUrl || '/login'}`
+            : 'No auth';
+        const runtime = selectedAgent === 'custom' ? (selectedDefinition?.runtime || agentRuntime) : agentRuntime;
+        const timeout = selectedAgent === 'custom'
+            ? `${Math.ceil((selectedDefinition?.timeout_seconds || 1800) / 60)} minutes`
+            : selectedAgent === 'exploratory'
+            ? `${timeLimitMinutes} minutes`
+            : 'Default';
+        return [
+            ['Agent', selectedAgent === 'custom' ? selectedDefinition?.name || 'Custom agent required' : selectedAgent === 'writer' ? 'Writer' : 'Enhanced Explorer'],
+            ['Runtime', runtime === 'hermes' ? 'Hermes' : 'Claude SDK'],
+            ['Target', url.trim() || (selectedAgent === 'custom' ? 'Optional' : 'Required')],
+            ['Auth', authMode],
+            ['Timeout', timeout],
+            ['Tools', selectedAgent === 'custom' ? selectedDefinitionToolLabels.slice(0, 4).join(', ') || 'Select a saved agent' : 'Built-in browser exploration'],
+            ['Test data refs', testDataRefs.trim() || selectedDefinition?.test_data_refs?.join(', ') || 'None'],
+            ['Focus', focusAreas.trim() || 'General coverage'],
+            ['Exclusions', excludedPatterns.trim() || 'None'],
+            ['Queue', queueStatus ? `${queueStatus.active ?? 0} active, ${queueStatus.queued ?? 0} queued · ${queueStateLabel(queueStatus)}` : 'Not loaded'],
+        ];
+    }, [agentRuntime, authCredentials.loginUrl, authType, excludedPatterns, focusAreas, queueStatus, selectedAgent, selectedDefinition, selectedDefinitionToolLabels, sessionId, sessions, testDataRefs, timeLimitMinutes, url]);
+    const workspaceTabs: Array<{ key: AgentWorkspaceView; label: string; count?: number }> = [
+        { key: 'run', label: 'Run' },
+        { key: 'library', label: 'Agent Library', count: agentDefinitions.length },
+        { key: 'reports', label: 'Reports', count: reportSearchResults.length || undefined },
+        { key: 'queue', label: 'Queue', count: (queueStatus?.active || 0) + (queueStatus?.queued || 0) || undefined },
+    ];
+    const agentModeTabs: AgentWorkspaceMode[] = ['exploratory', 'custom'];
+    const handleAgentModeTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+        if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const currentIndex = agentModeTabs.indexOf(selectedAgent);
+        const lastIndex = agentModeTabs.length - 1;
+        const nextIndex = event.key === 'Home'
+            ? 0
+            : event.key === 'End'
+            ? lastIndex
+            : event.key === 'ArrowRight' || event.key === 'ArrowDown'
+            ? (currentIndex + 1) % agentModeTabs.length
+            : (currentIndex - 1 + agentModeTabs.length) % agentModeTabs.length;
+        const nextMode = agentModeTabs[nextIndex];
+        selectAgentMode(nextMode);
+        window.requestAnimationFrame(() => document.getElementById(`agents-agent-tab-${nextMode}`)?.focus());
+    };
 
     return (
-        <PageLayout tier="wide" style={{ paddingBottom: '4rem', height: '100vh', display: 'flex', flexDirection: 'column' }}>
+        <PageLayout tier="wide" style={{ paddingBottom: '4rem' }}>
+            <style>{`
+                .agents-workspace-grid {
+                    display: grid;
+                    grid-template-columns: minmax(220px, 0.72fr) minmax(300px, 0.95fr) minmax(0, 2fr);
+                    gap: 1rem;
+                    align-items: start;
+                }
+                .agents-panel {
+                    min-width: 0;
+                }
+                .agents-panel-scroll {
+                    max-height: calc(100vh - 11rem);
+                    overflow-y: auto;
+                }
+                .agents-mobile-trigger {
+                    display: none;
+                }
+                .agents-desktop-content {
+                    display: block;
+                }
+                .agents-history-row {
+                    width: 100%;
+                    min-height: 44px;
+                    text-align: left;
+                    border: 0;
+                    border-bottom: 1px solid var(--border);
+                    background: transparent;
+                    color: var(--text);
+                    cursor: pointer;
+                    transition: background 0.16s var(--ease-smooth), border-color 0.16s var(--ease-smooth);
+                }
+                .agents-history-row:focus-visible,
+                .agents-segment-button:focus-visible,
+                .agents-icon-button:focus-visible {
+                    outline: 2px solid var(--primary);
+                    outline-offset: 2px;
+                }
+                .agents-visually-hidden {
+                    position: absolute;
+                    width: 1px;
+                    height: 1px;
+                    padding: 0;
+                    margin: -1px;
+                    overflow: hidden;
+                    clip: rect(0, 0, 0, 0);
+                    white-space: nowrap;
+                    border: 0;
+                }
+                .agents-history-filter-grid {
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                    gap: 0.5rem;
+                    min-width: 0;
+                }
+                .agents-history-filter-grid > div {
+                    min-width: 0;
+                }
+                .agents-history-filter-trigger {
+                    height: 36px !important;
+                    min-height: 36px !important;
+                    padding: 0 0.65rem !important;
+                    font-size: 0.78rem;
+                    line-height: 1;
+                    white-space: nowrap;
+                }
+                .agents-history-filter-trigger > span {
+                    min-width: 0;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+                .agents-history-filter-trigger svg {
+                    width: 14px;
+                    height: 14px;
+                }
+                .agents-workspace-tabs {
+                    display: flex;
+                    gap: 0.5rem;
+                    flex-wrap: wrap;
+                    margin-bottom: 1rem;
+                }
+                .agents-workspace-tab {
+                    min-height: 40px;
+                    padding: 0.5rem 0.75rem;
+                    border: 1px solid var(--border);
+                    border-radius: 8px;
+                    background: var(--surface);
+                    color: var(--text-secondary);
+                    font-size: 0.86rem;
+                    font-weight: 700;
+                    cursor: pointer;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 0.45rem;
+                    transition: background 0.16s var(--ease-smooth), color 0.16s var(--ease-smooth), border-color 0.16s var(--ease-smooth);
+                }
+                .agents-workspace-tab[data-active="true"] {
+                    background: var(--primary-glow);
+                    color: var(--primary);
+                    border-color: var(--primary);
+                }
+                .agents-workspace-tab:focus-visible,
+                .agents-action-button:focus-visible {
+                    outline: 2px solid var(--primary);
+                    outline-offset: 2px;
+                }
+                .agents-run-plan {
+                    display: grid;
+                    gap: 0.45rem;
+                    margin-bottom: 0.85rem;
+                    padding: 0.8rem;
+                    border: 1px solid var(--border);
+                    border-radius: 8px;
+                    background: var(--surface-hover);
+                }
+                .agents-run-plan-row {
+                    display: grid;
+                    grid-template-columns: 92px minmax(0, 1fr);
+                    gap: 0.5rem;
+                    font-size: 0.78rem;
+                    line-height: 1.35;
+                }
+                .agents-run-plan-row strong {
+                    color: var(--text-secondary);
+                    font-weight: 750;
+                }
+                .agents-run-plan-row span {
+                    min-width: 0;
+                    overflow-wrap: anywhere;
+                }
+                .agents-builder-grid {
+                    display: grid;
+                    grid-template-columns: minmax(0, 0.9fr) minmax(280px, 1.1fr);
+                    gap: 1rem;
+                }
+                .agents-report-search-grid {
+                    display: grid;
+                    grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(150px, 0.35fr));
+                    gap: 0.65rem;
+                }
+                .agents-definition-action-trigger {
+                    width: 32px;
+                    height: 32px;
+                    margin-right: 0.45rem;
+                    border-radius: 8px;
+                    color: var(--text-secondary) !important;
+                }
+                .agents-definition-action-trigger:hover,
+                .agents-definition-action-trigger[data-state="open"] {
+                    background: var(--surface-active) !important;
+                    color: var(--text) !important;
+                }
+                .agents-definition-action-trigger:focus-visible {
+                    outline: 2px solid var(--primary);
+                    outline-offset: 2px;
+                }
+                .agents-definition-action-menu {
+                    min-width: 132px;
+                    padding: 0.35rem;
+                    background: var(--background-raised) !important;
+                    border-color: var(--border) !important;
+                    border-radius: 10px !important;
+                    box-shadow: 0 14px 32px rgba(0, 0, 0, 0.35) !important;
+                }
+                .agents-definition-action-item {
+                    min-height: 32px;
+                    padding: 0.4rem 0.55rem;
+                    border-radius: 7px;
+                    font-size: 0.82rem;
+                    font-weight: 650;
+                    cursor: pointer;
+                }
+                .agents-definition-action-item[data-highlighted] {
+                    background: var(--surface-hover);
+                    color: var(--text);
+                }
+                .agents-definition-action-item svg {
+                    width: 14px;
+                    height: 14px;
+                }
+                .agents-definition-action-item-danger {
+                    color: var(--danger) !important;
+                }
+                .agents-definition-action-item-danger[data-highlighted] {
+                    background: var(--danger-muted);
+                    color: var(--danger) !important;
+                }
+                @media (max-width: 1180px) {
+                    .agents-workspace-grid {
+                        grid-template-columns: minmax(260px, 0.85fr) minmax(0, 1.35fr);
+                    }
+                    .agents-setup-panel {
+                        grid-column: 1;
+                    }
+                    .agents-output-panel {
+                        grid-column: 2;
+                        grid-row: 1 / span 2;
+                    }
+                }
+                @media (max-width: 860px) {
+                    .agents-workspace-grid {
+                        grid-template-columns: minmax(0, 1fr);
+                    }
+                    .agents-setup-panel,
+                    .agents-output-panel {
+                        grid-column: auto;
+                        grid-row: auto;
+                    }
+                    .agents-panel-scroll {
+                        max-height: none;
+                        overflow: visible;
+                    }
+                    .agents-mobile-trigger {
+                        display: inline-flex;
+                    }
+                    .agents-desktop-content[data-open="false"] {
+                        display: none;
+                    }
+                }
+                @media (max-width: 720px) {
+                    .agents-builder-grid {
+                        grid-template-columns: minmax(0, 1fr);
+                    }
+                    .agents-report-search-grid {
+                        grid-template-columns: minmax(0, 1fr);
+                    }
+                }
+            `}</style>
             <PageHeader
                 title="Autonomous Agents"
                 subtitle="Deploy AI agents to explore, test, and specify your application autonomously."
                 icon={<Bot size={20} />}
             />
 
-            <div style={{ display: 'grid', gridTemplateColumns: '280px 350px 1fr', gap: '1.5rem', flex: 1, minHeight: 0 }}>
+            <div aria-live="polite" className="agents-visually-hidden">{workspaceStatus}</div>
+
+            <div className="agents-workspace-tabs" role="tablist" aria-label="Agents workspace views">
+                {workspaceTabs.map(tab => (
+                    <button
+                        key={tab.key}
+                        type="button"
+                        role="tab"
+                        aria-selected={workspaceView === tab.key}
+                        data-active={workspaceView === tab.key ? 'true' : 'false'}
+                        className="agents-workspace-tab"
+                        onClick={() => selectWorkspaceView(tab.key)}
+                    >
+                        {tab.label}
+                        {tab.count ? <Badge variant="secondary">{tab.count}</Badge> : null}
+                    </button>
+                ))}
+            </div>
+
+            {workspaceView === 'run' && (
+            <div className="agents-workspace-grid">
 
                 {/* History Sidebar */}
-                <div className="card" style={{ padding: '0', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                    <div style={{ padding: '1rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>Run History</h3>
-                        <button className="btn-icon" type="button" onClick={fetchHistory} title="Refresh run history" aria-label="Refresh run history">
-                            <RotateCcw size={14} />
-                        </button>
-                    </div>
-                    <div style={{ flex: 1, overflowY: 'auto' }}>
-                        {history.length === 0 ? (
-                            <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                                No runs yet.
+                <Collapsible open={historyOpen} onOpenChange={setHistoryOpen} className="agents-panel">
+                    <div className="card" style={{ padding: '0', overflow: 'hidden' }}>
+                        <div style={{ padding: '0.8rem 0.9rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
+                            <div>
+                                <h3 style={{ fontWeight: 700, fontSize: '0.9rem', margin: 0 }}>Run History</h3>
+                                <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
+                                    {filteredHistory.length} of {history.length} runs
+                                </p>
                             </div>
-                        ) : (
-                            history.map(run => (
-                                <div
-                                    key={run.id}
-                                    onClick={() => setSelectedRunId(run.id)}
-                                    style={{
-                                        padding: '0.75rem 1rem',
-                                        borderBottom: '1px solid var(--border)',
-                                        cursor: 'pointer',
-                                        background: selectedRunId === run.id ? 'rgba(59, 130, 246, 0.06)' : 'transparent',
-                                        borderLeft: selectedRunId === run.id ? '3px solid var(--primary)' : '3px solid transparent'
-                                    }}
-                                >
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
-                                        <span style={{ fontWeight: 600, fontSize: '0.85rem', color: run.agent_type === 'custom' ? 'var(--success)' : run.agent_type === 'writer' || run.agent_type === 'spec_generation' ? 'var(--primary)' : 'var(--warning)' }}>
-                                            {agentRunDisplayName(run)}
-                                        </span>
-                                        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{formatDate(run.created_at)}</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                <button className="btn-icon agents-icon-button" type="button" onClick={fetchHistory} title="Refresh run history" aria-label="Refresh run history">
+                                    <RotateCcw size={14} />
+                                </button>
+                                <CollapsibleTrigger asChild>
+                                    <button className="btn-icon agents-icon-button agents-mobile-trigger" type="button" aria-label={historyOpen ? 'Collapse run history' : 'Expand run history'}>
+                                        <ChevronDown size={14} />
+                                    </button>
+                                </CollapsibleTrigger>
+                            </div>
+                        </div>
+                        <CollapsibleContent forceMount>
+                            <div className="agents-desktop-content" data-open={historyOpen ? 'true' : 'false'}>
+                                <div style={{ padding: '0.75rem', display: 'grid', gap: '0.55rem', borderBottom: '1px solid var(--border)' }}>
+                                    <Label htmlFor="agents-history-search" className="agents-visually-hidden">Search run history</Label>
+                                    <div style={{ position: 'relative' }}>
+                                        <Search size={14} style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
+                                        <Input
+                                            id="agents-history-search"
+                                            name="agents-history-search"
+                                            value={historySearch}
+                                            onChange={event => updateHistorySearch(event.target.value)}
+                                            placeholder="Search URL, name, or ID"
+                                            autoComplete="off"
+                                            style={{ paddingLeft: '2rem', minHeight: 40 }}
+                                        />
                                     </div>
-                                    <div style={{ fontSize: '0.8rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'var(--text)' }}>
-                                        {run.config?.url?.replace('https://', '') || 'No URL'}
-                                    </div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', marginTop: '0.25rem' }}>
-                                        {run.status === 'running' || run.status === 'queued' || run.status === 'pending' ? <Loader2 size={12} className="spin" color="var(--primary)" /> :
-                                            run.status === 'paused' ? <Pause size={12} color="var(--warning)" /> :
-                                            run.status === 'cancelled' ? <X size={12} color="var(--danger)" /> :
-                                            run.status === 'failed' ? <AlertTriangle size={12} color="var(--danger)" /> :
-                                                <CheckCircle2 size={12} color="var(--success)" />}
-                                        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textTransform: 'capitalize' }}>{run.status}</span>
+                                    <div className="agents-history-filter-grid">
+                                        <div>
+                                            <Select value={historyStatusFilter} onValueChange={value => updateHistoryStatusFilter(value as AgentHistoryStatusFilter)}>
+                                                <SelectTrigger aria-label="Filter history by status" className="agents-history-filter-trigger">
+                                                    <span className="truncate">Status: {AGENT_HISTORY_STATUS_FILTER_LABELS[historyStatusFilter]}</span>
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    <SelectItem value="all">All statuses ({historyCounts.status.all})</SelectItem>
+                                                    <SelectItem value="active">Active ({historyCounts.status.active})</SelectItem>
+                                                    <SelectItem value="completed">Completed ({historyCounts.status.completed})</SelectItem>
+                                                    <SelectItem value="failed">Failed ({historyCounts.status.failed})</SelectItem>
+                                                    <SelectItem value="cancelled">Cancelled ({historyCounts.status.cancelled})</SelectItem>
+                                                    <SelectItem value="paused">Paused ({historyCounts.status.paused})</SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
+                                        <div>
+                                            <Select value={historyTypeFilter} onValueChange={value => updateHistoryTypeFilter(value as AgentHistoryTypeFilter)}>
+                                                <SelectTrigger aria-label="Filter history by agent type" className="agents-history-filter-trigger">
+                                                    <span className="truncate">Type: {AGENT_HISTORY_TYPE_FILTER_LABELS[historyTypeFilter]}</span>
+                                                </SelectTrigger>
+                                                <SelectContent>
+                                                    <SelectItem value="all">All types ({historyCounts.type.all})</SelectItem>
+                                                    <SelectItem value="exploratory">Explorer ({historyCounts.type.exploratory})</SelectItem>
+                                                    <SelectItem value="custom">Custom ({historyCounts.type.custom})</SelectItem>
+                                                    <SelectItem value="writer">Writer ({historyCounts.type.writer})</SelectItem>
+                                                    <SelectItem value="spec_generation">Spec runs ({historyCounts.type.spec_generation})</SelectItem>
+                                                </SelectContent>
+                                            </Select>
+                                        </div>
                                     </div>
                                 </div>
-                            ))
-                        )}
+                                <div className="agents-panel-scroll">
+                                    {history.length === 0 ? (
+                                        <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                                            No runs yet.
+                                        </div>
+                                    ) : filteredHistory.length === 0 ? (
+                                        <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                                            No runs match the current filters.
+                                        </div>
+                                    ) : (
+                                        filteredHistory.map(run => (
+                                            <button
+                                                key={run.id}
+                                                type="button"
+                                                className="agents-history-row"
+                                                onClick={() => selectRun(run.id)}
+                                                aria-current={selectedRunId === run.id ? 'true' : undefined}
+                                                style={{
+                                                    padding: '0.75rem 0.85rem',
+                                                    background: selectedRunId === run.id ? 'rgba(59, 130, 246, 0.08)' : 'transparent',
+                                                    borderLeft: selectedRunId === run.id ? '3px solid var(--primary)' : '3px solid transparent'
+                                                }}
+                                            >
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.35rem', gap: '0.6rem' }}>
+                                                    <span style={{ fontWeight: 700, fontSize: '0.84rem', color: run.agent_type === 'custom' ? 'var(--success)' : run.agent_type === 'writer' || run.agent_type === 'spec_generation' ? 'var(--primary)' : 'var(--warning)' }}>
+                                                        {agentRunDisplayName(run)}
+                                                    </span>
+                                                    <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{formatDate(run.created_at)}</span>
+                                                </div>
+                                                <div style={{ fontSize: '0.8rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'var(--text)' }}>
+                                                    {run.config?.url?.replace('https://', '') || run.config?.agent_name || run.id}
+                                                </div>
+                                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.45rem', marginTop: '0.45rem' }}>
+                                                    <StatusBadge status={run.status} />
+                                                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>{run.id.slice(0, 8)}</span>
+                                                </div>
+                                            </button>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                        </CollapsibleContent>
                     </div>
-                </div>
+                </Collapsible>
 
                 {/* Left Column: Configuration */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', overflowY: 'auto' }}>
+                <Collapsible open={setupOpen} onOpenChange={setSetupOpen} className="agents-panel agents-setup-panel">
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
 
                     {/* Agent Selection */}
                     <div className="card" style={{ padding: '0', overflow: 'hidden', flexShrink: 0 }}>
-                        <div style={{ padding: '1rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)' }}>
-                            <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>New Run</h3>
+                        <div style={{ padding: '0.8rem 0.9rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+                            <div>
+                                <h3 style={{ fontWeight: 700, fontSize: '0.9rem', margin: 0 }}>Run Setup</h3>
+                                <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
+                                    {selectedAgent === 'custom' ? 'Custom agent' : 'Explorer agent'}
+                                </p>
+                            </div>
+                            <CollapsibleTrigger asChild>
+                                <button className="btn-icon agents-icon-button agents-mobile-trigger" type="button" aria-label={setupOpen ? 'Collapse run setup' : 'Expand run setup'}>
+                                    <ChevronDown size={14} />
+                                </button>
+                            </CollapsibleTrigger>
                         </div>
-                        <div style={{ padding: '0.5rem' }}>
-                            <div
-                                onClick={() => setSelectedAgent('exploratory')}
+                        <CollapsibleContent forceMount>
+                            <div className="agents-desktop-content" data-open={setupOpen ? 'true' : 'false'} style={{ padding: '0.5rem' }}>
+                            <div role="tablist" aria-label="Agent type" style={{ display: 'grid', gap: '0.5rem' }}>
+                            <button
+                                id="agents-agent-tab-exploratory"
+                                type="button"
+                                role="tab"
+                                aria-selected={selectedAgent === 'exploratory'}
+                                aria-controls="agents-run-setup-panel"
+                                tabIndex={selectedAgent === 'exploratory' ? 0 : -1}
+                                className="agents-segment-button"
+                                onKeyDown={handleAgentModeTabKeyDown}
+                                onClick={() => selectAgentMode('exploratory')}
                                 style={{
+                                    width: '100%',
                                     padding: '0.75rem',
                                     cursor: 'pointer',
                                     background: selectedAgent === 'exploratory' ? 'var(--primary-glow)' : 'transparent',
                                     border: selectedAgent === 'exploratory' ? '1px solid var(--primary)' : '1px solid transparent',
                                     borderRadius: '8px',
-                                    marginBottom: '0.5rem',
-                                    display: 'flex', gap: '0.75rem'
+                                    display: 'flex', gap: '0.75rem',
+                                    textAlign: 'left',
+                                    minHeight: '44px'
                                 }}
                             >
                                 <Terminal size={20} color={selectedAgent === 'exploratory' ? 'var(--primary)' : 'var(--text-secondary)'} />
@@ -2031,17 +3475,28 @@ export default function AgentsPage() {
                                         15-min autonomous exploration
                                     </p>
                                 </div>
-                            </div>
+                            </button>
 
-                            <div
-                                onClick={() => setSelectedAgent('custom')}
+                            <button
+                                id="agents-agent-tab-custom"
+                                type="button"
+                                role="tab"
+                                aria-selected={selectedAgent === 'custom'}
+                                aria-controls="agents-run-setup-panel"
+                                tabIndex={selectedAgent === 'custom' ? 0 : -1}
+                                className="agents-segment-button"
+                                onKeyDown={handleAgentModeTabKeyDown}
+                                onClick={() => selectAgentMode('custom')}
                                 style={{
+                                    width: '100%',
                                     padding: '0.75rem',
                                     cursor: 'pointer',
                                     background: selectedAgent === 'custom' ? 'var(--primary-glow)' : 'transparent',
                                     border: selectedAgent === 'custom' ? '1px solid var(--primary)' : '1px solid transparent',
                                     borderRadius: '8px',
-                                    display: 'flex', gap: '0.75rem'
+                                    display: 'flex', gap: '0.75rem',
+                                    textAlign: 'left',
+                                    minHeight: '44px'
                                 }}
                             >
                                 <Wrench size={20} color={selectedAgent === 'custom' ? 'var(--primary)' : 'var(--text-secondary)'} />
@@ -2051,192 +3506,124 @@ export default function AgentsPage() {
                                         User-defined tools and prompt
                                     </p>
                                 </div>
+                            </button>
                             </div>
-                        </div>
+                            </div>
+                        </CollapsibleContent>
                     </div>
 
-                    {/* Custom Agent Builder */}
+                    {/* Custom Agents */}
                     <div className="card" style={{ padding: '1rem', flexShrink: 0 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
-                            <h3 style={{ fontWeight: 600, fontSize: '0.9rem' }}>Custom Agents</h3>
-                            <button
-                                onClick={resetDefinitionForm}
-                                title="Create agent"
-                                style={{ border: '1px solid var(--border)', background: 'var(--surface-hover)', borderRadius: '6px', padding: '0.35rem', cursor: 'pointer', color: 'var(--text)' }}
-                            >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', gap: '0.75rem' }}>
+                            <div>
+                                <h3 style={{ fontWeight: 700, fontSize: '0.9rem', margin: 0 }}>Custom Agents</h3>
+                                <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
+                                    {agentDefinitions.length} saved
+                                </p>
+                            </div>
+                            <Button type="button" size="icon" variant="outline" onClick={resetDefinitionForm} title="Create agent" aria-label="Create custom agent">
                                 <Plus size={15} />
-                            </button>
+                            </Button>
                         </div>
 
                         {agentDefinitions.length === 0 ? (
-                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '0.75rem' }}>
+                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                                 No custom agents yet.
                             </div>
                         ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                                 {agentDefinitions.map(definition => (
                                     <div
                                         key={definition.id}
-                                        onClick={() => { setSelectedDefinitionId(definition.id); setSelectedAgent('custom'); }}
                                         style={{
-                                            padding: '0.65rem',
+                                            display: 'grid',
+                                            gridTemplateColumns: 'minmax(0, 1fr) auto',
+                                            alignItems: 'center',
+                                            gap: '0.35rem',
                                             border: selectedDefinitionId === definition.id ? '1px solid var(--primary)' : '1px solid var(--border)',
                                             borderRadius: '6px',
                                             background: selectedDefinitionId === definition.id ? 'var(--primary-glow)' : 'var(--surface-hover)',
-                                            cursor: 'pointer'
                                         }}
                                     >
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem' }}>
-                                            <div style={{ minWidth: 0 }}>
-                                                <div style={{ fontSize: '0.85rem', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{definition.name}</div>
-                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>{definition.tool_ids.length} tools</div>
-                                            </div>
-                                            <div style={{ display: 'flex', gap: '0.25rem' }}>
-                                                <button
-                                                    onClick={(e) => { e.stopPropagation(); editDefinition(definition); }}
-                                                    title="Edit agent"
-                                                    style={{ border: 'none', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer' }}
+                                        <button
+                                            type="button"
+                                            onClick={() => { selectDefinition(definition.id); selectAgentMode('custom'); }}
+                                            aria-pressed={selectedDefinitionId === definition.id}
+                                            className="agents-segment-button"
+                                            style={{
+                                                minWidth: 0,
+                                                minHeight: 44,
+                                                padding: '0.65rem',
+                                                border: 0,
+                                                background: 'transparent',
+                                                color: 'var(--text)',
+                                                textAlign: 'left',
+                                                cursor: 'pointer',
+                                            }}
+                                        >
+                                            <div style={{ fontSize: '0.85rem', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{definition.name}</div>
+                                            <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>{definition.tool_ids.length} tools</div>
+                                        </button>
+                                        <DropdownMenu
+                                            modal={false}
+                                            open={openDefinitionMenuId === definition.id}
+                                            onOpenChange={(open) => setOpenDefinitionMenuId(open ? definition.id : null)}
+                                        >
+                                            <DropdownMenuTrigger asChild>
+                                                <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    aria-label={`Open actions for ${definition.name}`}
+                                                    className="agents-definition-action-trigger"
+                                                    onClick={(event) => event.stopPropagation()}
+                                                    onPointerDown={(event) => event.stopPropagation()}
+                                                >
+                                                    <MoreHorizontal size={15} />
+                                                </Button>
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent
+                                                align="end"
+                                                sideOffset={6}
+                                                className="agents-definition-action-menu"
+                                                onClick={(event) => event.stopPropagation()}
+                                            >
+                                                <DropdownMenuItem
+                                                    className="agents-definition-action-item"
+                                                    onSelect={(event) => {
+                                                        editDefinitionFromMenu(definition, event);
+                                                    }}
                                                 >
                                                     <Settings size={14} />
-                                                </button>
-                                                <button
-                                                    onClick={(e) => { e.stopPropagation(); archiveDefinition(definition); }}
-                                                    title="Archive agent"
-                                                    style={{ border: 'none', background: 'transparent', color: 'var(--danger)', cursor: 'pointer' }}
+                                                    Edit
+                                                </DropdownMenuItem>
+                                                <DropdownMenuItem
+                                                    className="agents-definition-action-item agents-definition-action-item-danger"
+                                                    onSelect={(event) => {
+                                                        archiveDefinitionFromMenu(definition, event);
+                                                    }}
                                                 >
-                                                    <Trash2 size={14} />
-                                                </button>
-                                            </div>
-                                        </div>
+                                                    <Archive size={14} />
+                                                    Archive
+                                                </DropdownMenuItem>
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
                                     </div>
                                 ))}
-                            </div>
-                        )}
-
-                        {builderOpen && (
-                            <div style={{ borderTop: '1px solid var(--border)', paddingTop: '0.75rem' }}>
-                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Name</label>
-                                <input
-                                    value={definitionForm.name}
-                                    onChange={e => setDefinitionForm({ ...definitionForm, name: e.target.value })}
-                                    placeholder="API explorer"
-                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', margin: '0.25rem 0 0.65rem' }}
-                                />
-                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Description</label>
-                                <input
-                                    value={definitionForm.description}
-                                    onChange={e => setDefinitionForm({ ...definitionForm, description: e.target.value })}
-                                    placeholder="Explores pages and reports API calls"
-                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', margin: '0.25rem 0 0.65rem' }}
-                                />
-                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>System Prompt</label>
-                                <textarea
-                                    value={definitionForm.system_prompt}
-                                    onChange={e => setDefinitionForm({ ...definitionForm, system_prompt: e.target.value })}
-                                    rows={4}
-                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.8rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', resize: 'vertical', margin: '0.25rem 0 0.65rem' }}
-                                />
-                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Runtime</label>
-                                <select
-                                    value={definitionForm.runtime}
-                                    onChange={e => setDefinitionForm({ ...definitionForm, runtime: e.target.value })}
-                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', margin: '0.25rem 0 0.65rem' }}
-                                >
-                                    <option value="claude_sdk">Claude SDK</option>
-                                    <option value="hermes">Hermes</option>
-                                </select>
-                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Timeout seconds</label>
-                                <input
-                                    type="number"
-                                    min={60}
-                                    max={7200}
-                                    value={definitionForm.timeout_seconds}
-                                    onChange={e => setDefinitionForm({ ...definitionForm, timeout_seconds: parseInt(e.target.value) || 1800 })}
-                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', margin: '0.25rem 0 0.65rem' }}
-                                />
-                                <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Default Test Data Refs</label>
-                                <input
-                                    value={definitionForm.test_data_refs}
-                                    onChange={e => setDefinitionForm({ ...definitionForm, test_data_refs: e.target.value })}
-                                    placeholder="login-users.valid-admin"
-                                    style={{ width: '100%', padding: '0.5rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', margin: '0.25rem 0 0.5rem' }}
-                                />
-                                <div style={{ marginBottom: '0.65rem' }}>
-                                    <TestDataPicker
-                                        projectId={currentProject?.id}
-                                        mode="ref"
-                                        onInsert={(value) => setDefinitionForm(prev => ({
-                                            ...prev,
-                                            test_data_refs: prev.test_data_refs ? `${prev.test_data_refs}, ${value}` : value,
-                                        }))}
-                                    />
-                                </div>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem' }}>
-                                    <div style={{ fontSize: '0.75rem', fontWeight: 600 }}>Tools</div>
-                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>
-                                        {definitionForm.tool_ids.length} of {toolCatalog.length} selected
-                                    </div>
-                                </div>
-                                <div style={{ maxHeight: '260px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: '6px', padding: '0.5rem' }}>
-                                    {Object.entries(toolsByCategory).map(([category, tools]) => (
-                                        <div key={category} style={{ marginBottom: '0.75rem' }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '0.35rem' }}>
-                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontWeight: 700, textTransform: 'uppercase' }}>
-                                                    {category} ({tools.length})
-                                                </div>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => toggleCategoryTools(tools)}
-                                                    style={{ fontSize: '0.68rem', border: 'none', background: 'transparent', color: 'var(--primary)', cursor: 'pointer', padding: 0 }}
-                                                >
-                                                    {tools.every(tool => definitionForm.tool_ids.includes(tool.id)) ? 'Clear' : 'Select all'}
-                                                </button>
-                                            </div>
-                                            {tools.map(tool => (
-                                                <label key={tool.id} style={{ display: 'flex', gap: '0.45rem', alignItems: 'flex-start', fontSize: '0.78rem', marginBottom: '0.4rem', cursor: 'pointer' }}>
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={definitionForm.tool_ids.includes(tool.id)}
-                                                        onChange={() => toggleDefinitionTool(tool.id)}
-                                                        style={{ marginTop: '0.15rem' }}
-                                                    />
-                                                    <span style={{ flex: 1 }}>
-                                                        <span style={{ fontWeight: 600 }}>{tool.label}</span>
-                                                        <span style={{ marginLeft: '0.35rem', fontSize: '0.68rem', color: tool.risk === 'high' ? 'var(--danger)' : tool.risk === 'medium' ? 'var(--warning)' : 'var(--success)' }}>{tool.risk}</span>
-                                                        <span style={{ display: 'block', color: 'var(--text-secondary)', lineHeight: 1.35 }}>{tool.description}</span>
-                                                    </span>
-                                                </label>
-                                            ))}
-                                        </div>
-                                    ))}
-                                </div>
-                                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
-                                    <button
-                                        onClick={saveDefinition}
-                                        disabled={savingDefinition}
-                                        style={{ flex: 1, padding: '0.6rem', borderRadius: '6px', background: 'var(--primary)', color: 'white', border: 'none', fontWeight: 600, cursor: savingDefinition ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.4rem' }}
-                                    >
-                                        {savingDefinition ? <Loader2 className="spin" size={14} /> : <Save size={14} />} Save
-                                    </button>
-                                    <button
-                                        onClick={() => setBuilderOpen(false)}
-                                        style={{ padding: '0.6rem 0.75rem', borderRadius: '6px', background: 'var(--surface-hover)', color: 'var(--text)', border: '1px solid var(--border)', cursor: 'pointer' }}
-                                    >
-                                        Cancel
-                                    </button>
-                                </div>
                             </div>
                         )}
                     </div>
 
                     {/* Configuration Form */}
-                    <div className="card" style={{ padding: '1.25rem', flexShrink: 0 }}>
+                    <div id="agents-run-setup-panel" role="tabpanel" className="card" style={{ padding: '1.25rem', flexShrink: 0 }}>
                         {selectedAgent === 'custom' && (
                             <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Runnable Agent</label>
+                                <label htmlFor="agents-definition-select" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Runnable Agent</label>
                                 <select
+                                    id="agents-definition-select"
+                                    name="definitionId"
                                     value={selectedDefinitionId}
-                                    onChange={e => setSelectedDefinitionId(e.target.value)}
+                                    onChange={e => selectDefinition(e.target.value)}
                                     style={{ width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)' }}
                                 >
                                     <option value="">Select an agent</option>
@@ -2254,8 +3641,10 @@ export default function AgentsPage() {
 
                         {selectedAgent !== 'custom' && (
                             <div style={{ marginBottom: '1rem' }}>
-                                <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Agent Runtime</label>
+                                <label htmlFor="agents-runtime-select" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Agent Runtime</label>
                                 <select
+                                    id="agents-runtime-select"
+                                    name="runtime"
                                     value={agentRuntime}
                                     onChange={e => setAgentRuntime(e.target.value)}
                                     style={{ width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)' }}
@@ -2272,12 +3661,15 @@ export default function AgentsPage() {
                         )}
 
                         <div style={{ marginBottom: '1rem' }}>
-                            <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Target URL</label>
+                            <label htmlFor="agents-target-url" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Target URL</label>
                             <input
-                                type="text"
+                                id="agents-target-url"
+                                name="targetUrl"
+                                type="url"
                                 placeholder={selectedAgent === 'custom' ? 'Optional target URL' : 'https://example.com'}
                                 value={url}
                                 onChange={e => setUrl(e.target.value)}
+                                autoComplete="url"
                                 style={{
                                     width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem',
                                     border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
@@ -2288,8 +3680,10 @@ export default function AgentsPage() {
                         {selectedAgent === 'exploratory' && (
                             <>
                                 <div style={{ marginBottom: '1rem' }}>
-                                    <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Time Limit (minutes)</label>
+                                    <label htmlFor="agents-time-limit" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Time Limit (minutes)</label>
                                     <input
+                                        id="agents-time-limit"
+                                        name="timeLimitMinutes"
                                         type="number"
                                         min="2"
                                         max="60"
@@ -2303,10 +3697,12 @@ export default function AgentsPage() {
                                 </div>
 
                                 <div style={{ marginBottom: '1rem' }}>
-                                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>
+                                    <label htmlFor="agents-auth-type" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>
                                         <Lock size={14} /> Authentication
                                     </label>
                                     <select
+                                        id="agents-auth-type"
+                                        name="authType"
                                         value={authType}
                                         onChange={e => setAuthType(e.target.value as AuthType)}
                                         style={{
@@ -2323,8 +3719,10 @@ export default function AgentsPage() {
                                 {authType === 'credentials' && (
                                     <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '6px' }}>
                                         <div style={{ marginBottom: '0.5rem' }}>
-                                            <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Login URL</label>
+                                            <label htmlFor="agents-login-url" style={{ fontSize: '0.75rem', fontWeight: 500 }}>Login URL</label>
                                             <input
+                                                id="agents-login-url"
+                                                name="loginUrl"
                                                 type="text"
                                                 placeholder="/login"
                                                 value={authCredentials.loginUrl}
@@ -2336,12 +3734,15 @@ export default function AgentsPage() {
                                             />
                                         </div>
                                         <div style={{ marginBottom: '0.5rem' }}>
-                                            <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Username</label>
+                                            <label htmlFor="agents-auth-username" style={{ fontSize: '0.75rem', fontWeight: 500 }}>Username</label>
                                             <input
+                                                id="agents-auth-username"
+                                                name="username"
                                                 type="text"
                                                 placeholder="testuser"
                                                 value={authCredentials.username}
                                                 onChange={e => setAuthCredentials({ ...authCredentials, username: e.target.value })}
+                                                autoComplete="username"
                                                 style={{
                                                     width: '100%', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem',
                                                     border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
@@ -2349,12 +3750,15 @@ export default function AgentsPage() {
                                             />
                                         </div>
                                         <div>
-                                            <label style={{ fontSize: '0.75rem', fontWeight: 500 }}>Password</label>
+                                            <label htmlFor="agents-auth-password" style={{ fontSize: '0.75rem', fontWeight: 500 }}>Password</label>
                                             <input
+                                                id="agents-auth-password"
+                                                name="password"
                                                 type="password"
                                                 placeholder="••••••••"
                                                 value={authCredentials.password}
                                                 onChange={e => setAuthCredentials({ ...authCredentials, password: e.target.value })}
+                                                autoComplete="current-password"
                                                 style={{
                                                     width: '100%', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem',
                                                     border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
@@ -2366,8 +3770,10 @@ export default function AgentsPage() {
 
                                 {authType === 'session' && (
                                     <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '6px' }}>
-                                        <label style={{ fontSize: '0.75rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>Browser Login Session</label>
+                                        <label htmlFor="agents-session-select" style={{ fontSize: '0.75rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>Browser Login Session</label>
                                         <select
+                                            id="agents-session-select"
+                                            name="browserAuthSession"
                                             value={sessionId}
                                             onChange={e => setSessionId(e.target.value)}
                                             style={{
@@ -2394,8 +3800,10 @@ export default function AgentsPage() {
 
                         {selectedAgent === 'custom' && (
                             <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '6px' }}>
-                                <label style={{ fontSize: '0.75rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>Browser Login Session</label>
+                                <label htmlFor="agents-custom-session-select" style={{ fontSize: '0.75rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>Browser Login Session</label>
                                 <select
+                                    id="agents-custom-session-select"
+                                    name="customBrowserAuthSession"
                                     value={authType === 'session' ? sessionId : ''}
                                     onChange={e => {
                                         setSessionId(e.target.value);
@@ -2422,10 +3830,12 @@ export default function AgentsPage() {
                         )}
 
                         <div style={{ marginBottom: '1.25rem' }}>
-                            <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>
+                            <label htmlFor="agents-instructions" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>
                                 {selectedAgent === 'custom' ? 'Task Prompt' : 'Instructions (Optional)'}
                             </label>
                             <textarea
+                                id="agents-instructions"
+                                name="instructions"
                                 placeholder={selectedAgent === 'custom' ? "Inspect the API calls triggered by the login and checkout flows." : selectedAgent === 'exploratory' ? "Focus on checkout flow, test edge cases..." : "Generate spec for login page..."}
                                 value={instructions}
                                 onChange={e => setInstructions(e.target.value)}
@@ -2440,18 +3850,25 @@ export default function AgentsPage() {
 
                         {selectedAgent === 'custom' && (
                             <div style={{ marginBottom: '1rem' }}>
-                                <label style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
+                                <label htmlFor="agents-test-data-refs" style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
                                     Project Test Data Refs
                                 </label>
-                                <input
+                                <Input
+                                    id="agents-test-data-refs"
+                                    name="testDataRefs"
                                     value={testDataRefs}
                                     onChange={e => setTestDataRefs(e.target.value)}
-                                    placeholder="login-users.valid-admin"
-                                    style={{ width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.85rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)', marginBottom: '0.5rem' }}
+                                    placeholder="Refs appear here after adding"
+                                    autoComplete="off"
+                                    style={{ height: '36px', minHeight: '36px', borderRadius: '8px', fontSize: '0.8rem', marginBottom: '0.5rem' }}
                                 />
                                 <TestDataPicker
                                     projectId={currentProject?.id}
                                     mode="ref"
+                                    variant="sidebar"
+                                    compact
+                                    insertLabel="Add"
+                                    editLabel="Edit"
                                     onInsert={(value) => setTestDataRefs(prev => prev ? `${prev}, ${value}` : value)}
                                 />
                             </div>
@@ -2473,10 +3890,12 @@ export default function AgentsPage() {
                         {showAdvanced && selectedAgent === 'exploratory' && (
                             <>
                                 <div style={{ marginBottom: '1rem' }}>
-                                    <label style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
+                                    <label htmlFor="agents-test-data-json" style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
                                         Test Data (JSON)
                                     </label>
                                     <textarea
+                                        id="agents-test-data-json"
+                                        name="testDataJson"
                                         placeholder='{"usernames": ["testuser", "admin"], "emails": ["test@example.com", ""]}'
                                         value={testData}
                                         onChange={e => setTestData(e.target.value)}
@@ -2490,10 +3909,12 @@ export default function AgentsPage() {
                                 </div>
 
                                 <div style={{ marginBottom: '1rem' }}>
-                                    <label style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
+                                    <label htmlFor="agents-focus-areas" style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
                                         Focus Areas (comma-separated)
                                     </label>
                                     <input
+                                        id="agents-focus-areas"
+                                        name="focusAreas"
                                         type="text"
                                         placeholder="checkout, user-profile, search"
                                         value={focusAreas}
@@ -2506,10 +3927,12 @@ export default function AgentsPage() {
                                 </div>
 
                                 <div style={{ marginBottom: '1rem' }}>
-                                    <label style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
+                                    <label htmlFor="agents-excluded-patterns" style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
                                         Excluded URL Patterns (comma-separated)
                                     </label>
                                     <input
+                                        id="agents-excluded-patterns"
+                                        name="excludedPatterns"
                                         type="text"
                                         placeholder="/logout, /delete-account"
                                         value={excludedPatterns}
@@ -2522,6 +3945,26 @@ export default function AgentsPage() {
                                 </div>
                             </>
                         )}
+
+                        {runFormError && (
+                            <Alert variant="destructive" style={{ marginBottom: '0.85rem' }}>
+                                <AlertTriangle size={16} />
+                                <AlertDescription>{runFormError}</AlertDescription>
+                            </Alert>
+                        )}
+
+                        <div className="agents-run-plan" aria-label="Run plan preview">
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.15rem' }}>
+                                <strong style={{ fontSize: '0.84rem' }}>Run Plan</strong>
+                                {queueWarnings.degraded && <span style={{ color: 'var(--warning)', fontSize: '0.74rem', fontWeight: 800 }}>Queue needs attention</span>}
+                            </div>
+                            {runPlanRows.map(([label, value]) => (
+                                <div key={label} className="agents-run-plan-row">
+                                    <strong>{label}</strong>
+                                    <span>{value || '-'}</span>
+                                </div>
+                            ))}
+                        </div>
 
                         <button
                             onClick={handleRun}
@@ -2536,10 +3979,11 @@ export default function AgentsPage() {
                             {isStarting ? <><Loader2 className="spin" size={16} /> Starting...</> : <><Play size={16} /> Start Agent</>}
                         </button>
                     </div>
-                </div>
+                    </div>
+                </Collapsible>
 
                 {/* Right Column: Output */}
-                <div className="card" style={{ padding: '0', display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+                <div className="card agents-panel agents-output-panel" style={{ padding: '0', display: 'flex', flexDirection: 'column', minHeight: '640px', overflow: 'hidden' }}>
                     <div style={{ padding: '0.75rem 1rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '0.75rem', minHeight: '4.25rem' }}>
                         <h3
                             title={activeRun ? agentRunResultTitle(activeRun) : 'Agent Output'}
@@ -2566,6 +4010,7 @@ export default function AgentsPage() {
                                         onClick={() => controlAgentRun('pause')}
                                         disabled={runControlPending !== null}
                                         title="Pause agent"
+                                        aria-label="Pause agent run"
                                         style={{ border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--text)', borderRadius: '6px', padding: '0.35rem 0.55rem', cursor: runControlPending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600, opacity: runControlPending ? 0.65 : 1 }}
                                     >
                                         {runControlPending === 'pause' ? <Loader2 className="spin" size={14} /> : <Pause size={14} />} Pause
@@ -2576,6 +4021,7 @@ export default function AgentsPage() {
                                         onClick={() => controlAgentRun('resume')}
                                         disabled={runControlPending !== null}
                                         title="Resume agent"
+                                        aria-label="Resume agent run"
                                         style={{ border: '1px solid var(--primary)', background: 'var(--primary)', color: 'white', borderRadius: '6px', padding: '0.35rem 0.55rem', cursor: runControlPending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600, opacity: runControlPending ? 0.65 : 1 }}
                                     >
                                         {runControlPending === 'resume' ? <Loader2 className="spin" size={14} /> : <Play size={14} />} Resume
@@ -2583,31 +4029,51 @@ export default function AgentsPage() {
                                 )}
                                 {LIVE_AGENT_STATUSES.has(activeRun.status) && (
                                     <button
-                                        onClick={() => controlAgentRun('cancel')}
+                                        onClick={() => setCancelRunDialogOpen(true)}
                                         disabled={runControlPending !== null}
                                         title="Cancel agent"
+                                        aria-label="Cancel agent run"
                                         style={{ border: '1px solid var(--danger)', background: 'var(--danger-muted)', color: 'var(--danger)', borderRadius: '6px', padding: '0.35rem 0.55rem', cursor: runControlPending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600, opacity: runControlPending ? 0.65 : 1 }}
                                     >
                                         {runControlPending === 'cancel' ? <Loader2 className="spin" size={14} /> : <X size={14} />} Cancel
                                     </button>
                                 )}
-                                <span style={{
-                                    fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '12px',
-                                    background: agentStatusTone(activeRun.status).bg,
-                                    color: agentStatusTone(activeRun.status).color,
-                                    textTransform: 'capitalize'
-                                }}>
-                                    {activeRun.status}
-                                </span>
+                                <button
+                                    type="button"
+                                    onClick={exportAgentTrace}
+                                    title="Export redacted trace"
+                                    aria-label="Export redacted trace"
+                                    style={{ border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--text)', borderRadius: '6px', padding: '0.35rem 0.55rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600 }}
+                                >
+                                    <Download size={14} /> Export
+                                </button>
+                                <StatusBadge status={activeRun.status} />
                             </div>
                         )}
                     </div>
 
                     <div style={{ padding: '1.5rem', flex: 1, overflowY: 'auto', background: 'var(--surface)' }}>
                         {!activeRun ? (
-                            <div style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', opacity: 0.5 }}>
-                                <Bot size={64} style={{ marginBottom: '1rem' }} />
-                                <p>Select a run from history or start a new one.</p>
+                            <div style={{ minHeight: '420px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)', textAlign: 'center', gap: '1rem' }}>
+                                <Bot size={56} style={{ color: 'var(--primary)' }} />
+                                <div>
+                                    <h3 style={{ margin: 0, color: 'var(--text)', fontSize: '1.05rem', fontWeight: 800 }}>Start an agent run</h3>
+                                    <p style={{ margin: '0.45rem auto 0', maxWidth: 460, lineHeight: 1.5 }}>Choose a saved run from history or use one of the workspace actions to create the next agent task.</p>
+                                </div>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem', justifyContent: 'center' }}>
+                                    <Button type="button" onClick={() => { selectAgentMode('exploratory'); setSetupOpen(true); document.getElementById('agents-target-url')?.focus(); }}>
+                                        <Play size={14} /> Start Explorer
+                                    </Button>
+                                    <Button type="button" variant="outline" onClick={() => { selectWorkspaceView('library'); resetDefinitionForm(); }}>
+                                        <Plus size={14} /> Create Agent
+                                    </Button>
+                                    <Button type="button" variant="outline" onClick={() => openAssistantWithPrompt('Help me choose or draft an agent prompt for this project.')}>
+                                        <MessageSquare size={14} /> Ask Assistant
+                                    </Button>
+                                    <Button type="button" variant="outline" asChild>
+                                        <Link href="/workflow"><ArrowRight size={14} /> Workflow</Link>
+                                    </Button>
+                                </div>
                             </div>
                         ) : LIVE_AGENT_STATUSES.has(activeRun.status) && activeRun.agent_type === 'exploratory' ? (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -2629,7 +4095,7 @@ export default function AgentsPage() {
                                     vncUrl={activeRun.progress?.vnc_url}
                                 />
                                 <AgentRunCapturePanel activeRun={activeRun} mode="live" />
-                                <AgentRunObservabilityPanel run={activeRun} events={agentEvents} />
+                                <AgentRunObservabilityPanel run={activeRun} events={agentEvents} trace={agentTrace} traceLoading={traceLoading} traceSearch={traceSearch} onTraceSearch={setTraceSearch} traceSpanType={traceSpanType} onTraceSpanType={setTraceSpanType} onExportTrace={exportAgentTrace} activeTraceTab={traceTab} onTraceTabChange={selectTraceTab} />
                                 <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.85rem', textAlign: 'center' }}>
                                     {activeRun.status === 'paused'
                                         ? 'Resume to continue from the current state.'
@@ -2693,7 +4159,7 @@ export default function AgentsPage() {
                                             </div>
                                         )}
 
-                                        <AgentRunObservabilityPanel run={activeRun} events={agentEvents} />
+                                        <AgentRunObservabilityPanel run={activeRun} events={agentEvents} trace={agentTrace} traceLoading={traceLoading} traceSearch={traceSearch} onTraceSearch={setTraceSearch} traceSpanType={traceSpanType} onTraceSpanType={setTraceSpanType} onExportTrace={exportAgentTrace} activeTraceTab={traceTab} onTraceTabChange={selectTraceTab} />
 
                                         {activeRun.status === 'paused' && (
                                             <div style={{ padding: '0.9rem 1rem', background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.35)', borderRadius: '8px', color: 'var(--warning)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -2748,7 +4214,7 @@ export default function AgentsPage() {
                                                     <img
                                                         src={getArtifactUrl(latestImage)}
                                                         alt="Latest custom agent screenshot"
-                                                        style={{ width: '100%', display: 'block', maxHeight: '420px', objectFit: 'contain', background: '#000' }}
+                                                        style={{ width: '100%', display: 'block', aspectRatio: '16 / 9', maxHeight: '420px', objectFit: 'contain', background: '#000' }}
                                                     />
                                                 </a>
                                             ) : (
@@ -2806,13 +4272,13 @@ export default function AgentsPage() {
                                         {activeRun.result?.error || activeRun.health?.terminal_reason || "Unknown error occurred"}
                                     </p>
                                 </div>
-                                <AgentRunObservabilityPanel run={activeRun} events={agentEvents} />
+                                <AgentRunObservabilityPanel run={activeRun} events={agentEvents} trace={agentTrace} traceLoading={traceLoading} traceSearch={traceSearch} onTraceSearch={setTraceSearch} traceSpanType={traceSpanType} onTraceSpanType={setTraceSpanType} onExportTrace={exportAgentTrace} activeTraceTab={traceTab} onTraceTabChange={selectTraceTab} />
                             </div>
                         ) : (
                             // Completed successfully
                             <div className="markdown-content">
                                 {activeRun.agent_type !== 'spec_generation' && (
-                                    <AgentRunObservabilityPanel run={activeRun} events={agentEvents} />
+                                    <AgentRunObservabilityPanel run={activeRun} events={agentEvents} trace={agentTrace} traceLoading={traceLoading} traceSearch={traceSearch} onTraceSearch={setTraceSearch} traceSpanType={traceSpanType} onTraceSpanType={setTraceSpanType} onExportTrace={exportAgentTrace} activeTraceTab={traceTab} onTraceTabChange={selectTraceTab} />
                                 )}
                                 {activeRun.agent_type === 'spec_generation' ? (
                                     <SpecGenerationRunPanel run={activeRun} events={agentEvents} />
@@ -2836,12 +4302,16 @@ export default function AgentsPage() {
                                     <CustomAgentReportView
                                         run={activeRun}
                                         activeTab={customResultTab}
-                                        onTabChange={setCustomResultTab}
+                                        onTabChange={selectCustomResultTab}
                                         onAskAssistant={openAssistantWithPrompt}
                                         onCreateSpecFromReport={openSpecFromReportItem}
                                         onImportRequirements={importReportRequirements}
                                         importingRequirementIds={importingRequirementIds}
                                         importError={reportImportError}
+                                        reportStatusFilter={reportStatusFilter}
+                                        onReportStatusFilterChange={updateReportStatusFilter}
+                                        reportSeverityFilter={reportSeverityFilter}
+                                        onReportSeverityFilterChange={updateReportSeverityFilter}
                                     />
                                 ) : (
                                     // Exploratory Result - User Friendly Display
@@ -2945,7 +4415,7 @@ export default function AgentsPage() {
                                                                     background: 'var(--surface)',
                                                                     borderRadius: '10px',
                                                                     border: '1px solid var(--border)',
-                                                                    transition: 'all 0.2s'
+                                                                    transition: 'background 0.2s var(--ease-smooth), border-color 0.2s var(--ease-smooth)'
                                                                 }}>
                                                                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
                                                                         <div style={{
@@ -3134,51 +4604,173 @@ export default function AgentsPage() {
                         )}
                     </div>
                 </div>
+            </div>
+            )}
 
-                {/* Flow Details Modal */}
-                {flowModalOpen && selectedFlow && (
-                    <div style={{
-                        position: 'fixed',
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        background: 'rgba(0, 0, 0, 0.5)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        zIndex: 1000,
-                        padding: '1rem'
-                    }}>
-                        <div style={{
-                            background: 'var(--surface)',
-                            borderRadius: '12px',
-                            width: 'min(980px, calc(100vw - 2rem))',
-                            maxWidth: '980px',
-                            maxHeight: '80vh',
-                            overflowY: 'auto',
-                            padding: '1.5rem',
-                            position: 'relative',
-                            border: '1px solid var(--border)'
-                        }}>
-                            <button
-                                onClick={() => setFlowModalOpen(false)}
-                                style={{
-                                    position: 'absolute',
-                                    top: '1rem',
-                                    right: '1rem',
-                                    background: 'transparent',
-                                    border: 'none',
-                                    cursor: 'pointer',
-                                    color: 'var(--text-secondary)'
+                <Dialog open={builderOpen} onOpenChange={(open) => { setBuilderOpen(open); if (!open) setDefinitionFormError(null); }}>
+                    <DialogContent className="max-w-[920px]" style={{ width: 'min(920px, calc(100vw - 2rem))', maxHeight: '86vh', overflowY: 'auto' }}>
+                        <DialogHeader>
+                            <DialogTitle>{definitionForm.id ? 'Edit Custom Agent' : 'Create Custom Agent'}</DialogTitle>
+                            <DialogDescription>
+                                Configure the system prompt, runtime, default test data, and allowed tools.
+                            </DialogDescription>
+                        </DialogHeader>
+
+                        {definitionFormError && (
+                            <Alert variant="destructive">
+                                <AlertTriangle size={16} />
+                                <AlertDescription>{definitionFormError}</AlertDescription>
+                            </Alert>
+                        )}
+
+                        <div className="agents-builder-grid">
+                            <div style={{ display: 'grid', gap: '0.85rem', alignContent: 'start' }}>
+                                <div style={{ display: 'grid', gap: '0.35rem' }}>
+                                    <Label htmlFor="definition-name">Name</Label>
+                                    <Input id="definition-name" name="definitionName" value={definitionForm.name} onChange={e => setDefinitionForm({ ...definitionForm, name: e.target.value })} placeholder="API explorer" autoComplete="off" />
+                                </div>
+                                <div style={{ display: 'grid', gap: '0.35rem' }}>
+                                    <Label htmlFor="definition-description">Description</Label>
+                                    <Input id="definition-description" name="definitionDescription" value={definitionForm.description} onChange={e => setDefinitionForm({ ...definitionForm, description: e.target.value })} placeholder="Explores pages and reports API calls" autoComplete="off" />
+                                </div>
+                                <div style={{ display: 'grid', gap: '0.35rem' }}>
+                                    <Label htmlFor="definition-system-prompt">System Prompt</Label>
+                                    <textarea
+                                        id="definition-system-prompt"
+                                        name="definitionSystemPrompt"
+                                        value={definitionForm.system_prompt}
+                                        onChange={e => setDefinitionForm({ ...definitionForm, system_prompt: e.target.value })}
+                                        rows={7}
+                                        style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius)', fontSize: '0.86rem', border: '1px solid var(--border)', background: 'var(--background-raised)', color: 'var(--text)', resize: 'vertical' }}
+                                    />
+                                </div>
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                                    <div style={{ display: 'grid', gap: '0.35rem' }}>
+                                        <Label htmlFor="definition-runtime">Runtime</Label>
+                                        <Select value={definitionForm.runtime} onValueChange={value => setDefinitionForm({ ...definitionForm, runtime: value })}>
+                                            <SelectTrigger id="definition-runtime" aria-label="Runtime">
+                                                <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                <SelectItem value="claude_sdk">Claude SDK</SelectItem>
+                                                <SelectItem value="hermes">Hermes</SelectItem>
+                                            </SelectContent>
+                                        </Select>
+                                    </div>
+                                    <div style={{ display: 'grid', gap: '0.35rem' }}>
+                                        <Label htmlFor="definition-timeout">Timeout seconds</Label>
+                                        <Input id="definition-timeout" name="definitionTimeoutSeconds" type="number" min={60} max={7200} value={definitionForm.timeout_seconds} onChange={e => setDefinitionForm({ ...definitionForm, timeout_seconds: parseInt(e.target.value) || 1800 })} />
+                                    </div>
+                                </div>
+                                <div style={{ display: 'grid', gap: '0.35rem' }}>
+                                    <Label htmlFor="definition-test-data-refs">Default Test Data Refs</Label>
+                                    <Input id="definition-test-data-refs" name="definitionTestDataRefs" value={definitionForm.test_data_refs} onChange={e => setDefinitionForm({ ...definitionForm, test_data_refs: e.target.value })} placeholder="login-users.valid-admin" autoComplete="off" />
+                                    <TestDataPicker
+                                        projectId={currentProject?.id}
+                                        mode="ref"
+                                        onInsert={(value) => setDefinitionForm(prev => ({
+                                            ...prev,
+                                            test_data_refs: prev.test_data_refs ? `${prev.test_data_refs}, ${value}` : value,
+                                        }))}
+                                    />
+                                </div>
+                            </div>
+
+                            <div style={{ display: 'grid', gap: '0.65rem', alignContent: 'start' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', alignItems: 'center' }}>
+                                    <Label>Tools</Label>
+                                    <Badge variant="secondary">{definitionForm.tool_ids.length} of {toolCatalog.length} selected</Badge>
+                                </div>
+                                <div style={{ maxHeight: '520px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: '8px', padding: '0.75rem', display: 'grid', gap: '0.9rem' }}>
+                                    {Object.entries(toolsByCategory).map(([category, tools]) => (
+                                        <fieldset key={category} style={{ border: 0, margin: 0, padding: 0, display: 'grid', gap: '0.5rem' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
+                                                <legend style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', fontWeight: 800, textTransform: 'uppercase' }}>
+                                                    {category} ({tools.length})
+                                                </legend>
+                                                <Button type="button" variant="ghost" size="sm" onClick={() => toggleCategoryTools(tools)}>
+                                                    {tools.every(tool => definitionForm.tool_ids.includes(tool.id)) ? 'Clear' : 'Select all'}
+                                                </Button>
+                                            </div>
+                                            {tools.map(tool => (
+                                                <label key={tool.id} style={{ display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', gap: '0.5rem', alignItems: 'start', minHeight: 44, cursor: 'pointer' }}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={definitionForm.tool_ids.includes(tool.id)}
+                                                        onChange={() => toggleDefinitionTool(tool.id)}
+                                                        style={{ marginTop: '0.25rem' }}
+                                                    />
+                                                    <span style={{ minWidth: 0 }}>
+                                                        <span style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                                                            <span style={{ fontWeight: 700, fontSize: '0.82rem' }}>{tool.label}</span>
+                                                            <Badge variant={tool.risk === 'destructive' || tool.risk === 'high' ? 'destructive' : 'secondary'}>{tool.risk}</Badge>
+                                                        </span>
+                                                        <span style={{ display: 'block', color: 'var(--text-secondary)', lineHeight: 1.35, fontSize: '0.78rem' }}>{tool.description}</span>
+                                                    </span>
+                                                </label>
+                                            ))}
+                                        </fieldset>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+
+                        <DialogFooter style={{ gap: '0.6rem' }}>
+                            <Button type="button" variant="outline" onClick={() => setBuilderOpen(false)}>Cancel</Button>
+                            <Button type="button" onClick={saveDefinition} disabled={savingDefinition}>
+                                {savingDefinition ? <Loader2 className="spin" size={14} /> : <Save size={14} />} Save Agent
+                            </Button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
+
+                <Dialog open={Boolean(archiveCandidate)} onOpenChange={(open) => !open && setArchiveCandidate(null)}>
+                    <DialogContent>
+                        <DialogHeader>
+                            <DialogTitle>Archive Custom Agent</DialogTitle>
+                            <DialogDescription>
+                                Existing run history will remain. The agent will no longer appear as runnable.
+                            </DialogDescription>
+                        </DialogHeader>
+                        <p style={{ margin: 0, color: 'var(--text)' }}>
+                            Archive "{archiveCandidate?.name}"?
+                        </p>
+                        <DialogFooter style={{ gap: '0.6rem' }}>
+                            <Button type="button" variant="outline" onClick={() => setArchiveCandidate(null)}>Cancel</Button>
+                            <Button
+                                type="button"
+                                variant="destructive"
+                                onClick={async () => {
+                                    if (!archiveCandidate) return;
+                                    await archiveDefinition(archiveCandidate);
+                                    setArchiveCandidate(null);
                                 }}
                             >
-                                <X size={20} />
-                            </button>
+                                <Archive size={14} /> Archive
+                            </Button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
 
-                            <h3 style={{ margin: '0 0 1rem 0', fontSize: '1.3rem', fontWeight: 600 }}>
-                                {selectedFlow.title}
-                            </h3>
+                <ConfirmDialog
+                    open={cancelRunDialogOpen}
+                    onOpenChange={setCancelRunDialogOpen}
+                    title="Cancel Agent Run"
+                    description={activeRun ? `Cancel ${agentRunResultTitle(activeRun)}? The run will stop and current evidence will remain available in history.` : 'Cancel this agent run?'}
+                    confirmLabel="Cancel Run"
+                    variant="danger"
+                    loading={runControlPending === 'cancel'}
+                    onConfirm={() => controlAgentRun('cancel')}
+                />
+
+                {/* Flow Details Modal */}
+                <Dialog open={flowModalOpen && Boolean(selectedFlow)} onOpenChange={setFlowModalOpen}>
+                    {selectedFlow && (
+                        <DialogContent style={{ width: 'min(980px, calc(100vw - 2rem))', maxWidth: '980px', maxHeight: '84vh', overflowY: 'auto' }}>
+                            <DialogHeader>
+                                <DialogTitle>{selectedFlow.title}</DialogTitle>
+                                <DialogDescription>Review the discovered flow and generate a test spec.</DialogDescription>
+                            </DialogHeader>
 
                             {selectedFlow.pages && selectedFlow.pages.length > 0 && (
                                 <div style={{ marginBottom: '1rem' }}>
@@ -3382,36 +4974,24 @@ export default function AgentsPage() {
                                     Close
                                 </button>
                             </div>
-                        </div>
-                    </div>
-                )}
+                        </DialogContent>
+                    )}
+                </Dialog>
 
                 {/* Generated Spec Modal */}
-                {specModalOpen && generatedSpec && (
-                    <div style={{
-                        position: 'fixed',
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        background: 'rgba(0, 0, 0, 0.5)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        zIndex: 1001,
-                        padding: '1rem'
-                    }}>
-                        <div style={{
-                            background: 'var(--surface)',
-                            borderRadius: '12px',
+                <Dialog open={specModalOpen && Boolean(generatedSpec)} onOpenChange={setSpecModalOpen}>
+                    {generatedSpec && (
+                        <DialogContent style={{
                             maxWidth: '800px',
                             maxHeight: '85vh',
-                            width: '100%',
+                            width: 'min(800px, calc(100vw - 2rem))',
                             overflow: 'hidden',
                             display: 'flex',
                             flexDirection: 'column',
-                            border: '1px solid var(--border)'
+                            padding: 0
                         }}>
+                            <DialogTitle className="sr-only">Generated test spec</DialogTitle>
+                            <DialogDescription className="sr-only">Generated spec preview and export actions.</DialogDescription>
                             <div style={{
                                 padding: '1.25rem 1.5rem',
                                 borderBottom: '1px solid var(--border)',
@@ -3473,6 +5053,8 @@ export default function AgentsPage() {
                                     )}
                                     <button
                                         onClick={() => setSpecModalOpen(false)}
+                                        type="button"
+                                        aria-label="Close generated spec"
                                         style={{
                                             background: 'transparent',
                                             border: 'none',
@@ -3533,10 +5115,8 @@ export default function AgentsPage() {
                                                 <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                                     {file.split('/').pop()}
                                                 </span>
-                                                <a
+                                                <Link
                                                     href={`/specs?file=${encodeURIComponent(file)}`}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
                                                     style={{
                                                         color: 'var(--primary)',
                                                         display: 'flex',
@@ -3548,7 +5128,7 @@ export default function AgentsPage() {
                                                 >
                                                     <ExternalLink size={12} />
                                                     View
-                                                </a>
+                                                </Link>
                                             </div>
                                         ))}
                                     </div>
@@ -3606,7 +5186,8 @@ export default function AgentsPage() {
                                     <button
                                         onClick={() => {
                                             navigator.clipboard.writeText(generatedSpec.spec_content);
-                                            alert('Spec copied to clipboard!');
+                                            setWorkspaceStatus('Spec copied to clipboard.');
+                                            toast.success('Spec copied to clipboard');
                                         }}
                                         style={{
                                             padding: '0.6rem 1rem',
@@ -3642,10 +5223,81 @@ export default function AgentsPage() {
                                     </button>
                                 </div>
                             </div>
+                        </DialogContent>
+                    )}
+                </Dialog>
+
+            {workspaceView === 'library' && (
+                <div className="card" style={{ padding: '1rem', display: 'grid', gap: '1rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                        <div>
+                            <h2 style={{ margin: 0, fontSize: '1rem', fontWeight: 800 }}>Agent Library</h2>
+                            <p style={{ margin: '0.25rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Create, edit, archive, and choose reusable custom agents.</p>
                         </div>
+                        <Button type="button" onClick={resetDefinitionForm}>
+                            <Plus size={14} /> Create Agent
+                        </Button>
                     </div>
-                )}
-            </div>
+                    {returnToAfterSave && selectedDefinition && (
+                        <div style={{ padding: '0.85rem', border: '1px solid var(--primary)', borderRadius: '8px', background: 'var(--primary-glow)', display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: '0.85rem', fontWeight: 700 }}>Saved {selectedDefinition.name}. It is ready for workflow use.</span>
+                            <Link href={returnToAfterSave} style={{ color: 'var(--primary)', fontWeight: 800, textDecoration: 'none' }}>
+                                {returnToAfterSave.includes('workflow') ? 'Return to Workflow' : 'Use in Workflow'}
+                            </Link>
+                        </div>
+                    )}
+                    {agentDefinitions.length === 0 ? (
+                        <div style={{ padding: '2rem', textAlign: 'center', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)' }}>
+                            No custom agents yet.
+                        </div>
+                    ) : (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '0.75rem' }}>
+                            {agentDefinitions.map(definition => (
+                                <div key={definition.id} style={{ padding: '0.95rem', border: selectedDefinitionId === definition.id ? '1px solid var(--primary)' : '1px solid var(--border)', borderRadius: '8px', background: selectedDefinitionId === definition.id ? 'var(--primary-glow)' : 'var(--surface-hover)', display: 'grid', gap: '0.65rem' }}>
+                                    <div>
+                                        <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 800, overflowWrap: 'anywhere' }}>{definition.name}</h3>
+                                        <p style={{ margin: '0.25rem 0 0', color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45 }}>{definition.description || 'No description provided.'}</p>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
+                                        <Badge variant="secondary">{definition.tool_ids.length} tools</Badge>
+                                        <Badge variant="secondary">{definition.runtime === 'hermes' ? 'Hermes' : 'Claude SDK'}</Badge>
+                                        <Badge variant="secondary">{Math.ceil((definition.timeout_seconds || 1800) / 60)}m</Badge>
+                                    </div>
+                                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                        <Button type="button" size="sm" onClick={() => { selectDefinition(definition.id); selectAgentMode('custom'); selectWorkspaceView('run'); }}>
+                                            <Play size={13} /> Run Agent
+                                        </Button>
+                                        <Button type="button" size="sm" variant="outline" onClick={() => { selectDefinition(definition.id); editDefinition(definition); }}>
+                                            <Settings size={13} /> Edit
+                                        </Button>
+                                        <Button type="button" size="sm" variant="ghost" onClick={() => setArchiveCandidate(definition)} style={{ color: 'var(--danger)' }}>
+                                            <Archive size={13} /> Archive
+                                        </Button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {workspaceView === 'reports' && (
+                <ReportsSearchWorkspace
+                    query={reportSearchQuery}
+                    onQueryChange={updateReportSearchQuery}
+                    type={reportSearchType}
+                    onTypeChange={updateReportSearchType}
+                    severity={reportSearchSeverity}
+                    onSeverityChange={updateReportSearchSeverity}
+                    loading={reportSearchLoading}
+                    results={reportSearchResults}
+                    onRefresh={fetchReportSearch}
+                />
+            )}
+
+            {workspaceView === 'queue' && (
+                <QueueStatusPanel queue={queueStatus} loading={queueLoading} error={queueError} onRefresh={fetchQueueStatus} />
+            )}
         </PageLayout>
     );
 }

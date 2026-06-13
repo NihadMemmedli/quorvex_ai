@@ -1390,6 +1390,53 @@ async def test_execute_agent_run_completes_temporal_smoke_without_llm():
 
 
 @pytest.mark.asyncio
+async def test_exploratory_background_marks_zero_evidence_parse_fallback_failed(monkeypatch):
+    run_id = "agent-exploratory-zero-evidence"
+    _ensure_tables()
+    _cleanup_run(run_id)
+    with Session(engine) as session:
+        run = AgentRun(
+            id=run_id,
+            agent_type="exploratory",
+            status="running",
+            config_json='{"url":"https://example.com","project_id":"default"}',
+        )
+        session.add(run)
+        session.commit()
+
+    from agents.exploratory_agent import ExploratoryAgent
+
+    async def fake_run(self, config: dict):
+        return {
+            "summary": "Exploration failed: result parsing failed and no browser actions recovered.",
+            "parsing_failed": True,
+            "failure_reason": "zero_evidence_parse_fallback",
+            "action_trace": [],
+            "discovered_flow_summaries": [],
+            "total_flows_discovered": 0,
+        }
+
+    monkeypatch.setattr(ExploratoryAgent, "run", fake_run)
+
+    try:
+        await main_module.execute_agent_background(
+            run_id,
+            "exploratory",
+            {"url": "https://example.com", "project_id": "default"},
+        )
+
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            assert run.status == "failed"
+            assert run.completed_at is not None
+            assert run.result["failure_reason"] == "zero_evidence_parse_fallback"
+            assert run.progress["status"] == "failed"
+        assert _latest_event(run_id, "error") is not None
+    finally:
+        _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
 async def test_execute_agent_run_defaults_to_direct_execution_for_temporal_activity(monkeypatch):
     run_id = "agent-temporal-direct-execution"
     _ensure_tables()

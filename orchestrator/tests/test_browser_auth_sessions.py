@@ -927,6 +927,8 @@ def test_capture_storage_state_via_mcp_agent_reads_and_validates_storage_state(t
     assert captured["session_id"] == "session-123"
     assert "BROWSER_AUTH_USERNAME" in str(captured["prompt"])
     assert "secret-password" not in str(captured["prompt"])
+    assert "Leave site?" in str(captured["prompt"])
+    assert "`accept: true`" in str(captured["prompt"])
     run_dir = Path(captured["run_dir"])
     config = (run_dir / ".mcp.json").read_text()
     assert "--caps" in config

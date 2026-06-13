@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = "1.0"
 NON_HEALABLE_CATEGORIES = {"product_bug", "environment", "spec_impossible"}
 HIGH_CONFIDENCE_THRESHOLD = 0.8
+PLAN_SELECTOR_PATTERN = re.compile(
+    r"\b(?:getByRole|getByLabel|getByPlaceholder|getByText|getByTestId|locator)\(",
+)
 
 
 def _now() -> str:
@@ -67,6 +70,23 @@ def _read_text(path: Path) -> str:
     except Exception as exc:
         logger.warning(f"Could not read agentic artifact {path}: {exc}")
     return ""
+
+
+def extract_plan_selectors(plan_text: str, limit: int = 30) -> list[str]:
+    """Extract locator lines from a planner markdown artifact."""
+    selectors: list[str] = []
+    seen: set[str] = set()
+    for line in plan_text.splitlines():
+        if not PLAN_SELECTOR_PATTERN.search(line):
+            continue
+        cleaned = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+|>\s*)+", "", line).strip()
+        if not cleaned or cleaned in seen:
+            continue
+        selectors.append(cleaned)
+        seen.add(cleaned)
+        if len(selectors) >= limit:
+            break
+    return selectors
 
 
 def _summarize_costs(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -119,7 +139,12 @@ def _summarize_costs(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _stage_outcomes(run_dir: Path, validation: dict[str, Any], healing_attempts: dict[str, Any]) -> dict[str, Any]:
+def _stage_outcomes(
+    run_dir: Path,
+    validation: dict[str, Any],
+    healing_attempts: dict[str, Any],
+    run_metrics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     status = _read_text(run_dir / "status.txt")
     attempts = healing_attempts.get("attempts") if isinstance(healing_attempts, dict) else []
     attempts = attempts if isinstance(attempts, list) else []
@@ -130,13 +155,26 @@ def _stage_outcomes(run_dir: Path, validation: dict[str, Any], healing_attempts:
     except (TypeError, ValueError):
         iteration_count = 0
 
+    run_metrics = run_metrics or {}
+    first_run_passed = validation_status == "success" and iteration_count == 0 and not attempts
+    if isinstance(run_metrics.get("initial_run_passed"), bool):
+        first_run_passed = bool(run_metrics["initial_run_passed"])
+
     return {
         "planned": (run_dir / "plan.json").exists(),
         "generated": (run_dir / "export.json").exists() or bool(validation.get("testFile")),
-        "first_run_passed": validation_status == "success" and iteration_count == 0 and not attempts,
-        "healed": any(bool(item.get("passed_after")) for item in attempts) or iteration_count > 0,
-        "healing_attempts": len(attempts),
+        "first_run_passed": first_run_passed,
+        "stable_first_pass": run_metrics.get("stable_first_pass"),
+        "healed": bool(run_metrics.get("heal_rescued"))
+        or any(bool(item.get("passed_after")) for item in attempts)
+        or iteration_count > 0,
+        "healing_attempts": int(run_metrics.get("healing_attempts") or len(attempts)),
         "status": status or None,
+        "generation_repair_attempted": run_metrics.get("generation_repair_attempted"),
+        "generation_repair_accepted": run_metrics.get("generation_repair_accepted"),
+        "original_validation_error": run_metrics.get("original_validation_error"),
+        "repaired_file_hash": run_metrics.get("repaired_file_hash")
+        or run_metrics.get("generation_repaired_file_hash"),
     }
 
 
@@ -270,15 +308,41 @@ class TestDesignAgent:
         if not target_url:
             warnings.append("No target URL was available for design analysis.")
 
+        plan_text = ""
+        plan_present = bool(plan_path and plan_path.exists())
+        if plan_present and plan_path:
+            try:
+                plan_text = plan_path.read_text()
+            except OSError as exc:
+                logger.warning(f"Could not read planner artifact {plan_path}: {exc}")
+                warnings.append(
+                    "Planner produced a structured plan artifact, but it could not be read."
+                )
+
         for line in spec_content.splitlines():
             if re.search(r"expect|verify|should|see|visible|appears|created|saved", line, re.IGNORECASE):
                 success_oracles.append(line.strip("- ").strip())
             if len(success_oracles) >= 5:
                 break
 
-        plan_present = bool(plan_path and plan_path.exists())
+        if plan_text and len(success_oracles) < 5:
+            for line in plan_text.splitlines():
+                if re.search(r"expect|verify|should|see|visible|appears|created|saved", line, re.IGNORECASE):
+                    oracle = line.strip("- ").strip()
+                    if oracle:
+                        success_oracles.append(oracle)
+                if len(success_oracles) >= 5:
+                    break
+
         if not plan_present:
             warnings.append("Planner did not produce a structured plan artifact.")
+        elif plan_text:
+            plan_selectors = extract_plan_selectors(plan_text)
+            if plan_selectors:
+                selector_guidance.append(
+                    "Planner verified these selectors on the live app: "
+                    + "; ".join(plan_selectors[:8])
+                )
 
         flake_risk = "high" if len(warnings) >= 2 else "medium" if warnings else "low"
         testability = "low" if not target_url else "medium" if warnings else "high"
@@ -488,6 +552,7 @@ def build_agentic_summary(run_dir: Path) -> dict[str, Any]:
     stability = _read_json(run_dir / "stability_report.json") or {}
     validation = _read_json(run_dir / "validation.json") or {}
     healing_attempts = _read_json(run_dir / "healing_attempts.json") or {}
+    run_metrics = _read_json(run_dir / "run_metrics.json") or {}
     cost_rows = _read_jsonl(run_dir / "agent_costs.jsonl")
     issues = critic.get("issues") or []
 
@@ -516,5 +581,5 @@ def build_agentic_summary(run_dir: Path) -> dict[str, Any]:
             "failed_runs": stability.get("failed_runs"),
         },
         "costs": _summarize_costs(cost_rows),
-        "stage_outcomes": _stage_outcomes(run_dir, validation, healing_attempts),
+        "stage_outcomes": _stage_outcomes(run_dir, validation, healing_attempts, run_metrics),
     }
