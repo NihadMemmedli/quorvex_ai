@@ -93,11 +93,12 @@ const SelectContent = React.forwardRef<
         className
       )}
       style={{
-        background: 'var(--surface)',
-        borderColor: 'var(--border)',
-        borderRadius: 'var(--radius)',
+        background: 'var(--background-raised)',
+        borderColor: 'var(--border-bright)',
+        borderRadius: '12px',
         color: 'var(--text)',
-        boxShadow: 'var(--shadow-card)',
+        boxShadow: '0 18px 42px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(148, 163, 184, 0.06)',
+        zIndex: 10020,
       }}
       position={position}
       sideOffset={sideOffset}
@@ -138,18 +139,20 @@ const SelectItem = React.forwardRef<
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex w-full cursor-default select-none items-center py-1.5 pl-8 pr-2 text-sm outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "relative flex w-full cursor-default select-none items-center py-1.5 pl-10 pr-3 text-sm outline-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[state=checked]:font-semibold",
       className
     )}
     style={{
-      borderRadius: 'var(--radius-sm)',
-      transition: 'background 0.15s var(--ease-smooth)',
+      borderRadius: '9px',
+      minHeight: '34px',
+      lineHeight: 1.15,
+      transition: 'background 0.15s var(--ease-smooth), color 0.15s var(--ease-smooth)',
     }}
     onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--primary-glow)' }}
     onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
     {...props}
   >
-    <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
+    <span className="absolute left-3 flex h-4 w-4 items-center justify-center">
       <SelectPrimitive.ItemIndicator>
         <Check className="h-4 w-4" />
       </SelectPrimitive.ItemIndicator>

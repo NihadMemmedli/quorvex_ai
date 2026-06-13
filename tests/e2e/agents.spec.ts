@@ -1,6 +1,7 @@
-import { expect, Page, Route, test } from '@playwright/test';
+import { expect, type Locator, type Page, type Route, test } from '@playwright/test';
 
 const API_BASE = (process.env.API_BASE || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001').replace(/\/$/, '');
+const APP_BASE = (process.env.BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
 const PROJECT = {
   id: 'project-1',
   name: 'Project One',
@@ -16,7 +17,81 @@ function apiPath(url: string) {
   return parsed.pathname.replace(/^\/backend-proxy/, '');
 }
 
+function clone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+async function expectDialogInViewport(page: Page, dialog: Locator) {
+  const box = await dialog.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(viewport!.height);
+}
+
 function completedCustomRun() {
+  const testIdeas = [
+    {
+      id: 'T-001',
+      title: 'Checkout address validation',
+      priority: 'high',
+      page: '/checkout',
+      steps: ['Open checkout', 'Submit an empty postal code'],
+      expected: 'Validation feedback is visible.',
+    },
+    {
+      id: 'T-002',
+      title: 'Checkout card decline messaging',
+      priority: 'high',
+      page: '/checkout/payment',
+      steps: ['Open payment', 'Submit a declined card'],
+      expected: 'The decline reason is shown without clearing the cart.',
+    },
+    {
+      id: 'T-003',
+      title: 'Guest checkout email typo recovery',
+      priority: 'medium',
+      page: '/checkout/contact',
+      steps: ['Enter an invalid email', 'Continue checkout'],
+      expected: 'The email field receives actionable validation feedback.',
+    },
+    {
+      id: 'T-004',
+      title: 'Shipping method recalculates totals',
+      priority: 'medium',
+      page: '/checkout/shipping',
+      steps: ['Select express shipping', 'Return to standard shipping'],
+      expected: 'Order totals update after each shipping method change.',
+    },
+    {
+      id: 'T-005',
+      title: 'Promo code remains after address edit',
+      priority: 'medium',
+      page: '/checkout',
+      steps: ['Apply a promo code', 'Edit the shipping address'],
+      expected: 'The discount remains applied when the address is valid.',
+    },
+    {
+      id: 'T-006',
+      title: 'Payment retry keeps customer context',
+      priority: 'low',
+      page: '/checkout/payment',
+      steps: ['Fail payment once', 'Retry with a valid card'],
+      expected: 'Customer and shipping details remain populated for retry.',
+    },
+    {
+      id: 'T-007',
+      title: 'Order review blocks stale inventory',
+      priority: 'medium',
+      page: '/checkout/review',
+      steps: ['Open review', 'Simulate an out-of-stock line item'],
+      expected: 'Checkout blocks submission and identifies the stale item.',
+    },
+  ];
+
   return {
     id: 'custom-run-reqs',
     agent_type: 'custom',
@@ -34,7 +109,7 @@ function completedCustomRun() {
       output: 'Completed checkout review.',
       duration_seconds: 12.4,
       structured_report: {
-        summary: 'Checkout review captured one requirement and one regression idea.',
+        summary: 'Checkout review captured one requirement and seven regression ideas.',
         scope: 'Checkout',
         pages_checked: [{ id: 'P-001', url: '/checkout', status: 'loaded' }],
         findings: [{
@@ -45,14 +120,7 @@ function completedCustomRun() {
           description: 'Invalid addresses do not show validation feedback.',
           evidence: 'The form submitted with an empty postal code.',
         }],
-        test_ideas: [{
-          id: 'T-001',
-          title: 'Checkout address validation',
-          priority: 'high',
-          page: '/checkout',
-          steps: ['Open checkout', 'Submit an empty postal code'],
-          expected: 'Validation feedback is visible.',
-        }],
+        test_ideas: testIdeas,
         requirements: [{
           id: 'R-001',
           title: 'Checkout requires address validation feedback',
@@ -68,6 +136,56 @@ function completedCustomRun() {
         follow_up_actions: [],
         parse_status: 'structured',
       },
+    },
+    progress: {},
+    artifacts: [],
+    health: { event_count: 0, tool_event_count: 0, error_event_count: 0, terminal: true },
+  };
+}
+
+function completedExploratoryRun(resultOverride: Record<string, unknown> = {}) {
+  return {
+    id: 'explorer-run-results',
+    agent_type: 'exploratory',
+    runtime: 'claude_sdk',
+    status: 'completed',
+    created_at: '2026-06-08T11:00:00',
+    completed_at: '2026-06-08T11:04:00',
+    project_id: PROJECT.id,
+    config: {
+      url: 'https://example.test',
+      project_id: PROJECT.id,
+    },
+    result: {
+      summary: 'Explorer captured structured evidence.',
+      elapsed_time_minutes: 1.2,
+      coverage: {
+        pages_visited: 2,
+        flows_discovered: 1,
+        forms_interacted: 0,
+        errors_found: 0,
+        coverage_score: 0.75,
+      },
+      event_counts: { page_observed: 2, action_result: 1, flow_candidate: 1 },
+      diagnostics: {
+        evidence_event_count: 4,
+        browser_tool_calls: 3,
+        successful_browser_tool_calls: 3,
+        dedupe_stats: { duplicate_flows_removed: 1 },
+      },
+      discovered_flow_summaries: [{
+        id: 'flow_1',
+        title: 'Open pricing',
+        pages: ['https://example.test', 'https://example.test/pricing'],
+        steps_count: 2,
+        has_happy_path: true,
+        has_edge_cases: false,
+        entry_point: 'https://example.test',
+        exit_point: 'https://example.test/pricing',
+        complexity: 'low',
+      }],
+      total_flows_discovered: 1,
+      ...resultOverride,
     },
     progress: {},
     artifacts: [],
@@ -103,10 +221,17 @@ async function routeAgentsApi(page: Page, options: {
   onUpdateDefinition?: (payload: Record<string, unknown>) => void;
   onArchiveDefinition?: (id: string) => void;
   onCancelRun?: (id: string) => void;
-  runOverride?: Partial<ReturnType<typeof completedCustomRun>>;
+  onStartExploratory?: (payload: Record<string, unknown>) => void;
+  onGenerateReportSpec?: (payload: { itemId: string; itemType: string | null; body: Record<string, unknown> }) => void;
+  onPatchReport?: (payload: Record<string, unknown>) => void;
+  onPatchReportItem?: (payload: { itemId: string; itemType: string | null; body: Record<string, unknown> }) => void;
+  failPatchReport?: boolean;
+  onRunFetch?: (run: any, fetchCount: number) => any;
+  runOverride?: Record<string, any>;
 } = {}) {
-  let run = { ...completedCustomRun(), ...options.runOverride };
+  let run = { ...clone(completedCustomRun()), ...options.runOverride };
   let definitions = [...(options.definitions || [])];
+  let runFetchCount = 0;
 
   await page.route(`${API_BASE}/auth/refresh`, route =>
     route.fulfill({ status: 200, json: { access_token: 'access-token', refresh_token: 'refresh-token' } }),
@@ -130,6 +255,35 @@ async function routeAgentsApi(page: Page, options: {
   await page.route(`${API_BASE}/settings`, route => route.fulfill({ status: 200, json: { agent_runtime: 'claude_sdk' } }));
   await page.route(`${API_BASE}/chat/project-context`, route => route.fulfill({ status: 200, json: {} }));
   await page.route(`${API_BASE}/api/agents/tools/catalog`, route => route.fulfill({ status: 200, json: { tools: [] } }));
+  await page.route('**/test-data/datasets**', route => {
+    const path = apiPath(route.request().url());
+    if (path === '/test-data/datasets') {
+      return route.fulfill({
+        status: 200,
+        json: {
+          datasets: [{
+            id: 'test-data-dataset-1',
+            key: 'wetravel-login-users',
+            name: 'WeTravel Login Users',
+          }],
+        },
+      });
+    }
+    if (path === '/test-data/datasets/test-data-dataset-1/items') {
+      return route.fulfill({
+        status: 200,
+        json: {
+          items: [{
+            id: 'test-data-item-1',
+            key: 'valid-user',
+            ref: 'wetravel-login-users.valid-user',
+            name: 'Valid user',
+          }],
+        },
+      });
+    }
+    return route.fallback();
+  });
   await page.route(`${API_BASE}/api/agents/queue-status`, route => route.fulfill({
     status: 200,
     json: {
@@ -204,6 +358,24 @@ async function routeAgentsApi(page: Page, options: {
     return route.fulfill({ status: 200, json: definitions });
   });
   await page.route(`${API_BASE}/projects/${PROJECT.id}/browser-auth-sessions`, route => route.fulfill({ status: 200, json: { sessions: [] } }));
+  await page.route(`${API_BASE}/api/agents/exploratory`, route => {
+    const request = route.request();
+    if (request.method() !== 'POST') return route.fallback();
+    options.onStartExploratory?.(request.postDataJSON() as Record<string, unknown>);
+    return route.fulfill({
+      status: 200,
+      json: {
+        status: 'queued',
+        run_id: 'exploratory-run-started',
+        temporal_workflow_id: 'agent-exploratory-run-started',
+        temporal_run_id: 'temporal-run-1',
+        agent_runtime: 'claude_sdk',
+        browser_runtime: 'temporal_worker',
+        live_view_available: false,
+        agent_slots: { active: 1, max: 3, queued: 3 },
+      },
+    });
+  });
   await page.route(`${API_BASE}/api/agents/runs/${run.id}/trace**`, route =>
     route.fulfill({
       status: 200,
@@ -230,6 +402,79 @@ async function routeAgentsApi(page: Page, options: {
   );
   await page.route(`${API_BASE}/api/agents/runs/${run.id}/events**`, route => route.fulfill({ status: 200, json: [] }));
   await page.route(`${API_BASE}/api/agents/exploratory/${run.id}/specs`, route => route.fulfill({ status: 200, json: { specs: [] } }));
+  await page.route(`${API_BASE}/api/agents/exploratory/flow-spec-jobs/report-spec-job`, route => route.fulfill({
+    status: 200,
+    json: {
+      job_id: 'report-spec-job',
+      status: 'completed',
+      result: {
+        spec_content: '# Checkout address validation\n\nGenerated spec.',
+        spec_file: '/tmp/specs/checkout-address-validation.md',
+        flow_title: 'Checkout address validation',
+        validated: true,
+        pipeline: 'native_planner_generator',
+        requires_auth: false,
+      },
+    },
+  }));
+  await page.route(`${API_BASE}/api/agents/runs/${run.id}/report-items/*/generate-spec**`, async route => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const itemId = apiPath(request.url()).match(/\/report-items\/([^/]+)\/generate-spec$/)?.[1] || '';
+    options.onGenerateReportSpec?.({
+      itemId: decodeURIComponent(itemId),
+      itemType: url.searchParams.get('item_type'),
+      body: request.postDataJSON() as Record<string, unknown>,
+    });
+    return route.fulfill({
+      status: 200,
+      json: {
+        job_id: 'report-spec-job',
+        agent_run_id: 'report-spec-agent-run',
+      },
+    });
+  });
+  await page.route(`${API_BASE}/api/agents/runs/${run.id}/report-items/*`, async route => {
+    const request = route.request();
+    if (request.method() !== 'PATCH') return route.fallback();
+    if (options.failPatchReport) {
+      return route.fulfill({ status: 500, json: { detail: 'Report save failed in test.' } });
+    }
+    const url = new URL(request.url());
+    const itemId = decodeURIComponent(apiPath(request.url()).match(/\/report-items\/([^/]+)$/)?.[1] || '');
+    const itemType = url.searchParams.get('item_type');
+    const body = request.postDataJSON() as Record<string, unknown>;
+    const patch = (body.patch && typeof body.patch === 'object' ? body.patch : body) as Record<string, unknown>;
+    options.onPatchReportItem?.({ itemId, itemType, body });
+
+    const report = run.result.structured_report;
+    const key = itemType === 'finding' ? 'findings' : itemType === 'test_idea' ? 'test_ideas' : 'requirements';
+    report[key] = report[key].map((item: { id: string }) => item.id === itemId ? { ...item, ...patch, id: item.id } : item);
+    run = { ...run, result: { ...run.result, structured_report: { ...report } } };
+    return route.fulfill({ status: 200, json: run });
+  });
+  await page.route(`${API_BASE}/api/agents/runs/${run.id}/report**`, async route => {
+    const request = route.request();
+    if (apiPath(request.url()) !== `/api/agents/runs/${run.id}/report`) return route.fallback();
+    if (request.method() !== 'PATCH') return route.fallback();
+    if (options.failPatchReport) {
+      return route.fulfill({ status: 500, json: { detail: 'Report save failed in test.' } });
+    }
+    const body = request.postDataJSON() as Record<string, unknown>;
+    options.onPatchReport?.(body);
+    run = {
+      ...run,
+      result: {
+        ...run.result,
+        structured_report: {
+          ...run.result.structured_report,
+          summary: body.summary,
+          scope: body.scope,
+        },
+      },
+    };
+    return route.fulfill({ status: 200, json: run });
+  });
   await page.route(`${API_BASE}/api/agents/runs/${run.id}/report-requirements/import**`, async route => {
     const requirement = run.result.structured_report.requirements[0] as Record<string, unknown>;
     requirement.imported_requirement_id = 101;
@@ -251,7 +496,13 @@ async function routeAgentsApi(page: Page, options: {
     run = { ...run, status: 'cancelled', progress: { ...(run.progress || {}), phase: 'cancelled' } };
     return route.fulfill({ status: 200, json: run });
   });
-  await page.route(`${API_BASE}/api/agents/runs/${run.id}`, route => route.fulfill({ status: 200, json: run }));
+  await page.route(`${API_BASE}/api/agents/runs/${run.id}`, route => {
+    runFetchCount += 1;
+    if (options.onRunFetch) {
+      run = options.onRunFetch(run, runFetchCount);
+    }
+    return route.fulfill({ status: 200, json: run });
+  });
   await page.route(`${API_BASE}/api/agents/runs**`, route => {
     if (apiPath(route.request().url()) === '/api/agents/runs') {
       return route.fulfill({ status: 200, json: [run] });
@@ -267,6 +518,7 @@ async function routeAgentsApi(page: Page, options: {
       path === '/settings' ||
       path === '/chat/project-context' ||
       path === `/projects/${PROJECT.id}/browser-auth-sessions` ||
+      path.startsWith('/test-data/') ||
       path.startsWith('/api/agents/')
     ) {
       return route.fallback();
@@ -282,7 +534,7 @@ test.describe('Agents custom report requirements', () => {
 
     await page.goto('/agents?runId=custom-run-reqs');
     await expect(page.getByRole('heading', { name: 'Autonomous Agents' })).toBeVisible();
-    await expect(page.getByText('Checkout review captured one requirement and one regression idea.')).toBeVisible();
+    await expect(page.getByText('Checkout review captured one requirement and seven regression ideas.')).toBeVisible();
     await expect(page.getByRole('tab', { name: 'Requirements 1' })).toBeVisible();
 
     await page.getByRole('tab', { name: 'Requirements 1' }).click();
@@ -295,6 +547,505 @@ test.describe('Agents custom report requirements', () => {
 
     await page.getByRole('tab', { name: 'Findings 1' }).click();
     await expect(page.getByRole('button', { name: 'Create Spec' })).toBeVisible();
+  });
+});
+
+test.describe('Agents create and report spec actions', () => {
+  test('passes inserted project test data refs to enhanced explorer runs', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page);
+
+    await page.goto('/agents?agent=exploratory');
+    await page.getByLabel('Target URL').fill('https://pre.wetravel.to/user/itineraries');
+    await expect(page.getByLabel('Project Test Data Refs')).toBeVisible();
+    await expect(page.getByTestId('test-data-picker-item')).toContainText('Valid user');
+
+    await page.getByTestId('test-data-picker-insert').click();
+    await expect(page.getByLabel('Project Test Data Refs')).toHaveValue('wetravel-login-users.valid-user');
+
+    const requestPromise = page.waitForRequest(request =>
+      apiPath(request.url()) === '/api/agents/exploratory' && request.method() === 'POST',
+    );
+    await page.getByRole('button', { name: /Start Agent/ }).click();
+
+    const request = await requestPromise;
+    expect(request.postDataJSON()).toMatchObject({
+      url: 'https://pre.wetravel.to/user/itineraries',
+      test_data_refs: ['wetravel-login-users.valid-user'],
+      project_id: PROJECT.id,
+    });
+  });
+
+  test('opens the custom agent builder from the run setup create button', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page);
+
+    await page.goto('/agents?runId=custom-run-reqs');
+    await page.getByRole('button', { name: 'Create custom agent' }).click();
+
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Create Custom Agent' })).toBeVisible();
+    await expectDialogInViewport(page, dialog);
+    await expect(page).toHaveURL(/agent=custom/);
+    await expect(page).toHaveURL(/create=1/);
+  });
+
+  test('opens and updates the custom agent runtime dropdown', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page);
+
+    await page.goto('/agents?agent=custom&create=1');
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Create Custom Agent' })).toBeVisible();
+
+    const runtimeSelect = dialog.getByLabel('Runtime');
+    await runtimeSelect.click();
+    await expect(page.getByRole('option', { name: 'Hermes' })).toBeVisible();
+    await page.getByRole('option', { name: 'Hermes' }).click();
+
+    await expect(runtimeSelect).toContainText('Hermes');
+    await expectDialogInViewport(page, dialog);
+  });
+
+  test('opens the custom agent builder from the agent library create button', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page);
+
+    await page.goto('/agents?view=library');
+    await page.getByRole('button', { name: /^Create Agent$/ }).click();
+
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Create Custom Agent' })).toBeVisible();
+    await expectDialogInViewport(page, dialog);
+    await expect(page).toHaveURL(/agent=custom/);
+    await expect(page).toHaveURL(/create=1/);
+  });
+
+  test('opens the custom agent builder from the empty run view create button and clears create on Escape', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page);
+
+    await page.goto('/agents');
+    await expect(page.getByRole('heading', { name: 'Start an agent run' })).toBeVisible();
+    await page.getByRole('button', { name: /^Create Agent$/ }).click();
+
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Create Custom Agent' })).toBeVisible();
+    await expectDialogInViewport(page, dialog);
+    await expect(page).toHaveURL(/agent=custom/);
+    await expect(page).toHaveURL(/create=1/);
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(page).not.toHaveURL(/create=1/);
+  });
+
+  test('opens the custom agent builder when create intent is added after mount', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page);
+
+    await page.goto('/agents');
+    await expect(page.getByRole('heading', { name: 'Autonomous Agents' })).toBeVisible();
+
+    await page.evaluate(() => {
+      window.history.pushState(null, '', '/agents?agent=custom&create=1');
+    });
+
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Create Custom Agent' })).toBeVisible();
+    await expectDialogInViewport(page, dialog);
+    await expect(page).toHaveURL(/agent=custom/);
+    await expect(page).toHaveURL(/create=1/);
+  });
+
+  test('opens the spec review modal from a test idea without generating immediately', async ({ page }) => {
+    let generateCalls = 0;
+
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      onGenerateReportSpec: () => {
+        generateCalls += 1;
+      },
+    });
+
+    await page.goto('/agents?definitionId=trip-agent&runId=custom-run-reqs&resultTab=test_ideas');
+    await expect(page.getByRole('tab', { name: 'Test Ideas 7' })).toHaveAttribute('aria-selected', 'true');
+    await page.getByRole('tabpanel').getByRole('button', { name: 'Create Spec' }).first().click();
+
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Checkout address validation' })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Generate Test Spec' })).toBeVisible();
+    await expect(page.getByTestId('agents-action-status')).toContainText('Reviewing test idea T-001 for spec generation.');
+    await expect(page).toHaveURL(/definitionId=trip-agent/);
+    await expect(page).toHaveURL(/runId=custom-run-reqs/);
+    await expect(page).toHaveURL(/specItemId=T-001/);
+    await expect(page).toHaveURL(/specItemType=test_idea/);
+    expect(generateCalls).toBe(0);
+
+    await dialog.getByRole('button', { name: 'Close' }).first().click();
+    await expect(dialog).toBeHidden();
+    await expect(page).not.toHaveURL(/specItemId=/);
+    await expect(page).not.toHaveURL(/specItemType=/);
+    await expect(page.getByRole('button', { name: 'Create Spec' }).first()).toBeVisible();
+  });
+
+  test('opens the spec review modal from a finding without generating immediately', async ({ page }) => {
+    let generateCalls = 0;
+
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      onGenerateReportSpec: () => {
+        generateCalls += 1;
+      },
+    });
+
+    await page.goto('/agents?runId=custom-run-reqs');
+    await page.getByRole('tab', { name: 'Findings 1' }).click();
+    await page.getByRole('button', { name: 'Create Spec' }).first().click();
+
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Checkout address validation missing' })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Generate Test Spec' })).toBeVisible();
+    await expect(page).toHaveURL(/specItemId=F-001/);
+    await expect(page).toHaveURL(/specItemType=finding/);
+    expect(generateCalls).toBe(0);
+  });
+
+  test('calls the report item generate-spec endpoint from the spec review modal', async ({ page }) => {
+    const generateRequests: Array<{ itemId: string; itemType: string | null; body: Record<string, unknown> }> = [];
+
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      onGenerateReportSpec: payload => {
+        generateRequests.push(payload);
+      },
+    });
+
+    await page.goto('/agents?runId=custom-run-reqs');
+    await page.getByRole('tab', { name: 'Test Ideas 7' }).click();
+    await page.getByRole('tabpanel').getByRole('button', { name: 'Create Spec' }).first().click();
+
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Checkout address validation' })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Generate Test Spec' })).toBeVisible();
+    expect(generateRequests).toHaveLength(0);
+
+    const requestPromise = page.waitForRequest(request => request.url().includes(`/api/agents/runs/custom-run-reqs/report-items/T-001/generate-spec`));
+    await dialog.getByRole('button', { name: 'Generate Test Spec' }).click();
+    await requestPromise;
+
+    await expect.poll(() => generateRequests.length).toBe(1);
+    expect(generateRequests[0]).toMatchObject({ itemId: 'T-001', itemType: 'test_idea', body: { skip_browser_auth: true } });
+  });
+
+  test('shows a visible error if polling refresh removes the selected report item', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      onRunFetch: (run, fetchCount) => {
+        if (fetchCount < 2) return run;
+        return {
+          ...run,
+          result: {
+            ...run.result,
+            structured_report: {
+              ...run.result.structured_report,
+              test_ideas: run.result.structured_report.test_ideas.filter((item: { id: string }) => item.id !== 'T-001'),
+            },
+          },
+        };
+      },
+    });
+
+    await page.goto('/agents?runId=custom-run-reqs&resultTab=test_ideas&specItemId=T-001&specItemType=test_idea');
+    await expect(page.getByTestId('agents-action-status')).toContainText('Report item T-001 was not found in the refreshed agent report.', { timeout: 5000 });
+    await expect(page.getByRole('dialog', { name: 'Report Item Unavailable' })).toBeVisible();
+  });
+});
+
+test.describe('Agents exploratory completed results', () => {
+  test('prose-only run shows warning, zero flows, and no spec generation action', async ({ page }) => {
+    await authenticate(page);
+    const run = completedExploratoryRun({
+      summary: 'I documented 4 flows in prose only.',
+      coverage: {
+        pages_visited: 0,
+        flows_discovered: 0,
+        forms_interacted: 0,
+        errors_found: 0,
+        coverage_score: 0,
+      },
+      event_counts: {},
+      diagnostics: {
+        evidence_event_count: 0,
+        browser_tool_calls: 0,
+        successful_browser_tool_calls: 0,
+        dedupe_stats: { duplicate_flows_removed: 0 },
+      },
+      contract_warning: 'The model output claimed flow coverage, but no structured evidence-backed flow summaries were created.',
+      exploration_status: 'contract_violation',
+      discovered_flow_summaries: [],
+      total_flows_discovered: 0,
+    });
+    await routeAgentsApi(page, { runOverride: run });
+
+    await page.goto(`${APP_BASE}/agents?runId=explorer-run-results`);
+
+    await expect(page.getByTestId('explorer-contract-warnings')).toBeVisible();
+    await expect(page.getByTestId('explorer-metric-evidence-events')).toContainText('0');
+    await expect(page.getByTestId('explorer-metric-deduped-flows')).toContainText('0');
+    await expect(page.getByText('No flows discovered')).toBeVisible();
+    await expect(page.getByTestId('explorer-generate-test-specs')).toHaveCount(0);
+  });
+
+  test('partial run shows captured artifacts and unsupported candidates without spec generation', async ({ page }) => {
+    await authenticate(page);
+    await page.route(`${API_BASE}/artifacts/**`, route => route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      body: Buffer.from('iVBORw0KGgo=', 'base64'),
+    }));
+    await routeAgentsApi(page, {
+      runOverride: {
+        ...completedExploratoryRun({
+          summary: 'Explorer captured screenshot evidence but no valid flows.',
+          coverage: {
+            pages_visited: 1,
+            flows_discovered: 0,
+            forms_interacted: 0,
+            errors_found: 0,
+            coverage_score: 0.3,
+          },
+          event_counts: { page_observed: 1, action_result: 1, flow_candidate: 1 },
+          diagnostics: {
+            evidence_event_count: 3,
+            browser_tool_calls: 2,
+            successful_browser_tool_calls: 2,
+            unsupported_flow_candidates: 1,
+            missing_evidence_event_ids: ['evt_999'],
+            artifact_count: 1,
+            screenshot_count: 1,
+            dedupe_stats: { duplicate_flows_removed: 0 },
+          },
+          contract_warning: 'The model emitted flow candidates with missing evidence event ids; they are shown as unsupported and cannot generate tests.',
+          contract_warnings: [
+            'The model emitted flow candidates with missing evidence event ids; they are shown as unsupported and cannot generate tests.',
+          ],
+          artifact_evidence: {
+            artifact_count: 1,
+            screenshot_count: 1,
+            artifacts: [{ name: 'live-step-001.png', path: '/artifacts/explorer-run-results/live-step-001.png', type: 'image' }],
+          },
+          unsupported_flow_candidates: [{
+            id: 'flow_1',
+            title: 'Open pricing',
+            entry_point: 'https://example.test',
+            exit_point: 'https://example.test/pricing',
+            missing_evidence_event_ids: ['evt_999'],
+          }],
+          discovered_flow_summaries: [],
+          total_flows_discovered: 0,
+        }),
+        status: 'completed_partial',
+        artifacts: [{ name: 'live-step-001.png', path: '/artifacts/explorer-run-results/live-step-001.png', type: 'image' }],
+      },
+    });
+
+    await page.goto(`${APP_BASE}/agents?runId=explorer-run-results`);
+
+    await expect(page.getByTestId('explorer-partial-warning')).toContainText('no completed evidence-backed flows');
+    await expect(page.getByTestId('explorer-contract-warning')).toHaveCount(1);
+    await expect(page.getByTestId('explorer-metric-screenshots')).toContainText('1');
+    await expect(page.getByTestId('explorer-metric-artifacts')).toContainText('1');
+    await expect(page.getByTestId('explorer-captured-evidence')).toBeVisible();
+    await expect(page.getByTestId('explorer-captured-screenshot')).toHaveCount(1);
+    await expect(page.getByTestId('explorer-unsupported-flow-candidates')).toBeVisible();
+    await expect(page.getByTestId('explorer-unsupported-flow-candidates')).toContainText('missing or empty');
+    await expect(page.getByTestId('explorer-unsupported-flow-card')).toContainText('Open pricing');
+    await expect(page.getByTestId('explorer-flow-card')).toHaveCount(0);
+    await expect(page.getByTestId('explorer-generate-test-specs')).toHaveCount(0);
+  });
+
+  test('structured run renders nonzero metrics and flow cards', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page, { runOverride: completedExploratoryRun() });
+
+    await page.goto(`${APP_BASE}/agents?runId=explorer-run-results`);
+
+    await expect(page.getByTestId('explorer-metric-evidence-events')).toContainText('4');
+    await expect(page.getByTestId('explorer-metric-successful-browser-actions')).toContainText('3');
+    await expect(page.getByTestId('explorer-metric-deduped-flows')).toContainText('1');
+    await expect(page.getByTestId('explorer-flow-card')).toHaveCount(1);
+    await expect(page.getByTestId('explorer-flow-card')).toContainText('Open pricing');
+    await expect(page.getByTestId('explorer-generate-test-specs')).toBeVisible();
+  });
+
+  test('duplicate flow summaries are not rendered twice', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      runOverride: completedExploratoryRun({
+        discovered_flow_summaries: [{
+          id: 'flow_1',
+          title: 'Open pricing',
+          pages: ['https://example.test', 'https://example.test/pricing'],
+          steps_count: 2,
+          has_happy_path: true,
+          has_edge_cases: false,
+          entry_point: 'https://example.test',
+          exit_point: 'https://example.test/pricing',
+          complexity: 'low',
+        }],
+        total_flows_discovered: 1,
+        diagnostics: {
+          evidence_event_count: 6,
+          browser_tool_calls: 5,
+          successful_browser_tool_calls: 5,
+          dedupe_stats: { duplicate_flows_removed: 2 },
+        },
+      }),
+    });
+
+    await page.goto(`${APP_BASE}/agents?runId=explorer-run-results`);
+
+    await expect(page.getByTestId('explorer-flow-card')).toHaveCount(1);
+    await expect(page.getByTestId('explorer-metric-duplicates-removed')).toContainText('2');
+  });
+});
+
+test.describe('Agents editable custom report content', () => {
+  test('edits a finding and uses the returned run in the report view', async ({ page }) => {
+    const patches: Array<{ itemId: string; itemType: string | null; body: Record<string, unknown> }> = [];
+
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      onPatchReportItem: payload => patches.push(payload),
+    });
+
+    await page.goto('/agents?runId=custom-run-reqs&resultTab=findings');
+    await page.getByRole('tabpanel').getByRole('button', { name: 'Edit finding F-001' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Edit finding F-001' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel('Title').fill('Checkout postal code validation missing');
+    await dialog.getByLabel('Description').fill('Edited finding description from reviewer.');
+    await dialog.getByRole('button', { name: 'Save Changes' }).click();
+
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText('F-001: Checkout postal code validation missing')).toBeVisible();
+    await expect(page.getByText('Edited finding description from reviewer.')).toBeVisible();
+    expect(patches[0]).toMatchObject({
+      itemId: 'F-001',
+      itemType: 'finding',
+      body: {
+        patch: {
+          title: 'Checkout postal code validation missing',
+          description: 'Edited finding description from reviewer.',
+        },
+      },
+    });
+  });
+
+  test('edits a test idea before the Create Spec modal opens with edited steps and expected result', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page);
+
+    await page.goto('/agents?runId=custom-run-reqs&resultTab=test_ideas');
+    await page.getByRole('tabpanel').getByRole('button', { name: 'Edit test idea T-001' }).click();
+
+    const editDialog = page.getByRole('dialog', { name: 'Edit test idea T-001' });
+    await expect(editDialog).toBeVisible();
+    await editDialog.getByLabel('Steps').fill('Open checkout with edited data\nSubmit a blank edited ZIP');
+    await editDialog.getByLabel('Expected').fill('Edited validation feedback is visible.');
+    await editDialog.getByRole('button', { name: 'Save Changes' }).click();
+
+    await expect(editDialog).toBeHidden();
+    await expect(page.getByText('Open checkout with edited data')).toBeVisible();
+
+    await page.getByRole('tabpanel').getByRole('button', { name: 'Create Spec' }).first().click();
+    const specDialog = page.getByRole('dialog');
+    await expect(specDialog.getByRole('heading', { name: 'Checkout address validation' })).toBeVisible();
+    await expect(specDialog.getByText('Open checkout with edited data')).toBeVisible();
+    await expect(specDialog.getByText('Submit a blank edited ZIP')).toBeVisible();
+    await expect(specDialog.getByText('Edited validation feedback is visible.')).toBeVisible();
+  });
+
+  test('edits a requirement before importing it', async ({ page }) => {
+    const patches: Array<{ itemId: string; itemType: string | null; body: Record<string, unknown> }> = [];
+
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      onPatchReportItem: payload => patches.push(payload),
+    });
+
+    await page.goto('/agents?runId=custom-run-reqs&resultTab=requirements');
+    await page.getByRole('tabpanel').getByRole('button', { name: 'Edit requirement R-001' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Edit requirement R-001' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel('Title').fill('Checkout requires edited validation feedback');
+    await dialog.getByLabel('Acceptance Criteria').fill('Edited empty postal code criterion is imported.');
+    await dialog.getByRole('button', { name: 'Save Changes' }).click();
+
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText('R-001: Checkout requires edited validation feedback')).toBeVisible();
+    await expect(page.getByText('Edited empty postal code criterion is imported.')).toBeVisible();
+
+    await page.getByRole('button', { name: /^Import$/ }).click();
+    await expect(page.getByRole('link', { name: 'REQ-101' })).toHaveAttribute('href', '/requirements?highlight=101');
+    expect(patches[0]).toMatchObject({
+      itemId: 'R-001',
+      itemType: 'requirement',
+      body: {
+        patch: {
+          title: 'Checkout requires edited validation feedback',
+          acceptance_criteria: ['Edited empty postal code criterion is imported.'],
+        },
+      },
+    });
+  });
+
+  test('edits report summary and scope', async ({ page }) => {
+    let patch: Record<string, unknown> | null = null;
+
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      onPatchReport: payload => {
+        patch = payload;
+      },
+    });
+
+    await page.goto('/agents?runId=custom-run-reqs');
+    await page.getByRole('button', { name: 'Edit Report Summary' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Edit Report Summary' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel('Summary').fill('Edited checkout report summary.');
+    await dialog.getByLabel('Scope').fill('Edited checkout scope.');
+    await dialog.getByRole('button', { name: 'Save Changes' }).click();
+
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText('Edited checkout report summary.')).toBeVisible();
+    await expect(page.getByText('Edited checkout scope.')).toBeVisible();
+    expect(patch).toMatchObject({
+      summary: 'Edited checkout report summary.',
+      scope: 'Edited checkout scope.',
+    });
+  });
+
+  test('keeps the edit dialog open and shows an error when PATCH fails', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page, { failPatchReport: true });
+
+    await page.goto('/agents?runId=custom-run-reqs&resultTab=findings');
+    await page.getByRole('tabpanel').getByRole('button', { name: 'Edit finding F-001' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Edit finding F-001' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel('Title').fill('Will not save');
+    await dialog.getByRole('button', { name: 'Save Changes' }).click();
+
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText('Report save failed in test.')).toBeVisible();
+    await expect(dialog.getByLabel('Title')).toHaveValue('Will not save');
   });
 });
 
@@ -376,13 +1127,31 @@ test.describe('Agents workspace views', () => {
   });
 
   test('searches structured report items', async ({ page }) => {
+    let generateCalls = 0;
+
     await authenticate(page);
-    await routeAgentsApi(page);
+    await routeAgentsApi(page, {
+      onGenerateReportSpec: () => {
+        generateCalls += 1;
+      },
+    });
 
     await page.goto('/agents?view=reports&reportQ=address&reportType=finding&reportSeverity=high');
     await expect(page.getByRole('heading', { name: 'Search Reports' })).toBeVisible();
     await expect(page.getByText('Checkout address validation missing')).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Open report' })).toHaveAttribute('href', /runId=custom-run-reqs/);
+
+    await page.getByRole('link', { name: 'Open report' }).click();
+
+    await expect(page).toHaveURL(/view=run/);
+    await expect(page).toHaveURL(/runId=custom-run-reqs/);
+    await expect(page).toHaveURL(/resultTab=findings/);
+    await expect(page).toHaveURL(/specItemId=F-001/);
+    await expect(page).toHaveURL(/specItemType=finding/);
+
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Checkout address validation missing' })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Generate Test Spec' })).toBeVisible();
+    expect(generateCalls).toBe(0);
   });
 
   test('confirms before cancelling an active run and calls the API once', async ({ page }) => {
@@ -419,11 +1188,25 @@ test.describe('Agents workspace views', () => {
     await page.goto('/agents?agent=custom&create=1&returnTo=/workflow');
     const dialog = page.getByRole('dialog');
     await expect(dialog.getByRole('heading', { name: 'Create Custom Agent' })).toBeVisible();
+    await expectDialogInViewport(page, dialog);
     await dialog.getByLabel('Name').fill('Workflow Agent');
     await dialog.getByLabel('System Prompt').fill('Inspect workflow-created scenarios.');
     await dialog.getByRole('button', { name: 'Save Agent' }).click();
 
     await expect(dialog).toBeHidden();
     await expect(page.getByRole('link', { name: 'Return to Workflow' })).toHaveAttribute('href', '/workflow');
+  });
+
+  test('clears create intent when cancelling the custom agent builder', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page);
+
+    await page.goto('/agents?agent=custom&create=1&returnTo=/workflow');
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('heading', { name: 'Create Custom Agent' })).toBeVisible();
+
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page).not.toHaveURL(/create=1/);
   });
 });

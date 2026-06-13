@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import logging
+import os
 import re
 from datetime import datetime
 from typing import Any
@@ -22,6 +23,7 @@ from orchestrator.services.workflow_step_registry import (
     list_workflow_step_types,
     validate_input_schema,
 )
+from orchestrator.utils.token_budget import clip_text
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,10 @@ ACTIVE_STATUSES = {"queued", "running", "awaiting_input", "paused"}
 RECOVERY_ACTIONS = {"fail", "retry", "skip", "pause", "notify"}
 SECRET_RE = re.compile(r"(password|token|secret|api[_-]?key|authorization|credential)", re.IGNORECASE)
 TEMPLATE_RE = re.compile(r"{{\s*([^{}]+?)\s*}}")
+try:
+    WORKFLOW_INTERPOLATION_CHARS = max(0, int(os.environ.get("WORKFLOW_INTERPOLATION_MAX_CHARS", "4000")))
+except ValueError:
+    WORKFLOW_INTERPOLATION_CHARS = 4000
 
 
 class WorkflowPaused(RuntimeError):
@@ -1352,7 +1358,7 @@ def _render_templates(value: Any, context: dict[str, Any]) -> Any:
     if full:
         resolved = _lookup_path(context, full.group(1))
         return resolved if resolved is not None else value
-    return TEMPLATE_RE.sub(lambda match: str(_lookup_path(context, match.group(1)) or ""), value)
+    return TEMPLATE_RE.sub(lambda match: _stringify_template_value(match.group(1), _lookup_path(context, match.group(1))), value)
 
 
 def _render_templates_with_trace(value: Any, context: dict[str, Any]) -> tuple[Any, list[dict[str, Any]]]:
@@ -1375,12 +1381,35 @@ def _render_templates_with_trace(value: Any, context: dict[str, Any]) -> tuple[A
         def replace(match: re.Match[str]) -> str:
             ref = match.group(1)
             resolved = _lookup_path(context, ref)
-            trace.append({"path": path, "template": match.group(0), "reference": ref, "resolved": resolved, "status": "resolved" if resolved is not None else "missing"})
-            return str(resolved or "")
+            rendered = _stringify_template_value(ref, resolved)
+            trace.append({
+                "path": path,
+                "template": match.group(0),
+                "reference": ref,
+                "resolved": rendered,
+                "status": "resolved" if resolved is not None else "missing",
+                "truncated": isinstance(resolved, (dict, list, str)) and len(str(resolved)) > len(rendered),
+            })
+            return rendered
 
         return TEMPLATE_RE.sub(replace, child)
 
     return render(value, ""), trace
+
+
+def _stringify_template_value(ref: str, value: Any) -> str:
+    if value is None:
+        return ""
+    parts = [part.strip() for part in str(ref or "").split(".") if part.strip()]
+    if len(parts) == 2 and parts[0] == "steps" and isinstance(value, dict) and value.get("summary"):
+        return clip_text(str(value.get("summary") or ""), WORKFLOW_INTERPOLATION_CHARS)
+    if isinstance(value, str):
+        return clip_text(value, WORKFLOW_INTERPOLATION_CHARS)
+    try:
+        rendered = json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
+    except Exception:
+        rendered = str(value)
+    return clip_text(rendered, WORKFLOW_INTERPOLATION_CHARS)
 
 
 def _lookup_path(context: dict[str, Any], path: str) -> Any:

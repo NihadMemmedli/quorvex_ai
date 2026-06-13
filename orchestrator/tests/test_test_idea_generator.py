@@ -1466,6 +1466,44 @@ async def test_agent_runner_adds_browser_dialog_policy_to_direct_prompt(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_agent_runner_streams_prompt_when_tool_permission_guard_is_set(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_guard(tool_name, tool_input, context):
+        return None
+
+    async def fake_query(*, prompt, options):
+        captured["prompt"] = prompt
+        captured["options"] = options
+        yield {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}}
+
+    monkeypatch.setattr(_agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(_agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(_agent_runner_module, "AGENT_QUEUE_AVAILABLE", False)
+
+    runner = _AgentRunner(
+        allowed_tools=["Read"],
+        log_tools=False,
+        tool_permission_guard=fake_guard,
+        inject_memory=False,
+        capture_memory=False,
+    )
+
+    result = await runner.run("browse")
+
+    assert result.success is True
+    assert not isinstance(captured["prompt"], str)
+    streamed_messages = [message async for message in captured["prompt"]]
+    assert len(streamed_messages) == 1
+    assert streamed_messages[0]["type"] == "user"
+    assert streamed_messages[0]["message"]["role"] == "user"
+    assert streamed_messages[0]["message"]["content"].endswith("browse")
+    assert streamed_messages[0]["parent_tool_use_id"] is None
+    assert streamed_messages[0]["session_id"] == "default"
+    assert captured["options"]["can_use_tool"] is fake_guard
+
+
+@pytest.mark.asyncio
 async def test_agent_runner_tracks_nested_sdk_tool_events(monkeypatch):
     events = [
         {

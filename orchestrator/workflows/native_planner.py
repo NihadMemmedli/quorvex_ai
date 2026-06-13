@@ -36,8 +36,12 @@ if config_dir:
 from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
 from orchestrator.memory import get_memory_manager
 from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
-from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
+from orchestrator.utils.agent_tool_allowlists import (
+    PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS,
+    get_agent_tool_config,
+)
 from orchestrator.utils.string_utils import clean_extracted_url, slugify
+from orchestrator.utils.token_budget import context_budget_for_stage, truncate_text_to_tokens
 
 try:
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
@@ -119,6 +123,8 @@ class NativePlanner:
         Returns:
             Path to the generated spec file
         """
+        target_url = self._normalize_url_for_prompt(target_url)
+        login_url = self._normalize_url_for_prompt(login_url)
         feature_slug = slugify(feature_name)
         # Organize specs into project-specific folders
         project_dir = self.specs_dir / prd_project
@@ -176,6 +182,8 @@ class NativePlanner:
     ) -> str:
         """Build the prompt that combines PRD context with browser exploration instructions."""
 
+        target_url = self._normalize_url_for_prompt(target_url)
+        login_url = self._normalize_url_for_prompt(login_url)
         split_tc_section = self._split_tc_scope_section(
             feature_name=feature_name,
             feature_slug=feature_slug,
@@ -279,7 +287,7 @@ After creating the test plan:
 2. Include a `## Draft Playwright Script` section in the saved markdown plan
 3. In that section, include one fenced `typescript` code block with a draft Playwright test script
 4. ALSO output the COMPLETE test plan as text in your response (not just a summary)
-5. Call `browser_close` to close the browser before finishing
+5. Do not call `browser_close`; the system will validate the saved plan and handle browser cleanup after acceptance or final failure
 """
         else:
             save_section = f"""
@@ -451,10 +459,13 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
 
         target_url = self._normalize_url_for_prompt(target_url)
         profile_name = "prd-live-planner" if target_url else "prd-only-planner"
+        tool_config = get_agent_tool_config(profile_name, mcp_config_dir=self.cwd)
 
         runner = AgentRunner(
             timeout_seconds=timeout,
-            allowed_tools=get_agent_allowed_tools(profile_name, mcp_config_dir=self.cwd),
+            allowed_tools=tool_config.get("allowed_tools"),
+            tools=tool_config.get("tools"),
+            disallowed_tools=tool_config.get("disallowed_tools"),
             log_tools=True,
             on_tool_use=self.on_tool_use,
             on_progress=self.on_progress,
@@ -491,11 +502,11 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
 
     @staticmethod
     def _planner_max_attempts() -> int:
-        raw_value = os.environ.get("PLANNER_MAX_ATTEMPTS", "2")
+        raw_value = os.environ.get("PLANNER_MAX_ATTEMPTS", "5")
         try:
-            return max(1, int(raw_value))
+            return min(5, max(1, int(raw_value)))
         except ValueError:
-            return 2
+            return 5
 
     async def _run_planner_with_retry(
         self,
@@ -526,40 +537,76 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                 current_prompt, target_url=target_url
             )
             try:
+                live_sequence_error: SpecGenerationError | None = None
                 if target_url:
-                    self._validate_live_plan_tool_sequence(agent_result, target_url)
+                    try:
+                        self._validate_live_plan_tool_sequence(agent_result, target_url)
+                    except SpecGenerationError as exc:
+                        live_sequence_error = exc
 
                 saved_plan_path = self._recover_saved_plan(expected_output_path)
                 if saved_plan_path:
                     logger.info(f"Spec saved by agent: {saved_plan_path}")
-                    return self._finalize_plan_artifact(
+                    finalized_path = await self._finalize_or_repair_plan_artifact(
                         plan_path=saved_plan_path,
                         expected_output_path=expected_output_path,
                         require_draft_script=require_draft_script,
+                        subject_type=subject_type,
+                        subject_name=subject_name,
+                        agent_result=agent_result,
                     )
+                    if live_sequence_error:
+                        self._record_live_sequence_warning(
+                            error=live_sequence_error,
+                            expected_output_path=expected_output_path,
+                            generated_plan_path=finalized_path,
+                        )
+                    return finalized_path
 
                 plan_content = self._extract_plan_content(agent_result)
                 if plan_content:
                     logger.info(f"Saving extracted plan as spec: {expected_output_path}")
+                    expected_output_path.parent.mkdir(parents=True, exist_ok=True)
                     expected_output_path.write_text(plan_content)
-                    return self._finalize_plan_artifact(
+                    finalized_path = await self._finalize_or_repair_plan_artifact(
                         plan_path=expected_output_path,
                         expected_output_path=expected_output_path,
                         require_draft_script=require_draft_script,
+                        subject_type=subject_type,
+                        subject_name=subject_name,
+                        agent_result=agent_result,
                     )
+                    if live_sequence_error:
+                        self._record_live_sequence_warning(
+                            error=live_sequence_error,
+                            expected_output_path=expected_output_path,
+                            generated_plan_path=finalized_path,
+                        )
+                    return finalized_path
 
                 repaired_plan_path = await self._attempt_repair_plan(
                     subject_type=subject_type,
                     subject_name=subject_name,
                     agent_result=agent_result,
                     expected_output_path=expected_output_path,
+                    require_draft_script=require_draft_script,
                 )
                 if repaired_plan_path:
-                    return self._finalize_plan_artifact(
+                    finalized_path = self._finalize_plan_artifact(
                         plan_path=repaired_plan_path,
                         expected_output_path=expected_output_path,
                         require_draft_script=require_draft_script,
                     )
+                    if live_sequence_error:
+                        self._record_live_sequence_warning(
+                            error=live_sequence_error,
+                            expected_output_path=expected_output_path,
+                            generated_plan_path=finalized_path,
+                        )
+                    return finalized_path
+
+                if live_sequence_error:
+                    raise live_sequence_error
 
                 logger.error(
                     "Agent produced no usable output for %s: %s",
@@ -574,11 +621,8 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                 )
             except SpecGenerationError as exc:
                 last_error = exc
-                if exc.diagnostics.get("planner_repair_attempted"):
-                    raise
                 if attempt_number >= max_attempts:
                     raise
-                self._discard_rejected_plan_artifact(expected_output_path)
                 current_prompt = self._build_planner_retry_prompt(
                     original_prompt=prompt,
                     subject_type=subject_type,
@@ -586,7 +630,10 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                     error=exc,
                     target_url=target_url,
                     expected_output_path=expected_output_path,
+                    agent_result=agent_result,
                 )
+                if not exc.diagnostics.get("planner_repair_attempted"):
+                    self._discard_rejected_plan_artifact(expected_output_path)
 
         if last_error:
             raise last_error
@@ -609,6 +656,36 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                 exc,
             )
 
+    def _record_live_sequence_warning(
+        self,
+        *,
+        error: SpecGenerationError,
+        expected_output_path: Path,
+        generated_plan_path: Path,
+    ) -> None:
+        diagnostics = dict(error.diagnostics)
+        diagnostics.update(
+            {
+                "expected_output_path": str(expected_output_path),
+                "generated_plan_path": str(generated_plan_path),
+                "valid_saved_plan_observed": True,
+                "warning": self._redact_sensitive_text(str(error)),
+            }
+        )
+        logger.warning(
+            "Accepting valid saved planner output despite live-browser sequence warning: %s",
+            diagnostics["warning"],
+        )
+        if not self.session_dir:
+            return
+        try:
+            self.session_dir.mkdir(parents=True, exist_ok=True)
+            (self.session_dir / "planner_live_sequence_warning.json").write_text(
+                json.dumps(diagnostics, indent=2, sort_keys=True, default=str)
+            )
+        except OSError:
+            logger.debug("Could not write planner live sequence warning artifact", exc_info=True)
+
     def _build_planner_retry_prompt(
         self,
         *,
@@ -618,20 +695,25 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
         error: SpecGenerationError,
         target_url: str | None,
         expected_output_path: Path,
+        agent_result: Any | None = None,
     ) -> str:
         diagnostics = self._redact_sensitive_text(
             json.dumps(error.diagnostics, indent=2, sort_keys=True, default=str)
         )
+        previous_context = self._build_retry_context(
+            agent_result=agent_result,
+            expected_output_path=expected_output_path,
+        )
         target_instruction = ""
         if target_url:
             target_instruction = (
-                "\nFor the retry, start fresh with browser exploration. You must call "
+                "\nFor this retry, the browser contract still must be satisfied. Call "
                 "`planner_setup_page`, then `browser_navigate` to the exact Target URL "
                 f"`{target_url}`, then `browser_snapshot` before calling `planner_save_plan`."
             )
         return f"""You are retrying a rejected Playwright planner attempt.
 
-The previous attempt for {subject_type} "{subject_name}" was rejected and must not be reused.
+The previous attempt for {subject_type} "{subject_name}" was rejected. Do not repeat its failed tool sequence, but reuse the useful observations and selectors summarized below.
 
 Rejection:
 {self._redact_sensitive_text(str(error))}
@@ -641,6 +723,7 @@ Diagnostics:
 {diagnostics}
 ```
 {target_instruction}
+{previous_context}
 
 Write a valid markdown test plan to `{expected_output_path}` with this exact schema:
 - `# Test Plan: {subject_name}`
@@ -656,6 +739,88 @@ Original task follows. Obey it, but correct the failure above.
 
 {original_prompt}
 """
+
+    def _build_retry_context(
+        self,
+        *,
+        agent_result: Any | None,
+        expected_output_path: Path,
+    ) -> str:
+        parts: list[str] = []
+        if agent_result is not None:
+            tool_calls = list(getattr(agent_result, "tool_calls", []) or [])
+            stats = {
+                "success": bool(getattr(agent_result, "success", False)),
+                "timed_out": bool(getattr(agent_result, "timed_out", False)),
+                "error": getattr(agent_result, "error", None),
+                "messages_received": int(getattr(agent_result, "messages_received", 0) or 0),
+                "text_blocks_received": int(getattr(agent_result, "text_blocks_received", 0) or 0),
+                "tool_calls": len(tool_calls),
+            }
+            parts.extend(
+                [
+                    "",
+                    "Previous attempt compact context:",
+                    "```json",
+                    self._redact_sensitive_text(json.dumps(stats, indent=2, sort_keys=True, default=str)),
+                    "```",
+                ]
+            )
+            summary = self._tool_call_retry_summary(tool_calls)
+            if summary:
+                parts.extend(["", "Previous tool sequence:", "```text", summary, "```"])
+
+            raw_output = str(getattr(agent_result, "output", "") or "").strip()
+            if raw_output:
+                parts.extend(
+                    [
+                        "",
+                        "Previous raw output preview:",
+                        "```markdown",
+                        self._content_preview(raw_output, limit=3000),
+                        "```",
+                    ]
+                )
+
+        try:
+            if expected_output_path.exists() and expected_output_path.is_file():
+                content = expected_output_path.read_text()
+                if content.strip():
+                    parts.extend(
+                        [
+                            "",
+                            "Rejected saved plan preview:",
+                            "```markdown",
+                            self._content_preview(content, limit=5000),
+                            "```",
+                        ]
+                    )
+        except OSError:
+            logger.debug("Could not read rejected plan preview from %s", expected_output_path, exc_info=True)
+
+        return "\n".join(parts)
+
+    @classmethod
+    def _tool_call_retry_summary(cls, tool_calls: list[Any]) -> str:
+        lines: list[str] = []
+        for idx, tool_call in enumerate(tool_calls[-40:], start=max(1, len(tool_calls) - 39)):
+            short_name = cls._tool_call_short_name(tool_call)
+            tool_input = getattr(tool_call, "input", None)
+            details: dict[str, Any] = {}
+            if isinstance(tool_input, dict):
+                for key in ("url", "target_url", "targetUrl", "seedFile", "fileName", "path"):
+                    value = tool_input.get(key)
+                    if isinstance(value, str) and value.strip():
+                        details[key] = cls._redact_sensitive_text(value)
+                payload = cls._extract_plan_payload(tool_input)
+                if payload:
+                    details["payload_length"] = len(payload)
+                    details["payload_preview"] = cls._content_preview(payload, limit=500)
+            suffix = f" {json.dumps(details, sort_keys=True, default=str)}" if details else ""
+            lines.append(f"{idx}. {short_name}{suffix}")
+        if len(tool_calls) > 40:
+            lines.insert(0, f"... omitted {len(tool_calls) - 40} earlier tool calls")
+        return "\n".join(lines)
 
     def _build_live_plan_permission_guard(self, target_url: str | None):
         if not target_url or PermissionResultAllow is None or PermissionResultDeny is None:
@@ -674,6 +839,24 @@ Original task follows. Obey it, but correct the failure above.
             _context: Any,
         ):
             short_name = tool_name.split("__")[-1] if "__" in tool_name else tool_name
+
+            if short_name in PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS:
+                if short_name == "browser_close":
+                    return PermissionResultDeny(
+                        message=(
+                            "browser_close is system-owned for live planner runs. Save the plan "
+                            "with planner_save_plan and finish; the orchestrator validates the plan "
+                            "and handles browser cleanup after acceptance or final failure."
+                        )
+                    )
+                return PermissionResultDeny(
+                    message=(
+                        f"{short_name} is not available in live planner runs. Use safe visible "
+                        "browser interactions instead: planner_setup_page, browser_navigate, "
+                        "browser_snapshot, browser_click, browser_type, browser_wait_for, "
+                        "browser_take_screenshot, browser_handle_dialog, then planner_save_plan."
+                    )
+                )
 
             if short_name == "planner_save_plan":
                 missing = []
@@ -942,6 +1125,61 @@ Original task follows. Obey it, but correct the failure above.
             return False, "draft script is missing Playwright expect() assertions"
         return True, None
 
+    @classmethod
+    def _draft_script_validation_failure(cls, content: str) -> str | None:
+        draft_script = cls._extract_draft_script(content)
+        if not draft_script:
+            return "missing Draft Playwright Script fenced TypeScript block"
+        valid, reason = cls._validate_draft_script(draft_script)
+        return None if valid else reason
+
+    @staticmethod
+    def _is_draft_script_failure(error: SpecGenerationError) -> bool:
+        return bool(error.diagnostics.get("planner_draft_script_validation_failure"))
+
+    async def _finalize_or_repair_plan_artifact(
+        self,
+        *,
+        plan_path: Path,
+        expected_output_path: Path,
+        require_draft_script: bool,
+        subject_type: str,
+        subject_name: str,
+        agent_result: Any,
+    ) -> Path:
+        try:
+            return self._finalize_plan_artifact(
+                plan_path=plan_path,
+                expected_output_path=expected_output_path,
+                require_draft_script=require_draft_script,
+            )
+        except SpecGenerationError as exc:
+            if not (require_draft_script and self._is_draft_script_failure(exc)):
+                raise
+
+            draft_failure = str(exc.diagnostics.get("planner_draft_script_validation_failure") or exc)
+            logger.info(
+                "Attempting planner repair for draft script handoff failure in %s '%s': %s",
+                subject_type,
+                subject_name,
+                draft_failure,
+            )
+            repaired_plan_path = await self._attempt_repair_plan(
+                subject_type=subject_type,
+                subject_name=subject_name,
+                agent_result=agent_result,
+                expected_output_path=expected_output_path,
+                draft_script_validation_failure=draft_failure,
+                require_draft_script=require_draft_script,
+            )
+            if not repaired_plan_path:
+                raise
+            return self._finalize_plan_artifact(
+                plan_path=repaired_plan_path,
+                expected_output_path=expected_output_path,
+                require_draft_script=require_draft_script,
+            )
+
     def _finalize_plan_artifact(
         self,
         *,
@@ -961,6 +1199,15 @@ Original task follows. Obey it, but correct the failure above.
                     "planner_draft_script_error": str(exc),
                 },
             ) from exc
+        warnings = self._planner_evidence_warnings(content)
+        if warnings:
+            logger.warning("Planner evidence warnings for %s: %s", plan_path, "; ".join(warnings))
+            if self.session_dir:
+                try:
+                    warning_path = self.session_dir / "planner_evidence_warnings.json"
+                    warning_path.write_text(json.dumps({"plan_path": str(plan_path), "warnings": warnings}, indent=2))
+                except OSError:
+                    logger.debug("Could not write planner evidence warning artifact", exc_info=True)
 
         draft_script = self._extract_draft_script(content)
         if not draft_script:
@@ -1033,6 +1280,31 @@ Original task follows. Obey it, but correct the failure above.
                 return False, f"{title} missing numbered steps"
 
         return True, None
+
+    @classmethod
+    def _planner_evidence_warnings(cls, content: str) -> list[str]:
+        """Warn when UI-oriented TC blocks lack observable evidence fields."""
+        warnings: list[str] = []
+        tc_matches = list(re.finditer(r"(?m)^###\s+(TC-\d{3}):\s+(.+)", content or ""))
+        evidence_terms = (
+            "observed url",
+            "source:",
+            "selector",
+            "getbyrole",
+            "getbytext",
+            "screenshot",
+            "confidence",
+            "browser_snapshot",
+            "live-step-",
+        )
+        ui_terms = ("click", "navigate", "button", "field", "form", "page", "url", "screen", "visible")
+        for idx, match in enumerate(tc_matches):
+            end = tc_matches[idx + 1].start() if idx + 1 < len(tc_matches) else len(content)
+            block = content[match.start() : end]
+            lower = block.lower()
+            if any(term in lower for term in ui_terms) and not any(term in lower for term in evidence_terms):
+                warnings.append(f"{match.group(1)} has UI steps but no explicit observed URL/selector/screenshot/source confidence evidence.")
+        return warnings[:20]
 
     @classmethod
     def _is_valid_test_plan(cls, content: str) -> bool:
@@ -1162,9 +1434,19 @@ Original task follows. Obey it, but correct the failure above.
             unique.append(path)
         return unique
 
-    def _collect_repair_evidence(self, agent_result: Any, expected_output_path: Path) -> dict[str, Any]:
+    def _collect_repair_evidence(
+        self,
+        agent_result: Any,
+        expected_output_path: Path,
+        *,
+        draft_script_validation_failure: str | None = None,
+    ) -> dict[str, Any]:
         rejected_artifacts: list[dict[str, Any]] = []
         artifact_contents: list[tuple[str, str]] = []
+        try:
+            expected_resolved = expected_output_path.resolve()
+        except OSError:
+            expected_resolved = expected_output_path
         for path in self._plan_candidate_paths(expected_output_path):
             try:
                 if not path.exists() or not path.is_file():
@@ -1174,7 +1456,13 @@ Original task follows. Obey it, but correct the failure above.
                 continue
             valid, reason = self._validate_test_plan_schema(content)
             if valid:
-                continue
+                try:
+                    path_resolved = path.resolve()
+                except OSError:
+                    path_resolved = path
+                if not draft_script_validation_failure or path_resolved != expected_resolved:
+                    continue
+                reason = draft_script_validation_failure
             artifact_contents.append((str(path), self._redact_sensitive_text(content)))
             rejected_artifacts.append(
                 {
@@ -1197,7 +1485,9 @@ Original task follows. Obey it, but correct the failure above.
             payload = self._extract_plan_payload(getattr(tc, "input", None))
             if payload:
                 valid, reason = self._validate_test_plan_schema(payload)
-                if not valid:
+                if valid and draft_script_validation_failure:
+                    reason = draft_script_validation_failure
+                if not valid or draft_script_validation_failure:
                     payload_contents.append((tool_name, self._redact_sensitive_text(payload)))
                     rejected_payloads.append(
                         {
@@ -1230,6 +1520,7 @@ Original task follows. Obey it, but correct the failure above.
         return {
             "useful_evidence": useful,
             "save_plan_observed": save_plan_observed,
+            "draft_script_validation_failure": draft_script_validation_failure,
             "rejected_artifacts": rejected_artifacts,
             "rejected_save_plan_payloads": rejected_payloads,
             "raw_output": raw_output_meta,
@@ -1283,6 +1574,15 @@ Original task follows. Obey it, but correct the failure above.
             "",
             "Return only the markdown plan.",
         ]
+        draft_failure = evidence.get("draft_script_validation_failure")
+        if draft_failure:
+            parts.extend(
+                [
+                    "",
+                    f"Specific repair needed: the prior plan schema was valid, but its Draft Playwright Script failed validation: {draft_failure}.",
+                    "Preserve the discovered scenario and selectors from the evidence, and repair only the markdown/script handoff contract.",
+                ]
+            )
         budget = 60000
         for source, content in evidence.get("_payload_contents", []):
             budget = self._append_evidence_section(parts, "Rejected save-plan payload", source, content, budget)
@@ -1318,8 +1618,14 @@ Original task follows. Obey it, but correct the failure above.
         subject_name: str,
         agent_result: Any,
         expected_output_path: Path,
+        draft_script_validation_failure: str | None = None,
+        require_draft_script: bool = False,
     ) -> Path | None:
-        evidence = self._collect_repair_evidence(agent_result, expected_output_path)
+        evidence = self._collect_repair_evidence(
+            agent_result,
+            expected_output_path,
+            draft_script_validation_failure=draft_script_validation_failure,
+        )
         attempt: dict[str, Any] = {
             **evidence,
             "attempted": False,
@@ -1337,6 +1643,40 @@ Original task follows. Obey it, but correct the failure above.
         repair_result = await self._query_repair_agent(prompt)
         repaired_content = self._extract_plan_content(repair_result)
         if repaired_content:
+            repaired_draft_failure = (
+                self._draft_script_validation_failure(repaired_content)
+                if require_draft_script
+                else None
+            )
+            if repaired_draft_failure:
+                attempt["validation_failure_reason"] = repaired_draft_failure
+                attempt["repaired_output"] = {
+                    "length": len(repaired_content),
+                    "content_hash": self._content_hash(repaired_content),
+                    "preview": self._content_preview(repaired_content),
+                }
+                artifact_path = self._write_repair_attempt_artifact(attempt)
+                diagnostics = self._agent_diagnostics(agent_result, expected_output_path)
+                diagnostics.update(
+                    {
+                        "planner_repair_attempted": True,
+                        "planner_repair_accepted": False,
+                        "planner_repair_validation_failure": repaired_draft_failure,
+                        "planner_repair_artifact_path": str(artifact_path) if artifact_path else None,
+                        "rejected_artifact_count": len(evidence["rejected_artifacts"]),
+                        "rejected_save_plan_payload_count": len(evidence["rejected_save_plan_payloads"]),
+                        "raw_output_length": evidence["raw_output"]["length"],
+                        "planner_draft_script_validation_failure": repaired_draft_failure,
+                    }
+                )
+                raise SpecGenerationError(
+                    (
+                        f"Failed to generate spec for {subject_type} '{subject_name}': planner repair produced "
+                        f"a markdown plan, but the required Draft Playwright Script is still invalid. "
+                        f"Validation failure: {repaired_draft_failure}."
+                    ),
+                    diagnostics=diagnostics,
+                )
             expected_output_path.parent.mkdir(parents=True, exist_ok=True)
             expected_output_path.write_text(repaired_content)
             attempt["accepted"] = True
@@ -1463,11 +1803,13 @@ Original task follows. Obey it, but correct the failure above.
             return ""
 
         text = []
+        per_chunk_budget = context_budget_for_stage("planner_prd_chunk", 900)
         for _i, chunk in enumerate(chunks):
             content = chunk.get("content", "")
             # Sanitize: remove null bytes and control characters
             content = content.replace("\x00", " ")
             content = "".join(c if c.isprintable() or c in "\n\r\t" else " " for c in content)
+            content = truncate_text_to_tokens(content, per_chunk_budget)
 
             meta = chunk.get("metadata", {})
             source = meta.get("feature", "PRD")
@@ -1507,6 +1849,8 @@ Original task follows. Obey it, but correct the failure above.
         """
         from datetime import datetime
 
+        target_url = self._normalize_url_for_prompt(target_url) or target_url
+        login_url = self._normalize_url_for_prompt(login_url)
         feature_slug = slugify(flow_title)
 
         # Use provided output_dir or default

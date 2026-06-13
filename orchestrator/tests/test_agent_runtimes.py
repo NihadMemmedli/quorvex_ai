@@ -120,8 +120,53 @@ async def test_hermes_runtime_maps_run_events(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_hermes_runtime_uses_persisted_enabled_setting(tmp_path, monkeypatch):
+async def test_hermes_runtime_uses_shared_memory_augmentation(tmp_path, monkeypatch):
     from orchestrator.api import settings as settings_api
+    from orchestrator.memory.prompt_augmentation import PromptAugmentationResult
+
+    monkeypatch.setattr(settings_api, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.delenv("QUORVEX_SETTINGS_ENV_FILE", raising=False)
+    monkeypatch.setenv("HERMES_ENABLED", "true")
+    captured = {}
+
+    def fake_augment(prompt, **kwargs):
+        assert kwargs["project_id"] == "project-a"
+        assert kwargs["runtime"] == "hermes"
+        return PromptAugmentationResult(
+            prompt=f"## Memory Context\nInjected\n\n---\n\n{prompt}",
+            context_text="## Memory Context\nInjected",
+            injected=True,
+        )
+
+    monkeypatch.setattr(
+        "orchestrator.memory.prompt_augmentation.augment_prompt_with_agent_memory",
+        fake_augment,
+    )
+
+    class FakeHermesClient:
+        async def create_run(self, payload, timeout_seconds):
+            captured.update(payload)
+            return {"run_id": "hrun-memory"}
+
+        async def iter_events(self, run_id):
+            yield {"event": "lifecycle", "status": "completed"}
+
+        async def get_run(self, run_id):
+            return {"status": "completed", "output": "Done"}
+
+    runtime = HermesRuntime(client=FakeHermesClient())
+    result = await runtime.run(
+        "inspect app",
+        AgentRuntimeContext(timeout_seconds=60, owner_id="run-1", memory_project_id="project-a"),
+    )
+
+    assert result.success is True
+    assert captured["input"].startswith("## Memory Context")
+    assert captured["input"].endswith("inspect app")
+
+
+@pytest.mark.asyncio
+async def test_hermes_runtime_uses_persisted_enabled_setting(tmp_path, monkeypatch):
 
     env_file = tmp_path / "runtime.env"
     env_file.write_text("HERMES_ENABLED=true\nHERMES_MODEL=persisted-hermes\n")

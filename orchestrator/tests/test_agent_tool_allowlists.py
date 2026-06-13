@@ -1,6 +1,8 @@
+import os
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,7 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.agents import base_agent as base_agent_module
 from orchestrator.agents.base_agent import BaseAgent
-from orchestrator.utils.agent_tool_allowlists import AGENT_TOOL_PROFILES, get_agent_allowed_tools
+from orchestrator.utils.agent_tool_allowlists import (
+    AGENT_TOOL_PROFILES,
+    get_agent_allowed_tools,
+    get_agent_tool_config,
+)
 
 
 def _agent_profile_name(agent_file: Path) -> str:
@@ -55,6 +61,26 @@ def test_agent_allowlist_uses_root_playwright_prefix(tmp_path, monkeypatch):
     assert {"Glob", "Grep", "Read", "LS"} <= set(tools)
     assert "mcp__playwright__browser_snapshot" in tools
     assert "mcp__playwright__browser_network_requests" in tools
+    assert "mcp__playwright__browser_evaluate" not in tools
+    assert "mcp__playwright__browser_file_upload" not in tools
+    assert "mcp__playwright__browser_drag" not in tools
+    assert "mcp__playwright__browser_hover" not in tools
+    assert "mcp__playwright__browser_start_video" not in tools
+    assert "mcp__playwright__browser_stop_video" not in tools
+    assert "mcp__playwright__browser_video_chapter" not in tools
+
+
+def test_advanced_explorer_profile_includes_video_and_high_risk_tools(tmp_path, monkeypatch):
+    _write_mcp_config(tmp_path, "playwright")
+    monkeypatch.chdir(tmp_path)
+
+    tools = get_agent_allowed_tools("app-explorer-advanced")
+
+    assert "mcp__playwright__browser_snapshot" in tools
+    assert "mcp__playwright__browser_evaluate" in tools
+    assert "mcp__playwright__browser_file_upload" in tools
+    assert "mcp__playwright__browser_drag" in tools
+    assert "mcp__playwright__browser_hover" in tools
     assert "mcp__playwright__browser_start_video" in tools
     assert "mcp__playwright__browser_stop_video" in tools
     assert "mcp__playwright__browser_video_chapter" in tools
@@ -93,12 +119,34 @@ def test_prd_live_planner_allows_only_prd_browser_tools(tmp_path, monkeypatch):
     assert "mcp__playwright-test__planner_save_plan" in tools
     assert "mcp__playwright-test__browser_navigate" in tools
     assert "mcp__playwright-test__browser_snapshot" in tools
+    assert "mcp__playwright-test__browser_close" not in tools
     assert "Glob" not in tools
     assert "Grep" not in tools
     assert "Read" not in tools
     assert "LS" not in tools
+    assert "mcp__playwright-test__browser_run_code" not in tools
     assert "mcp__playwright-test__browser_evaluate" not in tools
+    assert "mcp__playwright-test__browser_console_messages" not in tools
     assert "mcp__playwright-test__browser_network_requests" not in tools
+
+
+def test_prd_live_planner_tool_config_disallows_broad_browser_tools(tmp_path, monkeypatch):
+    _write_mcp_config(tmp_path, "playwright-test")
+    monkeypatch.chdir(tmp_path)
+
+    config = get_agent_tool_config("prd-live-planner")
+    allowed_tools = set(config["allowed_tools"])
+    visible_tools = set(config["tools"])
+    disallowed_tools = set(config["disallowed_tools"])
+    denied = {
+        "mcp__playwright-test__browser_run_code",
+        "mcp__playwright-test__browser_evaluate",
+        "mcp__playwright-test__browser_close",
+    }
+
+    assert denied <= disallowed_tools
+    assert denied.isdisjoint(allowed_tools)
+    assert denied.isdisjoint(visible_tools)
 
 
 def test_known_profiles_do_not_grant_wildcards(tmp_path, monkeypatch):
@@ -194,6 +242,21 @@ async def test_base_agent_queue_marks_explorer_browser_tasks_live(tmp_path, monk
             return "{}"
 
     monkeypatch.setattr(base_agent_module, "get_agent_queue", lambda: FakeQueue())
+    monkeypatch.setattr(
+        BaseAgent,
+        "_refresh_runtime_settings",
+        lambda self: (
+            {},
+            SimpleNamespace(
+                runtime="claude_sdk",
+                provider="anthropic_compatible",
+                api_key="sk-test",
+                base_url="https://api.z.ai/api/anthropic",
+                model="glm-5.1",
+                tier="tool_deep",
+            ),
+        ),
+    )
 
     agent = BaseAgent()
     agent.agent_tool_profile = "app-explorer"
@@ -204,6 +267,151 @@ async def test_base_agent_queue_marks_explorer_browser_tasks_live(tmp_path, monk
     assert captured["requires_live_browser"] is True
     assert "mcp__playwright__browser_navigate" in captured["allowed_tools"]
     assert captured["cwd"] == str(tmp_path)
+
+
+def test_base_agent_refreshes_settings_runtime_env(monkeypatch):
+    from orchestrator.api import settings as settings_api
+    from orchestrator.services import ai_runtime_config
+
+    captured: dict = {}
+
+    def fake_runtime_env_vars():
+        return {
+            "QUORVEX_AGENT_RUNTIME": "claude_sdk",
+            "QUORVEX_LLM_API_KEY": "settings-key",
+            "QUORVEX_LLM_BASE_URL": "https://settings.example/anthropic",
+            "QUORVEX_LLM_TOOL_DEEP_MODEL": "settings-tool-model",
+        }
+
+    def fake_apply_runtime_settings(env_vars):
+        captured["applied_settings"] = dict(env_vars)
+
+    def fake_apply_runtime_env_aliases(env_vars, *, tier="standard", model_override=None):
+        captured["alias_env_vars"] = dict(env_vars)
+        captured["tier"] = tier
+        return SimpleNamespace(
+            runtime="claude_sdk",
+            provider="anthropic_compatible",
+            api_key=env_vars["QUORVEX_LLM_API_KEY"],
+            base_url=env_vars["QUORVEX_LLM_BASE_URL"],
+            model=env_vars["QUORVEX_LLM_TOOL_DEEP_MODEL"],
+            tier=tier,
+        )
+
+    monkeypatch.delenv("QUORVEX_RUN_MODEL_TIER", raising=False)
+    monkeypatch.setattr(settings_api, "runtime_env_vars", fake_runtime_env_vars)
+    monkeypatch.setattr(settings_api, "_apply_runtime_settings", fake_apply_runtime_settings)
+    monkeypatch.setattr(ai_runtime_config, "apply_runtime_env_aliases", fake_apply_runtime_env_aliases)
+
+    agent = object.__new__(BaseAgent)
+    _, selection = agent._refresh_runtime_settings()
+
+    assert captured["applied_settings"]["QUORVEX_LLM_API_KEY"] == "settings-key"
+    assert captured["alias_env_vars"]["QUORVEX_LLM_BASE_URL"] == "https://settings.example/anthropic"
+    assert captured["tier"] == "tool_deep"
+    assert selection.model == "settings-tool-model"
+    assert os.environ["QUORVEX_RUN_MODEL_TIER"] == "tool_deep"
+
+
+@pytest.mark.asyncio
+async def test_base_agent_queue_forwards_settings_runtime_env(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    class FakeQueue:
+        async def connect(self):
+            return None
+
+        async def get_metrics(self):
+            return {"workers_alive": 1, "queue_length": 0, "running": 0}
+
+        async def enqueue_task(self, **kwargs):
+            captured.update(kwargs)
+            return "agent-task-env"
+
+        async def wait_for_result(self, task_id, timeout, poll_interval, on_progress):
+            return "{}"
+
+    for key in (
+        "QUORVEX_LLM_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setattr(base_agent_module, "get_agent_queue", lambda: FakeQueue())
+    monkeypatch.setattr(
+        BaseAgent,
+        "_refresh_runtime_settings",
+        lambda self: (
+            {
+                "QUORVEX_AGENT_RUNTIME": "claude_sdk",
+                "QUORVEX_LLM_API_KEY": "settings-key",
+                "QUORVEX_LLM_BASE_URL": "https://settings.example/anthropic",
+                "QUORVEX_LLM_TOOL_DEEP_MODEL": "settings-tool-model",
+            },
+            SimpleNamespace(
+                runtime="claude_sdk",
+                provider="anthropic_compatible",
+                api_key="settings-key",
+                base_url="https://settings.example/anthropic",
+                model="settings-tool-model",
+                tier="tool_deep",
+            ),
+        ),
+    )
+
+    agent = BaseAgent()
+    agent.agent_cwd = str(tmp_path)
+
+    await agent._query_agent_via_queue("explore", timeout_seconds=30)
+
+    env_vars = captured["env_vars"]
+    assert env_vars["QUORVEX_AGENT_RUNTIME"] == "claude_sdk"
+    assert env_vars["QUORVEX_LLM_API_KEY"] == "settings-key"
+    assert env_vars["ANTHROPIC_AUTH_TOKEN"] == "settings-key"
+    assert env_vars["ANTHROPIC_API_KEY"] == "settings-key"
+    assert env_vars["ANTHROPIC_BASE_URL"] == "https://settings.example/anthropic"
+    assert env_vars["ANTHROPIC_MODEL"] == "settings-tool-model"
+    assert env_vars["QUORVEX_RUN_MODEL_TIER"] == "tool_deep"
+
+
+@pytest.mark.asyncio
+async def test_base_agent_queue_fails_fast_without_claude_auth(tmp_path, monkeypatch):
+    class FakeQueue:
+        async def connect(self):
+            return None
+
+        async def get_metrics(self):
+            return {"workers_alive": 1, "queue_length": 0, "running": 0}
+
+        async def enqueue_task(self, **kwargs):
+            raise AssertionError("queue should not be used without Claude SDK auth")
+
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    monkeypatch.setattr(base_agent_module, "get_agent_queue", lambda: FakeQueue())
+    monkeypatch.setattr(
+        BaseAgent,
+        "_refresh_runtime_settings",
+        lambda self: (
+            {"QUORVEX_AGENT_RUNTIME": "claude_sdk"},
+            SimpleNamespace(
+                runtime="claude_sdk",
+                provider="anthropic_compatible",
+                api_key="",
+                base_url="https://api.z.ai/api/anthropic",
+                model="glm-5.1",
+                tier="tool_deep",
+            ),
+        ),
+    )
+
+    agent = BaseAgent()
+    agent.agent_cwd = str(tmp_path)
+
+    with pytest.raises(RuntimeError, match="Claude SDK runtime is not authenticated"):
+        await agent._query_agent_via_queue("explore", timeout_seconds=30)
 
 
 def test_base_agent_unknown_profile_keeps_legacy_fallback():

@@ -790,6 +790,44 @@ def test_agent_memory_layered_scope_search(monkeypatch):
     assert other_project.id not in ids
 
 
+def test_memory_context_budget_preserves_high_value_items():
+    from orchestrator.memory.context_builder import MemoryContextBuilder, MemoryContextBundle, MemoryContextSection
+
+    bundle = MemoryContextBundle(
+        query="checkout",
+        sections=[
+            MemoryContextSection(
+                name="Semantic Memory",
+                guidance="Stable facts.",
+                items=[
+                    {
+                        "id": "low",
+                        "kind": "project_fact",
+                        "confidence": 0.4,
+                        "importance": 0.1,
+                        "summary": "Low value " + ("noise " * 80),
+                    },
+                    {
+                        "id": "high",
+                        "kind": "project_fact",
+                        "confidence": 0.99,
+                        "importance": 1.0,
+                        "score": 5.0,
+                        "summary": "Checkout confirmation uses getByRole button Complete.",
+                    },
+                ],
+            )
+        ],
+        unified={},
+    )
+
+    prompt = MemoryContextBuilder(service=None).format_prompt_context(bundle, token_budget=60)
+
+    assert "Checkout confirmation" in prompt
+    assert "Low value" not in prompt
+    assert "omitted" in prompt
+
+
 def test_agent_memory_scanner_blocks_prompt_injection(monkeypatch):
     from orchestrator.memory import agent_memory as agent_memory_module
     from orchestrator.memory.agent_memory import AgentMemoryService, MemorySafetyError

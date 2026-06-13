@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -49,6 +50,7 @@ if config_dir:
 from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
 from orchestrator.utils.agent_runner import AgentRunner
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
+from orchestrator.utils.token_budget import context_budget_for_stage, truncate_text_to_tokens
 from orchestrator.utils.text_utils import truncate_middle
 
 
@@ -191,10 +193,11 @@ class NativeHealer:
 
         error_section = ""
         if error_log:
+            error_budget = context_budget_for_stage("healer_error_log", 1800)
             error_section = f"""
 ## Previous Error Output
 ```
-{truncate_middle(error_log)}
+{truncate_text_to_tokens(error_log, error_budget)}
 ```
 """
 
@@ -244,11 +247,12 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
             test_data_section = "\n" + "\n".join(lines) + "\n"
 
         memory_section = self._build_memory_context_section(
-            query=f"{test_file}\n{error_log or ''}\n{diagnosis_context or ''}\n{test_content[:3000]}",
+            query=f"{test_file}\n{error_log or ''}\n{diagnosis_context or ''}\n{test_content[:1600]}",
             project_id=os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID"),
             source_id=test_file,
             run_id=memory_run_id,
         )
+        test_context = self._healer_test_context(test_content, error_log=error_log)
 
         prompt = f"""You are the Playwright Test Healer.
 
@@ -257,7 +261,7 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 ## Test File: {test_file}
 
 ```typescript
-{test_content}
+{test_context}
 ```
 
 {attempt_section}
@@ -336,7 +340,8 @@ Start with the exact scoped `test_run`.
                 agent_type="NativeHealer",
                 limit=8,
             )
-            context = builder.format_prompt_context(bundle, token_budget=1200)
+            token_budget = context_budget_for_stage("native_healer", 1200)
+            context = builder.format_prompt_context(bundle, token_budget=token_budget)
             if not context:
                 return ""
             bundle_dict = bundle.to_dict()
@@ -355,6 +360,7 @@ Start with the exact scoped `test_run`.
                     **({"run_id": run_id} if run_id else {}),
                     "empty_recall": not bool(ranking.get("selected_items")),
                     "memory_score_summary": ranking.get("score_summary", {}),
+                    "context_budget_tokens": token_budget,
                 },
             )
             return f"""
@@ -366,6 +372,44 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
         except Exception as exc:
             logger.debug("Healer memory context skipped: %s", exc)
             return ""
+
+    @staticmethod
+    def _healer_test_context(test_content: str, *, error_log: str | None = None) -> str:
+        if os.environ.get("HEALER_FULL_FILE_CONTEXT", "0") == "1":
+            return test_content
+        lines = test_content.splitlines()
+        if not lines:
+            return ""
+        target_line = NativeHealer._failed_line_number(error_log)
+        if target_line is None:
+            match = re.search(r"\b(?:Error|Timeout|expect|locator|click|fill|goto)\b", error_log or "", re.IGNORECASE)
+            target_line = 1 if match else min(len(lines), max(1, len(lines) // 2))
+        radius = int(os.environ.get("HEALER_CODE_FRAME_RADIUS", "35") or "35")
+        start = max(1, target_line - radius)
+        end = min(len(lines), target_line + radius)
+        framed = [f"{idx}: {lines[idx - 1]}" for idx in range(start, end + 1)]
+        prefix = [
+            f"// Compact healer context for {len(lines)}-line test file.",
+            f"// Showing lines {start}-{end}. Set HEALER_FULL_FILE_CONTEXT=1 to include the full file.",
+        ]
+        return "\n".join(prefix + framed)
+
+    @staticmethod
+    def _failed_line_number(error_log: str | None) -> int | None:
+        if not error_log:
+            return None
+        patterns = (
+            r":(\d+):\d+\)?",
+            r"line\s+(\d+)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, error_log, re.IGNORECASE)
+            if match:
+                try:
+                    return max(1, int(match.group(1)))
+                except ValueError:
+                    continue
+        return None
 
     def _fixture_import_path(self, test_file: str) -> str:
         fixture_path = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "test-data"

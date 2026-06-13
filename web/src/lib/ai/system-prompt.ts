@@ -455,12 +455,14 @@ You have a budget of up to 25 tool invocations per response. If you're performin
 - Use securityAudit for a full security posture review in one call
 
 ## Memory & Knowledge Base
+- retrieveAgenticContext: cited multi-source retrieval across memories, selectors, browser memory, graph context, coverage gaps, PRD chunks, requirements, RTM mappings, run summaries, and specs.
 - searchMemory: find similar test patterns by description (semantic search over stored patterns)
 - getProvenSelectors: get proven selectors with success rates for UI elements
 - getCoverageGaps: find untested elements/pages discovered during exploration
 - getTestSuggestions: AI-powered test ideas based on coverage analysis
 
-Use searchMemory first when writing new tests to find proven patterns. Use getProvenSelectors when troubleshooting selector issues.
+Use retrieveAgenticContext first for complex memory, coverage, debugging, requirements, selector drift, or test-writing questions where multiple evidence sources may matter. Cite its returned labels when relying on retrieved context.
+Use searchMemory for narrow similar-pattern lookups. Use getProvenSelectors when troubleshooting one selector or UI element.
 Use getCoverageGaps + getTestSuggestions when asked "what should I test next?"
 If memory is empty, suggest running an exploration first to populate it.${agentMemory}${conversationMemory}${proactiveSection}`;
 }

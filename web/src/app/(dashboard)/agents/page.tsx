@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import Link from 'next/link';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import Bot from 'lucide-react/dist/esm/icons/bot';
 import FileText from 'lucide-react/dist/esm/icons/file-text';
 import Play from 'lucide-react/dist/esm/icons/play';
@@ -45,6 +46,7 @@ import MoreHorizontal from 'lucide-react/dist/esm/icons/more-horizontal';
 import Archive from 'lucide-react/dist/esm/icons/archive';
 import SlidersHorizontal from 'lucide-react/dist/esm/icons/sliders-horizontal';
 import ChevronDown from 'lucide-react/dist/esm/icons/chevron-down';
+import Pencil from 'lucide-react/dist/esm/icons/pencil';
 import ReactMarkdown from 'react-markdown';
 import { toast } from 'sonner';
 import { useProject } from '@/contexts/ProjectContext';
@@ -101,6 +103,7 @@ import {
     type AgentWorkspaceMode,
     type AgentWorkspaceView,
     type ReportReviewFilter,
+    type ReportSpecItemType,
     type ReportSearchTypeFilter,
 } from './agents-workspace-state';
 
@@ -178,6 +181,7 @@ interface AgentRunHealth {
 
 interface AgentRunEvent {
     id: string;
+    run_id?: string;
     sequence: number;
     event_type: string;
     level: string;
@@ -252,6 +256,29 @@ interface AgentTool {
     requires_mcp_server?: string | null;
 }
 
+const TOOL_RISK_PILL_STYLES: Record<AgentTool['risk'], { background: string; borderColor: string; color: string }> = {
+    low: {
+        background: 'rgba(126, 139, 168, 0.14)',
+        borderColor: 'rgba(126, 139, 168, 0.24)',
+        color: 'var(--text-secondary)',
+    },
+    medium: {
+        background: 'var(--warning-muted)',
+        borderColor: 'rgba(251, 191, 36, 0.28)',
+        color: 'var(--warning)',
+    },
+    high: {
+        background: 'var(--danger-muted)',
+        borderColor: 'rgba(248, 113, 113, 0.3)',
+        color: 'var(--danger)',
+    },
+    destructive: {
+        background: 'rgba(248, 113, 113, 0.16)',
+        borderColor: 'rgba(248, 113, 113, 0.36)',
+        color: 'var(--danger)',
+    },
+};
+
 interface AgentDefinition {
     id: string;
     name: string;
@@ -264,6 +291,19 @@ interface AgentDefinition {
     test_data_refs?: string[];
     status: string;
     project_id?: string | null;
+}
+
+function defaultDefinitionForm(runtime: string) {
+    return {
+        id: '',
+        name: '',
+        description: '',
+        system_prompt: 'You are a focused QA automation agent. Use the selected tools to inspect the target, report findings clearly, and avoid actions outside the requested task.',
+        runtime,
+        timeout_seconds: 1800,
+        tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console', 'browser_screenshot'],
+        test_data_refs: '',
+    };
 }
 
 interface SpecResult {
@@ -281,6 +321,25 @@ type AuthType = 'none' | 'credentials' | 'session';
 type CustomResultTab = 'overview' | 'findings' | 'test_ideas' | 'requirements' | 'evidence' | 'raw';
 type ReportSpecBrowserAuthMode = 'session' | 'project_default' | 'none';
 type TraceTab = AgentTraceTab;
+type ReportEditableItemType = 'finding' | 'test_idea' | 'requirement';
+type AgentActionIntent =
+    | { type: 'none' }
+    | { type: 'createAgent' }
+    | { type: 'reviewReportSpec'; runId: string; itemId: string; itemType: ReportSpecItemType };
+
+interface FlowModalData {
+    id: string;
+    title: string;
+    pages?: string[];
+    happy_path?: string;
+    edge_cases?: string[];
+    test_ideas?: string[];
+    entry_point?: string;
+    exit_point?: string;
+    source_type?: 'custom_report' | string;
+    item_type?: ReportSpecItemType;
+    generated_spec?: unknown;
+}
 
 const AGENT_HISTORY_STATUS_FILTER_LABELS: Record<AgentHistoryStatusFilter, string> = {
     all: 'All',
@@ -298,6 +357,10 @@ const AGENT_HISTORY_TYPE_FILTER_LABELS: Record<AgentHistoryTypeFilter, string> =
     writer: 'Writer',
     spec_generation: 'Spec runs',
 };
+
+const REPORT_PRIORITY_OPTIONS = ['critical', 'high', 'medium', 'low'] as const;
+const REPORT_SEVERITY_OPTIONS = ['critical', 'high', 'medium', 'low', 'info'] as const;
+const REPORT_SELECT_EMPTY_VALUE = '__empty__';
 
 interface ReportSpecBrowserAuthSelection {
     mode: ReportSpecBrowserAuthMode;
@@ -366,6 +429,10 @@ interface StructuredAgentReport {
     parse_status?: string;
 }
 
+type ReportEditTarget =
+    | { type: 'overview'; runId: string }
+    | { type: ReportEditableItemType; runId: string; itemId: string };
+
 interface AgentQueueStatus {
     mode?: string;
     active?: number;
@@ -398,6 +465,39 @@ interface AgentReportSearchItem {
     item: Record<string, any>;
 }
 
+function reportSearchResultTab(type: AgentReportSearchItem['type']): CustomResultTab {
+    switch (type) {
+        case 'finding':
+            return 'findings';
+        case 'test_idea':
+            return 'test_ideas';
+        case 'requirement':
+            return 'requirements';
+        case 'evidence':
+            return 'evidence';
+        case 'page':
+        case 'action':
+        default:
+            return 'overview';
+    }
+}
+
+function reportSearchResultHref(result: AgentReportSearchItem) {
+    const params = new URLSearchParams({
+        runId: result.run_id,
+        view: 'run',
+        resultTab: reportSearchResultTab(result.type),
+    });
+    const itemId = result.item?.id != null ? String(result.item.id) : '';
+
+    if ((result.type === 'finding' || result.type === 'test_idea') && itemId) {
+        params.set('specItemId', itemId);
+        params.set('specItemType', result.type);
+    }
+
+    return `/agents?${params.toString()}`;
+}
+
 function formatToolName(toolName?: string) {
     if (!toolName) return 'Waiting for first tool';
     const short = toolName.includes('__') ? toolName.split('__').pop() || toolName : toolName;
@@ -405,8 +505,8 @@ function formatToolName(toolName?: string) {
 }
 
 function customAgentCurrentActivity(progress: any = {}) {
-    if (progress.last_tool_label || progress.last_tool) {
-        return progress.last_tool_label || formatToolName(progress.last_tool);
+    if (progress.current_tool_label || progress.last_tool_label || progress.current_tool || progress.last_tool) {
+        return progress.current_tool_label || progress.last_tool_label || formatToolName(progress.current_tool || progress.last_tool);
     }
     if (progress.phase === 'llm_retry' || progress.retry_attempt) {
         const attempt = progress.retry_attempt ? ` ${progress.retry_attempt}${progress.retry_max_attempts ? `/${progress.retry_max_attempts}` : ''}` : '';
@@ -648,10 +748,16 @@ function reportStatusColor(value?: string) {
     return 'var(--text-secondary)';
 }
 
-const LIVE_AGENT_STATUSES = new Set(['running', 'pending', 'queued', 'paused']);
+const LIVE_AGENT_STATUSES = new Set(['running', 'pending', 'queued', 'in_progress', 'waiting', 'paused']);
+const TERMINAL_AGENT_STATUSES = new Set(['completed', 'completed_partial', 'failed', 'cancelled', 'canceled', 'timeout']);
+
+function isAgentRunTerminal(status?: string) {
+    return TERMINAL_AGENT_STATUSES.has(String(status || '').toLowerCase());
+}
 
 function agentStatusTone(status?: string) {
     if (status === 'completed') return { bg: 'var(--success-muted)', color: 'var(--success)' };
+    if (status === 'completed_partial') return { bg: 'var(--warning-muted)', color: 'var(--warning)' };
     if (status === 'failed' || status === 'cancelled' || status === 'timeout') return { bg: 'var(--danger-muted)', color: 'var(--danger)' };
     if (status === 'paused') return { bg: 'rgba(245, 158, 11, 0.12)', color: 'var(--warning)' };
     return { bg: 'var(--primary-glow)', color: 'var(--primary)' };
@@ -711,12 +817,71 @@ function itemPrompt(run: AgentRun, item: ReportFinding | ReportTestIdea, kind: '
     ].join('\n');
 }
 
+function markAgentsAction(payload: Record<string, unknown>) {
+    if (typeof window === 'undefined' || process.env.NODE_ENV === 'production') return;
+    (window as typeof window & { __agentsLastAction?: Record<string, unknown> }).__agentsLastAction = payload;
+}
+
+function reportItemToFlow(item: ReportFinding | ReportTestIdea, kind: ReportSpecItemType, run: AgentRun): FlowModalData {
+    return {
+        id: item.id,
+        title: item.title || item.id,
+        pages: item.page ? [item.page] : [],
+        happy_path: 'steps' in item && item.steps?.length ? item.steps.join('\n') : ('description' in item ? item.description : undefined),
+        edge_cases: kind === 'finding' && 'evidence' in item && item.evidence ? [item.evidence] : [],
+        test_ideas: kind === 'test_idea' && 'expected' in item && item.expected ? [item.expected] : [],
+        entry_point: item.page || run.config?.url,
+        exit_point: item.page || run.config?.url,
+        source_type: 'custom_report',
+        item_type: kind,
+    };
+}
+
+function linesToText(value?: string[]) {
+    return Array.isArray(value) ? value.join('\n') : '';
+}
+
+function textToLines(value?: string) {
+    return (value || '')
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean);
+}
+
+function normalizeReportPatchResponse(data: any): AgentRun | null {
+    if (data?.run?.id) return data.run as AgentRun;
+    if (data?.id) return data as AgentRun;
+    return null;
+}
+
+function reportEditDialogTitle(target: ReportEditTarget | null) {
+    if (!target) return 'Edit Report Summary';
+    if (target.type === 'overview') return 'Edit Report Summary';
+    if (target.type === 'finding') return `Edit finding ${target.itemId}`;
+    if (target.type === 'test_idea') return `Edit test idea ${target.itemId}`;
+    return `Edit requirement ${target.itemId}`;
+}
+
+function findReportSpecItem(run: AgentRun | null, itemId: string, itemType: ReportSpecItemType) {
+    if (!run?.result?.structured_report || !itemId) return null;
+    const report = getStructuredReport(run);
+    const items = itemType === 'finding' ? report.findings || [] : report.test_ideas || [];
+    const item = items.find(candidate => candidate.id === itemId);
+    if (!item) return null;
+    return {
+        item,
+        flow: reportItemToFlow(item, itemType, run),
+    };
+}
+
 function CustomAgentReportView({
     run,
     activeTab,
     onTabChange,
     onAskAssistant,
     onCreateSpecFromReport,
+    onEditOverview,
+    onEditReportItem,
     onImportRequirements,
     importingRequirementIds,
     importError,
@@ -730,6 +895,8 @@ function CustomAgentReportView({
     onTabChange: (tab: CustomResultTab) => void;
     onAskAssistant: (prompt: string) => void;
     onCreateSpecFromReport: (item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test_idea') => void;
+    onEditOverview: (report: StructuredAgentReport) => void;
+    onEditReportItem: (item: ReportFinding | ReportTestIdea | ReportRequirement, kind: ReportEditableItemType) => void;
     onImportRequirements: (itemIds?: string[]) => void;
     importingRequirementIds: string[];
     importError?: string | null;
@@ -797,12 +964,22 @@ function CustomAgentReportView({
                             {report.parse_status ? ` · ${report.parse_status} report` : ''}
                         </p>
                     </div>
-                    <button
-                        onClick={() => onAskAssistant(basePrompt)}
-                        style={{ border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--text)', borderRadius: '6px', padding: '0.45rem 0.7rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem', fontWeight: 600 }}
-                    >
-                        <MessageSquare size={14} /> Ask Assistant
-                    </button>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <button
+                            type="button"
+                            onClick={() => onEditOverview(report)}
+                            style={{ border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--text)', borderRadius: '6px', padding: '0.45rem 0.7rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem', fontWeight: 600 }}
+                        >
+                            <Pencil size={14} /> Edit Report Summary
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => onAskAssistant(basePrompt)}
+                            style={{ border: '1px solid var(--border)', background: 'var(--background)', color: 'var(--text)', borderRadius: '6px', padding: '0.45rem 0.7rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.82rem', fontWeight: 600 }}
+                        >
+                            <MessageSquare size={14} /> Ask Assistant
+                        </button>
+                    </div>
                 </div>
                 {report.summary && (
                     <p style={{ margin: '0.85rem 0 0', color: 'var(--text)', lineHeight: 1.55, fontSize: '0.92rem' }}>
@@ -928,6 +1105,7 @@ function CustomAgentReportView({
                             {finding.description && <p style={{ margin: '0 0 0.45rem', color: 'var(--text-secondary)', fontSize: '0.85rem', lineHeight: 1.5 }}>{finding.description}</p>}
                             {finding.evidence && <p style={{ margin: '0 0 0.7rem', color: 'var(--text)', fontSize: '0.82rem', lineHeight: 1.45 }}><strong>Evidence:</strong> {finding.evidence}</p>}
                             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <ReportActionButton onClick={() => onEditReportItem(finding, 'finding')} label={`Edit finding ${finding.id}`} icon={Pencil} />
                                 <ReportActionButton onClick={() => onAskAssistant(itemPrompt(run, finding, 'finding'))} label="Use in Assistant" icon={MessageSquare} />
                                 <ReportActionButton onClick={() => onCreateSpecFromReport(finding, 'finding')} label="Create Spec" icon={FileText} />
                                 <ReportActionButton onClick={() => onAskAssistant(`Start a follow-up custom agent from finding ${finding.id} in run ${run.id}. Verify whether this issue still reproduces and collect evidence. Use approval before starting the agent.`)} label="Follow Up Agent" icon={Bot} />
@@ -955,6 +1133,7 @@ function CustomAgentReportView({
                             )}
                             {idea.expected && <p style={{ margin: '0 0 0.7rem', color: 'var(--text)', fontSize: '0.82rem' }}><strong>Expected:</strong> {idea.expected}</p>}
                             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                <ReportActionButton onClick={() => onEditReportItem(idea, 'test_idea')} label={`Edit test idea ${idea.id}`} icon={Pencil} />
                                 <ReportActionButton onClick={() => onAskAssistant(itemPrompt(run, idea, 'test idea'))} label="Use in Assistant" icon={MessageSquare} />
                                 <ReportActionButton onClick={() => onCreateSpecFromReport(idea, 'test_idea')} label="Create Spec" icon={FileText} />
                             </div>
@@ -1015,6 +1194,12 @@ function CustomAgentReportView({
                                     </div>
                                 )}
                                 <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                                    <ReportActionButton
+                                        onClick={() => onEditReportItem(requirement, 'requirement')}
+                                        label={`Edit requirement ${requirement.id}`}
+                                        icon={Pencil}
+                                        disabled={imported}
+                                    />
                                     <ReportActionButton onClick={() => onAskAssistant(`Review candidate requirement ${requirement.id} from custom agent run ${run.id}: ${requirement.title}`)} label="Use in Assistant" icon={MessageSquare} />
                                     <ReportActionButton
                                         onClick={() => onImportRequirements([requirement.id])}
@@ -1088,10 +1273,20 @@ function EmptyReportState({ text }: { text: string }) {
     );
 }
 
-function ReportActionButton({ onClick, label, icon: Icon, disabled = false }: { onClick: () => void; label: string; icon: any; disabled?: boolean }) {
+function ReportActionButton({ onClick, label, icon: Icon, disabled = false }: { onClick: () => void | Promise<void>; label: string; icon: any; disabled?: boolean }) {
+    const handleClick = async () => {
+        try {
+            await onClick();
+        } catch (e: unknown) {
+            const message = e instanceof Error ? e.message : 'Action failed. Please try again.';
+            toast.error(message);
+        }
+    };
+
     return (
         <button
-            onClick={onClick}
+            type="button"
+            onClick={handleClick}
             disabled={disabled}
             style={{ border: '1px solid var(--border)', background: 'var(--surface-hover)', color: disabled ? 'var(--text-secondary)' : 'var(--text)', borderRadius: '6px', padding: '0.38rem 0.6rem', cursor: disabled ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600, opacity: disabled ? 0.65 : 1 }}
         >
@@ -1724,7 +1919,7 @@ function ReportsSearchWorkspace({
                                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.84rem', lineHeight: 1.45, overflowWrap: 'anywhere' }}>{item.description || item.evidence || item.value}</div>
                             )}
                             <div>
-                                <Link href={`/agents?runId=${encodeURIComponent(result.run_id)}&view=reports&resultTab=${result.type === 'test_idea' ? 'test_ideas' : result.type === 'requirement' ? 'requirements' : result.type === 'evidence' ? 'evidence' : 'findings'}`} style={{ color: 'var(--primary)', fontWeight: 700, fontSize: '0.82rem' }}>
+                                <Link href={reportSearchResultHref(result)} style={{ color: 'var(--primary)', fontWeight: 700, fontSize: '0.82rem' }}>
                                     Open report
                                 </Link>
                             </div>
@@ -1738,6 +1933,10 @@ function ReportsSearchWorkspace({
 
 export default function AgentsPage() {
     const { currentProject } = useProject();
+    const router = useRouter();
+    const pathname = usePathname();
+    const searchParams = useSearchParams();
+    const searchParamsString = searchParams.toString();
     const [workspaceView, setWorkspaceView] = useState<AgentWorkspaceView>('run');
     const [selectedAgent, setSelectedAgent] = useState<AgentWorkspaceMode>('exploratory');
 
@@ -1771,12 +1970,13 @@ export default function AgentsPage() {
 
     // UI state
     const [isStarting, setIsStarting] = useState(false);
-    const [runControlPending, setRunControlPending] = useState<'pause' | 'resume' | 'cancel' | null>(null);
+    const [runControlPending, setRunControlPending] = useState<'pause' | 'resume' | 'cancel' | 'retry' | null>(null);
     const [isSynthesizing, setIsSynthesizing] = useState(false);
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [sessions, setSessions] = useState<BrowserAuthSession[]>([]);
     const [flowModalOpen, setFlowModalOpen] = useState(false);
-    const [selectedFlow, setSelectedFlow] = useState<any | null>(null);
+    const [selectedFlow, setSelectedFlow] = useState<FlowModalData | null>(null);
+    const [agentActionIntent, setAgentActionIntent] = useState<AgentActionIntent>({ type: 'none' });
     const [loadingFlowDetails, setLoadingFlowDetails] = useState(false);
     const [generatingSpec, setGeneratingSpec] = useState(false);
     const [flowSpecAgentRunId, setFlowSpecAgentRunId] = useState<string | null>(null);
@@ -1815,25 +2015,22 @@ export default function AgentsPage() {
     const [returnToAfterSave, setReturnToAfterSave] = useState('');
     const [importingRequirementIds, setImportingRequirementIds] = useState<string[]>([]);
     const [reportImportError, setReportImportError] = useState<string | null>(null);
+    const [reportEditTarget, setReportEditTarget] = useState<ReportEditTarget | null>(null);
+    const [reportEditForm, setReportEditForm] = useState<Record<string, string>>({});
+    const [reportEditError, setReportEditError] = useState<string | null>(null);
+    const [savingReportEdit, setSavingReportEdit] = useState(false);
     const [agentRuntime, setAgentRuntime] = useState('claude_sdk');
     const [hermesReachable, setHermesReachable] = useState(false);
     const [hermesStatusMessage, setHermesStatusMessage] = useState('');
     const [builderOpen, setBuilderOpen] = useState(false);
     const [savingDefinition, setSavingDefinition] = useState(false);
-    const [definitionForm, setDefinitionForm] = useState({
-        id: '',
-        name: '',
-        description: '',
-        system_prompt: 'You are a focused QA automation agent. Use the selected tools to inspect the target, report findings clearly, and avoid actions outside the requested task.',
-        runtime: 'claude_sdk',
-        timeout_seconds: 1800,
-        tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console'],
-        test_data_refs: '',
-    });
+    const [definitionForm, setDefinitionForm] = useState(() => defaultDefinitionForm('claude_sdk'));
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
     const agentEventSourceRef = useRef<EventSource | null>(null);
     const agentEventReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const agentEventsRef = useRef<AgentRunEvent[]>([]);
+    const workspaceQueryRef = useRef(searchParamsString);
+    const queryCreateOpenRef = useRef(false);
     const activeBrowserAuthSessions = useMemo(
         () => sessions.filter(isBrowserAuthSessionSelectable),
         [sessions]
@@ -1844,12 +2041,11 @@ export default function AgentsPage() {
     );
 
     const updateWorkspaceQuery = useCallback((patch: Parameters<typeof applyAgentWorkspaceQueryPatch>[1]) => {
-        if (typeof window === 'undefined') return;
-        const nextParams = applyAgentWorkspaceQueryPatch(new URLSearchParams(window.location.search), patch);
+        const nextParams = applyAgentWorkspaceQueryPatch(new URLSearchParams(workspaceQueryRef.current || searchParamsString), patch);
         const query = nextParams.toString();
-        const nextUrl = `${window.location.pathname}${query ? `?${query}` : ''}`;
-        window.history.replaceState(null, '', nextUrl);
-    }, []);
+        workspaceQueryRef.current = query;
+        router.replace(`${pathname}${query ? `?${query}` : ''}`, { scroll: false });
+    }, [pathname, router, searchParamsString]);
 
     const selectRun = useCallback((runId: string | null) => {
         setSelectedRunId(runId);
@@ -2023,33 +2219,54 @@ export default function AgentsPage() {
     };
 
     useEffect(() => {
+        workspaceQueryRef.current = searchParamsString;
+        const queryState = parseAgentWorkspaceQuery(new URLSearchParams(searchParamsString));
+        setWorkspaceView(queryState.view);
+        if (queryState.runId) setSelectedRunId(queryState.runId);
+        setSelectedAgent(queryState.agent);
+        if (queryState.definitionId) setSelectedDefinitionId(queryState.definitionId);
+        setReturnToAfterSave(queryState.returnTo);
+        if (queryState.create) {
+            if (!queryCreateOpenRef.current) {
+                setDefinitionForm(defaultDefinitionForm(agentRuntime));
+                setDefinitionFormError(null);
+            }
+            queryCreateOpenRef.current = true;
+            setSelectedAgent('custom');
+            setAgentActionIntent({ type: 'createAgent' });
+            setBuilderOpen(true);
+        } else {
+            queryCreateOpenRef.current = false;
+        }
+        if (queryState.runId && queryState.specItemId && queryState.specItemType) {
+            setAgentActionIntent({
+                type: 'reviewReportSpec',
+                runId: queryState.runId,
+                itemId: queryState.specItemId,
+                itemType: queryState.specItemType,
+            });
+            setFlowModalOpen(true);
+            setWorkspaceStatus(`Opening report item ${queryState.specItemId} for spec review.`);
+        }
+        setCustomResultTab(queryState.resultTab);
+        setTraceTab(queryState.traceTab);
+        setReportStatusFilter(queryState.reportStatus);
+        setReportSeverityFilter(queryState.reportSeverity);
+        setReportSearchQuery(queryState.reportQ);
+        setReportSearchSeverity(queryState.reportSeverity);
+        setReportSearchType(queryState.reportType);
+        setHistoryStatusFilter(queryState.status);
+        setHistoryTypeFilter(queryState.type);
+        setHistorySearch(queryState.q);
+    }, [agentRuntime, searchParamsString]);
+
+    useEffect(() => {
         fetchHistory();
         fetchSessions();
         fetchToolCatalog();
         fetchAgentDefinitions();
         fetchRuntimeSettings();
         fetchQueueStatus();
-        if (typeof window !== 'undefined') {
-            const queryState = parseAgentWorkspaceQuery(new URLSearchParams(window.location.search));
-            setWorkspaceView(queryState.view);
-            if (queryState.runId) setSelectedRunId(queryState.runId);
-            setSelectedAgent(queryState.agent);
-            setSelectedDefinitionId(queryState.definitionId);
-            setReturnToAfterSave(queryState.returnTo);
-            if (queryState.create) {
-                setBuilderOpen(true);
-            }
-            setCustomResultTab(queryState.resultTab);
-            setTraceTab(queryState.traceTab);
-            setReportStatusFilter(queryState.reportStatus);
-            setReportSeverityFilter(queryState.reportSeverity);
-            setReportSearchQuery(queryState.reportQ);
-            setReportSearchSeverity(queryState.reportSeverity);
-            setReportSearchType(queryState.reportType);
-            setHistoryStatusFilter(queryState.status);
-            setHistoryTypeFilter(queryState.type);
-            setHistorySearch(queryState.q);
-        }
         return () => {
             if (pollInterval.current) clearInterval(pollInterval.current);
             agentEventSourceRef.current?.close();
@@ -2094,16 +2311,16 @@ export default function AgentsPage() {
     const fetchRun = async (id: string) => {
         try {
             const res = await fetch(`${API_BASE}/api/agents/runs/${id}`);
-            if (res.ok) {
-                const data = await res.json();
-                setActiveRun(data);
-                fetchAgentEvents(id);
-                fetchAgentTrace(id);
+                if (res.ok) {
+                    const data = await res.json();
+                    setActiveRun(data);
+                    fetchAgentEvents(id);
+                    fetchAgentTrace(id);
 
-                // If actively running, keep polling
-                if (LIVE_AGENT_STATUSES.has(data.status)) {
-                    // Continue polling
-                } else {
+                    // If actively running, keep polling
+                    if (!isAgentRunTerminal(data.status)) {
+                        // Continue polling
+                    } else {
                     // Run completed or failed - do one final fetch to get the result
                     if (pollInterval.current && selectedRunId === id) {
                         clearInterval(pollInterval.current);
@@ -2166,6 +2383,37 @@ export default function AgentsPage() {
         }
     };
 
+    const mergeProgressFromAgentEvent = (event: AgentRunEvent) => {
+        if (!event || !['tool_call', 'browser_action'].includes(event.event_type)) return;
+        const payload = event.payload || {};
+        const eventRunId = event.run_id || selectedRunId;
+        const toolName = payload.tool_name || payload.current_tool || payload.last_tool;
+        const toolLabel = payload.tool_label || payload.current_tool_label || payload.last_tool_label || payload.short_name;
+        const events = [...agentEventsRef.current, event];
+        const uniqueEvents = [...new Map(events.map(item => [item.sequence, item])).values()];
+        const toolEventCount = uniqueEvents.filter(item => ['tool_call', 'browser_action'].includes(item.event_type)).length;
+        const browserEventCount = uniqueEvents.filter(item => item.event_type === 'browser_action').length;
+
+        setActiveRun(prev => {
+            if (!prev || prev.id !== eventRunId) return prev;
+            const currentProgress = prev.progress || {};
+            return {
+                ...prev,
+                progress: {
+                    ...currentProgress,
+                    phase: currentProgress.phase || 'tool_use',
+                    last_tool: toolName || currentProgress.last_tool,
+                    current_tool: toolName || currentProgress.current_tool,
+                    last_tool_label: toolLabel || currentProgress.last_tool_label,
+                    current_tool_label: toolLabel || currentProgress.current_tool_label,
+                    tool_calls: Math.max(Number(currentProgress.tool_calls ?? 0), toolEventCount),
+                    browser_tool_calls: Math.max(Number(currentProgress.browser_tool_calls ?? currentProgress.interactions ?? 0), browserEventCount),
+                    updated_at: event.created_at || currentProgress.updated_at,
+                },
+            };
+        });
+    };
+
     const fetchFlowSpecAgentRun = async (id: string) => {
         try {
             const [runRes, eventsRes] = await Promise.all([
@@ -2222,6 +2470,8 @@ export default function AgentsPage() {
             if (res.ok) {
                 const data = await res.json();
                 setSelectedFlow(data.flow);
+                setAgentActionIntent({ type: 'none' });
+                updateWorkspaceQuery({ specItemId: '', specItemType: '' });
                 setFlowModalOpen(true);
             } else {
                 const error = await res.json();
@@ -2257,6 +2507,7 @@ export default function AgentsPage() {
                     requires_auth: result.requires_auth as boolean,
                 });
                 setSpecModalOpen(true);
+                setWorkspaceStatus('Test spec generated.');
             }
             const agentRunId = status.agent_run_id || flowSpecAgentRunId;
             if (agentRunId) {
@@ -2268,6 +2519,7 @@ export default function AgentsPage() {
         onFailed: (message, status) => {
             setGeneratingSpec(false);
             setFlowSpecError(message || 'Unknown error');
+            setWorkspaceStatus(`Spec generation failed: ${message || 'Unknown error'}`);
             const agentRunId = status.agent_run_id || flowSpecAgentRunId;
             if (agentRunId) {
                 setFlowSpecAgentRunId(agentRunId);
@@ -2349,23 +2601,33 @@ export default function AgentsPage() {
     };
 
     const openSpecFromReportItem = (item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test_idea') => {
-        if (!activeRun?.id) return;
+        markAgentsAction({ action: 'reviewReportSpec', runId: activeRun?.id, itemId: item?.id, itemType: kind, phase: 'click' });
+        if (!activeRun?.id) {
+            const message = 'Select a completed custom agent run before creating a spec.';
+            setWorkspaceStatus(message);
+            setFlowSpecError(message);
+            setAgentActionIntent({ type: 'none' });
+            toast.error(message);
+            markAgentsAction({ action: 'reviewReportSpec', runId: null, itemId: item?.id, itemType: kind, phase: 'missing-run' });
+            return;
+        }
+        if (!item?.id) {
+            const message = 'This report item is missing an id and cannot be used to create a spec.';
+            setWorkspaceStatus(message);
+            setFlowSpecError(message);
+            setAgentActionIntent({ type: 'none' });
+            toast.error(message);
+            markAgentsAction({ action: 'reviewReportSpec', runId: activeRun.id, itemId: null, itemType: kind, phase: 'missing-item-id' });
+            return;
+        }
         const defaultSelection = defaultReportSpecBrowserAuthSelection(sessions, sessionId);
         setReportSpecAuthMode(defaultSelection.mode);
         setReportSpecAuthSessionId(defaultSelection.sessionId);
-        setSelectedFlow({
-            id: item.id,
-            title: item.title || item.id,
-            pages: item.page ? [item.page] : [],
-            happy_path: 'steps' in item && item.steps?.length ? item.steps.join('\n') : ('description' in item ? item.description : undefined),
-            edge_cases: kind === 'finding' && 'evidence' in item && item.evidence ? [item.evidence] : [],
-            test_ideas: kind === 'test_idea' && 'expected' in item && item.expected ? [item.expected] : [],
-            entry_point: item.page || activeRun.config?.url,
-            exit_point: item.page || activeRun.config?.url,
-            source_type: 'custom_report',
-            item_type: kind,
-        });
+        setSelectedFlow(null);
+        setAgentActionIntent({ type: 'reviewReportSpec', runId: activeRun.id, itemId: item.id, itemType: kind });
         setFlowModalOpen(true);
+        setWorkspaceStatus(`Reviewing ${kind === 'finding' ? 'finding' : 'test idea'} ${item.id} for spec generation.`);
+        updateWorkspaceQuery({ runId: activeRun.id, specItemId: item.id, specItemType: kind });
         setGeneratingSpec(false);
         setSplitResult(null);
         flowSpecPoller.clear();
@@ -2373,10 +2635,41 @@ export default function AgentsPage() {
         setFlowSpecAgentRun(null);
         setFlowSpecAgentEvents([]);
         setFlowSpecError(null);
+        markAgentsAction({ action: 'reviewReportSpec', runId: activeRun.id, itemId: item.id, itemType: kind, phase: 'modal-open' });
+    };
+
+    const closeFlowModal = () => {
+        setFlowModalOpen(false);
+        setGeneratingSpec(false);
+        setFlowSpecError(null);
+        setSelectedFlow(null);
+        if (agentActionIntent.type === 'reviewReportSpec') {
+            setAgentActionIntent({ type: 'none' });
+            updateWorkspaceQuery({ specItemId: '', specItemType: '' });
+        }
+        flowSpecPoller.clear();
+        setFlowSpecAgentRunId(null);
+        setFlowSpecAgentRun(null);
+        setFlowSpecAgentEvents([]);
+        markAgentsAction({ action: 'flowModal', phase: 'closed' });
     };
 
     const createSpecFromReportItem = async (item: ReportFinding | ReportTestIdea, kind: 'finding' | 'test_idea') => {
-        if (!activeRun?.id) return;
+        markAgentsAction({ action: 'generateReportSpec', runId: activeRun?.id, itemId: item?.id, itemType: kind, phase: 'click' });
+        if (!activeRun?.id) {
+            const message = 'Select a completed custom agent run before generating a spec.';
+            setWorkspaceStatus(message);
+            setFlowSpecError(message);
+            toast.error(message);
+            return;
+        }
+        if (!item?.id) {
+            const message = 'This report item is missing an id and cannot be used to generate a spec.';
+            setWorkspaceStatus(message);
+            setFlowSpecError(message);
+            toast.error(message);
+            return;
+        }
         if (reportSpecAuthMode === 'session') {
             const selected = activeBrowserAuthSessions.find(session => session.id === reportSpecAuthSessionId);
             if (!selected) {
@@ -2395,6 +2688,7 @@ export default function AgentsPage() {
         setFlowSpecAgentRun(null);
         setFlowSpecAgentEvents([]);
         setFlowSpecError(null);
+        setWorkspaceStatus(`Generating test spec from ${kind === 'finding' ? 'finding' : 'test idea'} ${item.id}.`);
         try {
             const params = new URLSearchParams({ item_type: kind });
             if (currentProject?.id) params.set('project_id', currentProject.id);
@@ -2414,13 +2708,239 @@ export default function AgentsPage() {
             }
             if (data.job_id) {
                 flowSpecPoller.startPolling(data.job_id);
+                markAgentsAction({ action: 'generateReportSpec', runId: activeRun.id, itemId: item.id, itemType: kind, phase: 'polling-started', jobId: data.job_id });
                 return;
             }
             throw new Error('Unexpected response from server');
         } catch (e: unknown) {
             const message = e instanceof Error ? e.message : 'Please try again.';
             setFlowSpecError(message);
+            setWorkspaceStatus(`Spec generation failed: ${message}`);
             setGeneratingSpec(false);
+            markAgentsAction({ action: 'generateReportSpec', runId: activeRun.id, itemId: item.id, itemType: kind, phase: 'failed', message });
+        }
+    };
+
+    const updateRunFromReportPatch = (updatedRun: AgentRun) => {
+        setActiveRun(updatedRun);
+        setHistory(prev => prev.map(run => run.id === updatedRun.id ? updatedRun : run));
+    };
+
+    const openReportOverviewEdit = (report: StructuredAgentReport) => {
+        if (!activeRun?.id) return;
+        setReportEditTarget({ type: 'overview', runId: activeRun.id });
+        setReportEditForm({
+            summary: report.summary || '',
+            scope: report.scope || '',
+        });
+        setReportEditError(null);
+    };
+
+    const openReportItemEdit = (item: ReportFinding | ReportTestIdea | ReportRequirement, kind: ReportEditableItemType) => {
+        if (!activeRun?.id) return;
+        setReportEditTarget({ type: kind, runId: activeRun.id, itemId: item.id });
+        if (kind === 'finding') {
+            const finding = item as ReportFinding;
+            setReportEditForm({
+                title: finding.title || '',
+                severity: finding.severity || '',
+                page: finding.page || '',
+                description: finding.description || '',
+                evidence: finding.evidence || '',
+                suggested_action: finding.suggested_action || '',
+            });
+        } else if (kind === 'test_idea') {
+            const idea = item as ReportTestIdea;
+            setReportEditForm({
+                title: idea.title || '',
+                priority: idea.priority || '',
+                page: idea.page || '',
+                steps: linesToText(idea.steps),
+                expected: idea.expected || '',
+                source_finding_id: idea.source_finding_id || '',
+            });
+        } else {
+            const requirement = item as ReportRequirement;
+            setReportEditForm({
+                title: requirement.title || '',
+                description: requirement.description || '',
+                category: requirement.category || '',
+                priority: requirement.priority || '',
+                acceptance_criteria: linesToText(requirement.acceptance_criteria),
+                page: requirement.page || '',
+                evidence: requirement.evidence || '',
+                confidence: requirement.confidence === undefined || requirement.confidence === null ? '' : String(requirement.confidence),
+            });
+        }
+        setReportEditError(null);
+    };
+
+    const closeReportEditDialog = () => {
+        if (savingReportEdit) return;
+        setReportEditTarget(null);
+        setReportEditForm({});
+        setReportEditError(null);
+    };
+
+    const updateReportEditField = (field: string, value: string) => {
+        setReportEditForm(prev => ({ ...prev, [field]: value }));
+    };
+
+    const reportEditFieldId = (field: string) => `agents-report-edit-${reportEditTarget?.type || 'report'}-${field}`;
+
+    const reportEditKicker = () => {
+        if (!reportEditTarget || reportEditTarget.type === 'overview') return 'Report summary';
+        if (reportEditTarget.type === 'finding') return `Finding ${reportEditTarget.itemId}`;
+        if (reportEditTarget.type === 'test_idea') return `Test idea ${reportEditTarget.itemId}`;
+        return `Requirement ${reportEditTarget.itemId}`;
+    };
+
+    const reportEditSelectValue = (field: string, options: readonly string[]) => {
+        const value = (reportEditForm[field] || '').trim();
+        if (!value) return REPORT_SELECT_EMPTY_VALUE;
+        const normalized = value.toLowerCase();
+        return options.includes(normalized) ? normalized : value;
+    };
+
+    const renderReportTextField = (label: string, field: string, type = 'text') => {
+        const id = reportEditFieldId(field);
+        return (
+            <div className="agents-report-edit-field">
+                <Label htmlFor={id}>{label}</Label>
+                <Input
+                    id={id}
+                    type={type}
+                    className="agents-report-edit-input"
+                    value={reportEditForm[field] || ''}
+                    onChange={event => updateReportEditField(field, event.target.value)}
+                />
+            </div>
+        );
+    };
+
+    const renderReportTextareaField = (label: string, field: string, rows: number, size: 'md' | 'lg' = 'md') => {
+        const id = reportEditFieldId(field);
+        return (
+            <div className="agents-report-edit-field">
+                <Label htmlFor={id}>{label}</Label>
+                <textarea
+                    id={id}
+                    className="agents-report-edit-textarea"
+                    data-size={size}
+                    value={reportEditForm[field] || ''}
+                    onChange={event => updateReportEditField(field, event.target.value)}
+                    rows={rows}
+                />
+            </div>
+        );
+    };
+
+    const renderReportSelectField = (label: string, field: 'priority' | 'severity', options: readonly string[]) => {
+        const id = reportEditFieldId(field);
+        const rawValue = (reportEditForm[field] || '').trim();
+        const normalizedValue = rawValue.toLowerCase();
+        const hasKnownValue = options.includes(normalizedValue);
+        const selectValue = reportEditSelectValue(field, options);
+        return (
+            <div className="agents-report-edit-field">
+                <Label htmlFor={id}>{label}</Label>
+                <Select
+                    value={selectValue}
+                    onValueChange={value => updateReportEditField(field, value === REPORT_SELECT_EMPTY_VALUE ? '' : value)}
+                >
+                    <SelectTrigger id={id} className="agents-report-edit-select-trigger">
+                        <SelectValue placeholder={`Select ${label.toLowerCase()}`} />
+                    </SelectTrigger>
+                    <SelectContent className="agents-report-edit-select-content" sideOffset={8}>
+                        <SelectItem value={REPORT_SELECT_EMPTY_VALUE}>Not set</SelectItem>
+                        {options.map(option => (
+                            <SelectItem key={option} value={option}>{option.charAt(0).toUpperCase() + option.slice(1)}</SelectItem>
+                        ))}
+                        {rawValue && !hasKnownValue && (
+                            <SelectItem value={rawValue}>{rawValue}</SelectItem>
+                        )}
+                    </SelectContent>
+                </Select>
+            </div>
+        );
+    };
+
+    const reportEditPayload = () => {
+        if (!reportEditTarget) return {};
+        if (reportEditTarget.type === 'overview') {
+            return {
+                summary: reportEditForm.summary || '',
+                scope: reportEditForm.scope || '',
+            };
+        }
+        if (reportEditTarget.type === 'finding') {
+            return {
+                title: reportEditForm.title || '',
+                severity: reportEditForm.severity || '',
+                page: reportEditForm.page || '',
+                description: reportEditForm.description || '',
+                evidence: reportEditForm.evidence || '',
+                suggested_action: reportEditForm.suggested_action || '',
+            };
+        }
+        if (reportEditTarget.type === 'test_idea') {
+            return {
+                title: reportEditForm.title || '',
+                priority: reportEditForm.priority || '',
+                page: reportEditForm.page || '',
+                steps: textToLines(reportEditForm.steps),
+                expected: reportEditForm.expected || '',
+                source_finding_id: reportEditForm.source_finding_id || '',
+            };
+        }
+        return {
+            title: reportEditForm.title || '',
+            description: reportEditForm.description || '',
+            category: reportEditForm.category || '',
+            priority: reportEditForm.priority || '',
+            acceptance_criteria: textToLines(reportEditForm.acceptance_criteria),
+            page: reportEditForm.page || '',
+            evidence: reportEditForm.evidence || '',
+            confidence: reportEditForm.confidence || '',
+        };
+    };
+
+    const saveReportEdit = async () => {
+        if (!reportEditTarget || !activeRun?.id) return;
+        setSavingReportEdit(true);
+        setReportEditError(null);
+        try {
+            const params = new URLSearchParams();
+            if (currentProject?.id) params.set('project_id', currentProject.id);
+            let url = `${API_BASE}/api/agents/runs/${reportEditTarget.runId}/report`;
+            if (reportEditTarget.type !== 'overview') {
+                params.set('item_type', reportEditTarget.type);
+                url = `${API_BASE}/api/agents/runs/${reportEditTarget.runId}/report-items/${encodeURIComponent(reportEditTarget.itemId)}`;
+            }
+            const query = params.toString() ? `?${params}` : '';
+            const res = await fetch(`${url}${query}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(reportEditTarget.type === 'overview' ? reportEditPayload() : { patch: reportEditPayload() }),
+            });
+            if (!res.ok) {
+                const error = await res.json().catch(() => ({}));
+                const detail = typeof error.detail === 'string' ? error.detail : error.detail?.message;
+                throw new Error(detail || `HTTP ${res.status}`);
+            }
+            const data = await res.json();
+            const updatedRun = normalizeReportPatchResponse(data);
+            if (!updatedRun) throw new Error('The server did not return the updated run.');
+            updateRunFromReportPatch(updatedRun);
+            setReportEditTarget(null);
+            setReportEditForm({});
+            setWorkspaceStatus('Report content saved.');
+        } catch (e: unknown) {
+            const message = e instanceof Error ? e.message : 'Failed to save report content.';
+            setReportEditError(message);
+            setWorkspaceStatus(`Report edit failed: ${message}`);
+        } finally {
+            setSavingReportEdit(false);
         }
     };
 
@@ -2573,6 +3093,7 @@ export default function AgentsPage() {
                     const data = JSON.parse(event.data);
                     attempts = 0;
                     mergeAgentEvents([data]);
+                    mergeProgressFromAgentEvent(data);
                     void fetchAgentTrace(selectedRunId);
                 } catch {
                     source.close();
@@ -2608,17 +3129,19 @@ export default function AgentsPage() {
     }, {});
 
     const resetDefinitionForm = () => {
-        setDefinitionForm({
-            id: '',
-            name: '',
-            description: '',
-            system_prompt: 'You are a focused QA automation agent. Use the selected tools to inspect the target, report findings clearly, and avoid actions outside the requested task.',
-            runtime: agentRuntime,
-            timeout_seconds: 1800,
-            tool_ids: ['read_file', 'list_files', 'browser_navigate', 'browser_snapshot', 'browser_network', 'browser_console', 'browser_screenshot'],
-            test_data_refs: '',
-        });
+        setDefinitionForm(defaultDefinitionForm(agentRuntime));
+        setDefinitionFormError(null);
+    };
+
+    const openCreateAgentBuilder = () => {
+        resetDefinitionForm();
+        selectAgentMode('custom');
+        setAgentActionIntent({ type: 'createAgent' });
+        queryCreateOpenRef.current = true;
         setBuilderOpen(true);
+        setWorkspaceStatus('Opening custom agent builder.');
+        updateWorkspaceQuery({ agent: 'custom', create: true });
+        markAgentsAction({ action: 'createAgent', phase: 'modal-open' });
     };
 
     const editDefinition = (definition: AgentDefinition) => {
@@ -2632,7 +3155,19 @@ export default function AgentsPage() {
             tool_ids: definition.tool_ids || [],
             test_data_refs: (definition.test_data_refs || []).join(', '),
         });
+        setDefinitionFormError(null);
         setBuilderOpen(true);
+    };
+
+    const closeCustomAgentBuilder = () => {
+        setBuilderOpen(false);
+        setDefinitionFormError(null);
+        if (agentActionIntent.type === 'createAgent') {
+            setAgentActionIntent({ type: 'none' });
+        }
+        queryCreateOpenRef.current = false;
+        updateWorkspaceQuery({ create: false });
+        markAgentsAction({ action: 'createAgent', phase: 'closed' });
     };
 
     const editDefinitionFromMenu = (definition: AgentDefinition, event?: Event) => {
@@ -2844,6 +3379,7 @@ export default function AgentsPage() {
                     auth: authConfig,
                     browser_auth_session_id: selectedBrowserAuthSessionId || undefined,
                     test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
+                    test_data_refs: testDataRefsList.length > 0 ? testDataRefsList : undefined,
                     focus_areas: focusAreasList.length > 0 ? focusAreasList : undefined,
                     excluded_patterns: excludedPatternsList.length > 0 ? excludedPatternsList : undefined,
                     runtime: selectedRuntime,
@@ -2911,6 +3447,29 @@ export default function AgentsPage() {
         }
     };
 
+    const retryAgentRun = async () => {
+        if (!activeRun || !isAgentRunTerminal(activeRun.status)) return;
+        setRunControlPending('retry');
+        try {
+            const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
+            const res = await fetch(`${API_BASE}/api/agents/runs/${activeRun.id}/retry${projectQuery}`, {
+                method: 'POST',
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.detail || 'Failed to retry agent run');
+            }
+            await fetchHistory();
+            selectRun(data.run_id || data.id);
+            setWorkspaceStatus('Retry agent run started.');
+            toast.success('Retry agent run started');
+        } catch (e: any) {
+            toast.error(e.message || 'Failed to retry agent run');
+        } finally {
+            setRunControlPending(null);
+        }
+    };
+
     const exportAgentTrace = () => {
         if (!activeRun) return;
         const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
@@ -2923,8 +3482,12 @@ export default function AgentsPage() {
             return;
         }
 
-        if (activeRun.status !== 'completed') {
+        if (!['completed', 'completed_partial'].includes(activeRun.status)) {
             toast.error("Please wait for the exploration to complete");
+            return;
+        }
+        if (!explorerCanGenerateSpecs) {
+            toast.error("This exploration has no evidence-backed flows to synthesize");
             return;
         }
 
@@ -2964,12 +3527,38 @@ export default function AgentsPage() {
         return dateFormatter.format(new Date(iso));
     };
 
+    const reportSpecReview = useMemo(() => {
+        if (agentActionIntent.type !== 'reviewReportSpec') return null;
+        if (activeRun?.id !== agentActionIntent.runId) return null;
+        return findReportSpecItem(activeRun, agentActionIntent.itemId, agentActionIntent.itemType);
+    }, [activeRun, agentActionIntent]);
+    const activeFlow = agentActionIntent.type === 'reviewReportSpec'
+        ? reportSpecReview?.flow || null
+        : selectedFlow;
+    const flowModalVisible = flowModalOpen && (Boolean(activeFlow) || agentActionIntent.type === 'reviewReportSpec');
+    const missingReportSpecItemMessage = agentActionIntent.type === 'reviewReportSpec' && activeRun?.id === agentActionIntent.runId && activeRun.result && !reportSpecReview
+        ? `Report item ${agentActionIntent.itemId} was not found in the refreshed agent report.`
+        : '';
+
+    useEffect(() => {
+        if (!missingReportSpecItemMessage) return;
+        setWorkspaceStatus(missingReportSpecItemMessage);
+        setFlowSpecError(missingReportSpecItemMessage);
+        markAgentsAction({
+            action: 'reviewReportSpec',
+            runId: agentActionIntent.type === 'reviewReportSpec' ? agentActionIntent.runId : null,
+            itemId: agentActionIntent.type === 'reviewReportSpec' ? agentActionIntent.itemId : null,
+            itemType: agentActionIntent.type === 'reviewReportSpec' ? agentActionIntent.itemType : null,
+            phase: 'item-not-found',
+        });
+    }, [missingReportSpecItemMessage, agentActionIntent]);
+
     const flowSpecLatestImage = sortArtifactsByModifiedAt((flowSpecAgentRun?.artifacts || []).filter(artifact => artifact.type === 'image'))[0];
     const flowSpecRunLive = Boolean(flowSpecAgentRun && LIVE_AGENT_STATUSES.has(flowSpecAgentRun.status));
     const flowSpecShowBrowser = Boolean(flowSpecAgentRunId && (generatingSpec || flowSpecRunLive || flowSpecLatestImage));
     const sourceRunBrowserAuthSessionId = runBrowserAuthSessionId(activeRun?.config);
     const inheritedBrowserAuthUnavailable = Boolean(
-        selectedFlow?.source_type === 'custom_report' &&
+        activeFlow?.source_type === 'custom_report' &&
         sourceRunBrowserAuthSessionId &&
         !activeBrowserAuthSessions.some(item => item.id === sourceRunBrowserAuthSessionId)
     );
@@ -2977,6 +3566,45 @@ export default function AgentsPage() {
         flowSpecAgentRun?.progress?.browser_auth_failure ||
         flowSpecAgentRun?.result?.browser_auth_failure
     );
+    const explorerResult = activeRun?.agent_type === 'exploratory' ? activeRun.result || {} : {};
+    const explorerDiagnostics = explorerResult?.diagnostics || {};
+    const explorerFinalizerDiagnostics = explorerDiagnostics?.finalizer || {};
+    const explorerEventCounts = explorerResult?.event_counts || {};
+    const explorerEvidenceEventCount = explorerDiagnostics.evidence_event_count
+        ?? Object.values(explorerEventCounts).reduce((sum: number, value: any) => sum + Number(value || 0), 0);
+    const explorerArtifactEvidence = explorerResult?.artifact_evidence && typeof explorerResult.artifact_evidence === 'object'
+        ? explorerResult.artifact_evidence
+        : {};
+    const explorerArtifactEvidenceItems = Array.isArray(explorerArtifactEvidence.artifacts)
+        ? explorerArtifactEvidence.artifacts
+        : [];
+    const explorerRunArtifacts = (activeRun?.artifacts || []).length > 0
+        ? activeRun?.artifacts || []
+        : explorerArtifactEvidenceItems;
+    const explorerCapturedArtifacts = sortArtifactsByModifiedAt(explorerRunArtifacts as AgentArtifact[]);
+    const explorerScreenshotArtifacts = sortArtifactsByModifiedAt(
+        explorerCapturedArtifacts.filter((artifact: AgentArtifact) => artifact.type === 'image' || /\.(png|jpe?g)$/i.test(artifact.name || ''))
+    );
+    const explorerArtifactCount = explorerFinalizerDiagnostics.artifact_count
+        ?? explorerDiagnostics.artifact_count
+        ?? explorerArtifactEvidence.artifact_count
+        ?? explorerCapturedArtifacts.length;
+    const explorerScreenshotCount = explorerFinalizerDiagnostics.screenshot_count
+        ?? explorerDiagnostics.screenshot_count
+        ?? explorerArtifactEvidence.screenshot_count
+        ?? explorerScreenshotArtifacts.length;
+    const explorerFlowSummaries = Array.isArray(explorerResult?.discovered_flow_summaries)
+        ? explorerResult.discovered_flow_summaries
+        : [];
+    const explorerUnsupportedFlowCandidates = Array.isArray(explorerResult?.unsupported_flow_candidates)
+        ? explorerResult.unsupported_flow_candidates
+        : [];
+    const explorerStructuredFlowCount = explorerFlowSummaries.length;
+    const explorerContractWarnings = Array.from(new Set([
+        explorerResult?.contract_warning,
+        ...(Array.isArray(explorerResult?.contract_warnings) ? explorerResult.contract_warnings : []),
+    ].filter(Boolean).map((warning: any) => String(warning).trim()).filter(Boolean)));
+    const explorerCanGenerateSpecs = explorerStructuredFlowCount > 0;
     const historyCounts = useMemo(() => getAgentHistoryCounts(history), [history]);
     const filteredHistory = useMemo(
         () => filterAgentHistoryRuns(history, {
@@ -3052,6 +3680,92 @@ export default function AgentsPage() {
         window.requestAnimationFrame(() => document.getElementById(`agents-agent-tab-${nextMode}`)?.focus());
     };
 
+    const renderExplorerCapturedEvidence = () => {
+        if (explorerCapturedArtifacts.length === 0 && Number(explorerScreenshotCount || 0) === 0) return null;
+        const previewImages = explorerScreenshotArtifacts.slice(0, 6);
+        const otherArtifacts = explorerCapturedArtifacts
+            .filter((artifact: AgentArtifact) => !previewImages.some((image: AgentArtifact) => image.path === artifact.path))
+            .slice(0, 8);
+        return (
+            <div data-testid="explorer-captured-evidence" style={{ display: 'grid', gap: '0.75rem' }}>
+                <div>
+                    <h4 style={{ fontWeight: 600, fontSize: '1rem', margin: '0 0 0.25rem', color: 'var(--text)' }}>Captured Evidence</h4>
+                    <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.86rem', lineHeight: 1.45 }}>
+                        Browser artifacts captured during the run are shown for review. They do not count as completed flows unless structured event IDs support a flow candidate.
+                    </p>
+                </div>
+                {previewImages.length > 0 && (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '0.75rem' }}>
+                        {previewImages.map((artifact: AgentArtifact) => (
+                            <a
+                                key={artifact.path}
+                                href={getArtifactUrl(artifact)}
+                                target="_blank"
+                                rel="noreferrer"
+                                data-testid="explorer-captured-screenshot"
+                                style={{ display: 'grid', gap: '0.45rem', padding: '0.6rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', textDecoration: 'none' }}
+                            >
+                                <img
+                                    src={getArtifactUrl(artifact)}
+                                    alt={artifact.name}
+                                    style={{ width: '100%', aspectRatio: '16 / 10', objectFit: 'cover', borderRadius: '6px', border: '1px solid var(--border)' }}
+                                />
+                                <span style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', overflowWrap: 'anywhere' }}>{artifact.name}</span>
+                            </a>
+                        ))}
+                    </div>
+                )}
+                {otherArtifacts.length > 0 && (
+                    <div style={{ display: 'grid', gap: '0.4rem' }}>
+                        {otherArtifacts.map((artifact: AgentArtifact) => (
+                            <a
+                                key={artifact.path}
+                                href={getArtifactUrl(artifact)}
+                                target="_blank"
+                                rel="noreferrer"
+                                data-testid="explorer-captured-artifact"
+                                style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.65rem 0.75rem', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text)', textDecoration: 'none', fontSize: '0.84rem' }}
+                            >
+                                {artifact.type === 'video' ? <VideoIcon size={15} /> : artifact.type === 'image' ? <ImageIcon size={15} /> : <FileText size={15} />}
+                                <span style={{ overflowWrap: 'anywhere' }}>{artifact.name}</span>
+                                <ExternalLink size={13} style={{ marginLeft: 'auto', color: 'var(--text-secondary)' }} />
+                            </a>
+                        ))}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    const renderExplorerUnsupportedFlowCandidates = () => {
+        if (explorerUnsupportedFlowCandidates.length === 0) return null;
+        return (
+            <div data-testid="explorer-unsupported-flow-candidates" style={{ display: 'grid', gap: '0.75rem' }}>
+                <div>
+                    <h4 style={{ fontWeight: 600, fontSize: '1rem', margin: '0 0 0.25rem', color: 'var(--text)' }}>Unsupported Flow Candidates ({explorerUnsupportedFlowCandidates.length})</h4>
+                    <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: '0.86rem', lineHeight: 1.45 }}>
+                        The model reported these candidates, but their cited evidence event IDs were missing or empty. They are visible for review and are not eligible for test generation.
+                    </p>
+                </div>
+                <div style={{ display: 'grid', gap: '0.65rem' }}>
+                    {explorerUnsupportedFlowCandidates.map((flow: any, i: number) => (
+                        <div key={flow.id || i} data-testid="explorer-unsupported-flow-card" style={{ padding: '0.9rem', background: 'var(--surface)', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                            <h5 style={{ margin: '0 0 0.4rem', fontWeight: 650, color: 'var(--text)' }}>{flow.title || `Unsupported candidate ${i + 1}`}</h5>
+                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45, overflowWrap: 'anywhere' }}>
+                                Missing evidence IDs: {(flow.missing_evidence_event_ids || []).join(', ') || 'not reported'}
+                            </div>
+                            {(flow.entry_point || flow.exit_point) && (
+                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45, overflowWrap: 'anywhere', marginTop: '0.3rem' }}>
+                                    {flow.entry_point ? `Starts: ${flow.entry_point}` : ''}{flow.entry_point && flow.exit_point ? ' · ' : ''}{flow.exit_point ? `Ends: ${flow.exit_point}` : ''}
+                                </div>
+                            )}
+                        </div>
+                    ))}
+                </div>
+            </div>
+        );
+    };
+
     return (
         <PageLayout tier="wide" style={{ paddingBottom: '4rem' }}>
             <style>{`
@@ -3101,6 +3815,30 @@ export default function AgentsPage() {
                     clip: rect(0, 0, 0, 0);
                     white-space: nowrap;
                     border: 0;
+                }
+                .agents-action-status {
+                    display: flex;
+                    align-items: flex-start;
+                    gap: 0.55rem;
+                    margin: 0 0 1rem;
+                    padding: 0.75rem 0.9rem;
+                    border: 1px solid var(--border);
+                    border-radius: 8px;
+                    background: var(--surface-hover);
+                    color: var(--text);
+                    font-size: 0.86rem;
+                    line-height: 1.4;
+                }
+                .agents-action-status[data-tone="error"] {
+                    border-color: rgba(248, 113, 113, 0.35);
+                    background: var(--danger-muted);
+                    color: var(--danger);
+                }
+                .agents-action-status svg {
+                    width: 16px;
+                    height: 16px;
+                    flex: 0 0 auto;
+                    margin-top: 0.1rem;
                 }
                 .agents-history-filter-grid {
                     display: grid;
@@ -3186,8 +3924,266 @@ export default function AgentsPage() {
                 }
                 .agents-builder-grid {
                     display: grid;
-                    grid-template-columns: minmax(0, 0.9fr) minmax(280px, 1.1fr);
+                    grid-template-columns: minmax(330px, 0.92fr) minmax(360px, 1.08fr);
+                    gap: 1.1rem;
+                    align-items: start;
+                }
+                .agents-builder-dialog {
+                    padding: 1.35rem !important;
+                }
+                .agents-builder-form {
+                    display: grid;
+                    gap: 0.85rem;
+                    align-content: start;
+                    min-width: 0;
+                }
+                .agents-builder-field {
+                    display: grid;
+                    gap: 0.38rem;
+                    min-width: 0;
+                }
+                .agents-builder-split {
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) minmax(130px, 0.8fr);
+                    gap: 0.7rem;
+                }
+                .agents-runtime-select-content {
+                    width: var(--radix-select-trigger-width) !important;
+                    min-width: var(--radix-select-trigger-width) !important;
+                }
+                .agents-builder-textarea {
+                    width: 100%;
+                    min-height: 178px;
+                    padding: 0.75rem;
+                    border-radius: var(--radius);
+                    font-size: 0.86rem;
+                    border: 1px solid var(--border);
+                    background: var(--background-raised);
+                    color: var(--text);
+                    resize: vertical;
+                    line-height: 1.35;
+                }
+                .agents-builder-tools {
+                    display: grid;
+                    gap: 0.65rem;
+                    align-content: start;
+                    min-width: 0;
+                }
+                .agents-builder-tools-header {
+                    display: flex;
+                    justify-content: space-between;
+                    gap: 0.75rem;
+                    align-items: center;
+                    min-width: 0;
+                }
+                .agents-builder-selected-count {
+                    min-height: 26px;
+                    padding: 0.25rem 0.6rem;
+                    border-radius: 999px;
+                    background: var(--surface-hover);
+                    color: var(--text-secondary);
+                    font-size: 0.78rem;
+                    font-weight: 750;
+                    white-space: nowrap;
+                }
+                .agents-builder-tools-list {
+                    max-height: min(520px, calc(86vh - 210px));
+                    overflow-y: auto;
+                    border: 1px solid var(--border);
+                    border-radius: 10px;
+                    padding: 0.8rem;
+                    display: grid;
                     gap: 1rem;
+                    background: rgba(15, 22, 41, 0.32);
+                }
+                .agents-tool-category-header {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 0.5rem;
+                }
+                .agents-tool-category-title {
+                    font-size: 0.74rem;
+                    color: var(--text-secondary);
+                    font-weight: 800;
+                    text-transform: uppercase;
+                    letter-spacing: 0;
+                }
+                .agents-tool-row {
+                    display: grid;
+                    grid-template-columns: 24px minmax(0, 1fr);
+                    gap: 0.55rem;
+                    align-items: start;
+                    min-height: 48px;
+                    cursor: pointer;
+                }
+                .agents-tool-row input {
+                    width: 16px;
+                    height: 16px;
+                    margin-top: 0.18rem;
+                    accent-color: var(--primary);
+                }
+                .agents-tool-title-line {
+                    display: flex;
+                    gap: 0.45rem;
+                    align-items: center;
+                    flex-wrap: wrap;
+                    min-width: 0;
+                }
+                .agents-tool-label {
+                    font-weight: 750;
+                    font-size: 0.83rem;
+                    line-height: 1.2;
+                }
+                .agents-tool-risk-pill {
+                    display: inline-flex;
+                    align-items: center;
+                    min-height: 22px;
+                    padding: 0.18rem 0.52rem;
+                    border: 1px solid;
+                    border-radius: 999px;
+                    font-size: 0.68rem;
+                    font-weight: 800;
+                    line-height: 1;
+                    text-transform: lowercase;
+                }
+                .agents-tool-description {
+                    display: block;
+                    margin-top: 0.18rem;
+                    color: var(--text-secondary);
+                    line-height: 1.35;
+                    font-size: 0.78rem;
+                }
+                .agents-builder-footer {
+                    gap: 0.6rem;
+                }
+                .agents-report-edit-dialog {
+                    background: linear-gradient(180deg, rgba(21, 29, 48, 0.98), rgba(15, 22, 41, 0.98)) !important;
+                    border-color: var(--border-bright) !important;
+                    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(148, 163, 184, 0.05) !important;
+                }
+                .agents-report-edit-header {
+                    padding: 1.35rem 4.5rem 1rem 1.35rem;
+                    border-bottom: 1px solid var(--border);
+                    background: rgba(10, 15, 26, 0.24);
+                    text-align: left;
+                    gap: 0.3rem;
+                }
+                .agents-report-edit-kicker {
+                    width: fit-content;
+                    max-width: 100%;
+                    padding: 0.24rem 0.55rem;
+                    border: 1px solid rgba(147, 197, 253, 0.22);
+                    border-radius: 999px;
+                    background: rgba(59, 130, 246, 0.11);
+                    color: #bfdbfe;
+                    font-size: 0.72rem;
+                    font-weight: 800;
+                    line-height: 1;
+                    letter-spacing: 0;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+                .agents-report-edit-title {
+                    margin: 0.15rem 0 0;
+                    font-size: 1.05rem;
+                    line-height: 1.25;
+                    letter-spacing: 0;
+                }
+                .agents-report-edit-description {
+                    margin: 0;
+                    max-width: 560px;
+                    color: var(--text-secondary) !important;
+                    font-size: 0.86rem;
+                    line-height: 1.45;
+                    letter-spacing: 0;
+                }
+                .agents-report-edit-body {
+                    min-height: 0;
+                    overflow-y: auto;
+                    padding: 1.15rem 1.35rem 1.25rem;
+                }
+                .agents-report-edit-form {
+                    display: grid;
+                    gap: 0.9rem;
+                }
+                .agents-report-edit-grid {
+                    display: grid;
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                    gap: 0.85rem;
+                    align-items: start;
+                }
+                .agents-report-edit-grid--title {
+                    grid-template-columns: minmax(0, 1fr) minmax(150px, 190px);
+                }
+                .agents-report-edit-field {
+                    display: grid;
+                    gap: 0.42rem;
+                    min-width: 0;
+                }
+                .agents-report-edit-field label {
+                    color: var(--text);
+                    font-size: 0.78rem;
+                    font-weight: 800;
+                    line-height: 1.2;
+                    letter-spacing: 0;
+                }
+                .agents-report-edit-input,
+                .agents-report-edit-select-trigger,
+                .agents-report-edit-textarea {
+                    border-color: var(--border-bright) !important;
+                    background: rgba(10, 15, 26, 0.58) !important;
+                    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+                }
+                .agents-report-edit-input,
+                .agents-report-edit-select-trigger {
+                    min-height: 42px;
+                    font-size: 0.88rem;
+                }
+                .agents-report-edit-select-trigger {
+                    color: var(--text);
+                    border-radius: var(--radius);
+                }
+                .agents-report-edit-textarea {
+                    width: 100%;
+                    min-height: 96px;
+                    padding: 0.7rem 0.78rem;
+                    border: 1px solid var(--border-bright);
+                    border-radius: var(--radius);
+                    color: var(--text);
+                    font-family: inherit;
+                    font-size: 0.88rem;
+                    line-height: 1.5;
+                    resize: vertical;
+                    outline: none;
+                }
+                .agents-report-edit-textarea[data-size="lg"] {
+                    min-height: 126px;
+                }
+                .agents-report-edit-input:focus,
+                .agents-report-edit-textarea:focus,
+                .agents-report-edit-select-trigger:focus,
+                .agents-report-edit-select-trigger[data-state="open"] {
+                    border-color: rgba(96, 165, 250, 0.82) !important;
+                    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.03) !important;
+                }
+                .agents-report-edit-input:disabled,
+                .agents-report-edit-textarea:disabled,
+                .agents-report-edit-select-trigger:disabled {
+                    cursor: not-allowed;
+                    opacity: 0.58;
+                }
+                .agents-report-edit-select-content {
+                    width: var(--radix-select-trigger-width) !important;
+                    min-width: var(--radix-select-trigger-width) !important;
+                }
+                .agents-report-edit-footer {
+                    gap: 0.65rem;
+                    justify-content: flex-end;
+                    padding: 1rem 1.35rem;
+                    border-top: 1px solid var(--border);
+                    background: rgba(10, 15, 26, 0.36);
                 }
                 .agents-report-search-grid {
                     display: grid;
@@ -3241,6 +4237,91 @@ export default function AgentsPage() {
                     background: var(--danger-muted);
                     color: var(--danger) !important;
                 }
+                .agents-library-panel {
+                    padding: 1rem;
+                    display: grid;
+                    gap: 1rem;
+                }
+                .agents-library-header {
+                    display: flex;
+                    justify-content: space-between;
+                    gap: 1rem;
+                    align-items: flex-start;
+                    flex-wrap: wrap;
+                }
+                .agents-library-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+                    gap: 0.85rem;
+                }
+                .agents-library-card {
+                    min-width: 0;
+                    padding: 1rem;
+                    border: 1px solid var(--border);
+                    border-radius: 10px;
+                    background: linear-gradient(180deg, rgba(38, 52, 80, 0.72), rgba(30, 42, 66, 0.92));
+                    display: grid;
+                    gap: 0.85rem;
+                    align-content: space-between;
+                    transition: border-color 0.16s var(--ease-smooth), background 0.16s var(--ease-smooth), box-shadow 0.16s var(--ease-smooth);
+                }
+                .agents-library-card[data-selected="true"] {
+                    border-color: var(--primary);
+                    background: linear-gradient(180deg, rgba(59, 130, 246, 0.2), rgba(30, 42, 66, 0.94));
+                    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.18);
+                }
+                .agents-library-card-header {
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) auto;
+                    gap: 0.7rem;
+                    align-items: start;
+                }
+                .agents-library-card-title {
+                    margin: 0;
+                    font-size: 0.98rem;
+                    font-weight: 800;
+                    line-height: 1.25;
+                    overflow-wrap: anywhere;
+                }
+                .agents-library-card-description {
+                    margin: 0.28rem 0 0;
+                    color: var(--text-secondary);
+                    font-size: 0.82rem;
+                    line-height: 1.45;
+                    overflow-wrap: anywhere;
+                }
+                .agents-library-menu-trigger {
+                    width: 36px;
+                    height: 36px;
+                    margin-right: 0;
+                }
+                .agents-library-card-meta {
+                    display: flex;
+                    gap: 0.45rem;
+                    flex-wrap: wrap;
+                    color: var(--text-secondary);
+                    font-size: 0.78rem;
+                }
+                .agents-library-run-button {
+                    width: 100%;
+                    min-height: 44px;
+                    padding: 0 1rem;
+                    border: 1px solid rgba(147, 197, 253, 0.32) !important;
+                    box-shadow: 0 10px 22px -16px rgba(59, 130, 246, 0.82);
+                    font-size: 0.9rem;
+                    font-weight: 800;
+                }
+                .agents-library-run-button:hover:not(:disabled) {
+                    background: var(--primary-hover) !important;
+                    border-color: rgba(191, 219, 254, 0.5) !important;
+                }
+                .agents-library-empty {
+                    padding: 2rem;
+                    text-align: center;
+                    border: 1px solid var(--border);
+                    border-radius: 8px;
+                    color: var(--text-secondary);
+                }
                 @media (max-width: 1180px) {
                     .agents-workspace-grid {
                         grid-template-columns: minmax(260px, 0.85fr) minmax(0, 1.35fr);
@@ -3277,8 +4358,37 @@ export default function AgentsPage() {
                     .agents-builder-grid {
                         grid-template-columns: minmax(0, 1fr);
                     }
+                    .agents-builder-split {
+                        grid-template-columns: minmax(0, 1fr);
+                    }
+                    .agents-builder-tools-list {
+                        max-height: 420px;
+                    }
                     .agents-report-search-grid {
                         grid-template-columns: minmax(0, 1fr);
+                    }
+                    .agents-report-edit-header {
+                        padding: 1.15rem 3.75rem 0.9rem 1rem;
+                    }
+                    .agents-report-edit-body {
+                        padding: 1rem;
+                    }
+                    .agents-report-edit-grid,
+                    .agents-report-edit-grid--title {
+                        grid-template-columns: minmax(0, 1fr);
+                    }
+                    .agents-report-edit-footer {
+                        padding: 0.9rem 1rem;
+                        flex-direction: column-reverse;
+                    }
+                    .agents-report-edit-footer button {
+                        width: 100%;
+                    }
+                    .agents-library-grid {
+                        grid-template-columns: minmax(0, 1fr);
+                    }
+                    .agents-library-header .agents-library-create-button {
+                        width: 100%;
                     }
                 }
             `}</style>
@@ -3289,6 +4399,21 @@ export default function AgentsPage() {
             />
 
             <div aria-live="polite" className="agents-visually-hidden">{workspaceStatus}</div>
+            {workspaceStatus && (
+                <div
+                    role="status"
+                    data-testid="agents-action-status"
+                    className="agents-action-status"
+                    data-tone={workspaceStatus.toLowerCase().includes('failed') || workspaceStatus.toLowerCase().includes('missing') || workspaceStatus.toLowerCase().includes('not found') ? 'error' : 'info'}
+                >
+                    {workspaceStatus.toLowerCase().includes('failed') || workspaceStatus.toLowerCase().includes('missing') || workspaceStatus.toLowerCase().includes('not found') ? (
+                        <AlertTriangle aria-hidden="true" />
+                    ) : (
+                        <Info aria-hidden="true" />
+                    )}
+                    <span>{workspaceStatus}</span>
+                </div>
+            )}
 
             <div className="agents-workspace-tabs" role="tablist" aria-label="Agents workspace views">
                 {workspaceTabs.map(tab => (
@@ -3521,7 +4646,7 @@ export default function AgentsPage() {
                                     {agentDefinitions.length} saved
                                 </p>
                             </div>
-                            <Button type="button" size="icon" variant="outline" onClick={resetDefinitionForm} title="Create agent" aria-label="Create custom agent">
+                            <Button type="button" size="icon" variant="outline" onClick={openCreateAgentBuilder} title="Create agent" aria-label="Create custom agent">
                                 <Plus size={15} />
                             </Button>
                         </div>
@@ -3848,7 +4973,7 @@ export default function AgentsPage() {
                             />
                         </div>
 
-                        {selectedAgent === 'custom' && (
+                        {selectedAgent !== 'writer' && (
                             <div style={{ marginBottom: '1rem' }}>
                                 <label htmlFor="agents-test-data-refs" style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
                                     Project Test Data Refs
@@ -4038,6 +5163,18 @@ export default function AgentsPage() {
                                         {runControlPending === 'cancel' ? <Loader2 className="spin" size={14} /> : <X size={14} />} Cancel
                                     </button>
                                 )}
+                                {isAgentRunTerminal(activeRun.status) && activeRun.status !== 'completed' && (
+                                    <button
+                                        onClick={retryAgentRun}
+                                        disabled={runControlPending !== null}
+                                        title="Retry agent run"
+                                        aria-label="Retry agent run"
+                                        data-testid="agents-retry-run"
+                                        style={{ border: '1px solid var(--primary)', background: 'var(--primary)', color: 'white', borderRadius: '6px', padding: '0.35rem 0.55rem', cursor: runControlPending ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.78rem', fontWeight: 600, opacity: runControlPending ? 0.65 : 1 }}
+                                    >
+                                        {runControlPending === 'retry' ? <Loader2 className="spin" size={14} /> : <RotateCcw size={14} />} Retry
+                                    </button>
+                                )}
                                 <button
                                     type="button"
                                     onClick={exportAgentTrace}
@@ -4064,7 +5201,7 @@ export default function AgentsPage() {
                                     <Button type="button" onClick={() => { selectAgentMode('exploratory'); setSetupOpen(true); document.getElementById('agents-target-url')?.focus(); }}>
                                         <Play size={14} /> Start Explorer
                                     </Button>
-                                    <Button type="button" variant="outline" onClick={() => { selectWorkspaceView('library'); resetDefinitionForm(); }}>
+                                    <Button type="button" variant="outline" onClick={() => { selectWorkspaceView('library'); openCreateAgentBuilder(); }}>
                                         <Plus size={14} /> Create Agent
                                     </Button>
                                     <Button type="button" variant="outline" onClick={() => openAssistantWithPrompt('Help me choose or draft an agent prompt for this project.')}>
@@ -4114,6 +5251,8 @@ export default function AgentsPage() {
                                 const executionStarted = customAgentExecutionStarted(activeRun);
                                 const waitingForWorker = (!executionStarted || progress.phase === 'queued') && activeRun.status !== 'paused';
                                 const workerMessage = customAgentWorkerMessage(activeRun);
+                                const toolCalls = Number(progress.tool_calls ?? 0);
+                                const browserActions = Number(progress.browser_tool_calls ?? progress.interactions ?? 0);
                                 return (
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                                         <div style={{
@@ -4133,14 +5272,14 @@ export default function AgentsPage() {
                                                 <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Current Tool</div>
                                                 <div style={{ fontWeight: 600, overflowWrap: 'anywhere' }}>{customAgentCurrentActivity(progress)}</div>
                                             </div>
-                                            <div>
-                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Tool Calls</div>
-                                                <div style={{ fontWeight: 700 }}>{progress.tool_calls ?? 0}</div>
-                                            </div>
-                                            <div>
-                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Browser Actions</div>
-                                                <div style={{ fontWeight: 700 }}>{progress.browser_tool_calls ?? 0}</div>
-                                            </div>
+	                                            <div>
+	                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Tool Calls</div>
+	                                                <div style={{ fontWeight: 700 }}>{Number.isFinite(toolCalls) ? toolCalls : 0}</div>
+	                                            </div>
+	                                            <div>
+	                                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>Browser Actions</div>
+	                                                <div style={{ fontWeight: 700 }}>{Number.isFinite(browserActions) ? browserActions : 0}</div>
+	                                            </div>
                                         </div>
 
                                         {selectedTools.length > 0 && (
@@ -4272,6 +5411,59 @@ export default function AgentsPage() {
                                         {activeRun.result?.error || activeRun.health?.terminal_reason || "Unknown error occurred"}
                                     </p>
                                 </div>
+                                {activeRun.agent_type === 'exploratory' && activeRun.result && (
+                                    <div data-testid="explorer-failed-recovery" style={{ display: 'grid', gap: '1rem' }}>
+                                        <div
+                                            data-testid="explorer-contract-warnings"
+                                            style={{ padding: '1rem', background: explorerEvidenceEventCount > 0 ? 'var(--warning-muted)' : 'var(--danger-muted)', borderRadius: '10px', border: `1px solid ${explorerEvidenceEventCount > 0 ? 'rgba(251, 191, 36, 0.28)' : 'rgba(248, 113, 113, 0.22)'}`, display: 'grid', gap: '0.45rem' }}
+                                        >
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 750, color: explorerEvidenceEventCount > 0 ? 'var(--warning)' : 'var(--danger)' }}>
+                                                <AlertTriangle size={16} /> {explorerEvidenceEventCount > 0 ? 'Explorer recovered partial evidence' : 'Explorer recovered no structured evidence'}
+                                            </div>
+                                            {[activeRun.result.summary, activeRun.result.failure_reason, ...explorerContractWarnings].filter(Boolean).map((warning: any, index: number) => (
+                                                <div key={`${warning}-${index}`} data-testid="explorer-contract-warning" style={{ color: 'var(--text-secondary)', fontSize: '0.86rem', lineHeight: 1.45 }}>
+                                                    {String(warning)}
+                                                </div>
+                                            ))}
+                                        </div>
+
+                                        <div data-testid="explorer-quality-metrics" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.75rem' }}>
+                                            {[
+                                                ['Evidence Events', explorerEvidenceEventCount, 'explorer-metric-evidence-events'],
+                                                ['Screenshots', explorerScreenshotCount, 'explorer-metric-screenshots'],
+                                                ['Artifacts', explorerArtifactCount, 'explorer-metric-artifacts'],
+                                                ['Successful Browser Actions', explorerDiagnostics.successful_browser_tool_calls ?? 0, 'explorer-metric-successful-browser-actions'],
+                                                ['Deduped Flows', explorerStructuredFlowCount, 'explorer-metric-deduped-flows'],
+                                                ['Duplicate Flows Removed', explorerDiagnostics.dedupe_stats?.duplicate_flows_removed ?? 0, 'explorer-metric-duplicates-removed'],
+                                            ].map(([label, value, testId]) => (
+                                                <div key={String(testId)} data-testid={String(testId)} style={{ padding: '0.85rem', background: 'var(--background)', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                                                    <div style={{ fontSize: '1.35rem', fontWeight: 800, color: 'var(--text)' }}>{String(value)}</div>
+                                                    <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '0.2rem' }}>{String(label)}</div>
+                                                </div>
+                                            ))}
+                                        </div>
+
+                                        {renderExplorerCapturedEvidence()}
+                                        {renderExplorerUnsupportedFlowCandidates()}
+
+                                        {explorerFlowSummaries.length > 0 ? (
+                                            <div style={{ display: 'grid', gap: '0.75rem' }}>
+                                                {explorerFlowSummaries.map((flow: any, i: number) => (
+                                                    <div key={flow.id || i} data-testid="explorer-flow-card" style={{ padding: '1rem', background: 'var(--surface)', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                                                        <h5 style={{ margin: '0 0 0.45rem', fontWeight: 650 }}>{flow.title || `Recovered flow ${i + 1}`}</h5>
+                                                        <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', overflowWrap: 'anywhere' }}>
+                                                            {(flow.steps_count || 0)} steps{flow.entry_point ? ` · Starts: ${flow.entry_point}` : ''}{flow.exit_point ? ` · Ends: ${flow.exit_point}` : ''}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div data-testid="explorer-no-structured-flows" style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '8px', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}>
+                                                No evidence-backed flow summaries were recovered, so test spec generation is disabled for this run.
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                                 <AgentRunObservabilityPanel run={activeRun} events={agentEvents} trace={agentTrace} traceLoading={traceLoading} traceSearch={traceSearch} onTraceSearch={setTraceSearch} traceSpanType={traceSpanType} onTraceSpanType={setTraceSpanType} onExportTrace={exportAgentTrace} activeTraceTab={traceTab} onTraceTabChange={selectTraceTab} />
                             </div>
                         ) : (
@@ -4305,6 +5497,8 @@ export default function AgentsPage() {
                                         onTabChange={selectCustomResultTab}
                                         onAskAssistant={openAssistantWithPrompt}
                                         onCreateSpecFromReport={openSpecFromReportItem}
+                                        onEditOverview={openReportOverviewEdit}
+                                        onEditReportItem={openReportItemEdit}
                                         onImportRequirements={importReportRequirements}
                                         importingRequirementIds={importingRequirementIds}
                                         importError={reportImportError}
@@ -4346,6 +5540,37 @@ export default function AgentsPage() {
                                                     </p>
                                                 </div>
 
+                                                {activeRun.status === 'completed_partial' && (
+                                                    <div
+                                                        data-testid="explorer-partial-warning"
+                                                        style={{ padding: '1rem', background: 'var(--warning-muted)', borderRadius: '10px', border: '1px solid rgba(251, 191, 36, 0.28)', color: 'var(--text-secondary)', display: 'flex', gap: '0.6rem', alignItems: 'flex-start' }}
+                                                    >
+                                                        <AlertTriangle size={16} style={{ color: 'var(--warning)', marginTop: '0.1rem' }} />
+                                                        <div>
+                                                            <strong style={{ color: 'var(--warning)' }}>Partial Explorer result</strong>
+                                                            <div style={{ fontSize: '0.86rem', lineHeight: 1.45, marginTop: '0.25rem' }}>
+                                                                The run explored the app, but no completed evidence-backed flows were recovered. Review captured evidence and unsupported candidates before retrying or generating specs.
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {explorerContractWarnings.length > 0 && (
+                                                    <div
+                                                        data-testid="explorer-contract-warnings"
+                                                        style={{ padding: '1rem', background: 'var(--warning-muted)', borderRadius: '10px', border: '1px solid rgba(251, 191, 36, 0.28)', display: 'grid', gap: '0.45rem' }}
+                                                    >
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: 750, color: 'var(--warning)' }}>
+                                                            <AlertTriangle size={16} /> Explorer evidence warning
+                                                        </div>
+                                                        {explorerContractWarnings.map((warning: string, index: number) => (
+                                                            <div key={`${warning}-${index}`} data-testid="explorer-contract-warning" style={{ color: 'var(--text-secondary)', fontSize: '0.86rem', lineHeight: 1.45 }}>
+                                                                {warning}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+
                                                 {/* Key Metrics */}
                                                 {activeRun.result.coverage && (
                                                     <div>
@@ -4353,7 +5578,7 @@ export default function AgentsPage() {
                                                             📊 What Was Explored
                                                         </h4>
                                                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '1rem' }}>
-                                                            <div style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '10px', border: '1px solid var(--border)' }}>
+                                                            <div data-testid="explorer-metric-pages" style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '10px', border: '1px solid var(--border)' }}>
                                                                 <div style={{ fontSize: '2rem', fontWeight: 700, color: 'var(--primary)' }}>
                                                                     {activeRun.result.coverage.pages_visited || 0}
                                                                 </div>
@@ -4361,7 +5586,7 @@ export default function AgentsPage() {
                                                                     Pages Visited
                                                                 </div>
                                                             </div>
-                                                            <div style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '10px', border: '1px solid var(--border)' }}>
+                                                            <div data-testid="explorer-metric-flows" style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '10px', border: '1px solid var(--border)' }}>
                                                                 <div style={{ fontSize: '2rem', fontWeight: 700, color: 'var(--success)' }}>
                                                                     {activeRun.result.coverage.flows_discovered || 0}
                                                                 </div>
@@ -4369,7 +5594,7 @@ export default function AgentsPage() {
                                                                     User Flows Found
                                                                 </div>
                                                             </div>
-                                                            <div style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '10px', border: '1px solid var(--border)' }}>
+                                                            <div data-testid="explorer-metric-forms" style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '10px', border: '1px solid var(--border)' }}>
                                                                 <div style={{ fontSize: '2rem', fontWeight: 700, color: 'var(--warning)' }}>
                                                                     {activeRun.result.coverage.forms_interacted || 0}
                                                                 </div>
@@ -4378,7 +5603,7 @@ export default function AgentsPage() {
                                                                 </div>
                                                             </div>
                                                             {activeRun.result.coverage.errors_found !== undefined && (
-                                                                <div style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '10px', border: '1px solid var(--border)' }}>
+                                                                <div data-testid="explorer-metric-issues" style={{ padding: '1rem', background: 'var(--surface-hover)', borderRadius: '10px', border: '1px solid var(--border)' }}>
                                                                     <div style={{ fontSize: '2rem', fontWeight: 700, color: activeRun.result.coverage.errors_found > 0 ? 'var(--danger)' : 'var(--success)' }}>
                                                                         {activeRun.result.coverage.errors_found || 0}
                                                                     </div>
@@ -4387,6 +5612,22 @@ export default function AgentsPage() {
                                                                     </div>
                                                                 </div>
                                                             )}
+                                                        </div>
+                                                        <div data-testid="explorer-quality-metrics" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '0.75rem', marginTop: '0.85rem' }}>
+                                                            {[
+                                                                ['Evidence Events', explorerEvidenceEventCount, 'explorer-metric-evidence-events'],
+                                                                ['Screenshots', explorerScreenshotCount, 'explorer-metric-screenshots'],
+                                                                ['Artifacts', explorerArtifactCount, 'explorer-metric-artifacts'],
+                                                                ['Unsupported Candidates', explorerUnsupportedFlowCandidates.length, 'explorer-metric-unsupported-candidates'],
+                                                                ['Successful Browser Actions', explorerDiagnostics.successful_browser_tool_calls ?? 0, 'explorer-metric-successful-browser-actions'],
+                                                                ['Deduped Flows', explorerStructuredFlowCount, 'explorer-metric-deduped-flows'],
+                                                                ['Duplicate Flows Removed', explorerDiagnostics.dedupe_stats?.duplicate_flows_removed ?? 0, 'explorer-metric-duplicates-removed'],
+                                                            ].map(([label, value, testId]) => (
+                                                                <div key={String(testId)} data-testid={String(testId)} style={{ padding: '0.85rem', background: 'var(--background)', borderRadius: '8px', border: '1px solid var(--border)' }}>
+                                                                    <div style={{ fontSize: '1.35rem', fontWeight: 800, color: 'var(--text)' }}>{String(value)}</div>
+                                                                    <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '0.2rem' }}>{String(label)}</div>
+                                                                </div>
+                                                            ))}
                                                         </div>
                                                         {activeRun.result.coverage.coverage_score !== undefined && (
                                                             <div style={{ marginTop: '1rem', padding: '0.75rem', background: activeRun.result.coverage.coverage_score > 0.7 ? 'var(--success-muted)' : 'var(--warning-muted)', borderRadius: '8px', border: `1px solid ${activeRun.result.coverage.coverage_score > 0.7 ? 'rgba(52, 211, 153, 0.2)' : 'rgba(251, 191, 36, 0.2)'}` }}>
@@ -4399,18 +5640,20 @@ export default function AgentsPage() {
                                                     </div>
                                                 )}
 
+                                                {renderExplorerCapturedEvidence()}
+
                                                 {/* Discovered Flows - Clear Display */}
-                                                {activeRun.result.discovered_flow_summaries && activeRun.result.discovered_flow_summaries.length > 0 ? (
+                                                {explorerFlowSummaries.length > 0 ? (
                                                     <div>
                                                         <h4 style={{ fontWeight: 600, fontSize: '1rem', marginBottom: '1rem', color: 'var(--text)' }}>
-                                                            🔍 Discovered User Flows ({activeRun.result.total_flows_discovered || activeRun.result.discovered_flow_summaries.length})
+                                                            🔍 Discovered User Flows ({activeRun.result.total_flows_discovered || explorerFlowSummaries.length})
                                                         </h4>
                                                         <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
                                                             These are the complete user journeys the agent found. Each one can be turned into a test.
                                                         </p>
                                                         <div style={{ display: 'grid', gap: '1rem' }}>
-                                                            {activeRun.result.discovered_flow_summaries.map((flow: any, i: number) => (
-                                                                <div key={i} style={{
+                                                            {explorerFlowSummaries.map((flow: any, i: number) => (
+                                                                <div key={flow.id || i} data-testid="explorer-flow-card" style={{
                                                                     padding: '1rem',
                                                                     background: 'var(--surface)',
                                                                     borderRadius: '10px',
@@ -4480,12 +5723,15 @@ export default function AgentsPage() {
                                                     <div style={{ padding: '2rem', background: 'var(--warning-muted)', borderRadius: '12px', textAlign: 'center' }}>
                                                         <h4 style={{ margin: '0 0 0.5rem 0' }}>No flows discovered</h4>
                                                         <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', margin: 0 }}>
-                                                            The agent didn't find any complete user flows. Try increasing the time limit or exploring a different area.
+                                                            The agent did not recover any complete evidence-backed flows. Try increasing the time limit or exploring a different area.
                                                         </p>
                                                     </div>
                                                 )}
 
+                                                {renderExplorerUnsupportedFlowCandidates()}
+
                                             {/* Next Steps */}
+                                            {explorerCanGenerateSpecs && (
                                             <div style={{ marginTop: '1.5rem', padding: '1.25rem', background: 'linear-gradient(135deg, var(--success-muted) 0%, var(--primary-glow) 100%)', borderRadius: '12px', border: '1px solid rgba(52, 211, 153, 0.2)' }}>
                                                 <h4 style={{ fontWeight: 600, fontSize: '1rem', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--text)' }}>
                                                     <ArrowRight size={18} style={{ color: 'var(--success)' }} /> Next Steps
@@ -4506,18 +5752,20 @@ export default function AgentsPage() {
                                                     </div>
                                                 </div>
                                             </div>
+                                            )}
 
                                             {/* Spec Synthesis Button */}
-                                            {activeRun.agent_type === 'exploratory' && (
+                                            {activeRun.agent_type === 'exploratory' && explorerCanGenerateSpecs && (
                                             <div style={{ display: 'flex', gap: '0.5rem' }}>
                                                 <button
                                                     onClick={handleSynthesize}
-                                                    disabled={isSynthesizing}
+                                                    disabled={isSynthesizing || !explorerCanGenerateSpecs}
+                                                    data-testid="explorer-generate-test-specs"
                                                     style={{
                                                         flex: 1, padding: '0.75rem', borderRadius: '6px', fontSize: '0.9rem',
                                                         background: 'var(--primary)', color: 'white', fontWeight: 600, border: 'none',
-                                                        cursor: isSynthesizing ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
-                                                        opacity: isSynthesizing ? 0.7 : 1
+                                                        cursor: isSynthesizing || !explorerCanGenerateSpecs ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
+                                                        opacity: isSynthesizing || !explorerCanGenerateSpecs ? 0.7 : 1
                                                     }}
                                                 >
                                                     {isSynthesizing ? <><Loader2 className="spin" size={16} /> Generating...</> : <><Sparkles size={16} /> Generate Test Specs</>}
@@ -4607,8 +5855,8 @@ export default function AgentsPage() {
             </div>
             )}
 
-                <Dialog open={builderOpen} onOpenChange={(open) => { setBuilderOpen(open); if (!open) setDefinitionFormError(null); }}>
-                    <DialogContent className="max-w-[920px]" style={{ width: 'min(920px, calc(100vw - 2rem))', maxHeight: '86vh', overflowY: 'auto' }}>
+                <Dialog open={builderOpen} onOpenChange={(open) => { if (open) setBuilderOpen(true); else closeCustomAgentBuilder(); }}>
+                    <DialogContent className="agents-builder-dialog max-w-[960px]" style={{ width: 'min(960px, calc(100vw - 2rem))', maxHeight: '86vh', overflowY: 'auto' }}>
                         <DialogHeader>
                             <DialogTitle>{definitionForm.id ? 'Edit Custom Agent' : 'Create Custom Agent'}</DialogTitle>
                             <DialogDescription>
@@ -4624,16 +5872,16 @@ export default function AgentsPage() {
                         )}
 
                         <div className="agents-builder-grid">
-                            <div style={{ display: 'grid', gap: '0.85rem', alignContent: 'start' }}>
-                                <div style={{ display: 'grid', gap: '0.35rem' }}>
+                            <div className="agents-builder-form">
+                                <div className="agents-builder-field">
                                     <Label htmlFor="definition-name">Name</Label>
                                     <Input id="definition-name" name="definitionName" value={definitionForm.name} onChange={e => setDefinitionForm({ ...definitionForm, name: e.target.value })} placeholder="API explorer" autoComplete="off" />
                                 </div>
-                                <div style={{ display: 'grid', gap: '0.35rem' }}>
+                                <div className="agents-builder-field">
                                     <Label htmlFor="definition-description">Description</Label>
                                     <Input id="definition-description" name="definitionDescription" value={definitionForm.description} onChange={e => setDefinitionForm({ ...definitionForm, description: e.target.value })} placeholder="Explores pages and reports API calls" autoComplete="off" />
                                 </div>
-                                <div style={{ display: 'grid', gap: '0.35rem' }}>
+                                <div className="agents-builder-field">
                                     <Label htmlFor="definition-system-prompt">System Prompt</Label>
                                     <textarea
                                         id="definition-system-prompt"
@@ -4641,33 +5889,34 @@ export default function AgentsPage() {
                                         value={definitionForm.system_prompt}
                                         onChange={e => setDefinitionForm({ ...definitionForm, system_prompt: e.target.value })}
                                         rows={7}
-                                        style={{ width: '100%', padding: '0.75rem', borderRadius: 'var(--radius)', fontSize: '0.86rem', border: '1px solid var(--border)', background: 'var(--background-raised)', color: 'var(--text)', resize: 'vertical' }}
+                                        className="agents-builder-textarea"
                                     />
                                 </div>
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
-                                    <div style={{ display: 'grid', gap: '0.35rem' }}>
+                                <div className="agents-builder-split">
+                                    <div className="agents-builder-field">
                                         <Label htmlFor="definition-runtime">Runtime</Label>
                                         <Select value={definitionForm.runtime} onValueChange={value => setDefinitionForm({ ...definitionForm, runtime: value })}>
                                             <SelectTrigger id="definition-runtime" aria-label="Runtime">
                                                 <SelectValue />
                                             </SelectTrigger>
-                                            <SelectContent>
+                                            <SelectContent className="agents-runtime-select-content" sideOffset={8}>
                                                 <SelectItem value="claude_sdk">Claude SDK</SelectItem>
                                                 <SelectItem value="hermes">Hermes</SelectItem>
                                             </SelectContent>
                                         </Select>
                                     </div>
-                                    <div style={{ display: 'grid', gap: '0.35rem' }}>
+                                    <div className="agents-builder-field">
                                         <Label htmlFor="definition-timeout">Timeout seconds</Label>
                                         <Input id="definition-timeout" name="definitionTimeoutSeconds" type="number" min={60} max={7200} value={definitionForm.timeout_seconds} onChange={e => setDefinitionForm({ ...definitionForm, timeout_seconds: parseInt(e.target.value) || 1800 })} />
                                     </div>
                                 </div>
-                                <div style={{ display: 'grid', gap: '0.35rem' }}>
+                                <div className="agents-builder-field">
                                     <Label htmlFor="definition-test-data-refs">Default Test Data Refs</Label>
                                     <Input id="definition-test-data-refs" name="definitionTestDataRefs" value={definitionForm.test_data_refs} onChange={e => setDefinitionForm({ ...definitionForm, test_data_refs: e.target.value })} placeholder="login-users.valid-admin" autoComplete="off" />
                                     <TestDataPicker
                                         projectId={currentProject?.id}
                                         mode="ref"
+                                        compact
                                         onInsert={(value) => setDefinitionForm(prev => ({
                                             ...prev,
                                             test_data_refs: prev.test_data_refs ? `${prev.test_data_refs}, ${value}` : value,
@@ -4676,16 +5925,16 @@ export default function AgentsPage() {
                                 </div>
                             </div>
 
-                            <div style={{ display: 'grid', gap: '0.65rem', alignContent: 'start' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem', alignItems: 'center' }}>
+                            <div className="agents-builder-tools">
+                                <div className="agents-builder-tools-header">
                                     <Label>Tools</Label>
-                                    <Badge variant="secondary">{definitionForm.tool_ids.length} of {toolCatalog.length} selected</Badge>
+                                    <span className="agents-builder-selected-count">{definitionForm.tool_ids.length} of {toolCatalog.length} selected</span>
                                 </div>
-                                <div style={{ maxHeight: '520px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: '8px', padding: '0.75rem', display: 'grid', gap: '0.9rem' }}>
+                                <div className="agents-builder-tools-list">
                                     {Object.entries(toolsByCategory).map(([category, tools]) => (
                                         <fieldset key={category} style={{ border: 0, margin: 0, padding: 0, display: 'grid', gap: '0.5rem' }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
-                                                <legend style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', fontWeight: 800, textTransform: 'uppercase' }}>
+                                            <div className="agents-tool-category-header">
+                                                <legend className="agents-tool-category-title">
                                                     {category} ({tools.length})
                                                 </legend>
                                                 <Button type="button" variant="ghost" size="sm" onClick={() => toggleCategoryTools(tools)}>
@@ -4693,19 +5942,18 @@ export default function AgentsPage() {
                                                 </Button>
                                             </div>
                                             {tools.map(tool => (
-                                                <label key={tool.id} style={{ display: 'grid', gridTemplateColumns: 'auto minmax(0, 1fr)', gap: '0.5rem', alignItems: 'start', minHeight: 44, cursor: 'pointer' }}>
+                                                <label key={tool.id} className="agents-tool-row">
                                                     <input
                                                         type="checkbox"
                                                         checked={definitionForm.tool_ids.includes(tool.id)}
                                                         onChange={() => toggleDefinitionTool(tool.id)}
-                                                        style={{ marginTop: '0.25rem' }}
                                                     />
                                                     <span style={{ minWidth: 0 }}>
-                                                        <span style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
-                                                            <span style={{ fontWeight: 700, fontSize: '0.82rem' }}>{tool.label}</span>
-                                                            <Badge variant={tool.risk === 'destructive' || tool.risk === 'high' ? 'destructive' : 'secondary'}>{tool.risk}</Badge>
+                                                        <span className="agents-tool-title-line">
+                                                            <span className="agents-tool-label">{tool.label}</span>
+                                                            <span className="agents-tool-risk-pill" style={TOOL_RISK_PILL_STYLES[tool.risk]}>{tool.risk}</span>
                                                         </span>
-                                                        <span style={{ display: 'block', color: 'var(--text-secondary)', lineHeight: 1.35, fontSize: '0.78rem' }}>{tool.description}</span>
+                                                        <span className="agents-tool-description">{tool.description}</span>
                                                     </span>
                                                 </label>
                                             ))}
@@ -4715,10 +5963,98 @@ export default function AgentsPage() {
                             </div>
                         </div>
 
-                        <DialogFooter style={{ gap: '0.6rem' }}>
-                            <Button type="button" variant="outline" onClick={() => setBuilderOpen(false)}>Cancel</Button>
+                        <DialogFooter className="agents-builder-footer">
+                            <Button type="button" variant="outline" onClick={closeCustomAgentBuilder}>Cancel</Button>
                             <Button type="button" onClick={saveDefinition} disabled={savingDefinition}>
                                 {savingDefinition ? <Loader2 className="spin" size={14} /> : <Save size={14} />} Save Agent
+                            </Button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
+
+                <Dialog open={Boolean(reportEditTarget)} onOpenChange={(open) => { if (!open) closeReportEditDialog(); }}>
+                    <DialogContent
+                        className="agents-report-edit-dialog"
+                        style={{
+                            width: 'min(760px, calc(100vw - 2rem))',
+                            maxWidth: '760px',
+                            maxHeight: '88vh',
+                            overflow: 'hidden',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            padding: 0,
+                            gap: 0,
+                        }}
+                    >
+                        <DialogHeader className="agents-report-edit-header">
+                            <span className="agents-report-edit-kicker">{reportEditKicker()}</span>
+                            <DialogTitle className="agents-report-edit-title">{reportEditDialogTitle(reportEditTarget)}</DialogTitle>
+                            <DialogDescription className="agents-report-edit-description">
+                                Update the stored report content for this custom agent run.
+                            </DialogDescription>
+                        </DialogHeader>
+
+                        <div className="agents-report-edit-body">
+                            {reportEditError && (
+                                <Alert variant="destructive">
+                                    <AlertDescription>{reportEditError}</AlertDescription>
+                                </Alert>
+                            )}
+
+                            <div className="agents-report-edit-form">
+                                {reportEditTarget?.type === 'overview' && (
+                                    <>
+                                        {renderReportTextareaField('Summary', 'summary', 4, 'lg')}
+                                        {renderReportTextareaField('Scope', 'scope', 3)}
+                                    </>
+                                )}
+
+                                {reportEditTarget?.type !== 'overview' && (
+                                    <>
+                                        <div className="agents-report-edit-grid agents-report-edit-grid--title">
+                                            {renderReportTextField('Title', 'title')}
+                                            {reportEditTarget?.type === 'finding'
+                                                ? renderReportSelectField('Severity', 'severity', REPORT_SEVERITY_OPTIONS)
+                                                : renderReportSelectField('Priority', 'priority', REPORT_PRIORITY_OPTIONS)}
+                                        </div>
+                                        {renderReportTextField('Page', 'page')}
+                                    </>
+                                )}
+
+                                {reportEditTarget?.type === 'finding' && (
+                                    <>
+                                        {renderReportTextareaField('Description', 'description', 4, 'lg')}
+                                        {renderReportTextareaField('Evidence', 'evidence', 3)}
+                                        {renderReportTextField('Suggested Action', 'suggested_action')}
+                                    </>
+                                )}
+
+                                {reportEditTarget?.type === 'test_idea' && (
+                                    <>
+                                        {renderReportTextareaField('Steps', 'steps', 5, 'lg')}
+                                        {renderReportTextareaField('Expected', 'expected', 3)}
+                                        {renderReportTextField('Source Finding ID', 'source_finding_id')}
+                                    </>
+                                )}
+
+                                {reportEditTarget?.type === 'requirement' && (
+                                    <>
+                                        <div className="agents-report-edit-grid">
+                                            {renderReportTextField('Category', 'category')}
+                                            {renderReportTextField('Confidence', 'confidence')}
+                                        </div>
+                                        {renderReportTextareaField('Description', 'description', 4, 'lg')}
+                                        {renderReportTextareaField('Acceptance Criteria', 'acceptance_criteria', 4, 'lg')}
+                                        {renderReportTextareaField('Evidence', 'evidence', 3)}
+                                    </>
+                                )}
+                            </div>
+                        </div>
+
+                        <DialogFooter className="agents-report-edit-footer">
+                            <Button type="button" variant="outline" onClick={closeReportEditDialog} disabled={savingReportEdit}>Cancel</Button>
+                            <Button type="button" onClick={saveReportEdit} disabled={savingReportEdit}>
+                                {savingReportEdit ? <Loader2 className="spin" size={14} /> : <Save size={14} />} Save Changes
                             </Button>
                         </DialogFooter>
                     </DialogContent>
@@ -4764,19 +6100,19 @@ export default function AgentsPage() {
                 />
 
                 {/* Flow Details Modal */}
-                <Dialog open={flowModalOpen && Boolean(selectedFlow)} onOpenChange={setFlowModalOpen}>
-                    {selectedFlow && (
+                <Dialog open={flowModalVisible} onOpenChange={(open) => { if (open) setFlowModalOpen(true); else closeFlowModal(); }}>
+                    {activeFlow ? (
                         <DialogContent style={{ width: 'min(980px, calc(100vw - 2rem))', maxWidth: '980px', maxHeight: '84vh', overflowY: 'auto' }}>
                             <DialogHeader>
-                                <DialogTitle>{selectedFlow.title}</DialogTitle>
+                                <DialogTitle>{activeFlow.title}</DialogTitle>
                                 <DialogDescription>Review the discovered flow and generate a test spec.</DialogDescription>
                             </DialogHeader>
 
-                            {selectedFlow.pages && selectedFlow.pages.length > 0 && (
+                            {activeFlow.pages && activeFlow.pages.length > 0 && (
                                 <div style={{ marginBottom: '1rem' }}>
                                     <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '0.5rem' }}>Pages</h4>
                                     <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                        {selectedFlow.pages.map((page: string, i: number) => (
+                                        {activeFlow.pages.map((page: string, i: number) => (
                                             <span key={i} style={{
                                                 padding: '0.25rem 0.5rem',
                                                 background: 'var(--surface-hover)',
@@ -4790,45 +6126,45 @@ export default function AgentsPage() {
                                 </div>
                             )}
 
-                            {selectedFlow.happy_path && (
+                            {activeFlow.happy_path && (
                                 <div style={{ marginBottom: '1rem' }}>
                                     <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '0.5rem', color: 'var(--success)' }}>Happy Path</h4>
                                     <p style={{ fontSize: '0.9rem', lineHeight: '1.5', margin: 0 }}>
-                                        {selectedFlow.happy_path}
+                                        {activeFlow.happy_path}
                                     </p>
                                 </div>
                             )}
 
-                            {selectedFlow.edge_cases && selectedFlow.edge_cases.length > 0 && (
+                            {activeFlow.edge_cases && activeFlow.edge_cases.length > 0 && (
                                 <div style={{ marginBottom: '1rem' }}>
                                     <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '0.5rem', color: 'var(--warning)' }}>Edge Cases</h4>
                                     <ul style={{ margin: 0, paddingLeft: '1.5rem' }}>
-                                        {selectedFlow.edge_cases.map((ec: string, i: number) => (
+                                        {activeFlow.edge_cases.map((ec: string, i: number) => (
                                             <li key={i} style={{ fontSize: '0.9rem', marginBottom: '0.25rem' }}>{ec}</li>
                                         ))}
                                     </ul>
                                 </div>
                             )}
 
-                            {selectedFlow.test_ideas && selectedFlow.test_ideas.length > 0 && (
+                            {activeFlow.test_ideas && activeFlow.test_ideas.length > 0 && (
                                 <div style={{ marginBottom: '1rem' }}>
                                     <h4 style={{ fontSize: '0.9rem', fontWeight: 600, marginBottom: '0.5rem' }}>Test Ideas</h4>
                                     <ul style={{ margin: 0, paddingLeft: '1.5rem' }}>
-                                        {selectedFlow.test_ideas.map((idea: string, i: number) => (
+                                        {activeFlow.test_ideas.map((idea: string, i: number) => (
                                             <li key={i} style={{ fontSize: '0.9rem', marginBottom: '0.25rem' }}>{idea}</li>
                                         ))}
                                     </ul>
                                 </div>
                             )}
 
-                            {selectedFlow.entry_point && (
+                            {activeFlow.entry_point && (
                                 <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
-                                    Entry: {selectedFlow.entry_point}
-                                    {selectedFlow.exit_point && ` → Exit: ${selectedFlow.exit_point}`}
+                                    Entry: {activeFlow.entry_point}
+                                    {activeFlow.exit_point && ` -> Exit: ${activeFlow.exit_point}`}
                                 </div>
                             )}
 
-                            {selectedFlow.source_type === 'custom_report' && (
+                            {activeFlow.source_type === 'custom_report' && (
                                 <div style={{ marginBottom: '1rem', padding: '0.85rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--surface-hover)', display: 'grid', gap: '0.65rem' }}>
                                     <label style={{ display: 'grid', gap: '0.35rem', fontSize: '0.82rem', fontWeight: 700 }}>
                                         Browser login for spec generation
@@ -4910,17 +6246,18 @@ export default function AgentsPage() {
 
                             <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border)' }}>
                                 <button
+                                    type="button"
                                     onClick={() => {
-                                        if (selectedFlow.source_type === 'custom_report') {
-                                            const item = {
-                                                id: selectedFlow.id,
-                                                title: selectedFlow.title,
-                                                page: selectedFlow.entry_point,
-                                                description: selectedFlow.happy_path,
-                                            } as ReportFinding;
-                                            createSpecFromReportItem(item, selectedFlow.item_type || 'finding');
+                                        if (activeFlow.source_type === 'custom_report') {
+                                            if (reportSpecReview && activeFlow.item_type) {
+                                                createSpecFromReportItem(reportSpecReview.item, activeFlow.item_type);
+                                            } else {
+                                                const message = 'The selected report item is no longer available for spec generation.';
+                                                setFlowSpecError(message);
+                                                setWorkspaceStatus(message);
+                                            }
                                         } else {
-                                            generateFlowSpec(selectedFlow.id);
+                                            generateFlowSpec(activeFlow.id);
                                         }
                                     }}
                                     disabled={generatingSpec}
@@ -4946,7 +6283,7 @@ export default function AgentsPage() {
                                             <Loader2 size={16} className="spin" />
                                             {flowSpecPoller.status?.message || 'Generating...'}
                                         </>
-                                    ) : selectedFlow.generated_spec ? (
+                                    ) : activeFlow.generated_spec ? (
                                         <>
                                             <FileText size={16} />
                                             View Test Spec
@@ -4959,7 +6296,8 @@ export default function AgentsPage() {
                                     )}
                                 </button>
                                 <button
-                                    onClick={() => setFlowModalOpen(false)}
+                                    type="button"
+                                    onClick={closeFlowModal}
                                     style={{
                                         padding: '0.75rem 1.5rem',
                                         background: 'transparent',
@@ -4975,7 +6313,22 @@ export default function AgentsPage() {
                                 </button>
                             </div>
                         </DialogContent>
-                    )}
+                    ) : agentActionIntent.type === 'reviewReportSpec' ? (
+                        <DialogContent style={{ width: 'min(640px, calc(100vw - 2rem))', maxWidth: '640px' }}>
+                            <DialogHeader>
+                                <DialogTitle>Report Item Unavailable</DialogTitle>
+                                <DialogDescription>
+                                    {missingReportSpecItemMessage || 'Loading the selected report item for spec review.'}
+                                </DialogDescription>
+                            </DialogHeader>
+                            <div style={{ padding: '0.9rem 1rem', border: '1px solid var(--border)', borderRadius: '8px', background: 'var(--surface-hover)', color: 'var(--text)' }}>
+                                {missingReportSpecItemMessage || `Looking for ${agentActionIntent.itemType} ${agentActionIntent.itemId} in run ${agentActionIntent.runId}.`}
+                            </div>
+                            <DialogFooter>
+                                <Button type="button" variant="outline" onClick={closeFlowModal}>Close</Button>
+                            </DialogFooter>
+                        </DialogContent>
+                    ) : null}
                 </Dialog>
 
                 {/* Generated Spec Modal */}
@@ -5027,8 +6380,8 @@ export default function AgentsPage() {
                                     {generatedSpec.cached && (
                                         <button
                                             onClick={() => {
-                                                if (selectedFlow) {
-                                                    generateFlowSpec(selectedFlow.id, true);
+                                                if (activeFlow) {
+                                                    generateFlowSpec(activeFlow.id, true);
                                                 }
                                             }}
                                             disabled={generatingSpec}
@@ -5228,13 +6581,13 @@ export default function AgentsPage() {
                 </Dialog>
 
             {workspaceView === 'library' && (
-                <div className="card" style={{ padding: '1rem', display: 'grid', gap: '1rem' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                <div className="card agents-library-panel">
+                    <div className="agents-library-header">
                         <div>
                             <h2 style={{ margin: 0, fontSize: '1rem', fontWeight: 800 }}>Agent Library</h2>
                             <p style={{ margin: '0.25rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Create, edit, archive, and choose reusable custom agents.</p>
                         </div>
-                        <Button type="button" onClick={resetDefinitionForm}>
+                        <Button type="button" className="agents-library-create-button" onClick={openCreateAgentBuilder}>
                             <Plus size={14} /> Create Agent
                         </Button>
                     </div>
@@ -5247,31 +6600,80 @@ export default function AgentsPage() {
                         </div>
                     )}
                     {agentDefinitions.length === 0 ? (
-                        <div style={{ padding: '2rem', textAlign: 'center', border: '1px solid var(--border)', borderRadius: '8px', color: 'var(--text-secondary)' }}>
+                        <div className="agents-library-empty">
                             No custom agents yet.
                         </div>
                     ) : (
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '0.75rem' }}>
+                        <div className="agents-library-grid">
                             {agentDefinitions.map(definition => (
-                                <div key={definition.id} style={{ padding: '0.95rem', border: selectedDefinitionId === definition.id ? '1px solid var(--primary)' : '1px solid var(--border)', borderRadius: '8px', background: selectedDefinitionId === definition.id ? 'var(--primary-glow)' : 'var(--surface-hover)', display: 'grid', gap: '0.65rem' }}>
-                                    <div>
-                                        <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 800, overflowWrap: 'anywhere' }}>{definition.name}</h3>
-                                        <p style={{ margin: '0.25rem 0 0', color: 'var(--text-secondary)', fontSize: '0.82rem', lineHeight: 1.45 }}>{definition.description || 'No description provided.'}</p>
+                                <div
+                                    key={definition.id}
+                                    className="agents-library-card"
+                                    data-selected={selectedDefinitionId === definition.id}
+                                >
+                                    <div className="agents-library-card-header">
+                                        <div>
+                                            <h3 className="agents-library-card-title">{definition.name}</h3>
+                                            <p className="agents-library-card-description">{definition.description || 'No description provided.'}</p>
+                                        </div>
+                                        <DropdownMenu
+                                            modal={false}
+                                            open={openDefinitionMenuId === definition.id}
+                                            onOpenChange={(open) => setOpenDefinitionMenuId(open ? definition.id : null)}
+                                        >
+                                            <DropdownMenuTrigger asChild>
+                                                <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    aria-label={`Open actions for ${definition.name}`}
+                                                    className="agents-definition-action-trigger agents-library-menu-trigger"
+                                                    onClick={(event) => event.stopPropagation()}
+                                                    onPointerDown={(event) => event.stopPropagation()}
+                                                >
+                                                    <MoreHorizontal size={15} />
+                                                </Button>
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent
+                                                align="end"
+                                                sideOffset={6}
+                                                className="agents-definition-action-menu"
+                                                onClick={(event) => event.stopPropagation()}
+                                            >
+                                                <DropdownMenuItem
+                                                    className="agents-definition-action-item"
+                                                    onSelect={(event) => {
+                                                        editDefinitionFromMenu(definition, event);
+                                                    }}
+                                                >
+                                                    <Settings size={14} />
+                                                    Edit
+                                                </DropdownMenuItem>
+                                                <DropdownMenuItem
+                                                    className="agents-definition-action-item agents-definition-action-item-danger"
+                                                    onSelect={(event) => {
+                                                        archiveDefinitionFromMenu(definition, event);
+                                                    }}
+                                                >
+                                                    <Archive size={14} />
+                                                    Archive
+                                                </DropdownMenuItem>
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
                                     </div>
-                                    <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', color: 'var(--text-secondary)', fontSize: '0.78rem' }}>
+                                    <div className="agents-library-card-meta">
                                         <Badge variant="secondary">{definition.tool_ids.length} tools</Badge>
                                         <Badge variant="secondary">{definition.runtime === 'hermes' ? 'Hermes' : 'Claude SDK'}</Badge>
                                         <Badge variant="secondary">{Math.ceil((definition.timeout_seconds || 1800) / 60)}m</Badge>
                                     </div>
-                                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                                        <Button type="button" size="sm" onClick={() => { selectDefinition(definition.id); selectAgentMode('custom'); selectWorkspaceView('run'); }}>
+                                    <div>
+                                        <Button
+                                            type="button"
+                                            size="sm"
+                                            className="agents-library-run-button"
+                                            onClick={() => { selectDefinition(definition.id); selectAgentMode('custom'); selectWorkspaceView('run'); }}
+                                        >
                                             <Play size={13} /> Run Agent
-                                        </Button>
-                                        <Button type="button" size="sm" variant="outline" onClick={() => { selectDefinition(definition.id); editDefinition(definition); }}>
-                                            <Settings size={13} /> Edit
-                                        </Button>
-                                        <Button type="button" size="sm" variant="ghost" onClick={() => setArchiveCandidate(definition)} style={{ color: 'var(--danger)' }}>
-                                            <Archive size={13} /> Archive
                                         </Button>
                                     </div>
                                 </div>

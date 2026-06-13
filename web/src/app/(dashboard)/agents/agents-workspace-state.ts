@@ -6,6 +6,7 @@ export type AgentHistoryStatusFilter = 'all' | 'active' | 'completed' | 'failed'
 export type AgentHistoryTypeFilter = 'all' | 'exploratory' | 'custom' | 'writer' | 'spec_generation';
 export type ReportReviewFilter = 'all' | 'unreviewed' | 'needs_action' | 'imported' | 'spec_created';
 export type ReportSearchTypeFilter = 'all' | 'finding' | 'test_idea' | 'requirement' | 'page' | 'evidence' | 'action';
+export type ReportSpecItemType = 'finding' | 'test_idea';
 
 export interface AgentWorkspaceQueryState {
     view: AgentWorkspaceView;
@@ -23,6 +24,8 @@ export interface AgentWorkspaceQueryState {
     reportStatus: ReportReviewFilter;
     reportSeverity: string;
     reportType: ReportSearchTypeFilter;
+    specItemId: string;
+    specItemType: ReportSpecItemType | '';
 }
 
 export interface AgentHistoryRunLike {
@@ -62,6 +65,8 @@ export const DEFAULT_AGENT_WORKSPACE_QUERY: AgentWorkspaceQueryState = {
     reportStatus: 'all',
     reportSeverity: 'all',
     reportType: 'all',
+    specItemId: '',
+    specItemType: '',
 };
 
 const WORKSPACE_VIEWS = new Set<AgentWorkspaceView>(['run', 'library', 'reports', 'queue']);
@@ -72,13 +77,16 @@ const STATUS_FILTERS = new Set<AgentHistoryStatusFilter>(['all', 'active', 'comp
 const TYPE_FILTERS = new Set<AgentHistoryTypeFilter>(['all', 'exploratory', 'custom', 'writer', 'spec_generation']);
 const REPORT_REVIEW_FILTERS = new Set<ReportReviewFilter>(['all', 'unreviewed', 'needs_action', 'imported', 'spec_created']);
 const REPORT_TYPE_FILTERS = new Set<ReportSearchTypeFilter>(['all', 'finding', 'test_idea', 'requirement', 'page', 'evidence', 'action']);
+const REPORT_SPEC_ITEM_TYPES = new Set<ReportSpecItemType>(['finding', 'test_idea']);
 const ACTIVE_STATUSES = new Set(['running', 'pending', 'queued']);
+const COMPLETED_STATUSES = new Set(['completed', 'completed_partial']);
 
 function pickParam<T extends string>(value: string | null, allowed: Set<T>, fallback: T): T {
     return value && allowed.has(value as T) ? value as T : fallback;
 }
 
 export function parseAgentWorkspaceQuery(params: URLSearchParams): AgentWorkspaceQueryState {
+    const specItemType = params.get('specItemType');
     return {
         view: pickParam(params.get('view'), WORKSPACE_VIEWS, DEFAULT_AGENT_WORKSPACE_QUERY.view),
         runId: params.get('runId') || DEFAULT_AGENT_WORKSPACE_QUERY.runId,
@@ -95,6 +103,10 @@ export function parseAgentWorkspaceQuery(params: URLSearchParams): AgentWorkspac
         reportStatus: pickParam(params.get('reportStatus'), REPORT_REVIEW_FILTERS, DEFAULT_AGENT_WORKSPACE_QUERY.reportStatus),
         reportSeverity: params.get('reportSeverity') || DEFAULT_AGENT_WORKSPACE_QUERY.reportSeverity,
         reportType: pickParam(params.get('reportType'), REPORT_TYPE_FILTERS, DEFAULT_AGENT_WORKSPACE_QUERY.reportType),
+        specItemId: params.get('specItemId') || DEFAULT_AGENT_WORKSPACE_QUERY.specItemId,
+        specItemType: specItemType && REPORT_SPEC_ITEM_TYPES.has(specItemType as ReportSpecItemType)
+            ? specItemType as ReportSpecItemType
+            : DEFAULT_AGENT_WORKSPACE_QUERY.specItemType,
     };
 }
 
@@ -126,6 +138,8 @@ export function filterAgentHistoryRuns<T extends AgentHistoryRunLike>(
         if (filters.status !== 'all') {
             if (filters.status === 'active') {
                 if (!ACTIVE_STATUSES.has(run.status)) return false;
+            } else if (filters.status === 'completed') {
+                if (!COMPLETED_STATUSES.has(run.status)) return false;
             } else if (run.status !== filters.status) {
                 return false;
             }
@@ -148,7 +162,7 @@ export function getAgentHistoryCounts(runs: AgentHistoryRunLike[]) {
         status: {
             all: runs.length,
             active: runs.filter(run => ACTIVE_STATUSES.has(run.status)).length,
-            completed: runs.filter(run => run.status === 'completed').length,
+            completed: runs.filter(run => COMPLETED_STATUSES.has(run.status)).length,
             failed: runs.filter(run => run.status === 'failed').length,
             cancelled: runs.filter(run => run.status === 'cancelled').length,
             paused: runs.filter(run => run.status === 'paused').length,

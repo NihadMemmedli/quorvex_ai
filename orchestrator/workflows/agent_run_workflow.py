@@ -80,12 +80,27 @@ class AgentRunWorkflow:
             )
             return {"run_id": run_id, "status": "cancelled", "action": "cancelled"}
 
-        result = await workflow.execute_activity(
-            "execute_agent_run",
-            {"run_id": run_id},
-            start_to_close_timeout=timedelta(hours=12),
-            retry_policy=AGENT_ACTIVITY_RETRY_POLICY,
-        )
+        try:
+            result = await workflow.execute_activity(
+                "execute_agent_run",
+                {"run_id": run_id},
+                start_to_close_timeout=timedelta(hours=12),
+                retry_policy=AGENT_ACTIVITY_RETRY_POLICY,
+            )
+        except Exception as exc:
+            result = {
+                "run_id": run_id,
+                "status": "failed",
+                "error": str(exc),
+                "activity_failed": True,
+            }
+            await workflow.execute_activity(
+                "finalize_agent_run_workflow",
+                {"run_id": run_id, "result": result},
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=CONTROL_ACTIVITY_RETRY_POLICY,
+            )
+            return {"run_id": run_id, "status": "failed", "action": "failed"}
         if self._cancelled:
             await workflow.execute_activity(
                 "set_agent_run_control_status",

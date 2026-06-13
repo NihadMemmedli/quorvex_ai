@@ -364,6 +364,7 @@ These variables are used by specialized workflows, browser-auth helpers, generat
 | `OPENAPI_IMPORT_CODEGEN_CONCURRENCY` | feature default | No | Concurrent code-generation workers for OpenAPI import |
 | `OPENAPI_IMPORT_EXECUTION_CONCURRENCY` | feature default | No | Concurrent execution workers for OpenAPI import |
 | `OPENAPI_IMPORT_EXECUTION_TIMEOUT` | feature default | No | Execution timeout for OpenAPI import checks |
+| `PLANNER_MAX_ATTEMPTS` | `5` | No | Maximum native planner attempts; values above 5 are capped |
 | `PLANNER_REPAIR_TIMEOUT_SECONDS` | feature default | No | Timeout for planner repair passes |
 | `PLAYWRIGHT_BROWSERS_PATH` | Playwright default | No | Browser binary path used by Playwright |
 | `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` | auto-detected | No | Chromium executable override |

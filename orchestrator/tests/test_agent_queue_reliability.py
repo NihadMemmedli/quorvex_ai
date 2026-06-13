@@ -1542,6 +1542,7 @@ async def test_running_task_summaries_are_sanitized():
             "owner_label": None,
             "owner_status": None,
             "owner_terminal": False,
+            "live": True,
             "orphaned": False,
             "progress": {
                 "activity_label": "Exploring https://example.test",
@@ -1554,3 +1555,97 @@ async def test_running_task_summaries_are_sanitized():
     assert "system_prompt" not in summaries[0]
     assert "env_vars" not in summaries[0]
     assert "last_tool_input" not in summaries[0]["progress"]
+
+
+@pytest.mark.asyncio
+async def test_running_summary_marks_missing_heartbeat_stale_not_live():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    task = AgentTask(
+        id="agent-stale-running",
+        prompt="inspect",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-1",
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.sadd(queue.RUNNING_KEY, task.id)
+
+    summaries = await queue.get_running_task_summaries()
+
+    assert len(summaries) == 1
+    assert summaries[0]["id"] == task.id
+    assert summaries[0]["heartbeat_alive"] is False
+    assert summaries[0]["live"] is False
+    assert summaries[0]["orphaned"] is True
+
+
+@pytest.mark.asyncio
+async def test_running_summary_marks_terminal_owner_not_live():
+    redis = _MemoryRedis()
+
+    class OwnerTerminalQueue(_MemoryQueue):
+        async def _get_owner_state(self, task):
+            return {
+                "type": task.owner_type,
+                "id": task.owner_id,
+                "label": task.owner_label,
+                "status": "failed",
+                "terminal": True,
+            }
+
+    queue = OwnerTerminalQueue(redis)
+    task = AgentTask(
+        id="agent-terminal-running",
+        prompt="inspect",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-1",
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+        owner_type="agent_run",
+        owner_id="run-failed",
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.sadd(queue.RUNNING_KEY, task.id)
+    await queue.update_heartbeat(task.id)
+
+    summaries = await queue.get_running_task_summaries()
+
+    assert summaries[0]["heartbeat_alive"] is True
+    assert summaries[0]["owner_terminal"] is True
+    assert summaries[0]["live"] is False
+    assert summaries[0]["orphaned"] is True
+
+
+@pytest.mark.asyncio
+async def test_running_summary_counts_paused_active_owner_as_live():
+    redis = _MemoryRedis()
+
+    class ActiveOwnerQueue(_MemoryQueue):
+        async def _get_owner_state(self, task):
+            return {
+                "type": task.owner_type,
+                "id": task.owner_id,
+                "label": task.owner_label,
+                "status": "running",
+                "terminal": False,
+            }
+
+    queue = ActiveOwnerQueue(redis)
+    task = AgentTask(
+        id="agent-paused-active",
+        prompt="inspect",
+        status=AgentTaskStatus.PAUSED,
+        worker_id="worker-1",
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+        owner_type="agent_run",
+        owner_id="run-paused",
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.sadd(queue.RUNNING_KEY, task.id)
+
+    summaries = await queue.get_running_task_summaries()
+
+    assert summaries[0]["heartbeat_alive"] is False
+    assert summaries[0]["owner_terminal"] is False
+    assert summaries[0]["live"] is True
+    assert summaries[0]["orphaned"] is False

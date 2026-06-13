@@ -224,7 +224,44 @@ class HermesRuntime(AgentRuntime):
         run_id: str | None = None
         total_cost_usd: float | None = None
 
-        payload = self._run_payload(prompt, context)
+        augmented_prompt = prompt
+        memory_context_text = ""
+        try:
+            from orchestrator.memory.prompt_augmentation import augment_prompt_with_agent_memory
+
+            augmented = augment_prompt_with_agent_memory(
+                prompt,
+                inject_memory=context.inject_memory,
+                project_id=context.memory_project_id,
+                agent_type=context.memory_agent_type or "HermesRuntime",
+                stage=context.memory_stage or "agent_runtime",
+                source_type=context.memory_source_type or "agent_run",
+                source_id=context.memory_source_id or context.owner_id,
+                owner_type=context.owner_type,
+                owner_id=context.owner_id,
+                trace_agent_run_id=context.agent_run_id or context.owner_id,
+                trace_id=context.trace_id,
+                runtime="hermes",
+                model=context.model,
+                model_tier=context.model_tier,
+                allowed_tools=context.allowed_tools or [],
+            )
+            augmented_prompt = augmented.prompt
+            memory_context_text = augmented.context_text
+            if augmented.injected:
+                self._emit_progress(
+                    context,
+                    {
+                        "runtime": "hermes",
+                        "phase": "memory_injection",
+                        "message": "Memory context injected into Hermes prompt.",
+                        "memory_context_characters": len(memory_context_text),
+                    },
+                )
+        except Exception as exc:
+            logger.debug("Hermes memory augmentation skipped: %s", exc)
+
+        payload = self._run_payload(augmented_prompt, context)
         try:
             created = await self.client.create_run(payload, timeout_seconds)
             run_id = str(created["run_id"])

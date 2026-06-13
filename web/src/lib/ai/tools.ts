@@ -1380,6 +1380,44 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
 
     // ===== Memory & Knowledge Base tools =====
 
+    retrieveAgenticContext: tool({
+      description: 'Retrieve cited, multi-source project context for complex memory, coverage, debugging, requirements, selector, or test-writing questions. Read-only and project-scoped.',
+      inputSchema: z.object({
+        query: z.string().describe('The user question or task to retrieve grounded context for'),
+        intent: z.enum(['general', 'debugging', 'test_generation', 'coverage_planning', 'requirements', 'selectors']).optional(),
+        sources: z.array(z.enum([
+          'agent_memories',
+          'selector_patterns',
+          'browser_memory',
+          'graph_context',
+          'coverage_gaps',
+          'prd_chunks',
+          'requirements',
+          'rtm',
+          'run_summaries',
+          'specs',
+        ])).optional().describe('Optional source allowlist. Omit to let the backend route by intent.'),
+        url: z.string().optional().describe('Optional URL focus'),
+        specName: z.string().optional().describe('Optional spec name focus'),
+        runId: z.string().optional().describe('Optional run ID focus'),
+        maxItems: z.number().optional().default(8).describe('Maximum evidence items to return'),
+        includeDebug: z.boolean().optional().default(false).describe('Include retrieval diagnostics'),
+      }),
+      execute: async ({ query, intent, sources, url, specName, runId, maxItems, includeDebug }): Promise<ToolResult> => {
+        return fetchTool('/api/memory/agentic-context', 'POST', {
+          query,
+          intent,
+          sources,
+          project_id: projectId,
+          url,
+          specName,
+          runId,
+          max_items: maxItems ?? 8,
+          include_debug: includeDebug ?? false,
+        });
+      },
+    }),
+
     searchMemory: tool({
       description: 'Search the memory system for similar test patterns by description. Uses semantic search to find proven test approaches.',
       inputSchema: z.object({

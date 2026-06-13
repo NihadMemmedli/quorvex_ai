@@ -1132,6 +1132,27 @@ class AgentQueue:
             "oldest_queued_age_seconds": oldest_queued_age_seconds,
         }
 
+    @staticmethod
+    def _task_live_for_capacity(
+        task: AgentTask | None,
+        *,
+        heartbeat_alive: bool,
+        owner_state: dict[str, Any] | None,
+    ) -> bool:
+        """Return whether a running-set task should consume live capacity."""
+        if not task:
+            return False
+        if owner_state and owner_state.get("terminal"):
+            return False
+        if task.status in (
+            AgentTaskStatus.RUNNING,
+            AgentTaskStatus.CANCEL_REQUESTED,
+        ):
+            return heartbeat_alive
+        if task.status == AgentTaskStatus.PAUSED:
+            return bool(owner_state and not owner_state.get("terminal"))
+        return False
+
     async def get_running_task_summaries(self) -> list[dict[str, Any]]:
         """Return sanitized summaries for currently running tasks."""
         redis = await self._ensure_connected()
@@ -1160,6 +1181,11 @@ class AgentQueue:
                 )
                 if key in progress and progress.get(key) is not None
             }
+            live_for_capacity = self._task_live_for_capacity(
+                task,
+                heartbeat_alive=heartbeat_alive,
+                owner_state=owner_state,
+            )
 
             summaries.append(
                 {
@@ -1187,8 +1213,8 @@ class AgentQueue:
                     "owner_label": task.owner_label if task else None,
                     "owner_status": owner_state.get("status") if owner_state else None,
                     "owner_terminal": bool(owner_state and owner_state.get("terminal")),
-                    "orphaned": (not heartbeat_alive)
-                    or bool(owner_state and owner_state.get("terminal")),
+                    "live": live_for_capacity,
+                    "orphaned": not live_for_capacity,
                     "progress": progress_summary,
                 }
             )

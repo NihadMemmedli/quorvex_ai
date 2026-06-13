@@ -88,6 +88,23 @@ LOW_RISK_LEVELS = {"low", "info"}
 PROPOSAL_VALIDATION_TIMEOUT_SECONDS = 120
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RUNS_DIR = REPOSITORY_ROOT / "runs"
+BROWSER_LEASE_MODES = {"isolated", "sequential_handoff", "read_only_snapshot"}
+DEFAULT_BROWSER_ACTIONS = (
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_fill_form",
+    "browser_select_option",
+    "browser_press_key",
+    "browser_wait_for",
+    "browser_handle_dialog",
+    "browser_evaluate",
+    "browser_take_screenshot",
+    "browser_console_messages",
+    "browser_network_requests",
+    "browser_close",
+)
 
 
 class StructuredRequirementArtifact(BaseModel):
@@ -201,8 +218,7 @@ def _normalize_fingerprint_value(value: Any) -> str:
         return " ".join(_normalize_fingerprint_value(item) for item in value)
     if isinstance(value, dict):
         return " ".join(
-            f"{_normalize_fingerprint_value(key)} {_normalize_fingerprint_value(value[key])}"
-            for key in sorted(value)
+            f"{_normalize_fingerprint_value(key)} {_normalize_fingerprint_value(value[key])}" for key in sorted(value)
         )
     text = str(value).lower()
     text = re.sub(r"https?://[^/\s]+", "", text)
@@ -340,7 +356,9 @@ def _resolve_requirement_ids(
         if requirement and requirement.id is not None:
             ids.append(requirement.id)
     if title:
-        fingerprint = _requirement_fingerprint({"title": title, "category": row.get("category"), "acceptance_criteria": []})
+        fingerprint = _requirement_fingerprint(
+            {"title": title, "category": row.get("category"), "acceptance_criteria": []}
+        )
         for requirement in session.exec(select(Requirement).where(Requirement.project_id == project_id)).all():
             existing_fingerprint = _requirement_fingerprint(
                 {
@@ -589,12 +607,16 @@ def execute_mission_iteration(payload: dict[str, Any]) -> dict[str, Any]:
             queued = _queue_mission_exploration(session, mission, run)
             summary["exploration"] = {**summary.get("exploration", {}), **queued}
             if queued.get("session_id"):
-                summary["notes"].append(f"Queued exploration session {queued['session_id']} for the next memory comparison.")
+                summary["notes"].append(
+                    f"Queued exploration session {queued['session_id']} for the next memory comparison."
+                )
 
         approved_finding_count = _create_proposals_for_approved_findings(session, mission, run)
         summary["test_proposals_created"] += approved_finding_count
         if approved_finding_count:
-            summary["notes"].append(f"Generated {approved_finding_count} pending test proposal(s) from approved findings.")
+            summary["notes"].append(
+                f"Generated {approved_finding_count} pending test proposal(s) from approved findings."
+            )
 
         materialization_summary = _auto_materialize_low_risk_proposals(session, mission, run)
         summary["auto_materialization"] = materialization_summary
@@ -609,11 +631,15 @@ def execute_mission_iteration(payload: dict[str, Any]) -> dict[str, Any]:
 
         if mission.mission_type in {"regression", "mixed"}:
             _update_run_checkpoint(session, mission, run, "regression_watch_ready")
-            summary["notes"].append("Regression mission ledger is ready; existing batch execution can be attached as a next activity.")
+            summary["notes"].append(
+                "Regression mission ledger is ready; existing batch execution can be attached as a next activity."
+            )
 
         if mission.mission_type in {"flake_triage", "mixed"}:
             _update_run_checkpoint(session, mission, run, "flake_triage_ready")
-            summary["notes"].append("Flake triage will use parsed Playwright JSON retries and historical TestExecutionHistory.")
+            summary["notes"].append(
+                "Flake triage will use parsed Playwright JSON retries and historical TestExecutionHistory."
+            )
 
         if mission.mission_type not in {"coverage", "exploration", "regression", "flake_triage", "mixed"}:
             summary["notes"].append(f"Unknown mission type '{mission.mission_type}' recorded without execution.")
@@ -758,7 +784,9 @@ def _queue_mission_exploration(
             {
                 "autonomous_mission_id": mission.id,
                 "autonomous_run_id": run.id,
-                "timeout_minutes": _config_int(config, "exploration_timeout_minutes", min(mission.max_runtime_minutes, 30)),
+                "timeout_minutes": _config_int(
+                    config, "exploration_timeout_minutes", min(mission.max_runtime_minutes, 30)
+                ),
                 "max_interactions": _config_int(config, "max_interactions", 50),
                 "max_depth": _config_int(config, "max_depth", 10),
                 "focus_areas": config.get("focus_areas") or [],
@@ -996,45 +1024,51 @@ def _memory_delta_finding_candidates(delta: dict[str, Any]) -> list[dict[str, An
     page_states = delta.get("page_states") or {}
     for item in page_states.get("new", []) or []:
         current = item.get("current") or {}
-        candidates.append(_classified_memory_delta_candidate(
-            {
-                "kind": "new_page_state",
-                "page_key": item.get("page_key"),
-                "signature": current.get("state_key"),
-                "url": current.get("url"),
-                "title": f"New app surface discovered: {current.get('url') or item.get('page_key')}",
-                "description": "Browser memory discovered a page state that was not present in the previous mission baseline.",
-                "current": current,
-            }
-        ))
+        candidates.append(
+            _classified_memory_delta_candidate(
+                {
+                    "kind": "new_page_state",
+                    "page_key": item.get("page_key"),
+                    "signature": current.get("state_key"),
+                    "url": current.get("url"),
+                    "title": f"New app surface discovered: {current.get('url') or item.get('page_key')}",
+                    "description": "Browser memory discovered a page state that was not present in the previous mission baseline.",
+                    "current": current,
+                }
+            )
+        )
     for item in page_states.get("changed", []) or []:
         current = item.get("current") or {}
-        candidates.append(_classified_memory_delta_candidate(
-            {
-                "kind": "changed_page_state",
-                "page_key": item.get("page_key"),
-                "signature": current.get("state_key") or current.get("exact_hash"),
-                "url": current.get("url"),
-                "title": f"Known app surface changed: {current.get('url') or item.get('page_key')}",
-                "description": "Browser memory detected a changed page state. Review whether existing coverage should be updated.",
-                "changed_fields": item.get("changed_fields") or {},
-                "baseline": item.get("baseline") or {},
-                "current": current,
-            }
-        ))
+        candidates.append(
+            _classified_memory_delta_candidate(
+                {
+                    "kind": "changed_page_state",
+                    "page_key": item.get("page_key"),
+                    "signature": current.get("state_key") or current.get("exact_hash"),
+                    "url": current.get("url"),
+                    "title": f"Known app surface changed: {current.get('url') or item.get('page_key')}",
+                    "description": "Browser memory detected a changed page state. Review whether existing coverage should be updated.",
+                    "changed_fields": item.get("changed_fields") or {},
+                    "baseline": item.get("baseline") or {},
+                    "current": current,
+                }
+            )
+        )
     for item in page_states.get("removed", []) or []:
         baseline = item.get("baseline") or {}
-        candidates.append(_classified_memory_delta_candidate(
-            {
-                "kind": "removed_page_state",
-                "page_key": item.get("page_key"),
-                "signature": baseline.get("state_key") or baseline.get("exact_hash"),
-                "url": baseline.get("url"),
-                "title": f"Previously known app surface disappeared: {baseline.get('url') or item.get('page_key')}",
-                "description": "Browser memory no longer sees a page state from the previous mission baseline.",
-                "baseline": baseline,
-            }
-        ))
+        candidates.append(
+            _classified_memory_delta_candidate(
+                {
+                    "kind": "removed_page_state",
+                    "page_key": item.get("page_key"),
+                    "signature": baseline.get("state_key") or baseline.get("exact_hash"),
+                    "url": baseline.get("url"),
+                    "title": f"Previously known app surface disappeared: {baseline.get('url') or item.get('page_key')}",
+                    "description": "Browser memory no longer sees a page state from the previous mission baseline.",
+                    "baseline": baseline,
+                }
+            )
+        )
     elements = delta.get("elements") or {}
     for bucket, kind in (
         ("new", "new_element"),
@@ -1045,34 +1079,38 @@ def _memory_delta_finding_candidates(delta: dict[str, Any]) -> list[dict[str, An
             current = item.get("current") or {}
             baseline = item.get("baseline") or {}
             element = current or baseline
-            candidates.append(_classified_memory_delta_candidate(
-                {
-                    "kind": kind,
-                    "element_key": item.get("element_key") or element.get("logical_key") or element.get("id"),
-                    "signature": element.get("locator_signature") or element.get("logical_key"),
-                    "url": element.get("state_url"),
-                    "title": _element_change_title(kind, element),
-                    "description": _element_change_description(kind),
-                    "changed_fields": item.get("changed_fields") or {},
-                    "baseline": baseline,
-                    "current": current,
-                }
-            ))
+            candidates.append(
+                _classified_memory_delta_candidate(
+                    {
+                        "kind": kind,
+                        "element_key": item.get("element_key") or element.get("logical_key") or element.get("id"),
+                        "signature": element.get("locator_signature") or element.get("logical_key"),
+                        "url": element.get("state_url"),
+                        "title": _element_change_title(kind, element),
+                        "description": _element_change_description(kind),
+                        "changed_fields": item.get("changed_fields") or {},
+                        "baseline": baseline,
+                        "current": current,
+                    }
+                )
+            )
     for item in (delta.get("elements") or {}).get("locator_drift", []) or []:
         current = item.get("current") or {}
-        candidates.append(_classified_memory_delta_candidate(
-            {
-                "kind": "locator_drift",
-                "element_key": current.get("logical_key") or current.get("id"),
-                "signature": current.get("locator_signature"),
-                "url": current.get("state_url"),
-                "title": f"Locator drift detected for {current.get('name') or current.get('role') or 'element'}",
-                "description": "Browser memory detected that the best locator changed or became less stable.",
-                "drift": item.get("drift") or {},
-                "baseline": item.get("baseline") or {},
-                "current": current,
-            }
-        ))
+        candidates.append(
+            _classified_memory_delta_candidate(
+                {
+                    "kind": "locator_drift",
+                    "element_key": current.get("logical_key") or current.get("id"),
+                    "signature": current.get("locator_signature"),
+                    "url": current.get("state_url"),
+                    "title": f"Locator drift detected for {current.get('name') or current.get('role') or 'element'}",
+                    "description": "Browser memory detected that the best locator changed or became less stable.",
+                    "drift": item.get("drift") or {},
+                    "baseline": item.get("baseline") or {},
+                    "current": current,
+                }
+            )
+        )
     severity_order = {"high": 0, "medium": 1, "low": 2, "info": 3}
     return sorted(candidates, key=lambda item: severity_order.get(str(item.get("risk_level")), 9))
 
@@ -1091,7 +1129,9 @@ def _classified_memory_delta_candidate(candidate: dict[str, Any]) -> dict[str, A
     change_type, risk_level, test_value, confidence = mapping.get(kind, ("memory_delta", "low", "informational", 0.7))
     uncertainty_reason = None
     if confidence < 0.8:
-        uncertainty_reason = "Review needed because browser memory changed, but intended product behavior is not confirmed."
+        uncertainty_reason = (
+            "Review needed because browser memory changed, but intended product behavior is not confirmed."
+        )
     if change_type == "removed_page":
         uncertainty_reason = "The page may be intentionally removed, gated by auth, or unreachable during this run."
     if change_type == "removed_element":
@@ -1220,7 +1260,9 @@ def _run_parallel_team_supervisor(
             )
             .order_by(col(AutonomousAgentWorkItem.priority).asc(), col(AutonomousAgentWorkItem.created_at).asc())
         ).all()
-        pending = sorted(queued_candidates, key=_queued_work_item_sort_key)[: min(DEFAULT_WORK_ITEM_BATCH_SIZE, available_slots)]
+        pending = sorted(queued_candidates, key=_queued_work_item_sort_key)[
+            : min(DEFAULT_WORK_ITEM_BATCH_SIZE, available_slots)
+        ]
         for item in pending:
             if _enqueue_agent_work_item(session, mission, item):
                 summary["work_items_enqueued"] += 1
@@ -1263,7 +1305,9 @@ def _recover_stale_work_items(
             continue
         if _active_recovery_work_item_exists(session, mission.id, item.id):
             continue
-        reason = task_state if task_state != "unknown" else _stale_work_item_reason(item, now=now, stale_after=stale_after)
+        reason = (
+            task_state if task_state != "unknown" else _stale_work_item_reason(item, now=now, stale_after=stale_after)
+        )
         replacement = _create_recovery_work_item(session, mission, run, item, reason=reason)
         if not replacement:
             continue
@@ -1517,7 +1561,9 @@ def _planner_work_item_exists(session: Session, mission_id: str, planner_key: st
     ).first()
     if direct:
         return True
-    candidates = session.exec(select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)).all()
+    candidates = session.exec(
+        select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)
+    ).all()
     return any((candidate.progress or {}).get("planner_key") == planner_key for candidate in candidates)
 
 
@@ -1636,16 +1682,50 @@ def _agent_prompt_for_work_item(
     mission: AutonomousMission,
     item: AutonomousAgentWorkItem,
     test_data_context: dict[str, Any] | None = None,
+    browser_handoff: dict[str, Any] | None = None,
+    child_browser_handoffs: list[dict[str, Any]] | None = None,
 ) -> str:
     surfaces = item.assigned_surface or mission.target_urls
     revision_context = item.progress or {}
-    context_bundle = _work_item_context_bundle(mission, item)
+    context_bundle = _work_item_context_bundle(mission, item, omit_browser_memory=bool(browser_handoff))
     test_data_context = test_data_context or _autonomous_test_data_execution_context(mission)
     context_note = ""
     if context_bundle:
         context_note = f"""
 Canonical context bundle:
 {_compact_json(context_bundle, max_chars=7000)}
+"""
+    browser_note = ""
+    if browser_handoff:
+        child_contracts = child_browser_handoffs or []
+        first_action = "None required."
+        if browser_handoff.get("handoff_mode") != "sequential_handoff":
+            first_action = (
+                f"Call browser_navigate to {browser_handoff.get('start_url')}, "
+                "then call browser_snapshot before interacting."
+            )
+        browser_note = f"""
+Current Browser Contract:
+{_compact_json(browser_handoff, max_chars=4500)}
+
+Known Browser Memory:
+- state ids: {", ".join(browser_handoff.get("browser_memory_state_ids") or []) or "none"}
+- frontier item ids: {", ".join(browser_handoff.get("frontier_item_ids") or []) or "none"}
+- omitted: {_compact_json(browser_handoff.get("omitted_browser_memory") or {{}}, max_chars=600)}
+
+Required First Browser Action:
+{first_action}
+
+State Validation Rules:
+- Call browser_snapshot before the first browser interaction.
+- After navigation, dialog handling, form submission, or any state-changing click, call browser_snapshot again.
+- If browser memory conflicts with the live snapshot, treat browser memory as stale and prefer the live snapshot.
+- Close the browser when done if browser_close is available.
+- Do not delegate browser work unless the child receives one of the BrowserContextHandoff packets below.
+- Parallel browser subagents must use isolated mode with their own run_dir and mcp_config_path.
+
+BrowserContextHandoff packets available for isolated child agents:
+{_compact_json(child_contracts, max_chars=5000) if child_contracts else "[]"}
 """
     test_data_note = ""
     if test_data_context.get("prompt_markdown"):
@@ -1659,8 +1739,8 @@ When delegating to subagents, copy the relevant test-data ref names and plaintex
         revision_note = f"""
 Revision request:
 - revise work item: {revision_context.get("revision_of_work_item_id")}
-- reviewer work item: {revision_context.get("reviewer_work_item_id") or 'human/manual review'}
-- reviewer reason: {revision_context.get("review_reason") or 'No reason provided'}
+- reviewer work item: {revision_context.get("reviewer_work_item_id") or "human/manual review"}
+- reviewer reason: {revision_context.get("review_reason") or "No reason provided"}
 - revision attempt: {revision_context.get("revision_attempt") or 1}
 Address the reviewer feedback directly and explain what changed from the prior output.
 """
@@ -1680,8 +1760,9 @@ Hermes delegation policy:
 
 Mission: {mission.name}
 Objective: {item.objective}
-Target surfaces: {', '.join(surfaces or ['project data and known app artifacts'])}
+Target surfaces: {", ".join(surfaces or ["project data and known app artifacts"])}
 {context_note}
+{browser_note}
 {test_data_note}
 {revision_note}
 {hermes_note}
@@ -1697,6 +1778,8 @@ Return JSON only, preferably in a ```json fenced block, with this exact top-leve
       "category": "authentication|navigation|crud|validation|checkout|other",
       "priority": "low|medium|high|critical",
       "acceptance_criteria": ["observable criterion"],
+      "evidence": {{"url": "observed URL if any", "selector": "observed selector/text if any", "source": "browser_snapshot|test_run|memory|file"}},
+      "evidence_refs": ["artifact, snapshot, URL, selector, or source IDs"],
       "truth_state": "candidate_requirement",
       "confidence": 0.0,
       "uncertainty_reason": "why this is candidate/uncertain"
@@ -1723,7 +1806,8 @@ Return JSON only, preferably in a ```json fenced block, with this exact top-leve
       "route": "/route if known",
       "test_type": "e2e|api|regression|security|accessibility|unit",
       "risk_level": "low|medium|high|critical",
-      "requirement_ids": []
+      "requirement_ids": [],
+      "evidence": {{"url": "observed URL if any", "selector": "observed selector/text if any", "source": "browser_snapshot|test_run|memory|file"}}
     }}
   ],
   "bugs": [
@@ -1756,12 +1840,17 @@ Every proposed file or repository change must be a proposal only. The human appr
 """
 
 
-def _work_item_context_bundle(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> dict[str, Any]:
+def _work_item_context_bundle(
+    mission: AutonomousMission,
+    item: AutonomousAgentWorkItem,
+    *,
+    omit_browser_memory: bool = False,
+) -> dict[str, Any]:
     bundle: dict[str, Any] = {}
     try:
         from orchestrator.memory.unified import get_unified_memory_service
 
-        bundle["memory"] = get_unified_memory_service().build_bundle(
+        memory_bundle = get_unified_memory_service().build_bundle(
             query=item.objective,
             project_id=mission.project_id,
             agent_type=item.role,
@@ -1769,6 +1858,19 @@ def _work_item_context_bundle(mission: AutonomousMission, item: AutonomousAgentW
             include_review_required=True,
             include_usage=False,
         )
+        if omit_browser_memory and isinstance(memory_bundle, dict):
+            memory_bundle["browser_memory"] = {
+                "states": [],
+                "elements": [],
+                "frontier": [],
+                "omitted_reason": "current_browser_handoff_present",
+            }
+            diagnostics = memory_bundle.setdefault("diagnostics", {})
+            if isinstance(diagnostics, dict):
+                diagnostics.setdefault("warnings", []).append(
+                    "Durable browser memory omitted because this work item has a current browser handoff."
+                )
+        bundle["memory"] = memory_bundle
     except Exception:
         logger.debug("Unable to build autonomous work item memory context.", exc_info=True)
 
@@ -1824,6 +1926,170 @@ def _compact_json(value: Any, *, max_chars: int) -> str:
     return text[: max_chars - 3] + "..."
 
 
+def _browser_owner_metadata(
+    mission: AutonomousMission,
+    item: AutonomousAgentWorkItem,
+    *,
+    handoff_id: str | None = None,
+    child_agent_id: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "mission_id": mission.id,
+        "run_id": item.run_id,
+        "work_item_id": item.id,
+        "child_agent_id": child_agent_id,
+        "handoff_id": handoff_id or item.id,
+        "role": item.role,
+        "recorded_at": _utcnow().isoformat(),
+    }
+
+
+def _tool_call_browser_action(tool_call: Any) -> dict[str, Any] | None:
+    name = _short_tool_name(getattr(tool_call, "name", None))
+    if not name.startswith("browser_"):
+        return None
+    raw_input = getattr(tool_call, "input", None)
+    tool_input = raw_input if isinstance(raw_input, dict) else {}
+    action_type = name.removeprefix("browser_")
+    target = (
+        tool_input.get("url")
+        or tool_input.get("target")
+        or tool_input.get("element")
+        or tool_input.get("text")
+        or tool_input.get("key")
+        or tool_input.get("function")
+    )
+    action = {
+        "action": "navigate" if name == "browser_navigate" else action_type,
+        "target": str(target or name),
+        "outcome": "ok" if getattr(tool_call, "success", True) else "failed",
+    }
+    if getattr(tool_call, "duration_ms", None) is not None:
+        action["duration_ms"] = tool_call.duration_ms
+    return action
+
+
+def _snapshot_lines_from_app_map(update: dict[str, Any]) -> str:
+    lines: list[str] = []
+    elements = update.get("elements") or {}
+    if isinstance(elements, dict):
+        for role, values in elements.items():
+            for value in _as_list(values)[:20]:
+                if isinstance(value, dict):
+                    name = value.get("name") or value.get("text") or value.get("label") or role
+                else:
+                    name = value
+                if str(name or "").strip():
+                    lines.append(f'- {str(role).lower()} "{str(name).strip()[:120]}"')
+    forms = update.get("forms") or []
+    for form in _as_list(forms)[:10]:
+        if isinstance(form, dict):
+            name = form.get("name") or form.get("action") or form.get("label") or "form"
+            lines.append(f'- form "{str(name).strip()[:120]}"')
+    return "\n".join(lines)
+
+
+def _attach_browser_owner_metadata(
+    *,
+    project_id: str | None,
+    session_id: str,
+    owner_metadata: dict[str, Any],
+) -> None:
+    if not project_id:
+        return
+    try:
+        from orchestrator.api.models_db import BrowserElement, BrowserPageState
+
+        with Session(engine) as db:
+            states = db.exec(
+                select(BrowserPageState).where(
+                    BrowserPageState.project_id == project_id,
+                    BrowserPageState.session_id == session_id,
+                )
+            ).all()
+            for state in states:
+                canonical = dict(state.canonical_json or {})
+                canonical["owner_metadata"] = owner_metadata
+                state.canonical_json = canonical
+                db.add(state)
+                elements = db.exec(
+                    select(BrowserElement).where(
+                        BrowserElement.project_id == project_id,
+                        BrowserElement.state_id == state.id,
+                    )
+                ).all()
+                for element in elements:
+                    attrs = dict(element.attributes_json or {})
+                    attrs["owner_metadata"] = owner_metadata
+                    element.attributes_json = attrs
+                    db.add(element)
+            if states:
+                db.commit()
+    except Exception:
+        logger.debug("Unable to attach browser owner metadata.", exc_info=True)
+
+
+def _record_browser_observations_for_work_item(
+    *,
+    mission: AutonomousMission,
+    item: AutonomousAgentWorkItem,
+    result: Any,
+    browser_handoff: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not mission.project_id:
+        return {"states": 0, "transitions": 0, "app_map_states": 0}
+    session_id = f"autonomous:{mission.id}:{item.id}"
+    owner_metadata = _browser_owner_metadata(
+        mission,
+        item,
+        handoff_id=(browser_handoff or {}).get("mcp_config_path") or item.id,
+    )
+    summary = {"states": 0, "transitions": 0, "app_map_states": 0, "session_id": session_id}
+    try:
+        from orchestrator.memory.browser_memory import get_exploration_memory_service
+
+        memory = get_exploration_memory_service(project_id=mission.project_id)
+        action_trace = [
+            action
+            for action in (
+                _tool_call_browser_action(tool_call) for tool_call in (getattr(result, "tool_calls", []) or [])
+            )
+            if action
+        ]
+        if action_trace:
+            seeded = memory.seed_from_action_trace(
+                session_id=session_id,
+                entry_url=str((browser_handoff or {}).get("start_url") or _default_target_url(mission)),
+                action_trace=action_trace,
+            )
+            summary["states"] += int(seeded.get("states", 0) or 0)
+            summary["transitions"] += int(seeded.get("transitions", 0) or 0)
+
+        structured = _extract_structured_agent_output(getattr(result, "output", "") or "") or {}
+        for update in structured.get("app_map_updates") or []:
+            if not isinstance(update, dict) or not update.get("url"):
+                continue
+            memory.upsert_page_state(
+                session_id=session_id,
+                url=str(update.get("url")),
+                title=str(update.get("page_title") or update.get("url")),
+                snapshot_text=_snapshot_lines_from_app_map(update),
+                snapshot_ref=f"autonomous:{item.id}",
+                source_fidelity="autonomous_agent_observation",
+            )
+            summary["app_map_states"] += 1
+
+        if summary["states"] or summary["app_map_states"]:
+            _attach_browser_owner_metadata(
+                project_id=mission.project_id,
+                session_id=session_id,
+                owner_metadata=owner_metadata,
+            )
+    except Exception:
+        logger.debug("Unable to record autonomous browser observations.", exc_info=True)
+    return summary
+
+
 def _allowed_tools_for_work_item(
     item: AutonomousAgentWorkItem,
     *,
@@ -1855,11 +2121,290 @@ def _is_browser_tool(tool_name: str | None) -> bool:
     return short_name.startswith("browser_") or "__browser_" in text
 
 
+def _browser_action_names(allowed_tools: list[str]) -> list[str]:
+    actions: list[str] = []
+    for tool in allowed_tools:
+        short_name = _short_tool_name(tool)
+        if short_name.startswith("browser_") and short_name not in actions:
+            actions.append(short_name)
+    return actions or list(DEFAULT_BROWSER_ACTIONS)
+
+
+def _state_hash_from_browser_contract(contract: dict[str, Any] | None) -> str | None:
+    if not contract:
+        return None
+    basis = {
+        "url": contract.get("last_known_url") or contract.get("start_url"),
+        "title": contract.get("last_known_title"),
+        "snapshot_summary": contract.get("snapshot_summary"),
+        "browser_memory_state_ids": contract.get("browser_memory_state_ids") or [],
+        "frontier_item_ids": contract.get("frontier_item_ids") or [],
+    }
+    if not any(basis.values()):
+        return None
+    return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:24]
+
+
+def _browser_lease_for_handoff(
+    *,
+    owner_id: str,
+    mode: str,
+    timeout_seconds: int,
+    contract: dict[str, Any],
+    owner_type: str = "autonomous_work_item",
+) -> dict[str, Any]:
+    safe_mode = mode if mode in BROWSER_LEASE_MODES else "isolated"
+    now = _utcnow()
+    last_snapshot_at = contract.get("last_snapshot_at") or contract.get("live_snapshot_at")
+    return {
+        "owner_type": owner_type,
+        "owner_id": owner_id,
+        "mode": safe_mode,
+        "lease_timeout_seconds": max(30, int(timeout_seconds or 0)),
+        "lease_until": (now + timedelta(seconds=max(30, int(timeout_seconds or 0)))).isoformat(),
+        "heartbeat_at": now.isoformat(),
+        "current_url": contract.get("last_known_url") or contract.get("start_url"),
+        "page_state_hash": _state_hash_from_browser_contract(contract),
+        "last_snapshot_at": last_snapshot_at,
+    }
+
+
+def _browser_contract_memory_context(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "states": [],
+        "frontier": [],
+        "snapshot_summary": None,
+        "last_known_url": None,
+        "last_known_title": None,
+        "omitted": {"states": 0, "frontier": 0},
+    }
+    if not mission.project_id:
+        return context
+    try:
+        from orchestrator.memory.browser_memory import get_exploration_memory_service
+
+        service = get_exploration_memory_service(project_id=mission.project_id)
+        bundle = service.get_memory_bundle(query=item.objective, limit=5)
+        states = bundle.get("states") or []
+        frontier = bundle.get("frontier") or []
+        context["states"] = states[:3]
+        context["frontier"] = frontier[:5]
+        context["omitted"] = {
+            "states": max(0, len(states) - len(context["states"])),
+            "frontier": max(0, len(frontier) - len(context["frontier"])),
+        }
+        if context["states"]:
+            latest = context["states"][0]
+            context["last_known_url"] = latest.get("url")
+            context["last_known_title"] = latest.get("title")
+            context["snapshot_summary"] = (
+                f"Latest durable browser memory state {latest.get('id')} at "
+                f"{latest.get('url') or 'unknown URL'} last seen {latest.get('last_seen_at') or 'unknown time'}."
+            )
+    except Exception:
+        logger.debug("Unable to build browser handoff memory context.", exc_info=True)
+    return context
+
+
+def _browser_context_handoff(
+    *,
+    mission: AutonomousMission,
+    item: AutonomousAgentWorkItem,
+    run_dir: Path,
+    runtime: dict[str, Any],
+    allowed_tools: list[str],
+    mode: str = "isolated",
+    storage_state_path: Path | str | None = None,
+    auth_session_id: str | None = None,
+    auth_session_name: str | None = None,
+) -> dict[str, Any]:
+    memory_context = _browser_contract_memory_context(mission, item)
+    start_url = (item.assigned_surface or mission.target_urls or [_default_target_url(mission)])[0]
+    expected_url_pattern = str((mission.config or {}).get("expected_url_pattern") or start_url or ".*")
+    contract = {
+        "contract_type": "BrowserContextHandoff",
+        "run_dir": str(run_dir),
+        "mcp_config_path": str(runtime.get("mcp_config_path") or run_dir / ".mcp.json"),
+        "storage_state_attached": bool(storage_state_path),
+        "auth_session_id": auth_session_id,
+        "auth_session_name": auth_session_name,
+        "start_url": start_url,
+        "expected_url_pattern": expected_url_pattern,
+        "last_known_url": memory_context.get("last_known_url") or start_url,
+        "last_known_title": memory_context.get("last_known_title"),
+        "snapshot_summary": memory_context.get("snapshot_summary")
+        or "No live snapshot has been captured for this handoff yet.",
+        "browser_memory_state_ids": [
+            str(state.get("id")) for state in (memory_context.get("states") or []) if state.get("id")
+        ],
+        "frontier_item_ids": [
+            str(frontier.get("id")) for frontier in (memory_context.get("frontier") or []) if frontier.get("id")
+        ],
+        "risk_level": str((mission.config or {}).get("browser_risk_level") or "medium"),
+        "allowed_browser_actions": _browser_action_names(allowed_tools),
+        "handoff_mode": mode if mode in BROWSER_LEASE_MODES else "isolated",
+        "omitted_browser_memory": memory_context.get("omitted") or {"states": 0, "frontier": 0},
+    }
+    contract["browser_lease"] = _browser_lease_for_handoff(
+        owner_id=item.id,
+        mode=contract["handoff_mode"],
+        timeout_seconds=max(300, min(mission.max_runtime_minutes * 60, 7200)),
+        contract=contract,
+    )
+    return contract
+
+
+def _assert_browser_lease_available(
+    session: Session,
+    *,
+    mission_id: str,
+    requested_owner_id: str,
+    mode: str,
+) -> None:
+    if mode == "isolated":
+        return
+    now = _utcnow()
+    running_items = session.exec(
+        select(AutonomousAgentWorkItem).where(
+            AutonomousAgentWorkItem.mission_id == mission_id,
+            AutonomousAgentWorkItem.status == "running",
+        )
+    ).all()
+    for running in running_items:
+        if running.id == requested_owner_id:
+            continue
+        lease = (running.progress or {}).get("browser_context_handoff", {}).get("browser_lease", {})
+        if not isinstance(lease, dict) or lease.get("mode") in {None, "isolated", "read_only_snapshot"}:
+            continue
+        try:
+            lease_until = datetime.fromisoformat(str(lease.get("lease_until")))
+        except (TypeError, ValueError):
+            lease_until = running.lease_until
+        if lease_until and lease_until > now:
+            raise RuntimeError(
+                f"Browser lease conflict: work item {running.id} already owns a {lease.get('mode')} browser lease."
+            )
+
+
+def _validate_browser_handoff_mode(
+    item: AutonomousAgentWorkItem,
+    *,
+    mode: str,
+    max_snapshot_age_seconds: int = 300,
+) -> None:
+    if mode != "sequential_handoff":
+        return
+    existing = (item.progress or {}).get("browser_context_handoff", {})
+    if not isinstance(existing, dict):
+        existing = {}
+    lease = existing.get("browser_lease") if isinstance(existing.get("browser_lease"), dict) else {}
+    snapshot_at = lease.get("last_snapshot_at") or existing.get("last_snapshot_at")
+    if not snapshot_at:
+        raise RuntimeError("Sequential browser handoff requires a recent browser_snapshot in work-item progress.")
+    try:
+        snapshot_dt = datetime.fromisoformat(str(snapshot_at))
+    except ValueError as exc:
+        raise RuntimeError("Sequential browser handoff has an invalid browser_snapshot timestamp.") from exc
+    if _utcnow() - snapshot_dt.replace(tzinfo=None) > timedelta(seconds=max_snapshot_age_seconds):
+        raise RuntimeError("Sequential browser handoff requires a browser_snapshot captured within the last 5 minutes.")
+
+
+def _child_browser_run_dir(mission: AutonomousMission, item: AutonomousAgentWorkItem, child_id: str) -> Path:
+    return _autonomous_work_item_run_dir(mission, item) / "children" / child_id
+
+
+def _prepare_child_browser_handoffs(
+    *,
+    mission: AutonomousMission,
+    item: AutonomousAgentWorkItem,
+    allowed_tools: list[str],
+    parent_auth_session_id: str | None,
+    parent_auth_session_name: str | None,
+    max_children: int,
+) -> list[dict[str, Any]]:
+    if max_children <= 0:
+        return []
+    handoffs: list[dict[str, Any]] = []
+    try:
+        from orchestrator.utils.playwright_mcp import write_playwright_mcp_config
+    except Exception:
+        logger.debug("Could not import Playwright MCP helper for child browser handoffs.", exc_info=True)
+        return handoffs
+
+    for index in range(max_children):
+        child_id = f"child-{index + 1}"
+        child_run_dir = _child_browser_run_dir(mission, item, child_id)
+        child_run_dir.mkdir(parents=True, exist_ok=True)
+        storage_state_path = None
+        if parent_auth_session_id or (mission.config or {}).get("use_project_default_browser_auth"):
+            try:
+                with Session(engine) as db_session:
+                    resolved = resolve_browser_auth_for_run(
+                        db_session,
+                        mission.project_id,
+                        run_dir=child_run_dir,
+                        browser_auth_session_id=parent_auth_session_id,
+                        use_default=bool((mission.config or {}).get("use_project_default_browser_auth")),
+                    )
+                storage_state_path = resolved.storage_state_path if resolved else None
+            except BrowserAuthSessionError:
+                logger.debug("Could not attach browser auth storage state for child handoff.", exc_info=True)
+        runtime = write_playwright_mcp_config(
+            run_dir=child_run_dir,
+            server_name="playwright",
+            project_root=REPOSITORY_ROOT,
+            storage_state_path=storage_state_path,
+        )
+        child_allowed_tools = _allowed_tools_for_work_item(item, mcp_config_dir=child_run_dir)
+        contract = _browser_context_handoff(
+            mission=mission,
+            item=item,
+            run_dir=child_run_dir,
+            runtime=runtime,
+            allowed_tools=child_allowed_tools,
+            mode="isolated",
+            storage_state_path=storage_state_path,
+            auth_session_id=parent_auth_session_id,
+            auth_session_name=parent_auth_session_name,
+        )
+        contract.update(
+            {
+                "child_agent_id": child_id,
+                "parent_work_item_id": item.id,
+                "allowed_tools": child_allowed_tools,
+                "strict_mcp_config": True,
+                "required_first_browser_action": (
+                    f"Call browser_navigate to {contract['start_url']}, then call browser_snapshot before interaction."
+                ),
+            }
+        )
+        _validate_child_browser_handoff_contract(contract)
+        handoffs.append(contract)
+    return handoffs
+
+
+def _validate_child_browser_handoff_contract(contract: dict[str, Any]) -> None:
+    if contract.get("handoff_mode") != "isolated":
+        raise RuntimeError("Child browser handoff must use isolated mode.")
+    mcp_config_path = Path(str(contract.get("mcp_config_path") or ""))
+    if not mcp_config_path.exists():
+        raise RuntimeError("Child browser handoff requires an isolated MCP config.")
+    allowed = {_short_tool_name(tool) for tool in _as_text_list(contract.get("allowed_tools"))}
+    missing = sorted({"browser_navigate", "browser_snapshot"} - allowed)
+    if missing:
+        raise RuntimeError(f"Child browser handoff missing required browser tools: {', '.join(missing)}")
+    first_action = str(contract.get("required_first_browser_action") or "")
+    if "browser_navigate" not in first_action or "browser_snapshot" not in first_action:
+        raise RuntimeError("Child browser handoff must require navigate and snapshot evidence first.")
+
+
 def _autonomous_work_item_run_dir(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> Path:
     return RUNS_DIR / "autonomous" / mission.id / item.id
 
 
-def _prepare_autonomous_work_item_runtime(mission: AutonomousMission, item: AutonomousAgentWorkItem) -> tuple[Path, dict[str, Any]]:
+def _prepare_autonomous_work_item_runtime(
+    mission: AutonomousMission, item: AutonomousAgentWorkItem
+) -> tuple[Path, dict[str, Any]]:
     run_dir = _autonomous_work_item_run_dir(mission, item)
     run_dir.mkdir(parents=True, exist_ok=True)
     runtime: dict[str, Any] = {}
@@ -1868,6 +2413,8 @@ def _prepare_autonomous_work_item_runtime(mission: AutonomousMission, item: Auto
 
         mission_config = mission.config
         storage_state_path = None
+        auth_session_id = None
+        auth_session_name = None
         if mission_config.get("browser_auth_session_id") or mission_config.get("use_project_default_browser_auth"):
             try:
                 with Session(engine) as db_session:
@@ -1879,15 +2426,24 @@ def _prepare_autonomous_work_item_runtime(mission: AutonomousMission, item: Auto
                         use_default=bool(mission_config.get("use_project_default_browser_auth")),
                     )
                 storage_state_path = resolved.storage_state_path if resolved else None
+                auth_session_id = resolved.session_id if resolved else None
+                auth_session_name = resolved.session_name if resolved else None
             except BrowserAuthSessionError as exc:
                 raise RuntimeError(f"{exc}. Refresh browser auth session.") from exc
-        write_playwright_mcp_config(
+        runtime = write_playwright_mcp_config(
             run_dir=run_dir,
             server_name="playwright",
             project_root=REPOSITORY_ROOT,
             storage_state_path=storage_state_path,
         )
-        runtime = browser_runtime_status()
+        runtime = {
+            **runtime,
+            **browser_runtime_status(),
+            "storage_state_attached": bool(storage_state_path),
+            "storage_state_path": str(storage_state_path) if storage_state_path else None,
+            "auth_session_id": auth_session_id,
+            "auth_session_name": auth_session_name,
+        }
     except RuntimeError:
         raise
     except Exception:
@@ -1912,12 +2468,47 @@ def _execute_agent_work_item_direct(
     now = _utcnow()
     current_item = session.get(AutonomousAgentWorkItem, item.id)
     current_mission = session.get(AutonomousMission, mission.id)
-    if not current_item or current_item.status == "cancelled" or (current_mission and current_mission.status == "cancelled"):
+    if (
+        not current_item
+        or current_item.status == "cancelled"
+        or (current_mission and current_mission.status == "cancelled")
+    ):
         return False
     timeout_seconds = max(300, min(mission.max_runtime_minutes * 60, 7200))
     run_dir, browser_runtime = _prepare_autonomous_work_item_runtime(mission, item)
     allowed_tools = _allowed_tools_for_work_item(item, mcp_config_dir=run_dir)
     has_browser_tools = any(_is_browser_tool(tool) for tool in allowed_tools)
+    browser_handoff: dict[str, Any] | None = None
+    child_browser_handoffs: list[dict[str, Any]] = []
+    browser_handoff_mode = str((mission.config or {}).get("browser_handoff_mode") or "isolated")
+    if has_browser_tools:
+        _validate_browser_handoff_mode(item, mode=browser_handoff_mode)
+        _assert_browser_lease_available(
+            session,
+            mission_id=mission.id,
+            requested_owner_id=item.id,
+            mode=browser_handoff_mode,
+        )
+        browser_handoff = _browser_context_handoff(
+            mission=mission,
+            item=item,
+            run_dir=run_dir,
+            runtime=browser_runtime,
+            allowed_tools=allowed_tools,
+            mode=browser_handoff_mode,
+            storage_state_path=browser_runtime.get("storage_state_path"),
+            auth_session_id=browser_runtime.get("auth_session_id"),
+            auth_session_name=browser_runtime.get("auth_session_name"),
+        )
+        if str((mission.config or {}).get("runtime") or "").lower() in {"hermes", "hermes-agent", "hermes_agent"}:
+            child_browser_handoffs = _prepare_child_browser_handoffs(
+                mission=mission,
+                item=item,
+                allowed_tools=allowed_tools,
+                parent_auth_session_id=browser_runtime.get("auth_session_id"),
+                parent_auth_session_name=browser_runtime.get("auth_session_name"),
+                max_children=_config_int(mission.config, "hermes_max_concurrent_children", 3),
+            )
     item.agent_task_id = None
     item.status = "running"
     item.attempt_count += 1
@@ -1931,6 +2522,8 @@ def _execute_agent_work_item_direct(
         "message": "Agent work item is running in a Temporal activity.",
         "runtime": str((mission.config or {}).get("runtime") or "claude_sdk"),
         "has_browser_tools": has_browser_tools,
+        "browser_context_handoff": browser_handoff,
+        "browser_child_handoffs": child_browser_handoffs,
         **browser_runtime,
     }
     session.add(item)
@@ -1948,7 +2541,9 @@ def _execute_agent_work_item_direct(
         last_progress_signature: tuple[str, str, str] | None = None
         last_assistant_message: str | None = None
 
-        def _emit_event(event_type: str, message: str, *, level: str = "info", payload: dict[str, Any] | None = None) -> None:
+        def _emit_event(
+            event_type: str, message: str, *, level: str = "info", payload: dict[str, Any] | None = None
+        ) -> None:
             try:
                 create_autonomous_agent_event(
                     project_id=item.project_id,
@@ -1989,6 +2584,8 @@ def _execute_agent_work_item_direct(
                     **progress,
                     "runtime": runtime_name,
                     "has_browser_tools": has_browser_tools,
+                    "browser_context_handoff": browser_handoff,
+                    "browser_child_handoffs": child_browser_handoffs,
                     **browser_runtime,
                 }
                 current.progress = {
@@ -2059,6 +2656,8 @@ def _execute_agent_work_item_direct(
                     "phase": "queued" if runtime_name == "hermes" else "running",
                     "message": "Hermes run started." if runtime_name == "hermes" else "Agent task started.",
                     "has_browser_tools": has_browser_tools,
+                    "browser_context_handoff": browser_handoff,
+                    "browser_child_handoffs": child_browser_handoffs,
                     **browser_runtime,
                 }
                 current.updated_at = _utcnow()
@@ -2088,7 +2687,13 @@ def _execute_agent_work_item_direct(
         async def _run_agent():
             runtime = get_agent_runtime(runtime_name)
             return await runtime.run(
-                _agent_prompt_for_work_item(mission, item, test_data_context),
+                _agent_prompt_for_work_item(
+                    mission,
+                    item,
+                    test_data_context,
+                    browser_handoff=browser_handoff,
+                    child_browser_handoffs=child_browser_handoffs,
+                ),
                 AgentRuntimeContext(
                     timeout_seconds=timeout_seconds,
                     allowed_tools=allowed_tools,
@@ -2116,6 +2721,8 @@ def _execute_agent_work_item_direct(
                         "mission_run_id": item.run_id,
                         "role": item.role,
                         "planner_key": item.planner_key,
+                        "browser_context_handoff": browser_handoff,
+                        "browser_child_handoffs": child_browser_handoffs,
                     },
                     env_vars=test_data_env_vars or None,
                     is_cancelled=_is_cancelled,
@@ -2134,7 +2741,14 @@ def _execute_agent_work_item_direct(
             item.completed_at = item.completed_at or now
             item.updated_at = now
             item.last_heartbeat_at = now
-            item.progress = {**(item.progress or {}), "phase": "cancelled", "message": item.error_message, **browser_runtime}
+            item.progress = {
+                **(item.progress or {}),
+                "phase": "cancelled",
+                "message": item.error_message,
+                "browser_context_handoff": browser_handoff,
+                "browser_child_handoffs": child_browser_handoffs,
+                **browser_runtime,
+            }
             session.add(item)
             session.commit()
             emit_work_item_status_event(item, item.error_message, event_type="lifecycle")
@@ -2144,7 +2758,13 @@ def _execute_agent_work_item_direct(
         item.completed_at = now
         item.updated_at = now
         item.last_heartbeat_at = now
-        item.progress = {"phase": "failed", "message": item.error_message, **browser_runtime}
+        item.progress = {
+            "phase": "failed",
+            "message": item.error_message,
+            "browser_context_handoff": browser_handoff,
+            "browser_child_handoffs": child_browser_handoffs,
+            **browser_runtime,
+        }
         session.add(item)
         session.commit()
         emit_work_item_status_event(item, item.error_message, event_type="error")
@@ -2156,6 +2776,16 @@ def _execute_agent_work_item_direct(
     item = session.get(AutonomousAgentWorkItem, item.id) or item
     current_mission = session.get(AutonomousMission, mission.id) or mission
     if item.status == "cancelled" or current_mission.status == "cancelled" or getattr(result, "cancelled", False):
+        browser_observation_summary = (
+            _record_browser_observations_for_work_item(
+                mission=mission,
+                item=item,
+                result=result,
+                browser_handoff=browser_handoff,
+            )
+            if has_browser_tools
+            else {"states": 0, "transitions": 0, "app_map_states": 0}
+        )
         item.status = "cancelled"
         item.error_message = item.error_message or "Agent work item cancelled"
         item.completed_at = item.completed_at or now
@@ -2171,13 +2801,31 @@ def _execute_agent_work_item_direct(
                 "text_blocks_received": getattr(result, "text_blocks_received", 0),
                 "duration_seconds": getattr(result, "duration_seconds", 0.0),
                 "cancelled": True,
+                "browser_observations": browser_observation_summary,
             },
         }
-        item.progress = {**(item.progress or {}), "phase": "cancelled", "message": item.error_message, **browser_runtime}
+        item.progress = {
+            **(item.progress or {}),
+            "phase": "cancelled",
+            "message": item.error_message,
+            "browser_context_handoff": browser_handoff,
+            "browser_child_handoffs": child_browser_handoffs,
+            **browser_runtime,
+        }
         session.add(item)
         session.commit()
         emit_work_item_status_event(item, item.error_message, event_type="lifecycle")
         return False
+    browser_observation_summary = (
+        _record_browser_observations_for_work_item(
+            mission=mission,
+            item=item,
+            result=result,
+            browser_handoff=browser_handoff,
+        )
+        if has_browser_tools
+        else {"states": 0, "transitions": 0, "app_map_states": 0}
+    )
     telemetry = {
         "runtime": str((mission.config or {}).get("runtime") or "claude_sdk"),
         "tool_calls": len(result.tool_calls),
@@ -2187,6 +2835,7 @@ def _execute_agent_work_item_direct(
         "timed_out": result.timed_out,
         "total_cost_usd": result.total_cost_usd,
         "stop_reason": result.stop_reason,
+        "browser_observations": browser_observation_summary,
     }
     if result.success:
         item.status = "completed"
@@ -2202,7 +2851,13 @@ def _execute_agent_work_item_direct(
                 "content": result.output or "",
             }
         ]
-        item.progress = {"phase": "completed", "message": "Agent completed this assignment.", **browser_runtime}
+        item.progress = {
+            "phase": "completed",
+            "message": "Agent completed this assignment.",
+            "browser_context_handoff": browser_handoff,
+            "browser_child_handoffs": child_browser_handoffs,
+            **browser_runtime,
+        }
         item.budget_used_usd = float(result.total_cost_usd or 0.0)
         item.updated_at = now
         item.last_heartbeat_at = now
@@ -2229,7 +2884,13 @@ def _execute_agent_work_item_direct(
     item.error_message = result.error or "Agent work item failed"
     item.completed_at = now
     item.result = {"output": result.output or "", "telemetry": telemetry, "error": item.error_message}
-    item.progress = {"phase": "failed", "message": item.error_message, **browser_runtime}
+    item.progress = {
+        "phase": "failed",
+        "message": item.error_message,
+        "browser_context_handoff": browser_handoff,
+        "browser_child_handoffs": child_browser_handoffs,
+        **browser_runtime,
+    }
     item.updated_at = now
     item.last_heartbeat_at = now
     item.budget_used_usd = float(result.total_cost_usd or 0.0)
@@ -2335,7 +2996,9 @@ def _sync_agent_work_items(session: Session, mission: AutonomousMission) -> int:
             finally:
                 await queue.disconnect()
 
-        tasks, progress_by_id = asyncio.run(_load_tasks([str(item.agent_task_id) for item in running_items if item.agent_task_id]))
+        tasks, progress_by_id = asyncio.run(
+            _load_tasks([str(item.agent_task_id) for item in running_items if item.agent_task_id])
+        )
         task_by_id = {task.id: task for task in tasks if task}
     except Exception as exc:
         logger.debug("Unable to sync autonomous agent work items: %s", exc)
@@ -2507,7 +3170,10 @@ def _create_contract_revision_work_item(
     ).all()
     for candidate in existing:
         progress = candidate.progress
-        if progress.get("revision_of_work_item_id") == item.id and progress.get("review_reason") == "structured_contract_validation":
+        if (
+            progress.get("revision_of_work_item_id") == item.id
+            and progress.get("review_reason") == "structured_contract_validation"
+        ):
             item.result = {
                 **item.result,
                 "review_decision": "needs_revision",
@@ -2579,6 +3245,9 @@ def _merge_structured_work_item_artifacts(
 
     requirement_id_by_fingerprint: dict[str, int] = {}
     for row in _dict_rows(contract.get("requirements")):
+        if not _row_has_required_evidence("requirement", row):
+            logger.info("Quarantined low-evidence autonomous requirement from work item %s: %s", item.id, row.get("title"))
+            continue
         requirement, created, fingerprint = _merge_requirement_artifact(session, mission, item, row)
         if not requirement or requirement.id is None:
             continue
@@ -2630,6 +3299,49 @@ def _dict_rows(value: Any) -> list[dict[str, Any]]:
     return [row for row in _as_list(value) if isinstance(row, dict)]
 
 
+def _autonomous_require_evidence() -> bool:
+    return os.environ.get("AUTONOMOUS_REQUIRE_EVIDENCE", "1").lower() not in {"0", "false", "no"}
+
+
+def _row_has_required_evidence(kind: str, row: dict[str, Any]) -> bool:
+    if not _autonomous_require_evidence():
+        return True
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    evidence_refs = _as_text_list(row.get("evidence_refs") or row.get("evidenceRefs"))
+    direct_fields = [
+        row.get("target_url"),
+        row.get("url"),
+        row.get("route"),
+        row.get("selector"),
+        row.get("source"),
+        row.get("snapshot_ref"),
+        row.get("screenshot"),
+        row.get("observed_failure"),
+        row.get("action"),
+    ]
+    nested_fields = []
+    if evidence:
+        nested_fields = [
+            evidence.get("url"),
+            evidence.get("target_url"),
+            evidence.get("route"),
+            evidence.get("selector"),
+            evidence.get("text"),
+            evidence.get("source"),
+            evidence.get("snapshot_ref"),
+            evidence.get("screenshot"),
+            evidence.get("artifact"),
+        ]
+    has_observation = any(str(value or "").strip() for value in [*direct_fields, *nested_fields]) or bool(evidence_refs)
+    if kind == "bug":
+        return has_observation and bool(str(row.get("observed_failure") or row.get("description") or "").strip())
+    if kind == "test_proposal":
+        return has_observation or bool(_as_list(row.get("requirement_ids") or row.get("requirements")))
+    if kind == "requirement":
+        return has_observation or _as_float(row.get("confidence"), 0.0) >= 0.9
+    return has_observation
+
+
 def _merge_app_map_update(session: Session, mission: AutonomousMission, row: dict[str, Any]) -> bool:
     url = str(row.get("url") or row.get("target_url") or "").strip()
     if not url:
@@ -2668,7 +3380,8 @@ def _merge_app_map_update(session: Session, mission: AutonomousMission, row: dic
         linked_urls=_as_text_list(row.get("linked_urls")) or None,
         elements=row.get("elements") if isinstance(row.get("elements"), dict) else None,
         forms=[form for form in _as_list(row.get("forms")) if isinstance(form, dict)] or None,
-        api_endpoints=[endpoint for endpoint in _as_list(row.get("api_endpoints")) if isinstance(endpoint, dict)] or None,
+        api_endpoints=[endpoint for endpoint in _as_list(row.get("api_endpoints")) if isinstance(endpoint, dict)]
+        or None,
         last_crawled=now,
     )
     session.add(app_map)
@@ -2688,11 +3401,15 @@ def _merge_requirement_artifact(
     criteria = _as_text_list(row.get("acceptance_criteria") or row.get("criteria"))
     fingerprint = _requirement_fingerprint({"title": title, "category": category, "acceptance_criteria": criteria})
     existing_by_key = session.exec(
-        select(Requirement).where(Requirement.project_id == mission.project_id, Requirement.canonical_key == fingerprint)
+        select(Requirement).where(
+            Requirement.project_id == mission.project_id, Requirement.canonical_key == fingerprint
+        )
     ).first()
-    candidates = [existing_by_key] if existing_by_key else session.exec(
-        select(Requirement).where(Requirement.project_id == mission.project_id)
-    ).all()
+    candidates = (
+        [existing_by_key]
+        if existing_by_key
+        else session.exec(select(Requirement).where(Requirement.project_id == mission.project_id)).all()
+    )
     for requirement in candidates:
         if not requirement:
             continue
@@ -2753,7 +3470,9 @@ def _merge_rtm_candidate(
     requirement_ids = _resolve_requirement_ids(session, mission.project_id, row)
     if not requirement_ids:
         return None
-    test_spec_name = str(row.get("test_spec_name") or row.get("spec_name") or row.get("suggested_file_path") or "").strip()
+    test_spec_name = str(
+        row.get("test_spec_name") or row.get("spec_name") or row.get("suggested_file_path") or ""
+    ).strip()
     if not test_spec_name:
         return None
     created_any = False
@@ -2790,7 +3509,9 @@ def _merge_rtm_candidate(
         if existing:
             existing.dedupe_key = existing.dedupe_key or dedupe_key
             existing.mapping_type = str(row.get("mapping_type") or existing.mapping_type or "suggested")
-            existing.test_spec_path = str(row.get("test_spec_path") or row.get("spec_path") or existing.test_spec_path or "") or None
+            existing.test_spec_path = (
+                str(row.get("test_spec_path") or row.get("spec_path") or existing.test_spec_path or "") or None
+            )
             existing.confidence = max(float(existing.confidence or 0), _as_float(row.get("confidence"), 0.7))
             existing.coverage_notes = str(row.get("coverage_notes") or existing.coverage_notes or "") or None
             existing.gap_notes = str(row.get("gap_notes") or existing.gap_notes or "") or None
@@ -2833,6 +3554,7 @@ def _merge_test_proposal_artifact(
     rationale = str(row.get("rationale") or row.get("description") or title).strip()
     if not title or not rationale:
         return None
+    quarantined = not _row_has_required_evidence("test_proposal", row)
     target_url = str(row.get("target_url") or row.get("url") or "").strip() or _default_target_url(mission)
     if row.get("route") and not row.get("target_url"):
         target_url = _url_for_route(_default_target_url(mission), str(row["route"]))
@@ -2845,8 +3567,12 @@ def _merge_test_proposal_artifact(
             "requirement_ids": requirement_ids,
             "route": row.get("route") or _route_from_url(target_url),
             "agent_rationale": rationale,
+            "evidence": row.get("evidence") if isinstance(row.get("evidence"), dict) else {},
         },
     )
+    if quarantined:
+        metadata["quarantined"] = True
+        metadata["quarantine_reason"] = "autonomous_output_missing_required_evidence"
     if requirement_ids:
         metadata["requirement_id"] = requirement_ids[0]
     return _create_test_proposal(
@@ -2860,6 +3586,7 @@ def _merge_test_proposal_artifact(
         target_url=target_url,
         risk_level=str(row.get("risk_level") or row.get("severity") or "medium"),
         source_metadata=metadata,
+        approval_status="rejected" if quarantined else "pending",
     )
 
 
@@ -2874,13 +3601,22 @@ def _merge_bug_or_finding_artifact(
     description = str(row.get("description") or row.get("observed_failure") or "").strip()
     if not title or not description:
         return None, False
-    kind = "bug" if row.get("observed_failure") or row.get("expected_behavior") else str(row.get("finding_type") or "coverage_gap")
-    fingerprint = _bug_fingerprint(row) if kind == "bug" else _stable_dedupe_hash(
-        "finding",
-        kind,
-        row.get("route") or row.get("target_url") or row.get("url"),
-        title,
-        description,
+    quarantined = not _row_has_required_evidence("bug", row)
+    kind = (
+        "bug"
+        if row.get("observed_failure") or row.get("expected_behavior")
+        else str(row.get("finding_type") or "coverage_gap")
+    )
+    fingerprint = (
+        _bug_fingerprint(row)
+        if kind == "bug"
+        else _stable_dedupe_hash(
+            "finding",
+            kind,
+            row.get("route") or row.get("target_url") or row.get("url"),
+            title,
+            description,
+        )
     )
     dedupe_key = _stable_dedupe_hash(mission.project_id or "default", kind, fingerprint)
     existing = session.exec(
@@ -2914,7 +3650,7 @@ def _merge_bug_or_finding_artifact(
         severity=_normalize_risk(str(row.get("severity") or row.get("risk_level") or "medium")),
         title=title,
         description=description,
-        status="awaiting_approval" if kind == "bug" else "open",
+        status="rejected" if quarantined else "awaiting_approval" if kind == "bug" else "open",
         confidence=_as_float(row.get("confidence"), 0.75),
         dedupe_key=dedupe_key,
         evidence_json=json.dumps(evidence),
@@ -3104,7 +3840,9 @@ def _create_coverage_gap_artifacts(
     return summary
 
 
-def _create_proposals_for_approved_findings(session: Session, mission: AutonomousMission, run: AutonomousMissionRun) -> int:
+def _create_proposals_for_approved_findings(
+    session: Session, mission: AutonomousMission, run: AutonomousMissionRun
+) -> int:
     findings = session.exec(
         select(AutonomousFinding)
         .where(
@@ -3229,11 +3967,29 @@ def _auto_materialize_low_risk_proposals(
             summary["skipped"] += 1
             continue
 
+        dry_run = _dry_run_validate_materialization(proposal, relative_path)
+        validation = dry_run["validation"]
+        proposal.validation_status = str(validation.get("status") or "failed")
+        proposal.validation_result = {
+            **validation,
+            "dry_run": True,
+            "dry_run_path": dry_run.get("dry_run_path"),
+        }
+        proposal.validation_artifacts = [
+            item for item in _as_list(validation.get("artifacts")) if isinstance(item, dict)
+        ]
+        proposal.validation_log_path = str(validation.get("log_path") or "") or None
+        proposal.validation_trace_path = str(validation.get("trace_path") or "") or None
+        proposal.validated_at = _utcnow()
+        proposal.updated_at = proposal.validated_at
+        if proposal.validation_status != "passed":
+            session.add(proposal)
+            summary["validation_failed"] += 1
+            _create_validation_failure_work_item(session, mission, run, proposal, proposal.validation_result)
+            continue
+
         target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as temp_file:
-            temp_file.write(proposal.generated_spec_content)
-            temp_path = Path(temp_file.name)
-        temp_path.replace(target)
+        Path(str(dry_run["absolute_path"])).replace(target)
 
         now = _utcnow()
         proposal.approval_status = "materialized"
@@ -3247,26 +4003,13 @@ def _auto_materialize_low_risk_proposals(
             "run_id": run.id,
             "risk_level": proposal.risk_level,
             "review_context": review_context,
+            "dry_run_validation": proposal.validation_result,
         }
         proposal.updated_at = now
         session.add(proposal)
         session.flush()
         summary["materialized"] += 1
-
-        validation = _validate_materialized_proposal(proposal)
-        proposal.validation_status = str(validation.get("status") or "failed")
-        proposal.validation_result = validation
-        proposal.validation_artifacts = [item for item in _as_list(validation.get("artifacts")) if isinstance(item, dict)]
-        proposal.validation_log_path = str(validation.get("log_path") or "") or None
-        proposal.validation_trace_path = str(validation.get("trace_path") or "") or None
-        proposal.validated_at = _utcnow()
-        proposal.updated_at = proposal.validated_at
-        session.add(proposal)
-        if proposal.validation_status == "passed":
-            summary["validated"] += 1
-        else:
-            summary["validation_failed"] += 1
-            _create_validation_failure_work_item(session, mission, run, proposal, validation)
+        summary["validated"] += 1
 
     session.commit()
     return summary
@@ -3301,6 +4044,30 @@ def _validate_materialize_path_for_policy(requested_path: str, test_type: str) -
     return normalized
 
 
+def _dry_run_validate_materialization(proposal: AutonomousTestProposal, final_relative_path: str) -> dict[str, Any]:
+    dry_dir = REPOSITORY_ROOT / "tests" / "generated" / ".autonomous-dry-run"
+    dry_dir.mkdir(parents=True, exist_ok=True)
+    dry_relative = f"tests/generated/.autonomous-dry-run/{proposal.id}-{Path(final_relative_path).name}"
+    dry_absolute = (REPOSITORY_ROOT / dry_relative).resolve()
+    dry_absolute.write_text(proposal.generated_spec_content, encoding="utf-8")
+    original_path = proposal.materialized_file_path
+    try:
+        proposal.materialized_file_path = dry_relative
+        validation = _validate_materialized_proposal(proposal)
+        if str(validation.get("status") or "failed") != "passed":
+            try:
+                dry_absolute.unlink()
+            except OSError:
+                pass
+        return {
+            "dry_run_path": dry_relative,
+            "absolute_path": str(dry_absolute),
+            "validation": validation,
+        }
+    finally:
+        proposal.materialized_file_path = original_path
+
+
 def _validate_materialized_proposal(proposal: AutonomousTestProposal) -> dict[str, Any]:
     relative_path = proposal.materialized_file_path
     if not relative_path:
@@ -3328,7 +4095,11 @@ def _validate_materialized_proposal(proposal: AutonomousTestProposal) -> dict[st
         elif web_package_json.exists():
             command = ["npm", "--prefix", "web", "exec", "playwright", "test", str(Path("..") / relative_path)]
         else:
-            return {"status": "not_run", "reason": "no Node package found for Playwright validation", "path": relative_path}
+            return {
+                "status": "not_run",
+                "reason": "no Node package found for Playwright validation",
+                "path": relative_path,
+            }
         command.extend(["--trace", "retain-on-failure", "--output", str(playwright_output_dir)])
     else:
         return {"status": "not_run", "reason": "no validator for file type", "path": relative_path}
@@ -3424,7 +4195,9 @@ def _finalize_validation_artifacts(
     metadata_path.write_text(json.dumps(metadata, default=str, indent=2), encoding="utf-8")
     artifacts = _collect_validation_artifacts(artifact_dir)
     log_path = _artifact_url_for_file(artifact_dir / "stdout.log")
-    trace = next((artifact for artifact in artifacts if artifact["path"].endswith(".zip") or "trace" in artifact["path"]), None)
+    trace = next(
+        (artifact for artifact in artifacts if artifact["path"].endswith(".zip") or "trace" in artifact["path"]), None
+    )
     result.update(
         {
             "artifacts": artifacts,
@@ -3608,7 +4381,8 @@ def autonomous_health_diagnostics(session: Session, project_id: str | None = Non
     unmapped_requirements = [
         requirement.id
         for requirement in requirements
-        if requirement.id is not None and not any(entry.mapping_type == "full" for entry in entries_by_requirement.get(requirement.id, []))
+        if requirement.id is not None
+        and not any(entry.mapping_type == "full" for entry in entries_by_requirement.get(requirement.id, []))
     ]
     diagnostics = {
         "project_id": project_id,
@@ -3627,7 +4401,11 @@ def autonomous_health_diagnostics(session: Session, project_id: str | None = Non
             "total": len(work_items),
             "stale_running": len(stale_work_items),
             "stale_work_item_ids": stale_work_items[:100],
-            "recovered": sum(1 for item in work_items if item.recovery_count or (item.progress or {}).get("recovered_from_work_item_id")),
+            "recovered": sum(
+                1
+                for item in work_items
+                if item.recovery_count or (item.progress or {}).get("recovered_from_work_item_id")
+            ),
         },
         "proposals": {
             "total": len(proposals),
@@ -3635,7 +4413,9 @@ def autonomous_health_diagnostics(session: Session, project_id: str | None = Non
             "auto_materialized": sum(1 for proposal in proposals if proposal.materialized_by == "autonomous_policy"),
             "validation_failed": sum(1 for proposal in proposals if proposal.validation_status == "failed"),
             "validation_blocked": sum(1 for proposal in proposals if proposal.validation_status == "blocked"),
-            "validation_not_run": sum(1 for proposal in proposals if proposal.validation_status in {"", "not_run", None}),
+            "validation_not_run": sum(
+                1 for proposal in proposals if proposal.validation_status in {"", "not_run", None}
+            ),
         },
     }
     diagnostics["status"] = _diagnostics_status(diagnostics)
@@ -3728,7 +4508,9 @@ def _diagnostics_status(diagnostics: dict[str, Any]) -> str:
 
 
 def _validation_artifact_count(session: Session, mission_id: str) -> int:
-    proposals = session.exec(select(AutonomousTestProposal).where(AutonomousTestProposal.mission_id == mission_id)).all()
+    proposals = session.exec(
+        select(AutonomousTestProposal).where(AutonomousTestProposal.mission_id == mission_id)
+    ).all()
     return sum(len(proposal.validation_artifacts) for proposal in proposals)
 
 
@@ -3852,6 +4634,7 @@ def _create_test_proposal(
     coverage_gap_id: int | None = None,
     approval_id: str | None = None,
     source_metadata: dict[str, Any] | None = None,
+    approval_status: str = "pending",
 ) -> AutonomousTestProposal | None:
     test_type = _infer_test_type(source_type, title, rationale or "", target_url)
     route = _route_from_url(target_url)
@@ -3892,7 +4675,7 @@ def _create_test_proposal(
         generated_spec_content=generated_spec_content,
         suggested_file_path=suggested_file_path,
         risk_level=_normalize_risk(risk_level),
-        approval_status="pending",
+        approval_status=approval_status,
         dedupe_key=dedupe_key,
         source_type=source_type,
         source_id=source_id,
@@ -3946,7 +4729,7 @@ test.describe({json.dumps(suite)}, () => {{
 
     await expect(page.locator('body')).toBeVisible();
     const bodyText = (await page.locator('body').innerText()).trim();
-    expect(bodyText.length, {json.dumps(rationale[:120] or 'page should render visible content')}).toBeGreaterThan(0);
+    expect(bodyText.length, {json.dumps(rationale[:120] or "page should render visible content")}).toBeGreaterThan(0);
   }});
 }});
 """

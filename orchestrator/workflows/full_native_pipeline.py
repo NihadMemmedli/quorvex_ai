@@ -70,6 +70,7 @@ from utils.progress_reporter import (
 from utils.spec_detector import SpecDetector, SpecType
 from utils.test_results_parser import categorize_error
 from utils.text_utils import truncate_middle
+from utils.token_budget import context_budget_for_stage, truncate_text_to_tokens
 from workflows.agentic_quality import (
     FailureTriageAgent,
     StabilityVerifier,
@@ -1535,7 +1536,7 @@ Target URL:
 
 Source spec ({spec_path}):
 ```markdown
-{truncate_middle(self._redact_sensitive_text(spec_content), head=8000, tail=8000)}
+{truncate_text_to_tokens(self._redact_sensitive_text(spec_content), context_budget_for_stage("generation_repair_spec", 1800))}
 ```
 
 Fixture context:
@@ -1545,17 +1546,17 @@ Fixture context:
 
 Planner plan:
 ```markdown
-{truncate_middle(self._redact_sensitive_text(plan_content), head=6000, tail=6000)}
+{truncate_text_to_tokens(self._redact_sensitive_text(plan_content), context_budget_for_stage("generation_repair_plan", 1400))}
 ```
 
 Planner draft script:
 ```typescript
-{truncate_middle(self._redact_sensitive_text(draft_content), head=6000, tail=6000)}
+{truncate_text_to_tokens(self._redact_sensitive_text(draft_content), context_budget_for_stage("generation_repair_draft", 1400))}
 ```
 
 Current generated file:
 ```typescript
-{truncate_middle(self._redact_sensitive_text(generated_code), head=12000, tail=12000)}
+{truncate_text_to_tokens(self._redact_sensitive_text(generated_code), context_budget_for_stage("generation_repair_code", 2600))}
 ```
 
 Requirements:
@@ -2017,8 +2018,8 @@ Requirements:
         return len(re.findall(r"\bexpect\s*\(|\bassert\.", content or ""))
 
     @staticmethod
-    def _is_assertion_removal_allowed(content_after: str) -> bool:
-        return bool(re.search(r"\btest\.fixme\s*\(", content_after or ""))
+    def _has_test_fixme(content: str) -> bool:
+        return bool(re.search(r"\btest\.fixme\s*\(", content or ""))
 
     @staticmethod
     def _guardrail_category(category: str | None) -> str:
@@ -2039,6 +2040,7 @@ Requirements:
         tool_calls: list[dict[str, Any]],
         error_category: str | None,
         failure_metadata: dict[str, Any] | None = None,
+        triage_allows_fixme: bool = False,
     ) -> dict[str, Any]:
         tools = [str(call.get("tool") or self._normalized_tool_name(call.get("name"))) for call in tool_calls]
         tool_set = set(tools)
@@ -2068,9 +2070,13 @@ Requirements:
             missing.append("browser_network_requests_or_browser_console_messages")
 
         assertion_removed = self._assertion_count(content_after) < self._assertion_count(content_before)
-        fixme_explicit = self._is_assertion_removal_allowed(content_after)
-        if assertion_removed and not fixme_explicit:
+        fixme_before = self._has_test_fixme(content_before)
+        fixme_explicit = self._has_test_fixme(content_after)
+        newly_introduced_fixme = fixme_explicit and not fixme_before
+        if assertion_removed and not (fixme_explicit and triage_allows_fixme):
             missing.append("assertion_preservation_or_explicit_test_fixme")
+        if changed and newly_introduced_fixme and not triage_allows_fixme:
+            missing.append("new_test_fixme_requires_non_healable_triage")
 
         added, removed = self._diff_counts(content_before, content_after)
         before_lines = max(len(content_before.splitlines()), 1)
@@ -2098,6 +2104,8 @@ Requirements:
             "used_failure_state_tool": bool({"browser_resume", "browser_snapshot"} & tool_set),
             "assertion_removed": assertion_removed,
             "test_fixme_explicit": fixme_explicit,
+            "newly_introduced_test_fixme": newly_introduced_fixme,
+            "triage_allows_fixme": triage_allows_fixme,
             "broad_rewrite": broad_rewrite,
         }
 
@@ -2496,6 +2504,11 @@ Requirements:
                         tool_calls=tool_calls,
                         error_category=current_error_category,
                         failure_metadata=failure_metadata,
+                        triage_allows_fixme=bool(
+                            (diagnosis or {}).get("allow_fixme")
+                            or (diagnosis or {}).get("fixme_allowed")
+                            or (diagnosis or {}).get("non_healable")
+                        ),
                     )
                     if fixed_code
                     else {

@@ -8,8 +8,10 @@ This workflow uses the Playwright Test Generator agent to:
 """
 
 import asyncio
+import json
 import logging
 import os
+import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -52,6 +54,7 @@ from orchestrator.services.handoff_manifest import (
 )
 from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
+from orchestrator.utils.token_budget import context_budget_for_stage, truncate_text_to_tokens
 from orchestrator.utils.text_utils import truncate_middle
 
 
@@ -93,6 +96,7 @@ class NativeGenerator:
         self.env_vars = dict(env_vars or {})
         self.cwd = Path(cwd) if cwd else None
         self.last_handoff_consumption: dict[str, Any] = {}
+        self.last_coverage_warnings: list[str] = []
         # Use absolute path to project's tests directory (not relative to cwd)
         # This fixes Docker issue where cwd changes to run directory
         self.tests_dir = BASE_DIR / "tests" / "generated"
@@ -219,6 +223,7 @@ class NativeGenerator:
         # Check if the agent created the file
         if output_path.exists():
             logger.info(f"Test generated: {output_path}")
+            self._record_generation_coverage(spec_content, output_path)
             if handoff_manifest_path:
                 record_artifact(
                     handoff_manifest_path,
@@ -238,6 +243,7 @@ class NativeGenerator:
         if fixed_code:
             logger.info(f"Saving generated code to: {output_path}")
             output_path.write_text(fixed_code)
+            self._record_generation_coverage(spec_content, output_path)
             if handoff_manifest_path:
                 record_artifact(
                     handoff_manifest_path,
@@ -396,15 +402,16 @@ Use this design guidance to reduce flaky output. Treat it as advisory context fr
 
         plan_section = ""
         if plan_content:
-            try:
-                plan_context_chars = int(os.environ.get("GENERATOR_PLAN_CONTEXT_CHARS", "8000"))
-            except ValueError:
-                logger.warning("Invalid GENERATOR_PLAN_CONTEXT_CHARS; using default 8000")
-                plan_context_chars = 8000
-            plan_context_chars = max(plan_context_chars, 0)
-            if plan_context_chars:
-                head = plan_context_chars // 2
-                tail = plan_context_chars - head
+            mode = os.environ.get("GENERATOR_PLAN_EVIDENCE_MODE", "summary").strip().lower()
+            if mode not in {"summary", "full"}:
+                mode = "summary"
+            plan_budget = context_budget_for_stage("generator_plan", 1600 if mode == "summary" else 2400)
+            rendered_plan = (
+                self._planner_evidence_summary(plan_content, token_budget=plan_budget)
+                if mode == "summary"
+                else truncate_text_to_tokens(plan_content, plan_budget)
+            )
+            if rendered_plan:
                 plan_section = f"""
 
 ## Verified Test Plan (selectors discovered on the live app by the planner)
@@ -412,22 +419,14 @@ The planner explored the live application and verified these steps/selectors.
 Prefer these selectors over guessing, but verify with browser_snapshot before
 relying on them - the page may have changed since planning.
 
-{truncate_middle(plan_content, head=head, tail=tail)}
+{rendered_plan}
 """
 
         draft_script_section = ""
         if planner_draft_script_content:
-            try:
-                draft_context_chars = int(
-                    os.environ.get("GENERATOR_DRAFT_SCRIPT_CONTEXT_CHARS", "10000")
-                )
-            except ValueError:
-                logger.warning("Invalid GENERATOR_DRAFT_SCRIPT_CONTEXT_CHARS; using default 10000")
-                draft_context_chars = 10000
-            draft_context_chars = max(draft_context_chars, 0)
-            if draft_context_chars:
-                head = draft_context_chars // 2
-                tail = draft_context_chars - head
+            draft_budget = context_budget_for_stage("generator_draft_script", 1800)
+            rendered_draft = truncate_text_to_tokens(planner_draft_script_content, draft_budget)
+            if rendered_draft:
                 draft_script_section = f"""
 
 ## Planner Draft Script
@@ -443,7 +442,7 @@ and durable async waits such as visible result text, success toasts, list-count
 changes, completed status, or `page.waitForResponse(...)` when appropriate.
 
 ```typescript
-{truncate_middle(planner_draft_script_content, head=head, tail=tail)}
+{rendered_draft}
 ```
 """
 
@@ -617,7 +616,8 @@ Do not write `process.env.TESTDATA_*` in generated code.
                 agent_type="NativeGenerator",
                 limit=8,
             )
-            context = builder.format_prompt_context(bundle, token_budget=1200)
+            token_budget = context_budget_for_stage("native_generator", 1200)
+            context = builder.format_prompt_context(bundle, token_budget=token_budget)
             if not context:
                 return ""
             bundle_dict = bundle.to_dict()
@@ -636,6 +636,7 @@ Do not write `process.env.TESTDATA_*` in generated code.
                     **({"run_id": run_id} if run_id else {}),
                     "empty_recall": not bool(ranking.get("selected_items")),
                     "memory_score_summary": ranking.get("score_summary", {}),
+                    "context_budget_tokens": token_budget,
                 },
             )
             return f"""
@@ -648,6 +649,80 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
         except Exception as exc:
             logger.debug("Generator memory context skipped: %s", exc)
             return ""
+
+    @staticmethod
+    def _planner_evidence_summary(plan_content: str, *, token_budget: int) -> str:
+        lines: list[str] = []
+        for raw in (plan_content or "").splitlines():
+            line = raw.strip()
+            lower = line.lower()
+            if not line:
+                continue
+            if re.match(r"^#{1,3}\s+", line) or line.startswith(("**Steps:**", "**Expected Result:**", "**Test Data:**")):
+                lines.append(line)
+            elif any(marker in lower for marker in ("selector", "getby", "observed url", "screenshot", "confidence", "source:", "await expect", "page.")):
+                lines.append(line)
+            elif re.match(r"^\d+\.\s+", line) and any(marker in lower for marker in ("click", "fill", "navigate", "verify", "expect", "visible", "select", "submit")):
+                lines.append(line)
+        summary = "\n".join(lines)
+        return truncate_text_to_tokens(summary or plan_content, token_budget)
+
+    def _record_generation_coverage(self, spec_content: str, output_path: Path) -> None:
+        try:
+            generated = output_path.read_text()
+        except OSError:
+            return
+        warnings = self._coverage_warnings(spec_content, generated)
+        self.last_coverage_warnings = warnings
+        if not warnings:
+            return
+        logger.warning("Generator spec coverage warnings for %s: %s", output_path, "; ".join(warnings[:5]))
+        artifact = output_path.with_suffix(".coverage.json")
+        try:
+            artifact.write_text(json.dumps({"warnings": warnings}, indent=2))
+        except Exception:
+            logger.debug("Could not write generator coverage artifact", exc_info=True)
+        if os.environ.get("GENERATOR_ENFORCE_SPEC_COVERAGE", "0") == "1":
+            raise RuntimeError(f"Generated test appears to miss spec coverage: {'; '.join(warnings[:5])}")
+
+    @staticmethod
+    def _coverage_warnings(spec_content: str, generated_code: str) -> list[str]:
+        def keywords(text: str) -> set[str]:
+            words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", text.lower())
+            stop = {
+                "step",
+                "steps",
+                "expected",
+                "result",
+                "should",
+                "with",
+                "from",
+                "into",
+                "page",
+                "user",
+                "test",
+                "case",
+                "visible",
+                "verify",
+            }
+            return {word for word in words if word not in stop}
+
+        warnings: list[str] = []
+        generated_lower = generated_code.lower()
+        step_lines = [
+            line.strip()
+            for line in (spec_content or "").splitlines()
+            if re.match(r"^\s*\d+\.\s+\S", line)
+        ]
+        expected_blocks = re.findall(r"\*\*Expected Result:\*\*\s*(.+)", spec_content or "", flags=re.IGNORECASE)
+        for label, values in (("step", step_lines), ("expected result", expected_blocks)):
+            for idx, text in enumerate(values, start=1):
+                keys = sorted(keywords(text), key=len, reverse=True)[:4]
+                if keys and not any(key in generated_lower for key in keys):
+                    warnings.append(f"Missing apparent {label} coverage #{idx}: {text[:180]}")
+        if "expect(" not in generated_code and "test.fixme" not in generated_code:
+            warnings.append("Generated code has no Playwright expect() assertion or explicit test.fixme().")
+        return warnings[:25]
 
     async def _query_generator_agent(self, prompt: str) -> str:
         """

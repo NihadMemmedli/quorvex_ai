@@ -29,6 +29,11 @@ from orchestrator.services.ai_runtime_config import (
     apply_runtime_env_aliases,
 )
 from orchestrator.utils.browser_dialog_policy import append_browser_dialog_recovery_policy
+from orchestrator.utils.token_budget import (
+    build_agent_token_telemetry,
+    estimate_tokens,
+    extract_provider_usage,
+)
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -304,6 +309,7 @@ class AgentResult:
     session_id: str | None = None
     total_cost_usd: float | None = None
     hook_events_received: int = 0
+    token_telemetry: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentRunner:
@@ -509,8 +515,28 @@ class AgentRunner:
             "prompt": {
                 "provided": prompt is not None,
                 "hash": prompt_hash,
+                "chars": len(prompt or ""),
+                "estimated_tokens": estimate_tokens(prompt),
             },
         }
+
+    def _build_token_telemetry(
+        self,
+        *,
+        prompt: str | None,
+        output: str | None,
+        provider_usage: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return build_agent_token_telemetry(
+            prompt=prompt,
+            output=output,
+            memory_context=self._last_memory_context,
+            stage=self.memory_stage,
+            agent_type=self.memory_agent_type,
+            model=self.model,
+            model_tier=self.model_tier,
+            provider_usage=provider_usage,
+        )
 
     def _requested_mcp_tools(self) -> list[str]:
         requested: list[str] = []
@@ -554,6 +580,7 @@ class AgentRunner:
         session_id: str | None = None,
         total_cost_usd: float | None = None,
         hook_events_received: int = 0,
+        token_telemetry: dict[str, Any] | None = None,
     ) -> AgentResult:
         return AgentResult(
             success=False,
@@ -570,6 +597,7 @@ class AgentRunner:
             session_id=session_id,
             total_cost_usd=total_cost_usd,
             hook_events_received=hook_events_received,
+            token_telemetry=token_telemetry or {},
         )
 
     def _should_attach_mcp_config(self, cwd: Path | None = None) -> bool:
@@ -734,6 +762,7 @@ class AgentRunner:
             self.model = selection.model
         self._validate_mcp_config_for_allowed_tools(self.cwd)
         original_prompt = prompt
+        final_prompt_for_telemetry: str | None = None
         self._last_memory_injected = False
         self._last_memory_context = ""
         prompt = append_browser_dialog_recovery_policy(
@@ -749,6 +778,7 @@ class AgentRunner:
             prompt = attach_delivered_prompt_metadata(prompt, memory_injected=self._last_memory_injected)
         except Exception as exc:
             logger.debug("Delivered prompt metadata skipped: %s", exc)
+        final_prompt_for_telemetry = prompt
         if self.trace_agent_run_id:
             try:
                 from orchestrator.services.agent_trace import ensure_trace_snapshot
@@ -778,6 +808,11 @@ class AgentRunner:
         ):
             logger.info(f"Using agent queue for execution (timeout={timeout}s)")
             queued_result = await self._run_via_queue(prompt, timeout)
+            if not queued_result.token_telemetry:
+                queued_result.token_telemetry = self._build_token_telemetry(
+                    prompt=final_prompt_for_telemetry,
+                    output=queued_result.output,
+                )
             self._append_cost_log(queued_result)
             self._capture_agent_memory(original_prompt, queued_result)
             return queued_result
@@ -798,6 +833,7 @@ class AgentRunner:
         stop_reason: str | None = None
         session_id: str | None = None
         total_cost_usd: float | None = None
+        provider_usage: dict[str, Any] = {}
         current_tool_start: datetime | None = None
         current_tool_name: str | None = None
         current_tool_input: dict[str, Any] | None = None
@@ -812,7 +848,7 @@ class AgentRunner:
             async def _run_query():
                 nonlocal messages_received, text_blocks_received, result_parts
                 nonlocal tool_calls, current_tool_start, current_tool_name, current_tool_input
-                nonlocal hook_events_received, api_error_status, stop_reason, session_id, total_cost_usd
+                nonlocal hook_events_received, api_error_status, stop_reason, session_id, total_cost_usd, provider_usage
 
                 def _field(item: Any, name: str, default: Any = None) -> Any:
                     if isinstance(item, dict):
@@ -909,9 +945,21 @@ class AgentRunner:
                     current_tool_start = None
                     current_tool_input = None
 
+                options_kwargs = self._claude_options_kwargs()
+
+                async def _stream_user_prompt():
+                    yield {
+                        "type": "user",
+                        "message": {"role": "user", "content": prompt},
+                        "parent_tool_use_id": None,
+                        "session_id": "default",
+                    }
+
+                sdk_prompt = _stream_user_prompt() if options_kwargs.get("can_use_tool") else prompt
+
                 async for message in query(
-                    prompt=prompt,
-                    options=ClaudeAgentOptions(**self._claude_options_kwargs()),
+                    prompt=sdk_prompt,
+                    options=ClaudeAgentOptions(**options_kwargs),
                 ):
                     if await self._check_cancelled():
                         raise asyncio.CancelledError("Agent run cancelled")
@@ -1012,6 +1060,9 @@ class AgentRunner:
                     message_total_cost_usd = getattr(message, "total_cost_usd", None)
                     if message_total_cost_usd is not None:
                         total_cost_usd = message_total_cost_usd
+                    message_usage = extract_provider_usage(message)
+                    if message_usage:
+                        provider_usage.update(message_usage)
 
                     # Periodic progress logging
                     if messages_received > 0 and messages_received % 25 == 0:
@@ -1076,6 +1127,11 @@ class AgentRunner:
             # Calculate duration
             duration = (datetime.now() - start_time).total_seconds()
             output = "\n".join(result_parts)
+            token_telemetry = self._build_token_telemetry(
+                prompt=final_prompt_for_telemetry,
+                output=output,
+                provider_usage=provider_usage,
+            )
 
             # Save debug output if session_dir provided
             if self.session_dir:
@@ -1098,6 +1154,7 @@ class AgentRunner:
                 session_id=session_id,
                 total_cost_usd=total_cost_usd,
                 hook_events_received=hook_events_received,
+                token_telemetry=token_telemetry,
             )
 
         except asyncio.TimeoutError:
@@ -1120,6 +1177,11 @@ class AgentRunner:
                 session_id=session_id,
                 total_cost_usd=total_cost_usd,
                 hook_events_received=hook_events_received,
+                token_telemetry=self._build_token_telemetry(
+                    prompt=final_prompt_for_telemetry,
+                    output="\n".join(result_parts),
+                    provider_usage=provider_usage,
+                ),
             )
 
         except asyncio.CancelledError:
@@ -1135,6 +1197,11 @@ class AgentRunner:
                 session_id=session_id,
                 total_cost_usd=total_cost_usd,
                 hook_events_received=hook_events_received,
+                token_telemetry=self._build_token_telemetry(
+                    prompt=final_prompt_for_telemetry,
+                    output="\n".join(result_parts),
+                    provider_usage=provider_usage,
+                ),
             )
 
         except Exception as e:
@@ -1168,6 +1235,11 @@ class AgentRunner:
                     session_id=session_id,
                     total_cost_usd=total_cost_usd,
                     hook_events_received=hook_events_received,
+                    token_telemetry=self._build_token_telemetry(
+                        prompt=final_prompt_for_telemetry,
+                        output=output,
+                        provider_usage=provider_usage,
+                    ),
                 )
             else:
                 # Actual error
@@ -1187,6 +1259,11 @@ class AgentRunner:
                     session_id=session_id,
                     total_cost_usd=total_cost_usd,
                     hook_events_received=hook_events_received,
+                    token_telemetry=self._build_token_telemetry(
+                        prompt=final_prompt_for_telemetry,
+                        output="\n".join(result_parts),
+                        provider_usage=provider_usage,
+                    ),
                 )
 
         finally:
@@ -1223,6 +1300,7 @@ class AgentRunner:
                 "duration_seconds": result.duration_seconds,
                 "timed_out": result.timed_out,
                 "ts": datetime.now(timezone.utc).isoformat(),
+                **(result.token_telemetry or {}),
             }
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(payload, sort_keys=True) + "\n")
@@ -1235,87 +1313,30 @@ class AgentRunner:
     def _augment_prompt_with_agent_memory(self, prompt: str) -> str:
         self._last_memory_injected = False
         self._last_memory_context = ""
-        if not self.inject_memory or os.environ.get("MEMORY_ENABLED", "true").lower() != "true":
-            return prompt
-        project_id = self._agent_memory_project_id()
-        if not project_id:
-            return prompt
         try:
-            from orchestrator.memory.agent_memory import get_agent_memory_service
-            from orchestrator.memory.context_builder import MemoryContextBuilder
-            from orchestrator.memory.telemetry import record_memory_injection
+            from orchestrator.memory.prompt_augmentation import augment_prompt_with_agent_memory
 
-            builder = MemoryContextBuilder(service=get_agent_memory_service())
-            bundle = builder.build_bundle(
-                query=prompt[:2000],
-                project_id=project_id,
+            augmented = augment_prompt_with_agent_memory(
+                prompt,
+                inject_memory=self.inject_memory,
+                project_id=self._agent_memory_project_id(),
                 agent_type=self.memory_agent_type,
-                limit=8,
-            )
-            context = builder.format_prompt_context(bundle, token_budget=1200)
-            if not context:
-                return prompt
-            self._last_memory_context = context
-            bundle_dict = bundle.to_dict()
-            unified = bundle_dict.get("unified") or {}
-            ranking = unified.get("ranking") or {}
-            prompt_hash = _sha256_text(prompt)
-            span_id = None
-            if self.trace_agent_run_id:
-                try:
-                    from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span
-
-                    snapshot = ensure_trace_snapshot(
-                        run_id=self.trace_agent_run_id,
-                        prompt=prompt,
-                        memory_context=context,
-                        runtime="claude_sdk",
-                        model=self.model,
-                        model_tier=self.model_tier,
-                        allowed_tools=self.allowed_tools,
-                    )
-                    if snapshot:
-                        self.trace_id = snapshot.id
-                    span = record_trace_span(
-                        run_id=self.trace_agent_run_id,
-                        trace_id=self.trace_id,
-                        span_type="memory_injection",
-                        name="Memory injection",
-                        message="Agent memory context injected into prompt.",
-                        payload={
-                            "prompt_hash": prompt_hash,
-                            "selected_items": ranking.get("selected_items", []),
-                            "score_summary": ranking.get("score_summary", {}),
-                            "context_characters": len(context),
-                        },
-                    )
-                    span_id = span.id if span else None
-                except Exception as exc:
-                    logger.debug("Agent trace memory span skipped: %s", exc)
-            record_memory_injection(
-                project_id=project_id,
-                actor_type="agent",
                 stage=self.memory_stage,
-                query=prompt[:1000],
-                bundle=bundle_dict,
-                context_text=context,
                 source_type=self.memory_source_type,
                 source_id=self.memory_source_id or self.owner_id,
-                extra_data={
-                    "agent_type": self.memory_agent_type,
-                    "owner_type": self.owner_type,
-                    "owner_id": self.owner_id,
-                    "agent_run_id": self.trace_agent_run_id,
-                    "trace_id": self.trace_id,
-                    "span_id": span_id,
-                    "prompt_hash": prompt_hash,
-                    **({"run_id": self.memory_source_id} if self.memory_source_id else {}),
-                    "empty_recall": not bool(ranking.get("selected_items")),
-                    "memory_score_summary": ranking.get("score_summary", {}),
-                },
+                owner_type=self.owner_type,
+                owner_id=self.owner_id,
+                trace_agent_run_id=self.trace_agent_run_id,
+                trace_id=self.trace_id,
+                runtime="claude_sdk",
+                model=self.model,
+                model_tier=self.model_tier,
+                allowed_tools=self.allowed_tools,
             )
-            self._last_memory_injected = True
-            return f"{context}\n\n---\n\n{prompt}"
+            self._last_memory_context = augmented.context_text
+            self._last_memory_injected = augmented.injected
+            self.trace_id = augmented.trace_id or self.trace_id
+            return augmented.prompt
         except Exception as exc:
             logger.debug("Agent memory retrieval skipped: %s", exc)
             return prompt
@@ -1675,6 +1696,32 @@ class AgentRunner:
                 )
             except (TypeError, ValueError):
                 total_cost_usd = None
+            token_telemetry = {
+                key: telemetry[key]
+                for key in (
+                    "stage",
+                    "agent_type",
+                    "model",
+                    "model_tier",
+                    "prompt_hash",
+                    "prompt_chars",
+                    "estimated_input_tokens",
+                    "output_chars",
+                    "estimated_output_tokens",
+                    "memory_chars",
+                    "estimated_memory_tokens",
+                    "input_tokens",
+                    "output_tokens",
+                    "cached_input_tokens",
+                    "provider_input_tokens",
+                    "provider_output_tokens",
+                    "provider_cached_input_tokens",
+                    "provider_cache_creation_input_tokens",
+                )
+                if key in telemetry
+            }
+            if not token_telemetry:
+                token_telemetry = self._build_token_telemetry(prompt=prompt, output=output)
 
             # Save debug output if session_dir provided
             if self.session_dir:
@@ -1706,6 +1753,7 @@ class AgentRunner:
                     ),
                     total_cost_usd=total_cost_usd,
                     hook_events_received=hook_events_received,
+                    token_telemetry=token_telemetry,
                 )
 
             if is_short:
@@ -1738,6 +1786,7 @@ class AgentRunner:
                 ),
                 total_cost_usd=total_cost_usd,
                 hook_events_received=hook_events_received,
+                token_telemetry=token_telemetry,
             )
 
         except asyncio.TimeoutError:

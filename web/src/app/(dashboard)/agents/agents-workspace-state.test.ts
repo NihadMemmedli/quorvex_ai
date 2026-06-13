@@ -22,6 +22,12 @@ const runs: AgentHistoryRunLike[] = [
         config: { agent_name: 'API Scout', url: 'https://api.example.com' },
     },
     {
+        id: 'run-partial',
+        agent_type: 'exploratory',
+        status: 'completed_partial',
+        config: { url: 'https://app.example.com/inventory' },
+    },
+    {
         id: 'run-failed',
         agent_type: 'writer',
         status: 'failed',
@@ -31,7 +37,7 @@ const runs: AgentHistoryRunLike[] = [
 
 describe('agents workspace query state', () => {
     it('initializes from supported URL params and ignores invalid enum values', () => {
-        const state = parseAgentWorkspaceQuery(new URLSearchParams('view=reports&runId=abc&agent=custom&definitionId=def-1&create=1&returnTo=%2Fworkflow&resultTab=findings&traceTab=tools&status=active&type=custom&q=checkout&reportQ=postal&reportStatus=needs_action&reportSeverity=high&reportType=finding'));
+        const state = parseAgentWorkspaceQuery(new URLSearchParams('view=reports&runId=abc&agent=custom&definitionId=def-1&create=1&returnTo=%2Fworkflow&resultTab=findings&traceTab=tools&status=active&type=custom&q=checkout&reportQ=postal&reportStatus=needs_action&reportSeverity=high&reportType=finding&specItemId=T-001&specItemType=test_idea'));
 
         expect(state).toEqual({
             view: 'reports',
@@ -49,9 +55,11 @@ describe('agents workspace query state', () => {
             reportStatus: 'needs_action',
             reportSeverity: 'high',
             reportType: 'finding',
+            specItemId: 'T-001',
+            specItemType: 'test_idea',
         });
 
-        const fallback = parseAgentWorkspaceQuery(new URLSearchParams('view=bad&agent=bad&resultTab=bad&traceTab=bad&status=bad&type=bad&reportStatus=bad&reportType=bad'));
+        const fallback = parseAgentWorkspaceQuery(new URLSearchParams('view=bad&agent=bad&resultTab=bad&traceTab=bad&status=bad&type=bad&reportStatus=bad&reportType=bad&specItemType=bad'));
         expect(fallback.view).toBe('run');
         expect(fallback.agent).toBe('exploratory');
         expect(fallback.resultTab).toBe('overview');
@@ -60,10 +68,11 @@ describe('agents workspace query state', () => {
         expect(fallback.type).toBe('all');
         expect(fallback.reportStatus).toBe('all');
         expect(fallback.reportType).toBe('all');
+        expect(fallback.specItemType).toBe('');
     });
 
     it('updates and clears URL params when values return to defaults', () => {
-        const initial = new URLSearchParams('runId=old&agent=custom&q=api&create=1&view=library');
+        const initial = new URLSearchParams('runId=old&agent=custom&q=api&create=1&view=library&specItemId=F-001&specItemType=finding');
         const updated = applyAgentWorkspaceQueryPatch(initial, {
             runId: 'new',
             agent: 'exploratory',
@@ -74,6 +83,8 @@ describe('agents workspace query state', () => {
             reportStatus: 'imported',
             reportType: 'requirement',
             q: '',
+            specItemId: '',
+            specItemType: '',
         });
 
         expect(updated.get('runId')).toBe('new');
@@ -85,6 +96,8 @@ describe('agents workspace query state', () => {
         expect(updated.has('create')).toBe(false);
         expect(updated.has('agent')).toBe(false);
         expect(updated.has('q')).toBe(false);
+        expect(updated.has('specItemId')).toBe(false);
+        expect(updated.has('specItemType')).toBe(false);
     });
 });
 
@@ -92,14 +105,15 @@ describe('agents history filtering', () => {
     it('filters by search text, status, and agent type', () => {
         expect(filterAgentHistoryRuns(runs, { q: 'checkout', status: 'all', type: 'all' })).toHaveLength(1);
         expect(filterAgentHistoryRuns(runs, { q: '', status: 'active', type: 'all' }).map(run => run.id)).toEqual(['run-active']);
+        expect(filterAgentHistoryRuns(runs, { q: '', status: 'completed', type: 'all' }).map(run => run.id)).toEqual(['run-custom', 'run-partial']);
         expect(filterAgentHistoryRuns(runs, { q: 'api', status: 'completed', type: 'custom' }).map(run => run.id)).toEqual(['run-custom']);
     });
 
     it('returns counted filters for status and type controls', () => {
         const counts = getAgentHistoryCounts(runs);
 
-        expect(counts.status).toMatchObject({ all: 3, active: 1, completed: 1, failed: 1 });
-        expect(counts.type).toMatchObject({ all: 3, exploratory: 1, custom: 1, writer: 1 });
+        expect(counts.status).toMatchObject({ all: 4, active: 1, completed: 2, failed: 1 });
+        expect(counts.type).toMatchObject({ all: 4, exploratory: 2, custom: 1, writer: 1 });
     });
 });
 

@@ -187,7 +187,8 @@ async def test_generator_records_handoff_consumption_and_generated_hash(monkeypa
 
 def test_generator_prompt_truncates_long_verified_plan(monkeypatch):
     monkeypatch.setenv("MEMORY_ENABLED", "false")
-    monkeypatch.setenv("GENERATOR_PLAN_CONTEXT_CHARS", "60")
+    monkeypatch.setenv("GENERATOR_PLAN_EVIDENCE_MODE", "full")
+    monkeypatch.setenv("AGENT_CONTEXT_BUDGET_GENERATOR_PLAN", "20")
     generator = object.__new__(NativeGenerator)
     generator._extract_credential_placeholders = lambda _content: {}
 
@@ -203,6 +204,16 @@ def test_generator_prompt_truncates_long_verified_plan(monkeypatch):
     assert "PLAN-HEAD" in prompt
     assert "PLAN-TAIL" in prompt
     assert "[truncated" in prompt
+
+
+def test_generator_coverage_warnings_detect_missing_steps():
+    warnings = NativeGenerator._coverage_warnings(
+        "### TC-001: Save\n**Steps:**\n1. Click the purple Save button\n**Expected Result:** Success toast appears",
+        "import { test, expect } from '@playwright/test';\ntest('x', async ({ page }) => { await expect(page.locator('body')).toBeVisible(); });",
+    )
+
+    assert any("purple Save" in warning for warning in warnings)
+    assert any("Success toast" in warning for warning in warnings)
 
 
 def test_generator_prompt_omits_verified_plan_section_without_plan(monkeypatch):

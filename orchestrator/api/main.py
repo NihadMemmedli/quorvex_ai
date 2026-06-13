@@ -797,6 +797,9 @@ def _is_terminal_run_status(status: str | None) -> bool:
     }
 
 
+ACTIVE_RUN_STATUSES = {"queued", "pending", "running", "in_progress"}
+
+
 def _format_browser_pool_status(status: dict[str, Any], run_id: str) -> tuple[str, str | None]:
     lines = [
         f"max_browsers={status.get('max_browsers')} running={status.get('running')} queued={status.get('queued')} available={status.get('available')}",
@@ -1826,28 +1829,35 @@ async def get_agent_queue_status():
             await queue.connect()
             metrics = await queue.get_metrics()
             health = await queue.get_worker_health()
-            running_tasks = await queue.get_running_task_summaries()
+            running_task_summaries = await queue.get_running_task_summaries()
+            live_running_tasks = [
+                task for task in running_task_summaries if task.get("live")
+            ]
             pool = BROWSER_POOL or await get_browser_pool()
             browser_pool_status = await pool.get_status()
-            linked_tasks = [task for task in running_tasks if task.get("owner_type")]
-            background_tasks = [task for task in running_tasks if not task.get("owner_type")]
-            orphaned_tasks = [task for task in running_tasks if task.get("orphaned")]
+            linked_tasks = [task for task in live_running_tasks if task.get("owner_type")]
+            background_tasks = [task for task in live_running_tasks if not task.get("owner_type")]
+            orphaned_tasks = [
+                task for task in running_task_summaries if task.get("orphaned")
+            ]
             worker_process_count = int(health.get("worker_count") or 0)
             alive_running_tasks = int(health.get("alive_tasks") or 0)
-            running_count = int(metrics.get("running", 0) or 0)
+            raw_running_count = int(metrics.get("running", 0) or 0)
+            running_count = len(live_running_tasks)
             workers_busy = min(worker_process_count, running_count)
             workers_idle = max(0, worker_process_count - workers_busy)
             if worker_process_count > 0:
                 capacity_state = "workers_saturated" if workers_idle == 0 and running_count > 0 else "workers_available"
             elif running_count > 0 and alive_running_tasks > 0:
                 capacity_state = "running_tasks_alive"
-            elif running_count > 0:
+            elif raw_running_count > 0:
                 capacity_state = "running_tasks_stale"
             else:
                 capacity_state = "no_workers"
             return {
                 "mode": "redis",
-                "active": metrics.get("running", 0),
+                "active": running_count,
+                "raw_running": raw_running_count,
                 "queued": metrics.get("queue_length", 0),
                 "workers_alive": metrics.get("workers_alive", 0),
                 "worker_processes_alive": worker_process_count,
@@ -1859,7 +1869,7 @@ async def get_agent_queue_status():
                 "oldest_queued_age_seconds": metrics.get("oldest_queued_age_seconds"),
                 "by_status": metrics.get("by_status", {}),
                 "worker_health": health,
-                "running_tasks": running_tasks,
+                "running_tasks": live_running_tasks,
                 "linked_tasks": len(linked_tasks),
                 "background_tasks": len(background_tasks),
                 "orphaned_tasks": len(orphaned_tasks),
@@ -4146,6 +4156,7 @@ async def get_run(
         payload = {
             "id": id,
             "status": run_db.status,
+            "effective_status": run_db.status or "unknown",
             "spec_name": run_db.spec_name,
             "test_name": run_db.test_name,
             "agentic_summary": run_db.agentic_summary,
@@ -4181,6 +4192,7 @@ async def get_run(
 
     data = {
         "id": id,
+        "status": run_db.status,
         "spec_name": run_db.spec_name,
         "test_name": run_db.test_name,
         "agentic_summary": run_db.agentic_summary,
@@ -4233,16 +4245,25 @@ async def get_run(
     if failure_evidence_file.exists():
         data["failure_evidence"] = json.loads(failure_evidence_file.read_text())
 
-    # Compute effective status considering validation result
-    effective_status = "unknown"
-    if data.get("validation", {}).get("status") == "success":
-        effective_status = "passed"
-    elif data.get("validation", {}).get("status") == "failed":
-        effective_status = "failed"
-    elif data.get("run", {}).get("finalState"):
-        effective_status = data["run"]["finalState"]
-    elif run_db and run_db.status:
-        effective_status = run_db.status
+    # Active DB state wins over stale/intermediate artifacts. validation.json may be
+    # written during healing before the whole run lifecycle reaches a final state.
+    run_status = str(run_db.status or "")
+    validation_status = data.get("validation", {}).get("status")
+    run_final_state = data.get("run", {}).get("finalState")
+    run_is_active = run_status.lower() in ACTIVE_RUN_STATUSES
+    run_is_finalized = _is_terminal_run_status(run_status) or bool(run_db.completed_at)
+    effective_status = run_status or "unknown"
+    if run_is_active:
+        effective_status = run_status
+    elif run_is_finalized:
+        if validation_status == "success":
+            effective_status = "passed"
+        elif validation_status == "failed":
+            effective_status = "failed"
+        elif run_final_state:
+            effective_status = run_final_state
+    elif run_final_state:
+        effective_status = run_final_state
     data["effective_status"] = effective_status
     browser_metadata = _augment_active_browser_metadata(browser_metadata, effective_status)
     data.update(
@@ -7260,6 +7281,7 @@ class ExploratoryRunRequest(BaseModel):
     instructions: str = ""
     auth: dict[str, Any] | None = None  # {"type": "credentials|session|none", ...}
     test_data: dict[str, Any] | None = None
+    test_data_refs: list[str] | None = None
     focus_areas: list[str] | None = None
     excluded_patterns: list[str] | None = None
     project_id: str | None = None  # Project to associate generated specs with
@@ -7267,6 +7289,8 @@ class ExploratoryRunRequest(BaseModel):
     model_tier: str | None = "tool_deep"
     browser_auth_session_id: str | None = None
     use_project_default_browser_auth: bool = False
+    advanced_tools: bool = False
+    record_video: bool = False
 
 
 class SpecSynthesisRequest(BaseModel):
@@ -7298,6 +7322,15 @@ class GenerateReportItemSpecRequest(BaseModel):
 class ImportReportRequirementsRequest(BaseModel):
     item_ids: list[str] | None = None
     import_all: bool = False
+
+
+class UpdateAgentReportItemRequest(BaseModel):
+    patch: dict[str, Any]
+
+
+class UpdateAgentReportOverviewRequest(BaseModel):
+    summary: str | None = None
+    scope: str | None = None
 
 
 class GenerateFlowTestRequest(BaseModel):
@@ -7339,7 +7372,7 @@ def _exploratory_result_is_zero_evidence_failure(result: Any) -> bool:
     except (TypeError, ValueError):
         total_flows = 0
     return bool(
-        result.get("failure_reason") == "zero_evidence_parse_fallback"
+        result.get("failure_reason") in {"zero_evidence_parse_fallback", "zero_evidence"}
         or (
             result.get("parsing_failed")
             and not action_trace
@@ -7348,6 +7381,91 @@ def _exploratory_result_is_zero_evidence_failure(result: Any) -> bool:
             and total_flows == 0
         )
     )
+
+
+def _exploratory_result_is_terminal_failure(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if result.get("failure_reason") == "runtime_auth_failed":
+        return True
+    return _exploratory_result_is_zero_evidence_failure(result)
+
+
+def _exploratory_result_has_usable_evidence(result: Any) -> bool:
+    if not isinstance(result, dict):
+        return False
+    action_trace = result.get("action_trace") if isinstance(result.get("action_trace"), list) else []
+    flow_summaries = (
+        result.get("discovered_flow_summaries")
+        if isinstance(result.get("discovered_flow_summaries"), list)
+        else []
+    )
+    pages = result.get("pages_visited") if isinstance(result.get("pages_visited"), list) else []
+    screenshots = result.get("screenshots") if isinstance(result.get("screenshots"), list) else []
+    diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    event_count = _coerce_progress_int(diagnostics.get("evidence_event_count"), 0)
+    successful_browser_actions = _coerce_progress_int(diagnostics.get("successful_browser_tool_calls"), 0)
+    return bool(action_trace or flow_summaries or pages or screenshots or event_count > 0 or successful_browser_actions > 0)
+
+
+def _merge_agent_failure_into_result(result: Any, error: Exception | str, *, failure_reason: str) -> dict[str, Any]:
+    merged = dict(result) if isinstance(result, dict) else {}
+    error_text = str(error)
+    diagnostics = dict(merged.get("diagnostics") or {})
+    diagnostics["runtime_error"] = error_text
+    merged["diagnostics"] = diagnostics
+    merged["error"] = error_text
+    merged.setdefault("failure_reason", failure_reason)
+    merged["partial_results"] = True
+    merged["exploration_status"] = merged.get("exploration_status") or "completed_partial"
+    warnings = list(merged.get("contract_warnings") or [])
+    warning = f"Explorer recovered partial evidence after runtime failure: {error_text}"
+    if warning not in warnings:
+        warnings.append(warning)
+    merged["contract_warnings"] = warnings
+    merged.setdefault("contract_warning", warning)
+    merged.setdefault("summary", "Exploration recovered partial evidence after the agent runtime failed.")
+    return merged
+
+
+def _recover_exploratory_partial_result(run_id: str, config: dict[str, Any], error: Exception | str) -> dict[str, Any] | None:
+    try:
+        from agents.exploratory_agent import ExplorationState, ExploratoryAgent
+
+        run_dir = RUNS_DIR / run_id
+        runtime_tool_calls: list[Any] = []
+        tool_calls_path = run_dir / "tool_calls.json"
+        if tool_calls_path.exists():
+            try:
+                loaded_calls = json.loads(tool_calls_path.read_text(encoding="utf-8"))
+                if isinstance(loaded_calls, list):
+                    runtime_tool_calls = loaded_calls
+            except Exception as exc:
+                logger.debug("Failed to read tool call recovery artifact for %s: %s", run_id, exc)
+        processor = ExploratoryAgent()
+        processor.state = ExplorationState(start_time=time_module.time())
+        result = processor._process_results(
+            "",
+            {
+                **config,
+                "run_id": run_id,
+                "_runtime_tool_calls": runtime_tool_calls,
+                "_runtime_diagnostics": {
+                    "runtime": normalize_agent_runtime(config.get("runtime")),
+                    "recovered_after_error": True,
+                    "error": str(error),
+                },
+            },
+        )
+        if _exploratory_result_has_usable_evidence(result):
+            return _merge_agent_failure_into_result(
+                result,
+                error,
+                failure_reason="runtime_failed_after_evidence",
+            )
+    except Exception as exc:
+        logger.debug("Failed to recover exploratory partial result for %s: %s", run_id, exc)
+    return None
 
 
 def _filter_agent_run_project(run: AgentRun, project_id: str | None) -> None:
@@ -7361,8 +7479,40 @@ def _filter_agent_run_project(run: AgentRun, project_id: str | None) -> None:
             raise HTTPException(status_code=404, detail="Run not found")
 
 
-AGENT_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timeout"}
-AGENT_ACTIVE_STATUSES = {"queued", "pending", "running", "paused"}
+AGENT_PARTIAL_STATUS = "completed_partial"
+AGENT_TERMINAL_STATUSES = {"completed", AGENT_PARTIAL_STATUS, "failed", "cancelled", "timeout"}
+AGENT_ACTIVE_STATUSES = {"queued", "pending", "running", "in_progress", "waiting", "paused"}
+
+
+def _coerce_progress_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_agent_run_progress(progress: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep live agent progress compatible across direct, queue, and event paths."""
+    normalized = dict(progress or {})
+    for key in ("tool_calls", "browser_tool_calls", "interactions"):
+        if key in normalized:
+            normalized[key] = _coerce_progress_int(normalized.get(key))
+
+    last_tool = normalized.get("last_tool") or normalized.get("current_tool")
+    if last_tool:
+        normalized["last_tool"] = str(last_tool)
+        normalized["current_tool"] = str(last_tool)
+
+    label = normalized.get("last_tool_label") or normalized.get("current_tool_label")
+    if not label and last_tool:
+        label = _short_tool_name(str(last_tool))
+    if label:
+        normalized["last_tool_label"] = str(label)
+        normalized["current_tool_label"] = str(label)
+
+    return normalized
 
 
 def _record_agent_run_event(
@@ -7393,11 +7543,17 @@ def _record_agent_run_event(
 
 async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session) -> None:
     from orchestrator.config import settings as app_settings
-    from orchestrator.services.temporal_client import TemporalUnavailableError, start_agent_run_workflow
+    from orchestrator.services.temporal_client import TemporalUnavailableError, describe_temporal_task_queue, start_agent_run_workflow
 
     task_queue = app_settings.temporal_workflow_task_queue
     if _agent_run_has_browser_tools(run.agent_type, run.config) and browser_live_worker_enabled():
         task_queue = app_settings.temporal_browser_workflow_task_queue
+
+    task_queue_status: dict[str, Any] = {}
+    try:
+        task_queue_status = await describe_temporal_task_queue(task_queue)
+    except Exception as exc:
+        task_queue_status = {"status": "unknown", "error": str(exc)}
 
     try:
         temporal = await start_agent_run_workflow(run.id, task_queue=task_queue)
@@ -7436,6 +7592,7 @@ async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session) -> 
             "workflow_id": temporal.workflow_id,
             "temporal_run_id": temporal.run_id,
             "task_queue": task_queue,
+            "task_queue_status": task_queue_status,
         },
         session=session,
     )
@@ -7618,6 +7775,7 @@ def _serialize_agent_run(run: AgentRun, session: Session | None = None) -> dict[
     progress = run.progress or {}
     if _agent_run_has_browser_tools(run.agent_type, run.config):
         progress = {**browser_runtime_status(), **progress}
+    progress = _normalize_agent_run_progress(progress)
     payload = {
         "id": run.id,
         "agent_type": run.agent_type,
@@ -7636,6 +7794,34 @@ def _serialize_agent_run(run: AgentRun, session: Session | None = None) -> dict[
         "artifacts": _collect_agent_run_artifacts(run.id) if run.agent_type in ("exploratory", "custom", "spec_generation") else [],
     }
     payload["health"] = _agent_run_health(run, session)
+    return payload
+
+
+async def _live_agent_queue_progress(run: AgentRun) -> dict[str, Any]:
+    if not run.agent_task_id or run.status in AGENT_TERMINAL_STATUSES:
+        return {}
+    try:
+        from orchestrator.services.agent_queue import get_agent_queue
+
+        queue = get_agent_queue()
+        await queue.connect()
+        progress = await queue.get_task_progress(str(run.agent_task_id))
+        return progress if isinstance(progress, dict) else {}
+    except Exception as exc:
+        logger.debug("Failed to read live queue progress for agent run %s: %s", run.id, exc)
+        return {}
+
+
+async def _serialize_agent_run_live(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
+    payload = _serialize_agent_run(run, session)
+    live_progress = await _live_agent_queue_progress(run)
+    if live_progress:
+        payload["progress"] = _normalize_agent_run_progress(
+            {
+                **(payload.get("progress") or {}),
+                **live_progress,
+            }
+        )
     return payload
 
 
@@ -7713,6 +7899,98 @@ def _requirement_create_body_from_report_item(item: dict[str, Any]) -> dict[str,
         "confidence": _report_requirement_confidence(item.get("confidence")),
         "uncertainty_reason": "Imported from a custom agent report; agent-derived requirement requires human review.",
     }
+
+
+REPORT_ITEM_COLLECTIONS = {
+    "finding": "findings",
+    "test_idea": "test_ideas",
+    "requirement": "requirements",
+}
+
+REPORT_ITEM_EDITABLE_FIELDS = {
+    "finding": {"title", "severity", "page", "description", "evidence", "suggested_action", "confidence"},
+    "test_idea": {"title", "priority", "page", "steps", "expected", "source_finding_id"},
+    "requirement": {
+        "title",
+        "description",
+        "category",
+        "priority",
+        "acceptance_criteria",
+        "page",
+        "evidence",
+        "confidence",
+    },
+}
+
+REPORT_ITEM_LIST_FIELDS = {"steps", "acceptance_criteria"}
+REPORT_ITEM_PROTECTED_FIELDS = {"id", "imported_requirement_id", "imported_requirement_code", "imported_at"}
+
+
+def _normalize_report_item_type(item_type: str | None) -> str:
+    normalized = (item_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "findings": "finding",
+        "test": "test_idea",
+        "test_ideas": "test_idea",
+        "tests": "test_idea",
+        "requirement": "requirement",
+        "requirements": "requirement",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in REPORT_ITEM_COLLECTIONS:
+        raise HTTPException(status_code=400, detail="item_type must be finding, test_idea, or requirement")
+    return normalized
+
+
+def _stored_custom_agent_report(run: AgentRun) -> tuple[dict[str, Any], dict[str, Any]]:
+    if run.agent_type != "custom":
+        raise HTTPException(status_code=400, detail="Only custom agent reports can be edited")
+    result = run.result or {}
+    report = result.get("structured_report") if isinstance(result, dict) else None
+    if not isinstance(report, dict):
+        raise HTTPException(status_code=400, detail="This run does not have a stored structured report")
+    return result, report
+
+
+def _normalize_report_patch_value(field: str, value: Any) -> Any:
+    if field in REPORT_ITEM_LIST_FIELDS:
+        return [_clean_text(item, 1000) for item in _as_report_list(value) if _clean_text(item, 1000)]
+    if value is None:
+        return None
+    if field == "confidence" and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    max_length = 2000 if field in {"description", "evidence", "suggested_action", "expected"} else 500
+    if field in {"title"}:
+        max_length = 220
+    if field in {"severity", "priority", "category", "source_finding_id"}:
+        max_length = 80
+    return _clean_text(value, max_length)
+
+
+def _editable_report_item_patch(item_type: str, patch: dict[str, Any]) -> dict[str, Any]:
+    allowed = REPORT_ITEM_EDITABLE_FIELDS[item_type]
+    blocked = sorted(field for field in patch if field not in allowed or field in REPORT_ITEM_PROTECTED_FIELDS)
+    if blocked:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Report item patch contains uneditable fields",
+                "fields": blocked,
+                "allowed_fields": sorted(allowed),
+            },
+        )
+    return {
+        field: _normalize_report_patch_value(field, value)
+        for field, value in patch.items()
+    }
+
+
+def _find_report_item(report: dict[str, Any], item_type: str, item_id: str) -> dict[str, Any]:
+    collection = REPORT_ITEM_COLLECTIONS[item_type]
+    for item in _as_report_list(report.get(collection)):
+        if isinstance(item, dict) and str(item.get("id") or "") == item_id:
+            return item
+    raise HTTPException(status_code=404, detail=f"Report {item_type} item {item_id} not found")
 
 
 def _capture_custom_agent_report_memory(
@@ -8294,7 +8572,12 @@ def _update_agent_run_progress(run_id: str, patch: dict[str, Any]) -> None:
                 return
             existing = run.progress or {}
             recent_tools = list(existing.get("recent_tools") or [])
-            last_tool = patch.get("last_tool")
+            progress_patch = dict(patch or {})
+            last_tool = progress_patch.get("last_tool") or progress_patch.get("current_tool")
+            if not last_tool:
+                progress_patch.pop("last_tool", None)
+                progress_patch.pop("current_tool", None)
+                last_tool = existing.get("last_tool") or existing.get("current_tool")
             if last_tool and (not recent_tools or recent_tools[-1].get("name") != last_tool):
                 recent_tools.append(
                     {
@@ -8307,14 +8590,14 @@ def _update_agent_run_progress(run_id: str, patch: dict[str, Any]) -> None:
 
             progress = {
                 **existing,
-                **patch,
-                "last_tool_label": _short_tool_name(str(last_tool or existing.get("last_tool") or "")),
+                **progress_patch,
                 "recent_tools": recent_tools,
                 "updated_at": datetime.utcnow().isoformat(),
             }
+            progress = _normalize_agent_run_progress(progress)
             run.progress = progress
-            if patch.get("agent_task_id"):
-                run.agent_task_id = str(patch["agent_task_id"])
+            if progress_patch.get("agent_task_id"):
+                run.agent_task_id = str(progress_patch["agent_task_id"])
             session.add(run)
             session.commit()
     except Exception as exc:
@@ -8325,13 +8608,19 @@ def _generic_agent_runtime_prompt(agent_type: str, config: dict[str, Any]) -> st
     """Build a Quorvex-owned prompt for non-Claude runtime adapters."""
 
     if agent_type == "exploratory":
-        return "\n".join(
-            [
-                "You are a Quorvex exploratory QA agent.",
-                "Inspect the target application and return a concise JSON report with summary, pages, findings, test_ideas, and blockers.",
-                "Do not modify repository files. Browser/file/terminal actions are allowed only to complete the requested QA investigation.",
-                f"Config JSON:\n{json.dumps(config, indent=2, default=str)}",
-            ]
+        from agents.exploratory_agent import ExploratoryAgent
+
+        agent = ExploratoryAgent()
+        return agent._build_exploration_prompt(
+            url=config.get("url"),
+            instructions=config.get("instructions", ""),
+            time_limit_minutes=int(config.get("time_limit_minutes") or 15),
+            auth_config=config.get("auth") or {"type": "none"},
+            test_data=config.get("test_data") or {},
+            focus_areas=config.get("focus_areas") or [],
+            excluded_patterns=config.get("excluded_patterns") or [],
+            browser_memory_context=config.get("browser_memory_context") or "",
+            advanced_tools=bool(config.get("advanced_tools") or config.get("record_video") or config.get("capture_video")),
         )
     if agent_type == "spec-synthesis":
         return "\n".join(
@@ -8349,6 +8638,42 @@ def _generic_agent_runtime_prompt(agent_type: str, config: dict[str, Any]) -> st
             f"Config JSON:\n{json.dumps(config, indent=2, default=str)}",
         ]
     )
+
+
+KNOWN_AGENT_TYPE_TOOL_PROFILES = {
+    "exploratory": "app-explorer-basic",
+    "writer": "app-explorer-basic",
+    "spec-synthesis": "text-analysis",
+}
+
+
+def _agent_tool_profile_for_run(agent_type: str, config: dict[str, Any]) -> str | None:
+    configured = str(config.get("agent_tool_profile") or "").strip()
+    if configured:
+        return configured
+    if agent_type == "exploratory" and bool(
+        config.get("advanced_tools") or config.get("record_video") or config.get("capture_video")
+    ):
+        return "app-explorer-advanced"
+    return KNOWN_AGENT_TYPE_TOOL_PROFILES.get(agent_type)
+
+
+def _resolve_known_agent_allowed_tools(
+    agent_type: str,
+    config: dict[str, Any],
+    *,
+    mcp_config_dir: Path | str | None = None,
+) -> list[str] | None:
+    """Resolve explicit tools for known built-in agent types.
+
+    Built-in agents must not inherit legacy wildcard access when callers omit
+    allowed_tools. Unknown/custom agents keep their existing behavior elsewhere.
+    """
+    profile_name = _agent_tool_profile_for_run(agent_type, config)
+    if not profile_name:
+        return None
+    config["agent_tool_profile"] = profile_name
+    return get_agent_allowed_tools(profile_name, mcp_config_dir=mcp_config_dir)
 
 
 def _resolve_agent_execution_test_data_context(
@@ -8418,14 +8743,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             if not acquired:
                 # Timeout waiting for slot
                 logger.warning(f"Agent {run_id} failed to acquire browser slot (timeout)")
-                with Session(engine) as session:
-                    run = session.get(AgentRun, run_id)
-                    if run:
-                        run.status = "failed"
-                        run.result = {"error": "Timeout waiting for browser slot"}
-                        session.add(run)
-                        session.commit()
-                return
+                raise TimeoutError("Timeout waiting for browser slot")
 
             if not await _wait_if_agent_run_paused(run_id):
                 return
@@ -8443,7 +8761,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             logger.info(f"Browser slot acquired for agent {run_id}")
 
             # Use relative imports since server runs from orchestrator/ directory
-            from agents.exploratory_agent import ExploratoryAgent
+            from agents.exploratory_agent import ExplorationState, ExploratoryAgent
             from agents.spec_synthesis_agent import SpecSynthesisAgent
             from agents.spec_writer_agent import SpecWriterAgent
 
@@ -8451,6 +8769,28 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             if runtime_name == "hermes" and agent_type in {"exploratory", "writer", "spec-synthesis"}:
                 from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
                 from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span, record_tool_result_spans
+
+                runtime_session_dir = None
+                if agent_type == "exploratory":
+                    candidate_run_dir = RUNS_DIR / run_id
+                    storage_state_path = _resolve_agent_browser_auth_storage_path(
+                        run_id=run_id,
+                        project_id=config.get("project_id"),
+                        config=config,
+                        run_dir=candidate_run_dir,
+                    )
+                    runtime_session_dir = exploration._prepare_exploration_mcp_config(
+                        run_id,
+                        storage_state_path=storage_state_path,
+                    )
+                resolved_allowed_tools = _resolve_known_agent_allowed_tools(
+                    agent_type,
+                    config,
+                    mcp_config_dir=runtime_session_dir,
+                )
+                if resolved_allowed_tools is not None:
+                    config["allowed_tools"] = resolved_allowed_tools
+                effective_allowed_tools = config.get("allowed_tools") or []
 
                 test_data_refs = config.get("test_data_refs") if isinstance(config.get("test_data_refs"), list) else []
                 test_data_context = _resolve_agent_execution_test_data_context(
@@ -8472,7 +8812,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     runtime=runtime_name,
                     model=config.get("model"),
                     model_tier=config.get("model_tier") or "tool_deep",
-                    allowed_tools=config.get("allowed_tools") or ["*"],
+                    allowed_tools=effective_allowed_tools,
                     test_data_refs=test_data_refs,
                     runtime_diagnostics={"runtime": runtime_name, "agent_type": agent_type},
                 )
@@ -8527,7 +8867,10 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     prompt,
                     AgentRuntimeContext(
                         timeout_seconds=int(config.get("timeout_seconds") or 1800),
-                        allowed_tools=config.get("allowed_tools") or ["*"],
+                        allowed_tools=effective_allowed_tools,
+                        tools=effective_allowed_tools,
+                        session_dir=runtime_session_dir,
+                        cwd=runtime_session_dir,
                         owner_type="agent_run",
                         owner_id=run_id,
                         owner_label=f"Agent run {run_id}",
@@ -8539,6 +8882,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         model=config.get("model"),
                         model_tier=config.get("model_tier") or "tool_deep",
                         agent_name=agent_type,
+                        hermes_profile=config.get("agent_tool_profile"),
                         hermes_conversation=run_id,
                         metadata={"agent_type": agent_type, "run_id": run_id},
                         trace_id=trace_snapshot.id if trace_snapshot else None,
@@ -8554,26 +8898,58 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 if agent_result.cancelled:
                     raise asyncio.CancelledError("Agent run cancelled")
                 record_tool_result_spans(run_id, agent_result.tool_calls)
-                result = {
-                    "summary": (agent_result.output or agent_result.error or "")[:500],
-                    "output": agent_result.output,
-                    "error": agent_result.error,
-                    "duration_seconds": agent_result.duration_seconds,
-                    "runtime": runtime_name,
-                    "session_id": agent_result.session_id,
-                    "total_cost_usd": agent_result.total_cost_usd,
-                    "tool_calls": [
+                serialized_tool_calls = [
+                    {
+                        "name": call.name,
+                        "timestamp": call.timestamp.isoformat(),
+                        "duration_ms": call.duration_ms,
+                        "success": call.success,
+                        "error": call.error,
+                        "input": call.input,
+                    }
+                    for call in agent_result.tool_calls
+                ]
+                if agent_type == "exploratory":
+                    processor = ExploratoryAgent()
+                    processor.state = ExplorationState(
+                        start_time=time_module.time() - max(agent_result.duration_seconds or 0, 0)
+                    )
+                    result = processor._process_results(
+                        agent_result.output or "",
                         {
-                            "name": call.name,
-                            "timestamp": call.timestamp.isoformat(),
-                            "duration_ms": call.duration_ms,
-                            "success": call.success,
-                            "error": call.error,
-                            "input": call.input,
-                        }
-                        for call in agent_result.tool_calls
-                    ],
-                }
+                            **config,
+                            "run_id": run_id,
+                            "_runtime_tool_calls": serialized_tool_calls,
+                            "_runtime_diagnostics": {
+                                "runtime": runtime_name,
+                                "session_id": agent_result.session_id,
+                                "tool_calls": len(agent_result.tool_calls),
+                                "messages_received": agent_result.messages_received,
+                                "text_blocks_received": agent_result.text_blocks_received,
+                                "timed_out": agent_result.timed_out,
+                                "total_cost_usd": agent_result.total_cost_usd,
+                                "error": agent_result.error,
+                            },
+                        },
+                    )
+                    result["runtime"] = runtime_name
+                    result["output"] = agent_result.output
+                    result["error"] = agent_result.error
+                    result["duration_seconds"] = agent_result.duration_seconds
+                    result["session_id"] = agent_result.session_id
+                    result["total_cost_usd"] = agent_result.total_cost_usd
+                    result["tool_calls"] = serialized_tool_calls
+                else:
+                    result = {
+                        "summary": (agent_result.output or agent_result.error or "")[:500],
+                        "output": agent_result.output,
+                        "error": agent_result.error,
+                        "duration_seconds": agent_result.duration_seconds,
+                        "runtime": runtime_name,
+                        "session_id": agent_result.session_id,
+                        "total_cost_usd": agent_result.total_cost_usd,
+                        "tool_calls": serialized_tool_calls,
+                    }
                 if not agent_result.success:
                     raise RuntimeError(agent_result.error or "Hermes agent failed")
             elif agent_type == "exploratory":
@@ -8590,6 +8966,14 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 )
                 run_dir = exploration._prepare_exploration_mcp_config(run_id, storage_state_path=storage_state_path)
                 agent.agent_cwd = str(run_dir)
+                resolved_allowed_tools = _resolve_known_agent_allowed_tools(
+                    agent_type,
+                    config,
+                    mcp_config_dir=run_dir,
+                )
+                if resolved_allowed_tools is not None:
+                    config["allowed_tools"] = resolved_allowed_tools
+                agent.agent_tool_profile = config.get("agent_tool_profile") or "app-explorer-basic"
                 agent.on_task_enqueued = lambda task_id: _update_agent_run_progress(
                     run_id,
                     {
@@ -8605,6 +8989,34 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
 
                 # Pass run_id to agent for file storage
                 config["run_id"] = run_id
+                test_data_refs = config.get("test_data_refs") if isinstance(config.get("test_data_refs"), list) else []
+                if test_data_refs:
+                    resolved_test_data = _resolve_agent_execution_test_data_context(
+                        project_id=config.get("project_id"),
+                        refs=test_data_refs,
+                        markdown=json.dumps(config, default=str),
+                    )
+                    runtime_fixtures = resolved_test_data.get("runtime_fixtures") or {}
+                    if runtime_fixtures:
+                        merged_test_data = config.get("test_data") if isinstance(config.get("test_data"), dict) else {}
+                        for ref, fixture in runtime_fixtures.items():
+                            if not isinstance(fixture, dict):
+                                continue
+                            if fixture.get("data") is not None:
+                                merged_test_data[ref] = fixture.get("data")
+                            elif fixture.get("text"):
+                                merged_test_data[ref] = fixture.get("text")
+                        config["test_data"] = merged_test_data
+                    if resolved_test_data.get("prompt_markdown"):
+                        existing_context = str(config.get("browser_memory_context") or "").strip()
+                        test_data_context = (
+                            f"{resolved_test_data['prompt_markdown']}\n\n"
+                            "If you delegate work to subagents, copy the relevant test-data ref names and plaintext values needed for execution "
+                            "into each delegated prompt. Subagents do not automatically inherit this full parent context."
+                        )
+                        config["browser_memory_context"] = "\n\n".join(
+                            part for part in [existing_context, test_data_context] if part
+                        )
                 if not await _wait_if_agent_run_paused(run_id):
                     return
                 result = await agent.run(config)
@@ -8675,12 +9087,14 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 agent.owner_type = "agent_run"
                 agent.owner_id = run_id
                 agent.owner_label = f"Agent run {run_id}"
+                agent.agent_tool_profile = _agent_tool_profile_for_run(agent_type, config)
                 result = await agent.run(config)
             elif agent_type == "spec-synthesis":
                 agent = SpecSynthesisAgent()
                 agent.owner_type = "agent_run"
                 agent.owner_id = run_id
                 agent.owner_label = f"Agent run {run_id}"
+                agent.agent_tool_profile = _agent_tool_profile_for_run(agent_type, config)
                 result = await agent.run(config)
             elif agent_type == "custom":
                 from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
@@ -8948,13 +9362,49 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             with Session(engine) as session:
                 run = session.get(AgentRun, run_id)
                 if run and run.status not in AGENT_TERMINAL_STATUSES:
-                    exploratory_zero_evidence_failed = (
-                        agent_type == "exploratory" and _exploratory_result_is_zero_evidence_failure(result)
+                    finalized = None
+                    if agent_type in {"custom", "exploratory"} and isinstance(result, dict):
+                        try:
+                            from orchestrator.services.agent_run_finalizer import AgentRunFinalizer
+
+                            finalized = AgentRunFinalizer().finalize(
+                                run_id=run_id,
+                                agent_type=agent_type,
+                                config=config,
+                                raw_model_output=result.get("output") or result.get("raw_output_preview"),
+                                tool_calls=result.get("tool_calls") if isinstance(result.get("tool_calls"), list) else [],
+                                runtime_diagnostics={
+                                    "runtime": runtime_name,
+                                    "source": "execute_agent_background",
+                                },
+                                artifacts=_collect_agent_run_artifacts(run_id)
+                                if agent_type in {"custom", "exploratory"}
+                                else [],
+                                existing_result=result,
+                            )
+                            result = finalized.result
+                        except Exception as finalizer_error:
+                            logger.warning("Agent result finalizer failed for %s: %s", run_id, finalizer_error)
+
+                    exploratory_failed = (
+                        finalized.status == "failed"
+                        if finalized is not None
+                        else agent_type == "exploratory" and _exploratory_result_is_terminal_failure(result)
                     )
-                    run.status = "failed" if exploratory_zero_evidence_failed else "completed"
+                    failure_reason = result.get("failure_reason") if isinstance(result, dict) else None
+                    partial_result = (
+                        finalized.status == AGENT_PARTIAL_STATUS
+                        if finalized is not None
+                        else isinstance(result, dict) and bool(result.get("partial_results"))
+                    )
+                    run.status = (
+                        finalized.status
+                        if finalized is not None
+                        else "failed" if exploratory_failed else AGENT_PARTIAL_STATUS if partial_result else "completed"
+                    )
                     run.completed_at = datetime.utcnow()
                     run.result = result
-                    if exploratory_zero_evidence_failed:
+                    if exploratory_failed:
                         run.progress = {
                             **(run.progress or {}),
                             "phase": "failed",
@@ -8969,14 +9419,20 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     session.commit()
                     _record_agent_run_event(
                         run_id,
-                        event_type="error" if exploratory_zero_evidence_failed else "complete",
-                        level="error" if exploratory_zero_evidence_failed else "info",
+                        event_type="error" if exploratory_failed else "complete",
+                        level="error" if exploratory_failed else "info",
                         message=(
-                            "Exploratory agent run failed: result parsing failed and no structured data recovered."
-                            if exploratory_zero_evidence_failed
+                            result.get("summary")
+                            if exploratory_failed and failure_reason == "runtime_auth_failed"
+                            else "Exploratory agent run failed: result parsing failed and no structured data recovered."
+                            if exploratory_failed
                             else "Agent run completed."
                         ),
-                        payload={"status": run.status, "summary": _agent_run_summary(run)},
+                        payload={
+                            "status": run.status,
+                            "summary": _agent_run_summary(run),
+                            "failure_reason": failure_reason,
+                        },
                         agent_task_id=run.agent_task_id,
                         session=session,
                     )
@@ -9005,31 +9461,84 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
 
         traceback.print_exc()
         logger.error(f"Agent {run_id} failed with exception: {e}")
-        # Update DB failure
+        retry_via_temporal = os.environ.get("QUORVEX_AGENT_TEMPORAL_ACTIVITY") == "true"
+        should_reraise = retry_via_temporal
         with Session(engine) as session:
             run = session.get(AgentRun, run_id)
             if run and run.status not in AGENT_TERMINAL_STATUSES:
-                run.status = "failed"
-                run.completed_at = datetime.utcnow()
-                run.result = {"error": str(e)}
-                run.progress = {
-                    **(run.progress or {}),
-                    "phase": "failed",
-                    "status": "failed",
-                    "message": str(e),
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
+                recovered = None
+                if agent_type == "exploratory":
+                    if _exploratory_result_has_usable_evidence(run.result):
+                        recovered = _merge_agent_failure_into_result(
+                            run.result,
+                            e,
+                            failure_reason="runtime_failed_after_evidence",
+                        )
+                    else:
+                        recovered = _recover_exploratory_partial_result(run_id, config, e)
+
+                if recovered is not None:
+                    should_reraise = False
+                    run.status = AGENT_PARTIAL_STATUS
+                    run.completed_at = datetime.utcnow()
+                    run.result = recovered
+                    run.progress = {
+                        **(run.progress or {}),
+                        "phase": AGENT_PARTIAL_STATUS,
+                        "status": AGENT_PARTIAL_STATUS,
+                        "message": recovered.get("summary") or "Recovered partial Explorer evidence after runtime failure.",
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                    event_type = "partial"
+                    event_level = "warning"
+                    event_message = "Exploratory agent recovered partial evidence after runtime failure."
+                    event_payload = {
+                        "status": run.status,
+                        "error": str(e),
+                        "summary": _agent_run_summary(run),
+                        "failure_reason": recovered.get("failure_reason"),
+                    }
+                elif should_reraise:
+                    run.progress = {
+                        **(run.progress or {}),
+                        "phase": "retrying",
+                        "status": run.status,
+                        "message": f"Agent execution failed and will be retried by Temporal: {e}",
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                    event_type = "retry"
+                    event_level = "warning"
+                    event_message = f"Agent run failed; Temporal will retry if attempts remain: {e}"
+                    event_payload = {"status": run.status, "error": str(e), "retryable": True}
+                else:
+                    run.status = "failed"
+                    run.completed_at = datetime.utcnow()
+                    existing_result = run.result if isinstance(run.result, dict) else {}
+                    run.result = {**existing_result, "error": str(e)}
+                    run.progress = {
+                        **(run.progress or {}),
+                        "phase": "failed",
+                        "status": "failed",
+                        "message": str(e),
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                    event_type = "error"
+                    event_level = "error"
+                    event_message = f"Agent run failed: {e}"
+                    event_payload = {"status": run.status, "error": str(e)}
                 session.add(run)
                 session.commit()
                 _record_agent_run_event(
                     run_id,
-                    event_type="error",
-                    level="error",
-                    message=f"Agent run failed: {e}",
-                    payload={"status": run.status, "error": str(e)},
+                    event_type=event_type,
+                    level=event_level,
+                    message=event_message,
+                    payload=event_payload,
                     agent_task_id=run.agent_task_id,
                     session=session,
                 )
+        if should_reraise:
+            raise
 
 
 @app.post("/api/agents/runs")
@@ -9401,7 +9910,7 @@ async def get_agent_run(
 
     _filter_agent_run_project(r, project_id)
 
-    payload = _serialize_agent_run(r, session)
+    payload = await _serialize_agent_run_live(r, session)
     payload["temporal"] = await _agent_run_temporal_payload(r)
     return payload
 
@@ -9666,6 +10175,88 @@ async def cancel_agent_run(
     return _serialize_agent_run(run, session)
 
 
+@app.post("/api/agents/runs/{id}/retry")
+async def retry_agent_run(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(get_current_user_optional),
+):
+    source = session.get(AgentRun, id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(source, project_id)
+    await _ensure_agent_write_access(source.project_id, current_user, session)
+
+    if source.status not in AGENT_TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Cannot retry a {source.status} run")
+
+    retry_id = str(uuid.uuid4())
+    retry_config = dict(source.config or {})
+    previous_attempt = _coerce_progress_int(retry_config.get("retry_attempt"), 0)
+    retry_config.update(
+        {
+            "runtime": "claude_sdk",
+            "retry_of": source.id,
+            "source_run_id": source.id,
+            "retry_attempt": previous_attempt + 1,
+        }
+    )
+    if source.project_id and not retry_config.get("project_id"):
+        retry_config["project_id"] = source.project_id
+
+    retry_run = AgentRun(
+        id=retry_id,
+        agent_type=source.agent_type,
+        runtime="claude_sdk",
+        config_json=json.dumps(retry_config),
+        status="queued",
+        project_id=source.project_id,
+    )
+    browser_metadata = browser_runtime_status() if _agent_run_has_browser_tools(source.agent_type, retry_config) else {}
+    retry_run.progress = {
+        **browser_metadata,
+        "phase": "queued",
+        "status": "queued",
+        "runtime": "claude_sdk",
+        "message": f"Retry queued from agent run {source.id[:8]}.",
+        "retry_of": source.id,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    session.add(retry_run)
+    session.commit()
+
+    _record_agent_run_event(
+        retry_run.id,
+        event_type="created",
+        message=f"Retry agent run created from {source.id}.",
+        payload={
+            "agent_type": retry_run.agent_type,
+            "runtime": "claude_sdk",
+            "status": retry_run.status,
+            "retry_of": source.id,
+            "source_status": source.status,
+        },
+        session=session,
+    )
+    _record_agent_run_event(
+        source.id,
+        event_type="retry_created",
+        message=f"Retry agent run {retry_run.id} created.",
+        payload={"retry_run_id": retry_run.id, "source_status": source.status},
+        session=session,
+    )
+
+    await _start_agent_run_temporal_or_fail(retry_run, session)
+    session.refresh(retry_run)
+    return {
+        **_serialize_agent_run(retry_run, session),
+        "run_id": retry_run.id,
+        "source_run_id": source.id,
+        "retry_of": source.id,
+    }
+
+
 @app.get("/api/agents/runs/{id}/report")
 def get_agent_run_report(
     id: str,
@@ -9694,6 +10285,79 @@ def get_agent_run_report(
         "structured_report": structured,
         "raw_output": result.get("output") if isinstance(result, dict) else None,
         "artifacts": artifacts,
+    }
+
+
+@app.patch("/api/agents/runs/{run_id}/report")
+def update_agent_run_report_overview(
+    run_id: str,
+    request: UpdateAgentReportOverviewRequest,
+    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    session: Session = Depends(get_session),
+):
+    run = session.get(AgentRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+
+    result, report = _stored_custom_agent_report(run)
+    fields_set = getattr(request, "model_fields_set", None)
+    if fields_set is None:
+        fields_set = getattr(request, "__fields_set__", set())
+    if "summary" in fields_set:
+        report["summary"] = _clean_text(request.summary, 2000)
+    if "scope" in fields_set:
+        report["scope"] = _clean_text(request.scope, 2000)
+
+    result["structured_report"] = report
+    run.result = result
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+
+    return {
+        "structured_report": report,
+        "run": _serialize_agent_run(run, session),
+    }
+
+
+@app.patch("/api/agents/runs/{run_id}/report-items/{item_id}")
+def update_agent_run_report_item(
+    run_id: str,
+    item_id: str,
+    request: UpdateAgentReportItemRequest,
+    item_type: str = Query(..., description="finding, test_idea, or requirement"),
+    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    session: Session = Depends(get_session),
+):
+    run = session.get(AgentRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+
+    normalized_type = _normalize_report_item_type(item_type)
+    result, report = _stored_custom_agent_report(run)
+    item = _find_report_item(report, normalized_type, item_id)
+    if normalized_type == "requirement" and (
+        item.get("imported_requirement_id") or item.get("imported_requirement_code") or item.get("imported_at")
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This report requirement was already imported. Edit it in Requirements instead.",
+        )
+
+    for field, value in _editable_report_item_patch(normalized_type, request.patch or {}).items():
+        item[field] = value
+
+    result["structured_report"] = report
+    run.result = result
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+
+    return {
+        "item": item,
+        "run": _serialize_agent_run(run, session),
     }
 
 
@@ -9902,6 +10566,11 @@ async def run_exploratory_agent(
     config = request.dict()
     runtime = normalize_agent_runtime(request.runtime or config.get("runtime"))
     config["runtime"] = runtime
+    config["agent_tool_profile"] = (
+        "app-explorer-advanced"
+        if bool(config.get("advanced_tools") or config.get("record_video"))
+        else "app-explorer-basic"
+    )
 
     # Process auth configuration
     auth_result = {"success": True, "type": "none"}
@@ -9978,12 +10647,18 @@ async def synthesize_specs(run_id: str, session: Session = Depends(get_session))
     if not exploration_run:
         raise HTTPException(status_code=404, detail="Exploration run not found")
 
-    if exploration_run.status != "completed":
-        raise HTTPException(status_code=400, detail="Exploration must be completed before synthesis")
-
     exploration_result = exploration_run.result
     if not exploration_result:
         raise HTTPException(status_code=400, detail="No exploration results found")
+    flow_summaries = (
+        exploration_result.get("discovered_flow_summaries")
+        if isinstance(exploration_result, dict) and isinstance(exploration_result.get("discovered_flow_summaries"), list)
+        else []
+    )
+    if exploration_run.status not in {"completed", AGENT_PARTIAL_STATUS}:
+        raise HTTPException(status_code=400, detail="Exploration must be completed before synthesis")
+    if exploration_run.status == AGENT_PARTIAL_STATUS and not flow_summaries:
+        raise HTTPException(status_code=400, detail="Recovered exploration has no evidence-backed flows to synthesize")
 
     # Create synthesis run
     import os

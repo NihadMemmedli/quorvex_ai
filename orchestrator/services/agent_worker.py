@@ -49,6 +49,7 @@ from orchestrator.services.agent_run_events import create_agent_run_event
 from orchestrator.services.browser_pool import OperationType as BrowserOpType
 from orchestrator.services.browser_pool import get_browser_pool
 from orchestrator.utils.browser_cleanup import kill_autopilot_process_tree, kill_test_run_process_tree
+from orchestrator.utils.token_budget import build_agent_token_telemetry, extract_provider_usage
 
 # Claude CLI path
 CLAUDE_CLI_PATH = "/usr/local/lib/python3.10/dist-packages/claude_agent_sdk/_bundled/claude"
@@ -166,11 +167,13 @@ class BrowserObservationRecorder:
         self.cwd = Path(cwd) if cwd else None
         self.service_factory = service_factory or self._default_service_factory
         self.artifact_path = artifact_path or ((self.cwd / "browser-memory-observations.jsonl") if self.cwd else None)
+        self.event_log_path = (self.cwd / "exploration_events.jsonl") if self.cwd else None
         self.pending_tool_calls: dict[str, _BrowserToolCall] = {}
         self.latest_state = None
         self.pending_interaction: _PendingBrowserInteraction | None = None
         self.last_url: str | None = None
         self.project_id: str | None = None
+        self.event_counter = 0
         self.stats = {"snapshots": 0, "transitions": 0, "errors": 0}
 
     def observe_event(self, evt: dict[str, object]) -> None:
@@ -204,6 +207,16 @@ class BrowserObservationRecorder:
             if url:
                 self.last_url = url
         if short_name in INTERACTION_TOOLS:
+            self._write_evidence_event(
+                {
+                    "event_type": "action_attempted",
+                    "action": short_name.replace("browser_", ""),
+                    "target": self._input_target(call.input),
+                    "url": self.last_url,
+                    "source": "browser_tool_stream",
+                    "tool_use_id": tool_use_id,
+                }
+            )
             self.pending_interaction = _PendingBrowserInteraction(
                 action_type=short_name.replace("browser_", ""),
                 target=self._input_target(call.input),
@@ -217,12 +230,53 @@ class BrowserObservationRecorder:
         if not call:
             return
         result_text = _tool_result_text(item.get("content"))
+        is_error = bool(item.get("is_error") or item.get("error"))
         if call.short_name == "browser_snapshot":
             self._persist_snapshot(result_text)
         elif call.short_name == "browser_navigate":
             url = self._input_target(call.input) or self._extract_url(result_text)
             if url:
                 self.last_url = url
+                if not is_error:
+                    self._write_evidence_event(
+                        {
+                            "event_type": "page_observed",
+                            "url": url,
+                            "title": url,
+                            "summary": "Observed after browser_navigate.",
+                            "source": "browser_tool_stream",
+                            "tool_use_id": tool_use_id,
+                        }
+                    )
+        elif call.short_name in {"browser_take_screenshot", "browser_screenshot"} and not is_error:
+            filename = self._input_value(call.input, "filename") or self._input_value(call.input, "path")
+            self._write_evidence_event(
+                {
+                    "event_type": "page_observed",
+                    "url": self.last_url,
+                    "title": self.last_url,
+                    "summary": "Observed via screenshot.",
+                    "screenshot_path": filename,
+                    "source": "browser_tool_stream",
+                    "tool_use_id": tool_use_id,
+                }
+            )
+        if call.short_name in INTERACTION_TOOLS:
+            target = self._input_target(call.input)
+            if call.short_name == "browser_navigate" and target:
+                self.last_url = target
+            self._write_evidence_event(
+                {
+                    "event_type": "action_result",
+                    "action": call.short_name.replace("browser_", ""),
+                    "target": target or call.short_name,
+                    "success": not is_error,
+                    "outcome": "Browser tool completed." if not is_error else "Browser tool failed.",
+                    "url": self.last_url,
+                    "source": "browser_tool_stream",
+                    "tool_use_id": tool_use_id,
+                }
+            )
         self._write_artifact(
             {
                 "event": "tool_result",
@@ -240,6 +294,20 @@ class BrowserObservationRecorder:
         }
 
     def flush_pending(self) -> None:
+        for tool_use_id, call in list(self.pending_tool_calls.items()):
+            if call.short_name in INTERACTION_TOOLS:
+                self._write_evidence_event(
+                    {
+                        "event_type": "action_result",
+                        "action": call.short_name.replace("browser_", ""),
+                        "target": self._input_target(call.input) or call.short_name,
+                        "success": False,
+                        "outcome": "Browser tool did not return before the agent stopped.",
+                        "url": self.last_url,
+                        "source": "browser_tool_stream",
+                        "tool_use_id": tool_use_id,
+                    }
+                )
         self._write_artifact(
             {
                 "event": "flush",
@@ -248,6 +316,8 @@ class BrowserObservationRecorder:
                 **self.telemetry(),
             }
         )
+        self.pending_tool_calls.clear()
+        self.pending_interaction = None
 
     def _persist_snapshot(self, snapshot_text: str) -> None:
         url = self._extract_url(snapshot_text) or self.last_url or "about:blank"
@@ -277,6 +347,15 @@ class BrowserObservationRecorder:
             self.pending_interaction = None
         self.latest_state = state
         self.last_url = url
+        self._write_evidence_event(
+            {
+                "event_type": "page_observed",
+                "url": url,
+                "title": title,
+                "summary": "Observed from browser_snapshot.",
+                "source": "browser_tool_stream",
+            }
+        )
         self._write_artifact({"event": "snapshot", "url": url, "state_id": state.id, **self.telemetry()})
 
     def _default_service_factory(self):
@@ -304,17 +383,35 @@ class BrowserObservationRecorder:
         except Exception:
             pass
 
+    def _write_evidence_event(self, payload: dict[str, object]) -> None:
+        if not self.event_log_path:
+            return
+        try:
+            self.event_counter += 1
+            event = {"id": f"runtime_evt_{self.event_counter:03d}", "created_at": time.time(), **payload}
+            self.event_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.event_log_path.open("a") as f:
+                f.write(json.dumps(event, sort_keys=True, default=str) + "\n")
+        except Exception as exc:
+            self._record_error("write_evidence_event", exc)
+
     def _record_error(self, stage: str, exc: Exception) -> None:
         self.stats["errors"] += 1
         logger.debug("Browser memory recorder skipped %s: %s", stage, exc)
         self._write_artifact({"event": "error", "stage": stage, "error": str(exc)})
 
-    @staticmethod
-    def _input_target(tool_input: dict[str, object]) -> str:
-        for key in ("url", "target", "element", "text", "selector"):
-            value = tool_input.get(key)
+    def _input_target(self, tool_input: dict[str, object]) -> str:
+        for key in ("url", "target", "element", "text", "selector", "key"):
+            value = self._input_value(tool_input, key)
             if value:
-                return str(value)
+                return value
+        return self._input_value(tool_input, "values")
+
+    @staticmethod
+    def _input_value(tool_input: dict[str, object], key: str) -> str:
+        value = tool_input.get(key)
+        if value is not None:
+            return str(value)
         return ""
 
     def _extract_url(self, text: str) -> str | None:
@@ -355,6 +452,9 @@ class AgentWorker:
             "tool_calls": 0,
             "browser_tool_calls": 0,
             "last_tool": "",
+            "last_tool_label": "",
+            "current_tool": "",
+            "current_tool_label": "",
             "tool_names": [],
             "tool_call_records": [],
             "chars": 0,
@@ -1421,6 +1521,7 @@ class AgentWorker:
             "worker_id": self.worker_id,
             "attempt": attempt,
             "agent_type": task.agent_type,
+            "stage": task.operation_type,
             "operation_type": task.operation_type,
             "timeout_seconds": task.timeout_seconds,
             "tool_calls": int(progress.get("tool_calls", 0) or 0),
@@ -1463,6 +1564,11 @@ class AgentWorker:
         )
         if error_type:
             telemetry["error_type"] = error_type
+        if telemetry.get("stage") != task.operation_type:
+            telemetry["stage"] = task.operation_type
+        if task.env_vars:
+            telemetry.setdefault("model", task.env_vars.get("QUORVEX_LLM_ACTIVE_MODEL") or task.env_vars.get("ANTHROPIC_MODEL"))
+            telemetry.setdefault("model_tier", task.env_vars.get("QUORVEX_LLM_ACTIVE_TIER"))
         if task.started_at:
             telemetry["duration_seconds"] = (time.time() - task.started_at.timestamp())
         return telemetry
@@ -1591,7 +1697,7 @@ class AgentWorker:
         }
         browser_recorder = (
             BrowserObservationRecorder(session_id=owner_id, cwd=effective_cwd)
-            if owner_type == "exploration_session" and owner_id
+            if owner_type in {"exploration_session", "agent_run"} and owner_id
             else None
         )
 
@@ -1765,6 +1871,12 @@ class AgentWorker:
                                         stream_stats["stop_reason"] = evt.get("stop_reason")
                                         stream_stats["session_id"] = evt.get("session_id")
                                         stream_stats["total_cost_usd"] = evt.get("total_cost_usd")
+                                        usage = extract_provider_usage(evt)
+                                        if usage:
+                                            stream_stats["provider_usage"] = {
+                                                **(stream_stats.get("provider_usage") or {}),
+                                                **usage,
+                                            }
                                     elif evt_type == "hook_event":
                                         stream_stats["hook_events"] += 1
                                     if browser_recorder is not None:
@@ -1807,6 +1919,7 @@ class AgentWorker:
                                                 self._current_progress["phase"] = "tool_use"
                                                 self._current_progress["message"] = f"Using {_short_tool_name(tool_name) or tool_name}"
                                                 self._current_progress["last_tool"] = tool_name
+                                                self._current_progress["current_tool"] = tool_name
                                                 tool_names = self._current_progress.setdefault("tool_names", [])
                                                 if isinstance(tool_names, list) and len(tool_names) < 200:
                                                     tool_names.append(tool_name)
@@ -1815,11 +1928,17 @@ class AgentWorker:
                                                     tool_records.append(
                                                         {
                                                             "name": tool_name,
+                                                            "tool_use_id": item.get("id"),
                                                             "input": item.get("input") or {},
+                                                            "success": None,
+                                                            "error": None,
+                                                            "started_at": time.time(),
                                                         }
                                                     )
                                                 # Strip MCP prefix: mcp__playwright-test__browser_click -> browser_click
                                                 short_name = _short_tool_name(tool_name)
+                                                self._current_progress["last_tool_label"] = short_name
+                                                self._current_progress["current_tool_label"] = short_name
                                                 if tool_name.startswith("mcp__") and short_name.startswith("browser_"):
                                                     self._current_progress["browser_tool_calls"] += 1
                                                     event_type = "browser_action"
@@ -1836,6 +1955,9 @@ class AgentWorker:
                                                     payload={
                                                         "tool_name": tool_name,
                                                         "short_name": short_name,
+                                                        "tool_label": short_name,
+                                                        "current_tool": tool_name,
+                                                        "current_tool_label": short_name,
                                                         "input": item.get("input") or {},
                                                     },
                                                 )
@@ -1848,6 +1970,9 @@ class AgentWorker:
                                                     payload={
                                                         "tool_name": tool_name,
                                                         "short_name": short_name,
+                                                        "tool_label": short_name,
+                                                        "current_tool": tool_name,
+                                                        "current_tool_label": short_name,
                                                         "input": item.get("input") or {},
                                                     },
                                                 )
@@ -1861,10 +1986,34 @@ class AgentWorker:
                                                         "tool_name": tool_name,
                                                         "short_name": short_name,
                                                         "tool_label": short_name,
+                                                        "current_tool": tool_name,
+                                                        "current_tool_label": short_name,
                                                         "input": item.get("input") or {},
                                                     },
                                                 )
-                                        self._current_progress["chars"] = sum(len(c) for c in output_chunks)
+                                                self._current_progress["chars"] = sum(len(c) for c in output_chunks)
+                                        elif evt.get("type") == "user":
+                                            for item in _event_tool_results(evt):
+                                                tool_use_id = item.get("tool_use_id")
+                                                if not tool_use_id:
+                                                    continue
+                                                is_error = bool(item.get("is_error") or item.get("error"))
+                                                result_text = _tool_result_text(item.get("content"))
+                                                tool_records = self._current_progress.setdefault("tool_call_records", [])
+                                                if isinstance(tool_records, list):
+                                                    for record in reversed(tool_records):
+                                                        if not isinstance(record, dict):
+                                                            continue
+                                                        if record.get("tool_use_id") != tool_use_id:
+                                                            continue
+                                                        record["success"] = not is_error
+                                                        record["error"] = str(item.get("error") or "") if is_error else None
+                                                        record["duration_ms"] = int(
+                                                            max(0.0, (time.time() - float(record.get("started_at") or time.time())) * 1000)
+                                                        )
+                                                        record["result_preview"] = result_text[:500]
+                                                        break
+                                            self._current_progress["chars"] = sum(len(c) for c in output_chunks)
                                 except (json.JSONDecodeError, TypeError):
                                     stream_stats["parse_errors"] += 1
                                     pass
@@ -1879,6 +2028,8 @@ class AgentWorker:
                 elapsed = self._effective_elapsed_seconds(task_id, start_time)
                 if elapsed > timeout_seconds:
                     logger.warning(f"[CLI] Timeout after {elapsed:.1f}s active runtime, killing process group")
+                    if browser_recorder is not None:
+                        browser_recorder.flush_pending()
                     try:
                         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
                     except (ProcessLookupError, OSError):
@@ -1949,11 +2100,21 @@ class AgentWorker:
         stream_stats["paused_duration_seconds"] = paused_duration
         logger.info(f"[CLI] Completed in {elapsed:.1f}s, exit_code={exit_code}, collected {len(raw_output)} chars")
 
+        parsed_output = self._parse_cli_output(raw_output)
         with self._progress_lock:
             final_progress = dict(self._current_progress)
             self._last_execution_telemetry = {
                 **stream_stats,
                 **(browser_recorder.telemetry() if browser_recorder is not None else {}),
+                **build_agent_token_telemetry(
+                    prompt=full_prompt,
+                    output=parsed_output,
+                    stage=(owner_type or "agent_worker"),
+                    agent_type="AgentRunner",
+                    model=selected_model,
+                    model_tier=env.get("QUORVEX_LLM_ACTIVE_TIER"),
+                    provider_usage=stream_stats.get("provider_usage") if isinstance(stream_stats.get("provider_usage"), dict) else {},
+                ),
                 "tool_calls": int(final_progress.get("tool_calls", 0) or 0),
                 "browser_tool_calls": int(final_progress.get("browser_tool_calls", 0) or 0),
                 "interactions": int(final_progress.get("interactions", 0) or 0),
@@ -1963,7 +2124,7 @@ class AgentWorker:
                 "raw_output_chars": len(raw_output),
                 "cli_elapsed_seconds": elapsed,
             }
-        if owner_type == "prd_generation" and owner_id:
+        if owner_type in {"agent_run", "prd_generation"} and owner_id:
             try:
                 artifact_dir = Path(effective_cwd)
                 artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -1976,16 +2137,26 @@ class AgentWorker:
                     json.dumps(self._last_execution_telemetry, indent=2, default=str),
                     encoding="utf-8",
                 )
-                self._emit_prd_generation_event(
-                    owner_type=owner_type,
-                    owner_id=owner_id,
-                    task_id=task_id,
-                    event_type="telemetry",
-                    message="Agent telemetry artifacts captured.",
-                    payload={"telemetry": self._last_execution_telemetry},
-                )
+                if owner_type == "agent_run":
+                    self._emit_agent_run_event(
+                        owner_type=owner_type,
+                        owner_id=owner_id,
+                        task_id=task_id,
+                        event_type="telemetry",
+                        message="Agent telemetry artifacts captured.",
+                        payload={"telemetry": self._last_execution_telemetry},
+                    )
+                else:
+                    self._emit_prd_generation_event(
+                        owner_type=owner_type,
+                        owner_id=owner_id,
+                        task_id=task_id,
+                        event_type="telemetry",
+                        message="Agent telemetry artifacts captured.",
+                        payload={"telemetry": self._last_execution_telemetry},
+                    )
             except Exception as exc:
-                logger.debug("Failed to write PRD agent artifacts for task %s: %s", task_id, exc)
+                logger.debug("Failed to write agent artifacts for task %s: %s", task_id, exc)
 
         if task_id in self._cancelled_task_ids:
             self._cancelled_task_ids.discard(task_id)
@@ -2002,7 +2173,7 @@ class AgentWorker:
         else:
             logger.debug(f"[CLI] First 2000 chars:\n{raw_output[:2000]}")
 
-        return self._parse_cli_output(raw_output)
+        return parsed_output
 
     def _validate_mcp_config(self, mcp_config_path: Path, allowed_tools: list[str]) -> None:
         """Validate queued-worker MCP config before launching Claude CLI."""

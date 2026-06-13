@@ -79,6 +79,7 @@ from orchestrator.services.workflow_runner import (
     _dispatch_step,
     _build_context,
     _execute_step,
+    _render_templates_with_trace,
     _raise_if_run_controlled,
     create_workflow_run_steps,
     duplicate_workflow_definition_record,
@@ -693,6 +694,33 @@ async def test_execute_step_persists_rendered_input_and_context_snapshot():
     assert step.context_snapshot["steps"]["first"]["summary"] == "First summary"
     assert step.input_resolution[0]["reference"] == "steps.first.summary"
     assert step.output["contract_version"] == 1
+
+
+def test_workflow_interpolation_prefers_step_summary_and_truncates(monkeypatch):
+    monkeypatch.setattr("orchestrator.services.workflow_runner.WORKFLOW_INTERPOLATION_CHARS", 32)
+    context = {
+        "steps": {
+            "explore": {
+                "summary": "Short useful summary",
+                "items": ["very " * 100],
+            }
+        }
+    }
+
+    rendered, trace = _render_templates_with_trace(
+        {
+            "prompt": "Use {{ steps.explore }}",
+            "details": "Raw {{ steps.explore.items }}",
+            "exact": "{{ steps.explore }}",
+        },
+        context,
+    )
+
+    assert rendered["prompt"] == "Use Short useful summary"
+    assert "very" in rendered["details"]
+    assert len(rendered["details"]) < 50
+    assert rendered["exact"] == context["steps"]["explore"]
+    assert any(item.get("truncated") for item in trace if item["reference"] == "steps.explore.items")
 
 
 @pytest.mark.asyncio

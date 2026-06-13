@@ -10,6 +10,7 @@ from sqlmodel import Session
 
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import MemoryInjectionEvent
+from orchestrator.utils.token_budget import estimate_tokens
 
 
 def _memory_ids_from_bundle(bundle: dict[str, Any]) -> list[str]:
@@ -22,6 +23,13 @@ def _memory_ids_from_bundle(bundle: dict[str, Any]) -> list[str]:
             memory_id = item.get("id")
             if memory_id and memory_id not in ids:
                 ids.append(str(memory_id))
+    retrieved = bundle.get("retrieved_knowledge") or {}
+    for item in retrieved.get("citations", []) or []:
+        if item.get("source") != "agent_memories":
+            continue
+        memory_id = item.get("id")
+        if memory_id and memory_id not in ids:
+            ids.append(str(memory_id))
     return ids
 
 
@@ -46,7 +54,11 @@ def _ranking_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
 def _diagnostics_from_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
     if "unified" in bundle and isinstance(bundle.get("unified"), dict):
         bundle = bundle["unified"]
-    return bundle.get("diagnostics") if isinstance(bundle.get("diagnostics"), dict) else {}
+    diagnostics = bundle.get("diagnostics") if isinstance(bundle.get("diagnostics"), dict) else {}
+    retrieved = bundle.get("retrieved_knowledge") if isinstance(bundle.get("retrieved_knowledge"), dict) else {}
+    if retrieved.get("diagnostics"):
+        diagnostics = {**diagnostics, "retrieved_knowledge": retrieved.get("diagnostics")}
+    return diagnostics
 
 
 def record_memory_injection(
@@ -86,7 +98,13 @@ def record_memory_injection(
         if diagnostics:
             event_extra.setdefault("candidate_count", diagnostics.get("candidate_count", 0))
             event_extra.setdefault("diagnostic_warnings", diagnostics.get("warnings") or [])
+            retrieved = diagnostics.get("retrieved_knowledge") if isinstance(diagnostics.get("retrieved_knowledge"), dict) else {}
+            if retrieved:
+                event_extra.setdefault("retriever_name", retrieved.get("retriever"))
+                event_extra.setdefault("retrieved_selected_count", retrieved.get("selected_count"))
+                event_extra.setdefault("retrieved_candidate_count", retrieved.get("candidate_count"))
         event_extra.setdefault("context_characters", len(context_text or ""))
+        event_extra.setdefault("context_tokens_estimated", estimate_tokens(context_text))
         event = MemoryInjectionEvent(
             project_id=project_id,
             actor_type=actor_type,

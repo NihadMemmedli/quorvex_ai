@@ -146,6 +146,85 @@ class TestRunEndpoints:
         response = client.post("/runs/nonexistent-run-id/stop")
         assert response.status_code == 404
 
+    def test_get_active_run_status_wins_over_failed_validation(self, client):
+        """GET /runs/{id} should keep active DB status despite stale validation failure."""
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import TestRun as DBTestRun
+
+        run_id = f"active-validation-precedence-{uuid4()}"
+
+        with Session(engine) as session:
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="active-validation-precedence.md",
+                    status="running",
+                    created_at=datetime.utcnow(),
+                    test_name="Active validation precedence",
+                )
+            )
+            session.commit()
+
+        try:
+            run_dir = main_module.RUNS_DIR / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "validation.json").write_text(json.dumps({"status": "failed"}))
+
+            response = client.get(f"/runs/{run_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "running"
+            assert data["effective_status"] == "running"
+            assert data["validation"]["status"] == "failed"
+        finally:
+            shutil.rmtree(main_module.RUNS_DIR / run_id, ignore_errors=True)
+            with Session(engine) as session:
+                run = session.get(DBTestRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
+
+    def test_get_completed_run_uses_failed_validation_status(self, client):
+        """GET /runs/{id} should use validation failure once the DB run is finalized."""
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import TestRun as DBTestRun
+
+        run_id = f"completed-validation-precedence-{uuid4()}"
+
+        with Session(engine) as session:
+            session.add(
+                DBTestRun(
+                    id=run_id,
+                    spec_name="completed-validation-precedence.md",
+                    status="completed",
+                    created_at=datetime.utcnow(),
+                    completed_at=datetime.utcnow(),
+                    test_name="Completed validation precedence",
+                )
+            )
+            session.commit()
+
+        try:
+            run_dir = main_module.RUNS_DIR / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "validation.json").write_text(json.dumps({"status": "failed"}))
+
+            response = client.get(f"/runs/{run_id}")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "completed"
+            assert data["effective_status"] == "failed"
+            assert data["validation"]["status"] == "failed"
+        finally:
+            shutil.rmtree(main_module.RUNS_DIR / run_id, ignore_errors=True)
+            with Session(engine) as session:
+                run = session.get(DBTestRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
+
 
 class TestAgentDefinitionEndpoints:
     """Test UI-created custom agent definition endpoints."""
@@ -424,6 +503,67 @@ class TestAgentDefinitionEndpoints:
 
 class TestAgentRunControlEndpoints:
     """Test autonomous agent pause/resume API endpoints."""
+
+    def test_get_agent_run_merges_and_normalizes_live_queue_progress(self, client, monkeypatch):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+
+        run_id = f"agent-live-progress-{uuid4()}"
+        task_id = f"agent-task-{uuid4()}"
+
+        class FakeQueue:
+            async def connect(self):
+                return None
+
+            async def get_task_progress(self, value: str):
+                assert value == task_id
+                return {
+                    "phase": "tool_use",
+                    "last_tool": "mcp__playwright__browser_click",
+                    "tool_calls": "3",
+                    "browser_tool_calls": "2",
+                    "interactions": "2",
+                    "message": "Clicking checkout",
+                }
+
+        monkeypatch.setattr("orchestrator.services.agent_queue.get_agent_queue", lambda: FakeQueue())
+
+        with Session(engine) as session:
+            run = AgentRun(
+                id=run_id,
+                agent_type="custom",
+                status="running",
+                agent_task_id=task_id,
+                config_json='{"prompt":"inspect"}',
+            )
+            run.progress = {
+                "phase": "queued",
+                "tool_calls": 0,
+                "browser_tool_calls": 0,
+                "message": "Queued",
+            }
+            session.add(run)
+            session.commit()
+
+        try:
+            response = client.get(f"/api/agents/runs/{run_id}")
+            assert response.status_code == 200
+            progress = response.json()["progress"]
+            assert progress["phase"] == "tool_use"
+            assert progress["message"] == "Clicking checkout"
+            assert progress["tool_calls"] == 3
+            assert progress["browser_tool_calls"] == 2
+            assert progress["interactions"] == 2
+            assert progress["last_tool"] == "mcp__playwright__browser_click"
+            assert progress["current_tool"] == "mcp__playwright__browser_click"
+            assert progress["last_tool_label"] == "browser_click"
+            assert progress["current_tool_label"] == "browser_click"
+        finally:
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
 
     def test_cancel_run_before_task_exists(self, client):
         from orchestrator.api.db import engine
@@ -1516,6 +1656,71 @@ class TestQueueEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "running_count" in data or "running" in data
+
+    def test_agent_queue_status_excludes_stale_running_tasks(
+        self, client, monkeypatch
+    ):
+        """GET /api/agents/queue-status should count only live running tasks as active."""
+        import orchestrator.api.main as main_module
+        import orchestrator.services.agent_queue as agent_queue_module
+
+        class FakeQueue:
+            async def connect(self):
+                return None
+
+            async def get_metrics(self):
+                return {
+                    "queue_length": 0,
+                    "running": 1,
+                    "workers_alive": 2,
+                    "stale_running": 1,
+                    "oldest_queued_age_seconds": None,
+                    "by_status": {"running": 1},
+                }
+
+            async def get_worker_health(self):
+                return {
+                    "worker_count": 2,
+                    "alive_tasks": 0,
+                }
+
+            async def get_running_task_summaries(self):
+                return [
+                    {
+                        "id": "agent-stale-running",
+                        "status": "running",
+                        "heartbeat_alive": False,
+                        "live": False,
+                        "orphaned": True,
+                    }
+                ]
+
+        class FakeBrowserPool:
+            async def get_status(self):
+                return {
+                    "running": 0,
+                    "max_browsers": 3,
+                    "available": 3,
+                    "by_type": {"agent": 0},
+                }
+
+        monkeypatch.setattr(agent_queue_module, "REDIS_AVAILABLE", True)
+        monkeypatch.setattr(agent_queue_module, "should_use_agent_queue", lambda: True)
+        monkeypatch.setattr(agent_queue_module, "get_agent_queue", lambda: FakeQueue())
+        monkeypatch.setattr(main_module, "BROWSER_POOL", FakeBrowserPool())
+
+        response = client.get("/api/agents/queue-status")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["mode"] == "redis"
+        assert data["active"] == 0
+        assert data["raw_running"] == 1
+        assert data["running_tasks"] == []
+        assert data["stale_running"] == 1
+        assert data["orphaned_tasks"] == 1
+        assert data["workers_busy"] == 0
+        assert data["workers_idle"] == 2
 
 
 class TestDashboardEndpoints:

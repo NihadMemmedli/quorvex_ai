@@ -47,6 +47,7 @@ from orchestrator.api.main import (
     _resolve_playwright_chromium_executable,
     _signal_agent_run_temporal,
     _start_agent_run_temporal_or_fail,
+    retry_agent_run,
 )
 from orchestrator.api.models_db import AgentRun, AgentRunEvent, DomainJob
 from orchestrator.api.requirements import get_bulk_generate_job_status, get_generate_job_status
@@ -1315,6 +1316,61 @@ def test_agent_run_temporal_activity_records_started_metadata():
         _cleanup_run(run_id)
 
 
+@pytest.mark.asyncio
+async def test_retry_agent_run_creates_linked_claude_sdk_run(monkeypatch):
+    run_id = "agent-temporal-retry-source"
+    created_workflows: list[str] = []
+    _ensure_tables()
+    _cleanup_run(run_id)
+
+    async def fake_start_agent_run_temporal_or_fail(run, session):
+        run.temporal_workflow_id = f"agent-run-{run.id}"
+        run.temporal_run_id = "temporal-retry-run"
+        session.add(run)
+        session.commit()
+        created_workflows.append(run.id)
+
+    monkeypatch.setattr(main_module, "_start_agent_run_temporal_or_fail", fake_start_agent_run_temporal_or_fail)
+
+    retry_run_id = None
+    try:
+        with Session(engine) as session:
+            source = AgentRun(
+                id=run_id,
+                agent_type="exploratory",
+                runtime="claude_sdk",
+                status="failed",
+                config_json=json.dumps(
+                    {
+                        "url": "https://example.com",
+                        "runtime": "claude_sdk",
+                        "browser_auth_session_id": "session-1",
+                    }
+                ),
+            )
+            source.result = {"error": "zero evidence"}
+            session.add(source)
+            session.commit()
+
+            response = await retry_agent_run(run_id, session=session, current_user=None)
+            retry_run_id = response["run_id"]
+
+            session.refresh(source)
+            retry_run = session.get(AgentRun, retry_run_id)
+            assert source.status == "failed"
+            assert retry_run is not None
+            assert retry_run.status == "queued"
+            assert retry_run.runtime == "claude_sdk"
+            assert retry_run.config["retry_of"] == run_id
+            assert retry_run.config["source_run_id"] == run_id
+            assert retry_run.config["browser_auth_session_id"] == "session-1"
+            assert created_workflows == [retry_run_id]
+    finally:
+        _cleanup_run(run_id)
+        if retry_run_id:
+            _cleanup_run(retry_run_id)
+
+
 def test_agent_run_control_activity_updates_status():
     run_id = "agent-temporal-control"
     _create_run(run_id, status="running")
@@ -1437,6 +1493,55 @@ async def test_exploratory_background_marks_zero_evidence_parse_fallback_failed(
 
 
 @pytest.mark.asyncio
+async def test_exploratory_background_marks_runtime_auth_failed(monkeypatch):
+    run_id = "agent-exploratory-runtime-auth"
+    _ensure_tables()
+    _cleanup_run(run_id)
+    with Session(engine) as session:
+        run = AgentRun(
+            id=run_id,
+            agent_type="exploratory",
+            status="running",
+            config_json='{"url":"https://example.com","project_id":"default"}',
+        )
+        session.add(run)
+        session.commit()
+
+    from agents.exploratory_agent import ExploratoryAgent
+
+    async def fake_run(self, config: dict):
+        return {
+            "summary": "Claude SDK runtime is not authenticated. Add an API key in Settings or run Claude login in the container.",
+            "failure_reason": "runtime_auth_failed",
+            "action_trace": [],
+            "discovered_flow_summaries": [],
+            "total_flows_discovered": 0,
+        }
+
+    monkeypatch.setattr(ExploratoryAgent, "run", fake_run)
+
+    try:
+        await main_module.execute_agent_background(
+            run_id,
+            "exploratory",
+            {"url": "https://example.com", "project_id": "default"},
+        )
+
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            assert run.status == "failed"
+            assert run.completed_at is not None
+            assert run.result["failure_reason"] == "runtime_auth_failed"
+            assert run.progress["status"] == "failed"
+            assert "Claude SDK runtime is not authenticated" in run.progress["message"]
+        event = _latest_event(run_id, "error")
+        assert event is not None
+        assert "Claude SDK runtime is not authenticated" in event.message
+    finally:
+        _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
 async def test_execute_agent_run_defaults_to_direct_execution_for_temporal_activity(monkeypatch):
     run_id = "agent-temporal-direct-execution"
     _ensure_tables()
@@ -1544,12 +1649,15 @@ async def test_execute_agent_run_reattaches_existing_agent_task(monkeypatch):
             return None
 
         async def wait_for_result(
-            self, task_id: str, timeout: int, poll_interval: float
+            self, task_id: str, timeout: int, poll_interval: float, on_progress=None
         ):
             assert task_id == "agent-task-existing"
             assert timeout == 12 * 60 * 60
             assert poll_interval == 1.0
-            return "reattached result"
+            return '```json\n{"structured_report":{"summary":"reattached result","scope":"inspect","findings":[],"test_ideas":[],"requirements":[],"evidence":[],"pages_checked":[],"follow_up_actions":[]}}\n```'
+
+        async def get_task(self, task_id: str):
+            return types.SimpleNamespace(telemetry={})
 
     monkeypatch.setattr(
         "orchestrator.services.agent_queue.get_agent_queue", lambda: FakeQueue()
@@ -1562,7 +1670,75 @@ async def test_execute_agent_run_reattaches_existing_agent_task(monkeypatch):
         with Session(engine) as session:
             run = session.get(AgentRun, run_id)
             assert run.status == "completed"
-            assert run.result["output"] == "reattached result"
+            assert run.result["structured_report"]["summary"] == "reattached result"
+            assert run.result["contract_status"] in {"valid", "repaired"}
+        assert _latest_event(run_id, "complete") is not None
+    finally:
+        _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_execute_agent_run_reattach_persists_queue_progress(monkeypatch):
+    run_id = "agent-temporal-reattach-progress"
+    _ensure_tables()
+    _cleanup_run(run_id)
+    with Session(engine) as session:
+        run = AgentRun(
+            id=run_id,
+            agent_type="custom",
+            status="running",
+            agent_task_id="agent-task-progress",
+            config_json='{"prompt":"inspect"}',
+        )
+        run.progress = {"phase": "queued", "message": "Queued"}
+        session.add(run)
+        session.commit()
+
+    class FakeQueue:
+        async def connect(self):
+            return None
+
+        async def wait_for_result(
+            self, task_id: str, timeout: int, poll_interval: float, on_progress=None
+        ):
+            assert task_id == "agent-task-progress"
+            assert on_progress is not None
+            on_progress(
+                {
+                    "phase": "tool_use",
+                    "last_tool": "mcp__playwright__browser_click",
+                    "tool_calls": 3,
+                    "browser_tool_calls": 2,
+                    "interactions": 2,
+                    "message": "Clicking checkout",
+                }
+            )
+            return '```json\n{"structured_report":{"summary":"reattached result","scope":"inspect","findings":[],"test_ideas":[],"requirements":[],"evidence":[],"pages_checked":[],"follow_up_actions":[]}}\n```'
+
+        async def get_task(self, task_id: str):
+            return types.SimpleNamespace(telemetry={})
+
+    monkeypatch.setattr(
+        "orchestrator.services.agent_queue.get_agent_queue", lambda: FakeQueue()
+    )
+
+    try:
+        result = await execute_agent_run({"run_id": run_id})
+
+        assert result["status"] == "completed"
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            assert run.status == "completed"
+            assert run.progress["phase"] == "completed"
+            assert run.progress["status"] == "completed"
+            assert run.progress["tool_calls"] == 3
+            assert run.progress["browser_tool_calls"] == 2
+            assert run.progress["interactions"] == 2
+            assert run.progress["last_tool"] == "mcp__playwright__browser_click"
+            assert run.progress["current_tool"] == "mcp__playwright__browser_click"
+            assert run.progress["last_tool_label"] == "browser_click"
+            assert run.progress["current_tool_label"] == "browser_click"
+            assert run.progress["recent_tools"][-1]["label"] == "browser_click"
         assert _latest_event(run_id, "complete") is not None
     finally:
         _cleanup_run(run_id)

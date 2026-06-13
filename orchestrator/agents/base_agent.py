@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,10 @@ except ImportError:
 
 # Path to bundled Claude CLI
 CLAUDE_CLI_PATH = "/usr/local/lib/python3.10/dist-packages/claude_agent_sdk/_bundled/claude"
+RUNTIME_MODEL_TIERS = {"light", "standard", "deep", "tool_deep", "chat", "embedding"}
+CLAUDE_AUTH_FAILURE_MESSAGE = (
+    "Claude SDK runtime is not authenticated. Add an API key in Settings or run Claude login in the container."
+)
 
 # Import agent queue for Redis-based execution
 try:
@@ -156,14 +161,213 @@ class _QueryAccumulator:
         self.content = ""
 
     def add_content(self, content):
-        # Handle both string and list content from SDK
+        # Handle both string and list content from SDK. Keep only text blocks so
+        # partial output recovery does not stringify tool-use dataclasses.
         if isinstance(content, list):
-            self.content += "".join(str(c) for c in content)
+            self.content += "".join(_content_block_text(c) for c in content)
         else:
             self.content += str(content)
 
     def get_content(self) -> str:
         return self.content
+
+
+def _sdk_field(item: Any, name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(name, default)
+    return getattr(item, name, default)
+
+
+def _sdk_message_type(message: Any) -> str:
+    msg_type = str(_sdk_field(message, "type", "") or "")
+    if msg_type:
+        return msg_type
+    class_name = type(message).__name__.lower()
+    if class_name.endswith("message"):
+        class_name = class_name[: -len("message")]
+    return class_name or "unknown"
+
+
+def _sdk_block_type(block: Any) -> str:
+    block_type = str(_sdk_field(block, "type", "") or "")
+    if block_type:
+        return block_type
+    class_name = type(block).__name__.lower()
+    if class_name.endswith("block"):
+        class_name = class_name[: -len("block")]
+    mapping = {
+        "text": "text",
+        "tooluse": "tool_use",
+        "toolresult": "tool_result",
+        "thinking": "thinking",
+    }
+    return mapping.get(class_name, class_name)
+
+
+def _sdk_content_items(message: Any) -> list[Any]:
+    payload = _sdk_field(message, "message", None)
+    content = _sdk_field(message, "content", None)
+    if content is None and payload is not None:
+        content = _sdk_field(payload, "content", None)
+    if isinstance(content, list):
+        return content
+    if isinstance(content, dict):
+        return [content]
+    return []
+
+
+def _content_block_text(block: Any) -> str:
+    if _sdk_block_type(block) == "text":
+        return str(_sdk_field(block, "text", "") or "")
+    if isinstance(block, str):
+        return block
+    return ""
+
+
+def _tool_result_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        if content.get("type") == "text":
+            return str(content.get("text") or "")
+        for key in ("content", "text", "result"):
+            if key in content:
+                text = _tool_result_text(content.get(key))
+                if text:
+                    return text
+        return ""
+    if isinstance(content, list):
+        return "\n".join(part for part in (_tool_result_text(item) for item in content) if part)
+    return str(content)
+
+
+def _safe_dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+class _SdkToolTelemetry:
+    """Collect Claude SDK tool_use/tool_result blocks into persisted records."""
+
+    def __init__(self):
+        self.records: list[dict[str, Any]] = []
+        self.pending_by_id: dict[str, dict[str, Any]] = {}
+        self.message_count = 0
+        self.assistant_messages = 0
+        self.user_messages = 0
+        self.result_messages = 0
+        self.text_blocks = 0
+        self.session_id: str | None = None
+        self.total_cost_usd: float | None = None
+        self.stop_reason: str | None = None
+        self.api_error_status: int | None = None
+        self.provider_usage: dict[str, Any] = {}
+
+    def observe_message(self, message: Any) -> None:
+        self.message_count += 1
+        msg_type = _sdk_message_type(message)
+        if msg_type == "assistant":
+            self.assistant_messages += 1
+        elif msg_type == "user":
+            self.user_messages += 1
+        elif msg_type == "result":
+            self.result_messages += 1
+
+        for block in _sdk_content_items(message):
+            block_type = _sdk_block_type(block)
+            if block_type == "text":
+                self.text_blocks += 1
+            elif block_type == "tool_use":
+                self.observe_tool_use(block)
+            elif block_type == "tool_result":
+                self.observe_tool_result(block)
+
+        if msg_type == "tool_use":
+            self.observe_tool_use(message)
+        elif msg_type == "tool_result":
+            self.observe_tool_result(message)
+        elif msg_type == "text":
+            self.text_blocks += 1
+
+        for source, target in (
+            ("session_id", "session_id"),
+            ("total_cost_usd", "total_cost_usd"),
+            ("stop_reason", "stop_reason"),
+            ("api_error_status", "api_error_status"),
+        ):
+            value = _sdk_field(message, source, None)
+            if value is not None:
+                setattr(self, target, value)
+        usage = _sdk_field(message, "usage", None)
+        if isinstance(usage, dict):
+            self.provider_usage.update(usage)
+
+    def observe_tool_use(self, item: Any) -> None:
+        tool_name = str(_sdk_field(item, "name", "") or "")
+        if not tool_name:
+            return
+        tool_use_id = str(_sdk_field(item, "id", "") or f"{tool_name}-{time.time_ns()}")
+        record = {
+            "name": tool_name,
+            "tool_use_id": tool_use_id,
+            "input": _safe_dict(_sdk_field(item, "input", None)),
+            "success": None,
+            "error": None,
+            "started_at": time.time(),
+            "timestamp": datetime.now().isoformat(),
+        }
+        self.records.append(record)
+        self.pending_by_id[tool_use_id] = record
+
+    def observe_tool_result(self, item: Any) -> None:
+        tool_use_id = str(_sdk_field(item, "tool_use_id", "") or "")
+        if not tool_use_id:
+            return
+        record = self.pending_by_id.pop(tool_use_id, None)
+        if record is None:
+            return
+        is_error = bool(_sdk_field(item, "is_error", False) or _sdk_field(item, "error", None))
+        result_text = _tool_result_text(_sdk_field(item, "content", None))
+        record["success"] = not is_error
+        record["error"] = result_text[:500] if is_error else None
+        record["duration_ms"] = int(max(0.0, (time.time() - float(record.get("started_at") or time.time())) * 1000))
+        record["result_preview"] = result_text[:500]
+
+    def diagnostics(self, *, output: str = "") -> dict[str, Any]:
+        finalized_records: list[dict[str, Any]] = []
+        for record in self.records:
+            item = dict(record)
+            item.pop("started_at", None)
+            if item.get("success") is None:
+                item["success"] = False
+                item["error"] = item.get("error") or "Tool result was not observed before the agent stopped."
+            finalized_records.append(item)
+
+        browser_tool_calls = [
+            record
+            for record in finalized_records
+            if str(record.get("name") or "").rsplit("__", 1)[-1].startswith("browser_")
+        ]
+        successful_browser_tool_calls = [record for record in browser_tool_calls if record.get("success")]
+        return {
+            "runtime": "claude_sdk",
+            "messages_received": self.message_count,
+            "assistant_messages": self.assistant_messages,
+            "user_messages": self.user_messages,
+            "result_messages": self.result_messages,
+            "text_blocks_received": self.text_blocks,
+            "tool_calls": len(finalized_records),
+            "browser_tool_calls": len(browser_tool_calls),
+            "successful_browser_tool_calls": len(successful_browser_tool_calls),
+            "tool_call_records": finalized_records,
+            "session_id": self.session_id,
+            "total_cost_usd": self.total_cost_usd,
+            "stop_reason": self.stop_reason,
+            "api_error_status": self.api_error_status,
+            "provider_usage": self.provider_usage,
+            "raw_output_chars": len(output or ""),
+        }
 
 
 class BaseAgent:
@@ -184,6 +388,7 @@ class BaseAgent:
         self.owner_type: str | None = None
         self.owner_id: str | None = None
         self.owner_label: str | None = None
+        self.last_agent_diagnostics: dict[str, Any] = {}
 
     def _agent_memory_project_id(self) -> str | None:
         return os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID")
@@ -283,6 +488,34 @@ class BaseAgent:
         if tool_config.get("tools") == [] or tool_config.get("allowed_tools") == []:
             return "dontAsk"
         return "bypassPermissions"
+
+    def _runtime_model_tier(self) -> str:
+        tier = os.environ.get("QUORVEX_RUN_MODEL_TIER") or "tool_deep"
+        return tier if tier in RUNTIME_MODEL_TIERS else "tool_deep"
+
+    def _refresh_runtime_settings(self, *, model_tier: str | None = None):
+        """Refresh DB-backed runtime settings and apply Claude SDK env aliases."""
+        try:
+            from orchestrator.api import settings as settings_api
+            from orchestrator.services.ai_runtime_config import apply_runtime_env_aliases
+        except ImportError:
+            from api import settings as settings_api
+            from services.ai_runtime_config import apply_runtime_env_aliases
+
+        tier = model_tier if model_tier in RUNTIME_MODEL_TIERS else self._runtime_model_tier()
+        env_vars = settings_api.runtime_env_vars()
+        settings_api._apply_runtime_settings(env_vars)
+        selection = apply_runtime_env_aliases(env_vars, tier=tier)
+        os.environ["QUORVEX_RUN_MODEL_TIER"] = tier
+        return env_vars, selection
+
+    def _preflight_claude_sdk_auth(self, selection) -> None:
+        runtime = str(getattr(selection, "runtime", "") or os.environ.get("QUORVEX_AGENT_RUNTIME") or "claude_sdk")
+        if runtime != "claude_sdk":
+            return
+        if getattr(selection, "api_key", "") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            return
+        raise RuntimeError(CLAUDE_AUTH_FAILURE_MESSAGE)
 
     async def _query_agent_direct(self, prompt: str, system_prompt: str = None, timeout_seconds: int = None) -> Any:
         """Query the agent using subprocess.run in a thread pool executor.
@@ -569,20 +802,14 @@ echo "done" > {done_file}
             except Exception as diag_err:
                 logger.debug(f"[QUEUE] Pre-enqueue diagnostics failed (non-fatal): {diag_err}")
 
-            try:
-                from orchestrator.services.ai_runtime_config import apply_runtime_env_aliases
-            except ImportError:
-                from services.ai_runtime_config import apply_runtime_env_aliases
-
-            tier = os.environ.get("QUORVEX_RUN_MODEL_TIER", "standard")
-            if tier not in {"light", "standard", "deep", "tool_deep", "chat", "embedding"}:
-                tier = "standard"
-            apply_runtime_env_aliases(tier=tier)
+            env_settings, selection = self._refresh_runtime_settings()
+            self._preflight_claude_sdk_auth(selection)
 
             # Collect API credentials to forward to the worker process
             api_env_keys = [
                 "QUORVEX_LLM_PROVIDER",
                 "QUORVEX_AGENT_RUNTIME",
+                "QUORVEX_ASSISTANT_RUNTIME",
                 "QUORVEX_LLM_API_KEY",
                 "QUORVEX_LLM_API_KEYS",
                 "QUORVEX_LLM_BASE_URL",
@@ -598,13 +825,34 @@ echo "done" > {done_file}
                 "CLAUDE_CODE_OAUTH_TOKEN",
                 "ANTHROPIC_BASE_URL",
                 "ANTHROPIC_MODEL",
+                "ANTHROPIC_CHAT_MODEL",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL",
                 "ANTHROPIC_DEFAULT_SONNET_MODEL",
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "OPENAI_BASE_URL",
+                "OPENAI_API_KEY",
+                "OPENAI_MODEL_ID",
+                "OPENAI_CHAT_MODEL",
                 "API_TIMEOUT_MS",
                 "QUORVEX_TEST_DATA_FILE",
             ]
             env_vars = {k: os.environ[k] for k in api_env_keys if os.environ.get(k)}
+            for key, value in env_settings.items():
+                if key in api_env_keys and value:
+                    env_vars[key] = value
+            for key, value in {
+                "QUORVEX_AGENT_RUNTIME": selection.runtime,
+                "QUORVEX_LLM_PROVIDER": selection.provider,
+                "QUORVEX_LLM_API_KEY": selection.api_key,
+                "QUORVEX_LLM_BASE_URL": selection.base_url,
+                "ANTHROPIC_AUTH_TOKEN": selection.api_key,
+                "ANTHROPIC_API_KEY": selection.api_key,
+                "ANTHROPIC_BASE_URL": selection.base_url,
+                "ANTHROPIC_MODEL": selection.model,
+                "QUORVEX_RUN_MODEL_TIER": selection.tier,
+            }.items():
+                if value:
+                    env_vars[key] = value
             tool_config = self._resolved_tool_config()
 
             # Enqueue the task
@@ -651,6 +899,12 @@ echo "done" > {done_file}
                 poll_interval=0.5,
                 on_progress=_on_progress,
             )
+            try:
+                completed_task = await queue.get_task(task_id)
+                self.last_agent_diagnostics = dict(completed_task.telemetry or {}) if completed_task else {}
+            except Exception as diag_err:
+                logger.debug(f"[QUEUE] Failed to load completed task telemetry: {diag_err}")
+                self.last_agent_diagnostics = {}
 
             logger.info(f"[QUEUE] Task {task_id} completed, result length: {len(result) if result else 0}")
             return result
@@ -709,23 +963,37 @@ echo "done" > {done_file}
 
         # Original SDK-based implementation (kept for reference)
         accumulator = _QueryAccumulator()
+        sdk_telemetry = _SdkToolTelemetry()
+
+        def _persist_sdk_telemetry(cwd: str, output: str) -> None:
+            diagnostics = sdk_telemetry.diagnostics(output=output)
+            self.last_agent_diagnostics = diagnostics
+            try:
+                artifact_dir = Path(cwd)
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                if self.owner_type in {"agent_run", "prd_generation"} or self.agent_cwd:
+                    (artifact_dir / "raw_output.txt").write_text(output or "", encoding="utf-8")
+                    (artifact_dir / "tool_calls.json").write_text(
+                        json.dumps(diagnostics.get("tool_call_records") or [], indent=2, default=str),
+                        encoding="utf-8",
+                    )
+                    (artifact_dir / "agent_summary.json").write_text(
+                        json.dumps(diagnostics, indent=2, default=str),
+                        encoding="utf-8",
+                    )
+            except Exception as exc:
+                logger.warning("[SDK DEBUG] Failed to persist SDK telemetry artifacts: %s", exc)
 
         async def _do_query():
             try:
-                try:
-                    from orchestrator.services.ai_runtime_config import apply_runtime_env_aliases
-                except ImportError:
-                    from services.ai_runtime_config import apply_runtime_env_aliases
-
-                tier = os.environ.get("QUORVEX_RUN_MODEL_TIER", "standard")
-                if tier not in {"light", "standard", "deep", "tool_deep", "chat", "embedding"}:
-                    tier = "standard"
-                selection = apply_runtime_env_aliases(tier=tier)
+                _, selection = self._refresh_runtime_settings()
+                self._preflight_claude_sdk_auth(selection)
 
                 # Pre-flight diagnostics - use logger to ensure visibility in Docker logs
                 cwd = self.agent_cwd or os.getcwd()
                 original_cwd = os.getcwd()
                 if self.agent_cwd:
+                    Path(cwd).mkdir(parents=True, exist_ok=True)
                     os.chdir(cwd)
                 mcp_path = Path(cwd) / ".mcp.json"
                 logger.info("[SDK DEBUG] Pre-flight check:")
@@ -785,6 +1053,7 @@ echo "done" > {done_file}
 
                 try:
                     async for message in query(prompt=full_prompt, options=options):
+                        sdk_telemetry.observe_message(message)
                         message_count += 1
                         if first_message_time is None:
                             first_message_time = datetime.now()
@@ -809,7 +1078,9 @@ echo "done" > {done_file}
                         if hasattr(message, "result"):
                             result_preview = str(message.result)[:200] if message.result else "None"
                             logger.info(f"[SDK DEBUG] Got result: {result_preview}...")
-                            return message.result
+                            result_text = message.result
+                            _persist_sdk_telemetry(cwd, str(result_text or ""))
+                            return result_text
                         if hasattr(message, "content"):
                             # Accumulate streaming content for timeout recovery
                             accumulator.add_content(message.content)
@@ -821,7 +1092,9 @@ echo "done" > {done_file}
                 logger.info(
                     f"[SDK DEBUG] Loop ended, returning accumulated content ({len(accumulator.get_content())} chars)"
                 )
-                return accumulator.get_content()
+                result_text = accumulator.get_content()
+                _persist_sdk_telemetry(cwd, result_text)
+                return result_text
 
             except Exception as e:
                 if self.agent_cwd and "original_cwd" in locals():
@@ -856,10 +1129,12 @@ echo "done" > {done_file}
                     logger.info(f"Recovered {len(partial_content)} characters of partial content")
                     # Wrap in special marker so caller knows it's partial
                     result = f"__TIMEOUT_PARTIAL__\n{partial_content}"
+                    _persist_sdk_telemetry(self.agent_cwd or os.getcwd(), result)
                     self._capture_agent_memory(original_prompt, result)
                     return result
                 # Reraise if no partial content
                 logger.error("No partial content recovered, re-raising timeout")
+                _persist_sdk_telemetry(self.agent_cwd or os.getcwd(), "")
                 raise
 
         result = await _do_query()

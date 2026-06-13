@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+import re
 
 import pytest
 
@@ -131,3 +132,30 @@ def test_healer_prompt_includes_failed_test_metadata(monkeypatch):
     assert "Title: `can submit form`" in prompt
     assert "Your first MCP tool call must be `test_run`" in prompt
     assert "use `browser_resume` if it is available" in prompt
+
+
+def test_healer_prompt_uses_failed_code_frame_by_default(monkeypatch):
+    monkeypatch.delenv("MEMORY_PROJECT_ID", raising=False)
+    monkeypatch.delenv("PROJECT_ID", raising=False)
+    monkeypatch.delenv("HEALER_FULL_FILE_CONTEXT", raising=False)
+    healer = NativeHealer()
+    content = "\n".join(f"line {idx}" for idx in range(1, 120))
+
+    prompt = healer._build_healer_prompt(
+        test_file="/tmp/test.spec.ts",
+        test_content=content,
+        error_log="/tmp/test.spec.ts:80:12 Error: failed",
+    )
+
+    assert "Compact healer context" in prompt
+    assert "80: line 80" in prompt
+    assert not re.search(r"(?m)^1: line 1$", prompt)
+
+    monkeypatch.setenv("HEALER_FULL_FILE_CONTEXT", "1")
+    full_prompt = healer._build_healer_prompt(
+        test_file="/tmp/test.spec.ts",
+        test_content=content,
+        error_log="/tmp/test.spec.ts:80:12 Error: failed",
+    )
+    assert "Compact healer context" not in full_prompt
+    assert "line 1" in full_prompt

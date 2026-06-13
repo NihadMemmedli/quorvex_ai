@@ -24,6 +24,25 @@ def test_planner_prompt_instructs_seed_file_for_setup():
     assert "## Draft Playwright Script" in prompt
     assert "Do not use `page.waitForTimeout()`" in prompt
     assert "await expect(...).toBeVisible()" in prompt
+    assert "Do not call `browser_close`" in prompt
+    assert "handle browser cleanup after acceptance or final failure" in prompt
+
+
+def test_planner_prompt_normalizes_markdown_target_url():
+    planner = object.__new__(NativePlanner)
+
+    prompt = planner._build_hybrid_prompt(
+        feature_name="Trips",
+        feature_slug="trips",
+        prd_context="Users can review trips.",
+        target_url="https://pre.wetravel.to/user/my_trips?view=List`",
+        login_url=None,
+        credentials=None,
+        output_path="/tmp/trips.md",
+    )
+
+    assert "https://pre.wetravel.to/user/my_trips?view=List`" not in prompt
+    assert "https://pre.wetravel.to/user/my_trips?view=List" in prompt
 
 
 def test_planner_agent_definition_requires_seed_file():

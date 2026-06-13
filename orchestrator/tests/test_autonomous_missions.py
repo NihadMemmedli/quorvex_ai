@@ -65,13 +65,20 @@ from orchestrator.api.models_db import (
 from orchestrator.services.autonomous_activities import (
     _agent_prompt_for_work_item,
     _allowed_tools_for_work_item,
+    _assert_browser_lease_available,
     _auto_materialize_low_risk_proposals,
+    _browser_context_handoff,
     _create_findings_from_completed_work_items,
     _create_proposals_for_approved_findings,
-    _generate_pytest_content,
     _execute_agent_work_item_direct,
+    _generate_pytest_content,
     _plan_whole_app_work_items,
+    _prepare_child_browser_handoffs,
+    _record_browser_observations_for_work_item,
+    _row_has_required_evidence,
+    _validate_child_browser_handoff_contract,
     _recover_stale_work_items,
+    _validate_browser_handoff_mode,
     autonomous_health_diagnostics,
     backfill_autonomous_canonical_state,
     complete_mission_run,
@@ -138,9 +145,7 @@ def test_autonomous_work_item_prompt_includes_testdata_and_delegation_instructio
                 "### wetravel-auth.valid-user\n"
                 "- `testData.get('wetravel-auth.valid-user')` returns the resolved fixture data"
             ),
-            "env_vars": {
-                "TESTDATA_WETRAVEL_AUTH_VALID_USER_USERNAME": "user@example.com"
-            },
+            "env_vars": {"TESTDATA_WETRAVEL_AUTH_VALID_USER_USERNAME": "user@example.com"},
         },
     )
 
@@ -149,6 +154,249 @@ def test_autonomous_work_item_prompt_includes_testdata_and_delegation_instructio
     assert "TESTDATA_WETRAVEL_AUTH_VALID_USER_USERNAME" not in prompt
     assert "copy the relevant test-data ref names" in prompt
     assert "subagents do not automatically inherit" in prompt.lower()
+
+
+def test_autonomous_browser_prompt_includes_handoff_and_validation_rules(tmp_path, monkeypatch):
+    _ensure_tables()
+    monkeypatch.setattr("orchestrator.services.autonomous_activities.RUNS_DIR", tmp_path)
+    mission = AutonomousMission(
+        id="am-browser-prompt",
+        project_id="project-browser-prompt",
+        name="Browser mission",
+        mission_type="exploration",
+        status="running",
+        target_urls_json='["https://example.com"]',
+        config_json='{"runtime": "hermes"}',
+    )
+    item = AutonomousAgentWorkItem(
+        id="work-browser-prompt",
+        mission_id=mission.id,
+        project_id=mission.project_id,
+        role="explorer",
+        objective="Explore login",
+    )
+    run_dir = tmp_path / mission.id / item.id
+    run_dir.mkdir(parents=True)
+    handoff = _browser_context_handoff(
+        mission=mission,
+        item=item,
+        run_dir=run_dir,
+        runtime={"mcp_config_path": str(run_dir / ".mcp.json")},
+        allowed_tools=["mcp__playwright__browser_navigate", "mcp__playwright__browser_snapshot"],
+    )
+
+    prompt = _agent_prompt_for_work_item(mission, item, {}, browser_handoff=handoff)
+
+    assert "Current Browser Contract" in prompt
+    assert "Required First Browser Action" in prompt
+    assert "Call browser_navigate to https://example.com" in prompt
+    assert "After navigation, dialog handling" in prompt
+    assert "Parallel browser subagents must use isolated mode" in prompt
+
+
+def test_child_browser_handoff_gets_isolated_mcp_config(tmp_path, monkeypatch):
+    _ensure_tables()
+    monkeypatch.setattr("orchestrator.services.autonomous_activities.RUNS_DIR", tmp_path)
+    mission = AutonomousMission(
+        id="am-child-browser",
+        project_id="project-child-browser",
+        name="Child browser mission",
+        mission_type="exploration",
+        status="running",
+        target_urls_json='["https://example.com"]',
+        config_json='{"runtime": "hermes", "hermes_max_concurrent_children": 1}',
+    )
+    item = AutonomousAgentWorkItem(
+        id="work-child-browser",
+        mission_id=mission.id,
+        project_id=mission.project_id,
+        role="explorer",
+        objective="Explore checkout",
+    )
+
+    handoffs = _prepare_child_browser_handoffs(
+        mission=mission,
+        item=item,
+        allowed_tools=["mcp__playwright__browser_navigate"],
+        parent_auth_session_id=None,
+        parent_auth_session_name=None,
+        max_children=1,
+    )
+
+    assert len(handoffs) == 1
+    handoff = handoffs[0]
+    assert handoff["handoff_mode"] == "isolated"
+    assert handoff["strict_mcp_config"] is True
+    assert handoff["storage_state_attached"] is False
+    assert "/children/child-1/" in handoff["mcp_config_path"]
+    mcp_config = json.loads(Path(handoff["mcp_config_path"]).read_text())
+    args = mcp_config["mcpServers"]["playwright"]["args"]
+    assert "--isolated" in args
+    assert "--storage-state" not in args
+    assert "mcp__playwright__browser_navigate" in handoff["allowed_tools"]
+    assert handoff["required_first_browser_action"].startswith("Call browser_navigate")
+
+
+def test_parallel_browser_work_items_cannot_share_non_isolated_lease():
+    _ensure_tables()
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="exploration")
+        running = AutonomousAgentWorkItem(
+            id=f"amwork-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            role="explorer",
+            objective="Explore live browser",
+            status="running",
+        )
+        running.progress = {
+            "browser_context_handoff": {
+                "browser_lease": {
+                    "mode": "sequential_handoff",
+                    "lease_until": (datetime.utcnow() + timedelta(minutes=5)).isoformat(),
+                }
+            }
+        }
+        session.add(running)
+        session.commit()
+
+        with pytest.raises(RuntimeError, match="Browser lease conflict"):
+            _assert_browser_lease_available(
+                session,
+                mission_id=mission.id,
+                requested_owner_id="other-work-item",
+                mode="sequential_handoff",
+            )
+
+
+def test_sequential_browser_handoff_requires_recent_snapshot():
+    stale_item = AutonomousAgentWorkItem(
+        id="work-stale-snapshot",
+        mission_id="mission-stale-snapshot",
+        role="explorer",
+        objective="Use existing page",
+    )
+
+    with pytest.raises(RuntimeError, match="recent browser_snapshot"):
+        _validate_browser_handoff_mode(stale_item, mode="sequential_handoff")
+
+    stale_item.progress = {
+        "browser_context_handoff": {
+            "browser_lease": {"last_snapshot_at": (datetime.utcnow() - timedelta(minutes=10)).isoformat()}
+        }
+    }
+    with pytest.raises(RuntimeError, match="within the last 5 minutes"):
+        _validate_browser_handoff_mode(stale_item, mode="sequential_handoff")
+
+    stale_item.progress = {
+        "browser_context_handoff": {"browser_lease": {"last_snapshot_at": datetime.utcnow().isoformat()}}
+    }
+    _validate_browser_handoff_mode(stale_item, mode="sequential_handoff")
+
+
+def test_child_browser_contract_requires_isolated_mcp_and_evidence_tools(tmp_path):
+    mcp_config = tmp_path / ".mcp.json"
+    mcp_config.write_text(json.dumps({"mcpServers": {"playwright": {"command": "node"}}}))
+    contract = {
+        "handoff_mode": "isolated",
+        "mcp_config_path": str(mcp_config),
+        "allowed_tools": ["mcp__playwright__browser_navigate", "mcp__playwright__browser_snapshot"],
+        "required_first_browser_action": "Call browser_navigate, then call browser_snapshot before interaction.",
+    }
+
+    _validate_child_browser_handoff_contract(contract)
+
+    contract["allowed_tools"] = ["mcp__playwright__browser_navigate"]
+    with pytest.raises(RuntimeError, match="browser_snapshot"):
+        _validate_child_browser_handoff_contract(contract)
+
+
+def test_autonomous_evidence_gate_quarantines_low_evidence_rows(monkeypatch):
+    monkeypatch.setenv("AUTONOMOUS_REQUIRE_EVIDENCE", "1")
+
+    assert not _row_has_required_evidence(
+        "requirement",
+        {
+            "title": "Users can export data",
+            "acceptance_criteria": ["Export is available"],
+            "confidence": 0.5,
+        },
+    )
+    assert _row_has_required_evidence(
+        "requirement",
+        {
+            "title": "Users can save trips",
+            "evidence": {"url": "https://example.test/trips", "selector": "button Save"},
+            "confidence": 0.6,
+        },
+    )
+    assert not _row_has_required_evidence("bug", {"title": "Broken", "description": "It broke"})
+
+
+def test_autonomous_browser_observations_write_owner_metadata(monkeypatch):
+    _ensure_tables()
+    from orchestrator.memory import browser_memory as browser_memory_module
+    from orchestrator.memory.browser_memory import ExplorationMemoryService
+
+    monkeypatch.setattr(ExplorationMemoryService, "_index_page_state", lambda self, state, document: None)
+    monkeypatch.setattr(ExplorationMemoryService, "_index_element", lambda self, element, state: None)
+    monkeypatch.setattr(ExplorationMemoryService, "_project_state_to_graph", lambda self, state, elements: None)
+    monkeypatch.setattr(
+        ExplorationMemoryService,
+        "_project_transition_to_graph",
+        lambda self, transition, from_state, to_state: None,
+    )
+
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="exploration")
+        item = AutonomousAgentWorkItem(
+            id=f"amwork-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=f"amrun-{uuid4().hex[:12]}",
+            project_id=mission.project_id,
+            role="explorer",
+            objective="Explore dashboard",
+        )
+        session.add(item)
+        session.commit()
+        project_id = mission.project_id
+        mission_id = mission.id
+        item_id = item.id
+
+    result = AgentResult(
+        success=True,
+        output='{"app_map_updates":[{"url":"https://example.com/dashboard","page_title":"Dashboard","elements":{"button":["Save"]}}]}',
+        tool_calls=[
+            ToolCall(
+                name="mcp__playwright__browser_navigate",
+                timestamp=datetime.utcnow(),
+                success=True,
+                input={"url": "https://example.com/dashboard"},
+            ),
+            ToolCall(
+                name="mcp__playwright__browser_snapshot",
+                timestamp=datetime.utcnow(),
+                success=True,
+            ),
+        ],
+    )
+
+    summary = _record_browser_observations_for_work_item(
+        mission=mission,
+        item=item,
+        result=result,
+        browser_handoff={"start_url": "https://example.com", "mcp_config_path": "handoff-1"},
+    )
+
+    assert summary["states"] >= 1
+    assert summary["app_map_states"] == 1
+    with Session(browser_memory_module.engine) as session:
+        states = session.exec(select(BrowserPageState).where(BrowserPageState.project_id == project_id)).all()
+
+    assert states
+    owner_metadata = [state.canonical_json.get("owner_metadata") for state in states if state.canonical_json]
+    assert any(metadata and metadata["mission_id"] == mission_id for metadata in owner_metadata)
+    assert any(metadata and metadata["work_item_id"] == item_id for metadata in owner_metadata)
 
 
 def test_load_mission_policy_returns_durable_controls():
@@ -188,7 +436,9 @@ def test_execute_mission_iteration_creates_deduped_approval_gated_coverage_findi
     assert summary["findings_created"] == 1
     assert summary["approvals_created"] == 1
 
-    duplicate_summary = execute_mission_iteration({"mission_id": mission_id, "run_id": run_id, "workflow_id": "wf-test"})
+    duplicate_summary = execute_mission_iteration(
+        {"mission_id": mission_id, "run_id": run_id, "workflow_id": "wf-test"}
+    )
     assert duplicate_summary["findings_created"] == 0
 
     with Session(engine) as session:
@@ -206,13 +456,18 @@ def test_execute_mission_iteration_creates_deduped_approval_gated_coverage_findi
     assert mission_db.total_findings == 1
 
     with Session(engine) as session:
-        proposals = session.exec(select(AutonomousTestProposal).where(AutonomousTestProposal.mission_id == mission_id)).all()
+        proposals = session.exec(
+            select(AutonomousTestProposal).where(AutonomousTestProposal.mission_id == mission_id)
+        ).all()
 
     assert len(proposals) == 1
     assert proposals[0].approval_status == "pending"
     assert proposals[0].test_type in {"e2e", "api", "regression", "security", "accessibility", "unit"}
     assert proposals[0].suggested_file_path.startswith(("tests/generated/", "orchestrator/tests/generated/"))
-    assert "coverage" in proposals[0].generated_spec_content.lower() or "rationale" in proposals[0].generated_spec_content.lower()
+    assert (
+        "coverage" in proposals[0].generated_spec_content.lower()
+        or "rationale" in proposals[0].generated_spec_content.lower()
+    )
 
 
 def test_complete_mission_run_persists_summary():
@@ -314,7 +569,9 @@ def test_execute_mission_iteration_creates_proposal_for_approved_finding():
     assert duplicate["test_proposals_created"] == 0
 
     with Session(engine) as session:
-        proposals = session.exec(select(AutonomousTestProposal).where(AutonomousTestProposal.mission_id == mission_id)).all()
+        proposals = session.exec(
+            select(AutonomousTestProposal).where(AutonomousTestProposal.mission_id == mission_id)
+        ).all()
 
     assert len(proposals) == 1
     assert proposals[0].finding_id == finding_id
@@ -731,7 +988,9 @@ def test_approved_memory_delta_finding_generates_proposal_with_requirement_truth
         run_id = run.id
         finding_id = finding.id
 
-    summary = execute_mission_iteration({"mission_id": mission_id, "run_id": run_id, "workflow_id": "wf-approved-memory"})
+    summary = execute_mission_iteration(
+        {"mission_id": mission_id, "run_id": run_id, "workflow_id": "wf-approved-memory"}
+    )
 
     assert summary["test_proposals_created"] == 1
     with Session(engine) as session:
@@ -1091,7 +1350,9 @@ def test_execute_mission_iteration_creates_parallel_team_work_items(monkeypatch)
     assert summary["team"]["running_count"] == 2
 
     with Session(engine) as session:
-        items = session.exec(select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)).all()
+        items = session.exec(
+            select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)
+        ).all()
 
     assert {item.role for item in items} == {"surface_mapper", "requirements_analyst", "rtm_mapper"}
     assert len([item for item in items if item.status == "running"]) == 2
@@ -1128,7 +1389,9 @@ def test_execute_mission_iteration_clamps_team_parallelism_to_execution_settings
 
     try:
         run_id = create_mission_run({"mission_id": mission_id, "workflow_id": "wf-team-clamped"})
-        summary = execute_mission_iteration({"mission_id": mission_id, "run_id": run_id, "workflow_id": "wf-team-clamped"})
+        summary = execute_mission_iteration(
+            {"mission_id": mission_id, "run_id": run_id, "workflow_id": "wf-team-clamped"}
+        )
     finally:
         with Session(engine) as session:
             settings = session.get(ExecutionSettings, 1) or ExecutionSettings(id=1)
@@ -1243,13 +1506,17 @@ def test_completed_team_work_items_merge_structured_artifacts_without_duplicates
         created = _create_findings_from_completed_work_items(session, mission, run)
         requirements = session.exec(select(Requirement).where(Requirement.project_id == project_id)).all()
         rtm_entries = session.exec(select(RtmEntry).where(RtmEntry.project_id == project_id)).all()
-        proposals = session.exec(select(AutonomousTestProposal).where(AutonomousTestProposal.project_id == project_id)).all()
+        proposals = session.exec(
+            select(AutonomousTestProposal).where(AutonomousTestProposal.project_id == project_id)
+        ).all()
         findings = session.exec(select(AutonomousFinding).where(AutonomousFinding.project_id == project_id)).all()
         snapshots = session.exec(select(RtmSnapshot).where(RtmSnapshot.project_id == project_id)).all()
         app_map = session.exec(select(ApplicationMap).where(ApplicationMap.url == target_url)).first()
         merge_summaries = [
             item.result.get("structured_merge")
-            for item in session.exec(select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)).all()
+            for item in session.exec(
+                select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)
+            ).all()
         ]
 
     assert created == 1
@@ -1360,7 +1627,9 @@ def test_whole_app_planner_creates_idempotent_rtm_gap_work_items():
         run = session.get(AutonomousMissionRun, run_id)
         first = _plan_whole_app_work_items(session, mission, run)
         second = _plan_whole_app_work_items(session, mission, run)
-        items = session.exec(select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)).all()
+        items = session.exec(
+            select(AutonomousAgentWorkItem).where(AutonomousAgentWorkItem.mission_id == mission_id)
+        ).all()
 
     assert first == 1
     assert second == 0
@@ -1696,7 +1965,9 @@ def test_execute_mission_iteration_prioritizes_revision_work_items(monkeypatch):
         regular_id = regular.id
         revision_id = revision.id
 
-    summary = execute_mission_iteration({"mission_id": mission_id, "run_id": run_id, "workflow_id": "wf-revision-priority"})
+    summary = execute_mission_iteration(
+        {"mission_id": mission_id, "run_id": run_id, "workflow_id": "wf-revision-priority"}
+    )
 
     assert summary["work_items_created"] == 0
     assert summary["work_items_enqueued"] == 1
@@ -1877,13 +2148,15 @@ def test_direct_work_item_execution_emits_progress_tool_browser_and_completion_e
             context.on_task_enqueued("agent-task-1")
             context.on_progress({"phase": "running", "message": "Inspecting target page"})
             context.on_tool_use("mcp__playwright__browser_navigate", {"url": "https://example.com"})
-            context.on_progress({
-                "phase": "tool_result",
-                "message": "Navigation complete",
-                "last_tool": "mcp__playwright__browser_navigate",
-                "tool_calls": 1,
-                "browser_tool_calls": 1,
-            })
+            context.on_progress(
+                {
+                    "phase": "tool_result",
+                    "message": "Navigation complete",
+                    "last_tool": "mcp__playwright__browser_navigate",
+                    "tool_calls": 1,
+                    "browser_tool_calls": 1,
+                }
+            )
             return AgentResult(
                 success=True,
                 output="Finished browser-backed exploration.",
@@ -1902,11 +2175,14 @@ def test_direct_work_item_execution_emits_progress_tool_browser_and_completion_e
 
     monkeypatch.setattr("orchestrator.services.autonomous_activities.RUNS_DIR", tmp_path)
     monkeypatch.setattr("orchestrator.services.agent_runtimes.get_agent_runtime", lambda _runtime: FakeRuntime())
-    monkeypatch.setattr("orchestrator.utils.playwright_mcp.browser_runtime_status", lambda: {
-        "browser_runtime": "vnc",
-        "live_view_available": True,
-        "vnc_url": "ws://localhost:6080/websockify",
-    })
+    monkeypatch.setattr(
+        "orchestrator.utils.playwright_mcp.browser_runtime_status",
+        lambda: {
+            "browser_runtime": "vnc",
+            "live_view_available": True,
+            "vnc_url": "ws://localhost:6080/websockify",
+        },
+    )
 
     with Session(engine) as session:
         mission = _create_project_and_mission(session, mission_type="exploration")

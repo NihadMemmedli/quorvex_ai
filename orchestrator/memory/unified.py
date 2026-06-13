@@ -10,7 +10,6 @@ from orchestrator.api.models_db import AgentMemory
 
 from .agent_memory import get_agent_memory_service
 
-
 URL_PATTERN = re.compile(r"https?://[^\s\"'<>),]+")
 
 
@@ -114,6 +113,12 @@ class UnifiedMemoryService:
             "memory_graph": {"related_memories": [], "relationships": [], "explanations": []},
             "selector_patterns": [],
             "coverage_gaps": [],
+            "retrieved_knowledge": {
+                "items": [],
+                "citations": [],
+                "warnings": [],
+                "diagnostics": {"retriever": "unified_memory_v1"},
+            },
             "ranking": {"selected_items": [], "rejected_candidates": [], "score_summary": {}},
             "diagnostics": {"warnings": [], "candidate_count": 0},
         }
@@ -203,6 +208,7 @@ class UnifiedMemoryService:
             "candidate_count": len(selected_items) + len(rejected_candidates),
             "selected_count": len(selected_items),
         }
+        bundle["retrieved_knowledge"] = self._retrieved_knowledge(bundle, limit=limit)
         return bundle
 
     def _score_memories(
@@ -399,6 +405,95 @@ class UnifiedMemoryService:
             return items
         except Exception:
             return []
+
+    def _retrieved_knowledge(self, bundle: dict[str, Any], *, limit: int) -> dict[str, Any]:
+        """Shape existing unified retrieval into a citation-ready section.
+
+        AgenticRagService performs broader orchestration for the API/tool path.
+        This compact section lets the existing prompt builder expose typed
+        citations without a recursive dependency on that service.
+        """
+
+        items: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        for memory_type, memories in (bundle.get("agent_memories") or {}).items():
+            for memory in memories or []:
+                warning = memory.get("staleness_warning")
+                if warning:
+                    warnings.append(warning)
+                items.append(
+                    {
+                        "id": memory.get("id"),
+                        "source": "agent_memories",
+                        "title": f"{memory.get('kind')} ({memory_type})",
+                        "summary": memory.get("summary"),
+                        "score": memory.get("score"),
+                        "freshness": memory.get("last_verified_at") or memory.get("updated_at"),
+                        "warning": warning,
+                        "reason": memory.get("retrieval_reason"),
+                        "metadata": {
+                            "memory_type": memory_type,
+                            "source_type": memory.get("source_type"),
+                            "source_id": memory.get("source_id"),
+                        },
+                    }
+                )
+        for pattern in bundle.get("selector_patterns") or []:
+            selector = pattern.get("playwright_selector") or pattern.get("selector_value") or ""
+            items.append(
+                {
+                    "id": pattern.get("id") or selector,
+                    "source": "selector_patterns",
+                    "title": f"Selector pattern: {pattern.get('test_name') or pattern.get('action') or 'test'}",
+                    "summary": f"{pattern.get('action') or 'action'} {pattern.get('target') or ''}: {selector}",
+                    "score": None if pattern.get("distance") is None else round(max(0.0, 1.0 - float(pattern["distance"])), 3),
+                    "freshness": None,
+                    "warning": "Validate selector against the live page before using it.",
+                    "reason": "similar successful test pattern",
+                    "metadata": {"distance": pattern.get("distance"), "page_url": pattern.get("page_url")},
+                }
+            )
+        for gap in bundle.get("coverage_gaps") or []:
+            items.append(
+                {
+                    "id": gap.get("id") or gap.get("element_id") or gap.get("description"),
+                    "source": "coverage_gaps",
+                    "title": f"Coverage gap: {gap.get('priority') or 'medium'}",
+                    "summary": gap.get("description") or str(gap),
+                    "score": 0.65 if gap.get("priority") in {"high", "critical"} else 0.5,
+                    "freshness": None,
+                    "warning": None,
+                    "reason": "coverage gap",
+                    "metadata": {"url": gap.get("url"), "type": gap.get("type")},
+                }
+            )
+
+        def score(item: dict[str, Any]) -> float:
+            return float(item.get("score") or 0.45)
+
+        selected = sorted(items, key=score, reverse=True)[: max(1, min(limit, 12))]
+        citations = []
+        for index, item in enumerate(selected, start=1):
+            item["citation_label"] = f"M{index}"
+            citations.append(
+                {
+                    "label": item["citation_label"],
+                    "id": item.get("id"),
+                    "source": item.get("source"),
+                    "title": item.get("title"),
+                    "score": item.get("score"),
+                }
+            )
+        return {
+            "items": selected,
+            "citations": citations,
+            "warnings": list(dict.fromkeys(warnings)),
+            "diagnostics": {
+                "retriever": "unified_memory_v1",
+                "candidate_count": len(items),
+                "selected_count": len(selected),
+            },
+        }
 
 
 def get_unified_memory_service(agent_service=None) -> UnifiedMemoryService:

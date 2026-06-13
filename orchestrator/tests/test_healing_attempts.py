@@ -324,7 +324,7 @@ def test_auth_data_server_guardrail_requires_network_or_console():
     assert ok["guardrail_status"] == "passed"
 
 
-def test_assertion_removal_requires_explicit_fixme():
+def test_assertion_removal_blocks_new_fixme_without_triage_override():
     pipeline = _bare_pipeline()
     before = "test('x', async ({ page }) => { await expect(page.locator('#done')).toBeVisible(); });"
     after = "test('x', async ({ page }) => { await page.locator('#done').click(); });"
@@ -342,13 +342,23 @@ def test_assertion_removal_requires_explicit_fixme():
     assert rejected["guardrail_status"] == "failed"
     assert "assertion_preservation_or_explicit_test_fixme" in rejected["missing_required_tools"]
 
-    fixme = pipeline._evaluate_healer_guardrails(
+    fixme_blocked = pipeline._evaluate_healer_guardrails(
         content_before=before,
         content_after="test.fixme('x is blocked', async () => {});",
         tool_calls=calls,
         error_category="selector",
     )
-    assert "assertion_preservation_or_explicit_test_fixme" not in fixme["missing_required_tools"]
+    assert "new_test_fixme_requires_non_healable_triage" in fixme_blocked["missing_required_tools"]
+
+    fixme_allowed = pipeline._evaluate_healer_guardrails(
+        content_before=before,
+        content_after="test.fixme('x is blocked', async () => {});",
+        tool_calls=calls,
+        error_category="selector",
+        triage_allows_fixme=True,
+    )
+    assert "assertion_preservation_or_explicit_test_fixme" not in fixme_allowed["missing_required_tools"]
+    assert "new_test_fixme_requires_non_healable_triage" not in fixme_allowed["missing_required_tools"]
 
 
 def test_noop_edit_is_guardrail_failure():

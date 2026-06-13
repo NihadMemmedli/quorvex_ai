@@ -111,6 +111,21 @@ def _normalize_test_data_refs(config: dict[str, Any] | None, explicit: list[Any]
     return refs
 
 
+def latest_trace_snapshot(*, run_id: str, session: Session | None = None) -> AgentTraceSnapshot | None:
+    db = session or Session(engine)
+    should_close = session is None
+    try:
+        return db.exec(
+            select(AgentTraceSnapshot)
+            .where(AgentTraceSnapshot.run_id == run_id)
+            .order_by(col(AgentTraceSnapshot.attempt).desc())
+            .limit(1)
+        ).first()
+    finally:
+        if should_close:
+            db.close()
+
+
 def ensure_trace_snapshot(
     *,
     run_id: str,
@@ -138,14 +153,17 @@ def ensure_trace_snapshot(
         run = db.get(AgentRun, run_id)
         if not run:
             return None
-        snapshot = db.exec(
-            select(AgentTraceSnapshot)
-            .where(AgentTraceSnapshot.run_id == run_id)
-            .order_by(col(AgentTraceSnapshot.attempt).desc())
-            .limit(1)
-        ).first()
+        snapshot = latest_trace_snapshot(run_id=run_id, session=db)
         now = _utcnow()
         config = run.config if isinstance(run.config, dict) else {}
+        placeholder_only = (
+            prompt is None
+            and context is None
+            and memory_context is None
+            and allowed_tools is None
+            and runtime_diagnostics is None
+            and test_data_refs is None
+        )
         redacted_prompt = _redacted_text(prompt)
         redacted_context = _redacted_text(context)
         redacted_memory = _redacted_text(memory_context)
@@ -193,7 +211,12 @@ def ensure_trace_snapshot(
                 memory_preview=redacted_memory or redacted_context,
                 prompt_artifact_path=prompt_artifact_path,
                 context_artifact_path=context_artifact_path,
-                runtime_diagnostics=safe_event_payload(runtime_diagnostics or {}),
+                runtime_diagnostics=safe_event_payload(
+                    {
+                        **(runtime_diagnostics or {}),
+                        **({"placeholder_only": True} if placeholder_only else {}),
+                    }
+                ),
                 created_at=now,
                 updated_at=now,
             )
@@ -234,13 +257,13 @@ def ensure_trace_snapshot(
             "prompt_artifact_path": prompt_artifact_path,
             "context_artifact_path": context_artifact_path,
         }.items():
-            if value and not getattr(snapshot, attr):
+            if value and getattr(snapshot, attr) != value:
                 setattr(snapshot, attr, value)
                 changed = True
-        if redacted_prompt and not snapshot.prompt_preview:
+        if redacted_prompt and snapshot.prompt_preview != redacted_prompt:
             snapshot.prompt_preview = redacted_prompt
             changed = True
-        if (redacted_memory or redacted_context) and not snapshot.memory_preview:
+        if (redacted_memory or redacted_context) and snapshot.memory_preview != (redacted_memory or redacted_context):
             snapshot.memory_preview = redacted_memory or redacted_context
             changed = True
         tools = _normalize_tools(allowed_tools or config.get("allowed_tools"))
@@ -251,8 +274,23 @@ def ensure_trace_snapshot(
         if refs and not snapshot.test_data_refs:
             snapshot.test_data_refs = refs
             changed = True
-        if runtime_diagnostics and not snapshot.runtime_diagnostics:
-            snapshot.runtime_diagnostics = safe_event_payload(runtime_diagnostics)
+        if runtime_diagnostics:
+            existing_diagnostics = snapshot.runtime_diagnostics or {}
+            merged_diagnostics = {
+                **existing_diagnostics,
+                **safe_event_payload(runtime_diagnostics),
+            }
+            if merged_diagnostics.get("placeholder_only") and (
+                prompt is not None or context is not None or memory_context is not None
+            ):
+                merged_diagnostics["placeholder_only"] = False
+            if snapshot.runtime_diagnostics != merged_diagnostics:
+                snapshot.runtime_diagnostics = merged_diagnostics
+                changed = True
+        elif (prompt is not None or context is not None or memory_context is not None) and (
+            snapshot.runtime_diagnostics or {}
+        ).get("placeholder_only"):
+            snapshot.runtime_diagnostics = {**(snapshot.runtime_diagnostics or {}), "placeholder_only": False}
             changed = True
         if changed:
             snapshot.updated_at = now
@@ -524,7 +562,7 @@ async def trace_bundle_for_run(
 ) -> dict[str, Any]:
     from orchestrator.services.agent_run_events import event_to_response
 
-    snapshot = ensure_trace_snapshot(run_id=run.id, session=session)
+    snapshot = latest_trace_snapshot(run_id=run.id, session=session)
     spans = list_trace_spans(run_id=run.id, limit=500, session=session)
     events = session.exec(
         select(AgentRunEvent).where(AgentRunEvent.run_id == run.id).order_by(col(AgentRunEvent.sequence).asc()).limit(500)

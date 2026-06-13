@@ -23,30 +23,36 @@ class AgentToolProfile:
 
     base_tools: tuple[str, ...] = ()
     playwright_mcp_tools: tuple[str, ...] = ()
+    disallowed_playwright_mcp_tools: tuple[str, ...] = ()
 
 
-EXPLORER_MCP_TOOLS: tuple[str, ...] = (
+EXPLORER_BASIC_MCP_TOOLS: tuple[str, ...] = (
     "browser_click",
     "browser_close",
     "browser_console_messages",
-    "browser_drag",
-    "browser_evaluate",
-    "browser_file_upload",
     "browser_handle_dialog",
-    "browser_hover",
     "browser_navigate",
     "browser_navigate_back",
     "browser_network_requests",
     "browser_press_key",
     "browser_select_option",
     "browser_snapshot",
-    "browser_start_video",
-    "browser_stop_video",
     "browser_take_screenshot",
     "browser_type",
-    "browser_video_chapter",
     "browser_wait_for",
 )
+
+EXPLORER_ADVANCED_MCP_TOOLS: tuple[str, ...] = EXPLORER_BASIC_MCP_TOOLS + (
+    "browser_drag",
+    "browser_evaluate",
+    "browser_file_upload",
+    "browser_hover",
+    "browser_start_video",
+    "browser_stop_video",
+    "browser_video_chapter",
+)
+
+EXPLORER_MCP_TOOLS: tuple[str, ...] = EXPLORER_ADVANCED_MCP_TOOLS
 
 PLANNER_MCP_TOOLS: tuple[str, ...] = EXPLORER_MCP_TOOLS + (
     "planner_setup_page",
@@ -63,7 +69,18 @@ PRD_LIVE_PLANNER_MCP_TOOLS: tuple[str, ...] = (
     "browser_wait_for",
     "browser_handle_dialog",
     "browser_take_screenshot",
+)
+
+PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS: tuple[str, ...] = (
+    "browser_run_code",
+    "browser_evaluate",
+    "browser_file_upload",
+    "browser_drag",
+    "browser_hover",
     "browser_close",
+    "browser_start_video",
+    "browser_stop_video",
+    "browser_video_chapter",
     "browser_console_messages",
 )
 
@@ -136,11 +153,17 @@ TEST_OPERATOR_MCP_TOOLS: tuple[str, ...] = (
 
 
 AGENT_TOOL_PROFILES: dict[str, AgentToolProfile] = {
-    "app-explorer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_MCP_TOOLS),
+    "app-explorer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_BASIC_MCP_TOOLS),
+    "app-explorer-basic": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_BASIC_MCP_TOOLS),
+    "app-explorer-advanced": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_ADVANCED_MCP_TOOLS),
     "api-explorer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_MCP_TOOLS),
     "playwright-test-planner": AgentToolProfile(("Glob", "Grep", "Read", "LS"), PLANNER_MCP_TOOLS),
     "prd-only-planner": AgentToolProfile((), ()),
-    "prd-live-planner": AgentToolProfile((), PRD_LIVE_PLANNER_MCP_TOOLS),
+    "prd-live-planner": AgentToolProfile(
+        (),
+        PRD_LIVE_PLANNER_MCP_TOOLS,
+        PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS,
+    ),
     "playwright-test-generator": AgentToolProfile(("Glob", "Grep", "Read", "LS"), GENERATOR_MCP_TOOLS),
     "playwright-test-healer": AgentToolProfile(
         ("Glob", "Grep", "Read", "LS", "Edit", "MultiEdit", "Write"),
@@ -231,4 +254,16 @@ def get_agent_tool_config(
     )
     if allowed_tools is None:
         return {}
-    return {"allowed_tools": allowed_tools, "tools": list(allowed_tools)}
+    profile_name = normalize_agent_profile_name(agent_name)
+    profile = AGENT_TOOL_PROFILES[profile_name] if profile_name else AgentToolProfile()
+    disallowed_tools = build_allowed_tools(
+        [],
+        list(profile.disallowed_playwright_mcp_tools),
+        mcp_config_dir=mcp_config_dir,
+        mcp_config_path=mcp_config_path,
+    )
+    return {
+        "allowed_tools": allowed_tools,
+        "tools": list(allowed_tools),
+        "disallowed_tools": disallowed_tools,
+    }

@@ -50,6 +50,10 @@ export function TestDataPicker({
 
   const selectedDataset = useMemo(() => datasets.find(dataset => dataset.id === datasetId), [datasets, datasetId]);
   const selectedItem = useMemo(() => items.find(item => item.ref === itemRef), [items, itemRef]);
+  const defaultDatasetLabel = selectedDataset?.name || selectedDataset?.key || 'Dataset';
+  const defaultItemLabel = selectedDataset && selectedItem
+    ? `${selectedDataset.key}.${selectedItem.key}`
+    : itemRef || 'Item';
 
   useEffect(() => {
     if (!projectId) return;
@@ -267,19 +271,37 @@ export function TestDataPicker({
 
   return (
     <div
-      className="flex flex-wrap items-center gap-2"
-      style={compact ? { width: '100%' } : undefined}
+      className={compact ? undefined : 'flex flex-wrap items-center gap-2'}
+      style={compact ? {
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+        gap: '0.5rem',
+        alignItems: 'center',
+        width: '100%',
+      } : undefined}
       data-testid={`test-data-picker-${mode}`}
     >
       {!compact && <Database size={16} style={{ color: 'var(--text-secondary)' }} />}
       <Select value={datasetId} onValueChange={setDatasetId}>
-        <SelectTrigger className={compact ? 'h-9 min-w-[160px] flex-1' : 'h-9 w-[180px]'} data-testid="test-data-picker-dataset"><SelectValue placeholder="Dataset" /></SelectTrigger>
+        <SelectTrigger className={compact ? 'h-9 min-w-[160px] flex-1' : 'h-9 w-[180px]'} data-testid="test-data-picker-dataset">
+          {compact ? (
+            <span title={defaultDatasetLabel} style={triggerTextStyle}>{defaultDatasetLabel}</span>
+          ) : (
+            <SelectValue placeholder="Dataset" />
+          )}
+        </SelectTrigger>
         <SelectContent>
           {datasets.map(dataset => <SelectItem key={dataset.id} value={dataset.id}>{dataset.name || dataset.key}</SelectItem>)}
         </SelectContent>
       </Select>
       <Select value={itemRef} onValueChange={setItemRef}>
-        <SelectTrigger className={compact ? 'h-9 min-w-[180px] flex-[1.2]' : 'h-9 w-[220px]'} data-testid="test-data-picker-item"><SelectValue placeholder="Item" /></SelectTrigger>
+        <SelectTrigger className={compact ? 'h-9 min-w-[180px] flex-[1.2]' : 'h-9 w-[220px]'} data-testid="test-data-picker-item">
+          {compact ? (
+            <span title={itemRef || defaultItemLabel} style={triggerTextStyle}>{defaultItemLabel}</span>
+          ) : (
+            <SelectValue placeholder="Item" />
+          )}
+        </SelectTrigger>
         <SelectContent>
           {items.map(item => <SelectItem key={item.id} value={item.ref}>{selectedDataset?.key}.{item.key}</SelectItem>)}
         </SelectContent>
@@ -287,10 +309,11 @@ export function TestDataPicker({
       <Button
         type="button"
         size="sm"
-        variant={compact ? 'ghost' : 'outline'}
+        variant="outline"
         disabled={!itemRef}
         data-testid="test-data-picker-insert"
         onClick={handleInsert}
+        style={compact ? { height: '36px', width: '100%', whiteSpace: 'nowrap' } : undefined}
       >
         <Plus size={16} /> {insertLabel}
       </Button>
@@ -301,6 +324,7 @@ export function TestDataPicker({
         disabled={!itemRef}
         data-testid="test-data-picker-edit"
         onClick={() => itemRef && router.push(`/test-data?ref=${encodeURIComponent(itemRef)}`)}
+        style={compact ? { height: '36px', width: '100%', whiteSpace: 'nowrap' } : undefined}
       >
         <Edit size={16} /> {editLabel}
       </Button>

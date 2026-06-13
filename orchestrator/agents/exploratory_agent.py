@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,7 +13,14 @@ from memory.manager import get_memory_manager
 # Import using absolute path (sys.path is set in base_agent.py)
 from utils.json_utils import extract_json_from_markdown
 
-from .base_agent import BaseAgent
+from .base_agent import CLAUDE_AUTH_FAILURE_MESSAGE, BaseAgent
+from .explorer_result_synthesizer import (
+    ExplorerResultSynthesizer,
+    parse_event_records,
+    read_event_log,
+    synthesize_browser_events_from_tool_calls,
+    write_event_log,
+)
 
 
 @dataclass
@@ -96,6 +104,7 @@ class ExploratoryAgent(BaseAgent):
         focus_areas = config.get("focus_areas") or []
         excluded_patterns = config.get("excluded_patterns") or []
         browser_memory_context = config.get("browser_memory_context") or ""
+        advanced_tools = bool(config.get("advanced_tools") or config.get("record_video") or config.get("capture_video"))
 
         # Initialize state and coverage
         self.state = ExplorationState(start_time=time.time())
@@ -116,7 +125,28 @@ class ExploratoryAgent(BaseAgent):
             focus_areas=focus_areas,
             excluded_patterns=excluded_patterns,
             browser_memory_context=browser_memory_context,
+            advanced_tools=advanced_tools,
         )
+        if self.owner_type == "agent_run" and self.owner_id:
+            try:
+                from orchestrator.services.agent_trace import ensure_trace_snapshot
+
+                ensure_trace_snapshot(
+                    run_id=self.owner_id,
+                    prompt=prompt,
+                    context=browser_memory_context or None,
+                    runtime=str(config.get("runtime") or "claude_sdk"),
+                    model=config.get("model"),
+                    model_tier=config.get("model_tier"),
+                    allowed_tools=config.get("allowed_tools") or self.allowed_tools,
+                    runtime_diagnostics={
+                        "agent_type": "exploratory",
+                        "path": "classic",
+                    },
+                    test_data_refs=config.get("test_data_refs") if isinstance(config.get("test_data_refs"), list) else [],
+                )
+            except Exception as exc:
+                print(f"⚠️ Trace prompt snapshot skipped: {exc}")
 
         # Execute exploration with timeout
         # Add 30 second buffer for processing time
@@ -127,6 +157,10 @@ class ExploratoryAgent(BaseAgent):
             result = await self._query_agent(prompt, timeout_seconds=timeout_seconds)
             print(f"   Agent returned result type: {type(result)}")
             print(f"   Result preview: {str(result)[:500]}...")
+        except RuntimeError as e:
+            if self._is_runtime_auth_failure_text(str(e)):
+                return self._runtime_auth_failure_result(config, str(e))
+            raise
         except asyncio.TimeoutError:
             # Return partial results on timeout - but include what we have!
             print("⏱️ Timeout reached, but preserving partial results...")
@@ -137,26 +171,25 @@ class ExploratoryAgent(BaseAgent):
             print(f"   Observations: {len(self.state.observations)}")
             print(f"   Flows completed: {len(self.state.completed_flows)}")
 
-            return {
-                "summary": f"Exploration timed out after {time_limit_minutes} minutes",
-                "elapsed_time_seconds": round(elapsed, 2),
-                "elapsed_time_minutes": round(elapsed / 60, 2),
-                "termination_reason": "timeout",
-                "discovered_flows": self.state.completed_flows,
-                "action_trace": [
-                    {
-                        "step": obs.step_number,
-                        "action": obs.action,
-                        "target": obs.target,
-                        "outcome": obs.outcome,
-                        "is_new_discovery": obs.is_new_discovery,
-                    }
-                    for obs in self.state.observations
-                ],
-                "coverage": {"coverage_score": self.coverage.coverage_score(), **self.coverage.__dict__},
-                "timeout": True,
-                "partial_results": True,
-            }
+            processed = self._process_results(
+                {
+                    "summary": f"Exploration timed out after {time_limit_minutes} minutes",
+                    "termination_reason": "timeout",
+                    "timeout": True,
+                    "partial_results": True,
+                },
+                config,
+            )
+            processed.update(
+                {
+                    "elapsed_time_seconds": round(elapsed, 2),
+                    "elapsed_time_minutes": round(elapsed / 60, 2),
+                    "termination_reason": "timeout",
+                    "timeout": True,
+                    "partial_results": True,
+                }
+            )
+            return processed
 
         # Check if result is a partial timeout response
         if isinstance(result, str) and result.startswith("__TIMEOUT_PARTIAL__\n"):
@@ -180,7 +213,7 @@ class ExploratoryAgent(BaseAgent):
                             f"Exploration timed out after {time_limit_minutes} minutes (partial results recovered)"
                         )
                     # Process and return normally
-                    return self._process_results(parsed, config)
+                    return self._process_results(partial_content, config)
             except Exception as e:
                 print(f"   ⚠️ Could not parse JSON from partial content: {e}")
 
@@ -189,6 +222,55 @@ class ExploratoryAgent(BaseAgent):
 
         # Process and return results
         return self._process_results(result, config)
+
+    @staticmethod
+    def _is_runtime_auth_failure_text(value: Any) -> bool:
+        text = str(value or "").lower()
+        return (
+            "not logged in" in text
+            and "please run /login" in text
+        ) or CLAUDE_AUTH_FAILURE_MESSAGE.lower() in text
+
+    def _runtime_auth_failure_result(self, config: dict[str, Any], raw_output: Any = "") -> dict[str, Any]:
+        elapsed = time.time() - self.state.start_time if self.state else 0.0
+        raw_preview = str(raw_output or "")[:500]
+        return {
+            "status": "failed",
+            "exploration_failed": True,
+            "failure_reason": "runtime_auth_failed",
+            "summary": CLAUDE_AUTH_FAILURE_MESSAGE,
+            "error": CLAUDE_AUTH_FAILURE_MESSAGE,
+            "raw_output_preview": raw_preview,
+            "parsing_failed": False,
+            "elapsed_time_seconds": round(elapsed, 2),
+            "elapsed_time_minutes": round(elapsed / 60, 2),
+            "config": {
+                "url": config.get("url"),
+                "time_limit_minutes": config.get("time_limit_minutes", 15),
+                "auth_type": (config.get("auth") or {}).get("type", "none"),
+                "project_id": config.get("project_id"),
+            },
+            "coverage": {
+                "navigation_explored": False,
+                "forms_interacted": 0,
+                "flows_discovered": 0,
+                "inferred_opportunities": 0,
+                "pages_visited": 0,
+                "errors_found": 0,
+                "blockers_found": 0,
+                "coverage_score": 0.0,
+            },
+            "action_trace": [],
+            "inferred_flows": [],
+            "blockers": [],
+            "issues": [],
+            "pages_visited": [],
+            "screenshots": [],
+            "event_counts": {},
+            "meaningful_interactions": 0,
+            "discovered_flow_summaries": [],
+            "total_flows_discovered": 0,
+        }
 
     def _build_exploration_prompt(
         self,
@@ -200,6 +282,7 @@ class ExploratoryAgent(BaseAgent):
         focus_areas: list[str],
         excluded_patterns: list[str],
         browser_memory_context: str = "",
+        advanced_tools: bool = False,
     ) -> str:
         """Build the enhanced exploration prompt."""
 
@@ -270,59 +353,65 @@ BROWSER MEMORY RULES:
 6. Record stale, skipped, or completed frontier work in the action_trace outcome.
 """
 
+        video_section = ""
+        if advanced_tools:
+            video_section = """
+OPTIONAL VIDEO RECORDING:
+1. If video tools are available, call browser_start_video with filename "exploration.webm" before navigation.
+2. Add browser_video_chapter markers only for major phases.
+3. Call browser_stop_video before the final summary.
+4. If video tools fail or are unavailable, continue without video.
+"""
+
         return f"""You are an Enhanced E2E Exploration Agent with a {time_limit_minutes}-minute budget.
 
-CRITICAL OUTPUT INSTRUCTIONS:
-You MUST return the result in strictly valid JSON format.
-DO NOT include any conversational text, intro, or outro.
-DO NOT use markdown formatting outside the JSON block.
-Your ENTIRE response must be parseable as JSON.
+OUTPUT CONTRACT:
+Your result has two parts and no conversational prose.
+1. Exploration event records as line-delimited JSON. Each event must be one complete JSON object on one line.
+2. A final small JSON summary in a ```json fenced block.
 
-VIDEO RECORDING:
-1. Before navigating to the target, call browser_start_video with filename "exploration.webm".
-2. Add browser_video_chapter markers for major phases such as "Start", "Authentication", "Discovery", and "Flow testing" when those phases apply.
-3. Before returning the final JSON, call browser_stop_video.
-4. If video recording tools fail or are unavailable, continue exploration and still return the required JSON.
+Allowed event_type values:
+- page_observed
+- action_attempted
+- action_result
+- flow_candidate
+- network_observed
+- issue_observed
+- blocker
 
-LIVE VIEW SCREENSHOTS:
-1. Save a screenshot after initial navigation, after authentication, and after every 3-5 meaningful browser interactions.
-2. Use browser_take_screenshot with filenames like "live-step-001.png", "live-step-004.png", etc. so the UI can show the latest state while you run.
-3. Do not take screenshots of pages that visibly contain passwords or secret tokens.
-4. If screenshot capture fails, continue exploration and still return the required JSON.
+Event requirements:
+- Every event must include "id" and "event_type".
+- For page_observed, include url, title or summary, and screenshot_path when a screenshot was taken.
+- For action_attempted, include action and target.
+- For action_result, include action, target, success, outcome, and url when known.
+- For flow_candidate, include title, step_event_ids, evidence_event_ids, entry_point, exit_point, edge_cases, and test_ideas.
+- A completed flow_candidate must reference action_result/page_observed ids for every step. Do not invent event ids.
+- Emit page_observed and action_result records before any flow_candidate that cites them.
+- If you have not emitted the supporting page_observed/action_result ids, omit flow_candidate entirely and describe the gap in the final summary.
+- Use blocker when authentication, navigation, permissions, app errors, or tool failures prevent useful exploration.
 
-REQUIRED JSON OUTPUT FORMAT:
+Example event lines:
+{{"id":"evt_001","event_type":"page_observed","url":"https://app.example/","title":"Home","summary":"Landing page with sign-in link","screenshot_path":"live-step-001.png"}}
+{{"id":"evt_002","event_type":"action_result","action":"click","target":"Sign in","success":true,"outcome":"Login form opened","url":"https://app.example/login"}}
+{{"id":"evt_003","event_type":"flow_candidate","title":"Open sign-in form","step_event_ids":["evt_001","evt_002"],"evidence_event_ids":["evt_001","evt_002"],"entry_point":"https://app.example/","exit_point":"https://app.example/login","edge_cases":[],"test_ideas":["Verify sign-in opens from the home page."]}}
+
+FINAL SUMMARY JSON FORMAT:
 ```json
 {{
   "summary": "One sentence overview (max 150 chars)",
-  "discovered_flows": [
-    {{
-      "id": "flow_1",
-      "title": "Flow Name (descriptive)",
-      "pages": ["page1", "page2"],
-      "steps_count": 5,
-      "happy_path": "Complete happy path description",
-      "edge_cases": ["case1", "case2"],
-      "test_ideas": ["idea1", "idea2"],
-      "entry_point": "/start-url",
-      "exit_point": "/end-url",
-      "complexity": "medium"
-    }}
-  ],
-  "action_trace": [
-    {{"step": 1, "action": "navigate", "target": "url", "outcome": "ok", "is_new_discovery": false}}
-  ],
-  "happy_paths_found": ["Flow1"],
-  "edge_cases_found": ["case1"],
-  "coverage": {{
-    "navigation_explored": true,
-    "forms_interacted": 2,
-    "flows_discovered": 1,
-    "pages_visited": 3,
-    "errors_found": 0
-  }},
-  "total_actions": 5
+  "coverage_notes": "Brief note on what was and was not covered",
+  "blocker_status": "none|blocked|partial",
+  "event_counts": {{"page_observed": 0, "action_result": 0, "flow_candidate": 0}},
+  "termination_reason": "completed|blocked|time_limit_reached|no_new_discoveries"
 }}
 ```
+{video_section}
+
+LIVE VIEW SCREENSHOTS:
+1. Save screenshots after initial navigation, after authentication, at flow boundaries, and on blockers.
+2. Use browser_take_screenshot with filenames like "live-step-001.png", "live-step-004.png".
+3. Do not take screenshots of pages that visibly contain passwords or secret tokens.
+4. If screenshot capture fails, emit an issue_observed event and continue.
 
 TARGET URL: {url}
 {auth_section}
@@ -330,18 +419,16 @@ INSTRUCTIONS: {instructions if instructions else "Explore the application thorou
 {memory_section}
 
 EXPLORATION STRATEGY:
-1. DISCOVER: Start by exploring the site structure (navigation, main sections)
-2. IDENTIFY: User flows (multi-step journeys like: browse → cart → checkout)
-3. EXPLORE: Each flow with BOTH valid data AND edge cases
-4. AVOID LOOPS: Track visited pages and elements, don't revisit same states
-5. CAPTURE: Document all discoveries with clear action descriptions
+1. DISCOVER: Start by exploring the site structure and emit page_observed events.
+2. IDENTIFY: User flows from observed pages and actions only.
+3. EXPLORE: For each high-value flow, sample one happy path and one safe edge case.
+4. AVOID LOOPS: Track visited pages and elements; do not revisit same states.
+5. CAPTURE: Emit compact evidence events as you go.
 
-COVERAGE GOALS (aim for these):
-- Visit all navigation items
-- Interact with all forms (submit valid + invalid data)
-- Complete at least 3 end-to-end flows
-- Visit 10+ unique pages
-- Find and document any error states
+COVERAGE GOALS:
+- Minimum useful result: 3 observed pages or 1 observed flow, unless blocked.
+- Prefer reliable observed flows over exhaustive crawling.
+- Find and document blockers or error states.
 {focus_section}
 {test_data_section}
 {exclusion_section}
@@ -349,15 +436,14 @@ COVERAGE GOALS (aim for these):
 SMART TERMINATION:
 You should stop exploring when:
 - Time limit is reached ({time_limit_minutes} minutes)
-- 5 consecutive actions yield no new discoveries (diminishing returns)
-- Coverage goals are met
+- 5 consecutive meaningful interactions yield no new discoveries
+- You have at least 3 observed pages and 1 observed flow
+- A blocker prevents further progress
 
 IMPORTANT EXPLORATION RULES:
 1. Focus on MULTI-PAGE flows (not single page tests)
-2. For each flow, test:
-   - HAPPY PATH: Complete the flow successfully
-   - EDGE CASES: Empty fields, special chars, boundary values
-3. Track every action for test spec generation
+2. Edge cases must be safe: no destructive submits, purchases, deletes, or external sends unless explicitly requested
+3. Track every meaningful action with action_attempted and action_result events
 4. Be thorough but efficient - don't waste time on repetitive actions
 5. CRITICAL: BROWSER DIALOG HANDLING
    - When a "Leave site?", unsaved changes, or beforeunload dialog appears, use browser_handle_dialog with accept: true immediately to accept Leave and continue navigation
@@ -366,25 +452,31 @@ IMPORTANT EXPLORATION RULES:
    - Preserve draft data only if the user explicitly requested it
 
 CONSTRAINTS:
-- action_trace: MAX 30 entries (significant actions only)
-- discovered_flows: Include ALL complete flows
-- String fields: MAX 300 chars
-- NO string dumps or HTML content in JSON values
+- Event lines: compact, no HTML dumps, max 300 chars per string
+- Flow candidates: include only observed or page-evidence-backed flows
+- Do not put discovered_flows or action_trace in the final summary JSON
 
 Begin exploration now:
-Step 0: Start video recording with browser_start_video using filename "exploration.webm"
-Step 1: {"Clear ALL cookies and localStorage to ensure a fresh start" if auth_config.get("type") != "session" else "Load session data (Pre-authenticated)"}
-Step 2: {"Navigate to login and authenticate" if auth_config.get("type") == "credentials" else f"Navigate to {url} and discover site structure"}
-Step 3: Save the first live screenshot with browser_take_screenshot
-Step 4: Explore navigation and main features, saving live screenshots every 3-5 meaningful interactions
-Step 5: Identify and test user flows, saving live screenshots at major state changes
-Step 6: Stop video recording with browser_stop_video
-Step 7: Return JSON summary when done"""
+Step 1: {"Clear cookies/localStorage if tools allow and start fresh" if auth_config.get("type") != "session" else "Use the pre-authenticated session"}
+Step 2: {"Navigate to login and authenticate" if auth_config.get("type") == "credentials" else f"Navigate to {url} and observe the first page"}
+Step 3: Emit page_observed for the first loaded page and save the first screenshot
+Step 4: Explore navigation and main features, emitting events after each observation/action
+Step 5: Emit flow_candidate records only after evidence event ids exist
+Step 6: Return the final summary JSON when done"""
 
     def _process_results(self, result: Any, config: dict[str, Any]) -> dict[str, Any]:
         """Process exploration results, save full flows to file, and persist to memory."""
         elapsed = time.time() - self.state.start_time
         run_id = config.get("run_id")
+        run_dir = self._run_dir(run_id) if run_id else None
+        event_log_path = run_dir / "exploration_events.jsonl" if run_dir else None
+        runtime_tool_calls = config.get("_runtime_tool_calls") or []
+        runtime_diagnostics = {
+            **getattr(self, "last_agent_diagnostics", {}),
+            **(config.get("_runtime_diagnostics") or {}),
+        }
+        if not runtime_tool_calls and isinstance(runtime_diagnostics.get("tool_call_records"), list):
+            runtime_tool_calls = runtime_diagnostics.get("tool_call_records") or []
 
         memory_manager = None
         memory_enabled = os.getenv("MEMORY_ENABLED", "true").lower() == "true"
@@ -394,173 +486,83 @@ Step 7: Return JSON summary when done"""
             except Exception as e:
                 print(f"⚠️ Memory unavailable, continuing without persistence: {e}")
 
-        parsed_data = {}
-        action_trace = []
+        parsed_data: dict[str, Any] = result if isinstance(result, dict) else {}
         parsing_failed = False
         error_details = None
         raw_output_preview = ""
-        browser_tool_evidence = False
         zero_evidence_failure = False
 
-        try:
-            parsed_data = extract_json_from_markdown(result)
-            if not parsed_data or not isinstance(parsed_data, dict):
-                raise ValueError("Extracted result is not a dictionary")
+        if self._is_runtime_auth_failure_text(result) or parsed_data.get("failure_reason") == "runtime_auth_failed":
+            return self._runtime_auth_failure_result(config, result)
 
-            # Extract action trace from parsed data if available
-            action_trace = parsed_data.get("action_trace", [])
+        if not isinstance(result, dict):
+            try:
+                parsed = extract_json_from_markdown(result)
+                if not parsed or not isinstance(parsed, dict):
+                    raise ValueError("Extracted result is not a dictionary")
+                parsed_data = parsed
+            except Exception as e:
+                parsing_failed = True
+                error_details = str(e)
+                raw_output_preview = str(result)[:500]
+                print(f"⚠️ Final summary parsing failed; recovering from event evidence if available: {e}")
 
-        except Exception as e:
-            parsing_failed = True
-            error_details = str(e)
-            result_str = str(result)
-            raw_output_preview = result_str[:500]
-
-            print(f"⚠️ Result parsing failed: {e}")
-
-            # Enhanced Regex Fallback
-            import re
-
-            browser_tool_pattern = (
-                r"(mcp__[^_\s]+__browser_|"
-                r"browser_(?:navigate|click|type|snapshot|take_screenshot|wait_for|evaluate|"
-                r"start_video|stop_video|video_chapter))"
+        event_records: list[dict[str, Any]] = []
+        if event_log_path:
+            event_records.extend(read_event_log(event_log_path))
+        event_records.extend(
+            synthesize_browser_events_from_tool_calls(
+                runtime_tool_calls,
+                target_url=config.get("url"),
+                start_index=len(event_records) + 1,
             )
-            browser_tool_evidence = bool(
-                re.search(
-                    browser_tool_pattern,
-                    result_str,
-                    re.IGNORECASE,
-                )
-            )
-
-            action_patterns = [
-                r'(Navigate|Click|Fill|Select|Check|Uncheck|Assert|Hover|Drag|Visit|Go)\s+(?:to|on|in|with)?\s+["\']?([^"\':\n]+)["\']?',
-                r"Step\s+\d+:\s*(?:I will |I am |)(\w+)\s+(.+?)(?:\n|$)",
-                r"Action:\s*(\w+)\s*Target:\s*(.+?)(?:\n|$)",
-                r"\[(\w+)\]\s+(.+?)(?:\n|$)",
-                r'(Visiting|Opening)\s+["\']?([^"\':\n]+)["\']?',
-            ]
-
-            for pattern in action_patterns:
-                matches = re.findall(pattern, result_str, re.IGNORECASE)
-                for match in matches:  # No limit, capture all
-                    if isinstance(match, tuple):
-                        action = match[0] if len(match) > 0 else "unknown"
-                        target = match[-1] if len(match) > 1 else match[0]
-                    else:
-                        action = "unknown"
-                        target = match
-
-                    # Clean up
-                    action = action.strip().lower()
-                    target = target.strip()
-
-                    # Normalize "visiting/go/opening" to "navigate"
-                    if action in ["visiting", "go", "opening", "visit"]:
-                        action = "navigate"
-
-                    # Remove common prepositions from start of target
-                    for prep in ["to ", "on ", "in ", "with ", "into "]:
-                        if target.lower().startswith(prep):
-                            target = target[len(prep) :].strip()
-
-                    # Filter out common false positives and long garbage
-                    if action in ["the", "a", "an", "step", "note"] or len(target) < 2:
-                        continue
-
-                    # CRITICAL: Filter out long/messy targets (likely page dumps or non-elements)
-                    if len(target) > 100 or "\n" in target or "page state" in target.lower():
-                        continue
-
-                    action_trace.append(
-                        {
-                            "step": len(action_trace) + 1,
-                            "action": action,
-                            "target": target[:100],  # Enforce hard limit
-                            "outcome": "ok",
-                            "is_new_discovery": False,
-                        }
-                    )
-
-            # Deduplicate actions based on action+target signature
-            unique_trace = []
-            seen = set()
-            for _i, act in enumerate(action_trace):
-                # Normalize values
-                a_val = act.get("action", "").lower()
-                t_val = act.get("target", "").lower()
-                sig = (a_val, t_val)
-
-                if sig not in seen:
-                    seen.add(sig)
-                    # Re-assign proper step number
-                    act["step"] = len(unique_trace) + 1
-                    unique_trace.append(act)
-
-            action_trace = unique_trace
-
-        # --- Construct Final Data ---
-
-        # Base stats
-        pages_visited = len([a for a in action_trace if "navigate" in a.get("action", "").lower()])
-        forms_interacted = len(
-            [
-                a
-                for a in action_trace
-                if any(x in a.get("action", "").lower() for x in ["fill", "select", "check", "submit"])
-            ]
         )
+        event_records.extend(parse_event_records(result))
+        event_records.extend(parse_event_records(parsed_data))
 
-        # Force pages_visited to at least 1 if we have any interactions (we must be ON a page)
-        if pages_visited == 0 and len(action_trace) > 0:
-            pages_visited = 1
+        # Merge by event id while preserving first-seen order. This lets timeout
+        # recovery combine an existing file with partial model output.
+        merged_events: list[dict[str, Any]] = []
+        seen_event_ids: set[str] = set()
+        for index, event in enumerate(event_records, start=1):
+            event_id = str(event.get("id") or event.get("event_id") or f"event_{index:03d}")
+            if event_id in seen_event_ids:
+                continue
+            seen_event_ids.add(event_id)
+            item = dict(event)
+            item["id"] = event_id
+            merged_events.append(item)
 
-        # Handle Flows - Try to infer if not parsed
-        discovered_flows = parsed_data.get("discovered_flows", [])
-        if parsing_failed and not discovered_flows:
-            # Try to infer at least one flow from the trace if it's long enough
-            if len(action_trace) >= 3:
-                discovered_flows = [
-                    {
-                        "id": "inferred_flow_1",
-                        "title": "Explored User Path",
-                        "pages": [config.get("url")] + [a["target"] for a in action_trace if a["action"] == "navigate"],
-                        "steps_count": len(action_trace),
-                        "happy_path": "Inferred from execution trace",
-                        "entry_point": config.get("url"),
-                        "feature": "General Exploration",
-                    }
-                ]
+        if event_log_path and merged_events:
+            normalized_events = ExplorerResultSynthesizer(merged_events, config.get("url")).normalized_events()
+            write_event_log(event_log_path, normalized_events)
 
-        if parsing_failed and not action_trace and not discovered_flows and not browser_tool_evidence:
+        synthesis = ExplorerResultSynthesizer(merged_events, config.get("url")).synthesize()
+        diagnostics = ExplorerResultSynthesizer(merged_events, config.get("url")).diagnostics(
+            tool_calls=runtime_tool_calls,
+            extra=runtime_diagnostics,
+            synthesis=synthesis,
+        )
+        action_trace = synthesis["action_trace"]
+        discovered_flows = synthesis["discovered_flows"]
+        inferred_flows = synthesis["inferred_flows"]
+        unsupported_flow_candidates = synthesis["unsupported_flow_candidates"]
+        coverage = synthesis["coverage"]
+
+        if not synthesis["events"]:
             zero_evidence_failure = True
-
-        # Use parsed coverage if valid, otherwise calculate from trace
-        if not parsing_failed and "coverage" in parsed_data:
-            coverage = parsed_data["coverage"]
-        else:
-            # Dynamic coverage score calculation
-            score = 0.0
-            if pages_visited > 0:
-                score += 0.2
-            if forms_interacted > 0:
-                score += 0.2
-            if len(discovered_flows) > 0:
-                score += 0.3
-            if len(action_trace) > 10:
-                score += 0.2
-            if len(action_trace) > 20:
-                score += 0.1
-
             coverage = {
-                "navigation_explored": pages_visited > 1,
-                "forms_interacted": forms_interacted,
-                "flows_discovered": len(discovered_flows),
-                "pages_visited": pages_visited,
-                "errors_found": len([a for a in action_trace if "error" in a.get("action", "").lower()]),
-                "coverage_score": min(1.0, score),
+                "navigation_explored": False,
+                "forms_interacted": 0,
+                "flows_discovered": 0,
+                "inferred_opportunities": 0,
+                "pages_visited": 0,
+                "errors_found": 0,
+                "blockers_found": 0,
+                "coverage_score": 0.0,
             }
+
+        contract_warning = self._contract_warning(result, parsed_data, discovered_flows, synthesis["events"], diagnostics)
 
         # --- PERSISTENCE TO MEMORY ---
         if zero_evidence_failure:
@@ -683,7 +685,11 @@ Step 7: Return JSON summary when done"""
                     print(f"❌ Failed to save graph to disk: {save_err}")
 
         # --- Final Response Construction ---
-        response_data = parsed_data if not parsing_failed else {}
+        response_data = {
+            key: value
+            for key, value in (parsed_data if isinstance(parsed_data, dict) else {}).items()
+            if key not in {"discovered_flows", "action_trace", "events", "exploration_events", "coverage"}
+        }
 
         response_data.update(
             {
@@ -697,17 +703,32 @@ Step 7: Return JSON summary when done"""
                 },
                 "coverage": coverage,
                 "action_trace": action_trace,
+                "inferred_flows": inferred_flows,
+                "unsupported_flow_candidates": unsupported_flow_candidates,
+                "blockers": synthesis["blockers"],
+                "issues": synthesis["issues"],
+                "pages_visited": synthesis["pages_visited"],
+                "screenshots": synthesis["screenshots"],
+                "event_counts": synthesis["event_counts"],
+                "meaningful_interactions": synthesis["meaningful_interactions"],
+                "event_log_path": str(event_log_path) if event_log_path else None,
+                "parsing_failed": parsing_failed,
+                "diagnostics": diagnostics,
             }
         )
+
+        if contract_warning:
+            response_data["contract_warning"] = contract_warning
+            if not discovered_flows:
+                response_data["exploration_status"] = "contract_violation"
 
         if parsing_failed:
             response_data.update(
                 {
                     "summary": (
-                        "Exploration failed: result parsing failed and no browser actions, flows, or tool evidence "
-                        "were recovered."
+                        "Exploration failed: result parsing failed and no event evidence was recovered."
                         if zero_evidence_failure
-                        else "Exploration completed. Result parsing required fallback."
+                        else "Exploration completed. Final summary parsing failed, but event evidence was recovered."
                     ),
                     "preview": f"{raw_output_preview[:200]}..." if raw_output_preview else "",
                     "raw_output_preview": raw_output_preview,
@@ -723,10 +744,34 @@ Step 7: Return JSON summary when done"""
                         "failure_reason": "zero_evidence_parse_fallback",
                     }
                 )
+        elif zero_evidence_failure:
+            response_data.update(
+                {
+                    "summary": response_data.get("summary")
+                    or "Exploration failed: no event evidence was recovered.",
+                    "status": "failed",
+                    "exploration_failed": True,
+                    "failure_reason": "zero_evidence",
+                }
+            )
+
+        if not zero_evidence_failure and not discovered_flows:
+            response_data.setdefault(
+                "summary",
+                "Exploration completed with evidence, but no completed flows were observed.",
+            )
+            response_data["exploration_status"] = "blocked" if synthesis["blockers"] else "no_flows_observed"
 
         # Save flows to file and generate summaries
         if run_id:
-            flow_summaries = self._save_flows_and_generate_summaries(discovered_flows, run_id)
+            flow_summaries = self._save_flows_and_generate_summaries(
+                discovered_flows,
+                run_id,
+                inferred_flows=inferred_flows,
+                events=synthesis["events"],
+                blockers=synthesis["blockers"],
+                coverage=coverage,
+            )
             response_data["discovered_flow_summaries"] = flow_summaries
             response_data["total_flows_discovered"] = len(discovered_flows)
             if "discovered_flows" in response_data:
@@ -739,21 +784,71 @@ Step 7: Return JSON summary when done"""
 
         return response_data
 
-    def _save_flows_and_generate_summaries(self, flows: list[dict], run_id: str) -> list[dict]:
-        """Save full flows to file and return summaries."""
-        # Get project root (2 levels up from this file)
-        project_root = Path(__file__).parent.parent.parent
-        runs_dir = project_root / "runs"
-        runs_dir.mkdir(exist_ok=True)
+    def _contract_warning(
+        self,
+        raw_result: Any,
+        parsed_data: dict[str, Any],
+        discovered_flows: list[dict[str, Any]],
+        events: list[dict[str, Any]],
+        diagnostics: dict[str, Any],
+    ) -> str | None:
+        if discovered_flows:
+            return None
+        text = ""
+        if isinstance(raw_result, str):
+            text = raw_result
+        elif isinstance(parsed_data, dict):
+            text = json.dumps(parsed_data, default=str)
+        claims_flows = bool(
+            text
+            and (
+                re.search(r"\b(discovered|documented|found|identified|covered)\b.{0,80}\bflows?\b", text, re.I)
+                or re.search(r"\b\d+\s+flows?\b", text, re.I)
+            )
+        )
+        if claims_flows:
+            return (
+                "The model output claimed flow coverage, but no structured evidence-backed flow summaries were "
+                "created. Prose claims were not converted into flows."
+            )
+        if int(diagnostics.get("browser_tool_calls") or 0) > 0 and int(diagnostics.get("successful_browser_tool_calls") or 0) == 0:
+            return "Browser tools were attempted, but none completed successfully."
+        if events and not discovered_flows:
+            return "Evidence was captured, but it did not contain both a page observation and a meaningful successful action."
+        return None
 
-        # Create run-specific directory
-        run_dir = runs_dir / run_id
-        run_dir.mkdir(exist_ok=True)
+    def _run_dir(self, run_id: str) -> Path:
+        project_root = Path(__file__).parent.parent.parent
+        return project_root / "runs" / run_id
+
+    def _save_flows_and_generate_summaries(
+        self,
+        flows: list[dict],
+        run_id: str,
+        *,
+        inferred_flows: list[dict] | None = None,
+        events: list[dict] | None = None,
+        blockers: list[dict] | None = None,
+        coverage: dict[str, Any] | None = None,
+    ) -> list[dict]:
+        """Save full flows to file and return summaries."""
+        run_dir = self._run_dir(run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
 
         # Save full flows to JSON file
         flows_file = run_dir / "flows.json"
         with open(flows_file, "w") as f:
-            json.dump({"flows": flows}, f, indent=2)
+            json.dump(
+                {
+                    "flows": flows,
+                    "inferred_flows": inferred_flows or [],
+                    "events_count": len(events or []),
+                    "blockers": blockers or [],
+                    "coverage": coverage or {},
+                },
+                f,
+                indent=2,
+            )
 
         print(f"💾 Saved {len(flows)} flows to {flows_file}")
 

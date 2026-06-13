@@ -162,6 +162,29 @@ class MemoryRepairRequest(BaseModel):
     dry_run: bool = True
 
 
+class AgenticContextRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=4000)
+    intent: str | None = None
+    sources: list[str] | None = None
+    project_id: str | None = None
+    user_id: str | None = None
+    url: str | None = None
+    specName: str | None = None
+    runId: str | None = None
+    max_items: int = Field(default=8, ge=1, le=25)
+    include_debug: bool = False
+
+
+class AgenticContextResponse(BaseModel):
+    query: str
+    answer_context: str
+    citations: list[dict[str, Any]] = Field(default_factory=list)
+    gaps: list[dict[str, Any]] = Field(default_factory=list)
+    recommended_next_tools: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    debug: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentMemoryResponse(BaseModel):
     id: str
     project_id: str | None = None
@@ -890,6 +913,35 @@ async def get_unified_memory_context(
         return bundle
     except Exception as e:
         logger.error(f"Failed to get unified memory context: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/agentic-context", response_model=AgenticContextResponse)
+async def get_agentic_memory_context(request: AgenticContextRequest) -> AgenticContextResponse:
+    """Return planned, cited, multi-source retrieval context for assistant/tools."""
+    try:
+        from orchestrator.memory.agentic_rag import AgenticRagRequest, get_agentic_rag_service
+
+        result = get_agentic_rag_service().retrieve(
+            AgenticRagRequest(
+                query=request.query,
+                intent=request.intent,
+                sources=request.sources,
+                project_id=request.project_id,
+                user_id=request.user_id,
+                url=request.url,
+                spec_name=request.specName,
+                run_id=request.runId,
+                agent_type="assistant",
+                max_items=request.max_items,
+                include_debug=request.include_debug,
+            )
+        )
+        return AgenticContextResponse(**result)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to get agentic memory context: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

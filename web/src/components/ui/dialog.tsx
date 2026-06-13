@@ -17,14 +17,21 @@ const DialogClose = DialogPrimitive.Close
 const DialogOverlay = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Overlay>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Overlay>
->(({ className, ...props }, ref) => (
+>(({ className, style, ...props }, ref) => (
   <DialogPrimitive.Overlay
     ref={ref}
     className={cn(
       "fixed inset-0 z-[10000] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
       className
     )}
-    style={{ background: 'rgba(0, 0, 0, 0.85)', backdropFilter: 'blur(4px)' }}
+    style={{
+      position: 'fixed',
+      inset: 0,
+      zIndex: 10000,
+      background: 'rgba(0, 0, 0, 0.85)',
+      backdropFilter: 'blur(4px)',
+      ...style,
+    }}
     {...props}
   />
 ))
@@ -33,7 +40,7 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(({ className, children, ...props }, ref) => (
+>(({ className, children, style, ...props }, ref) => (
   <DialogPortal>
     <DialogOverlay />
     <DialogPrimitive.Content
@@ -43,21 +50,63 @@ const DialogContent = React.forwardRef<
         className
       )}
       style={{
+        position: 'fixed',
+        left: '50%',
+        top: '50%',
+        transform: 'translate(-50%, -50%)',
+        zIndex: 10001,
+        display: 'grid',
+        width: 'min(32rem, calc(100vw - 2rem))',
+        gap: '1rem',
+        border: '1px solid var(--border-subtle)',
+        padding: '1.5rem',
         background: 'var(--surface)',
         borderColor: 'var(--border-subtle)',
         borderRadius: 'var(--radius-lg)',
         boxShadow: 'var(--shadow-card)',
         color: 'var(--text)',
+        ...style,
       }}
       {...props}
     >
       {children}
       <DialogPrimitive.Close
-        className="absolute right-4 top-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:pointer-events-none"
-        style={{ color: 'var(--text-secondary)' }}
+        aria-label="Close"
+        className="absolute right-4 top-4 inline-flex items-center justify-center transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:pointer-events-none"
+        style={{
+          position: 'absolute',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          right: '1rem',
+          top: '1rem',
+          width: '32px',
+          height: '32px',
+          padding: 0,
+          border: '1px solid var(--border)',
+          borderRadius: '8px',
+          background: 'transparent',
+          color: 'var(--text-secondary)',
+          lineHeight: 1,
+        }}
       >
-        <X className="h-4 w-4" />
-        <span className="sr-only">Close</span>
+        <X className="h-4 w-4" size={16} style={{ display: 'block', flexShrink: 0 }} />
+        <span
+          className="sr-only"
+          style={{
+            position: 'absolute',
+            width: 1,
+            height: 1,
+            padding: 0,
+            margin: -1,
+            overflow: 'hidden',
+            clip: 'rect(0, 0, 0, 0)',
+            whiteSpace: 'nowrap',
+            border: 0,
+          }}
+        >
+          Close
+        </span>
       </DialogPrimitive.Close>
     </DialogPrimitive.Content>
   </DialogPortal>

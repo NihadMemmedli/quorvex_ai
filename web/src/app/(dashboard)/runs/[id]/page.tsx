@@ -33,7 +33,9 @@ const ACTIVE_RUN_STATUSES = new Set(['queued', 'pending', 'running', 'in_progres
 const STREAMING_RUN_STATUSES = new Set(['running', 'in_progress']);
 
 function getRunStatus(runData: any): string {
-    return runData?.effective_status || runData?.run?.status || runData?.status || 'unknown';
+    const persistedStatus = runData?.status;
+    if (ACTIVE_RUN_STATUSES.has(persistedStatus)) return persistedStatus;
+    return runData?.effective_status || persistedStatus || runData?.run?.status || 'unknown';
 }
 
 function isActiveRunData(runData: any): boolean {
@@ -408,7 +410,7 @@ export default function RunDetailPage() {
                 }
                 actions={
                     <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-                        {(data.run?.status === 'running' || data.run?.status === 'pending') && (
+                        {isRunActive && (
                             <button
                                 onClick={handleStop}
                                 className="btn btn-danger"
@@ -417,7 +419,7 @@ export default function RunDetailPage() {
                                 <Square size={16} fill="currentColor" /> Stop Run
                             </button>
                         )}
-                        {data.effective_status === 'failed' && jiraConfig?.configured && (
+                        {runStatus === 'failed' && jiraConfig?.configured && (
                             jiraIssue?.exists ? (
                                 <a
                                     href={jiraIssue.jira_url}
@@ -443,10 +445,10 @@ export default function RunDetailPage() {
                                 </button>
                             )
                         )}
-                        <div className={`badge badge-${data.effective_status === 'passed' ? 'success' : data.effective_status === 'failed' ? 'danger' : 'secondary'}`} style={{ fontSize: '1rem', padding: '0.5rem 1rem' }}>
-                            {data.effective_status === 'passed' ? 'Passed' :
-                             data.effective_status === 'failed' ? 'Failed' :
-                             data.effective_status || 'Unknown Status'}
+                        <div className={`badge badge-${runStatus === 'passed' ? 'success' : runStatus === 'failed' ? 'danger' : 'secondary'}`} style={{ fontSize: '1rem', padding: '0.5rem 1rem' }}>
+                            {runStatus === 'passed' ? 'Passed' :
+                             runStatus === 'failed' ? 'Failed' :
+                             runStatus || 'Unknown Status'}
                         </div>
                     </div>
                 }
@@ -510,21 +512,21 @@ export default function RunDetailPage() {
                 </div>
 
                 {/* Error Message Banner */}
-                {(data.effective_status === 'error' || data.effective_status === 'failed' || data.effective_status === 'stopped') && (data.run?.error_message || data.error_message) && (
+                {(runStatus === 'error' || runStatus === 'failed' || runStatus === 'stopped') && (data.run?.error_message || data.error_message) && (
                     <div style={{
                         marginTop: '1.5rem',
                         padding: '1rem 1.25rem',
-                        background: data.effective_status === 'stopped' ? 'rgba(251, 191, 36, 0.08)' : 'rgba(239, 68, 68, 0.08)',
-                        border: `1px solid ${data.effective_status === 'stopped' ? 'rgba(251, 191, 36, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                        background: runStatus === 'stopped' ? 'rgba(251, 191, 36, 0.08)' : 'rgba(239, 68, 68, 0.08)',
+                        border: `1px solid ${runStatus === 'stopped' ? 'rgba(251, 191, 36, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
                         borderRadius: 'var(--radius)',
                         display: 'flex',
                         alignItems: 'flex-start',
                         gap: '0.75rem'
                     }}>
-                        <XCircle size={20} style={{ color: data.effective_status === 'stopped' ? 'var(--warning)' : 'var(--danger)', flexShrink: 0, marginTop: '2px' }} />
+                        <XCircle size={20} style={{ color: runStatus === 'stopped' ? 'var(--warning)' : 'var(--danger)', flexShrink: 0, marginTop: '2px' }} />
                         <div style={{ flex: 1 }}>
-                            <div style={{ fontWeight: 600, marginBottom: '0.25rem', color: data.effective_status === 'stopped' ? 'var(--warning)' : 'var(--danger)' }}>
-                                {data.effective_status === 'error' ? 'Pipeline Error' : data.effective_status === 'failed' ? 'Test Failed' : 'Run Stopped'}
+                            <div style={{ fontWeight: 600, marginBottom: '0.25rem', color: runStatus === 'stopped' ? 'var(--warning)' : 'var(--danger)' }}>
+                                {runStatus === 'error' ? 'Pipeline Error' : runStatus === 'failed' ? 'Test Failed' : 'Run Stopped'}
                             </div>
                             <div style={{
                                 fontFamily: 'var(--font-mono)',
