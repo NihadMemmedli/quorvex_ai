@@ -1149,6 +1149,9 @@ class AgentWorker:
                         max_budget_usd=task.max_budget_usd,
                         task_budget=task.task_budget,
                         include_hook_events=task.include_hook_events,
+                        resume_session_id=task.resume_session_id,
+                        continue_conversation=task.continue_conversation,
+                        max_turns=task.max_turns,
                         owner_type=task.owner_type,
                         owner_id=task.owner_id,
                     )
@@ -1588,6 +1591,9 @@ class AgentWorker:
         max_budget_usd: float | None = None,
         task_budget: dict[str, int] | None = None,
         include_hook_events: bool = False,
+        resume_session_id: str | None = None,
+        continue_conversation: bool = False,
+        max_turns: int | None = None,
         owner_type: str | None = None,
         owner_id: str | None = None,
     ) -> str:
@@ -1613,6 +1619,9 @@ class AgentWorker:
             max_budget_usd,
             task_budget,
             include_hook_events,
+            resume_session_id,
+            continue_conversation,
+            max_turns,
             owner_type,
             owner_id,
         )
@@ -1634,6 +1643,9 @@ class AgentWorker:
         max_budget_usd: float | None = None,
         task_budget: dict[str, int] | None = None,
         include_hook_events: bool = False,
+        resume_session_id: str | None = None,
+        continue_conversation: bool = False,
+        max_turns: int | None = None,
         owner_type: str | None = None,
         owner_id: str | None = None,
     ) -> str:
@@ -1729,6 +1741,14 @@ class AgentWorker:
         if selected_model:
             cli_args.extend(["--model", selected_model])
             logger.info(f"[CLI]   Model: {selected_model}")
+        if resume_session_id:
+            cli_args.extend(["--resume", resume_session_id])
+            logger.info("[CLI]   Resuming Claude session")
+        elif continue_conversation:
+            cli_args.append("--continue")
+            logger.info("[CLI]   Continuing Claude conversation")
+        if max_turns is not None:
+            cli_args.extend(["--max-turns", str(max_turns)])
 
         mcp_config_path = Path(effective_cwd) / ".mcp.json"
         requested_tool_names = []

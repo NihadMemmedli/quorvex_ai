@@ -43,6 +43,10 @@ class AgentRuntimeContext:
     max_budget_usd: float | None = None
     task_budget: dict[str, int] | None = None
     include_hook_events: bool = False
+    output_format: dict[str, Any] | None = None
+    resume_session_id: str | None = None
+    continue_conversation: bool = False
+    max_turns: int | None = None
     session_dir: Path | None = None
     cwd: Path | str | None = None
     owner_type: str | None = None

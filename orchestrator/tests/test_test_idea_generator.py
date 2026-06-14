@@ -1438,6 +1438,26 @@ def test_agent_runner_attaches_strict_local_mcp_config(tmp_path, monkeypatch):
         assert kwargs["extra_args"]["strict-mcp-config"] is None
 
 
+def test_agent_runner_includes_guardrail_sdk_options_when_supported(monkeypatch):
+    monkeypatch.setattr(_agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    output_format = {"type": "json_schema", "schema": {"type": "object"}}
+    runner = _AgentRunner(
+        allowed_tools=[],
+        output_format=output_format,
+        resume_session_id="claude-session-1",
+        continue_conversation=True,
+        max_turns=3,
+        log_tools=False,
+    )
+
+    kwargs = runner._claude_options_kwargs()
+
+    assert kwargs["output_format"] == output_format
+    assert kwargs["resume"] == "claude-session-1"
+    assert kwargs["continue_conversation"] is True
+    assert kwargs["max_turns"] == 3
+
+
 @pytest.mark.asyncio
 async def test_agent_runner_adds_browser_dialog_policy_to_direct_prompt(monkeypatch):
     captured: dict[str, str] = {}

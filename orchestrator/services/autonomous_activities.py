@@ -10,7 +10,6 @@ import os
 import re
 import shlex
 import subprocess
-import tempfile
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -59,6 +58,8 @@ DEFAULT_MAX_PENDING_APPROVALS = 25
 DEFAULT_MAX_PARALLEL_AGENTS = 2
 DEFAULT_WORK_ITEM_BATCH_SIZE = 7
 DEFAULT_WORK_ITEM_STALE_MINUTES = 45
+DEFAULT_STRUCTURED_GUARDRAIL_REPAIR_ATTEMPTS = 2
+DEFAULT_STRUCTURED_GUARDRAIL_REPAIR_MAX_TURNS = 2
 WORK_ITEM_ACTIVE_STATUSES = {"queued", "running"}
 WORK_ITEM_TERMINAL_STATUSES = {"completed", "failed", "blocked", "cancelled"}
 WHOLE_APP_TEAM_ROLES = (
@@ -170,6 +171,18 @@ class StructuredAgentContract(BaseModel):
     findings: list[StructuredBugArtifact] = PydanticField(default_factory=list)
     app_map_updates: list[StructuredAppMapUpdateArtifact] = PydanticField(default_factory=list)
     blockers: list[str] = PydanticField(default_factory=list)
+
+
+def structured_agent_contract_output_format() -> dict[str, Any]:
+    """Return the Claude SDK native output format for autonomous structured artifacts."""
+    if hasattr(StructuredAgentContract, "model_json_schema"):
+        schema = StructuredAgentContract.model_json_schema()
+    else:
+        schema = StructuredAgentContract.schema()
+    return {
+        "type": "json_schema",
+        "schema": schema,
+    }
 
 
 def _utcnow() -> datetime:
@@ -329,6 +342,233 @@ def _extract_structured_agent_contract(output: str) -> tuple[dict[str, Any] | No
             loc = ".".join(str(part) for part in error.get("loc", ())) or "root"
             errors.append(f"{loc}: {error.get('msg', 'invalid value')}")
         return None, errors or ["Structured output failed schema validation."], True
+
+
+def _structured_guardrail_attempt_limit(mission: AutonomousMission) -> int:
+    return max(
+        0,
+        _config_int(
+            mission.config,
+            "structured_guardrail_repair_attempts",
+            DEFAULT_STRUCTURED_GUARDRAIL_REPAIR_ATTEMPTS,
+        ),
+    )
+
+
+def _structured_guardrail_repair_max_turns(mission: AutonomousMission) -> int:
+    return max(
+        1,
+        _config_int(
+            mission.config,
+            "structured_guardrail_repair_max_turns",
+            DEFAULT_STRUCTURED_GUARDRAIL_REPAIR_MAX_TURNS,
+        ),
+    )
+
+
+def _work_item_claude_session_id(item: AutonomousAgentWorkItem) -> str | None:
+    result = item.result or {}
+    telemetry = result.get("telemetry") if isinstance(result.get("telemetry"), dict) else {}
+    for value in (
+        result.get("session_id"),
+        telemetry.get("session_id"),
+        (item.progress or {}).get("session_id"),
+        (item.progress or {}).get("claude_session_id"),
+    ):
+        if str(value or "").strip():
+            return str(value).strip()
+    return None
+
+
+def _run_coroutine_blocking(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    import threading
+
+    result_box: dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            result_box["result"] = asyncio.run(coro)
+        except BaseException as exc:  # pragma: no cover - defensive async bridge
+            result_box["error"] = exc
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result_box:
+        raise result_box["error"]
+    return result_box.get("result")
+
+
+def _structured_contract_repair_prompt(
+    *,
+    item: AutonomousAgentWorkItem,
+    validation_errors: list[str],
+    invalid_output: str,
+    attempt: int,
+) -> str:
+    truncated_output = invalid_output[:14000]
+    if len(invalid_output) > len(truncated_output):
+        truncated_output += "\n...[truncated]"
+    return f"""The previous autonomous work item output failed the structured JSON contract.
+
+Work item: {item.id}
+Role: {item.role}
+Repair attempt: {attempt}
+
+Validation errors:
+{json.dumps(validation_errors[:20], indent=2)}
+
+Invalid output:
+{truncated_output}
+
+Return only contract-valid JSON matching the autonomous structured artifact schema. Preserve any valid discoveries from
+the invalid output. Do not include markdown, prose, or explanations outside the JSON object."""
+
+
+def _persist_structured_guardrail_telemetry(
+    session: Session,
+    item: AutonomousAgentWorkItem,
+    *,
+    attempts: int,
+    validation_errors: list[str],
+    used_native_output_format: bool,
+    repair_session_id: str | None = None,
+    fallback_revision_created: bool = False,
+) -> None:
+    result = item.result or {}
+    telemetry = result.get("telemetry") if isinstance(result.get("telemetry"), dict) else {}
+    telemetry = {
+        **telemetry,
+        "guardrail_attempts": attempts,
+        "guardrail_repair_session_id": repair_session_id,
+        "guardrail_validation_errors": validation_errors[:20],
+        "guardrail_used_native_output_format": used_native_output_format,
+        "guardrail_fallback_revision_created": fallback_revision_created,
+    }
+    item.result = {
+        **result,
+        "telemetry": telemetry,
+        "guardrail_attempts": attempts,
+        "guardrail_repair_session_id": repair_session_id,
+        "guardrail_validation_errors": validation_errors,
+        "guardrail_used_native_output_format": used_native_output_format,
+        "guardrail_fallback_revision_created": fallback_revision_created,
+    }
+    session.add(item)
+    session.commit()
+
+
+def _repair_structured_work_item_contract(
+    session: Session,
+    mission: AutonomousMission,
+    item: AutonomousAgentWorkItem,
+    *,
+    invalid_output: str,
+    validation_errors: list[str],
+) -> tuple[dict[str, Any] | None, list[str], int, str | None, bool]:
+    session_id = _work_item_claude_session_id(item)
+    max_attempts = _structured_guardrail_attempt_limit(mission)
+    if not session_id or max_attempts <= 0:
+        return None, validation_errors, 0, session_id, False
+
+    try:
+        from orchestrator.utils.agent_runner import AgentRunner
+    except Exception as exc:
+        logger.debug("Unable to import AgentRunner for structured guardrail repair: %s", exc)
+        return None, [*validation_errors, f"Guardrail repair unavailable: {exc}"], 0, session_id, False
+
+    output_format = structured_agent_contract_output_format()
+    used_native_output_format = AgentRunner._claude_options_accepts("output_format")
+    current_errors = list(validation_errors)
+    last_repair_session_id: str | None = session_id
+    last_output = invalid_output
+
+    for attempt in range(1, max_attempts + 1):
+        runner = AgentRunner(
+            timeout_seconds=max(60, min(mission.max_runtime_minutes * 60, 600)),
+            allowed_tools=[],
+            tools=[],
+            permission_mode="dontAsk",
+            cwd=REPOSITORY_ROOT,
+            output_format=output_format,
+            resume_session_id=session_id,
+            max_turns=_structured_guardrail_repair_max_turns(mission),
+            log_tools=False,
+            inject_memory=False,
+            capture_memory=False,
+            force_direct_execution=True,
+            model=(mission.config or {}).get("model"),
+            model_tier=(mission.config or {}).get("model_tier") or "standard",
+            owner_type="autonomous_work_item",
+            owner_id=item.id,
+            owner_label=f"{mission.name}: {item.role} structured repair",
+            memory_project_id=mission.project_id,
+            memory_agent_type=item.role,
+            memory_source_type="autonomous_work_item",
+            memory_source_id=item.id,
+            memory_stage="autonomous_structured_guardrail",
+        )
+        prompt = _structured_contract_repair_prompt(
+            item=item,
+            validation_errors=current_errors,
+            invalid_output=last_output,
+            attempt=attempt,
+        )
+        try:
+            result = _run_coroutine_blocking(runner.run(prompt))
+        except Exception as exc:
+            current_errors = [*current_errors, f"Guardrail repair attempt {attempt} failed: {exc}"]
+            continue
+
+        last_repair_session_id = getattr(result, "session_id", None) or last_repair_session_id
+        if not getattr(result, "success", False):
+            error = getattr(result, "error", None) or "agent returned failure"
+            current_errors = [
+                *current_errors,
+                f"Guardrail repair attempt {attempt} failed: {error}",
+            ]
+            continue
+
+        repaired_output = str(getattr(result, "output", "") or "").strip()
+        last_output = repaired_output or last_output
+        repaired, repaired_errors, saw_structured_output = _extract_structured_agent_contract(repaired_output)
+        if repaired:
+            item.result = {
+                **(item.result or {}),
+                "output": repaired_output,
+                "guardrail_original_output": invalid_output,
+            }
+            item.artifacts = [
+                {
+                    "type": "agent_report",
+                    "label": f"{item.role} report",
+                    "content": repaired_output,
+                }
+            ]
+            _persist_structured_guardrail_telemetry(
+                session,
+                item,
+                attempts=attempt,
+                validation_errors=[],
+                used_native_output_format=used_native_output_format,
+                repair_session_id=last_repair_session_id,
+                fallback_revision_created=False,
+            )
+            return repaired, [], attempt, last_repair_session_id, used_native_output_format
+
+        if repaired_errors:
+            current_errors = repaired_errors
+        elif not saw_structured_output:
+            current_errors = ["Guardrail repair did not return structured JSON."]
+        else:
+            current_errors = ["Guardrail repair failed schema validation."]
+
+    return None, current_errors, max_attempts, last_repair_session_id, used_native_output_format
 
 
 def _next_requirement_code(session: Session, project_id: str | None) -> str:
@@ -2683,9 +2923,19 @@ def _execute_agent_work_item_direct(
 
         test_data_context = _autonomous_test_data_execution_context(mission)
         test_data_env_vars = {}
+        native_output_format_supported = False
+        if runtime_name == "claude_sdk":
+            try:
+                from orchestrator.utils.agent_runner import AgentRunner
+
+                native_output_format_supported = AgentRunner._claude_options_accepts("output_format")
+            except Exception:
+                native_output_format_supported = False
 
         async def _run_agent():
             runtime = get_agent_runtime(runtime_name)
+            structured_output_format = structured_agent_contract_output_format() if runtime_name == "claude_sdk" else None
+            configured_max_turns = _config_int(mission.config, "structured_guardrail_max_turns", 0)
             return await runtime.run(
                 _agent_prompt_for_work_item(
                     mission,
@@ -2699,6 +2949,8 @@ def _execute_agent_work_item_direct(
                     allowed_tools=allowed_tools,
                     tools=list(allowed_tools),
                     max_budget_usd=mission.max_llm_budget_usd,
+                    output_format=structured_output_format,
+                    max_turns=configured_max_turns if configured_max_turns > 0 else None,
                     on_task_enqueued=_on_task_enqueued,
                     on_tool_use=_on_tool_use,
                     on_progress=_on_progress,
@@ -2835,6 +3087,8 @@ def _execute_agent_work_item_direct(
         "timed_out": result.timed_out,
         "total_cost_usd": result.total_cost_usd,
         "stop_reason": result.stop_reason,
+        "session_id": result.session_id,
+        "guardrail_used_native_output_format": native_output_format_supported,
         "browser_observations": browser_observation_summary,
     }
     if result.success:
@@ -3092,8 +3346,36 @@ def _create_findings_from_completed_work_items(
             continue
         structured, validation_errors, saw_structured_output = _extract_structured_agent_contract(output)
         if saw_structured_output and validation_errors:
-            _create_contract_revision_work_item(session, mission, run, item, validation_errors)
-            continue
+            (
+                repaired_structured,
+                repair_errors,
+                repair_attempts,
+                repair_session_id,
+                used_native_output_format,
+            ) = _repair_structured_work_item_contract(
+                session,
+                mission,
+                item,
+                invalid_output=output,
+                validation_errors=validation_errors,
+            )
+            if repaired_structured:
+                structured = repaired_structured
+                validation_errors = []
+                output = str((item.result or {}).get("output") or output).strip()
+            else:
+                _persist_structured_guardrail_telemetry(
+                    session,
+                    item,
+                    attempts=repair_attempts,
+                    validation_errors=repair_errors,
+                    used_native_output_format=used_native_output_format,
+                    repair_session_id=repair_session_id,
+                    fallback_revision_created=True,
+                )
+                validation_errors = repair_errors
+                _create_contract_revision_work_item(session, mission, run, item, validation_errors)
+                continue
         if structured:
             merge_summary = _merge_structured_work_item_artifacts(session, mission, run, item, structured)
             item.result = {**item.result, "structured_merge": merge_summary}

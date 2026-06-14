@@ -1590,6 +1590,177 @@ def test_invalid_structured_agent_output_creates_revision_work_item():
     assert revisions[0].progress["review_reason"] == "structured_contract_validation"
 
 
+def test_invalid_structured_agent_output_repairs_same_claude_session(monkeypatch):
+    _ensure_tables()
+    invalid_output = {
+        "summary": "Invalid requirement payload.",
+        "requirements": [{"description": "Missing the required title field."}],
+    }
+    unique = uuid4().hex
+    target_url = f"https://example.com/{unique}/checkout"
+    repaired_output = {
+        "summary": "Repaired checkout finding.",
+        "bugs": [
+            {
+                "title": "Checkout hangs after declined payment",
+                "description": "The checkout page keeps loading after a declined card.",
+                "severity": "high",
+                "target_url": target_url,
+                "action": "Submit declined card",
+                "observed_failure": "Spinner remains visible after the decline response.",
+                "expected_behavior": "A payment error is shown and the form remains usable.",
+                "evidence": {"url": target_url, "source": "browser_snapshot"},
+            }
+        ],
+        "app_map_updates": [{"url": target_url, "page_title": "Checkout"}],
+        "blockers": [],
+    }
+    captured: list[dict] = []
+
+    class FakeRunner:
+        @staticmethod
+        def _claude_options_accepts(option_name):
+            return True
+
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+        async def run(self, prompt):
+            assert "failed the structured JSON contract" in prompt
+            return AgentResult(
+                success=True,
+                output=json.dumps(repaired_output),
+                session_id="claude-session-1",
+            )
+
+    monkeypatch.setattr("orchestrator.utils.agent_runner.AgentRunner", FakeRunner)
+
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        item = AutonomousAgentWorkItem(
+            id=f"amwork-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            role="requirements_analyst",
+            objective="Analyze checkout.",
+            status="completed",
+        )
+        item.result = {"output": json.dumps(invalid_output), "telemetry": {"session_id": "claude-session-1"}}
+        session.add(run)
+        session.add(item)
+        session.commit()
+        mission_id = mission.id
+        item_id = item.id
+        run_id = run.id
+
+    with Session(engine) as session:
+        mission = session.get(AutonomousMission, mission_id)
+        run = session.get(AutonomousMissionRun, run_id)
+        created = _create_findings_from_completed_work_items(session, mission, run)
+        original = session.get(AutonomousAgentWorkItem, item_id)
+        revisions = session.exec(
+            select(AutonomousAgentWorkItem).where(
+                AutonomousAgentWorkItem.mission_id == mission_id,
+                AutonomousAgentWorkItem.status == "queued",
+            )
+        ).all()
+
+    assert created == 1
+    assert revisions == []
+    assert captured[0]["resume_session_id"] == "claude-session-1"
+    assert captured[0]["output_format"]["type"] == "json_schema"
+    assert captured[0]["max_turns"] == 2
+    assert original.result.get("review_decision", "none") == "none"
+    assert original.result["guardrail_attempts"] == 1
+    assert original.result["guardrail_repair_session_id"] == "claude-session-1"
+    assert original.result["guardrail_fallback_revision_created"] is False
+    assert "Checkout hangs after declined payment" in original.result["output"]
+
+
+def test_invalid_structured_agent_output_falls_back_after_repair_exhaustion(monkeypatch):
+    _ensure_tables()
+    invalid_output = {
+        "summary": "Invalid requirement payload.",
+        "requirements": [{"description": "Missing the required title field."}],
+    }
+    repair_calls = 0
+
+    class FakeRunner:
+        @staticmethod
+        def _claude_options_accepts(option_name):
+            return True
+
+        def __init__(self, **kwargs):
+            assert kwargs["resume_session_id"] == "claude-session-2"
+
+        async def run(self, prompt):
+            nonlocal repair_calls
+            repair_calls += 1
+            return AgentResult(
+                success=True,
+                output=json.dumps(invalid_output),
+                session_id="claude-session-2",
+            )
+
+    monkeypatch.setattr("orchestrator.utils.agent_runner.AgentRunner", FakeRunner)
+
+    with Session(engine) as session:
+        mission = _create_project_and_mission(session, mission_type="mixed")
+        run = AutonomousMissionRun(
+            id=f"amrun-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            project_id=mission.project_id,
+            mission_type=mission.mission_type,
+            status="running",
+        )
+        item = AutonomousAgentWorkItem(
+            id=f"amwork-{uuid4().hex[:12]}",
+            mission_id=mission.id,
+            run_id=run.id,
+            project_id=mission.project_id,
+            role="requirements_analyst",
+            objective="Analyze checkout.",
+            status="completed",
+        )
+        item.result = {"output": json.dumps(invalid_output), "telemetry": {"session_id": "claude-session-2"}}
+        session.add(run)
+        session.add(item)
+        session.commit()
+        mission_id = mission.id
+        item_id = item.id
+        run_id = run.id
+
+    with Session(engine) as session:
+        mission = session.get(AutonomousMission, mission_id)
+        run = session.get(AutonomousMissionRun, run_id)
+        created = _create_findings_from_completed_work_items(session, mission, run)
+        original = session.get(AutonomousAgentWorkItem, item_id)
+        revisions = session.exec(
+            select(AutonomousAgentWorkItem).where(
+                AutonomousAgentWorkItem.mission_id == mission_id,
+                AutonomousAgentWorkItem.status == "queued",
+            )
+        ).all()
+
+    assert created == 0
+    assert repair_calls == 2
+    assert original.result["review_decision"] == "needs_revision"
+    assert original.result["guardrail_attempts"] == 2
+    assert original.result["guardrail_repair_session_id"] == "claude-session-2"
+    assert original.result["guardrail_fallback_revision_created"] is True
+    assert original.result["validation_errors"]
+    assert len(revisions) == 1
+    assert revisions[0].progress["revision_of_work_item_id"] == item_id
+
+
 def test_whole_app_planner_creates_idempotent_rtm_gap_work_items():
     _ensure_tables()
     with Session(engine) as session:

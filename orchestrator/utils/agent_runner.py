@@ -336,6 +336,10 @@ class AgentRunner:
         max_budget_usd: float | None = None,
         task_budget: dict[str, int] | None = None,
         include_hook_events: bool = False,
+        output_format: dict[str, Any] | None = None,
+        resume_session_id: str | None = None,
+        continue_conversation: bool = False,
+        max_turns: int | None = None,
         log_tools: bool = True,
         on_tool_use: Callable[[str, dict], None] | None = None,
         tool_permission_guard: Callable[[str, dict[str, Any], Any], Any] | None = None,
@@ -380,6 +384,10 @@ class AgentRunner:
             max_budget_usd: Optional per-run spend cap passed to Claude Code
             task_budget: Optional token budget, e.g. {"total": 50000}
             include_hook_events: Include hook lifecycle events in the SDK stream
+            output_format: Optional native SDK output format contract.
+            resume_session_id: Optional Claude session ID to resume.
+            continue_conversation: Continue the most recent Claude conversation when supported.
+            max_turns: Optional SDK maximum turn count.
             log_tools: Whether to log tool invocations to console
             on_tool_use: Optional callback when a tool is used
             tool_permission_guard: Optional SDK permission callback for denying tool use before execution.
@@ -419,6 +427,10 @@ class AgentRunner:
         self.max_budget_usd = max_budget_usd
         self.task_budget = task_budget
         self.include_hook_events = include_hook_events
+        self.output_format = output_format
+        self.resume_session_id = resume_session_id
+        self.continue_conversation = continue_conversation
+        self.max_turns = max_turns
         self.log_tools = log_tools
         self.on_tool_use = on_tool_use
         self.tool_permission_guard = tool_permission_guard
@@ -624,6 +636,14 @@ class AgentRunner:
             kwargs["task_budget"] = self.task_budget
         if self.include_hook_events:
             kwargs["include_hook_events"] = True
+        if self.output_format is not None and self._claude_options_accepts("output_format"):
+            kwargs["output_format"] = self.output_format
+        if self.resume_session_id and self._claude_options_accepts("resume"):
+            kwargs["resume"] = self.resume_session_id
+        if self.continue_conversation and self._claude_options_accepts("continue_conversation"):
+            kwargs["continue_conversation"] = True
+        if self.max_turns is not None and self._claude_options_accepts("max_turns"):
+            kwargs["max_turns"] = self.max_turns
         if self.model:
             kwargs["model"] = self.model
         if self.tool_permission_guard and self._claude_options_accepts("can_use_tool"):
@@ -1559,6 +1579,10 @@ class AgentRunner:
                 max_budget_usd=self.max_budget_usd,
                 task_budget=self.task_budget,
                 include_hook_events=self.include_hook_events,
+                output_format=self.output_format,
+                resume_session_id=self.resume_session_id,
+                continue_conversation=self.continue_conversation,
+                max_turns=self.max_turns,
                 owner_type=owner_type,
                 owner_id=owner_id,
                 owner_label=owner_label,

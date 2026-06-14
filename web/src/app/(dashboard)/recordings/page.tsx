@@ -74,13 +74,28 @@ function statusBadge(status: RecordingSession['status']) {
     );
 }
 
+function isLocalDashboardHost(hostname: string): boolean {
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]';
+}
+
+function formatLocalRecorderHost(hostname: string): string {
+    return hostname === '::1' ? '[::1]' : hostname;
+}
+
+function localRecorderBrowserUrl(): string | null {
+    if (typeof window === 'undefined') return null;
+    const hostname = window.location.hostname;
+    if (!isLocalDashboardHost(hostname)) return null;
+    return `http://${formatLocalRecorderHost(hostname)}:6080/vnc.html?autoconnect=true&resize=scale`;
+}
+
 function recorderBrowserUrl(session: RecordingSession): string | null {
-    if (!session.browser_url) return null;
+    if (!session.browser_url) return localRecorderBrowserUrl();
     if (typeof window === 'undefined') return session.browser_url;
     try {
         const url = new URL(session.browser_url);
-        if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
-            url.hostname = window.location.hostname;
+        if (isLocalDashboardHost(url.hostname)) {
+            url.hostname = formatLocalRecorderHost(window.location.hostname);
         }
         return url.toString();
     } catch {
@@ -120,6 +135,7 @@ export default function RecordingsPage() {
 
     const projectId = currentProject?.id || 'default';
     const isRecording = activeSession?.status === 'starting' || activeSession?.status === 'recording';
+    const activeRecorderUrl = activeSession ? recorderBrowserUrl(activeSession) : null;
 
     const projectParam = useMemo(() => {
         const params = new URLSearchParams();
@@ -316,20 +332,20 @@ export default function RecordingsPage() {
                                 </div>
                                 <div style={{ fontWeight: 700 }}>{activeSession.name || 'Recording session'}</div>
                                 <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.25rem' }}>{activeSession.target_url}</div>
-                                {recorderBrowserUrl(activeSession) && (
+                                {activeRecorderUrl && (
                                     <div style={{ marginTop: '0.65rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                                         <span style={{ color: 'var(--text-tertiary)', fontSize: '0.82rem' }}>
                                             The recorder browser is running in the backend display.
                                         </span>
                                         <a
                                             className="btn btn-secondary"
-                                            href={recorderBrowserUrl(activeSession) || undefined}
+                                            href={activeRecorderUrl}
                                             target="_blank"
                                             rel="noreferrer"
                                             style={{ padding: '0.4rem 0.65rem', textDecoration: 'none' }}
                                         >
                                             <ExternalLink size={14} />
-                                            Open recorder browser
+                                            Open Recorder
                                         </a>
                                     </div>
                                 )}
@@ -389,58 +405,68 @@ export default function RecordingsPage() {
                             </div>
                         ) : (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                                {sessions.map(session => (
-                                    <div
-                                        key={session.id}
-                                        style={{
-                                            display: 'grid',
-                                            gridTemplateColumns: '1fr auto',
-                                            gap: '1rem',
-                                            alignItems: 'center',
-                                            padding: '0.85rem',
-                                            border: '1px solid var(--border)',
-                                            borderRadius: 'var(--radius-sm)',
-                                            background: 'rgba(255,255,255,0.02)',
-                                        }}
-                                    >
-                                        <div style={{ minWidth: 0 }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.45rem', flexWrap: 'wrap' }}>
-                                                {statusBadge(session.status)}
-                                                <span style={{ color: 'var(--text-tertiary)', fontSize: '0.78rem' }}>{new Date(session.created_at).toLocaleString()}</span>
+                                {sessions.map(session => {
+                                    const isLiveSession = session.status === 'starting' || session.status === 'recording';
+                                    const rowRecorderUrl = isLiveSession ? recorderBrowserUrl(session) : null;
+
+                                    return (
+                                        <div
+                                            key={session.id}
+                                            style={{
+                                                display: 'grid',
+                                                gridTemplateColumns: '1fr auto',
+                                                gap: '1rem',
+                                                alignItems: 'center',
+                                                padding: '0.85rem',
+                                                border: '1px solid var(--border)',
+                                                borderRadius: 'var(--radius-sm)',
+                                                background: 'rgba(255,255,255,0.02)',
+                                            }}
+                                        >
+                                            <div style={{ minWidth: 0 }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.45rem', flexWrap: 'wrap' }}>
+                                                    {statusBadge(session.status)}
+                                                    <span style={{ color: 'var(--text-tertiary)', fontSize: '0.78rem' }}>{new Date(session.created_at).toLocaleString()}</span>
+                                                </div>
+                                                <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                    {session.name || session.id}
+                                                </div>
+                                                <div style={{ color: 'var(--text-secondary)', fontSize: '0.84rem', marginTop: '0.25rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                    {session.target_url}
+                                                </div>
+                                                {session.error && <div style={{ color: 'var(--danger)', fontSize: '0.8rem', marginTop: '0.35rem' }}>{session.error}</div>}
                                             </div>
-                                            <div style={{ fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                {session.name || session.id}
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                                                {rowRecorderUrl && (
+                                                    <a className="btn btn-secondary" href={rowRecorderUrl} target="_blank" rel="noreferrer" style={{ padding: '0.5rem 0.75rem', textDecoration: 'none' }}>
+                                                        <ExternalLink size={14} /> Open Recorder
+                                                    </a>
+                                                )}
+                                                {session.output_spec_path && (
+                                                    <Link className="btn btn-secondary" href={`/specs/${session.output_spec_path}`} style={{ padding: '0.5rem 0.75rem', textDecoration: 'none' }}>
+                                                        <FileText size={14} /> Spec
+                                                    </Link>
+                                                )}
+                                                {session.output_code_path && (
+                                                    <a className="btn btn-secondary" href={`${API_BASE}/recordings/${session.id}/code`} target="_blank" rel="noreferrer" style={{ padding: '0.5rem 0.75rem', textDecoration: 'none' }}>
+                                                        <Code2 size={14} /> Code <ExternalLink size={12} />
+                                                    </a>
+                                                )}
+                                                {(session.status === 'completed' || session.status === 'stopped') && (
+                                                    <button
+                                                        className="btn btn-primary"
+                                                        onClick={() => importSession(session)}
+                                                        disabled={importingId === session.id}
+                                                        style={{ padding: '0.5rem 0.75rem', cursor: importingId === session.id ? 'not-allowed' : 'pointer' }}
+                                                    >
+                                                        {importingId === session.id ? <Loader2 size={14} className="spin" /> : <Upload size={14} />}
+                                                        Import
+                                                    </button>
+                                                )}
                                             </div>
-                                            <div style={{ color: 'var(--text-secondary)', fontSize: '0.84rem', marginTop: '0.25rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                                {session.target_url}
-                                            </div>
-                                            {session.error && <div style={{ color: 'var(--danger)', fontSize: '0.8rem', marginTop: '0.35rem' }}>{session.error}</div>}
                                         </div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                                            {session.output_spec_path && (
-                                                <Link className="btn btn-secondary" href={`/specs/${session.output_spec_path}`} style={{ padding: '0.5rem 0.75rem', textDecoration: 'none' }}>
-                                                    <FileText size={14} /> Spec
-                                                </Link>
-                                            )}
-                                            {session.output_code_path && (
-                                                <a className="btn btn-secondary" href={`${API_BASE}/recordings/${session.id}/code`} target="_blank" rel="noreferrer" style={{ padding: '0.5rem 0.75rem', textDecoration: 'none' }}>
-                                                    <Code2 size={14} /> Code <ExternalLink size={12} />
-                                                </a>
-                                            )}
-                                            {(session.status === 'completed' || session.status === 'stopped') && (
-                                                <button
-                                                    className="btn btn-primary"
-                                                    onClick={() => importSession(session)}
-                                                    disabled={importingId === session.id}
-                                                    style={{ padding: '0.5rem 0.75rem', cursor: importingId === session.id ? 'not-allowed' : 'pointer' }}
-                                                >
-                                                    {importingId === session.id ? <Loader2 size={14} className="spin" /> : <Upload size={14} />}
-                                                    Import
-                                                </button>
-                                            )}
-                                        </div>
-                                    </div>
-                                ))}
+                                    );
+                                })}
                             </div>
                         )}
                     </div>

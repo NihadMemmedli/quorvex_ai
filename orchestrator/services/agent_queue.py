@@ -78,6 +78,10 @@ class AgentTask:
     max_budget_usd: float | None = None  # Optional spend cap
     task_budget: dict[str, int] | None = None  # Optional token budget
     include_hook_events: bool = False  # Stream hook lifecycle events
+    output_format: dict[str, Any] | None = None  # Optional native SDK output contract
+    resume_session_id: str | None = None  # Optional Claude session to resume
+    continue_conversation: bool = False
+    max_turns: int | None = None
     owner_type: str | None = None  # Logical owner, e.g. autopilot or agent_run
     owner_id: str | None = None
     owner_label: str | None = None
@@ -116,6 +120,10 @@ class AgentTask:
             "max_budget_usd": self.max_budget_usd,
             "task_budget": self.task_budget,
             "include_hook_events": self.include_hook_events,
+            "output_format": self.output_format,
+            "resume_session_id": self.resume_session_id,
+            "continue_conversation": self.continue_conversation,
+            "max_turns": self.max_turns,
             "owner_type": self.owner_type,
             "owner_id": self.owner_id,
             "owner_label": self.owner_label,
@@ -164,6 +172,10 @@ class AgentTask:
             max_budget_usd=data.get("max_budget_usd"),
             task_budget=data.get("task_budget"),
             include_hook_events=bool(data.get("include_hook_events", False)),
+            output_format=data.get("output_format"),
+            resume_session_id=data.get("resume_session_id"),
+            continue_conversation=bool(data.get("continue_conversation", False)),
+            max_turns=data.get("max_turns"),
             owner_type=data.get("owner_type"),
             owner_id=data.get("owner_id"),
             owner_label=data.get("owner_label"),
@@ -317,6 +329,10 @@ class AgentQueue:
         max_budget_usd: float | None = None,
         task_budget: dict[str, int] | None = None,
         include_hook_events: bool = False,
+        output_format: dict[str, Any] | None = None,
+        resume_session_id: str | None = None,
+        continue_conversation: bool = False,
+        max_turns: int | None = None,
         owner_type: str | None = None,
         owner_id: str | None = None,
         owner_label: str | None = None,
@@ -343,6 +359,10 @@ class AgentQueue:
             max_budget_usd: Optional spend cap
             task_budget: Optional token budget
             include_hook_events: Whether hook events should be emitted
+            output_format: Optional native SDK output contract
+            resume_session_id: Optional Claude session to resume
+            continue_conversation: Continue the most recent conversation when supported
+            max_turns: Optional maximum turn count
             requires_live_browser: Whether this task requires a headed/VNC browser worker
 
         Returns:
@@ -367,6 +387,10 @@ class AgentQueue:
             max_budget_usd=max_budget_usd,
             task_budget=task_budget,
             include_hook_events=include_hook_events,
+            output_format=output_format,
+            resume_session_id=resume_session_id,
+            continue_conversation=continue_conversation,
+            max_turns=max_turns,
             owner_type=owner_type,
             owner_id=owner_id,
             owner_label=owner_label,
