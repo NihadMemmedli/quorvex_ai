@@ -1908,6 +1908,87 @@ class TestQueueEndpoints:
         assert data["workers_busy"] == 0
         assert data["workers_idle"] == 2
 
+    def test_agent_queue_status_includes_persisted_active_agent_runs(
+        self, client, monkeypatch
+    ):
+        """GET /api/agents/queue-status should surface active AgentRun rows in Redis mode."""
+        import orchestrator.api.main as main_module
+        import orchestrator.services.agent_queue as agent_queue_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+
+        run_id = f"agent-queue-active-{uuid4()}"
+
+        class FakeQueue:
+            async def connect(self):
+                return None
+
+            async def get_metrics(self):
+                return {
+                    "queue_length": 0,
+                    "running": 0,
+                    "workers_alive": 1,
+                    "stale_running": 0,
+                    "oldest_queued_age_seconds": None,
+                    "by_status": {},
+                }
+
+            async def get_worker_health(self):
+                return {
+                    "worker_count": 1,
+                    "alive_tasks": 0,
+                }
+
+            async def get_running_task_summaries(self):
+                return []
+
+        class FakeBrowserPool:
+            async def get_status(self):
+                return {
+                    "running": 0,
+                    "max_browsers": 3,
+                    "available": 3,
+                    "by_type": {"agent": 0},
+                }
+
+        monkeypatch.setattr(agent_queue_module, "REDIS_AVAILABLE", True)
+        monkeypatch.setattr(agent_queue_module, "should_use_agent_queue", lambda: True)
+        monkeypatch.setattr(agent_queue_module, "get_agent_queue", lambda: FakeQueue())
+        monkeypatch.setattr(main_module, "BROWSER_POOL", FakeBrowserPool())
+
+        with Session(engine) as session:
+            run = AgentRun(
+                id=run_id,
+                agent_type="custom",
+                status="running",
+                started_at=datetime(2026, 1, 1, 12, 0, 0),
+                config_json='{"prompt":"inspect"}',
+            )
+            run.progress = {"phase": "running", "message": "Inspecting checkout"}
+            session.add(run)
+            session.commit()
+
+        try:
+            response = client.get("/api/agents/queue-status")
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["mode"] == "redis"
+            assert data["active"] == 1
+            assert data["active_runs"] == 1
+            assert data["queue_tasks_active"] == 0
+            assert data["queued"] == 0
+            assert data["running_tasks"][0]["id"] == run_id
+            assert data["running_tasks"][0]["agent_type"] == "custom"
+            assert data["running_tasks"][0]["status"] == "running"
+            assert data["running_tasks"][0]["progress"]["message"] == "Inspecting checkout"
+        finally:
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                if run:
+                    session.delete(run)
+                    session.commit()
+
     def test_clean_stale_agent_queue_tasks_returns_cleanup_breakdown(
         self, client, monkeypatch
     ):

@@ -140,6 +140,9 @@ from .process_manager import ProcessManager, get_process_manager
 setup_logging(level="INFO", console=True)
 logger = get_logger(__name__)
 
+AGENT_QUEUE_ACTIVE_STATUSES = ["queued", "pending", "running", "paused"]
+AGENT_QUEUE_QUEUED_STATUSES = ["queued", "pending"]
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SPECS_DIR = BASE_DIR / "specs"
 RUNS_DIR = BASE_DIR / "runs"
@@ -1819,6 +1822,47 @@ async def get_resource_status():
     }
 
 
+def _agent_run_queue_summary(run: AgentRun) -> dict[str, Any]:
+    """Return a compact queue-compatible summary for a persisted AgentRun."""
+    progress = run.progress or {}
+    progress_summary = {
+        key: progress.get(key)
+        for key in (
+            "phase",
+            "activity_label",
+            "status",
+            "message",
+            "current_stage",
+            "tool_calls",
+            "browser_tool_calls",
+            "interactions",
+            "last_tool",
+            "last_tool_label",
+        )
+        if key in progress and progress.get(key) is not None
+    }
+    return {
+        "id": run.id,
+        "status": run.status,
+        "worker_id": None,
+        "agent_type": run.agent_type,
+        "operation_type": "agent",
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "timeout_seconds": None,
+        "heartbeat_alive": None,
+        "owner_type": "agent_run",
+        "owner_id": run.id,
+        "agent_run_id": run.id,
+        "agent_task_id": run.agent_task_id,
+        "source": "agent_run",
+        "live": True,
+        "orphaned": False,
+        "progress": progress_summary,
+        "message": progress_summary.get("message"),
+    }
+
+
 @app.get("/api/agents/queue-status")
 async def get_agent_queue_status():
     """Get current agent queue status.
@@ -1838,6 +1882,54 @@ async def get_agent_queue_status():
             live_running_tasks = [
                 task for task in running_task_summaries if task.get("live")
             ]
+            active_agent_runs: list[AgentRun] = []
+            try:
+                with Session(engine) as session:
+                    active_agent_runs = list(
+                        session.exec(
+                            select(AgentRun)
+                            .where(AgentRun.status.in_(AGENT_QUEUE_ACTIVE_STATUSES))
+                            .order_by(AgentRun.created_at.desc())
+                        ).all()
+                    )
+            except Exception as exc:
+                logger.debug("Failed to load active AgentRun rows for queue status: %s", exc)
+
+            live_task_ids = {str(task.get("id")) for task in live_running_tasks if task.get("id")}
+            live_agent_run_owner_ids = {
+                str(task.get("owner_id"))
+                for task in live_running_tasks
+                if task.get("owner_type") == "agent_run" and task.get("owner_id")
+            }
+            active_run_ids = {run.id for run in active_agent_runs}
+            active_run_task_ids = {run.agent_task_id for run in active_agent_runs if run.agent_task_id}
+            persisted_run_summaries = [
+                _agent_run_queue_summary(run)
+                for run in active_agent_runs
+                if run.id not in live_agent_run_owner_ids
+                and (not run.agent_task_id or run.agent_task_id not in live_task_ids)
+            ]
+            redis_tasks_not_backed_by_active_runs = [
+                task
+                for task in live_running_tasks
+                if not (
+                    task.get("owner_type") == "agent_run"
+                    and task.get("owner_id")
+                    and str(task.get("owner_id")) in active_run_ids
+                )
+                and not (task.get("id") and str(task.get("id")) in active_run_task_ids)
+            ]
+            active_run_count = len(active_agent_runs)
+            queue_task_active_count = len(live_running_tasks)
+            redis_queue_length = int(metrics.get("queue_length", 0) or 0)
+            unrepresented_queued_runs = [
+                run
+                for run in active_agent_runs
+                if run.status in AGENT_QUEUE_QUEUED_STATUSES
+                and run.id not in live_agent_run_owner_ids
+                and (not run.agent_task_id or run.agent_task_id not in live_task_ids)
+            ]
+            merged_running_tasks = live_running_tasks + persisted_run_summaries
             pool = BROWSER_POOL or await get_browser_pool()
             browser_pool_status = await pool.get_status()
             linked_tasks = [task for task in live_running_tasks if task.get("owner_type")]
@@ -1848,7 +1940,7 @@ async def get_agent_queue_status():
             worker_process_count = int(health.get("worker_count") or 0)
             alive_running_tasks = int(health.get("alive_tasks") or 0)
             raw_running_count = int(metrics.get("running", 0) or 0)
-            running_count = len(live_running_tasks)
+            running_count = active_run_count + len(redis_tasks_not_backed_by_active_runs)
             workers_busy = min(worker_process_count, running_count)
             workers_idle = max(0, worker_process_count - workers_busy)
             if worker_process_count > 0:
@@ -1862,8 +1954,10 @@ async def get_agent_queue_status():
             return {
                 "mode": "redis",
                 "active": running_count,
+                "active_runs": active_run_count,
+                "queue_tasks_active": queue_task_active_count,
                 "raw_running": raw_running_count,
-                "queued": metrics.get("queue_length", 0),
+                "queued": redis_queue_length + len(unrepresented_queued_runs),
                 "workers_alive": metrics.get("workers_alive", 0),
                 "worker_processes_alive": worker_process_count,
                 "workers_busy": workers_busy,
@@ -1874,7 +1968,7 @@ async def get_agent_queue_status():
                 "oldest_queued_age_seconds": metrics.get("oldest_queued_age_seconds"),
                 "by_status": metrics.get("by_status", {}),
                 "worker_health": health,
-                "running_tasks": live_running_tasks,
+                "running_tasks": merged_running_tasks,
                 "linked_tasks": len(linked_tasks),
                 "background_tasks": len(background_tasks),
                 "orphaned_tasks": len(orphaned_tasks),
@@ -1890,7 +1984,6 @@ async def get_agent_queue_status():
     temporal_workers_alive = 0
     active_temporal_agent_runs = 0
     temporal_queued_agent_runs = 0
-    active_statuses = ["queued", "pending", "running", "paused"]
     try:
         from orchestrator.services.temporal_client import check_agent_run_temporal_health
 
@@ -1905,7 +1998,7 @@ async def get_agent_queue_status():
             active_temporal_agent_runs = session.exec(
                 select(func.count())
                 .select_from(AgentRun)
-                .where(AgentRun.status.in_(active_statuses))
+                .where(AgentRun.status.in_(AGENT_QUEUE_ACTIVE_STATUSES))
                 .where(AgentRun.temporal_workflow_id != None)  # noqa: E711
             ).one()
             temporal_queued_agent_runs = session.exec(
