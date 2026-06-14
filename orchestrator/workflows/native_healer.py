@@ -47,10 +47,16 @@ config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 if config_dir:
     os.chdir(config_dir)
 
-from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
-from orchestrator.utils.agent_runner import AgentRunner
+from orchestrator.ai.prompt_registry import (
+    attach_prompt_metadata,
+    build_prompt_metadata,
+)
+from orchestrator.utils.agent_runner import AgentResult, AgentRunner
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
-from orchestrator.utils.token_budget import context_budget_for_stage, truncate_text_to_tokens
+from orchestrator.utils.token_budget import (
+    context_budget_for_stage,
+    truncate_text_to_tokens,
+)
 from orchestrator.utils.text_utils import truncate_middle
 
 
@@ -89,6 +95,7 @@ class NativeHealer:
         self.cwd = Path(cwd) if cwd else None
         self._last_timed_out = False
         self.last_agent_output: str | None = None
+        self.last_agent_result: AgentResult | None = None
         self.last_tool_calls: list[dict[str, Any]] = []
 
     async def heal_test(
@@ -140,9 +147,12 @@ class NativeHealer:
         logger.info("Invoking Playwright Healer Agent...")
         result = await self._query_healer_agent(prompt, timeout_seconds=timeout_seconds)
         self.last_agent_output = result
+        agent_result = self.last_agent_result
 
         if self._last_timed_out:
-            raise HealerTimeoutError(f"Healer timed out after {timeout_seconds or 'default'}s")
+            raise HealerTimeoutError(
+                f"Healer timed out after {timeout_seconds or 'default'}s"
+            )
 
         # Check if file was modified by the agent
         new_content = path_obj.read_text()
@@ -174,8 +184,156 @@ class NativeHealer:
                 )
                 return fixed_code
 
+        retry_content = await self._retry_healer_format(
+            test_file=path_obj,
+            original_content=test_content,
+            validation_error="healer did not modify the file or return a valid complete Playwright TypeScript test",
+            previous_output=result or "",
+            previous_result=agent_result,
+        )
+        if retry_content:
+            self._capture_successful_healing_memory(
+                test_file=test_file,
+                error_log=error_log,
+                diagnosis_context=diagnosis_context,
+                healer_output=retry_content,
+                content_before=test_content,
+                content_after=retry_content,
+            )
+            return retry_content
+
         logger.warning("Healing completed but no changes detected")
         return None
+
+    @staticmethod
+    def _healer_schema_max_attempts() -> int:
+        raw_value = os.environ.get("HEALER_SCHEMA_MAX_ATTEMPTS", "2")
+        try:
+            return min(5, max(1, int(raw_value)))
+        except ValueError:
+            return 2
+
+    async def _retry_healer_format(
+        self,
+        *,
+        test_file: Path,
+        original_content: str,
+        validation_error: str,
+        previous_output: str,
+        previous_result: AgentResult | None,
+    ) -> str | None:
+        max_attempts = self._healer_schema_max_attempts()
+        if max_attempts <= 1 or previous_result is None:
+            return None
+
+        resume_session_id = getattr(previous_result, "session_id", None)
+        current_error = validation_error
+        current_output = previous_output or ""
+        for attempt_number in range(2, max_attempts + 1):
+            logger.info(
+                "Retrying healer output format after validation failure (%s/%s)",
+                attempt_number,
+                max_attempts,
+            )
+            prompt = self._build_healer_format_retry_prompt(
+                test_file=test_file,
+                original_content=original_content,
+                validation_error=current_error,
+                previous_output=current_output,
+            )
+            retry_result = await self._query_healer_format_retry_agent(
+                prompt,
+                resume_session_id=resume_session_id,
+                continue_conversation=bool(not resume_session_id and previous_result),
+            )
+            resume_session_id = retry_result.session_id or resume_session_id
+            current_output = retry_result.output or ""
+            fixed_code = self._extract_code(current_output)
+            if not fixed_code or not self._looks_like_playwright_test(fixed_code):
+                current_error = "retry output did not contain a valid complete Playwright TypeScript test"
+                continue
+            test_file.write_text(fixed_code.rstrip() + "\n")
+            logger.info("Healer format retry accepted: %s", test_file)
+            return fixed_code.rstrip() + "\n"
+        logger.warning("Healer format retry failed: %s", current_error)
+        return None
+
+    @staticmethod
+    def _looks_like_playwright_test(code: str) -> bool:
+        return (
+            ("test(" in code or "test.describe" in code)
+            and ("@playwright/test" in code or "fixtures/test-data" in code)
+            and "```" not in code
+        )
+
+    def _build_healer_format_retry_prompt(
+        self,
+        *,
+        test_file: Path,
+        original_content: str,
+        validation_error: str,
+        previous_output: str,
+    ) -> str:
+        return f"""You are correcting a rejected Playwright healing result.
+
+This is a schema/format correction turn in the same task, not a new healing investigation.
+Do not browse, do not call tools, do not run tests, do not start or close a browser, and do not create a new session.
+
+Validation failure:
+{validation_error}
+
+Return exactly one complete fixed Playwright TypeScript test file for:
+{test_file}
+
+Rules:
+- Return only a ```typescript code block.
+- Preserve the original test intent and imports unless the previous output clearly repaired them.
+- Include at least one `test(...)` or `test.describe(...)`.
+- Do not include markdown outside the code block.
+
+## Current Test File
+```typescript
+{truncate_middle(original_content, head=5000, tail=5000)}
+```
+
+## Previous Healer Output
+```text
+{truncate_middle(previous_output or "", head=4000, tail=4000)}
+```
+"""
+
+    async def _query_healer_format_retry_agent(
+        self,
+        prompt: str,
+        *,
+        resume_session_id: str | None = None,
+        continue_conversation: bool = False,
+    ) -> AgentResult:
+        timeout = int(os.environ.get("HEALER_SCHEMA_RETRY_TIMEOUT_SECONDS", "180"))
+        runner = AgentRunner(
+            timeout_seconds=timeout,
+            allowed_tools=[],
+            tools=[],
+            log_tools=False,
+            on_progress=self.on_progress,
+            on_task_enqueued=self.on_task_enqueued,
+            owner_type=self.owner_type,
+            owner_id=self.owner_id,
+            owner_label=self.owner_label,
+            model_tier=self.model_tier,
+            memory_agent_type="NativeHealer",
+            memory_source_type="test_file",
+            memory_stage="native_healer_schema_retry",
+            inject_memory=False,
+            capture_memory=False,
+            env_vars=self.env_vars,
+            cwd=self.cwd,
+            requires_live_browser=False,
+            resume_session_id=resume_session_id,
+            continue_conversation=continue_conversation,
+            force_direct_execution=True,
+        )
+        return await runner.run(prompt)
 
     def _build_healer_prompt(
         self,
@@ -220,7 +378,9 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 """
 
         failure_metadata = failure_metadata or {}
-        failed_title = failure_metadata.get("title") or failure_metadata.get("full_title")
+        failed_title = failure_metadata.get("title") or failure_metadata.get(
+            "full_title"
+        )
         failure_section = f"""
 ## Failed Test Target
 - Browser/project: `{browser or failure_metadata.get("project") or "unknown"}`
@@ -248,7 +408,8 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 
         memory_section = self._build_memory_context_section(
             query=f"{test_file}\n{error_log or ''}\n{diagnosis_context or ''}\n{test_content[:1600]}",
-            project_id=os.environ.get("MEMORY_PROJECT_ID") or os.environ.get("PROJECT_ID"),
+            project_id=os.environ.get("MEMORY_PROJECT_ID")
+            or os.environ.get("PROJECT_ID"),
             source_id=test_file,
             run_id=memory_run_id,
         )
@@ -382,7 +543,11 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
             return ""
         target_line = NativeHealer._failed_line_number(error_log)
         if target_line is None:
-            match = re.search(r"\b(?:Error|Timeout|expect|locator|click|fill|goto)\b", error_log or "", re.IGNORECASE)
+            match = re.search(
+                r"\b(?:Error|Timeout|expect|locator|click|fill|goto)\b",
+                error_log or "",
+                re.IGNORECASE,
+            )
             target_line = 1 if match else min(len(lines), max(1, len(lines) // 2))
         radius = int(os.environ.get("HEALER_CODE_FRAME_RADIUS", "35") or "35")
         start = max(1, target_line - radius)
@@ -412,7 +577,12 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
         return None
 
     def _fixture_import_path(self, test_file: str) -> str:
-        fixture_path = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "test-data"
+        fixture_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "tests"
+            / "fixtures"
+            / "test-data"
+        )
         relative = os.path.relpath(fixture_path, Path(test_file).parent)
         relative = Path(relative).as_posix()
         if not relative.startswith("."):
@@ -473,7 +643,9 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
             if selector_delta:
                 service.create_memory(
                     kind="agent_lesson",
-                    content=f"Selector fix in {Path(test_file).name}: {selector_delta}"[:1200],
+                    content=f"Selector fix in {Path(test_file).name}: {selector_delta}"[
+                        :1200
+                    ],
                     project_id=project_id,
                     confidence=0.8,
                     importance=0.7,
@@ -485,7 +657,9 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
                 )
             # Also let the consolidator extract any explicit lessons from the agent output.
             # Run the deterministic path synchronously by using existing heuristics directly.
-            for memory in service.extract_candidates(healer_output or "", agent_type="NativeHealer"):
+            for memory in service.extract_candidates(
+                healer_output or "", agent_type="NativeHealer"
+            ):
                 service.create_memory(
                     kind=memory.kind,
                     content=memory.content,
@@ -501,14 +675,18 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
             logger.debug("Healer memory capture skipped: %s", exc)
 
     @staticmethod
-    def _selector_delta(content_before: str | None, content_after: str | None) -> str | None:
+    def _selector_delta(
+        content_before: str | None, content_after: str | None
+    ) -> str | None:
         """Describe selector changes between pre- and post-heal test content."""
         if not content_before or not content_after:
             return None
         try:
             from orchestrator.memory.selector_writeback import extract_selectors
 
-            before = {s["playwright_selector"] for s in extract_selectors(content_before)}
+            before = {
+                s["playwright_selector"] for s in extract_selectors(content_before)
+            }
             after = {s["playwright_selector"] for s in extract_selectors(content_after)}
             removed = sorted(before - after)
             added = sorted(after - before)
@@ -526,7 +704,9 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
             logger.debug("Selector delta extraction skipped: %s", exc)
             return None
 
-    async def _query_healer_agent(self, prompt: str, timeout_seconds: int | None = None) -> str:
+    async def _query_healer_agent(
+        self, prompt: str, timeout_seconds: int | None = None
+    ) -> str:
         """
         Query the Playwright Healer agent using the unified AgentRunner.
         """
@@ -534,13 +714,19 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
         self.last_tool_calls = []
 
         effective_timeout = timeout_seconds or int(
-            os.environ.get("HEALER_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))
+            os.environ.get(
+                "HEALER_TIMEOUT_SECONDS",
+                os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"),
+            )
         )
 
         try:
             runner = AgentRunner(
                 timeout_seconds=effective_timeout,
-                allowed_tools=get_agent_allowed_tools("playwright-test-healer", mcp_config_dir=self.cwd) or [],
+                allowed_tools=get_agent_allowed_tools(
+                    "playwright-test-healer", mcp_config_dir=self.cwd
+                )
+                or [],
                 log_tools=True,
                 on_tool_use=self.on_tool_use,
                 on_progress=self.on_progress,
@@ -558,6 +744,7 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
                 cwd=self.cwd,
             )
             result = await runner.run(prompt)
+            self.last_agent_result = result
             self._last_timed_out = result.timed_out
             self.last_tool_calls = self._serialize_tool_calls(result.tool_calls)
 
@@ -599,17 +786,25 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
             serialized.append(
                 {
                     "name": str(name),
-                    "timestamp": timestamp.isoformat() if hasattr(timestamp, "isoformat") else None,
+                    "timestamp": (
+                        timestamp.isoformat()
+                        if hasattr(timestamp, "isoformat")
+                        else None
+                    ),
                     "duration_ms": getattr(call, "duration_ms", None),
                     "success": getattr(call, "success", True),
                     "error": getattr(call, "error", None),
-                    "input": NativeHealer._redact_tool_input(getattr(call, "input", None)),
+                    "input": NativeHealer._redact_tool_input(
+                        getattr(call, "input", None)
+                    ),
                 }
             )
         return serialized
 
     @staticmethod
-    def _redact_tool_input(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
+    def _redact_tool_input(
+        value: Any, *, key: str | None = None, depth: int = 0
+    ) -> Any:
         sensitive_parts = (
             "password",
             "passwd",
@@ -627,20 +822,29 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
         if depth > 4:
             return "[TRUNCATED_DEPTH]"
         if isinstance(value, str):
-            return value if len(value) <= 1000 else value[:1000] + f"...[truncated {len(value) - 1000} chars]"
+            return (
+                value
+                if len(value) <= 1000
+                else value[:1000] + f"...[truncated {len(value) - 1000} chars]"
+            )
         if isinstance(value, (int, float, bool)) or value is None:
             return value
         if isinstance(value, dict):
             items = list(value.items())
             redacted = {
-                str(item_key): NativeHealer._redact_tool_input(item_value, key=str(item_key), depth=depth + 1)
+                str(item_key): NativeHealer._redact_tool_input(
+                    item_value, key=str(item_key), depth=depth + 1
+                )
                 for item_key, item_value in items[:25]
             }
             if len(items) > 25:
                 redacted["__truncated_keys"] = len(items) - 25
             return redacted
         if isinstance(value, list):
-            redacted_list = [NativeHealer._redact_tool_input(item, key=key, depth=depth + 1) for item in value[:25]]
+            redacted_list = [
+                NativeHealer._redact_tool_input(item, key=key, depth=depth + 1)
+                for item in value[:25]
+            ]
             if len(value) > 25:
                 redacted_list.append(f"[truncated {len(value) - 25} items]")
             return redacted_list
@@ -723,7 +927,9 @@ if __name__ == "__main__":
                 error_log = Path(args.log).read_text()
             await healer.heal_test(args.test_file, error_log)
         else:
-            logger.info("Usage: native_healer.py <test_file> [--log <error.log>] or --all")
+            logger.info(
+                "Usage: native_healer.py <test_file> [--log <error.log>] or --all"
+            )
 
     try:
         asyncio.run(main())

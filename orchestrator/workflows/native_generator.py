@@ -52,9 +52,16 @@ from orchestrator.services.handoff_manifest import (
     record_artifact,
     record_consumption,
 )
-from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
+from orchestrator.utils.agent_runner import (
+    AgentResult,
+    AgentRunner,
+    get_default_timeout,
+)
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
-from orchestrator.utils.token_budget import context_budget_for_stage, truncate_text_to_tokens
+from orchestrator.utils.token_budget import (
+    context_budget_for_stage,
+    truncate_text_to_tokens,
+)
 from orchestrator.utils.text_utils import truncate_middle
 
 
@@ -97,6 +104,7 @@ class NativeGenerator:
         self.cwd = Path(cwd) if cwd else None
         self.last_handoff_consumption: dict[str, Any] = {}
         self.last_coverage_warnings: list[str] = []
+        self.last_agent_result: AgentResult | None = None
         # Use absolute path to project's tests directory (not relative to cwd)
         # This fixes Docker issue where cwd changes to run directory
         self.tests_dir = BASE_DIR / "tests" / "generated"
@@ -178,7 +186,9 @@ class NativeGenerator:
                 handoff_consumption["planner_draft_script_reason"] = str(exc)
         elif planner_draft_script_path:
             handoff_consumption["planner_draft_script_status"] = "missing"
-            handoff_consumption["planner_draft_script_reason"] = "draft script path does not exist"
+            handoff_consumption["planner_draft_script_reason"] = (
+                "draft script path does not exist"
+            )
 
         if handoff_manifest_path:
             if plan_path:
@@ -219,24 +229,50 @@ class NativeGenerator:
         # Invoke the Generator Agent
         logger.info("Invoking Playwright Generator Agent...")
         result = await self._query_generator_agent(prompt)
+        agent_result = self.last_agent_result
 
         # Check if the agent created the file
         if output_path.exists():
-            logger.info(f"Test generated: {output_path}")
-            self._record_generation_coverage(spec_content, output_path)
-            if handoff_manifest_path:
-                record_artifact(
-                    handoff_manifest_path,
-                    "generated_test",
-                    output_path,
-                    kind="playwright_test",
-                    producer_stage="generator",
-                    required=True,
-                    consumers=["test_run", "healer"],
-                    validation_status="valid",
-                    metadata=handoff_consumption,
-                )
-            return output_path
+            validation_error = self._generated_test_validation_error(output_path)
+            if not validation_error:
+                logger.info(f"Test generated: {output_path}")
+                self._record_generation_coverage(spec_content, output_path)
+                if handoff_manifest_path:
+                    record_artifact(
+                        handoff_manifest_path,
+                        "generated_test",
+                        output_path,
+                        kind="playwright_test",
+                        producer_stage="generator",
+                        required=True,
+                        consumers=["test_run", "healer"],
+                        validation_status="valid",
+                        metadata=handoff_consumption,
+                    )
+                return output_path
+            logger.warning(
+                "Generated test failed format validation: %s", validation_error
+            )
+            if await self._retry_generator_format(
+                output_path=output_path,
+                validation_error=validation_error,
+                previous_output=result,
+                previous_result=agent_result,
+            ):
+                self._record_generation_coverage(spec_content, output_path)
+                if handoff_manifest_path:
+                    record_artifact(
+                        handoff_manifest_path,
+                        "generated_test",
+                        output_path,
+                        kind="playwright_test",
+                        producer_stage="generator",
+                        required=True,
+                        consumers=["test_run", "healer"],
+                        validation_status="valid",
+                        metadata={**handoff_consumption, "source": "schema_retry"},
+                    )
+                return output_path
 
         # Fallback: If agent returned code but didn't write it
         fixed_code = self._extract_code(result or "")
@@ -254,12 +290,190 @@ class NativeGenerator:
                     required=True,
                     consumers=["test_run", "healer"],
                     validation_status="valid",
-                    metadata={**handoff_consumption, "source": "agent_response_fallback"},
+                    metadata={
+                        **handoff_consumption,
+                        "source": "agent_response_fallback",
+                    },
+                )
+            return output_path
+
+        validation_error = "agent did not write a valid Playwright TypeScript test or return one in a code block"
+        if await self._retry_generator_format(
+            output_path=output_path,
+            validation_error=validation_error,
+            previous_output=result,
+            previous_result=agent_result,
+        ):
+            self._record_generation_coverage(spec_content, output_path)
+            if handoff_manifest_path:
+                record_artifact(
+                    handoff_manifest_path,
+                    "generated_test",
+                    output_path,
+                    kind="playwright_test",
+                    producer_stage="generator",
+                    required=True,
+                    consumers=["test_run", "healer"],
+                    validation_status="valid",
+                    metadata={**handoff_consumption, "source": "schema_retry"},
                 )
             return output_path
 
         logger.warning(f"Generator finished but test file not found at: {output_path}")
         return output_path
+
+    def _generated_test_validation_error(self, output_path: Path) -> str | None:
+        try:
+            code = output_path.read_text()
+        except OSError as exc:
+            return f"could not read generated test file: {exc}"
+        if not code.strip():
+            return "generated test file is empty"
+        if not self._looks_like_playwright_test(code):
+            return "generated file is not a valid Playwright TypeScript test"
+        return None
+
+    @staticmethod
+    def _generator_schema_max_attempts() -> int:
+        raw_value = os.environ.get("GENERATOR_SCHEMA_MAX_ATTEMPTS", "2")
+        try:
+            return min(5, max(1, int(raw_value)))
+        except ValueError:
+            return 2
+
+    async def _retry_generator_format(
+        self,
+        *,
+        output_path: Path,
+        validation_error: str,
+        previous_output: str,
+        previous_result: AgentResult | None,
+    ) -> bool:
+        max_attempts = self._generator_schema_max_attempts()
+        if max_attempts <= 1 or previous_result is None:
+            return False
+
+        previous_file = ""
+        if output_path.exists():
+            try:
+                previous_file = output_path.read_text()
+            except OSError:
+                previous_file = ""
+
+        resume_session_id = getattr(previous_result, "session_id", None)
+        current_error = validation_error
+        current_output = previous_output or ""
+
+        for attempt_number in range(2, max_attempts + 1):
+            logger.info(
+                "Retrying generator output format after validation failure (%s/%s)",
+                attempt_number,
+                max_attempts,
+            )
+            prompt = self._build_generator_format_retry_prompt(
+                output_path=output_path,
+                validation_error=current_error,
+                previous_output=current_output,
+                previous_file=previous_file,
+            )
+            retry_result = await self._query_generator_format_retry_agent(
+                prompt,
+                resume_session_id=resume_session_id,
+                continue_conversation=bool(not resume_session_id and previous_result),
+            )
+            resume_session_id = retry_result.session_id or resume_session_id
+            current_output = retry_result.output or ""
+            fixed_code = self._extract_code(current_output)
+            if not fixed_code:
+                current_error = "retry output did not contain a valid Playwright TypeScript code block"
+                continue
+            output_path.write_text(fixed_code.rstrip() + "\n")
+            file_error = self._generated_test_validation_error(output_path)
+            if not file_error:
+                logger.info("Generator format retry accepted: %s", output_path)
+                return True
+            current_error = file_error
+            previous_file = fixed_code
+        logger.warning("Generator format retry failed: %s", current_error)
+        return False
+
+    def _build_generator_format_retry_prompt(
+        self,
+        *,
+        output_path: Path,
+        validation_error: str,
+        previous_output: str,
+        previous_file: str,
+    ) -> str:
+        previous_sections = []
+        if previous_file.strip():
+            previous_sections.append(
+                "## Rejected File Content\n```typescript\n"
+                + truncate_middle(previous_file, head=5000, tail=5000)
+                + "\n```"
+            )
+        if previous_output.strip():
+            previous_sections.append(
+                "## Previous Agent Output\n```text\n"
+                + truncate_middle(previous_output, head=4000, tail=4000)
+                + "\n```"
+            )
+        context = (
+            "\n\n".join(previous_sections) or "No usable previous output was captured."
+        )
+        return f"""You are correcting a rejected Playwright test generation result.
+
+This is a schema/format correction turn in the same task, not a new browser-generation run.
+Do not browse, do not call tools, do not start or close a browser, and do not create a new session.
+
+Validation failure:
+{validation_error}
+
+Return exactly one complete Playwright TypeScript test file for:
+{output_path}
+
+Rules:
+- Return only a ```typescript code block.
+- Include a valid `import {{ test, expect }} from '@playwright/test'` or the project fixture import already present in the rejected file.
+- Include at least one `test(...)` or `test.describe(...)`.
+- Do not include markdown outside the code block.
+- Do not include backticks inside the TypeScript file.
+
+{context}
+"""
+
+    async def _query_generator_format_retry_agent(
+        self,
+        prompt: str,
+        *,
+        resume_session_id: str | None = None,
+        continue_conversation: bool = False,
+    ) -> AgentResult:
+        timeout = int(os.environ.get("GENERATOR_SCHEMA_RETRY_TIMEOUT_SECONDS", "180"))
+        runner = AgentRunner(
+            timeout_seconds=timeout,
+            allowed_tools=[],
+            tools=[],
+            log_tools=False,
+            on_progress=self.on_progress,
+            on_task_enqueued=self.on_task_enqueued,
+            owner_type=self.owner_type,
+            owner_id=self.owner_id,
+            owner_label=self.owner_label,
+            model_tier=self.model_tier,
+            memory_agent_type="NativeGenerator",
+            memory_source_type="spec",
+            memory_stage="native_generator_schema_retry",
+            inject_memory=False,
+            capture_memory=False,
+            env_vars=self.env_vars,
+            cwd=self.cwd,
+            requires_live_browser=False,
+            resume_session_id=resume_session_id,
+            continue_conversation=continue_conversation,
+            force_direct_execution=True,
+        )
+        return await runner.run(prompt)
 
     def _extract_code(self, text: str) -> str | None:
         """Extract only TypeScript test code from an agent response."""
@@ -366,7 +580,9 @@ class NativeGenerator:
                 }
             )
         credentials = {
-            key: value for key, value in credentials.items() if not key.startswith("TESTDATA_")
+            key: value
+            for key, value in credentials.items()
+            if not key.startswith("TESTDATA_")
         }
         credentials_section = ""
         if credentials:
@@ -402,10 +618,16 @@ Use this design guidance to reduce flaky output. Treat it as advisory context fr
 
         plan_section = ""
         if plan_content:
-            mode = os.environ.get("GENERATOR_PLAN_EVIDENCE_MODE", "summary").strip().lower()
+            mode = (
+                os.environ.get("GENERATOR_PLAN_EVIDENCE_MODE", "summary")
+                .strip()
+                .lower()
+            )
             if mode not in {"summary", "full"}:
                 mode = "summary"
-            plan_budget = context_budget_for_stage("generator_plan", 1600 if mode == "summary" else 2400)
+            plan_budget = context_budget_for_stage(
+                "generator_plan", 1600 if mode == "summary" else 2400
+            )
             rendered_plan = (
                 self._planner_evidence_summary(plan_content, token_budget=plan_budget)
                 if mode == "summary"
@@ -425,7 +647,9 @@ relying on them - the page may have changed since planning.
         draft_script_section = ""
         if planner_draft_script_content:
             draft_budget = context_budget_for_stage("generator_draft_script", 1800)
-            rendered_draft = truncate_text_to_tokens(planner_draft_script_content, draft_budget)
+            rendered_draft = truncate_text_to_tokens(
+                planner_draft_script_content, draft_budget
+            )
             if rendered_draft:
                 draft_script_section = f"""
 
@@ -562,8 +786,12 @@ Save the generated test file to: {output_path}
         import_path = self._fixture_import_path(output_path)
         username = (execution_credentials or {}).get("username", "")
         password = (execution_credentials or {}).get("password", "")
-        username_field = (execution_credentials or {}).get("username_field") or "username"
-        password_field = (execution_credentials or {}).get("password_field") or "password"
+        username_field = (execution_credentials or {}).get(
+            "username_field"
+        ) or "username"
+        password_field = (execution_credentials or {}).get(
+            "password_field"
+        ) or "password"
 
         return f"""
 
@@ -658,11 +886,37 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
             lower = line.lower()
             if not line:
                 continue
-            if re.match(r"^#{1,3}\s+", line) or line.startswith(("**Steps:**", "**Expected Result:**", "**Test Data:**")):
+            if re.match(r"^#{1,3}\s+", line) or line.startswith(
+                ("**Steps:**", "**Expected Result:**", "**Test Data:**")
+            ):
                 lines.append(line)
-            elif any(marker in lower for marker in ("selector", "getby", "observed url", "screenshot", "confidence", "source:", "await expect", "page.")):
+            elif any(
+                marker in lower
+                for marker in (
+                    "selector",
+                    "getby",
+                    "observed url",
+                    "screenshot",
+                    "confidence",
+                    "source:",
+                    "await expect",
+                    "page.",
+                )
+            ):
                 lines.append(line)
-            elif re.match(r"^\d+\.\s+", line) and any(marker in lower for marker in ("click", "fill", "navigate", "verify", "expect", "visible", "select", "submit")):
+            elif re.match(r"^\d+\.\s+", line) and any(
+                marker in lower
+                for marker in (
+                    "click",
+                    "fill",
+                    "navigate",
+                    "verify",
+                    "expect",
+                    "visible",
+                    "select",
+                    "submit",
+                )
+            ):
                 lines.append(line)
         summary = "\n".join(lines)
         return truncate_text_to_tokens(summary or plan_content, token_budget)
@@ -676,14 +930,20 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
         self.last_coverage_warnings = warnings
         if not warnings:
             return
-        logger.warning("Generator spec coverage warnings for %s: %s", output_path, "; ".join(warnings[:5]))
+        logger.warning(
+            "Generator spec coverage warnings for %s: %s",
+            output_path,
+            "; ".join(warnings[:5]),
+        )
         artifact = output_path.with_suffix(".coverage.json")
         try:
             artifact.write_text(json.dumps({"warnings": warnings}, indent=2))
         except Exception:
             logger.debug("Could not write generator coverage artifact", exc_info=True)
         if os.environ.get("GENERATOR_ENFORCE_SPEC_COVERAGE", "0") == "1":
-            raise RuntimeError(f"Generated test appears to miss spec coverage: {'; '.join(warnings[:5])}")
+            raise RuntimeError(
+                f"Generated test appears to miss spec coverage: {'; '.join(warnings[:5])}"
+            )
 
     @staticmethod
     def _coverage_warnings(spec_content: str, generated_code: str) -> list[str]:
@@ -714,14 +974,23 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
             for line in (spec_content or "").splitlines()
             if re.match(r"^\s*\d+\.\s+\S", line)
         ]
-        expected_blocks = re.findall(r"\*\*Expected Result:\*\*\s*(.+)", spec_content or "", flags=re.IGNORECASE)
-        for label, values in (("step", step_lines), ("expected result", expected_blocks)):
+        expected_blocks = re.findall(
+            r"\*\*Expected Result:\*\*\s*(.+)", spec_content or "", flags=re.IGNORECASE
+        )
+        for label, values in (
+            ("step", step_lines),
+            ("expected result", expected_blocks),
+        ):
             for idx, text in enumerate(values, start=1):
                 keys = sorted(keywords(text), key=len, reverse=True)[:4]
                 if keys and not any(key in generated_lower for key in keys):
-                    warnings.append(f"Missing apparent {label} coverage #{idx}: {text[:180]}")
+                    warnings.append(
+                        f"Missing apparent {label} coverage #{idx}: {text[:180]}"
+                    )
         if "expect(" not in generated_code and "test.fixme" not in generated_code:
-            warnings.append("Generated code has no Playwright expect() assertion or explicit test.fixme().")
+            warnings.append(
+                "Generated code has no Playwright expect() assertion or explicit test.fixme()."
+            )
         return warnings[:25]
 
     async def _query_generator_agent(self, prompt: str) -> str:
@@ -738,7 +1007,9 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
 
         runner = AgentRunner(
             timeout_seconds=timeout,
-            allowed_tools=get_agent_allowed_tools("playwright-test-generator", mcp_config_dir=self.cwd),
+            allowed_tools=get_agent_allowed_tools(
+                "playwright-test-generator", mcp_config_dir=self.cwd
+            ),
             log_tools=True,
             on_tool_use=self.on_tool_use,
             on_progress=self.on_progress,
@@ -757,6 +1028,7 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
         )
 
         result = await runner.run(prompt)
+        self.last_agent_result = result
 
         # Log diagnostics
         logger.info(

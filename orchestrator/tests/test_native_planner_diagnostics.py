@@ -98,7 +98,10 @@ def _planner(tmp_path: Path) -> NativePlanner:
     planner.memory_manager = SimpleNamespace(
         vector_store=SimpleNamespace(
             search_prd_context=lambda **_kwargs: [
-                {"content": "Checkout requirements", "metadata": {"feature": "Checkout"}}
+                {
+                    "content": "Checkout requirements",
+                    "metadata": {"feature": "Checkout"},
+                }
             ]
         )
     )
@@ -120,7 +123,9 @@ def _write_mcp_config(tmp_path: Path, server_name: str = "playwright-test") -> N
     )
 
 
-def _patch_agent(monkeypatch: pytest.MonkeyPatch, planner: NativePlanner, result: AgentResult) -> None:
+def _patch_agent(
+    monkeypatch: pytest.MonkeyPatch, planner: NativePlanner, result: AgentResult
+) -> None:
     async def fake_query(_prompt: str, target_url: str | None = None) -> AgentResult:
         return result
 
@@ -145,7 +150,9 @@ def _patch_agent_sequence(
     return prompts
 
 
-def _patch_repair_agent(monkeypatch: pytest.MonkeyPatch, planner: NativePlanner, result: AgentResult) -> None:
+def _patch_repair_agent(
+    monkeypatch: pytest.MonkeyPatch, planner: NativePlanner, result: AgentResult
+) -> None:
     async def fake_repair(_prompt: str) -> AgentResult:
         return result
 
@@ -229,6 +236,31 @@ async def test_query_live_planner_uses_restricted_tool_config(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_planner_retry_passes_resume_session_to_agent_runner(
+    tmp_path, monkeypatch
+):
+    planner = _planner(tmp_path)
+    captured: dict = {}
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def run(self, prompt: str) -> AgentResult:
+            return AgentResult(success=True, output="", session_id="sdk-session-2")
+
+    monkeypatch.setattr("orchestrator.workflows.native_planner.AgentRunner", FakeRunner)
+    planner._planner_retry_session_id = "sdk-session-1"
+    planner._planner_retry_continue_conversation = False
+
+    result = await planner._query_planner_agent("retry this", target_url=None)
+
+    assert result.session_id == "sdk-session-2"
+    assert captured["resume_session_id"] == "sdk-session-1"
+    assert captured["continue_conversation"] is False
+
+
+@pytest.mark.asyncio
 async def test_flow_context_normalizes_target_url_before_prompt(tmp_path, monkeypatch):
     planner = _planner(tmp_path)
     prompts: list[str] = []
@@ -290,7 +322,13 @@ async def test_empty_agent_result_raises_diagnostic_error(tmp_path, monkeypatch)
     _patch_agent(
         monkeypatch,
         planner,
-        AgentResult(success=True, output="", messages_received=0, text_blocks_received=0, tool_calls=[]),
+        AgentResult(
+            success=True,
+            output="",
+            messages_received=0,
+            text_blocks_received=0,
+            tool_calls=[],
+        ),
     )
 
     with pytest.raises(SpecGenerationError) as exc_info:
@@ -311,7 +349,13 @@ async def test_timed_out_agent_result_surfaces_timeout(tmp_path, monkeypatch):
     _patch_agent(
         monkeypatch,
         planner,
-        AgentResult(success=False, output="", timed_out=True, messages_received=2, text_blocks_received=1),
+        AgentResult(
+            success=False,
+            output="",
+            timed_out=True,
+            messages_received=2,
+            text_blocks_received=1,
+        ),
     )
 
     with pytest.raises(SpecGenerationError) as exc_info:
@@ -328,7 +372,9 @@ async def test_errored_agent_result_surfaces_agent_error(tmp_path, monkeypatch):
     _patch_agent(
         monkeypatch,
         planner,
-        AgentResult(success=False, output="", error="queue unavailable", messages_received=1),
+        AgentResult(
+            success=False, output="", error="queue unavailable", messages_received=1
+        ),
     )
 
     with pytest.raises(SpecGenerationError) as exc_info:
@@ -340,7 +386,9 @@ async def test_errored_agent_result_surfaces_agent_error(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_valid_saved_plan_recovered_from_expected_output_path(tmp_path, monkeypatch):
+async def test_valid_saved_plan_recovered_from_expected_output_path(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     expected = planner.specs_dir / "prd-project" / "checkout.md"
     expected.parent.mkdir(parents=True)
@@ -368,13 +416,19 @@ async def test_valid_saved_plan_recovered_from_session_artifact(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_invalid_saved_plan_without_test_case_structure_fails(tmp_path, monkeypatch):
+async def test_invalid_saved_plan_without_test_case_structure_fails(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     expected = planner.specs_dir / "prd-project" / "checkout.md"
     expected.parent.mkdir(parents=True)
     expected.write_text("# Checkout Summary\n\nI created a plan in the workspace.")
     _patch_agent(monkeypatch, planner, AgentResult(success=True, output=""))
-    _patch_repair_agent(monkeypatch, planner, AgentResult(success=True, output="# Checkout Summary\n\nStill invalid."))
+    _patch_repair_agent(
+        monkeypatch,
+        planner,
+        AgentResult(success=True, output="# Checkout Summary\n\nStill invalid."),
+    )
 
     with pytest.raises(SpecGenerationError) as exc_info:
         await planner.generate_spec_for_feature("Checkout", "prd-project")
@@ -383,7 +437,9 @@ async def test_invalid_saved_plan_without_test_case_structure_fails(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_invalid_saved_markdown_with_save_plan_evidence_invokes_repair(tmp_path, monkeypatch):
+async def test_invalid_saved_markdown_with_save_plan_evidence_invokes_repair(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     expected = planner.specs_dir / "prd-project" / "checkout.md"
     expected.parent.mkdir(parents=True)
@@ -403,26 +459,40 @@ async def test_invalid_saved_markdown_with_save_plan_evidence_invokes_repair(tmp
             ],
         ),
     )
-    _patch_repair_agent(monkeypatch, planner, AgentResult(success=True, output=VALID_PLAN))
+    _patch_repair_agent(
+        monkeypatch, planner, AgentResult(success=True, output=VALID_PLAN)
+    )
 
     path = await planner.generate_spec_for_feature("Checkout", "prd-project")
 
     assert path == expected
     assert path.read_text().strip() == VALID_PLAN.strip()
-    attempt = json.loads((planner.session_dir / "planner_repair_attempt.json").read_text())
+    attempt = json.loads(
+        (planner.session_dir / "planner_repair_attempt.json").read_text()
+    )
     assert attempt["attempted"] is True
     assert attempt["accepted"] is True
     assert attempt["rejected_artifacts"][0]["path"] == str(expected)
-    assert attempt["rejected_save_plan_payloads"][0]["length"] == len(INVALID_PLAN_WITH_EVIDENCE)
+    assert attempt["rejected_save_plan_payloads"][0]["length"] == len(
+        INVALID_PLAN_WITH_EVIDENCE
+    )
 
 
 @pytest.mark.asyncio
-async def test_repair_not_attempted_when_no_useful_evidence_exists(tmp_path, monkeypatch):
+async def test_repair_not_attempted_when_no_useful_evidence_exists(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     _patch_agent(
         monkeypatch,
         planner,
-        AgentResult(success=True, output="", messages_received=0, text_blocks_received=0, tool_calls=[]),
+        AgentResult(
+            success=True,
+            output="",
+            messages_received=0,
+            text_blocks_received=0,
+            tool_calls=[],
+        ),
     )
 
     async def fail_if_called(_prompt: str) -> AgentResult:
@@ -433,14 +503,18 @@ async def test_repair_not_attempted_when_no_useful_evidence_exists(tmp_path, mon
     with pytest.raises(SpecGenerationError):
         await planner.generate_spec_for_feature("Checkout", "prd-project")
 
-    attempt = json.loads((planner.session_dir / "planner_repair_attempt.json").read_text())
+    attempt = json.loads(
+        (planner.session_dir / "planner_repair_attempt.json").read_text()
+    )
     assert attempt["attempted"] is False
     assert attempt["accepted"] is False
     assert attempt["useful_evidence"] is False
 
 
 @pytest.mark.asyncio
-async def test_repair_failure_raises_with_diagnostics_and_artifact_metadata(tmp_path, monkeypatch):
+async def test_repair_failure_raises_with_diagnostics_and_artifact_metadata(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     expected = planner.specs_dir / "prd-project" / "checkout.md"
     expected.parent.mkdir(parents=True)
@@ -463,7 +537,10 @@ async def test_repair_failure_raises_with_diagnostics_and_artifact_metadata(tmp_
     _patch_repair_agent(
         monkeypatch,
         planner,
-        AgentResult(success=True, output="# Test Plan: Checkout\n\n### TC-001: Still missing fields\n"),
+        AgentResult(
+            success=True,
+            output="# Test Plan: Checkout\n\n### TC-001: Still missing fields\n",
+        ),
     )
 
     with pytest.raises(SpecGenerationError) as exc_info:
@@ -474,8 +551,12 @@ async def test_repair_failure_raises_with_diagnostics_and_artifact_metadata(tmp_
     assert exc_info.value.diagnostics["planner_repair_accepted"] is False
     assert exc_info.value.diagnostics["rejected_artifact_count"] == 1
     assert exc_info.value.diagnostics["rejected_save_plan_payload_count"] == 1
-    assert exc_info.value.diagnostics["planner_repair_artifact_path"].endswith("planner_repair_attempt.json")
-    attempt = json.loads((planner.session_dir / "planner_repair_attempt.json").read_text())
+    assert exc_info.value.diagnostics["planner_repair_artifact_path"].endswith(
+        "planner_repair_attempt.json"
+    )
+    attempt = json.loads(
+        (planner.session_dir / "planner_repair_attempt.json").read_text()
+    )
     assert attempt["attempted"] is True
     assert attempt["accepted"] is False
     assert "missing required fields" in attempt["validation_failure_reason"]
@@ -515,7 +596,9 @@ async def test_flow_context_generation_uses_same_repair_recovery(tmp_path, monke
             ],
         ),
     )
-    _patch_repair_agent(monkeypatch, planner, AgentResult(success=True, output=VALID_PLAN))
+    _patch_repair_agent(
+        monkeypatch, planner, AgentResult(success=True, output=VALID_PLAN)
+    )
 
     path = await planner.generate_spec_from_flow_context(
         "Checkout",
@@ -612,9 +695,13 @@ def test_repair_evidence_preview_redacts_sensitive_text(tmp_path):
     planner = _planner(tmp_path)
     expected = planner.specs_dir / "prd-project" / "checkout.md"
     expected.parent.mkdir(parents=True)
-    expected.write_text("# Test Plan: Checkout\n\npassword: do-not-store\nAuthorization: Bearer abc123")
+    expected.write_text(
+        "# Test Plan: Checkout\n\npassword: do-not-store\nAuthorization: Bearer abc123"
+    )
 
-    evidence = planner._collect_repair_evidence(AgentResult(success=True, output="token=raw-output-secret"), expected)
+    evidence = planner._collect_repair_evidence(
+        AgentResult(success=True, output="token=raw-output-secret"), expected
+    )
 
     assert "do-not-store" not in evidence["rejected_artifacts"][0]["preview"]
     assert "abc123" not in evidence["rejected_artifacts"][0]["preview"]
@@ -678,7 +765,9 @@ def test_live_plan_rejected_when_saved_before_target_navigation():
     )
 
     with pytest.raises(SpecGenerationError) as exc_info:
-        NativePlanner._validate_live_plan_tool_sequence(result, "https://example.test/checkout")
+        NativePlanner._validate_live_plan_tool_sequence(
+            result, "https://example.test/checkout"
+        )
 
     assert "before navigating" in str(exc_info.value)
     assert exc_info.value.diagnostics["target_navigation_observed"] is False
@@ -712,7 +801,9 @@ def test_live_plan_accepted_after_setup_target_navigation_snapshot_and_save():
         ],
     )
 
-    NativePlanner._validate_live_plan_tool_sequence(result, "https://example.test/checkout")
+    NativePlanner._validate_live_plan_tool_sequence(
+        result, "https://example.test/checkout"
+    )
 
 
 def test_live_plan_validation_cleans_markdown_target_url():
@@ -743,7 +834,9 @@ def test_live_plan_validation_cleans_markdown_target_url():
         ],
     )
 
-    NativePlanner._validate_live_plan_tool_sequence(result, "https://example.test/checkout?view=List`")
+    NativePlanner._validate_live_plan_tool_sequence(
+        result, "https://example.test/checkout?view=List`"
+    )
 
 
 def test_live_plan_rejected_when_saved_before_snapshot_after_navigation():
@@ -770,11 +863,16 @@ def test_live_plan_rejected_when_saved_before_snapshot_after_navigation():
     )
 
     with pytest.raises(SpecGenerationError) as exc_info:
-        NativePlanner._validate_live_plan_tool_sequence(result, "https://example.test/checkout")
+        NativePlanner._validate_live_plan_tool_sequence(
+            result, "https://example.test/checkout"
+        )
 
     assert "before navigating" in str(exc_info.value)
     assert exc_info.value.diagnostics["target_navigation_observed"] is True
-    assert exc_info.value.diagnostics["browser_snapshot_after_navigation_observed"] is False
+    assert (
+        exc_info.value.diagnostics["browser_snapshot_after_navigation_observed"]
+        is False
+    )
 
 
 def test_finalize_live_plan_writes_planner_draft_script(tmp_path):
@@ -812,7 +910,9 @@ def test_finalize_live_plan_rejects_missing_draft_script(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_live_plan_repairs_missing_draft_without_browser_retry(tmp_path, monkeypatch):
+async def test_live_plan_repairs_missing_draft_without_browser_retry(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
     prompts = _patch_agent_sequence(
@@ -820,7 +920,9 @@ async def test_live_plan_repairs_missing_draft_without_browser_retry(tmp_path, m
         planner,
         [_live_save_result(VALID_PLAN_WITHOUT_DRAFT)],
     )
-    _patch_repair_agent(monkeypatch, planner, AgentResult(success=True, output=VALID_PLAN))
+    _patch_repair_agent(
+        monkeypatch, planner, AgentResult(success=True, output=VALID_PLAN)
+    )
 
     path = await planner.generate_spec_from_flow_context(
         flow_title="Checkout",
@@ -834,15 +936,25 @@ async def test_live_plan_repairs_missing_draft_without_browser_retry(tmp_path, m
     assert path.read_text().strip() == VALID_PLAN.strip()
     assert planner.last_draft_script_path == draft_path
     assert draft_path.exists()
-    attempt = json.loads((planner.session_dir / "planner_repair_attempt.json").read_text())
+    attempt = json.loads(
+        (planner.session_dir / "planner_repair_attempt.json").read_text()
+    )
     assert attempt["attempted"] is True
     assert attempt["accepted"] is True
-    assert attempt["draft_script_validation_failure"] == "missing Draft Playwright Script fenced TypeScript block"
-    assert attempt["rejected_artifacts"][0]["validation_failure_reason"] == "missing Draft Playwright Script fenced TypeScript block"
+    assert (
+        attempt["draft_script_validation_failure"]
+        == "missing Draft Playwright Script fenced TypeScript block"
+    )
+    assert (
+        attempt["rejected_artifacts"][0]["validation_failure_reason"]
+        == "missing Draft Playwright Script fenced TypeScript block"
+    )
 
 
 @pytest.mark.asyncio
-async def test_live_plan_repairs_invalid_draft_without_browser_retry(tmp_path, monkeypatch):
+async def test_live_plan_repairs_invalid_draft_without_browser_retry(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
     prompts = _patch_agent_sequence(
@@ -850,7 +962,9 @@ async def test_live_plan_repairs_invalid_draft_without_browser_retry(tmp_path, m
         planner,
         [_live_save_result(VALID_PLAN_WITH_BAD_DRAFT)],
     )
-    _patch_repair_agent(monkeypatch, planner, AgentResult(success=True, output=VALID_PLAN))
+    _patch_repair_agent(
+        monkeypatch, planner, AgentResult(success=True, output=VALID_PLAN)
+    )
 
     path = await planner.generate_spec_from_flow_context(
         flow_title="Checkout",
@@ -861,10 +975,15 @@ async def test_live_plan_repairs_invalid_draft_without_browser_retry(tmp_path, m
 
     assert len(prompts) == 1
     assert path.read_text().strip() == VALID_PLAN.strip()
-    attempt = json.loads((planner.session_dir / "planner_repair_attempt.json").read_text())
+    attempt = json.loads(
+        (planner.session_dir / "planner_repair_attempt.json").read_text()
+    )
     assert attempt["attempted"] is True
     assert attempt["accepted"] is True
-    assert attempt["draft_script_validation_failure"] == "draft script uses page.waitForTimeout()"
+    assert (
+        attempt["draft_script_validation_failure"]
+        == "draft script uses page.waitForTimeout()"
+    )
 
 
 def test_collect_repair_evidence_keeps_schema_valid_plan_for_draft_failure(tmp_path):
@@ -881,12 +1000,20 @@ def test_collect_repair_evidence_keeps_schema_valid_plan_for_draft_failure(tmp_p
 
     assert evidence["useful_evidence"] is True
     assert evidence["rejected_artifacts"][0]["path"] == str(expected)
-    assert evidence["rejected_artifacts"][0]["validation_failure_reason"] == "missing Draft Playwright Script fenced TypeScript block"
-    assert evidence["rejected_save_plan_payloads"][0]["validation_failure_reason"] == "missing Draft Playwright Script fenced TypeScript block"
+    assert (
+        evidence["rejected_artifacts"][0]["validation_failure_reason"]
+        == "missing Draft Playwright Script fenced TypeScript block"
+    )
+    assert (
+        evidence["rejected_save_plan_payloads"][0]["validation_failure_reason"]
+        == "missing Draft Playwright Script fenced TypeScript block"
+    )
 
 
 @pytest.mark.asyncio
-async def test_live_plan_draft_repair_failure_retries_until_max_attempts(tmp_path, monkeypatch):
+async def test_live_plan_draft_repair_failure_retries_until_max_attempts(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
     prompts = _patch_agent_sequence(
@@ -916,7 +1043,10 @@ async def test_live_plan_draft_repair_failure_retries_until_max_attempts(tmp_pat
     assert "Rejected saved plan preview" in prompts[1]
     assert exc_info.value.diagnostics["planner_repair_attempted"] is True
     assert exc_info.value.diagnostics["planner_repair_accepted"] is False
-    assert exc_info.value.diagnostics["planner_draft_script_validation_failure"] == "missing Draft Playwright Script fenced TypeScript block"
+    assert (
+        exc_info.value.diagnostics["planner_draft_script_validation_failure"]
+        == "missing Draft Playwright Script fenced TypeScript block"
+    )
 
 
 @pytest.mark.asyncio
@@ -970,7 +1100,9 @@ async def test_live_plan_permission_guard_blocks_save_until_contract(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_live_plan_accepts_valid_saved_plan_with_sequence_warning(tmp_path, monkeypatch):
+async def test_live_plan_accepts_valid_saved_plan_with_sequence_warning(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
     result = AgentResult(
@@ -998,7 +1130,9 @@ async def test_live_plan_accepts_valid_saved_plan_with_sequence_warning(tmp_path
         output_dir=tmp_path / "run",
     )
 
-    warning = json.loads((planner.session_dir / "planner_live_sequence_warning.json").read_text())
+    warning = json.loads(
+        (planner.session_dir / "planner_live_sequence_warning.json").read_text()
+    )
     assert path.read_text().strip() == VALID_PLAN.strip()
     assert len(prompts) == 1
     assert warning["valid_saved_plan_observed"] is True
@@ -1007,7 +1141,9 @@ async def test_live_plan_accepts_valid_saved_plan_with_sequence_warning(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_live_plan_retries_after_contract_failure_without_valid_saved_plan(tmp_path, monkeypatch):
+async def test_live_plan_retries_after_contract_failure_without_valid_saved_plan(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
     first = AgentResult(
@@ -1087,7 +1223,9 @@ async def test_unstructured_plan_retries_after_repair_fails(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_live_plan_repeated_contract_failure_raises_after_retry(tmp_path, monkeypatch):
+async def test_live_plan_repeated_contract_failure_raises_after_retry(
+    tmp_path, monkeypatch
+):
     planner = _planner(tmp_path)
     monkeypatch.setenv("PLANNER_MAX_ATTEMPTS", "2")
     invalid = AgentResult(

@@ -6,7 +6,12 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.workflows.native_generator import NativeGenerator
-from orchestrator.services.handoff_manifest import init_manifest, load_manifest, record_artifact
+from orchestrator.utils.agent_runner import AgentResult
+from orchestrator.services.handoff_manifest import (
+    init_manifest,
+    load_manifest,
+    record_artifact,
+)
 
 
 def test_generator_prompt_accepts_memory_run_id(monkeypatch):
@@ -118,7 +123,9 @@ async def test_generator_reads_planner_draft_script_path(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_generator_records_handoff_consumption_and_generated_hash(monkeypatch, tmp_path):
+async def test_generator_records_handoff_consumption_and_generated_hash(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("MEMORY_ENABLED", "false")
     manifest_path = init_manifest(tmp_path)
     captured = {}
@@ -277,14 +284,26 @@ def test_generator_extract_code_rejects_narrative_without_import():
 
 
 def test_generator_agent_definition_requires_seed_file():
-    content = (Path(__file__).resolve().parents[2] / ".claude" / "agents" / "playwright-test-generator.md").read_text()
+    content = (
+        Path(__file__).resolve().parents[2]
+        / ".claude"
+        / "agents"
+        / "playwright-test-generator.md"
+    ).read_text()
 
     assert 'generator_setup_page` tool with `seedFile: "tests/seed.spec.ts"`' in content
-    assert "Include every test case from the provided spec in that single file" in content
+    assert (
+        "Include every test case from the provided spec in that single file" in content
+    )
 
 
 def test_generator_agent_definition_consumes_draft_script_with_wait_best_practices():
-    content = (Path(__file__).resolve().parents[2] / ".claude" / "agents" / "playwright-test-generator.md").read_text()
+    content = (
+        Path(__file__).resolve().parents[2]
+        / ".claude"
+        / "agents"
+        / "playwright-test-generator.md"
+    ).read_text()
 
     assert "## Draft Playwright Script" in content
     assert "consume it as a starting scaffold" in content
@@ -313,7 +332,9 @@ async def test_generator_runner_does_not_inject_memory_twice(monkeypatch):
             captured["prompt"] = prompt
             return FakeResult()
 
-    monkeypatch.setattr("orchestrator.workflows.native_generator.AgentRunner", FakeRunner)
+    monkeypatch.setattr(
+        "orchestrator.workflows.native_generator.AgentRunner", FakeRunner
+    )
     generator = NativeGenerator(model_tier="tool_deep")
 
     result = await generator._query_generator_agent("prompt with native memory section")
@@ -322,3 +343,59 @@ async def test_generator_runner_does_not_inject_memory_twice(monkeypatch):
     assert captured["model_tier"] == "tool_deep"
     assert captured["memory_agent_type"] == "NativeGenerator"
     assert captured["inject_memory"] is False
+
+
+@pytest.mark.asyncio
+async def test_generator_format_retry_reuses_session_without_browser_tools(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("MEMORY_ENABLED", "false")
+    monkeypatch.setenv("GENERATOR_SCHEMA_MAX_ATTEMPTS", "2")
+    captured: list[dict] = []
+
+    valid_code = (
+        "import { test, expect } from '@playwright/test';\n"
+        "test('generated', async ({ page }) => {\n"
+        "  await expect(page.locator('body')).toBeVisible();\n"
+        "});\n"
+    )
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+        async def run(self, prompt):
+            if len(captured) == 1:
+                return AgentResult(
+                    success=True, output="not a code block", session_id="sdk-session-1"
+                )
+            return AgentResult(
+                success=True,
+                output=f"```typescript\n{valid_code}```",
+                session_id="sdk-session-1",
+            )
+
+    monkeypatch.setattr(
+        "orchestrator.workflows.native_generator.AgentRunner", FakeRunner
+    )
+    generator = NativeGenerator()
+    generator.tests_dir = tmp_path
+    generator._extract_credential_placeholders = lambda _content: {}
+    spec_path = tmp_path / "spec.md"
+    spec_path.write_text("# Test\n1. Navigate to https://example.test")
+
+    output = await generator.generate_test(
+        str(spec_path),
+        target_url="https://example.test",
+        output_name="generated",
+    )
+
+    assert output == tmp_path / "generated.spec.ts"
+    assert output.read_text() == valid_code
+    assert len(captured) == 2
+    retry_kwargs = captured[1]
+    assert retry_kwargs["allowed_tools"] == []
+    assert retry_kwargs["tools"] == []
+    assert retry_kwargs["requires_live_browser"] is False
+    assert retry_kwargs["force_direct_execution"] is True
+    assert retry_kwargs["resume_session_id"] == "sdk-session-1"

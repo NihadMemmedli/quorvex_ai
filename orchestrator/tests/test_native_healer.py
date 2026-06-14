@@ -7,6 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.workflows.native_healer import NativeHealer, truncate_middle
+from orchestrator.utils.agent_runner import AgentResult
 
 
 @pytest.mark.asyncio
@@ -53,6 +54,56 @@ async def test_native_healer_uses_agent_runner_with_tool_deep(monkeypatch):
     assert captured["memory_agent_type"] == "NativeHealer"
     assert captured["inject_memory"] is False
     assert "test_run" in ",".join(captured["allowed_tools"])
+
+
+@pytest.mark.asyncio
+async def test_healer_format_retry_reuses_session_without_browser_tools(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("MEMORY_ENABLED", "false")
+    monkeypatch.setenv("HEALER_SCHEMA_MAX_ATTEMPTS", "2")
+    captured: list[dict] = []
+    test_file = tmp_path / "broken.spec.ts"
+    original = (
+        "import { test, expect } from '@playwright/test';\n"
+        "test('broken', async ({ page }) => {\n"
+        "  await expect(page.locator('body')).toBeVisible();\n"
+        "});\n"
+    )
+    fixed = original.replace("broken", "fixed")
+    test_file.write_text(original)
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+        async def run(self, prompt):
+            if len(captured) == 1:
+                return AgentResult(
+                    success=True,
+                    output="strategy: unclear",
+                    session_id="heal-session-1",
+                )
+            return AgentResult(
+                success=True,
+                output=f"```typescript\n{fixed}```",
+                session_id="heal-session-1",
+            )
+
+    monkeypatch.setattr("orchestrator.workflows.native_healer.AgentRunner", FakeRunner)
+    healer = NativeHealer()
+
+    healed = await healer.heal_test(str(test_file), error_log="Timeout")
+
+    assert healed == fixed.rstrip() + "\n"
+    assert test_file.read_text() == fixed.rstrip() + "\n"
+    assert len(captured) == 2
+    retry_kwargs = captured[1]
+    assert retry_kwargs["allowed_tools"] == []
+    assert retry_kwargs["tools"] == []
+    assert retry_kwargs["requires_live_browser"] is False
+    assert retry_kwargs["force_direct_execution"] is True
+    assert retry_kwargs["resume_session_id"] == "heal-session-1"
 
 
 def test_truncate_middle_keeps_head_and_tail():

@@ -33,7 +33,10 @@ config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 if config_dir:
     os.chdir(config_dir)
 
-from orchestrator.ai.prompt_registry import attach_prompt_metadata, build_prompt_metadata
+from orchestrator.ai.prompt_registry import (
+    attach_prompt_metadata,
+    build_prompt_metadata,
+)
 from orchestrator.memory import get_memory_manager
 from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
 from orchestrator.utils.agent_tool_allowlists import (
@@ -41,7 +44,10 @@ from orchestrator.utils.agent_tool_allowlists import (
     get_agent_tool_config,
 )
 from orchestrator.utils.string_utils import clean_extracted_url, slugify
-from orchestrator.utils.token_budget import context_budget_for_stage, truncate_text_to_tokens
+from orchestrator.utils.token_budget import (
+    context_budget_for_stage,
+    truncate_text_to_tokens,
+)
 
 try:
     from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
@@ -141,7 +147,9 @@ class NativePlanner:
 
         if not prd_context.strip():
             logger.warning(f"No PRD context found for {feature_name}")
-            prd_context = "No specific PRD context available. Generate based on feature name."
+            prd_context = (
+                "No specific PRD context available. Generate based on feature name."
+            )
         if additional_context:
             prd_context = f"{prd_context.rstrip()}\n\n{additional_context.strip()}"
 
@@ -193,7 +201,9 @@ class NativePlanner:
 
         browser_section = ""
         if target_url:
-            auth_prompt_context = "" if credentials else self._browser_auth_prompt_context(auth_context)
+            auth_prompt_context = (
+                "" if credentials else self._browser_auth_prompt_context(auth_context)
+            )
             # Build login section if credentials provided
             login_section = ""
             if credentials:
@@ -346,7 +356,9 @@ Return a split-ready plan with TC-XXX sections. Every TC must be independently r
 Then add:
 - `## Draft Playwright Script`
 - one fenced `typescript` code block containing a draft Playwright test file that covers the TC sections
-""".format(feature_name=feature_name)
+""".format(
+                feature_name=feature_name
+            )
             critical_scope = (
                 "**CRITICAL**: Your final text response MUST contain the full test "
                 "plan with all TC-XXX test cases, steps, and expected results. "
@@ -478,9 +490,16 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
             requires_live_browser=bool(target_url),
             model_tier=self.model_tier,
             env_vars=self.env_vars,
-            tool_permission_guard=self._build_live_plan_permission_guard(target_url)
-            if target_url
-            else None,
+            resume_session_id=getattr(self, "_planner_retry_session_id", None),
+            continue_conversation=bool(
+                getattr(self, "_planner_retry_continue_conversation", False)
+                and not getattr(self, "_planner_retry_session_id", None)
+            ),
+            tool_permission_guard=(
+                self._build_live_plan_permission_guard(target_url)
+                if target_url
+                else None
+            ),
         )
 
         result = await runner.run(prompt)
@@ -522,6 +541,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
         last_error: SpecGenerationError | None = None
         self.last_draft_script_path = None
         require_draft_script = bool(target_url)
+        retry_session_id: str | None = None
 
         for attempt_number in range(1, max_attempts + 1):
             if attempt_number > 1:
@@ -533,8 +553,19 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                     max_attempts,
                 )
 
-            agent_result = await self._query_planner_agent(
-                current_prompt, target_url=target_url
+            self._planner_retry_session_id = retry_session_id
+            self._planner_retry_continue_conversation = (
+                attempt_number > 1 and not retry_session_id
+            )
+            try:
+                agent_result = await self._query_planner_agent(
+                    current_prompt, target_url=target_url
+                )
+            finally:
+                self._planner_retry_session_id = None
+                self._planner_retry_continue_conversation = False
+            retry_session_id = (
+                getattr(agent_result, "session_id", None) or retry_session_id
             )
             try:
                 live_sequence_error: SpecGenerationError | None = None
@@ -565,7 +596,9 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
 
                 plan_content = self._extract_plan_content(agent_result)
                 if plan_content:
-                    logger.info(f"Saving extracted plan as spec: {expected_output_path}")
+                    logger.info(
+                        f"Saving extracted plan as spec: {expected_output_path}"
+                    )
                     expected_output_path.parent.mkdir(parents=True, exist_ok=True)
                     expected_output_path.write_text(plan_content)
                     finalized_path = await self._finalize_or_repair_plan_artifact(
@@ -684,7 +717,9 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
                 json.dumps(diagnostics, indent=2, sort_keys=True, default=str)
             )
         except OSError:
-            logger.debug("Could not write planner live sequence warning artifact", exc_info=True)
+            logger.debug(
+                "Could not write planner live sequence warning artifact", exc_info=True
+            )
 
     def _build_planner_retry_prompt(
         self,
@@ -753,8 +788,12 @@ Original task follows. Obey it, but correct the failure above.
                 "success": bool(getattr(agent_result, "success", False)),
                 "timed_out": bool(getattr(agent_result, "timed_out", False)),
                 "error": getattr(agent_result, "error", None),
-                "messages_received": int(getattr(agent_result, "messages_received", 0) or 0),
-                "text_blocks_received": int(getattr(agent_result, "text_blocks_received", 0) or 0),
+                "messages_received": int(
+                    getattr(agent_result, "messages_received", 0) or 0
+                ),
+                "text_blocks_received": int(
+                    getattr(agent_result, "text_blocks_received", 0) or 0
+                ),
                 "tool_calls": len(tool_calls),
             }
             parts.extend(
@@ -762,7 +801,9 @@ Original task follows. Obey it, but correct the failure above.
                     "",
                     "Previous attempt compact context:",
                     "```json",
-                    self._redact_sensitive_text(json.dumps(stats, indent=2, sort_keys=True, default=str)),
+                    self._redact_sensitive_text(
+                        json.dumps(stats, indent=2, sort_keys=True, default=str)
+                    ),
                     "```",
                 ]
             )
@@ -796,34 +837,57 @@ Original task follows. Obey it, but correct the failure above.
                         ]
                     )
         except OSError:
-            logger.debug("Could not read rejected plan preview from %s", expected_output_path, exc_info=True)
+            logger.debug(
+                "Could not read rejected plan preview from %s",
+                expected_output_path,
+                exc_info=True,
+            )
 
         return "\n".join(parts)
 
     @classmethod
     def _tool_call_retry_summary(cls, tool_calls: list[Any]) -> str:
         lines: list[str] = []
-        for idx, tool_call in enumerate(tool_calls[-40:], start=max(1, len(tool_calls) - 39)):
+        for idx, tool_call in enumerate(
+            tool_calls[-40:], start=max(1, len(tool_calls) - 39)
+        ):
             short_name = cls._tool_call_short_name(tool_call)
             tool_input = getattr(tool_call, "input", None)
             details: dict[str, Any] = {}
             if isinstance(tool_input, dict):
-                for key in ("url", "target_url", "targetUrl", "seedFile", "fileName", "path"):
+                for key in (
+                    "url",
+                    "target_url",
+                    "targetUrl",
+                    "seedFile",
+                    "fileName",
+                    "path",
+                ):
                     value = tool_input.get(key)
                     if isinstance(value, str) and value.strip():
                         details[key] = cls._redact_sensitive_text(value)
                 payload = cls._extract_plan_payload(tool_input)
                 if payload:
                     details["payload_length"] = len(payload)
-                    details["payload_preview"] = cls._content_preview(payload, limit=500)
-            suffix = f" {json.dumps(details, sort_keys=True, default=str)}" if details else ""
+                    details["payload_preview"] = cls._content_preview(
+                        payload, limit=500
+                    )
+            suffix = (
+                f" {json.dumps(details, sort_keys=True, default=str)}"
+                if details
+                else ""
+            )
             lines.append(f"{idx}. {short_name}{suffix}")
         if len(tool_calls) > 40:
             lines.insert(0, f"... omitted {len(tool_calls) - 40} earlier tool calls")
         return "\n".join(lines)
 
     def _build_live_plan_permission_guard(self, target_url: str | None):
-        if not target_url or PermissionResultAllow is None or PermissionResultDeny is None:
+        if (
+            not target_url
+            or PermissionResultAllow is None
+            or PermissionResultDeny is None
+        ):
             return None
 
         expected = self._canonical_url(target_url)
@@ -929,7 +993,9 @@ Original task follows. Obey it, but correct the failure above.
         return None
 
     @classmethod
-    def _validate_live_plan_tool_sequence(cls, agent_result: Any, target_url: str) -> None:
+    def _validate_live_plan_tool_sequence(
+        cls, agent_result: Any, target_url: str
+    ) -> None:
         """Reject live PRD plans that were saved without first visiting Target URL."""
         expected = cls._canonical_url(target_url)
         tool_calls = list(getattr(agent_result, "tool_calls", []) or [])
@@ -1065,10 +1131,16 @@ Original task follows. Obey it, but correct the failure above.
                     ]
                 )
                 if steps:
-                    lines.extend(f"{idx}. {step}" for idx, step in enumerate(steps, start=1))
+                    lines.extend(
+                        f"{idx}. {step}" for idx, step in enumerate(steps, start=1)
+                    )
                 else:
                     lines.append("1. Execute the scenario described by the planner.")
-                expected = " ".join(expected_results) if expected_results else "The planned outcome is visible and stable."
+                expected = (
+                    " ".join(expected_results)
+                    if expected_results
+                    else "The planned outcome is visible and stable."
+                )
                 lines.extend(["**Expected Result:** " + expected, ""])
                 tc_number += 1
 
@@ -1157,7 +1229,9 @@ Original task follows. Obey it, but correct the failure above.
             if not (require_draft_script and self._is_draft_script_failure(exc)):
                 raise
 
-            draft_failure = str(exc.diagnostics.get("planner_draft_script_validation_failure") or exc)
+            draft_failure = str(
+                exc.diagnostics.get("planner_draft_script_validation_failure") or exc
+            )
             logger.info(
                 "Attempting planner repair for draft script handoff failure in %s '%s': %s",
                 subject_type,
@@ -1201,13 +1275,23 @@ Original task follows. Obey it, but correct the failure above.
             ) from exc
         warnings = self._planner_evidence_warnings(content)
         if warnings:
-            logger.warning("Planner evidence warnings for %s: %s", plan_path, "; ".join(warnings))
+            logger.warning(
+                "Planner evidence warnings for %s: %s", plan_path, "; ".join(warnings)
+            )
             if self.session_dir:
                 try:
                     warning_path = self.session_dir / "planner_evidence_warnings.json"
-                    warning_path.write_text(json.dumps({"plan_path": str(plan_path), "warnings": warnings}, indent=2))
+                    warning_path.write_text(
+                        json.dumps(
+                            {"plan_path": str(plan_path), "warnings": warnings},
+                            indent=2,
+                        )
+                    )
                 except OSError:
-                    logger.debug("Could not write planner evidence warning artifact", exc_info=True)
+                    logger.debug(
+                        "Could not write planner evidence warning artifact",
+                        exc_info=True,
+                    )
 
         draft_script = self._extract_draft_script(content)
         if not draft_script:
@@ -1236,7 +1320,11 @@ Original task follows. Obey it, but correct the failure above.
                         "planner_draft_script_validation_failure": reason,
                     },
                 )
-            logger.warning("Ignoring invalid optional planner draft script in %s: %s", plan_path, reason)
+            logger.warning(
+                "Ignoring invalid optional planner draft script in %s: %s",
+                plan_path,
+                reason,
+            )
             self.last_draft_script_path = None
             return plan_path
 
@@ -1266,7 +1354,11 @@ Original task follows. Obey it, but correct the failure above.
             "**Expected Result:**",
         )
         for idx, match in enumerate(tc_matches):
-            end = tc_matches[idx + 1].start() if idx + 1 < len(tc_matches) else len(content)
+            end = (
+                tc_matches[idx + 1].start()
+                if idx + 1 < len(tc_matches)
+                else len(content)
+            )
             block = content[match.start() : end]
             missing = [field for field in required_fields if field not in block]
             if missing:
@@ -1274,7 +1366,11 @@ Original task follows. Obey it, but correct the failure above.
                 return False, f"{title} missing required fields: {', '.join(missing)}"
             steps_start = block.find("**Steps:**")
             expected_start = block.find("**Expected Result:**")
-            steps_block = block[steps_start:expected_start] if expected_start > steps_start else block[steps_start:]
+            steps_block = (
+                block[steps_start:expected_start]
+                if expected_start > steps_start
+                else block[steps_start:]
+            )
             if not re.search(r"(?m)^\s*\d+\.\s+\S", steps_block):
                 title = match.group(0).strip()
                 return False, f"{title} missing numbered steps"
@@ -1297,13 +1393,31 @@ Original task follows. Obey it, but correct the failure above.
             "browser_snapshot",
             "live-step-",
         )
-        ui_terms = ("click", "navigate", "button", "field", "form", "page", "url", "screen", "visible")
+        ui_terms = (
+            "click",
+            "navigate",
+            "button",
+            "field",
+            "form",
+            "page",
+            "url",
+            "screen",
+            "visible",
+        )
         for idx, match in enumerate(tc_matches):
-            end = tc_matches[idx + 1].start() if idx + 1 < len(tc_matches) else len(content)
+            end = (
+                tc_matches[idx + 1].start()
+                if idx + 1 < len(tc_matches)
+                else len(content)
+            )
             block = content[match.start() : end]
             lower = block.lower()
-            if any(term in lower for term in ui_terms) and not any(term in lower for term in evidence_terms):
-                warnings.append(f"{match.group(1)} has UI steps but no explicit observed URL/selector/screenshot/source confidence evidence.")
+            if any(term in lower for term in ui_terms) and not any(
+                term in lower for term in evidence_terms
+            ):
+                warnings.append(
+                    f"{match.group(1)} has UI steps but no explicit observed URL/selector/screenshot/source confidence evidence."
+                )
         return warnings[:20]
 
     @classmethod
@@ -1329,7 +1443,13 @@ Original task follows. Obey it, but correct the failure above.
 
         for root in search_roots:
             try:
-                candidates.extend(sorted(root.rglob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True))
+                candidates.extend(
+                    sorted(
+                        root.rglob("*.md"),
+                        key=lambda path: path.stat().st_mtime,
+                        reverse=True,
+                    )
+                )
             except OSError:
                 logger.debug("Failed to search saved plan artifacts under %s", root)
 
@@ -1352,7 +1472,9 @@ Original task follows. Obey it, but correct the failure above.
             if path.resolve() != expected_output_path.resolve():
                 expected_output_path.parent.mkdir(parents=True, exist_ok=True)
                 expected_output_path.write_text(content)
-                logger.info("Recovered saved plan artifact %s to %s", path, expected_output_path)
+                logger.info(
+                    "Recovered saved plan artifact %s to %s", path, expected_output_path
+                )
                 return expected_output_path
             return path
 
@@ -1372,9 +1494,17 @@ Original task follows. Obey it, but correct the failure above.
         for tc in reversed(list(getattr(agent_result, "tool_calls", []) or [])):
             tool_name = str(getattr(tc, "name", "") or "")
             if "planner_save_plan" in tool_name or "save_plan" in tool_name:
-                content = NativePlanner._extract_plan_payload(getattr(tc, "input", None))
-                if content and len(content) > 100 and NativePlanner._is_valid_test_plan(content):
-                    logger.info(f"Extracted plan from planner_save_plan tool call ({len(content)} chars)")
+                content = NativePlanner._extract_plan_payload(
+                    getattr(tc, "input", None)
+                )
+                if (
+                    content
+                    and len(content) > 100
+                    and NativePlanner._is_valid_test_plan(content)
+                ):
+                    logger.info(
+                        f"Extracted plan from planner_save_plan tool call ({len(content)} chars)"
+                    )
                     return content
 
         # 2. Try to extract structured content from output (skip narrative preamble)
@@ -1386,12 +1516,18 @@ Original task follows. Obey it, but correct the failure above.
             plan_match = re.search(r"(# Test Plan:.*)", output, re.DOTALL)
             if plan_match:
                 plan_content = plan_match.group(1).strip()
-                if len(plan_content) > 200 and NativePlanner._is_valid_test_plan(plan_content):
-                    logger.info(f"Extracted plan from '# Test Plan:' header ({len(plan_content)} chars)")
+                if len(plan_content) > 200 and NativePlanner._is_valid_test_plan(
+                    plan_content
+                ):
+                    logger.info(
+                        f"Extracted plan from '# Test Plan:' header ({len(plan_content)} chars)"
+                    )
                     return plan_content
 
             # Look for TC-XXX patterns indicating structured test cases
-            tc_matches = re.findall(r"(?:^|\n)(##?\s+(?:TC-\d+|Test Case \d+).*)", output)
+            tc_matches = re.findall(
+                r"(?:^|\n)(##?\s+(?:TC-\d+|Test Case \d+).*)", output
+            )
             if len(tc_matches) >= 2:
                 # Output contains structured test cases, find where they start
                 first_tc = re.search(r"(##?\s+(?:TC-\d+|Test Case \d+))", output)
@@ -1400,8 +1536,12 @@ Original task follows. Obey it, but correct the failure above.
                     header_match = re.search(r"(# .+\n)", output[: first_tc.start()])
                     start = header_match.start() if header_match else first_tc.start()
                     plan_content = output[start:].strip()
-                    if len(plan_content) > 200 and NativePlanner._is_valid_test_plan(plan_content):
-                        logger.info(f"Extracted plan from TC-XXX patterns ({len(plan_content)} chars)")
+                    if len(plan_content) > 200 and NativePlanner._is_valid_test_plan(
+                        plan_content
+                    ):
+                        logger.info(
+                            f"Extracted plan from TC-XXX patterns ({len(plan_content)} chars)"
+                        )
                         return plan_content
 
         return None
@@ -1417,7 +1557,13 @@ Original task follows. Obey it, but correct the failure above.
 
         for root in search_roots:
             try:
-                candidates.extend(sorted(root.rglob("*.md"), key=lambda path: path.stat().st_mtime, reverse=True))
+                candidates.extend(
+                    sorted(
+                        root.rglob("*.md"),
+                        key=lambda path: path.stat().st_mtime,
+                        reverse=True,
+                    )
+                )
             except OSError:
                 logger.debug("Failed to search saved plan artifacts under %s", root)
 
@@ -1460,7 +1606,10 @@ Original task follows. Obey it, but correct the failure above.
                     path_resolved = path.resolve()
                 except OSError:
                     path_resolved = path
-                if not draft_script_validation_failure or path_resolved != expected_resolved:
+                if (
+                    not draft_script_validation_failure
+                    or path_resolved != expected_resolved
+                ):
                     continue
                 reason = draft_script_validation_failure
             artifact_contents.append((str(path), self._redact_sensitive_text(content)))
@@ -1488,7 +1637,9 @@ Original task follows. Obey it, but correct the failure above.
                 if valid and draft_script_validation_failure:
                     reason = draft_script_validation_failure
                 if not valid or draft_script_validation_failure:
-                    payload_contents.append((tool_name, self._redact_sensitive_text(payload)))
+                    payload_contents.append(
+                        (tool_name, self._redact_sensitive_text(payload))
+                    )
                     rejected_payloads.append(
                         {
                             "tool_name": tool_name,
@@ -1516,7 +1667,12 @@ Original task follows. Obey it, but correct the failure above.
             "preview": self._content_preview(raw_output) if raw_output else "",
         }
 
-        useful = bool(save_plan_observed or rejected_artifacts or rejected_payloads or raw_output.strip())
+        useful = bool(
+            save_plan_observed
+            or rejected_artifacts
+            or rejected_payloads
+            or raw_output.strip()
+        )
         return {
             "useful_evidence": useful,
             "save_plan_observed": save_plan_observed,
@@ -1533,9 +1689,7 @@ Original task follows. Obey it, but correct the failure above.
         if not self.session_dir:
             return None
         artifact = {
-            key: value
-            for key, value in attempt.items()
-            if not key.startswith("_")
+            key: value for key, value in attempt.items() if not key.startswith("_")
         }
         try:
             self.session_dir.mkdir(parents=True, exist_ok=True)
@@ -1547,11 +1701,15 @@ Original task follows. Obey it, but correct the failure above.
             return None
 
     @staticmethod
-    def _append_evidence_section(parts: list[str], title: str, source: str, content: str, budget: int) -> int:
+    def _append_evidence_section(
+        parts: list[str], title: str, source: str, content: str, budget: int
+    ) -> int:
         if budget <= 0 or not content.strip():
             return budget
         excerpt = content if len(content) <= budget else content[:budget]
-        parts.append(f"\n## Evidence: {title}\nSource: {source}\n\n```markdown\n{excerpt}\n```")
+        parts.append(
+            f"\n## Evidence: {title}\nSource: {source}\n\n```markdown\n{excerpt}\n```"
+        )
         return max(0, budget - len(excerpt))
 
     def _build_repair_prompt(self, subject_name: str, evidence: dict[str, Any]) -> str:
@@ -1585,11 +1743,17 @@ Original task follows. Obey it, but correct the failure above.
             )
         budget = 60000
         for source, content in evidence.get("_payload_contents", []):
-            budget = self._append_evidence_section(parts, "Rejected save-plan payload", source, content, budget)
+            budget = self._append_evidence_section(
+                parts, "Rejected save-plan payload", source, content, budget
+            )
         for source, content in evidence.get("_artifact_contents", []):
-            budget = self._append_evidence_section(parts, "Rejected markdown artifact", source, content, budget)
+            budget = self._append_evidence_section(
+                parts, "Rejected markdown artifact", source, content, budget
+            )
         raw_output = evidence.get("_raw_output_content", "")
-        self._append_evidence_section(parts, "Raw planner output", "agent final output", raw_output, budget)
+        self._append_evidence_section(
+            parts, "Raw planner output", "agent final output", raw_output, budget
+        )
         return "\n".join(parts)
 
     async def _query_repair_agent(self, prompt: str):
@@ -1656,15 +1820,21 @@ Original task follows. Obey it, but correct the failure above.
                     "preview": self._content_preview(repaired_content),
                 }
                 artifact_path = self._write_repair_attempt_artifact(attempt)
-                diagnostics = self._agent_diagnostics(agent_result, expected_output_path)
+                diagnostics = self._agent_diagnostics(
+                    agent_result, expected_output_path
+                )
                 diagnostics.update(
                     {
                         "planner_repair_attempted": True,
                         "planner_repair_accepted": False,
                         "planner_repair_validation_failure": repaired_draft_failure,
-                        "planner_repair_artifact_path": str(artifact_path) if artifact_path else None,
+                        "planner_repair_artifact_path": (
+                            str(artifact_path) if artifact_path else None
+                        ),
                         "rejected_artifact_count": len(evidence["rejected_artifacts"]),
-                        "rejected_save_plan_payload_count": len(evidence["rejected_save_plan_payloads"]),
+                        "rejected_save_plan_payload_count": len(
+                            evidence["rejected_save_plan_payloads"]
+                        ),
                         "raw_output_length": evidence["raw_output"]["length"],
                         "planner_draft_script_validation_failure": repaired_draft_failure,
                     }
@@ -1686,22 +1856,32 @@ Original task follows. Obey it, but correct the failure above.
                 "preview": self._content_preview(repaired_content),
             }
             self._write_repair_attempt_artifact(attempt)
-            logger.info("Accepted repaired planner output for %s '%s'", subject_type, subject_name)
+            logger.info(
+                "Accepted repaired planner output for %s '%s'",
+                subject_type,
+                subject_name,
+            )
             return expected_output_path
 
         output = str(getattr(repair_result, "output", "") or "")
         if output.strip():
             candidate_match = re.search(r"(# Test Plan:.*)", output, re.DOTALL)
-            candidate = candidate_match.group(1).strip() if candidate_match else output.strip()
+            candidate = (
+                candidate_match.group(1).strip() if candidate_match else output.strip()
+            )
             _valid, reason = self._validate_test_plan_schema(candidate)
-            attempt["validation_failure_reason"] = reason or "repair output did not contain a valid test plan"
+            attempt["validation_failure_reason"] = (
+                reason or "repair output did not contain a valid test plan"
+            )
             attempt["repaired_output"] = {
                 "length": len(candidate),
                 "content_hash": self._content_hash(candidate),
                 "preview": self._content_preview(candidate),
             }
         else:
-            attempt["validation_failure_reason"] = str(getattr(repair_result, "error", None) or "repair produced no output")
+            attempt["validation_failure_reason"] = str(
+                getattr(repair_result, "error", None) or "repair produced no output"
+            )
             attempt["repaired_output"] = {
                 "length": 0,
                 "content_hash": None,
@@ -1713,10 +1893,16 @@ Original task follows. Obey it, but correct the failure above.
             {
                 "planner_repair_attempted": True,
                 "planner_repair_accepted": False,
-                "planner_repair_validation_failure": attempt["validation_failure_reason"],
-                "planner_repair_artifact_path": str(artifact_path) if artifact_path else None,
+                "planner_repair_validation_failure": attempt[
+                    "validation_failure_reason"
+                ],
+                "planner_repair_artifact_path": (
+                    str(artifact_path) if artifact_path else None
+                ),
                 "rejected_artifact_count": len(evidence["rejected_artifacts"]),
-                "rejected_save_plan_payload_count": len(evidence["rejected_save_plan_payloads"]),
+                "rejected_save_plan_payload_count": len(
+                    evidence["rejected_save_plan_payloads"]
+                ),
                 "raw_output_length": evidence["raw_output"]["length"],
             }
         )
@@ -1735,7 +1921,8 @@ Original task follows. Obey it, but correct the failure above.
         agent_error = getattr(agent_result, "error", None)
         timed_out = bool(getattr(agent_result, "timed_out", False))
         planner_save_plan_observed = any(
-            "planner_save_plan" in getattr(tc, "name", "") or "save_plan" in getattr(tc, "name", "")
+            "planner_save_plan" in getattr(tc, "name", "")
+            or "save_plan" in getattr(tc, "name", "")
             for tc in tool_calls
         )
 
@@ -1743,8 +1930,12 @@ Original task follows. Obey it, but correct the failure above.
             "agent_success": bool(getattr(agent_result, "success", False)),
             "timed_out": timed_out,
             "agent_error": agent_error,
-            "messages_received": int(getattr(agent_result, "messages_received", 0) or 0),
-            "text_blocks_received": int(getattr(agent_result, "text_blocks_received", 0) or 0),
+            "messages_received": int(
+                getattr(agent_result, "messages_received", 0) or 0
+            ),
+            "text_blocks_received": int(
+                getattr(agent_result, "text_blocks_received", 0) or 0
+            ),
             "tool_calls": len(tool_calls),
             "planner_save_plan_observed": planner_save_plan_observed,
             "valid_saved_plan_observed": False,
@@ -1752,15 +1943,25 @@ Original task follows. Obey it, but correct the failure above.
         }
 
         if timed_out:
-            diagnostics["next_action"] = "Retry with a longer planner timeout or reduce the feature scope."
+            diagnostics["next_action"] = (
+                "Retry with a longer planner timeout or reduce the feature scope."
+            )
         elif agent_error:
-            diagnostics["next_action"] = "Check agent worker logs and SDK/queue runtime errors."
+            diagnostics["next_action"] = (
+                "Check agent worker logs and SDK/queue runtime errors."
+            )
         elif not tool_calls:
-            diagnostics["next_action"] = "Verify the MCP/browser runtime and planner tool allowlist."
+            diagnostics["next_action"] = (
+                "Verify the MCP/browser runtime and planner tool allowlist."
+            )
         elif not planner_save_plan_observed:
-            diagnostics["next_action"] = "Check whether the planner reached the save-plan step."
+            diagnostics["next_action"] = (
+                "Check whether the planner reached the save-plan step."
+            )
         else:
-            diagnostics["next_action"] = "Retry generation and inspect raw_output.txt and tool_calls.json."
+            diagnostics["next_action"] = (
+                "Retry generation and inspect raw_output.txt and tool_calls.json."
+            )
 
         return diagnostics
 
@@ -1808,7 +2009,9 @@ Original task follows. Obey it, but correct the failure above.
             content = chunk.get("content", "")
             # Sanitize: remove null bytes and control characters
             content = content.replace("\x00", " ")
-            content = "".join(c if c.isprintable() or c in "\n\r\t" else " " for c in content)
+            content = "".join(
+                c if c.isprintable() or c in "\n\r\t" else " " for c in content
+            )
             content = truncate_text_to_tokens(content, per_chunk_budget)
 
             meta = chunk.get("metadata", {})
@@ -1855,7 +2058,9 @@ Original task follows. Obey it, but correct the failure above.
 
         # Use provided output_dir or default
         if output_dir is None:
-            output_dir = self.specs_dir / f"explorer-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            output_dir = (
+                self.specs_dir / f"explorer-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            )
 
         # Ensure output_dir is a Path object
         if isinstance(output_dir, str):
@@ -1890,7 +2095,9 @@ Original task follows. Obey it, but correct the failure above.
             expected_output_path=output_path,
         )
 
-    async def generate_all_specs(self, prd_project: str, target_url: str | None = None) -> list[Path]:
+    async def generate_all_specs(
+        self, prd_project: str, target_url: str | None = None
+    ) -> list[Path]:
         """
         Generate specs for all features in the PRD.
 
@@ -1925,7 +2132,9 @@ Original task follows. Obey it, but correct the failure above.
             logger.info("=" * 60)
 
             path = await self.generate_spec_for_feature(
-                feature_name=feature_name, prd_project=prd_project, target_url=target_url
+                feature_name=feature_name,
+                prd_project=prd_project,
+                target_url=target_url,
             )
             results.append(path)
 
@@ -1939,7 +2148,9 @@ if __name__ == "__main__":
 
     import argparse
 
-    parser = argparse.ArgumentParser(description="Generate test specs from PRD using Playwright Planner")
+    parser = argparse.ArgumentParser(
+        description="Generate test specs from PRD using Playwright Planner"
+    )
     parser.add_argument("--project", required=True, help="PRD Project Name")
     parser.add_argument("--feature", help="Specific feature to generate (optional)")
     parser.add_argument("--url", help="Target URL for browser exploration (optional)")
@@ -1948,7 +2159,9 @@ if __name__ == "__main__":
     async def main():
         planner = NativePlanner(project_id=args.project)
         if args.feature:
-            await planner.generate_spec_for_feature(args.feature, args.project, target_url=args.url)
+            await planner.generate_spec_for_feature(
+                args.feature, args.project, target_url=args.url
+            )
         else:
             await planner.generate_all_specs(args.project, target_url=args.url)
 
