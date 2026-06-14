@@ -8,7 +8,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useCommandPalette } from './CommandPaletteProvider';
 import { useRecentPages } from './useRecentPages';
 import { useCommandSearch, SearchResult } from './useCommandSearch';
-import { quickActions, navigationItems, adminItems, matchesQuery, CommandItem } from './command-data';
+import { quickActions, navigationItems, adminItems, rankCommandItems, CommandItem } from './command-data';
 
 const typeIcons: Record<string, typeof FileText> = {
     spec: FileText,
@@ -16,6 +16,14 @@ const typeIcons: Record<string, typeof FileText> = {
     requirement: CheckSquare,
     batch: Layers,
     exploration: Compass,
+};
+
+const typeLabels: Record<SearchResult['type'], string> = {
+    spec: 'Spec',
+    run: 'Run',
+    requirement: 'Requirement',
+    batch: 'Batch',
+    exploration: 'Discovery',
 };
 
 export function CommandPalette() {
@@ -66,15 +74,15 @@ export function CommandPalette() {
 
     // Filter static commands
     const filteredQuickActions = useMemo(() =>
-        quickActions.filter(item => matchesQuery(item, query)),
+        rankCommandItems(quickActions, query),
     [query]);
 
     const filteredNavigation = useMemo(() =>
-        navigationItems.filter(item => matchesQuery(item, query)),
+        rankCommandItems(navigationItems, query),
     [query]);
 
     const filteredAdmin = useMemo(() =>
-        user?.is_superuser ? adminItems.filter(item => matchesQuery(item, query)) : [],
+        user?.is_superuser ? rankCommandItems(adminItems, query) : [],
     [query, user?.is_superuser]);
 
     // Group navigation by group
@@ -131,10 +139,10 @@ export function CommandPalette() {
                         <Command.Input
                             ref={inputRef}
                             className="cmdk-input"
-                            placeholder="Search pages, specs, runs, or actions..."
+                            placeholder="Search pages, actions, specs, runs, requirements, batches..."
                             value={query}
                             onValueChange={setQuery}
-                            aria-label="Search pages, specs, runs, or actions"
+                            aria-label="Search pages, actions, specs, runs, requirements, batches, and discovery sessions"
                         />
                         {isSearching && <Loader2 size={16} style={{ color: 'var(--text-secondary)', animation: 'spin 1s linear infinite' }} />}
                         <kbd className="cmdk-kbd">ESC</kbd>
@@ -188,28 +196,6 @@ export function CommandPalette() {
                             </Command.Group>
                         )}
 
-                        {/* Navigation */}
-                        {navGroupEntries.map(([group, items]) => (
-                            <Command.Group key={group} heading={group} className="cmdk-group">
-                                {items.map(item => (
-                                    <Command.Item
-                                        key={item.id}
-                                        value={item.id}
-                                        onSelect={() => handleSelect(item)}
-                                        className="cmdk-item"
-                                    >
-                                        <div className="cmdk-item-main">
-                                            <div className="cmdk-item-icon">
-                                                <item.icon size={16} />
-                                            </div>
-                                            <span className="cmdk-item-label">{item.label}</span>
-                                        </div>
-                                        <ArrowRight size={14} style={{ color: 'var(--text-secondary)', opacity: 0.3, flexShrink: 0 }} />
-                                    </Command.Item>
-                                ))}
-                            </Command.Group>
-                        ))}
-
                         {/* Matching Actions */}
                         {hasQuery && filteredQuickActions.length > 0 && (
                             <Command.Group heading="Actions" className="cmdk-group">
@@ -231,6 +217,28 @@ export function CommandPalette() {
                                 ))}
                             </Command.Group>
                         )}
+
+                        {/* Navigation */}
+                        {navGroupEntries.map(([group, items]) => (
+                            <Command.Group key={group} heading={group} className="cmdk-group">
+                                {items.map(item => (
+                                    <Command.Item
+                                        key={item.id}
+                                        value={item.id}
+                                        onSelect={() => handleSelect(item)}
+                                        className="cmdk-item"
+                                    >
+                                        <div className="cmdk-item-main">
+                                            <div className="cmdk-item-icon">
+                                                <item.icon size={16} />
+                                            </div>
+                                            <span className="cmdk-item-label">{item.label}</span>
+                                        </div>
+                                        <ArrowRight size={14} style={{ color: 'var(--text-secondary)', opacity: 0.3, flexShrink: 0 }} />
+                                    </Command.Item>
+                                ))}
+                            </Command.Group>
+                        ))}
 
                         {/* API Search Results */}
                         {searchResults.length > 0 && (
@@ -256,7 +264,7 @@ export function CommandPalette() {
                                                 {result.subtitle && (
                                                     <span className="cmdk-badge">{result.subtitle}</span>
                                                 )}
-                                                <span className="cmdk-badge">{result.type}</span>
+                                                <span className="cmdk-badge">{typeLabels[result.type]}</span>
                                             </div>
                                         </Command.Item>
                                     );
@@ -288,14 +296,14 @@ export function CommandPalette() {
                         {isSearching && (
                             <div className="cmdk-loading" role="status">
                                 <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} />
-                                Searching specs, runs, requirements, batches...
+                                Searching specs, runs, requirements, batches, and discovery sessions...
                             </div>
                         )}
 
                         {!isSearching && !hasVisibleResults && (
                             <div className="cmdk-empty">
                                 {trimmedQuery.length === 1
-                                    ? 'Keep typing to search project entities.'
+                                    ? 'Keep typing to search specs, runs, requirements, batches, and discovery sessions.'
                                     : `No results for "${trimmedQuery}".`}
                             </div>
                         )}

@@ -13,8 +13,49 @@ export interface SearchResult {
     subtitle?: string;
 }
 
-function specHref(name: string): string {
+const RESULT_TYPE_LIMITS: Record<SearchResult['type'], number> = {
+    spec: 5,
+    run: 5,
+    requirement: 5,
+    batch: 3,
+    exploration: 3,
+};
+
+export function specHref(name: string): string {
     return `/specs/${name.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+function requirementLabel(req: any): string {
+    const code = req.req_code || req.code || req.id;
+    const title = req.title || req.summary || 'Untitled requirement';
+    return code ? `${code}: ${title}` : title;
+}
+
+function normalizeRequirementItems(data: any): any[] {
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data?.items)) return data.items;
+    if (Array.isArray(data?.requirements)) return data.requirements;
+    return [];
+}
+
+function dedupeAndCapResults(results: SearchResult[]): SearchResult[] {
+    const seen = new Set<string>();
+    const counts: Partial<Record<SearchResult['type'], number>> = {};
+    const capped: SearchResult[] = [];
+
+    for (const result of results) {
+        const key = `${result.type}:${result.id}`;
+        const count = counts[result.type] || 0;
+        if (seen.has(key) || count >= RESULT_TYPE_LIMITS[result.type]) {
+            continue;
+        }
+
+        seen.add(key);
+        counts[result.type] = count + 1;
+        capped.push(result);
+    }
+
+    return capped;
 }
 
 export function useCommandSearch(query: string) {
@@ -25,6 +66,7 @@ export function useCommandSearch(query: string) {
 
     const search = useCallback(async (q: string, signal: AbortSignal) => {
         const projectParam = currentProject?.id ? `&project_id=${encodeURIComponent(currentProject.id)}` : '';
+        const requirementProjectParam = currentProject?.id ? `project_id=${encodeURIComponent(currentProject.id)}` : 'project_id=default';
         const encoded = encodeURIComponent(q);
 
         const fetches = [
@@ -55,27 +97,24 @@ export function useCommandSearch(query: string) {
                 })
                 .catch(() => [] as SearchResult[]),
 
-            currentProject?.id
-                ? fetchWithAuth(`${API_BASE}/requirements/${currentProject.id}?search=${encoded}`, { signal })
-                    .then(r => r.ok ? r.json() : [])
-                    .then((data: any[]) =>
-                        (Array.isArray(data) ? data : []).slice(0, 5).map((req: any) => ({
+            fetchWithAuth(`${API_BASE}/requirements?${requirementProjectParam}&search=${encoded}&limit=5`, { signal })
+                .then(r => r.ok ? r.json() : { items: [] })
+                .then((data: any) =>
+                    normalizeRequirementItems(data).slice(0, 5).map((req: any) => ({
                             id: `req-${req.id}`,
-                            label: `${req.req_code}: ${req.title}`,
+                            label: requirementLabel(req),
                             href: `/requirements?highlight=${req.id}`,
                             type: 'requirement' as const,
-                            subtitle: req.category,
+                            subtitle: req.category || req.status || 'requirement',
                         }))
-                    )
-                    .catch(() => [] as SearchResult[])
-                : Promise.resolve([] as SearchResult[]),
+                )
+                .catch(() => [] as SearchResult[]),
 
-            fetchWithAuth(`${API_BASE}/search-entities?q=${encoded}${projectParam}&limit=8`, { signal })
+            fetchWithAuth(`${API_BASE}/chat/search-entities?q=${encoded}${projectParam}&limit=8`, { signal })
                 .then(r => r.ok ? r.json() : { entities: [] })
                 .then((data: any) =>
                     (Array.isArray(data?.entities) ? data.entities : [])
                         .filter((entity: any) => entity.type === 'batch' || entity.type === 'exploration')
-                        .slice(0, 4)
                         .map((entity: any) => ({
                             id: `${entity.type}-${entity.id}`,
                             label: entity.label || entity.id,
@@ -91,7 +130,7 @@ export function useCommandSearch(query: string) {
 
         const settled = await Promise.allSettled(fetches);
         const all = settled.flatMap(r => r.status === 'fulfilled' ? r.value : []);
-        return all;
+        return dedupeAndCapResults(all);
     }, [currentProject?.id]);
 
     useEffect(() => {
