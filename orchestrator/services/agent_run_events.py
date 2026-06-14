@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from orchestrator.api.db import engine
@@ -94,23 +95,34 @@ def create_agent_run_event(
         run = db.get(AgentRun, run_id)
         if not run:
             return None
-        event = AgentRunEvent(
-            id=f"arevt-{uuid.uuid4().hex[:12]}",
-            project_id=project_id if project_id is not None else run.project_id,
-            run_id=run_id,
-            agent_task_id=agent_task_id or run.agent_task_id,
-            temporal_workflow_id=temporal_workflow_id or run.temporal_workflow_id,
-            temporal_run_id=temporal_run_id or run.temporal_run_id,
-            sequence=_next_sequence(db, run_id),
-            event_type=event_type,
-            level=level,
-            message=_compact_text(message, MAX_MESSAGE_CHARS),
-            created_at=_utcnow(),
-        )
-        event.payload = safe_event_payload(payload)
-        db.add(event)
-        db.commit()
-        db.refresh(event)
+        event: AgentRunEvent | None = None
+        for attempt in range(5):
+            event = AgentRunEvent(
+                id=f"arevt-{uuid.uuid4().hex[:12]}",
+                project_id=project_id if project_id is not None else run.project_id,
+                run_id=run_id,
+                agent_task_id=agent_task_id or run.agent_task_id,
+                temporal_workflow_id=temporal_workflow_id or run.temporal_workflow_id,
+                temporal_run_id=temporal_run_id or run.temporal_run_id,
+                sequence=_next_sequence(db, run_id),
+                event_type=event_type,
+                level=level,
+                message=_compact_text(message, MAX_MESSAGE_CHARS),
+                created_at=_utcnow(),
+            )
+            event.payload = safe_event_payload(payload)
+            db.add(event)
+            try:
+                db.commit()
+                db.refresh(event)
+                break
+            except IntegrityError as exc:
+                db.rollback()
+                if attempt >= 4:
+                    logger.warning("Failed to allocate unique event sequence for run %s: %s", run_id, exc)
+                    raise
+        if event is None:
+            return None
         try:
             from orchestrator.services.agent_trace import record_span_for_event
 

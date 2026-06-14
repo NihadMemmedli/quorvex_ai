@@ -1,7 +1,6 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
 import {
     AlertTriangle,
     ArrowRight,
@@ -17,9 +16,7 @@ import {
 } from 'lucide-react';
 import { PageHeader } from '@/components/ui/page-header';
 import { PageLayout } from '@/components/ui/page-layout';
-import { fetchWithAuth } from '@/contexts/AuthContext';
 import { useCommandCenterData, type AgentQueueTaskSummary, type AutoPilotSessionSummary } from '@/hooks/useCommandCenterData';
-import { API_BASE } from '@/lib/api';
 import { useWorkflowProgress } from '@/hooks/useWorkflowProgress';
 
 const statusMeta: Record<string, { label: string; color: string; bg: string; icon: typeof Clock }> = {
@@ -151,28 +148,6 @@ function StatusBadge({ status }: { status: string }) {
     );
 }
 
-function CompactMetricItem({ label, value, detail, tone }: { label: string; value: string | number; detail: string; tone?: string }) {
-    return (
-        <div style={{
-            minWidth: 0,
-            padding: '0.85rem',
-            borderRadius: '8px',
-            background: 'rgba(255, 255, 255, 0.025)',
-            border: '1px solid var(--border-subtle)',
-        }}>
-            <div style={{ color: 'var(--text-tertiary)', fontSize: '0.7rem', fontWeight: 750, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                {label}
-            </div>
-            <div style={{ color: tone || 'var(--text)', fontSize: '1.25rem', lineHeight: 1.15, fontWeight: 850, marginTop: '0.25rem' }}>
-                {value}
-            </div>
-            <div style={{ color: 'var(--text-secondary)', fontSize: '0.76rem', marginTop: '0.25rem', lineHeight: 1.35 }}>
-                {detail}
-            </div>
-        </div>
-    );
-}
-
 function EmptyState({ icon, title, detail, links }: { icon: React.ReactNode; title: string; detail: string; links?: React.ReactNode }) {
     return (
         <div style={{ padding: '2.25rem 1.25rem', color: 'var(--text-secondary)', textAlign: 'center' }}>
@@ -188,56 +163,83 @@ function EmptyState({ icon, title, detail, links }: { icon: React.ReactNode; tit
     );
 }
 
-function TopRiskRow({
-    href,
-    icon,
-    title,
-    detail,
-    tone = '#f59e0b',
-    action,
-}: {
-    href?: string;
+type SignalSeverity = 'healthy' | 'warning' | 'danger' | 'neutral';
+
+type QualitySignal = {
+    label: string;
+    value: string | number;
+    detail: string;
     icon: React.ReactNode;
-    title: string;
-    detail: React.ReactNode;
-    tone?: string;
-    action?: React.ReactNode;
-}) {
-    const content = (
-        <>
+    href: string;
+    severity: SignalSeverity;
+};
+
+const signalSeverityMeta: Record<SignalSeverity, { label: string; color: string; background: string; border: string }> = {
+    healthy: {
+        label: 'Healthy',
+        color: '#22c55e',
+        background: 'rgba(34, 197, 94, 0.045)',
+        border: 'rgba(34, 197, 94, 0.16)',
+    },
+    warning: {
+        label: 'Watch',
+        color: '#f59e0b',
+        background: 'rgba(245, 158, 11, 0.075)',
+        border: 'rgba(245, 158, 11, 0.22)',
+    },
+    danger: {
+        label: 'At risk',
+        color: '#ef4444',
+        background: 'rgba(239, 68, 68, 0.08)',
+        border: 'rgba(239, 68, 68, 0.24)',
+    },
+    neutral: {
+        label: 'Pending',
+        color: '#94a3b8',
+        background: 'rgba(148, 163, 184, 0.045)',
+        border: 'rgba(148, 163, 184, 0.16)',
+    },
+};
+
+function QualitySignalCard({ signal }: { signal: QualitySignal }) {
+    const meta = signalSeverityMeta[signal.severity];
+    return (
+        <Link
+            href={signal.href}
+            className="quality-signal-card command-action-row"
+            style={{
+                display: 'grid',
+                gridTemplateColumns: 'minmax(0, 1fr) auto',
+                alignItems: 'start',
+                gap: '0.85rem',
+                minWidth: 0,
+                minHeight: 132,
+                padding: '0.95rem',
+                borderRadius: '8px',
+                border: `1px solid ${meta.border}`,
+                background: meta.background,
+                color: 'inherit',
+                textDecoration: 'none',
+            }}
+        >
             <div style={{ minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: tone, fontSize: '0.82rem', fontWeight: 800 }}>
-                    {icon}
-                    {title}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: meta.color, fontSize: '0.78rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    {signal.icon}
+                    <span>{meta.label}</span>
                 </div>
-                <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', marginTop: '0.3rem', lineHeight: 1.45 }}>
-                    {detail}
+                <div style={{ marginTop: '0.7rem', color: 'var(--text-tertiary)', fontSize: '0.72rem', fontWeight: 750 }}>
+                    {signal.label}
+                </div>
+                <div style={{ marginTop: '0.25rem', color: 'var(--text)', fontSize: '1.35rem', lineHeight: 1.1, fontWeight: 850, overflowWrap: 'anywhere' }}>
+                    {signal.value}
+                </div>
+                <div style={{ marginTop: '0.4rem', color: 'var(--text-secondary)', fontSize: '0.8rem', lineHeight: 1.4 }}>
+                    {signal.detail}
                 </div>
             </div>
-            {action || (href ? <ArrowRight size={16} /> : null)}
-        </>
+            <ArrowRight size={15} style={{ color: meta.color, marginTop: '0.15rem', flexShrink: 0 }} />
+        </Link>
     );
-
-    const style = {
-        display: 'grid',
-        gridTemplateColumns: 'minmax(0, 1fr) auto',
-        alignItems: 'center',
-        gap: '0.75rem',
-        padding: '0.95rem 1rem',
-        borderBottom: '1px solid var(--border-subtle)',
-        color: 'inherit',
-        textDecoration: 'none',
-    };
-
-    if (href) {
-        return (
-            <Link href={href} className="command-action-row" style={style}>
-                {content}
-            </Link>
-        );
-    }
-
-    return <div className="command-action-row" style={style}>{content}</div>;
 }
 
 function SessionRow({ session, compact = false }: { session: AutoPilotSessionSummary; compact?: boolean }) {
@@ -345,7 +347,7 @@ function AgentTaskRow({ task }: { task: AgentQueueTaskSummary }) {
 
 function Panel({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
     return (
-        <section className="card-elevated" style={{ overflow: 'hidden' }}>
+        <section aria-label={title} className="card-elevated" style={{ overflow: 'hidden' }}>
             <div style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -363,8 +365,6 @@ function Panel({ title, action, children }: { title: string; action?: React.Reac
 }
 
 export default function Home() {
-    const [isCleaningOrphans, setIsCleaningOrphans] = useState(false);
-    const [cleanupError, setCleanupError] = useState<string | null>(null);
     const {
         dashboard,
         sessions,
@@ -377,7 +377,6 @@ export default function Home() {
         pendingQuestions,
         awaitingInput,
         hasAnySessions,
-        reload,
     } = useCommandCenterData();
     const { progress: workflowProgress } = useWorkflowProgress();
 
@@ -412,34 +411,12 @@ export default function Home() {
     const hasCoverageData = rtmCoverage > 0 || (workflowProgress?.requirements ?? 0) > 0;
     const coverageGap = hasCoverageData && rtmCoverage < 60;
     const hasRecentQualityData = dashboard.total_runs > 0 || hasAnySessions;
-    const cleanOrphanedTasks = async () => {
-        if (isCleaningOrphans) return;
-
-        setIsCleaningOrphans(true);
-        setCleanupError(null);
-        try {
-            const response = await fetchWithAuth(`${API_BASE}/api/agents/queue-clean-orphans`, {
-                method: 'POST',
-            });
-            const result = await response.json().catch(() => ({}));
-
-            if (!response.ok || result.status === 'error') {
-                throw new Error(result.message || 'Failed to clean orphaned tasks');
-            }
-
-            await reload({ silent: true });
-        } catch (err) {
-            setCleanupError(err instanceof Error ? err.message : 'Failed to clean orphaned tasks');
-        } finally {
-            setIsCleaningOrphans(false);
-        }
-    };
     const qualityHealth = (() => {
         const pendingQuestion = pendingQuestions[0];
         if (failedSessions.length > 0 || totalFailures > 0) {
             return {
                 state: 'At Risk',
-                detail: failedSessions[0]?.error_message || `${totalFailures} generated test failure${totalFailures === 1 ? '' : 's'} need review.`,
+                detail: 'The current quality baseline has a blocking signal that needs review.',
                 href: failedSessions[0] ? `/autopilot?sessionId=${encodeURIComponent(failedSessions[0].id)}` : '/runs',
                 actionLabel: 'Review failures',
                 tone: 'danger' as const,
@@ -449,7 +426,7 @@ export default function Home() {
         if (dashboard.total_runs > 0 && passRate < 60) {
             return {
                 state: 'At Risk',
-                detail: `Pass rate is ${passRate}%, below the executive quality threshold.`,
+                detail: 'The current execution baseline is below the executive quality threshold.',
                 href: '/analytics',
                 actionLabel: 'Inspect analytics',
                 tone: 'danger' as const,
@@ -459,7 +436,7 @@ export default function Home() {
         if (pendingQuestion) {
             return {
                 state: 'Watch',
-                detail: pendingQuestion.question_text,
+                detail: 'A review gate is blocking automation progress.',
                 href: `/autopilot?sessionId=${encodeURIComponent(pendingQuestion.session_id)}`,
                 actionLabel: 'Review gate',
                 tone: 'warning' as const,
@@ -469,7 +446,7 @@ export default function Home() {
         if (dashboard.flaky_test_count > 0) {
             return {
                 state: 'Watch',
-                detail: `${dashboard.flaky_test_count} flaky test${dashboard.flaky_test_count === 1 ? '' : 's'} reduce confidence in the current signal.`,
+                detail: 'Intermittent outcomes are reducing confidence in the current baseline.',
                 href: '/analytics',
                 actionLabel: 'Inspect analytics',
                 tone: 'warning' as const,
@@ -479,7 +456,7 @@ export default function Home() {
         if (coverageGap) {
             return {
                 state: 'Watch',
-                detail: `RTM coverage is ${Math.round(rtmCoverage)}%, so important requirements may still be untested.`,
+                detail: 'Traceability coverage needs attention before requirements can be trusted.',
                 href: '/rtm?coverage_status=uncovered',
                 actionLabel: 'Close coverage gaps',
                 tone: 'warning' as const,
@@ -489,11 +466,7 @@ export default function Home() {
         if (queueDegraded) {
             return {
                 state: 'Watch',
-                detail: orphanedTaskCount > 0
-                    ? `${orphanedTaskCount} automation task${orphanedTaskCount === 1 ? '' : 's'} need cleanup before queue data is fully trusted.`
-                    : queueUnavailable
-                    ? 'Automation workers are not polling, so fresh quality data may be delayed.'
-                    : `${staleRunningCount} stale automation task${staleRunningCount === 1 ? '' : 's'} may affect confidence.`,
+                detail: 'Automation confidence needs attention before fresh quality data is trusted.',
                 href: '/workflow',
                 actionLabel: 'Check workflow',
                 tone: 'warning' as const,
@@ -513,7 +486,7 @@ export default function Home() {
         if (activeSessions.length > 0) {
             return {
                 state: 'Healthy',
-                detail: `${formatPhase(activeSessions[0].current_phase)} is ${Math.round(activeSessions[0].overall_progress)}% complete, with no blocking quality risks surfaced.`,
+                detail: 'An automation run is in progress with no blocking quality risks surfaced.',
                 href: `/autopilot?sessionId=${encodeURIComponent(activeSessions[0].id)}`,
                 actionLabel: 'View active run',
                 tone: 'primary' as const,
@@ -529,196 +502,78 @@ export default function Home() {
             icon: <CheckCircle2 size={20} />,
         };
     })();
-    const qualitySignals = [
-        {
-            label: 'Failed generated tests',
-            value: totalFailures,
-            detail: totalFailures > 0 ? `${failedSessions.length} failed workflow${failedSessions.length === 1 ? '' : 's'} in recent automation` : 'No generated-test failures in recent sessions',
-            icon: <XCircle size={16} />,
-            href: failedSessions[0] ? `/autopilot?sessionId=${encodeURIComponent(failedSessions[0].id)}` : '/runs',
-            tone: totalFailures > 0 ? 'danger' : 'healthy',
-        },
-        {
-            label: 'Flaky tests',
-            value: dashboard.flaky_test_count,
-            detail: dashboard.flaky_test_count > 0 ? 'Intermittent outcomes need triage' : 'No flaky tests detected',
-            icon: <ShieldAlert size={16} />,
-            href: '/analytics',
-            tone: dashboard.flaky_test_count > 0 ? 'warning' : 'healthy',
-        },
-        {
-            label: 'Pending review gates',
-            value: pendingQuestions.length,
-            detail: pendingQuestions.length > 0 ? `${awaitingInput.length} blocked run${awaitingInput.length === 1 ? '' : 's'} awaiting decision` : 'No review gates blocking progress',
-            icon: <AlertTriangle size={16} />,
-            href: pendingQuestions[0] ? `/autopilot?sessionId=${encodeURIComponent(pendingQuestions[0].session_id)}` : '/workflow',
-            tone: pendingQuestions.length > 0 ? 'warning' : 'healthy',
-        },
-        {
-            label: 'RTM gaps',
-            value: hasCoverageData ? (coverageGap ? `${Math.max(0, Math.round(60 - rtmCoverage))} pts` : 'Clear') : '—',
-            detail: hasCoverageData ? `RTM coverage is ${Math.round(rtmCoverage)}%` : 'RTM coverage has not been generated',
-            icon: <GitBranch size={16} />,
-            href: '/rtm?coverage_status=uncovered',
-            tone: coverageGap ? 'warning' : 'healthy',
-        },
-        {
-            label: 'Automation confidence',
-            value: queueDegraded ? 'Watch' : 'Stable',
-            detail: queueDegraded
-                ? `${orphanedTaskCount} orphaned, ${staleRunningCount} stale, ${queue?.queued ?? 0} queued`
-                : `${queueSourceLabel}: ${queue?.active ?? 0} active, ${queue?.queued ?? 0} queued`,
-            icon: <Bot size={16} />,
-            href: '/workflow',
-            tone: queueDegraded ? 'warning' : 'healthy',
-        },
-    ];
-    const attentionQualitySignals = qualitySignals.filter(signal => signal.tone !== 'healthy');
-    const openQualityRiskCount = attentionQualitySignals.length;
     const lastRunAge = (() => {
         if (!dashboard.last_run_at) return null;
         const age = formatAge(dashboard.last_run_at);
         return age === dashboard.last_run_at ? null : age;
     })();
-    const activeAutomationCount = activeSessions.length + backgroundAgentTaskCount;
-    const healthMetrics = [
+    const lastRunAgeDays = (() => {
+        if (!dashboard.last_run_at) return null;
+        const timestamp = new Date(dashboard.last_run_at).getTime();
+        if (!Number.isFinite(timestamp)) return null;
+        return Math.floor(Math.max(0, Date.now() - timestamp) / 86400000);
+    })();
+    const qualitySignals: QualitySignal[] = [
+        {
+            label: 'Failed generated tests',
+            value: totalFailures,
+            detail: totalFailures > 0 ? `${failedSessions.length} failed workflow${failedSessions.length === 1 ? '' : 's'} in recent automation` : 'No generated-test failures in recent sessions',
+            icon: <XCircle size={15} />,
+            href: failedSessions[0] ? `/autopilot?sessionId=${encodeURIComponent(failedSessions[0].id)}` : '/runs',
+            severity: totalFailures > 0 ? 'danger' : hasRecentQualityData ? 'healthy' : 'neutral',
+        },
         {
             label: 'Pass rate',
             value: hasRecentQualityData ? `${passRate}%` : '—',
-            detail: dashboard.total_runs > 0 ? `${dashboard.total_runs} run${dashboard.total_runs === 1 ? '' : 's'}` : 'Baseline needed',
-            tone: dashboard.total_runs > 0 && passRate < 60 ? '#ef4444' : dashboard.total_runs > 0 && passRate < 80 ? '#f59e0b' : undefined,
+            detail: dashboard.total_runs > 0 ? `${dashboard.total_runs} completed run${dashboard.total_runs === 1 ? '' : 's'} in the current baseline` : 'Run baseline has not been established',
+            icon: <CheckCircle2 size={15} />,
+            href: '/analytics',
+            severity: dashboard.total_runs === 0 ? 'neutral' : passRate < 60 ? 'danger' : passRate < 80 ? 'warning' : 'healthy',
+        },
+        {
+            label: 'Flaky tests',
+            value: dashboard.flaky_test_count,
+            detail: dashboard.flaky_test_count > 0 ? 'Intermittent outcomes need triage' : 'No flaky tests detected',
+            icon: <ShieldAlert size={15} />,
+            href: '/analytics',
+            severity: dashboard.flaky_test_count > 0 ? 'warning' : hasRecentQualityData ? 'healthy' : 'neutral',
+        },
+        {
+            label: 'Pending review gates',
+            value: pendingQuestions.length,
+            detail: pendingQuestions.length > 0 ? `${awaitingInput.length} blocked run${awaitingInput.length === 1 ? '' : 's'} awaiting decision` : 'No review gates blocking progress',
+            icon: <AlertTriangle size={15} />,
+            href: pendingQuestions[0] ? `/autopilot?sessionId=${encodeURIComponent(pendingQuestions[0].session_id)}` : '/workflow',
+            severity: pendingQuestions.length > 0 ? 'warning' : hasRecentQualityData ? 'healthy' : 'neutral',
         },
         {
             label: 'RTM coverage',
             value: hasCoverageData ? `${Math.round(rtmCoverage)}%` : '—',
-            detail: hasCoverageData ? `${workflowProgress?.requirements ?? 0} requirement${(workflowProgress?.requirements ?? 0) === 1 ? '' : 's'}` : 'Not generated',
-            tone: coverageGap ? '#f59e0b' : undefined,
+            detail: hasCoverageData ? `${workflowProgress?.requirements ?? 0} requirement${(workflowProgress?.requirements ?? 0) === 1 ? '' : 's'} traced` : 'RTM coverage has not been generated',
+            icon: <GitBranch size={15} />,
+            href: '/rtm?coverage_status=uncovered',
+            severity: hasCoverageData ? (coverageGap ? 'warning' : 'healthy') : 'neutral',
         },
         {
-            label: 'Active automation',
-            value: activeAutomationCount,
-            detail: `${queue?.queued ?? 0} queued`,
-            tone: queueDegraded ? '#f59e0b' : undefined,
+            label: 'Automation confidence',
+            value: queueUnavailable ? 'Blocked' : queueDegraded ? 'Watch' : queue ? 'Stable' : '—',
+            detail: queueDegraded
+                ? `${orphanedTaskCount} orphaned, ${staleRunningCount} stale, ${queue?.queued ?? 0} queued`
+                : queue ? `${queueSourceLabel}: ${queue?.active ?? 0} active, ${queue?.queued ?? 0} queued` : 'Queue status has not loaded',
+            icon: <Bot size={15} />,
+            href: '/workflow',
+            severity: queueUnavailable ? 'danger' : queueDegraded ? 'warning' : queue ? 'healthy' : 'neutral',
         },
         {
             label: 'Recent run age',
             value: lastRunAge || '—',
-            detail: lastRunAge ? 'Latest completed signal' : dashboard.total_runs > 0 ? 'Last run unavailable' : 'No recent runs',
+            detail: lastRunAge ? 'Latest completed signal' : dashboard.total_runs > 0 ? 'Last run timestamp unavailable' : 'No recent runs',
+            icon: <Clock size={15} />,
+            href: '/runs',
+            severity: !lastRunAge ? 'neutral' : (lastRunAgeDays ?? 0) > 7 ? 'warning' : 'healthy',
         },
     ];
-    const queueRiskItem = queueDegraded ? {
-        key: 'queue-confidence',
-        node: (
-            <TopRiskRow
-                icon={<Bot size={15} />}
-                title="Queue confidence"
-                detail={(
-                    <>
-                        {orphanedTaskCount} orphaned, {staleRunningCount} stale, {queue?.queued ?? 0} queued
-                        {cleanupError && (
-                            <div style={{ color: '#f87171', fontSize: '0.72rem', marginTop: '0.45rem', lineHeight: 1.35 }}>
-                                {cleanupError}
-                            </div>
-                        )}
-                    </>
-                )}
-                action={orphanedTaskCount > 0 ? (
-                    <button
-                        type="button"
-                        onClick={cleanOrphanedTasks}
-                        disabled={isCleaningOrphans}
-                        style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            gap: '0.4rem',
-                            minHeight: 30,
-                            padding: '0.35rem 0.65rem',
-                            borderRadius: '8px',
-                            border: '1px solid rgba(239, 68, 68, 0.28)',
-                            background: isCleaningOrphans ? 'rgba(239, 68, 68, 0.08)' : 'rgba(239, 68, 68, 0.13)',
-                            color: '#f87171',
-                            fontSize: '0.74rem',
-                            fontWeight: 750,
-                            cursor: isCleaningOrphans ? 'wait' : 'pointer',
-                            whiteSpace: 'nowrap',
-                            opacity: isCleaningOrphans ? 0.75 : 1,
-                        }}
-                    >
-                        {isCleaningOrphans && <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />}
-                        {isCleaningOrphans ? 'Cleaning' : 'Clean up'}
-                    </button>
-                ) : (
-                    <Link href="/workflow" style={{ color: 'var(--primary)', fontSize: '0.8rem', fontWeight: 750, textDecoration: 'none', whiteSpace: 'nowrap' }}>
-                        Workflow
-                    </Link>
-                )}
-            />
-        ),
-    } : null;
-    const topQualityRisks = (() => {
-        const items: { key: string; node: React.ReactNode }[] = [
-            ...failedSessions.slice(0, 2).map(session => ({
-                key: `failed-${session.id}`,
-                node: <SessionRow session={session} compact />,
-            })),
-            ...pendingQuestions.slice(0, 2).map(question => ({
-                key: `gate-${question.id}`,
-                node: (
-                    <TopRiskRow
-                        href={`/autopilot?sessionId=${encodeURIComponent(question.session_id)}`}
-                        icon={<AlertTriangle size={15} />}
-                        title="Review gate"
-                        detail={question.question_text}
-                    />
-                ),
-            })),
-            ...(totalFailures > 0 && failedSessions.length === 0 ? [{
-                key: 'generated-failures',
-                node: (
-                    <TopRiskRow
-                        href="/runs"
-                        icon={<XCircle size={15} />}
-                        title="Generated test failures"
-                        detail={`${totalFailures} generated test failure${totalFailures === 1 ? '' : 's'} need review.`}
-                        tone="#ef4444"
-                    />
-                ),
-            }] : []),
-            ...(dashboard.flaky_test_count > 0 ? [{
-                key: 'flaky-tests',
-                node: (
-                    <TopRiskRow
-                        href="/analytics"
-                        icon={<ShieldAlert size={15} />}
-                        title="Flaky test group"
-                        detail={`${dashboard.flaky_test_count} spec${dashboard.flaky_test_count === 1 ? '' : 's'} need triage.`}
-                    />
-                ),
-            }] : []),
-            ...(coverageGap ? [{
-                key: 'coverage-gap',
-                node: (
-                    <TopRiskRow
-                        href="/rtm?coverage_status=uncovered"
-                        icon={<GitBranch size={15} />}
-                        title="RTM gap"
-                        detail={`RTM coverage is ${Math.round(rtmCoverage)}%, below the 60% threshold.`}
-                    />
-                ),
-            }] : []),
-            ...(queueRiskItem ? [queueRiskItem] : []),
-        ];
-        const visible = items.slice(0, 5);
-        if (queueRiskItem && orphanedTaskCount > 0 && !visible.some(item => item.key === queueRiskItem.key)) {
-            if (visible.length >= 5) {
-                visible[visible.length - 1] = queueRiskItem;
-            } else {
-                visible.push(queueRiskItem);
-            }
-        }
-        return visible;
-    })();
+    const hasQualityBaseline = hasRecentQualityData || hasCoverageData || Boolean(queue);
 
     return (
         <PageLayout tier="wide" className="command-center-page">
@@ -758,12 +613,12 @@ export default function Home() {
                         marginBottom: '1rem',
                     }}>
                         <div className="card-elevated quality-health-card" style={{
-                            padding: '1.2rem',
+                            padding: '1.35rem',
                             display: 'grid',
-                            gridTemplateColumns: 'minmax(0, 1.3fr) minmax(320px, 0.9fr)',
+                            gridTemplateColumns: 'minmax(0, 1fr)',
                             gap: '1.1rem',
                             alignItems: 'stretch',
-                            minHeight: 150,
+                            minHeight: 180,
                             borderColor: qualityHealth.tone === 'danger'
                                 ? 'rgba(239, 68, 68, 0.32)'
                                 : qualityHealth.tone === 'warning'
@@ -805,94 +660,47 @@ export default function Home() {
                                     </div>
                                 </div>
                             </div>
-                            <div className="quality-health-metrics" style={{
-                                display: 'grid',
-                                gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-                                gap: '0.75rem',
-                            }}>
-                                {healthMetrics.map(item => (
-                                    <CompactMetricItem key={item.label} {...item} />
-                                ))}
-                            </div>
                         </div>
                     </section>
 
+                    <Panel
+                        title="Quality Signals"
+                        action={<Link href="/analytics" style={{ color: 'var(--primary)', fontSize: '0.84rem', fontWeight: 700, textDecoration: 'none' }}>Analytics</Link>}
+                    >
+                        {hasQualityBaseline ? (
+                            <div className="quality-signal-grid" style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                                gap: '0.85rem',
+                                padding: '1rem',
+                            }}>
+                                {qualitySignals.map(signal => (
+                                    <QualitySignalCard key={signal.label} signal={signal} />
+                                ))}
+                            </div>
+                        ) : (
+                            <EmptyState
+                                icon={<CheckCircle2 size={30} />}
+                                title="No quality baseline yet"
+                                detail="Start a QA run to establish the first quality baseline."
+                                links={(
+                                    <>
+                                        <Link href="/analytics" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Analytics</Link>
+                                        <Link href="/coverage" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Coverage</Link>
+                                        <Link href="/workflow" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Workflow</Link>
+                                        <Link href="/autopilot" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Autopilot</Link>
+                                    </>
+                                )}
+                            />
+                        )}
+                    </Panel>
+
                     <section className="command-grid" style={{
                         display: 'grid',
-                        gridTemplateColumns: 'minmax(0, 1.45fr) minmax(320px, 0.9fr)',
+                        gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
                         gap: '1rem',
+                        marginTop: '1rem',
                     }}>
-                        <Panel
-                            title="Quality Signals"
-                            action={<Link href="/analytics" style={{ color: 'var(--primary)', fontSize: '0.84rem', fontWeight: 700, textDecoration: 'none' }}>Analytics</Link>}
-                        >
-                            <div>
-                                {attentionQualitySignals.length === 0 ? (
-                                    <EmptyState
-                                        icon={<CheckCircle2 size={30} />}
-                                        title="Quality signals are clear"
-                                        detail={hasRecentQualityData ? 'Failures, review gates, flakiness, coverage, and queue confidence are all within expected bounds.' : 'Start a QA run to establish the first quality baseline.'}
-                                        links={(
-                                            <>
-                                                <Link href="/analytics" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Analytics</Link>
-                                                <Link href="/coverage" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Coverage</Link>
-                                                <Link href="/workflow" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Workflow</Link>
-                                                <Link href="/autopilot" style={{ color: 'var(--primary)', textDecoration: 'none' }}>Autopilot</Link>
-                                            </>
-                                        )}
-                                    />
-                                ) : (
-                                    attentionQualitySignals.map(signal => {
-                                        const signalColor = signal.tone === 'danger' ? '#ef4444' : '#f59e0b';
-                                        return (
-                                            <Link key={signal.label} href={signal.href} className="command-action-row" style={{
-                                                display: 'grid',
-                                                gridTemplateColumns: 'minmax(0, 1fr) auto',
-                                                gap: '0.9rem',
-                                                alignItems: 'center',
-                                                padding: '0.95rem 1rem',
-                                                borderBottom: '1px solid var(--border-subtle)',
-                                                color: 'inherit',
-                                                textDecoration: 'none',
-                                            }}>
-                                                <div style={{ minWidth: 0 }}>
-                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: signalColor, fontSize: '0.84rem', fontWeight: 800 }}>
-                                                        {signal.icon}
-                                                        {signal.label}
-                                                    </div>
-                                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', marginTop: '0.25rem', lineHeight: 1.45 }}>
-                                                        {signal.detail}
-                                                    </div>
-                                                </div>
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', color: signalColor, fontSize: '0.95rem', fontWeight: 850, whiteSpace: 'nowrap' }}>
-                                                    {signal.value}
-                                                    <ArrowRight size={15} />
-                                                </div>
-                                            </Link>
-                                        );
-                                    })
-                                )}
-                            </div>
-                        </Panel>
-
-                        <Panel title="Top Risks">
-                            {topQualityRisks.length === 0 ? (
-                                <EmptyState
-                                    icon={<CheckCircle2 size={30} />}
-                                    title="No open quality risks"
-                                    detail={hasRecentQualityData ? 'There are no concrete failed sessions, blocked gates, flaky groups, coverage gaps, or queue confidence issues.' : 'Run data has not been collected yet; risks will appear here after the first baseline run.'}
-                                />
-                            ) : (
-                                <div>
-                                    {topQualityRisks.map(item => (
-                                        <div key={item.key}>
-                                            {item.node}
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </Panel>
-
                         <Panel
                             title="Automation Activity"
                             action={<Link href="/autopilot" style={{ color: 'var(--primary)', fontSize: '0.84rem', fontWeight: 700, textDecoration: 'none' }}>View runs</Link>}
@@ -957,14 +765,6 @@ export default function Home() {
                 }
                 @media (max-width: 720px) {
                     .quality-health-card > div:first-child {
-                        grid-template-columns: 1fr !important;
-                    }
-                    .quality-health-metrics {
-                        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-                    }
-                }
-                @media (max-width: 360px) {
-                    .quality-health-metrics {
                         grid-template-columns: 1fr !important;
                     }
                 }

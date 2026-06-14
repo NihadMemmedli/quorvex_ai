@@ -14,6 +14,7 @@ if str(orchestrator_dir) not in sys.path:
     sys.path.insert(0, str(orchestrator_dir))
 
 import asyncio
+import base64
 import json
 import re
 import shlex
@@ -32,7 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from slowapi.errors import RateLimitExceeded
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlmodel import Session, select
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
@@ -1978,9 +1979,8 @@ async def flush_agent_queue():
         return {"status": "error", "message": str(e)}
 
 
-@app.post("/api/agents/queue-clean-orphans")
-async def clean_orphaned_agent_queue_tasks():
-    """Cancel only agent tasks whose owner, heartbeat, or timeout state is invalid."""
+async def _clean_stale_agent_queue_tasks() -> dict[str, Any]:
+    """Cancel agent queue tasks whose owner, heartbeat, or timeout state is invalid."""
     try:
         from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
 
@@ -1997,8 +1997,20 @@ async def clean_orphaned_agent_queue_tasks():
             **result,
         }
     except Exception as e:
-        logger.error(f"Orphan queue cleanup failed: {e}", exc_info=True)
+        logger.error(f"Agent queue cleanup failed: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/agents/queue-clean-stale")
+async def clean_stale_agent_queue_tasks():
+    """Cancel stale or orphaned agent queue tasks."""
+    return await _clean_stale_agent_queue_tasks()
+
+
+@app.post("/api/agents/queue-clean-orphans")
+async def clean_orphaned_agent_queue_tasks():
+    """Compatibility alias for stale/orphaned agent queue cleanup."""
+    return await _clean_stale_agent_queue_tasks()
 
 
 @app.get("/api/key-rotation/status")
@@ -7797,6 +7809,188 @@ def _serialize_agent_run(run: AgentRun, session: Session | None = None) -> dict[
     return payload
 
 
+def _safe_json_dict(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _compact_agent_run_config(config: dict[str, Any]) -> dict[str, Any]:
+    keys = {
+        "url",
+        "agent_name",
+        "flow_title",
+        "prompt",
+        "instructions",
+        "runtime",
+        "timeout_seconds",
+        "browser_auth_session_id",
+        "retry_of",
+        "source_run_id",
+    }
+    compact: dict[str, Any] = {}
+    for key in keys:
+        value = config.get(key)
+        if value is not None and value != "":
+            compact[key] = value
+    selected_tools = config.get("selected_tools")
+    if isinstance(selected_tools, list):
+        compact["selected_tools"] = selected_tools[:12]
+    return compact
+
+
+def _compact_agent_run_summary(progress: dict[str, Any]) -> str | None:
+    for key in ("summary", "message", "phase"):
+        value = progress.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:500]
+    return None
+
+
+def _encode_agent_run_cursor(created_at: datetime, run_id: str) -> str:
+    payload = json.dumps({"created_at": created_at.isoformat(), "id": run_id}, separators=(",", ":"))
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _decode_agent_run_cursor(cursor: str | None) -> tuple[datetime, str] | None:
+    if not cursor:
+        return None
+    try:
+        padded = cursor + ("=" * (-len(cursor) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        created_at = datetime.fromisoformat(str(payload["created_at"]).replace("Z", "+00:00"))
+        if created_at.tzinfo is not None:
+            created_at = created_at.replace(tzinfo=None)
+        return created_at, str(payload["id"])
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid cursor")
+
+
+def _agent_run_project_filters(project_id: str | None) -> list[Any]:
+    if not project_id:
+        return []
+    if project_id == "default":
+        return [or_(AgentRun.project_id == project_id, AgentRun.project_id == None)]
+    return [AgentRun.project_id == project_id]
+
+
+def _agent_run_search_filter(q: str | None) -> Any | None:
+    needle = (q or "").strip().lower()
+    if not needle:
+        return None
+    pattern = f"%{needle}%"
+    return or_(
+        func.lower(AgentRun.id).like(pattern),
+        func.lower(AgentRun.agent_type).like(pattern),
+        func.lower(AgentRun.status).like(pattern),
+        func.lower(AgentRun.config_json).like(pattern),
+        func.lower(AgentRun.progress_json).like(pattern),
+    )
+
+
+def _agent_run_status_filter(status: str | None) -> Any | None:
+    normalized = (status or "").strip().lower()
+    if not normalized or normalized == "all":
+        return None
+    if normalized == "active":
+        return AgentRun.status.in_(AGENT_ACTIVE_STATUSES)
+    if normalized == "completed":
+        return AgentRun.status.in_({"completed", AGENT_PARTIAL_STATUS})
+    if normalized == "cancelled":
+        return AgentRun.status.in_({"cancelled", "canceled"})
+    return AgentRun.status == normalized
+
+
+def _agent_run_type_filter(agent_type: str | None) -> Any | None:
+    normalized = (agent_type or "").strip()
+    if not normalized or normalized == "all":
+        return None
+    return AgentRun.agent_type == normalized
+
+
+def _agent_run_history_filters(
+    *,
+    project_id: str | None,
+    status: str | None = None,
+    agent_type: str | None = None,
+    q: str | None = None,
+) -> list[Any]:
+    filters = _agent_run_project_filters(project_id)
+    for item in (
+        _agent_run_status_filter(status),
+        _agent_run_type_filter(agent_type),
+        _agent_run_search_filter(q),
+    ):
+        if item is not None:
+            filters.append(item)
+    return filters
+
+
+def _agent_run_history_counts(session: Session, *, project_id: str | None, q: str | None) -> dict[str, Any]:
+    base_filters = _agent_run_history_filters(project_id=project_id, q=q)
+    status_counts = {status: int(count or 0) for status, count in session.exec(
+        select(AgentRun.status, func.count(AgentRun.id)).where(*base_filters).group_by(AgentRun.status)
+    ).all()}
+    type_counts = {agent_type: int(count or 0) for agent_type, count in session.exec(
+        select(AgentRun.agent_type, func.count(AgentRun.id)).where(*base_filters).group_by(AgentRun.agent_type)
+    ).all()}
+    total = sum(status_counts.values())
+    completed = status_counts.get("completed", 0) + status_counts.get(AGENT_PARTIAL_STATUS, 0)
+    active = sum(status_counts.get(status, 0) for status in AGENT_ACTIVE_STATUSES)
+    cancelled = status_counts.get("cancelled", 0) + status_counts.get("canceled", 0)
+    return {
+        "status": {
+            "all": total,
+            "active": active,
+            "completed": completed,
+            "failed": status_counts.get("failed", 0),
+            "cancelled": cancelled,
+            "paused": status_counts.get("paused", 0),
+        },
+        "type": {
+            "all": total,
+            "exploratory": type_counts.get("exploratory", 0),
+            "custom": type_counts.get("custom", 0),
+            "writer": type_counts.get("writer", 0),
+            "spec_generation": type_counts.get("spec_generation", 0),
+        },
+    }
+
+
+def _serialize_agent_run_summary_row(row: Any) -> dict[str, Any]:
+    (
+        run_id,
+        agent_type,
+        runtime,
+        status,
+        created_at,
+        started_at,
+        completed_at,
+        project_id,
+        config_json,
+        progress_json,
+    ) = row
+    config = _compact_agent_run_config(_safe_json_dict(config_json))
+    progress = _normalize_agent_run_progress(_safe_json_dict(progress_json))
+    return {
+        "id": run_id,
+        "agent_type": agent_type,
+        "runtime": runtime or "claude_sdk",
+        "status": status,
+        "created_at": created_at.isoformat(),
+        "started_at": started_at.isoformat() if started_at else None,
+        "completed_at": completed_at.isoformat() if completed_at else None,
+        "project_id": project_id,
+        "config": config,
+        "progress": progress,
+        "summary": _compact_agent_run_summary(progress),
+    }
+
+
 async def _live_agent_queue_progress(run: AgentRun) -> dict[str, Any]:
     if not run.agent_task_id or run.status in AGENT_TERMINAL_STATUSES:
         return {}
@@ -9873,29 +10067,60 @@ async def run_agent_definition(
 @app.get("/api/agents/runs")
 def list_agent_runs(
     project_id: str | None = None,
-    limit: int = Query(default=200, ge=1, le=500, description="Max items to return"),
+    status: str | None = Query(default=None, description="Status filter: all, active, completed, failed, cancelled, paused, or exact status"),
+    agent_type: str | None = Query(default=None, description="Agent type filter"),
+    q: str | None = Query(default=None, description="Case-insensitive search across IDs and compact run metadata"),
+    limit: int = Query(default=40, ge=1, le=100, description="Max items to return"),
+    cursor: str | None = Query(default=None, description="Cursor returned from the previous page"),
     offset: int = Query(default=0, ge=0, description="Items to skip"),
     session: Session = Depends(get_session),
 ):
-    statement = select(AgentRun).order_by(AgentRun.created_at.desc())
-    # Apply project filter if provided
-    if project_id:
-        if project_id == "default":
-            # Default project includes legacy runs (NULL project_id) for backward compatibility
-            statement = statement.where((AgentRun.project_id == project_id) | (AgentRun.project_id == None))
-        else:
-            statement = statement.where(AgentRun.project_id == project_id)
+    filters = _agent_run_history_filters(project_id=project_id, status=status, agent_type=agent_type, q=q)
+    decoded_cursor = _decode_agent_run_cursor(cursor)
+    if decoded_cursor:
+        cursor_created_at, cursor_id = decoded_cursor
+        filters.append(
+            or_(
+                AgentRun.created_at < cursor_created_at,
+                and_(AgentRun.created_at == cursor_created_at, AgentRun.id < cursor_id),
+            )
+        )
 
-    # Safety cap: apply limit/offset to prevent unbounded result sets
-    runs = session.exec(statement.offset(offset).limit(limit)).all()
-    return [
-        {
-            **_serialize_agent_run(r, session),
-            "result": None,
-            "summary": _agent_run_summary(r),
-        }
-        for r in runs
-    ]
+    total_filters = _agent_run_history_filters(project_id=project_id, status=status, agent_type=agent_type, q=q)
+    total = int(session.exec(select(func.count(AgentRun.id)).where(*total_filters)).one() or 0)
+    counts = _agent_run_history_counts(session, project_id=project_id, q=q)
+    statement = (
+        select(
+            AgentRun.id,
+            AgentRun.agent_type,
+            AgentRun.runtime,
+            AgentRun.status,
+            AgentRun.created_at,
+            AgentRun.started_at,
+            AgentRun.completed_at,
+            AgentRun.project_id,
+            AgentRun.config_json,
+            AgentRun.progress_json,
+        )
+        .where(*filters)
+        .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+        .limit(limit)
+    )
+    if offset and not cursor:
+        statement = statement.offset(offset)
+
+    rows = session.exec(statement).all()
+    items = [_serialize_agent_run_summary_row(row) for row in rows]
+    next_cursor = None
+    if len(rows) == limit:
+        last = rows[-1]
+        next_cursor = _encode_agent_run_cursor(last[4], last[0])
+    return {
+        "items": items,
+        "total": total,
+        "counts": counts,
+        "next_cursor": next_cursor,
+    }
 
 
 @app.get("/api/agents/runs/{id}")
@@ -9959,16 +10184,30 @@ async def stream_agent_run_events_api(
 
     async def event_generator():
         sequence = after_sequence
+        idle_ticks = 0
         from orchestrator.services.agent_run_events import event_to_response, list_agent_run_events
 
         while True:
             if await request.is_disconnected():
                 break
+            terminal = False
             with Session(engine) as session:
+                run = session.get(AgentRun, id)
+                terminal = bool(run and run.status in AGENT_TERMINAL_STATUSES)
                 events = list_agent_run_events(run_id=id, after_sequence=sequence, limit=limit, session=session)
                 for event in events:
                     sequence = max(sequence, event.sequence)
                     yield f"data: {json.dumps(event_to_response(event))}\n\n"
+                if events:
+                    idle_ticks = 0
+                else:
+                    idle_ticks += 1
+            if terminal and not events:
+                yield f"event: complete\ndata: {json.dumps({'run_id': id, 'sequence': sequence})}\n\n"
+                break
+            if idle_ticks >= 15:
+                yield f": heartbeat {datetime.utcnow().isoformat()}\n\n"
+                idle_ticks = 0
             await asyncio.sleep(1.0)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

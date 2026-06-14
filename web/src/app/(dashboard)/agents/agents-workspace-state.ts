@@ -1,5 +1,5 @@
 export type AgentWorkspaceMode = 'exploratory' | 'writer' | 'custom';
-export type AgentWorkspaceView = 'run' | 'library' | 'reports' | 'queue';
+export type AgentWorkspaceView = 'run' | 'history' | 'library' | 'reports' | 'queue';
 export type AgentResultTab = 'overview' | 'findings' | 'test_ideas' | 'requirements' | 'evidence' | 'raw';
 export type AgentTraceTab = 'timeline' | 'context' | 'tools' | 'memory' | 'runtime' | 'artifacts';
 export type AgentHistoryStatusFilter = 'all' | 'active' | 'completed' | 'failed' | 'cancelled' | 'paused';
@@ -52,7 +52,7 @@ export interface AgentRunValidationInput {
 export const DEFAULT_AGENT_WORKSPACE_QUERY: AgentWorkspaceQueryState = {
     view: 'run',
     runId: '',
-    agent: 'exploratory',
+    agent: 'custom',
     definitionId: '',
     create: false,
     returnTo: '',
@@ -69,7 +69,7 @@ export const DEFAULT_AGENT_WORKSPACE_QUERY: AgentWorkspaceQueryState = {
     specItemType: '',
 };
 
-const WORKSPACE_VIEWS = new Set<AgentWorkspaceView>(['run', 'library', 'reports', 'queue']);
+const WORKSPACE_VIEWS = new Set<AgentWorkspaceView>(['run', 'history', 'library', 'reports', 'queue']);
 const AGENT_MODES = new Set<AgentWorkspaceMode>(['exploratory', 'writer', 'custom']);
 const RESULT_TABS = new Set<AgentResultTab>(['overview', 'findings', 'test_ideas', 'requirements', 'evidence', 'raw']);
 const TRACE_TABS = new Set<AgentTraceTab>(['timeline', 'context', 'tools', 'memory', 'runtime', 'artifacts']);

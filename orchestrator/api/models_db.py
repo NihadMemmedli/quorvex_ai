@@ -107,7 +107,12 @@ class SpecMetadata(SQLModel, table=True):
 
 
 class AgentRun(SQLModel, table=True):
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        Index("ix_agentrun_project_created_id", "project_id", "created_at", "id"),
+        Index("ix_agentrun_project_status_created_id", "project_id", "status", "created_at", "id"),
+        Index("ix_agentrun_project_agent_type_created_id", "project_id", "agent_type", "created_at", "id"),
+        {"extend_existing": True},
+    )
 
     id: str = Field(primary_key=True)
     agent_type: str
@@ -173,6 +178,7 @@ class AgentRunEvent(SQLModel, table=True):
         Index("ix_agent_run_events_project_created", "project_id", "created_at"),
         Index("ix_agent_run_events_agent_task", "agent_task_id"),
         Index("ix_agent_run_events_temporal_workflow", "temporal_workflow_id"),
+        UniqueConstraint("run_id", "sequence", name="uq_agent_run_events_run_sequence"),
         {"extend_existing": True},
     )
 

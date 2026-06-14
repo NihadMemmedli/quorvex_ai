@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import Bot from 'lucide-react/dist/esm/icons/bot';
@@ -13,7 +14,6 @@ import AlertTriangle from 'lucide-react/dist/esm/icons/alert-triangle';
 import Loader2 from 'lucide-react/dist/esm/icons/loader-2';
 import Clock from 'lucide-react/dist/esm/icons/clock';
 import RotateCcw from 'lucide-react/dist/esm/icons/rotate-ccw';
-import Lock from 'lucide-react/dist/esm/icons/lock';
 import Globe from 'lucide-react/dist/esm/icons/globe';
 import Settings from 'lucide-react/dist/esm/icons/settings';
 import Download from 'lucide-react/dist/esm/icons/download';
@@ -47,7 +47,6 @@ import Archive from 'lucide-react/dist/esm/icons/archive';
 import SlidersHorizontal from 'lucide-react/dist/esm/icons/sliders-horizontal';
 import ChevronDown from 'lucide-react/dist/esm/icons/chevron-down';
 import Pencil from 'lucide-react/dist/esm/icons/pencil';
-import ReactMarkdown from 'react-markdown';
 import { toast } from 'sonner';
 import { useProject } from '@/contexts/ProjectContext';
 import { API_BASE } from '@/lib/api';
@@ -82,8 +81,6 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
-import { LiveBrowserView } from '@/components/LiveBrowserView';
-import { TestDataPicker } from '@/components/TestDataPicker';
 import { StatusBadge } from '@/components/shared/StatusBadge';
 import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
 import {
@@ -93,8 +90,6 @@ import {
 } from '@/lib/browser-auth-sessions';
 import {
     applyAgentWorkspaceQueryPatch,
-    filterAgentHistoryRuns,
-    getAgentHistoryCounts,
     parseAgentWorkspaceQuery,
     validateAgentRunInput,
     type AgentHistoryStatusFilter,
@@ -106,6 +101,9 @@ import {
     type ReportSpecItemType,
     type ReportSearchTypeFilter,
 } from './agents-workspace-state';
+
+const LiveBrowserView = dynamic<any>(() => import('@/components/LiveBrowserView').then(mod => mod.LiveBrowserView), { ssr: false });
+const TestDataPicker = dynamic<any>(() => import('@/components/TestDataPicker').then(mod => mod.TestDataPicker), { ssr: false });
 
 interface AgentRun {
     id: string;
@@ -126,6 +124,18 @@ interface AgentRun {
     health?: AgentRunHealth;
     started_at?: string | null;
     completed_at?: string | null;
+}
+
+interface AgentHistoryCounts {
+    status: Record<AgentHistoryStatusFilter, number>;
+    type: Record<AgentHistoryTypeFilter, number>;
+}
+
+interface AgentRunHistoryResponse {
+    items: AgentRun[];
+    total: number;
+    counts: AgentHistoryCounts;
+    next_cursor?: string | null;
 }
 
 interface AgentRunTemporal {
@@ -1350,7 +1360,7 @@ function AgentRunObservabilityPanel({
         if (onTraceTabChange) onTraceTabChange(tab);
         else setInternalTraceTab(tab);
     };
-    const traceSpans = trace?.spans || [];
+    const traceSpans = useMemo(() => trace?.spans || [], [trace?.spans]);
     const searchableTraceSpans = useMemo(() => traceSpans.map(span => ({
         span,
         searchText: [
@@ -1757,14 +1767,19 @@ function QueueStatusPanel({
     loading,
     error,
     onRefresh,
+    onCleanStaleTasks,
+    cleaningStaleTasks,
 }: {
     queue: AgentQueueStatus | null;
     loading: boolean;
     error: string | null;
     onRefresh: () => void;
+    onCleanStaleTasks: () => Promise<void>;
+    cleaningStaleTasks: boolean;
 }) {
     const stale = queue?.stale_running ?? 0;
     const orphaned = queue?.orphaned_tasks ?? 0;
+    const hasCleanupWork = stale > 0 || orphaned > 0;
     const workerCount = queue?.workers_alive ?? queue?.worker_processes_alive ?? 0;
     const browserPool = queue?.browser_pool || {};
     const browserMax = Number(browserPool.max_browsers ?? queue?.max ?? 0);
@@ -1785,9 +1800,16 @@ function QueueStatusPanel({
                         {queue ? `${queue.mode || 'agent'} mode · ${queueStateLabel(queue)}` : 'Queue status has not loaded yet.'}
                     </p>
                 </div>
-                <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
-                    {loading ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />} Refresh
-                </Button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    {hasCleanupWork && (
+                        <Button type="button" variant="outline" onClick={onCleanStaleTasks} disabled={loading || cleaningStaleTasks}>
+                            {cleaningStaleTasks ? <Loader2 className="spin" size={14} /> : <Wrench size={14} />} Clean stale tasks
+                        </Button>
+                    )}
+                    <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
+                        {loading ? <Loader2 className="spin" size={14} /> : <RefreshCw size={14} />} Refresh
+                    </Button>
+                </div>
             </div>
             {error && (
                 <Alert variant="destructive">
@@ -1932,30 +1954,32 @@ function ReportsSearchWorkspace({
 }
 
 export default function AgentsPage() {
-    const { currentProject } = useProject();
+    const { currentProject, isLoading: projectLoading } = useProject();
     const router = useRouter();
     const pathname = usePathname();
     const searchParams = useSearchParams();
     const searchParamsString = searchParams.toString();
     const [workspaceView, setWorkspaceView] = useState<AgentWorkspaceView>('run');
-    const [selectedAgent, setSelectedAgent] = useState<AgentWorkspaceMode>('exploratory');
-
     // Basic config
     const [url, setUrl] = useState('');
     const [instructions, setInstructions] = useState('');
 
     // Enhanced exploratory config
-    const [timeLimitMinutes, setTimeLimitMinutes] = useState(15);
+    const [timeLimitMinutes] = useState(15);
     const [authType, setAuthType] = useState<AuthType>('none');
-    const [authCredentials, setAuthCredentials] = useState({ username: '', password: '', loginUrl: '/login' });
     const [sessionId, setSessionId] = useState('');
-    const [testData, setTestData] = useState('');
     const [testDataRefs, setTestDataRefs] = useState('');
-    const [focusAreas, setFocusAreas] = useState('');
-    const [excludedPatterns, setExcludedPatterns] = useState('');
 
     // History & results
     const [history, setHistory] = useState<AgentRun[]>([]);
+    const [historyTotal, setHistoryTotal] = useState(0);
+    const [historyCounts, setHistoryCounts] = useState<AgentHistoryCounts>({
+        status: { all: 0, active: 0, completed: 0, failed: 0, cancelled: 0, paused: 0 },
+        type: { all: 0, exploratory: 0, custom: 0, writer: 0, spec_generation: 0 },
+    });
+    const [historyNextCursor, setHistoryNextCursor] = useState<string | null>(null);
+    const [historyLoading, setHistoryLoading] = useState(false);
+    const [historyError, setHistoryError] = useState<string | null>(null);
     const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
     const [activeRun, setActiveRun] = useState<AgentRun | null>(null);
     const [agentEvents, setAgentEvents] = useState<AgentRunEvent[]>([]);
@@ -1965,6 +1989,7 @@ export default function AgentsPage() {
     const [traceSpanType, setTraceSpanType] = useState('');
     const [specResult, setSpecResult] = useState<SpecResult | null>(null);
     const [historySearch, setHistorySearch] = useState('');
+    const [debouncedHistorySearch, setDebouncedHistorySearch] = useState('');
     const [historyStatusFilter, setHistoryStatusFilter] = useState<AgentHistoryStatusFilter>('all');
     const [historyTypeFilter, setHistoryTypeFilter] = useState<AgentHistoryTypeFilter>('all');
 
@@ -1972,7 +1997,6 @@ export default function AgentsPage() {
     const [isStarting, setIsStarting] = useState(false);
     const [runControlPending, setRunControlPending] = useState<'pause' | 'resume' | 'cancel' | 'retry' | null>(null);
     const [isSynthesizing, setIsSynthesizing] = useState(false);
-    const [showAdvanced, setShowAdvanced] = useState(false);
     const [sessions, setSessions] = useState<BrowserAuthSession[]>([]);
     const [flowModalOpen, setFlowModalOpen] = useState(false);
     const [selectedFlow, setSelectedFlow] = useState<FlowModalData | null>(null);
@@ -2003,12 +2027,14 @@ export default function AgentsPage() {
     const [reportSearchLoading, setReportSearchLoading] = useState(false);
     const [queueStatus, setQueueStatus] = useState<AgentQueueStatus | null>(null);
     const [queueLoading, setQueueLoading] = useState(false);
+    const [queueCleanupLoading, setQueueCleanupLoading] = useState(false);
     const [queueError, setQueueError] = useState<string | null>(null);
     const [runFormError, setRunFormError] = useState<string | null>(null);
     const [definitionFormError, setDefinitionFormError] = useState<string | null>(null);
     const [workspaceStatus, setWorkspaceStatus] = useState('');
-    const [historyOpen, setHistoryOpen] = useState(true);
     const [setupOpen, setSetupOpen] = useState(true);
+    const [contextDataOpen, setContextDataOpen] = useState(false);
+    const [runPlanDetailsOpen, setRunPlanDetailsOpen] = useState(false);
     const [openDefinitionMenuId, setOpenDefinitionMenuId] = useState<string | null>(null);
     const [archiveCandidate, setArchiveCandidate] = useState<AgentDefinition | null>(null);
     const [cancelRunDialogOpen, setCancelRunDialogOpen] = useState(false);
@@ -2020,14 +2046,19 @@ export default function AgentsPage() {
     const [reportEditError, setReportEditError] = useState<string | null>(null);
     const [savingReportEdit, setSavingReportEdit] = useState(false);
     const [agentRuntime, setAgentRuntime] = useState('claude_sdk');
-    const [hermesReachable, setHermesReachable] = useState(false);
-    const [hermesStatusMessage, setHermesStatusMessage] = useState('');
     const [builderOpen, setBuilderOpen] = useState(false);
     const [savingDefinition, setSavingDefinition] = useState(false);
     const [definitionForm, setDefinitionForm] = useState(() => defaultDefinitionForm('claude_sdk'));
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
     const agentEventSourceRef = useRef<EventSource | null>(null);
     const agentEventReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const historyAbortRef = useRef<AbortController | null>(null);
+    const reportSearchAbortRef = useRef<AbortController | null>(null);
+    const runDetailAbortRef = useRef<AbortController | null>(null);
+    const historyRequestIdRef = useRef(0);
+    const traceRequestIdRef = useRef(0);
+    const toolCatalogLoadedProjectRef = useRef<string | null>(null);
+    const definitionsLoadedProjectRef = useRef<string | null>(null);
     const agentEventsRef = useRef<AgentRunEvent[]>([]);
     const workspaceQueryRef = useRef(searchParamsString);
     const queryCreateOpenRef = useRef(false);
@@ -2052,13 +2083,18 @@ export default function AgentsPage() {
         updateWorkspaceQuery({ runId });
     }, [updateWorkspaceQuery]);
 
+    const selectHistoryRun = useCallback((runId: string) => {
+        setSelectedRunId(runId);
+        setWorkspaceView('run');
+        updateWorkspaceQuery({ runId, view: 'run' });
+    }, [updateWorkspaceQuery]);
+
     const selectWorkspaceView = useCallback((view: AgentWorkspaceView) => {
         setWorkspaceView(view);
         updateWorkspaceQuery({ view });
     }, [updateWorkspaceQuery]);
 
     const selectAgentMode = useCallback((mode: AgentWorkspaceMode) => {
-        setSelectedAgent(mode);
         updateWorkspaceQuery({ agent: mode });
     }, [updateWorkspaceQuery]);
 
@@ -2104,8 +2140,7 @@ export default function AgentsPage() {
 
     const updateHistorySearch = useCallback((value: string) => {
         setHistorySearch(value);
-        updateWorkspaceQuery({ q: value });
-    }, [updateWorkspaceQuery]);
+    }, []);
 
     const updateHistoryStatusFilter = useCallback((value: AgentHistoryStatusFilter) => {
         setHistoryStatusFilter(value);
@@ -2124,27 +2159,67 @@ export default function AgentsPage() {
             const data = await res.json();
             const runtime = data.agent_runtime || 'claude_sdk';
             setAgentRuntime(runtime);
-            setHermesReachable(Boolean(data.hermes_reachable));
-            setHermesStatusMessage(data.hermes_status_message || '');
             setDefinitionForm(prev => prev.id ? prev : { ...prev, runtime });
         } catch (e) {
             console.error('Failed to fetch runtime settings', e);
         }
     };
 
-    // Fetch history (filtered by project)
-    const fetchHistory = async () => {
+    // Fetch history summaries (filtered and paged by the API).
+    const fetchHistory = useCallback(async (options: { append?: boolean; cursor?: string | null } = {}) => {
+        if (projectLoading) return;
+        historyAbortRef.current?.abort();
+        const controller = new AbortController();
+        historyAbortRef.current = controller;
+        const requestId = historyRequestIdRef.current + 1;
+        historyRequestIdRef.current = requestId;
+        setHistoryLoading(true);
+        setHistoryError(null);
         try {
-            const projectParam = currentProject?.id
-                ? `?project_id=${encodeURIComponent(currentProject.id)}`
-                : '';
-            const res = await fetch(`${API_BASE}/api/agents/runs${projectParam}`);
-            if (res.ok) {
-                const data = await res.json();
-                setHistory(data);
+            const params = new URLSearchParams({ limit: '40' });
+            if (currentProject?.id) params.set('project_id', currentProject.id);
+            if (historyStatusFilter !== 'all') params.set('status', historyStatusFilter);
+            if (historyTypeFilter !== 'all') params.set('agent_type', historyTypeFilter);
+            if (debouncedHistorySearch.trim()) params.set('q', debouncedHistorySearch.trim());
+            if (options.cursor) params.set('cursor', options.cursor);
+            const res = await fetch(`${API_BASE}/api/agents/runs?${params}`, { signal: controller.signal });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            if (controller.signal.aborted || historyRequestIdRef.current !== requestId) return;
+            const payload: AgentRunHistoryResponse = Array.isArray(data)
+                ? {
+                    items: data,
+                    total: data.length,
+                    counts: {
+                        status: { all: data.length, active: 0, completed: 0, failed: 0, cancelled: 0, paused: 0 },
+                        type: { all: data.length, exploratory: 0, custom: 0, writer: 0, spec_generation: 0 },
+                    },
+                    next_cursor: null,
+                }
+                : data;
+            setHistory(prev => options.append ? [...prev, ...(payload.items || [])] : (payload.items || []));
+            setHistoryTotal(Number(payload.total || 0));
+            setHistoryCounts(payload.counts || {
+                status: { all: 0, active: 0, completed: 0, failed: 0, cancelled: 0, paused: 0 },
+                type: { all: 0, exploratory: 0, custom: 0, writer: 0, spec_generation: 0 },
+            });
+            setHistoryNextCursor(payload.next_cursor || null);
+        } catch (e) {
+            if (e instanceof DOMException && e.name === 'AbortError') return;
+            const message = e instanceof Error ? e.message : 'Failed to fetch history';
+            setHistoryError(message);
+            console.error("Failed to fetch history", e);
+        } finally {
+            if (historyRequestIdRef.current === requestId) {
+                setHistoryLoading(false);
             }
-        } catch (e) { console.error("Failed to fetch history", e); }
-    };
+        }
+    }, [currentProject?.id, debouncedHistorySearch, historyStatusFilter, historyTypeFilter, projectLoading]);
+
+    const loadMoreHistory = useCallback(() => {
+        if (!historyNextCursor || historyLoading) return;
+        void fetchHistory({ append: true, cursor: historyNextCursor });
+    }, [fetchHistory, historyLoading, historyNextCursor]);
 
     const fetchSessions = async () => {
         if (!currentProject?.id) {
@@ -2157,17 +2232,24 @@ export default function AgentsPage() {
         } catch (e) { console.error("Failed to fetch browser login sessions", e); }
     };
 
-    const fetchToolCatalog = async () => {
+    const fetchToolCatalog = useCallback(async () => {
+        if (projectLoading) return;
+        const projectKey = currentProject?.id || 'unscoped';
+        if (toolCatalogLoadedProjectRef.current === projectKey && toolCatalog.length > 0) return;
         try {
             const res = await fetch(`${API_BASE}/api/agents/tools/catalog`);
             if (res.ok) {
                 const data = await res.json();
                 setToolCatalog(data.tools || []);
+                toolCatalogLoadedProjectRef.current = projectKey;
             }
         } catch (e) { console.error("Failed to fetch agent tool catalog", e); }
-    };
+    }, [currentProject?.id, projectLoading, toolCatalog.length]);
 
-    const fetchAgentDefinitions = async () => {
+    const fetchAgentDefinitions = useCallback(async () => {
+        if (projectLoading) return;
+        const projectKey = currentProject?.id || 'unscoped';
+        if (definitionsLoadedProjectRef.current === projectKey && agentDefinitions.length > 0) return;
         try {
             const projectParam = currentProject?.id
                 ? `?project_id=${encodeURIComponent(currentProject.id)}`
@@ -2176,12 +2258,22 @@ export default function AgentsPage() {
             if (res.ok) {
                 const data = await res.json();
                 setAgentDefinitions(data || []);
+                definitionsLoadedProjectRef.current = projectKey;
                 if (!selectedDefinitionId && data?.length) {
                     setSelectedDefinitionId(data[0].id);
                 }
             }
         } catch (e) { console.error("Failed to fetch agent definitions", e); }
-    };
+    }, [agentDefinitions.length, currentProject?.id, projectLoading, selectedDefinitionId]);
+
+    const fetchAgentDefinitionsFresh = useCallback(async () => {
+        definitionsLoadedProjectRef.current = null;
+        await fetchAgentDefinitions();
+    }, [fetchAgentDefinitions]);
+
+    const ensureAgentLibraryData = useCallback(async () => {
+        await Promise.all([fetchToolCatalog(), fetchAgentDefinitions()]);
+    }, [fetchAgentDefinitions, fetchToolCatalog]);
 
     const fetchQueueStatus = async () => {
         setQueueLoading(true);
@@ -2198,7 +2290,47 @@ export default function AgentsPage() {
         }
     };
 
+    const cleanStaleQueueTasks = async () => {
+        setQueueCleanupLoading(true);
+        try {
+            const res = await fetch(`${API_BASE}/api/agents/queue-clean-stale`, { method: 'POST' });
+            let data: Record<string, any> = {};
+            try {
+                data = await res.json();
+            } catch {
+                data = {};
+            }
+            if (!res.ok || data.status === 'error') {
+                throw new Error(String(data.message || data.detail || `HTTP ${res.status}`));
+            }
+            const cleaned = Number(data.cleaned ?? 0);
+            const cleanupDetails = [
+                ['lost heartbeat', data.cancelled_orphaned],
+                ['timed out', data.timed_out],
+                ['terminal owner', data.terminal_owner],
+                ['orphaned queued', data.orphaned_queued],
+                ['stale queued', data.stale_ownerless_queued],
+                ['missing refs', data.missing_task_refs],
+            ]
+                .map(([label, value]) => [label, Number(value ?? 0)] as const)
+                .filter(([, value]) => value > 0)
+                .map(([label, value]) => `${value} ${label}`)
+                .join(', ');
+            toast.success(cleaned > 0 ? `Cleaned ${cleaned} stale queue task${cleaned === 1 ? '' : 's'}${cleanupDetails ? ` (${cleanupDetails})` : ''}` : 'No stale queue tasks needed cleanup');
+            await fetchQueueStatus();
+        } catch (e: unknown) {
+            const message = e instanceof Error ? e.message : 'Failed to clean stale queue tasks.';
+            toast.error(message);
+        } finally {
+            setQueueCleanupLoading(false);
+        }
+    };
+
     const fetchReportSearch = async () => {
+        if (projectLoading) return;
+        reportSearchAbortRef.current?.abort();
+        const controller = new AbortController();
+        reportSearchAbortRef.current = controller;
         setReportSearchLoading(true);
         try {
             const params = new URLSearchParams({ limit: '50' });
@@ -2206,15 +2338,19 @@ export default function AgentsPage() {
             if (reportSearchQuery.trim()) params.set('query', reportSearchQuery.trim());
             if (reportSearchType !== 'all') params.set('item_type', reportSearchType);
             if (reportSearchSeverity !== 'all') params.set('severity', reportSearchSeverity);
-            const res = await fetch(`${API_BASE}/api/agents/reports/search?${params}`);
+            const res = await fetch(`${API_BASE}/api/agents/reports/search?${params}`, { signal: controller.signal });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
+            if (controller.signal.aborted) return;
             setReportSearchResults(Array.isArray(data.items) ? data.items : []);
         } catch (e) {
+            if (e instanceof DOMException && e.name === 'AbortError') return;
             console.error('Failed to search agent reports', e);
             setReportSearchResults([]);
         } finally {
-            setReportSearchLoading(false);
+            if (!controller.signal.aborted) {
+                setReportSearchLoading(false);
+            }
         }
     };
 
@@ -2223,7 +2359,6 @@ export default function AgentsPage() {
         const queryState = parseAgentWorkspaceQuery(new URLSearchParams(searchParamsString));
         setWorkspaceView(queryState.view);
         if (queryState.runId) setSelectedRunId(queryState.runId);
-        setSelectedAgent(queryState.agent);
         if (queryState.definitionId) setSelectedDefinitionId(queryState.definitionId);
         setReturnToAfterSave(queryState.returnTo);
         if (queryState.create) {
@@ -2232,7 +2367,6 @@ export default function AgentsPage() {
                 setDefinitionFormError(null);
             }
             queryCreateOpenRef.current = true;
-            setSelectedAgent('custom');
             setAgentActionIntent({ type: 'createAgent' });
             setBuilderOpen(true);
         } else {
@@ -2258,21 +2392,65 @@ export default function AgentsPage() {
         setHistoryStatusFilter(queryState.status);
         setHistoryTypeFilter(queryState.type);
         setHistorySearch(queryState.q);
+        setDebouncedHistorySearch(queryState.q);
     }, [agentRuntime, searchParamsString]);
 
     useEffect(() => {
-        fetchHistory();
-        fetchSessions();
-        fetchToolCatalog();
-        fetchAgentDefinitions();
-        fetchRuntimeSettings();
-        fetchQueueStatus();
+        const timer = window.setTimeout(() => {
+            setDebouncedHistorySearch(historySearch);
+            updateWorkspaceQuery({ q: historySearch });
+        }, 300);
+        return () => window.clearTimeout(timer);
+    }, [historySearch, updateWorkspaceQuery]);
+
+    useEffect(() => {
+        if (projectLoading) return;
+        toolCatalogLoadedProjectRef.current = null;
+        definitionsLoadedProjectRef.current = null;
+        setToolCatalog([]);
+        setAgentDefinitions([]);
+        setSelectedDefinitionId('');
+        setSessions([]);
+        setSessionId('');
+    }, [currentProject?.id, projectLoading]);
+
+    useEffect(() => {
+        if (projectLoading) return;
+        void fetchRuntimeSettings();
+    }, [currentProject?.id, projectLoading]);
+
+    useEffect(() => {
+        if (projectLoading) return;
+        void fetchHistory();
+    }, [fetchHistory, projectLoading]);
+
+    useEffect(() => {
+        if (projectLoading) return;
+        if (!['run', 'library'].includes(workspaceView) && !builderOpen) return;
+        void ensureAgentLibraryData();
+    }, [builderOpen, ensureAgentLibraryData, projectLoading, workspaceView]);
+
+    useEffect(() => {
+        if (projectLoading) return;
+        const needsSessions =
+            workspaceView === 'run' ||
+            flowModalOpen ||
+            builderOpen;
+        if (!needsSessions) return;
+        void fetchSessions();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [builderOpen, currentProject?.id, flowModalOpen, projectLoading, workspaceView]);
+
+    useEffect(() => {
         return () => {
             if (pollInterval.current) clearInterval(pollInterval.current);
             agentEventSourceRef.current?.close();
+            historyAbortRef.current?.abort();
+            reportSearchAbortRef.current?.abort();
+            runDetailAbortRef.current?.abort();
             if (agentEventReconnectTimerRef.current) clearTimeout(agentEventReconnectTimerRef.current);
         }
-    }, [currentProject?.id]);  // Re-fetch when project changes
+    }, []);
 
     useEffect(() => {
         if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('resultTab')) return;
@@ -2280,21 +2458,20 @@ export default function AgentsPage() {
     }, [activeRun?.id]);
 
     useEffect(() => {
-        if (workspaceView !== 'reports') return;
+        if (projectLoading || workspaceView !== 'reports') return;
         const timer = window.setTimeout(() => {
             void fetchReportSearch();
         }, 200);
         return () => window.clearTimeout(timer);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [workspaceView, currentProject?.id, reportSearchQuery, reportSearchType, reportSearchSeverity]);
+    }, [workspaceView, currentProject?.id, reportSearchQuery, reportSearchType, reportSearchSeverity, projectLoading]);
 
     useEffect(() => {
-        if (workspaceView !== 'queue') return;
+        if (projectLoading || workspaceView !== 'queue') return;
         void fetchQueueStatus();
         const interval = window.setInterval(() => void fetchQueueStatus(), 5000);
         return () => window.clearInterval(interval);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [workspaceView]);
+    }, [workspaceView, projectLoading]);
 
     useEffect(() => {
         agentEventsRef.current = agentEvents;
@@ -2309,38 +2486,28 @@ export default function AgentsPage() {
 
     // Fetch single run
     const fetchRun = async (id: string) => {
+        runDetailAbortRef.current?.abort();
+        const controller = new AbortController();
+        runDetailAbortRef.current = controller;
         try {
-            const res = await fetch(`${API_BASE}/api/agents/runs/${id}`);
-                if (res.ok) {
-                    const data = await res.json();
-                    setActiveRun(data);
-                    fetchAgentEvents(id);
-                    fetchAgentTrace(id);
-
-                    // If actively running, keep polling
-                    if (!isAgentRunTerminal(data.status)) {
-                        // Continue polling
-                    } else {
-                    // Run completed or failed - do one final fetch to get the result
-                    if (pollInterval.current && selectedRunId === id) {
-                        clearInterval(pollInterval.current);
-                        pollInterval.current = null;
-
-                        // Fetch one more time after a short delay to ensure result is saved
-                        setTimeout(async () => {
-                            const finalRes = await fetch(`${API_BASE}/api/agents/runs/${id}`);
-                            if (finalRes.ok) {
-                                const finalData = await finalRes.json();
-                                setActiveRun(finalData);
-                                fetchAgentEvents(id);
-                                fetchAgentTrace(id);
-                            }
-                            fetchHistory(); // Refresh list to update status
-                        }, 500);
+            const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
+            const res = await fetch(`${API_BASE}/api/agents/runs/${id}${projectQuery}`, { signal: controller.signal });
+            if (res.ok) {
+                const data = await res.json();
+                if (controller.signal.aborted) return;
+                setActiveRun(prev => {
+                    const wasActive = prev?.id === id && !isAgentRunTerminal(prev.status);
+                    const isTerminal = isAgentRunTerminal(data.status);
+                    if (wasActive && isTerminal) {
+                        void fetchHistory();
+                        void fetchAgentEvents(id);
+                        void fetchAgentTrace(id);
                     }
-                }
+                    return data;
+                });
             }
         } catch (e) {
+            if (e instanceof DOMException && e.name === 'AbortError') return;
             console.error("Failed to fetch run", e);
         }
     };
@@ -2369,17 +2536,24 @@ export default function AgentsPage() {
     };
 
     const fetchAgentTrace = async (id: string) => {
+        const requestId = traceRequestIdRef.current + 1;
+        traceRequestIdRef.current = requestId;
         setTraceLoading(true);
         try {
             const projectQuery = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
             const res = await fetch(`${API_BASE}/api/agents/runs/${id}/trace${projectQuery}`);
             if (res.ok) {
-                setAgentTrace(await res.json());
+                const data = await res.json();
+                if (traceRequestIdRef.current === requestId) {
+                    setAgentTrace(data);
+                }
             }
         } catch (e) {
             console.error("Failed to fetch agent trace", e);
         } finally {
-            setTraceLoading(false);
+            if (traceRequestIdRef.current === requestId) {
+                setTraceLoading(false);
+            }
         }
     };
 
@@ -3042,22 +3216,21 @@ export default function AgentsPage() {
             return;
         }
 
-        // Clear existing poll
         if (pollInterval.current) clearInterval(pollInterval.current);
+        pollInterval.current = null;
+        runDetailAbortRef.current?.abort();
 
-        // Initial fetch
         fetchRun(selectedRunId);
+        fetchAgentEvents(selectedRunId);
         fetchSpecs(selectedRunId);
-
-        // Start polling
-        pollInterval.current = setInterval(() => {
-            fetchRun(selectedRunId);
-        }, 2000); // 2s poll
 
         return () => {
             if (pollInterval.current) clearInterval(pollInterval.current);
+            pollInterval.current = null;
+            runDetailAbortRef.current?.abort();
         };
-    }, [selectedRunId]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedRunId, currentProject?.id]);
 
     useEffect(() => {
         if (!selectedRunId || !activeRun || !LIVE_AGENT_STATUSES.has(activeRun.status)) return;
@@ -3067,7 +3240,6 @@ export default function AgentsPage() {
         const backfillEvents = async () => {
             const lastSequence = agentEventsRef.current.reduce((max, item) => Math.max(max, item.sequence), 0);
             await fetchAgentEvents(selectedRunId, lastSequence);
-            await fetchAgentTrace(selectedRunId);
         };
 
         const scheduleReconnect = () => {
@@ -3078,6 +3250,7 @@ export default function AgentsPage() {
             agentEventReconnectTimerRef.current = setTimeout(async () => {
                 agentEventReconnectTimerRef.current = null;
                 await backfillEvents();
+                await fetchRun(selectedRunId);
                 connect();
             }, delay);
         };
@@ -3094,13 +3267,21 @@ export default function AgentsPage() {
                     attempts = 0;
                     mergeAgentEvents([data]);
                     mergeProgressFromAgentEvent(data);
-                    void fetchAgentTrace(selectedRunId);
                 } catch {
                     source.close();
                     agentEventSourceRef.current = null;
                     scheduleReconnect();
                 }
             };
+            source.addEventListener('complete', () => {
+                source.close();
+                agentEventSourceRef.current = null;
+                window.setTimeout(() => {
+                    void fetchRun(selectedRunId);
+                    void fetchAgentTrace(selectedRunId);
+                    void fetchHistory();
+                }, 500);
+            });
             source.onerror = () => {
                 source.close();
                 agentEventSourceRef.current = null;
@@ -3120,13 +3301,22 @@ export default function AgentsPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedRunId, activeRun?.status, currentProject?.id]);
 
+    useEffect(() => {
+        if (!selectedRunId || !activeRun) return;
+        if (traceTab === 'timeline' && !isAgentRunTerminal(activeRun.status)) return;
+        void fetchAgentTrace(selectedRunId);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [selectedRunId, activeRun?.status, traceTab, currentProject?.id]);
 
-    const selectedDefinition = agentDefinitions.find(agent => agent.id === selectedDefinitionId);
-    const toolsByCategory = toolCatalog.reduce<Record<string, AgentTool[]>>((acc, tool) => {
+
+    const definitionById = useMemo(() => new Map(agentDefinitions.map(definition => [definition.id, definition])), [agentDefinitions]);
+    const selectedDefinition = useMemo(() => definitionById.get(selectedDefinitionId), [definitionById, selectedDefinitionId]);
+    const toolsByCategory = useMemo(() => toolCatalog.reduce<Record<string, AgentTool[]>>((acc, tool) => {
         acc[tool.category] = acc[tool.category] || [];
         acc[tool.category].push(tool);
         return acc;
-    }, {});
+    }, {}), [toolCatalog]);
+    const toolById = useMemo(() => new Map(toolCatalog.map(tool => [tool.id, tool])), [toolCatalog]);
 
     const resetDefinitionForm = () => {
         setDefinitionForm(defaultDefinitionForm(agentRuntime));
@@ -3244,11 +3434,12 @@ export default function AgentsPage() {
                 throw new Error(err.detail || 'Failed to save agent');
             }
             const saved = await res.json();
-            await fetchAgentDefinitions();
+            await fetchAgentDefinitionsFresh();
             selectDefinition(saved.id);
             selectAgentMode('custom');
-            setWorkspaceView(returnToAfterSave ? 'library' : 'run');
-            updateWorkspaceQuery({ create: false, view: returnToAfterSave ? 'library' : 'run' });
+            const nextView = returnToAfterSave || (isEdit && workspaceView === 'library') ? 'library' : 'run';
+            setWorkspaceView(nextView);
+            updateWorkspaceQuery({ create: false, view: nextView });
             setBuilderOpen(false);
             setWorkspaceStatus(`Saved ${saved.name || 'custom agent'}.`);
             toast.success('Custom agent saved');
@@ -3270,7 +3461,7 @@ export default function AgentsPage() {
                 const err = await res.json().catch(() => ({}));
                 throw new Error(err.detail || 'Failed to archive agent');
             }
-            await fetchAgentDefinitions();
+            await fetchAgentDefinitionsFresh();
             if (selectedDefinitionId === definition.id) selectDefinition('');
             setWorkspaceStatus(`Archived ${definition.name}.`);
             toast.success('Custom agent archived');
@@ -3282,12 +3473,12 @@ export default function AgentsPage() {
 
     const handleRun = async () => {
         const validationError = validateAgentRunInput({
-            selectedAgent,
+            selectedAgent: 'custom',
             selectedDefinitionId,
             url,
             authType,
             sessionId,
-            testData,
+            testData: '',
         });
         setRunFormError(validationError);
         if (validationError) {
@@ -3297,12 +3488,7 @@ export default function AgentsPage() {
         setIsStarting(true);
         setWorkspaceStatus('Starting agent run...');
         try {
-            const selectedBrowserAuthSessionId = selectedAgent !== 'writer' && authType === 'session' ? sessionId.trim() : '';
-            if (selectedAgent !== 'writer' && authType === 'session' && !selectedBrowserAuthSessionId) {
-                setRunFormError('Select a browser login session.');
-                setIsStarting(false);
-                return;
-            }
+            const selectedBrowserAuthSessionId = authType === 'session' ? sessionId.trim() : '';
             const selectedBrowserAuthSession = selectedBrowserAuthSessionId
                 ? sessions.find(session => session.id === selectedBrowserAuthSessionId)
                 : undefined;
@@ -3312,90 +3498,21 @@ export default function AgentsPage() {
                 return;
             }
 
-            // Build auth config
-            let authConfig: any = null;
-            if (selectedAgent !== 'custom' && authType !== 'none' && authType !== 'session') {
-                authConfig = { type: authType };
-                if (authType === 'credentials') {
-                    authConfig.credentials = {
-                        username: authCredentials.username,
-                        password: authCredentials.password
-                    };
-                    authConfig.login_url = authCredentials.loginUrl;
-                }
-            }
-
-            // Build test data from JSON
-            let testDataObj = {};
-            if (testData.trim()) {
-                try {
-                    testDataObj = JSON.parse(testData);
-                } catch (e) {
-                    setRunFormError('Test data must be valid JSON.');
-                    setIsStarting(false);
-                    return;
-                }
-            }
-
-            // Build focus areas
-            const focusAreasList = focusAreas ? focusAreas.split(',').map(s => s.trim()).filter(s => s) : [];
             const testDataRefsList = testDataRefs ? testDataRefs.split(',').map(s => s.trim()).filter(Boolean) : [];
 
-            // Build excluded patterns
-            const excludedPatternsList = excludedPatterns ? excludedPatterns.split(',').map(s => s.trim()).filter(s => s) : [];
-
-            // Use new enhanced endpoint for exploratory agent
-            const endpoint = selectedAgent === 'custom'
-                ? `${API_BASE}/api/agents/definitions/${selectedDefinitionId}/runs`
-                : selectedAgent === 'exploratory'
-                ? `${API_BASE}/api/agents/exploratory`
-                : `${API_BASE}/api/agents/runs`;
-
-            const selectedRuntime = selectedAgent === 'custom'
-                ? (selectedDefinition?.runtime || agentRuntime)
-                : agentRuntime;
-
-            const body = selectedAgent === 'custom'
-                ? {
-                    prompt: instructions || `Inspect ${url || 'the current application context'} and report useful QA findings.`,
-                    url: url || undefined,
-                    runtime: selectedRuntime,
-                    test_data_refs: testDataRefsList,
-                    config: {
-                        auth: authConfig,
-                        browser_auth_session_id: selectedBrowserAuthSessionId || undefined,
-                        test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
-                        test_data_refs: testDataRefsList.length > 0 ? testDataRefsList : undefined,
-                        focus_areas: focusAreasList,
-                        excluded_patterns: excludedPatternsList,
-                    },
-                    project_id: currentProject?.id,
-                }
-                : selectedAgent === 'exploratory'
-                ? {
-                    url,
-                    time_limit_minutes: timeLimitMinutes,
-                    instructions,
-                    auth: authConfig,
+            const endpoint = `${API_BASE}/api/agents/definitions/${selectedDefinitionId}/runs`;
+            const selectedRuntime = selectedDefinition?.runtime || agentRuntime;
+            const body = {
+                prompt: instructions || `Inspect ${url || 'the current application context'} and report useful QA findings.`,
+                url: url || undefined,
+                runtime: selectedRuntime,
+                test_data_refs: testDataRefsList,
+                config: {
                     browser_auth_session_id: selectedBrowserAuthSessionId || undefined,
-                    test_data: Object.keys(testDataObj).length > 0 ? testDataObj : undefined,
                     test_data_refs: testDataRefsList.length > 0 ? testDataRefsList : undefined,
-                    focus_areas: focusAreasList.length > 0 ? focusAreasList : undefined,
-                    excluded_patterns: excludedPatternsList.length > 0 ? excludedPatternsList : undefined,
-                    runtime: selectedRuntime,
-                    project_id: currentProject?.id  // Associate generated specs with current project
-                }
-                : {
-                    agent_type: 'writer',
-                    runtime: selectedRuntime,
-                    config: {
-                        url,
-                        instructions,
-                        max_steps: 10,
-                        runtime: selectedRuntime,
-                    },
-                    project_id: currentProject?.id  // Project isolation for writer agent
-                };
+                },
+                project_id: currentProject?.id,
+            };
 
             const res = await fetch(endpoint, {
                 method: 'POST',
@@ -3605,15 +3722,7 @@ export default function AgentsPage() {
         ...(Array.isArray(explorerResult?.contract_warnings) ? explorerResult.contract_warnings : []),
     ].filter(Boolean).map((warning: any) => String(warning).trim()).filter(Boolean)));
     const explorerCanGenerateSpecs = explorerStructuredFlowCount > 0;
-    const historyCounts = useMemo(() => getAgentHistoryCounts(history), [history]);
-    const filteredHistory = useMemo(
-        () => filterAgentHistoryRuns(history, {
-            q: historySearch,
-            status: historyStatusFilter,
-            type: historyTypeFilter,
-        }),
-        [history, historySearch, historyStatusFilter, historyTypeFilter]
-    );
+    const visibleHistory = history;
     const queueWarnings = useMemo(() => {
         const stale = queueStatus?.stale_running ?? 0;
         const orphaned = queueStatus?.orphaned_tasks ?? 0;
@@ -3627,58 +3736,40 @@ export default function AgentsPage() {
     }, [queueStatus]);
     const selectedDefinitionToolLabels = useMemo(() => {
         if (!selectedDefinition) return [];
-        return selectedDefinition.tool_ids.map(toolId => toolCatalog.find(tool => tool.id === toolId)?.label || toolId);
-    }, [selectedDefinition, toolCatalog]);
+        return selectedDefinition.tool_ids.map(toolId => toolById.get(toolId)?.label || toolId);
+    }, [selectedDefinition, toolById]);
+    const visibleTestDataRefs = useMemo(() => {
+        const explicitRefs = testDataRefs.split(',').map(ref => ref.trim()).filter(Boolean);
+        if (explicitRefs.length > 0) return explicitRefs;
+        return selectedDefinition?.test_data_refs || [];
+    }, [selectedDefinition?.test_data_refs, testDataRefs]);
+    const testDataRefsSummary = visibleTestDataRefs.length === 0
+        ? 'No refs selected'
+        : `${visibleTestDataRefs.length} ref${visibleTestDataRefs.length === 1 ? '' : 's'} selected`;
     const runPlanRows = useMemo(() => {
-        const authMode = selectedAgent === 'writer'
-            ? 'N/A'
-            : authType === 'session'
+        const authMode = authType === 'session'
             ? (sessions.find(session => session.id === sessionId)?.name || sessionId || 'Session required')
-            : authType === 'credentials'
-            ? `Credentials via ${authCredentials.loginUrl || '/login'}`
             : 'No auth';
-        const runtime = selectedAgent === 'custom' ? (selectedDefinition?.runtime || agentRuntime) : agentRuntime;
-        const timeout = selectedAgent === 'custom'
-            ? `${Math.ceil((selectedDefinition?.timeout_seconds || 1800) / 60)} minutes`
-            : selectedAgent === 'exploratory'
-            ? `${timeLimitMinutes} minutes`
-            : 'Default';
+        const runtime = selectedDefinition?.runtime || agentRuntime;
+        const timeout = `${Math.ceil((selectedDefinition?.timeout_seconds || 1800) / 60)} minutes`;
         return [
-            ['Agent', selectedAgent === 'custom' ? selectedDefinition?.name || 'Custom agent required' : selectedAgent === 'writer' ? 'Writer' : 'Enhanced Explorer'],
+            ['Agent', selectedDefinition?.name || 'Custom agent required'],
             ['Runtime', runtime === 'hermes' ? 'Hermes' : 'Claude SDK'],
-            ['Target', url.trim() || (selectedAgent === 'custom' ? 'Optional' : 'Required')],
+            ['Target', url.trim() || 'Optional'],
             ['Auth', authMode],
             ['Timeout', timeout],
-            ['Tools', selectedAgent === 'custom' ? selectedDefinitionToolLabels.slice(0, 4).join(', ') || 'Select a saved agent' : 'Built-in browser exploration'],
+            ['Tools', selectedDefinitionToolLabels.slice(0, 4).join(', ') || 'Select a saved agent'],
             ['Test data refs', testDataRefs.trim() || selectedDefinition?.test_data_refs?.join(', ') || 'None'],
-            ['Focus', focusAreas.trim() || 'General coverage'],
-            ['Exclusions', excludedPatterns.trim() || 'None'],
             ['Queue', queueStatus ? `${queueStatus.active ?? 0} active, ${queueStatus.queued ?? 0} queued · ${queueStateLabel(queueStatus)}` : 'Not loaded'],
         ];
-    }, [agentRuntime, authCredentials.loginUrl, authType, excludedPatterns, focusAreas, queueStatus, selectedAgent, selectedDefinition, selectedDefinitionToolLabels, sessionId, sessions, testDataRefs, timeLimitMinutes, url]);
+    }, [agentRuntime, authType, queueStatus, selectedDefinition, selectedDefinitionToolLabels, sessionId, sessions, testDataRefs, url]);
     const workspaceTabs: Array<{ key: AgentWorkspaceView; label: string; count?: number }> = [
         { key: 'run', label: 'Run' },
+        { key: 'history', label: 'History', count: historyTotal || undefined },
         { key: 'library', label: 'Agent Library', count: agentDefinitions.length },
         { key: 'reports', label: 'Reports', count: reportSearchResults.length || undefined },
         { key: 'queue', label: 'Queue', count: (queueStatus?.active || 0) + (queueStatus?.queued || 0) || undefined },
     ];
-    const agentModeTabs: AgentWorkspaceMode[] = ['exploratory', 'custom'];
-    const handleAgentModeTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-        if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-        event.preventDefault();
-        const currentIndex = agentModeTabs.indexOf(selectedAgent);
-        const lastIndex = agentModeTabs.length - 1;
-        const nextIndex = event.key === 'Home'
-            ? 0
-            : event.key === 'End'
-            ? lastIndex
-            : event.key === 'ArrowRight' || event.key === 'ArrowDown'
-            ? (currentIndex + 1) % agentModeTabs.length
-            : (currentIndex - 1 + agentModeTabs.length) % agentModeTabs.length;
-        const nextMode = agentModeTabs[nextIndex];
-        selectAgentMode(nextMode);
-        window.requestAnimationFrame(() => document.getElementById(`agents-agent-tab-${nextMode}`)?.focus());
-    };
 
     const renderExplorerCapturedEvidence = () => {
         if (explorerCapturedArtifacts.length === 0 && Number(explorerScreenshotCount || 0) === 0) return null;
@@ -3766,12 +3857,134 @@ export default function AgentsPage() {
         );
     };
 
+    const renderHistoryWorkspace = () => (
+        <div className="card agents-history-workspace">
+            <div className="agents-history-workspace-header">
+                <div>
+                    <h2 style={{ margin: 0, fontSize: '1rem', fontWeight: 800 }}>Run History</h2>
+                    <p style={{ margin: '0.25rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                        {visibleHistory.length} of {historyTotal} runs
+                    </p>
+                </div>
+                <button className="btn-icon agents-icon-button" type="button" onClick={() => void fetchHistory()} title="Refresh run history" aria-label="Refresh run history" disabled={historyLoading}>
+                    {historyLoading ? <Loader2 className="spin" size={14} /> : <RotateCcw size={14} />}
+                </button>
+            </div>
+
+            <div className="agents-history-toolbar">
+                <Label htmlFor="agents-history-search" className="agents-visually-hidden">Search run history</Label>
+                <div style={{ position: 'relative', minWidth: 0 }}>
+                    <Search size={14} style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
+                    <Input
+                        id="agents-history-search"
+                        name="agents-history-search"
+                        value={historySearch}
+                        onChange={event => updateHistorySearch(event.target.value)}
+                        placeholder="Search URL, name, or ID"
+                        autoComplete="off"
+                        style={{ paddingLeft: '2rem', minHeight: 40 }}
+                    />
+                </div>
+                <div className="agents-history-filter-grid">
+                    <div>
+                        <Select value={historyStatusFilter} onValueChange={value => updateHistoryStatusFilter(value as AgentHistoryStatusFilter)}>
+                            <SelectTrigger aria-label="Filter history by status" className="agents-history-filter-trigger">
+                                <span className="truncate">Status: {AGENT_HISTORY_STATUS_FILTER_LABELS[historyStatusFilter]}</span>
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="all">All statuses ({historyCounts.status.all})</SelectItem>
+                                <SelectItem value="active">Active ({historyCounts.status.active})</SelectItem>
+                                <SelectItem value="completed">Completed ({historyCounts.status.completed})</SelectItem>
+                                <SelectItem value="failed">Failed ({historyCounts.status.failed})</SelectItem>
+                                <SelectItem value="cancelled">Cancelled ({historyCounts.status.cancelled})</SelectItem>
+                                <SelectItem value="paused">Paused ({historyCounts.status.paused})</SelectItem>
+                            </SelectContent>
+                        </Select>
+                    </div>
+                    <div>
+                        <Select value={historyTypeFilter} onValueChange={value => updateHistoryTypeFilter(value as AgentHistoryTypeFilter)}>
+                            <SelectTrigger aria-label="Filter history by agent type" className="agents-history-filter-trigger">
+                                <span className="truncate">Type: {AGENT_HISTORY_TYPE_FILTER_LABELS[historyTypeFilter]}</span>
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="all">All types ({historyCounts.type.all})</SelectItem>
+                                <SelectItem value="exploratory">Explorer ({historyCounts.type.exploratory})</SelectItem>
+                                <SelectItem value="custom">Custom ({historyCounts.type.custom})</SelectItem>
+                                <SelectItem value="writer">Writer ({historyCounts.type.writer})</SelectItem>
+                                <SelectItem value="spec_generation">Spec runs ({historyCounts.type.spec_generation})</SelectItem>
+                            </SelectContent>
+                        </Select>
+                    </div>
+                </div>
+            </div>
+
+            <div className="agents-history-list">
+                {historyError ? (
+                    <div style={{ padding: '1rem', color: 'var(--danger)', fontSize: '0.85rem' }}>
+                        {historyError}
+                    </div>
+                ) : history.length === 0 && historyLoading ? (
+                    <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                        Loading runs...
+                    </div>
+                ) : history.length === 0 ? (
+                    <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                        No runs yet.
+                    </div>
+                ) : visibleHistory.length === 0 ? (
+                    <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                        No runs match the current filters.
+                    </div>
+                ) : (
+                    <>
+                        {visibleHistory.map(run => (
+                            <button
+                                key={run.id}
+                                type="button"
+                                className="agents-history-row agents-history-row-wide"
+                                onClick={() => selectHistoryRun(run.id)}
+                                aria-current={selectedRunId === run.id ? 'true' : undefined}
+                                style={{
+                                    background: selectedRunId === run.id ? 'rgba(59, 130, 246, 0.08)' : 'transparent',
+                                    borderLeft: selectedRunId === run.id ? '3px solid var(--primary)' : '3px solid transparent'
+                                }}
+                            >
+                                <div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem', flexWrap: 'wrap' }}>
+                                        <span style={{ fontWeight: 800, color: run.agent_type === 'custom' ? 'var(--success)' : run.agent_type === 'writer' || run.agent_type === 'spec_generation' ? 'var(--primary)' : 'var(--warning)' }}>
+                                            {agentRunDisplayName(run)}
+                                        </span>
+                                        <StatusBadge status={run.status} />
+                                    </div>
+                                    <div style={{ marginTop: '0.35rem', fontSize: '0.85rem', overflow: 'hidden', textOverflow: 'ellipsis', color: 'var(--text)' }}>
+                                        {run.config?.url?.replace('https://', '') || run.config?.agent_name || run.id}
+                                    </div>
+                                </div>
+                                <div className="agents-history-row-meta">
+                                    <span>{formatDate(run.created_at)}</span>
+                                    <span>{run.id.slice(0, 8)}</span>
+                                </div>
+                            </button>
+                        ))}
+                        {historyNextCursor && (
+                            <div style={{ padding: '0.9rem' }}>
+                                <Button type="button" variant="outline" size="sm" onClick={loadMoreHistory} disabled={historyLoading} style={{ width: '100%' }}>
+                                    {historyLoading ? <Loader2 className="spin" size={14} /> : <ChevronDown size={14} />} Load more
+                                </Button>
+                            </div>
+                        )}
+                    </>
+                )}
+            </div>
+        </div>
+    );
+
     return (
         <PageLayout tier="wide" style={{ paddingBottom: '4rem' }}>
             <style>{`
                 .agents-workspace-grid {
                     display: grid;
-                    grid-template-columns: minmax(220px, 0.72fr) minmax(300px, 0.95fr) minmax(0, 2fr);
+                    grid-template-columns: minmax(320px, 0.85fr) minmax(0, 1.65fr);
                     gap: 1rem;
                     align-items: start;
                 }
@@ -3799,8 +4012,46 @@ export default function AgentsPage() {
                     cursor: pointer;
                     transition: background 0.16s var(--ease-smooth), border-color 0.16s var(--ease-smooth);
                 }
+                .agents-history-workspace {
+                    padding: 0;
+                    overflow: hidden;
+                }
+                .agents-history-workspace-header {
+                    padding: 0.9rem 1rem;
+                    border-bottom: 1px solid var(--border);
+                    background: var(--surface-hover);
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    gap: 0.75rem;
+                }
+                .agents-history-toolbar {
+                    padding: 0.9rem 1rem;
+                    border-bottom: 1px solid var(--border);
+                    display: grid;
+                    grid-template-columns: minmax(280px, 1fr) minmax(300px, 0.75fr);
+                    gap: 0.75rem;
+                    align-items: center;
+                }
+                .agents-history-list {
+                    display: grid;
+                }
+                .agents-history-row-wide {
+                    padding: 0.9rem 1rem;
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) auto;
+                    gap: 1rem;
+                    align-items: center;
+                }
+                .agents-history-row-meta {
+                    display: grid;
+                    gap: 0.3rem;
+                    justify-items: end;
+                    color: var(--text-secondary);
+                    font-size: 0.76rem;
+                    white-space: nowrap;
+                }
                 .agents-history-row:focus-visible,
-                .agents-segment-button:focus-visible,
                 .agents-icon-button:focus-visible {
                     outline: 2px solid var(--primary);
                     outline-offset: 2px;
@@ -3893,19 +4144,209 @@ export default function AgentsPage() {
                     color: var(--primary);
                     border-color: var(--primary);
                 }
+                .agents-workspace-tab-count {
+                    display: inline-flex;
+                    align-items: center;
+                    align-self: center;
+                    color: #8f9bb7;
+                    font-size: 0.78em;
+                    font-weight: 800;
+                    font-variant-numeric: tabular-nums;
+                    line-height: 1.2;
+                }
+                .agents-workspace-tab[data-active="true"] .agents-workspace-tab-count {
+                    color: #8bb8ff;
+                }
                 .agents-workspace-tab:focus-visible,
                 .agents-action-button:focus-visible {
                     outline: 2px solid var(--primary);
                     outline-offset: 2px;
                 }
-                .agents-run-plan {
+                .agents-setup-stack {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.8rem;
+                    min-width: 0;
+                }
+                .agents-run-empty-compact {
                     display: grid;
-                    gap: 0.45rem;
-                    margin-bottom: 0.85rem;
-                    padding: 0.8rem;
+                    gap: 0.75rem;
+                    padding: 0.85rem;
+                    border: 1px dashed var(--border);
+                    border-radius: 8px;
+                    background: var(--surface-hover);
+                }
+                .agents-run-empty-compact p {
+                    margin: 0.25rem 0 0;
+                    color: var(--text-secondary);
+                    font-size: 0.82rem;
+                    line-height: 1.45;
+                }
+                .agents-custom-picker-row {
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) 40px;
+                    gap: 0.5rem;
+                    align-items: end;
+                    min-width: 0;
+                }
+                .agents-run-details-card {
+                    display: flex;
+                    flex-direction: column;
+                    min-width: 0;
+                    overflow: hidden;
+                }
+                .agents-run-details-body {
+                    padding: 0.85rem;
+                    flex: 1 1 auto;
+                    display: grid;
+                    gap: 0.8rem;
+                    min-height: 0;
+                    min-width: 0;
+                    padding-bottom: 0.85rem;
+                }
+                .agents-run-details-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+                    gap: 0.75rem;
+                    align-items: start;
+                    min-width: 0;
+                }
+                .agents-run-field {
+                    min-width: 0;
+                    display: grid;
+                    gap: 0.42rem;
+                }
+                .agents-run-field label,
+                .agents-run-field-label {
+                    display: flex;
+                    align-items: center;
+                    gap: 0.4rem;
+                    color: var(--text);
+                    font-size: 0.78rem;
+                    font-weight: 750;
+                    line-height: 1.2;
+                }
+                .agents-run-field input,
+                .agents-run-field select,
+                .agents-run-field textarea {
+                    box-sizing: border-box;
+                    max-width: 100%;
+                    min-width: 0;
+                }
+                .agents-run-field input,
+                .agents-run-field select {
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+                .agents-run-field-note {
+                    margin: 0;
+                    color: var(--text-secondary);
+                    font-size: 0.7rem;
+                    line-height: 1.35;
+                    overflow-wrap: anywhere;
+                    min-width: 0;
+                }
+                .agents-run-field-wide {
+                    grid-column: 1 / -1;
+                }
+                .agents-task-prompt {
+                    min-height: 74px;
+                    max-height: 148px;
+                    line-height: 1.4;
+                }
+                .agents-disclosure {
                     border: 1px solid var(--border);
                     border-radius: 8px;
                     background: var(--surface-hover);
+                    display: grid;
+                    grid-template-rows: auto;
+                    overflow: hidden;
+                    min-width: 0;
+                    max-width: 100%;
+                }
+                .agents-disclosure-trigger {
+                    width: 100%;
+                    min-height: 40px;
+                    padding: 0.55rem 0.7rem;
+                    border: 0;
+                    background: transparent;
+                    color: var(--text);
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 0.7rem;
+                    cursor: pointer;
+                    text-align: left;
+                    font-size: 0.82rem;
+                    font-weight: 800;
+                }
+                .agents-disclosure-trigger-main {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 0.12rem;
+                    min-width: 0;
+                }
+                .agents-disclosure-trigger-label,
+                .agents-disclosure-trigger-summary {
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+                .agents-disclosure-trigger-summary {
+                    color: var(--text-secondary);
+                    font-size: 0.7rem;
+                    font-weight: 700;
+                }
+                .agents-disclosure-trigger:focus-visible {
+                    outline: 2px solid var(--primary);
+                    outline-offset: -2px;
+                }
+                .agents-disclosure-body {
+                    padding: 0 0.7rem 0.75rem;
+                    display: grid;
+                    gap: 0.55rem;
+                    min-width: 0;
+                }
+                .agents-context-disclosure {
+                    grid-column: 1 / -1;
+                }
+                .agents-context-disclosure-custom {
+                    background: var(--background);
+                }
+                .agents-context-disclosure-open {
+                    min-height: 250px;
+                }
+                .agents-run-summary {
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 0.45rem;
+                    align-items: center;
+                    min-width: 0;
+                    max-width: 100%;
+                    overflow: hidden;
+                }
+                .agents-run-chip {
+                    flex: 0 1 auto;
+                    min-width: 0;
+                    max-width: 100%;
+                    min-height: 28px;
+                    padding: 0.3rem 0.55rem;
+                    border: 1px solid var(--border);
+                    border-radius: 999px;
+                    background: var(--background);
+                    color: var(--text-secondary);
+                    font-size: 0.73rem;
+                    font-weight: 750;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                }
+                .agents-run-plan {
+                    display: grid;
+                    gap: 0.45rem;
+                    padding-top: 0.2rem;
+                    min-width: 0;
                 }
                 .agents-run-plan-row {
                     display: grid;
@@ -3921,6 +4362,36 @@ export default function AgentsPage() {
                 .agents-run-plan-row span {
                     min-width: 0;
                     overflow-wrap: anywhere;
+                }
+                .agents-run-footer {
+                    padding: 0.75rem 0.85rem;
+                    border-top: 1px solid var(--border);
+                    background: color-mix(in srgb, var(--background-raised) 92%, transparent);
+                    backdrop-filter: blur(10px);
+                }
+                .agents-run-details-card-custom .agents-run-footer {
+                    z-index: 2;
+                    flex: 0 0 auto;
+                }
+                .agents-start-button {
+                    width: 100%;
+                    min-height: 44px;
+                    padding: 0.75rem;
+                    border-radius: 6px;
+                    font-size: 0.9rem;
+                    background: var(--primary);
+                    color: white;
+                    font-weight: 700;
+                    border: none;
+                    cursor: pointer;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 0.5rem;
+                }
+                .agents-start-button:disabled {
+                    cursor: not-allowed;
+                    opacity: 0.7;
                 }
                 .agents-builder-grid {
                     display: grid;
@@ -4324,14 +4795,7 @@ export default function AgentsPage() {
                 }
                 @media (max-width: 1180px) {
                     .agents-workspace-grid {
-                        grid-template-columns: minmax(260px, 0.85fr) minmax(0, 1.35fr);
-                    }
-                    .agents-setup-panel {
-                        grid-column: 1;
-                    }
-                    .agents-output-panel {
-                        grid-column: 2;
-                        grid-row: 1 / span 2;
+                        grid-template-columns: minmax(300px, 0.85fr) minmax(0, 1.35fr);
                     }
                 }
                 @media (max-width: 860px) {
@@ -4343,6 +4807,13 @@ export default function AgentsPage() {
                         grid-column: auto;
                         grid-row: auto;
                     }
+                    .agents-setup-panel {
+                        order: -1;
+                    }
+                    .agents-run-details-body {
+                        padding: 0.65rem;
+                        gap: 0.55rem;
+                    }
                     .agents-panel-scroll {
                         max-height: none;
                         overflow: visible;
@@ -4353,8 +4824,18 @@ export default function AgentsPage() {
                     .agents-desktop-content[data-open="false"] {
                         display: none;
                     }
+                    .agents-history-toolbar,
+                    .agents-history-row-wide {
+                        grid-template-columns: minmax(0, 1fr);
+                    }
+                    .agents-history-row-meta {
+                        justify-items: start;
+                    }
                 }
                 @media (max-width: 720px) {
+                    .agents-run-details-grid {
+                        grid-template-columns: minmax(0, 1fr);
+                    }
                     .agents-builder-grid {
                         grid-template-columns: minmax(0, 1fr);
                     }
@@ -4427,7 +4908,7 @@ export default function AgentsPage() {
                         onClick={() => selectWorkspaceView(tab.key)}
                     >
                         {tab.label}
-                        {tab.count ? <Badge variant="secondary">{tab.count}</Badge> : null}
+                        {tab.count ? <span className="agents-workspace-tab-count">{tab.count}</span> : null}
                     </button>
                 ))}
             </div>
@@ -4435,131 +4916,18 @@ export default function AgentsPage() {
             {workspaceView === 'run' && (
             <div className="agents-workspace-grid">
 
-                {/* History Sidebar */}
-                <Collapsible open={historyOpen} onOpenChange={setHistoryOpen} className="agents-panel">
-                    <div className="card" style={{ padding: '0', overflow: 'hidden' }}>
-                        <div style={{ padding: '0.8rem 0.9rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
-                            <div>
-                                <h3 style={{ fontWeight: 700, fontSize: '0.9rem', margin: 0 }}>Run History</h3>
-                                <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
-                                    {filteredHistory.length} of {history.length} runs
-                                </p>
-                            </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                                <button className="btn-icon agents-icon-button" type="button" onClick={fetchHistory} title="Refresh run history" aria-label="Refresh run history">
-                                    <RotateCcw size={14} />
-                                </button>
-                                <CollapsibleTrigger asChild>
-                                    <button className="btn-icon agents-icon-button agents-mobile-trigger" type="button" aria-label={historyOpen ? 'Collapse run history' : 'Expand run history'}>
-                                        <ChevronDown size={14} />
-                                    </button>
-                                </CollapsibleTrigger>
-                            </div>
-                        </div>
-                        <CollapsibleContent forceMount>
-                            <div className="agents-desktop-content" data-open={historyOpen ? 'true' : 'false'}>
-                                <div style={{ padding: '0.75rem', display: 'grid', gap: '0.55rem', borderBottom: '1px solid var(--border)' }}>
-                                    <Label htmlFor="agents-history-search" className="agents-visually-hidden">Search run history</Label>
-                                    <div style={{ position: 'relative' }}>
-                                        <Search size={14} style={{ position: 'absolute', left: '0.65rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
-                                        <Input
-                                            id="agents-history-search"
-                                            name="agents-history-search"
-                                            value={historySearch}
-                                            onChange={event => updateHistorySearch(event.target.value)}
-                                            placeholder="Search URL, name, or ID"
-                                            autoComplete="off"
-                                            style={{ paddingLeft: '2rem', minHeight: 40 }}
-                                        />
-                                    </div>
-                                    <div className="agents-history-filter-grid">
-                                        <div>
-                                            <Select value={historyStatusFilter} onValueChange={value => updateHistoryStatusFilter(value as AgentHistoryStatusFilter)}>
-                                                <SelectTrigger aria-label="Filter history by status" className="agents-history-filter-trigger">
-                                                    <span className="truncate">Status: {AGENT_HISTORY_STATUS_FILTER_LABELS[historyStatusFilter]}</span>
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="all">All statuses ({historyCounts.status.all})</SelectItem>
-                                                    <SelectItem value="active">Active ({historyCounts.status.active})</SelectItem>
-                                                    <SelectItem value="completed">Completed ({historyCounts.status.completed})</SelectItem>
-                                                    <SelectItem value="failed">Failed ({historyCounts.status.failed})</SelectItem>
-                                                    <SelectItem value="cancelled">Cancelled ({historyCounts.status.cancelled})</SelectItem>
-                                                    <SelectItem value="paused">Paused ({historyCounts.status.paused})</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                        <div>
-                                            <Select value={historyTypeFilter} onValueChange={value => updateHistoryTypeFilter(value as AgentHistoryTypeFilter)}>
-                                                <SelectTrigger aria-label="Filter history by agent type" className="agents-history-filter-trigger">
-                                                    <span className="truncate">Type: {AGENT_HISTORY_TYPE_FILTER_LABELS[historyTypeFilter]}</span>
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                    <SelectItem value="all">All types ({historyCounts.type.all})</SelectItem>
-                                                    <SelectItem value="exploratory">Explorer ({historyCounts.type.exploratory})</SelectItem>
-                                                    <SelectItem value="custom">Custom ({historyCounts.type.custom})</SelectItem>
-                                                    <SelectItem value="writer">Writer ({historyCounts.type.writer})</SelectItem>
-                                                    <SelectItem value="spec_generation">Spec runs ({historyCounts.type.spec_generation})</SelectItem>
-                                                </SelectContent>
-                                            </Select>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div className="agents-panel-scroll">
-                                    {history.length === 0 ? (
-                                        <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                                            No runs yet.
-                                        </div>
-                                    ) : filteredHistory.length === 0 ? (
-                                        <div style={{ padding: '2rem 1rem', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                                            No runs match the current filters.
-                                        </div>
-                                    ) : (
-                                        filteredHistory.map(run => (
-                                            <button
-                                                key={run.id}
-                                                type="button"
-                                                className="agents-history-row"
-                                                onClick={() => selectRun(run.id)}
-                                                aria-current={selectedRunId === run.id ? 'true' : undefined}
-                                                style={{
-                                                    padding: '0.75rem 0.85rem',
-                                                    background: selectedRunId === run.id ? 'rgba(59, 130, 246, 0.08)' : 'transparent',
-                                                    borderLeft: selectedRunId === run.id ? '3px solid var(--primary)' : '3px solid transparent'
-                                                }}
-                                            >
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.35rem', gap: '0.6rem' }}>
-                                                    <span style={{ fontWeight: 700, fontSize: '0.84rem', color: run.agent_type === 'custom' ? 'var(--success)' : run.agent_type === 'writer' || run.agent_type === 'spec_generation' ? 'var(--primary)' : 'var(--warning)' }}>
-                                                        {agentRunDisplayName(run)}
-                                                    </span>
-                                                    <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>{formatDate(run.created_at)}</span>
-                                                </div>
-                                                <div style={{ fontSize: '0.8rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'var(--text)' }}>
-                                                    {run.config?.url?.replace('https://', '') || run.config?.agent_name || run.id}
-                                                </div>
-                                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.45rem', marginTop: '0.45rem' }}>
-                                                    <StatusBadge status={run.status} />
-                                                    <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>{run.id.slice(0, 8)}</span>
-                                                </div>
-                                            </button>
-                                        ))
-                                    )}
-                                </div>
-                            </div>
-                        </CollapsibleContent>
-                    </div>
-                </Collapsible>
-
                 {/* Left Column: Configuration */}
                 <Collapsible open={setupOpen} onOpenChange={setSetupOpen} className="agents-panel agents-setup-panel">
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-
-                    {/* Agent Selection */}
-                    <div className="card" style={{ padding: '0', overflow: 'hidden', flexShrink: 0 }}>
-                        <div style={{ padding: '0.8rem 0.9rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
+                    <div className="agents-setup-stack">
+                    <div
+                        id="agents-run-setup-panel"
+                        className="card agents-run-details-card agents-run-details-card-custom"
+                    >
+                        <div style={{ padding: '0.8rem 0.85rem', borderBottom: '1px solid var(--border)', background: 'var(--surface-hover)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem' }}>
                             <div>
                                 <h3 style={{ fontWeight: 700, fontSize: '0.9rem', margin: 0 }}>Run Setup</h3>
                                 <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
-                                    {selectedAgent === 'custom' ? 'Custom agent' : 'Explorer agent'}
+                                    {agentDefinitions.length} custom saved
                                 </p>
                             </div>
                             <CollapsibleTrigger asChild>
@@ -4569,229 +4937,56 @@ export default function AgentsPage() {
                             </CollapsibleTrigger>
                         </div>
                         <CollapsibleContent forceMount>
-                            <div className="agents-desktop-content" data-open={setupOpen ? 'true' : 'false'} style={{ padding: '0.5rem' }}>
-                            <div role="tablist" aria-label="Agent type" style={{ display: 'grid', gap: '0.5rem' }}>
-                            <button
-                                id="agents-agent-tab-exploratory"
-                                type="button"
-                                role="tab"
-                                aria-selected={selectedAgent === 'exploratory'}
-                                aria-controls="agents-run-setup-panel"
-                                tabIndex={selectedAgent === 'exploratory' ? 0 : -1}
-                                className="agents-segment-button"
-                                onKeyDown={handleAgentModeTabKeyDown}
-                                onClick={() => selectAgentMode('exploratory')}
-                                style={{
-                                    width: '100%',
-                                    padding: '0.75rem',
-                                    cursor: 'pointer',
-                                    background: selectedAgent === 'exploratory' ? 'var(--primary-glow)' : 'transparent',
-                                    border: selectedAgent === 'exploratory' ? '1px solid var(--primary)' : '1px solid transparent',
-                                    borderRadius: '8px',
-                                    display: 'flex', gap: '0.75rem',
-                                    textAlign: 'left',
-                                    minHeight: '44px'
-                                }}
-                            >
-                                <Terminal size={20} color={selectedAgent === 'exploratory' ? 'var(--primary)' : 'var(--text-secondary)'} />
-                                <div>
-                                    <h4 style={{ fontWeight: 600, fontSize: '0.9rem', color: selectedAgent === 'exploratory' ? 'var(--primary)' : 'var(--text)' }}>Enhanced Explorer</h4>
-                                    <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                                        15-min autonomous exploration
-                                    </p>
+                        <div className="agents-desktop-content" data-open={setupOpen ? 'true' : 'false'}>
+                        <div className="agents-run-details-body">
+                        <div className="agents-run-details-grid">
+                        <div className="agents-run-field agents-run-field-wide">
+                            {agentDefinitions.length === 0 ? (
+                                <div className="agents-run-empty-compact">
+                                    <div>
+                                        <strong>No runnable agents yet.</strong>
+                                        <p>Create a saved custom agent to run it from this workspace.</p>
+                                    </div>
+                                    <Button type="button" size="sm" onClick={openCreateAgentBuilder}>
+                                        <Plus size={14} /> Create Agent
+                                    </Button>
                                 </div>
-                            </button>
-
-                            <button
-                                id="agents-agent-tab-custom"
-                                type="button"
-                                role="tab"
-                                aria-selected={selectedAgent === 'custom'}
-                                aria-controls="agents-run-setup-panel"
-                                tabIndex={selectedAgent === 'custom' ? 0 : -1}
-                                className="agents-segment-button"
-                                onKeyDown={handleAgentModeTabKeyDown}
-                                onClick={() => selectAgentMode('custom')}
-                                style={{
-                                    width: '100%',
-                                    padding: '0.75rem',
-                                    cursor: 'pointer',
-                                    background: selectedAgent === 'custom' ? 'var(--primary-glow)' : 'transparent',
-                                    border: selectedAgent === 'custom' ? '1px solid var(--primary)' : '1px solid transparent',
-                                    borderRadius: '8px',
-                                    display: 'flex', gap: '0.75rem',
-                                    textAlign: 'left',
-                                    minHeight: '44px'
-                                }}
-                            >
-                                <Wrench size={20} color={selectedAgent === 'custom' ? 'var(--primary)' : 'var(--text-secondary)'} />
-                                <div>
-                                    <h4 style={{ fontWeight: 600, fontSize: '0.9rem', color: selectedAgent === 'custom' ? 'var(--primary)' : 'var(--text)' }}>Custom Agent</h4>
-                                    <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                                        User-defined tools and prompt
-                                    </p>
+                            ) : (
+                                <div className="agents-custom-picker-row">
+                                    <div className="agents-run-field">
+                                        <label htmlFor="agents-definition-select">Runnable Agent</label>
+                                        <select
+                                            id="agents-definition-select"
+                                            name="definitionId"
+                                            value={selectedDefinitionId}
+                                            onChange={e => selectDefinition(e.target.value)}
+                                            style={{ width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)' }}
+                                        >
+                                            <option value="">Select an agent</option>
+                                            {agentDefinitions.map(definition => (
+                                                <option key={definition.id} value={definition.id}>{definition.name}</option>
+                                            ))}
+                                        </select>
+                                        {selectedDefinition && (
+                                            <p className="agents-run-field-note">
+                                                {selectedDefinition.description || `${selectedDefinition.tool_ids.length} selected tools`} · Runtime: {selectedDefinition.runtime === 'hermes' ? 'Hermes' : 'Claude SDK'}
+                                            </p>
+                                        )}
+                                    </div>
+                                    <Button type="button" size="icon" variant="outline" onClick={openCreateAgentBuilder} title="Create agent" aria-label="Create custom agent">
+                                        <Plus size={15} />
+                                    </Button>
                                 </div>
-                            </button>
-                            </div>
-                            </div>
-                        </CollapsibleContent>
-                    </div>
-
-                    {/* Custom Agents */}
-                    <div className="card" style={{ padding: '1rem', flexShrink: 0 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem', gap: '0.75rem' }}>
-                            <div>
-                                <h3 style={{ fontWeight: 700, fontSize: '0.9rem', margin: 0 }}>Custom Agents</h3>
-                                <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.74rem' }}>
-                                    {agentDefinitions.length} saved
-                                </p>
-                            </div>
-                            <Button type="button" size="icon" variant="outline" onClick={openCreateAgentBuilder} title="Create agent" aria-label="Create custom agent">
-                                <Plus size={15} />
-                            </Button>
+                            )}
                         </div>
 
-                        {agentDefinitions.length === 0 ? (
-                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                No custom agents yet.
-                            </div>
-                        ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                                {agentDefinitions.map(definition => (
-                                    <div
-                                        key={definition.id}
-                                        style={{
-                                            display: 'grid',
-                                            gridTemplateColumns: 'minmax(0, 1fr) auto',
-                                            alignItems: 'center',
-                                            gap: '0.35rem',
-                                            border: selectedDefinitionId === definition.id ? '1px solid var(--primary)' : '1px solid var(--border)',
-                                            borderRadius: '6px',
-                                            background: selectedDefinitionId === definition.id ? 'var(--primary-glow)' : 'var(--surface-hover)',
-                                        }}
-                                    >
-                                        <button
-                                            type="button"
-                                            onClick={() => { selectDefinition(definition.id); selectAgentMode('custom'); }}
-                                            aria-pressed={selectedDefinitionId === definition.id}
-                                            className="agents-segment-button"
-                                            style={{
-                                                minWidth: 0,
-                                                minHeight: 44,
-                                                padding: '0.65rem',
-                                                border: 0,
-                                                background: 'transparent',
-                                                color: 'var(--text)',
-                                                textAlign: 'left',
-                                                cursor: 'pointer',
-                                            }}
-                                        >
-                                            <div style={{ fontSize: '0.85rem', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{definition.name}</div>
-                                            <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>{definition.tool_ids.length} tools</div>
-                                        </button>
-                                        <DropdownMenu
-                                            modal={false}
-                                            open={openDefinitionMenuId === definition.id}
-                                            onOpenChange={(open) => setOpenDefinitionMenuId(open ? definition.id : null)}
-                                        >
-                                            <DropdownMenuTrigger asChild>
-                                                <Button
-                                                    type="button"
-                                                    variant="ghost"
-                                                    size="icon"
-                                                    aria-label={`Open actions for ${definition.name}`}
-                                                    className="agents-definition-action-trigger"
-                                                    onClick={(event) => event.stopPropagation()}
-                                                    onPointerDown={(event) => event.stopPropagation()}
-                                                >
-                                                    <MoreHorizontal size={15} />
-                                                </Button>
-                                            </DropdownMenuTrigger>
-                                            <DropdownMenuContent
-                                                align="end"
-                                                sideOffset={6}
-                                                className="agents-definition-action-menu"
-                                                onClick={(event) => event.stopPropagation()}
-                                            >
-                                                <DropdownMenuItem
-                                                    className="agents-definition-action-item"
-                                                    onSelect={(event) => {
-                                                        editDefinitionFromMenu(definition, event);
-                                                    }}
-                                                >
-                                                    <Settings size={14} />
-                                                    Edit
-                                                </DropdownMenuItem>
-                                                <DropdownMenuItem
-                                                    className="agents-definition-action-item agents-definition-action-item-danger"
-                                                    onSelect={(event) => {
-                                                        archiveDefinitionFromMenu(definition, event);
-                                                    }}
-                                                >
-                                                    <Archive size={14} />
-                                                    Archive
-                                                </DropdownMenuItem>
-                                            </DropdownMenuContent>
-                                        </DropdownMenu>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-
-                    {/* Configuration Form */}
-                    <div id="agents-run-setup-panel" role="tabpanel" className="card" style={{ padding: '1.25rem', flexShrink: 0 }}>
-                        {selectedAgent === 'custom' && (
-                            <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                                <label htmlFor="agents-definition-select" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Runnable Agent</label>
-                                <select
-                                    id="agents-definition-select"
-                                    name="definitionId"
-                                    value={selectedDefinitionId}
-                                    onChange={e => selectDefinition(e.target.value)}
-                                    style={{ width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)' }}
-                                >
-                                    <option value="">Select an agent</option>
-                                    {agentDefinitions.map(definition => (
-                                        <option key={definition.id} value={definition.id}>{definition.name}</option>
-                                    ))}
-                                </select>
-                                {selectedDefinition && (
-                                    <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', margin: '0.5rem 0 0' }}>
-                                        {selectedDefinition.description || `${selectedDefinition.tool_ids.length} selected tools`} · Runtime: {selectedDefinition.runtime === 'hermes' ? 'Hermes' : 'Claude SDK'}
-                                    </p>
-                                )}
-                            </div>
-                        )}
-
-                        {selectedAgent !== 'custom' && (
-                            <div style={{ marginBottom: '1rem' }}>
-                                <label htmlFor="agents-runtime-select" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Agent Runtime</label>
-                                <select
-                                    id="agents-runtime-select"
-                                    name="runtime"
-                                    value={agentRuntime}
-                                    onChange={e => setAgentRuntime(e.target.value)}
-                                    style={{ width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem', border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)' }}
-                                >
-                                    <option value="claude_sdk">Claude SDK</option>
-                                    <option value="hermes">Hermes</option>
-                                </select>
-                                {agentRuntime === 'hermes' && (
-                                    <p style={{ fontSize: '0.75rem', color: hermesReachable ? 'var(--success)' : 'var(--warning)', margin: '0.5rem 0 0', lineHeight: 1.4 }}>
-                                        {hermesReachable ? 'Hermes API is reachable.' : hermesStatusMessage || 'Hermes API is not reachable yet.'}
-                                    </p>
-                                )}
-                            </div>
-                        )}
-
-                        <div style={{ marginBottom: '1rem' }}>
-                            <label htmlFor="agents-target-url" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Target URL</label>
+                        <div className="agents-run-field">
+                            <label htmlFor="agents-target-url">Target URL</label>
                             <input
                                 id="agents-target-url"
                                 name="targetUrl"
                                 type="url"
-                                placeholder={selectedAgent === 'custom' ? 'Optional target URL' : 'https://example.com'}
+                                placeholder="Optional target URL"
                                 value={url}
                                 onChange={e => setUrl(e.target.value)}
                                 autoComplete="url"
@@ -4802,166 +4997,42 @@ export default function AgentsPage() {
                             />
                         </div>
 
-                        {selectedAgent === 'exploratory' && (
-                            <>
-                                <div style={{ marginBottom: '1rem' }}>
-                                    <label htmlFor="agents-time-limit" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>Time Limit (minutes)</label>
-                                    <input
-                                        id="agents-time-limit"
-                                        name="timeLimitMinutes"
-                                        type="number"
-                                        min="2"
-                                        max="60"
-                                        value={timeLimitMinutes}
-                                        onChange={e => setTimeLimitMinutes(parseInt(e.target.value) || 15)}
-                                        style={{
-                                            width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem',
-                                            border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
-                                        }}
-                                    />
-                                </div>
+                        <div className="agents-run-field">
+                            <label htmlFor="agents-custom-session-select">Browser Login Session</label>
+                            <select
+                                id="agents-custom-session-select"
+                                name="customBrowserAuthSession"
+                                value={authType === 'session' ? sessionId : ''}
+                                onChange={e => {
+                                    setSessionId(e.target.value);
+                                    setAuthType(e.target.value ? 'session' : 'none');
+                                }}
+                                style={{
+                                    width: '100%', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem',
+                                    border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
+                                }}
+                            >
+                                <option value="">No browser login session</option>
+                                {sessions.map(s => (
+                                    <option key={s.id} value={s.id} disabled={!isBrowserAuthSessionSelectable(s)}>
+                                        {browserAuthSessionLabel(s)}
+                                    </option>
+                                ))}
+                            </select>
+                            <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
+                                {sessions.length === 0
+                                    ? 'No browser login sessions found in Settings.'
+                                    : `${sessions.filter(isBrowserAuthSessionSelectable).length} active browser login session${sessions.filter(isBrowserAuthSessionSelectable).length !== 1 ? 's' : ''} available`}
+                            </p>
+                        </div>
 
-                                <div style={{ marginBottom: '1rem' }}>
-                                    <label htmlFor="agents-auth-type" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>
-                                        <Lock size={14} /> Authentication
-                                    </label>
-                                    <select
-                                        id="agents-auth-type"
-                                        name="authType"
-                                        value={authType}
-                                        onChange={e => setAuthType(e.target.value as AuthType)}
-                                        style={{
-                                            width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem',
-                                            border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
-                                        }}
-                                    >
-                                        <option value="none">No Authentication</option>
-                                        <option value="credentials">Credentials (Login Form)</option>
-                                        <option value="session">Browser Login Session</option>
-                                    </select>
-                                </div>
-
-                                {authType === 'credentials' && (
-                                    <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '6px' }}>
-                                        <div style={{ marginBottom: '0.5rem' }}>
-                                            <label htmlFor="agents-login-url" style={{ fontSize: '0.75rem', fontWeight: 500 }}>Login URL</label>
-                                            <input
-                                                id="agents-login-url"
-                                                name="loginUrl"
-                                                type="text"
-                                                placeholder="/login"
-                                                value={authCredentials.loginUrl}
-                                                onChange={e => setAuthCredentials({ ...authCredentials, loginUrl: e.target.value })}
-                                                style={{
-                                                    width: '100%', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem',
-                                                    border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
-                                                }}
-                                            />
-                                        </div>
-                                        <div style={{ marginBottom: '0.5rem' }}>
-                                            <label htmlFor="agents-auth-username" style={{ fontSize: '0.75rem', fontWeight: 500 }}>Username</label>
-                                            <input
-                                                id="agents-auth-username"
-                                                name="username"
-                                                type="text"
-                                                placeholder="testuser"
-                                                value={authCredentials.username}
-                                                onChange={e => setAuthCredentials({ ...authCredentials, username: e.target.value })}
-                                                autoComplete="username"
-                                                style={{
-                                                    width: '100%', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem',
-                                                    border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
-                                                }}
-                                            />
-                                        </div>
-                                        <div>
-                                            <label htmlFor="agents-auth-password" style={{ fontSize: '0.75rem', fontWeight: 500 }}>Password</label>
-                                            <input
-                                                id="agents-auth-password"
-                                                name="password"
-                                                type="password"
-                                                placeholder="••••••••"
-                                                value={authCredentials.password}
-                                                onChange={e => setAuthCredentials({ ...authCredentials, password: e.target.value })}
-                                                autoComplete="current-password"
-                                                style={{
-                                                    width: '100%', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem',
-                                                    border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
-                                                }}
-                                            />
-                                        </div>
-                                    </div>
-                                )}
-
-                                {authType === 'session' && (
-                                    <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '6px' }}>
-                                        <label htmlFor="agents-session-select" style={{ fontSize: '0.75rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>Browser Login Session</label>
-                                        <select
-                                            id="agents-session-select"
-                                            name="browserAuthSession"
-                                            value={sessionId}
-                                            onChange={e => setSessionId(e.target.value)}
-                                            style={{
-                                                width: '100%', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem',
-                                                border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
-                                            }}
-                                        >
-                                            <option value="">Select a browser login session</option>
-                                            {sessions.map(s => (
-                                                <option key={s.id} value={s.id} disabled={!isBrowserAuthSessionSelectable(s)}>
-                                                    {browserAuthSessionLabel(s)}
-                                                </option>
-                                            ))}
-                                        </select>
-                                        <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-                                            {sessions.length === 0
-                                                ? 'No browser login sessions found in Settings.'
-                                                : `${sessions.filter(isBrowserAuthSessionSelectable).length} active browser login session${sessions.filter(isBrowserAuthSessionSelectable).length !== 1 ? 's' : ''} available`}
-                                        </p>
-                                    </div>
-                                )}
-                            </>
-                        )}
-
-                        {selectedAgent === 'custom' && (
-                            <div style={{ marginBottom: '1rem', padding: '0.75rem', background: 'var(--surface-hover)', borderRadius: '6px' }}>
-                                <label htmlFor="agents-custom-session-select" style={{ fontSize: '0.75rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>Browser Login Session</label>
-                                <select
-                                    id="agents-custom-session-select"
-                                    name="customBrowserAuthSession"
-                                    value={authType === 'session' ? sessionId : ''}
-                                    onChange={e => {
-                                        setSessionId(e.target.value);
-                                        setAuthType(e.target.value ? 'session' : 'none');
-                                    }}
-                                    style={{
-                                        width: '100%', padding: '0.5rem', borderRadius: '4px', fontSize: '0.85rem',
-                                        border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
-                                    }}
-                                >
-                                    <option value="">No browser login session</option>
-                                    {sessions.map(s => (
-                                        <option key={s.id} value={s.id} disabled={!isBrowserAuthSessionSelectable(s)}>
-                                            {browserAuthSessionLabel(s)}
-                                        </option>
-                                    ))}
-                                </select>
-                                <p style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-                                    {sessions.length === 0
-                                        ? 'No browser login sessions found in Settings.'
-                                        : `${sessions.filter(isBrowserAuthSessionSelectable).length} active browser login session${sessions.filter(isBrowserAuthSessionSelectable).length !== 1 ? 's' : ''} available`}
-                                </p>
-                            </div>
-                        )}
-
-                        <div style={{ marginBottom: '1.25rem' }}>
-                            <label htmlFor="agents-instructions" style={{ display: 'block', fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem' }}>
-                                {selectedAgent === 'custom' ? 'Task Prompt' : 'Instructions (Optional)'}
-                            </label>
+                        <div className="agents-run-field agents-run-field-wide">
+                            <label htmlFor="agents-instructions">Task Prompt</label>
                             <textarea
+                                className="agents-task-prompt"
                                 id="agents-instructions"
                                 name="instructions"
-                                placeholder={selectedAgent === 'custom' ? "Inspect the API calls triggered by the login and checkout flows." : selectedAgent === 'exploratory' ? "Focus on checkout flow, test edge cases..." : "Generate spec for login page..."}
+                                placeholder="Inspect the API calls triggered by the login and checkout flows."
                                 value={instructions}
                                 onChange={e => setInstructions(e.target.value)}
                                 rows={3}
@@ -4972,104 +5043,48 @@ export default function AgentsPage() {
                                 }}
                             />
                         </div>
+                        </div>
 
-                        {selectedAgent !== 'writer' && (
-                            <div style={{ marginBottom: '1rem' }}>
-                                <label htmlFor="agents-test-data-refs" style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
-                                    Project Test Data Refs
-                                </label>
-                                <Input
-                                    id="agents-test-data-refs"
-                                    name="testDataRefs"
-                                    value={testDataRefs}
-                                    onChange={e => setTestDataRefs(e.target.value)}
-                                    placeholder="Refs appear here after adding"
-                                    autoComplete="off"
-                                    style={{ height: '36px', minHeight: '36px', borderRadius: '8px', fontSize: '0.8rem', marginBottom: '0.5rem' }}
-                                />
-                                <TestDataPicker
-                                    projectId={currentProject?.id}
-                                    mode="ref"
-                                    variant="sidebar"
-                                    compact
-                                    insertLabel="Add"
-                                    editLabel="Edit"
-                                    onInsert={(value) => setTestDataRefs(prev => prev ? `${prev}, ${value}` : value)}
-                                />
-                            </div>
-                        )}
-
-                        {selectedAgent === 'exploratory' && (
+                        <div className={`agents-disclosure agents-context-disclosure agents-context-disclosure-custom${contextDataOpen ? ' agents-context-disclosure-open' : ''}`}>
                             <button
-                                onClick={() => setShowAdvanced(!showAdvanced)}
-                                style={{
-                                    width: '100%', padding: '0.5rem', marginBottom: '0.75rem', borderRadius: '6px', fontSize: '0.85rem',
-                                    background: 'var(--surface-hover)', color: 'var(--text)', fontWeight: 500, border: '1px solid var(--border)',
-                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', cursor: 'pointer'
-                                }}
+                                type="button"
+                                className="agents-disclosure-trigger"
+                                aria-expanded={contextDataOpen}
+                                aria-controls="agents-context-test-data-panel"
+                                onClick={() => setContextDataOpen(open => !open)}
                             >
-                                <Settings size={14} /> {showAdvanced ? 'Hide' : 'Show'} Advanced Options
+                                <span className="agents-disclosure-trigger-main">
+                                    <span className="agents-disclosure-trigger-label">Context & Test Data</span>
+                                    <span className="agents-disclosure-trigger-summary">{testDataRefsSummary}</span>
+                                </span>
+                                <ChevronDown size={15} aria-hidden="true" />
                             </button>
-                        )}
-
-                        {showAdvanced && selectedAgent === 'exploratory' && (
-                            <>
-                                <div style={{ marginBottom: '1rem' }}>
-                                    <label htmlFor="agents-test-data-json" style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
-                                        Test Data (JSON)
-                                    </label>
-                                    <textarea
-                                        id="agents-test-data-json"
-                                        name="testDataJson"
-                                        placeholder='{"usernames": ["testuser", "admin"], "emails": ["test@example.com", ""]}'
-                                        value={testData}
-                                        onChange={e => setTestData(e.target.value)}
-                                        rows={3}
-                                        style={{
-                                            width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.85rem',
-                                            border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)',
-                                            resize: 'vertical', fontFamily: 'monospace'
-                                        }}
+                            {contextDataOpen && (
+                                <div id="agents-context-test-data-panel" className="agents-disclosure-body">
+                                    <div className="agents-run-field">
+                                        <label htmlFor="agents-test-data-refs">Project Test Data Refs</label>
+                                        <Input
+                                            id="agents-test-data-refs"
+                                            name="testDataRefs"
+                                            value={testDataRefs}
+                                            onChange={e => setTestDataRefs(e.target.value)}
+                                            placeholder="Refs appear here after adding"
+                                            autoComplete="off"
+                                            style={{ height: '36px', minHeight: '36px', borderRadius: '8px', fontSize: '0.8rem' }}
+                                        />
+                                    </div>
+                                    <TestDataPicker
+                                        projectId={currentProject?.id}
+                                        mode="ref"
+                                        variant="sidebar"
+                                        compact
+                                        insertLabel="Add"
+                                        editLabel="Edit"
+                                        onInsert={(value: string) => setTestDataRefs(prev => prev ? `${prev}, ${value}` : value)}
                                     />
                                 </div>
-
-                                <div style={{ marginBottom: '1rem' }}>
-                                    <label htmlFor="agents-focus-areas" style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
-                                        Focus Areas (comma-separated)
-                                    </label>
-                                    <input
-                                        id="agents-focus-areas"
-                                        name="focusAreas"
-                                        type="text"
-                                        placeholder="checkout, user-profile, search"
-                                        value={focusAreas}
-                                        onChange={e => setFocusAreas(e.target.value)}
-                                        style={{
-                                            width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem',
-                                            border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
-                                        }}
-                                    />
-                                </div>
-
-                                <div style={{ marginBottom: '1rem' }}>
-                                    <label htmlFor="agents-excluded-patterns" style={{ fontSize: '0.8rem', fontWeight: 500, marginBottom: '0.5rem', display: 'block' }}>
-                                        Excluded URL Patterns (comma-separated)
-                                    </label>
-                                    <input
-                                        id="agents-excluded-patterns"
-                                        name="excludedPatterns"
-                                        type="text"
-                                        placeholder="/logout, /delete-account"
-                                        value={excludedPatterns}
-                                        onChange={e => setExcludedPatterns(e.target.value)}
-                                        style={{
-                                            width: '100%', padding: '0.6rem', borderRadius: '6px', fontSize: '0.9rem',
-                                            border: '1px solid var(--input-border)', background: 'var(--input-bg)', color: 'var(--text)'
-                                        }}
-                                    />
-                                </div>
-                            </>
-                        )}
+                            )}
+                        </div>
 
                         {runFormError && (
                             <Alert variant="destructive" style={{ marginBottom: '0.85rem' }}>
@@ -5078,31 +5093,52 @@ export default function AgentsPage() {
                             </Alert>
                         )}
 
-                        <div className="agents-run-plan" aria-label="Run plan preview">
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', marginBottom: '0.15rem' }}>
-                                <strong style={{ fontSize: '0.84rem' }}>Run Plan</strong>
-                                {queueWarnings.degraded && <span style={{ color: 'var(--warning)', fontSize: '0.74rem', fontWeight: 800 }}>Queue needs attention</span>}
-                            </div>
-                            {runPlanRows.map(([label, value]) => (
-                                <div key={label} className="agents-run-plan-row">
-                                    <strong>{label}</strong>
-                                    <span>{value || '-'}</span>
-                                </div>
+                        <div className="agents-run-summary" aria-label="Run plan preview">
+                            {runPlanRows.slice(0, 5).map(([label, value]) => (
+                                <span key={label} className="agents-run-chip" title={`${label}: ${value || '-'}`}>
+                                    {label}: {value || '-'}
+                                </span>
                             ))}
+                            {queueWarnings.degraded && <span className="agents-run-chip" style={{ color: 'var(--warning)' }}>Queue needs attention</span>}
                         </div>
 
+                        <div className="agents-disclosure">
+                            <button
+                                type="button"
+                                className="agents-disclosure-trigger"
+                                aria-expanded={runPlanDetailsOpen}
+                                aria-controls="agents-run-plan-details"
+                                onClick={() => setRunPlanDetailsOpen(open => !open)}
+                            >
+                                <span>Run Plan Details</span>
+                                <ChevronDown size={15} aria-hidden="true" />
+                            </button>
+                            {runPlanDetailsOpen && (
+                                <div id="agents-run-plan-details" className="agents-disclosure-body">
+                                    <div className="agents-run-plan">
+                                        {runPlanRows.map(([label, value]) => (
+                                            <div key={label} className="agents-run-plan-row">
+                                                <strong>{label}</strong>
+                                                <span>{value || '-'}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                            </div>
+
+                        <div className="agents-run-footer">
                         <button
+                            className="agents-start-button"
                             onClick={handleRun}
                             disabled={isStarting}
-                            style={{
-                                width: '100%', padding: '0.75rem', borderRadius: '6px', fontSize: '0.9rem',
-                                background: 'var(--primary)', color: 'white', fontWeight: 600, border: 'none', cursor: isStarting ? 'not-allowed' : 'pointer',
-                                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
-                                opacity: isStarting ? 0.7 : 1
-                            }}
                         >
                             {isStarting ? <><Loader2 className="spin" size={16} /> Starting...</> : <><Play size={16} /> Start Agent</>}
                         </button>
+                        </div>
+                        </div>
+                        </CollapsibleContent>
                     </div>
                     </div>
                 </Collapsible>
@@ -5195,11 +5231,11 @@ export default function AgentsPage() {
                                 <Bot size={56} style={{ color: 'var(--primary)' }} />
                                 <div>
                                     <h3 style={{ margin: 0, color: 'var(--text)', fontSize: '1.05rem', fontWeight: 800 }}>Start an agent run</h3>
-                                    <p style={{ margin: '0.45rem auto 0', maxWidth: 460, lineHeight: 1.5 }}>Choose a saved run from history or use one of the workspace actions to create the next agent task.</p>
+                                    <p style={{ margin: '0.45rem auto 0', maxWidth: 460, lineHeight: 1.5 }}>Choose a saved custom agent to start a run, or open history to inspect previous results.</p>
                                 </div>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.6rem', justifyContent: 'center' }}>
-                                    <Button type="button" onClick={() => { selectAgentMode('exploratory'); setSetupOpen(true); document.getElementById('agents-target-url')?.focus(); }}>
-                                        <Play size={14} /> Start Explorer
+                                    <Button type="button" variant="outline" onClick={() => selectWorkspaceView('history')}>
+                                        <RotateCcw size={14} /> Open History
                                     </Button>
                                     <Button type="button" variant="outline" onClick={() => { selectWorkspaceView('library'); openCreateAgentBuilder(); }}>
                                         <Plus size={14} /> Create Agent
@@ -5855,6 +5891,8 @@ export default function AgentsPage() {
             </div>
             )}
 
+            {workspaceView === 'history' && renderHistoryWorkspace()}
+
                 <Dialog open={builderOpen} onOpenChange={(open) => { if (open) setBuilderOpen(true); else closeCustomAgentBuilder(); }}>
                     <DialogContent className="agents-builder-dialog max-w-[960px]" style={{ width: 'min(960px, calc(100vw - 2rem))', maxHeight: '86vh', overflowY: 'auto' }}>
                         <DialogHeader>
@@ -5917,7 +5955,7 @@ export default function AgentsPage() {
                                         projectId={currentProject?.id}
                                         mode="ref"
                                         compact
-                                        onInsert={(value) => setDefinitionForm(prev => ({
+                                        onInsert={(value: string) => setDefinitionForm(prev => ({
                                             ...prev,
                                             test_data_refs: prev.test_data_refs ? `${prev.test_data_refs}, ${value}` : value,
                                         }))}
@@ -6698,7 +6736,14 @@ export default function AgentsPage() {
             )}
 
             {workspaceView === 'queue' && (
-                <QueueStatusPanel queue={queueStatus} loading={queueLoading} error={queueError} onRefresh={fetchQueueStatus} />
+                <QueueStatusPanel
+                    queue={queueStatus}
+                    loading={queueLoading}
+                    error={queueError}
+                    onRefresh={fetchQueueStatus}
+                    onCleanStaleTasks={cleanStaleQueueTasks}
+                    cleaningStaleTasks={queueCleanupLoading}
+                />
             )}
         </PageLayout>
     );

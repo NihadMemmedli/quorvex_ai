@@ -1187,7 +1187,12 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
       execute: async ({ agentType, limit }): Promise<ToolResult> => {
         const params = projectParams();
         params.set('limit', String(limit ?? 20));
+        if (agentType) params.set('agent_type', agentType);
         const data = await fetchTool(`/api/agents/runs?${params}`) as unknown;
+        if (data && typeof data === 'object' && Array.isArray((data as { items?: unknown[] }).items)) {
+          const items = (data as { items: unknown[]; total?: number }).items;
+          return { runs: items, count: items.length, total: (data as { total?: number }).total ?? items.length } as ToolResult;
+        }
         if (!Array.isArray(data)) return data as ToolResult;
         const runs = agentType ? data.filter((run: any) => run.agent_type === agentType) : data;
         return { runs, count: runs.length } as ToolResult;

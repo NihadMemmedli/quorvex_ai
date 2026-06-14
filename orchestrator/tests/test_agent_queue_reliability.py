@@ -857,6 +857,55 @@ async def test_cleanup_times_out_running_task_by_task_timeout():
 
 
 @pytest.mark.asyncio
+async def test_cleanup_fails_running_task_with_missing_heartbeat_immediately():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    task = AgentTask(
+        id="agent-lost-heartbeat",
+        prompt="inspect",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-1",
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.sadd(queue.RUNNING_KEY, task.id)
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks()
+
+    cleaned = await queue.get_task(task.id)
+    assert counts["cancelled_orphaned"] == 1
+    assert cleaned.status == AgentTaskStatus.FAILED
+    assert cleaned.error == "Agent task heartbeat was lost"
+    assert await redis.sismember(queue.RUNNING_KEY, task.id) is False
+    assert await queue.is_cancelled(task.id) is True
+
+
+@pytest.mark.asyncio
+async def test_cleanup_keeps_running_task_with_live_heartbeat():
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    task = AgentTask(
+        id="agent-live-heartbeat",
+        prompt="inspect",
+        status=AgentTaskStatus.RUNNING,
+        worker_id="worker-1",
+        started_at=datetime.now(UTC).replace(tzinfo=None),
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.sadd(queue.RUNNING_KEY, task.id)
+    await queue.update_heartbeat(task.id)
+
+    counts = await queue.cleanup_orphaned_and_stale_tasks()
+
+    kept = await queue.get_task(task.id)
+    assert counts["skipped_active"] == 1
+    assert counts["cancelled_orphaned"] == 0
+    assert kept.status == AgentTaskStatus.RUNNING
+    assert await redis.sismember(queue.RUNNING_KEY, task.id) is True
+    assert await queue.is_cancelled(task.id) is False
+
+
+@pytest.mark.asyncio
 async def test_cleanup_cancels_task_when_owner_is_terminal():
     redis = _MemoryRedis()
 

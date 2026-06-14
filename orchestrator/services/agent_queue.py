@@ -1563,7 +1563,7 @@ class AgentQueue:
                     f"Agent task timed out after {max_age_minutes} minutes (stale cleanup)",
                 )
                 counts["timed_out"] += 1
-            elif not heartbeat_alive and elapsed_seconds > 120:
+            elif not heartbeat_alive:
                 await self._finish_task_for_cleanup(
                     redis,
                     task,

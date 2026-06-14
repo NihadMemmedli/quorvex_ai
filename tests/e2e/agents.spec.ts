@@ -12,6 +12,13 @@ const PROJECT = {
   batch_count: 0,
 };
 
+type BrowserAuthSessionFixture = {
+  id: string;
+  name: string;
+  status: string;
+  is_default: boolean;
+};
+
 function apiPath(url: string) {
   const parsed = new URL(url);
   return parsed.pathname.replace(/^\/backend-proxy/, '');
@@ -30,6 +37,26 @@ async function expectDialogInViewport(page: Page, dialog: Locator) {
   expect(box!.y).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
   expect(box!.y + box!.height).toBeLessThanOrEqual(viewport!.height);
+}
+
+async function expectLocatorInViewport(page: Page, locator: Locator) {
+  const box = await locator.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(viewport!.height);
+}
+
+async function expectLocatorWithinViewportWidth(page: Page, locator: Locator) {
+  const box = await locator.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewport!.width);
 }
 
 function completedCustomRun() {
@@ -209,6 +236,15 @@ function customAgentDefinition() {
   };
 }
 
+function activeBrowserAuthSession(): BrowserAuthSessionFixture {
+  return {
+    id: 'browser-session-active',
+    name: 'Travel Login',
+    status: 'active',
+    is_default: true,
+  };
+}
+
 async function authenticate(page: Page) {
   await page.addInitScript(() => {
     window.localStorage.setItem('refresh_token', 'refresh-token');
@@ -218,15 +254,19 @@ async function authenticate(page: Page) {
 
 async function routeAgentsApi(page: Page, options: {
   definitions?: ReturnType<typeof customAgentDefinition>[];
+  browserAuthSessions?: BrowserAuthSessionFixture[];
   onUpdateDefinition?: (payload: Record<string, unknown>) => void;
   onArchiveDefinition?: (id: string) => void;
   onCancelRun?: (id: string) => void;
   onStartExploratory?: (payload: Record<string, unknown>) => void;
+  onStartCustom?: (payload: Record<string, unknown>) => void;
   onGenerateReportSpec?: (payload: { itemId: string; itemType: string | null; body: Record<string, unknown> }) => void;
   onPatchReport?: (payload: Record<string, unknown>) => void;
   onPatchReportItem?: (payload: { itemId: string; itemType: string | null; body: Record<string, unknown> }) => void;
+  onCleanStaleQueue?: () => Record<string, unknown>;
   failPatchReport?: boolean;
   onRunFetch?: (run: any, fetchCount: number) => any;
+  queueStatus?: Record<string, unknown>;
   runOverride?: Record<string, any>;
 } = {}) {
   let run = { ...clone(completedCustomRun()), ...options.runOverride };
@@ -284,9 +324,8 @@ async function routeAgentsApi(page: Page, options: {
     }
     return route.fallback();
   });
-  await page.route(`${API_BASE}/api/agents/queue-status`, route => route.fulfill({
-    status: 200,
-    json: {
+  await page.route(`${API_BASE}/api/agents/queue-status`, route => {
+    const queueStatus = {
       mode: 'redis',
       active: 1,
       queued: 2,
@@ -300,8 +339,24 @@ async function routeAgentsApi(page: Page, options: {
       orphaned_tasks: 0,
       running_tasks: [{ id: 'task-1', status: 'running', agent_type: 'custom', heartbeat_alive: true }],
       browser_pool: { running: 1, max_browsers: 3, available: 2, by_type: { agent: 1 } },
-    },
-  }));
+      ...options.queueStatus,
+    };
+    return route.fulfill({ status: 200, json: queueStatus });
+  });
+  await page.route(`${API_BASE}/api/agents/queue-clean-stale`, route => {
+    const payload = options.onCleanStaleQueue?.() || {
+      status: 'success',
+      cleaned: 0,
+      cancelled_orphaned: 0,
+      timed_out: 0,
+      terminal_owner: 0,
+      orphaned_queued: 0,
+      stale_ownerless_queued: 0,
+      missing_task_refs: 0,
+      skipped_active: 0,
+    };
+    return route.fulfill({ status: 200, json: { status: 'success', ...payload } });
+  });
   await page.route(`${API_BASE}/api/agents/reports/search**`, route => route.fulfill({
     status: 200,
     json: {
@@ -318,7 +373,22 @@ async function routeAgentsApi(page: Page, options: {
   await page.route(`${API_BASE}/api/agents/definitions**`, async route => {
     const request = route.request();
     const path = apiPath(request.url());
+    const runDefinitionId = path.match(/^\/api\/agents\/definitions\/([^/]+)\/runs$/)?.[1];
     const definitionId = path.match(/^\/api\/agents\/definitions\/([^/]+)/)?.[1];
+
+    if (request.method() === 'POST' && runDefinitionId) {
+      const payload = request.postDataJSON() as Record<string, unknown>;
+      options.onStartCustom?.(payload);
+      return route.fulfill({
+        status: 200,
+        json: {
+          status: 'queued',
+          run_id: 'custom-run-started',
+          definition_id: runDefinitionId,
+          agent_runtime: 'claude_sdk',
+        },
+      });
+    }
 
     if (request.method() === 'PUT' && definitionId) {
       const payload = request.postDataJSON() as Record<string, unknown>;
@@ -357,7 +427,9 @@ async function routeAgentsApi(page: Page, options: {
 
     return route.fulfill({ status: 200, json: definitions });
   });
-  await page.route(`${API_BASE}/projects/${PROJECT.id}/browser-auth-sessions`, route => route.fulfill({ status: 200, json: { sessions: [] } }));
+  await page.route(`${API_BASE}/projects/${PROJECT.id}/browser-auth-sessions`, route =>
+    route.fulfill({ status: 200, json: { sessions: options.browserAuthSessions || [] } }),
+  );
   await page.route(`${API_BASE}/api/agents/exploratory`, route => {
     const request = route.request();
     if (request.method() !== 'POST') return route.fallback();
@@ -496,7 +568,8 @@ async function routeAgentsApi(page: Page, options: {
     run = { ...run, status: 'cancelled', progress: { ...(run.progress || {}), phase: 'cancelled' } };
     return route.fulfill({ status: 200, json: run });
   });
-  await page.route(`${API_BASE}/api/agents/runs/${run.id}`, route => {
+  await page.route(`${API_BASE}/api/agents/runs/${run.id}**`, route => {
+    if (apiPath(route.request().url()) !== `/api/agents/runs/${run.id}`) return route.fallback();
     runFetchCount += 1;
     if (options.onRunFetch) {
       run = options.onRunFetch(run, runFetchCount);
@@ -532,7 +605,7 @@ test.describe('Agents custom report requirements', () => {
     await authenticate(page);
     await routeAgentsApi(page);
 
-    await page.goto('/agents?runId=custom-run-reqs');
+    await page.goto('/agents?agent=custom&runId=custom-run-reqs');
     await expect(page.getByRole('heading', { name: 'Autonomous Agents' })).toBeVisible();
     await expect(page.getByText('Checkout review captured one requirement and seven regression ideas.')).toBeVisible();
     await expect(page.getByRole('tab', { name: 'Requirements 1' })).toBeVisible();
@@ -551,12 +624,15 @@ test.describe('Agents custom report requirements', () => {
 });
 
 test.describe('Agents create and report spec actions', () => {
-  test('passes inserted project test data refs to enhanced explorer runs', async ({ page }) => {
+  test('passes inserted project test data refs to custom agent runs', async ({ page }) => {
     await authenticate(page);
-    await routeAgentsApi(page);
+    await routeAgentsApi(page, {
+      definitions: [customAgentDefinition()],
+    });
 
-    await page.goto('/agents?agent=exploratory');
+    await page.goto('/agents?agent=custom&definitionId=trip-agent');
     await page.getByLabel('Target URL').fill('https://pre.wetravel.to/user/itineraries');
+    await page.getByRole('button', { name: /Context & Test Data/ }).click();
     await expect(page.getByLabel('Project Test Data Refs')).toBeVisible();
     await expect(page.getByTestId('test-data-picker-item')).toContainText('Valid user');
 
@@ -564,23 +640,147 @@ test.describe('Agents create and report spec actions', () => {
     await expect(page.getByLabel('Project Test Data Refs')).toHaveValue('wetravel-login-users.valid-user');
 
     const requestPromise = page.waitForRequest(request =>
-      apiPath(request.url()) === '/api/agents/exploratory' && request.method() === 'POST',
+      apiPath(request.url()) === '/api/agents/definitions/trip-agent/runs' && request.method() === 'POST',
     );
-    await page.getByRole('button', { name: /Start Agent/ }).click();
+    await page.locator('#agents-run-setup-panel').getByRole('button', { name: /Start Agent/ }).click();
 
     const request = await requestPromise;
     expect(request.postDataJSON()).toMatchObject({
       url: 'https://pre.wetravel.to/user/itineraries',
       test_data_refs: ['wetravel-login-users.valid-user'],
+      config: {
+        test_data_refs: ['wetravel-login-users.valid-user'],
+      },
       project_id: PROJECT.id,
     });
+  });
+
+  test('keeps run history in its own workspace tab', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page);
+
+    await page.goto('/agents');
+    await expect(page.getByText('Run Setup')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Run History' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /Explorer/ })).toHaveCount(0);
+
+    await page.getByRole('tab', { name: /History/ }).click();
+    await expect(page.getByRole('heading', { name: 'Run History' })).toBeVisible();
+    await expect(page.getByRole('button', { name: /Checkout QA Agent/ })).toBeVisible();
+
+    await page.getByRole('button', { name: /Checkout QA Agent/ }).click();
+    await expect(page.getByText('Run Setup')).toBeVisible();
+    await expect(page.getByText('Checkout review captured one requirement and seven regression ideas.')).toBeVisible();
+  });
+
+  test('loads browser login sessions on direct custom agent entry', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      definitions: [customAgentDefinition()],
+      browserAuthSessions: [activeBrowserAuthSession()],
+    });
+
+    const sessionsRequest = page.waitForRequest(request =>
+      apiPath(request.url()) === `/projects/${PROJECT.id}/browser-auth-sessions`,
+    );
+
+    await page.goto('/agents?agent=custom&definitionId=trip-agent');
+    await sessionsRequest;
+
+    const sessionSelect = page.getByLabel('Browser Login Session');
+    await expect(sessionSelect).toBeVisible();
+    await expect(sessionSelect).toContainText('Travel Login (Default, active)');
+  });
+
+  test('passes selected browser login session to custom agent runs', async ({ page }) => {
+    let customRunPayload: Record<string, unknown> | null = null;
+
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      definitions: [customAgentDefinition()],
+      browserAuthSessions: [activeBrowserAuthSession()],
+      onStartCustom: payload => {
+        customRunPayload = payload;
+      },
+    });
+
+    await page.goto('/agents?agent=custom&definitionId=trip-agent');
+    await page.getByLabel('Target URL').fill('https://example.test/trips');
+    await page.getByLabel('Browser Login Session').selectOption('browser-session-active');
+    const contextTrigger = page.getByRole('button', { name: /Context & Test Data/ });
+    await expect(contextTrigger).toBeVisible();
+    await expect(contextTrigger).toContainText('1 ref selected');
+    if ((await contextTrigger.getAttribute('aria-expanded')) !== 'true') {
+      await contextTrigger.click();
+    }
+    await expect(page.getByLabel('Project Test Data Refs')).toBeVisible();
+    await expect(page.getByTestId('test-data-picker-item')).toContainText('Valid user');
+    await expect(page.getByTestId('test-data-picker-insert')).toContainText('Add');
+    await expect(page.getByTestId('test-data-picker-edit')).toContainText('Edit');
+    await page.getByTestId('test-data-picker-insert').click();
+    await expect(page.getByLabel('Project Test Data Refs')).toHaveValue('wetravel-login-users.valid-user');
+    await expect(contextTrigger).toContainText('1 ref selected');
+
+    const requestPromise = page.waitForRequest(request =>
+      apiPath(request.url()) === '/api/agents/definitions/trip-agent/runs' && request.method() === 'POST',
+    );
+    await page.locator('#agents-run-setup-panel').getByRole('button', { name: /Start Agent/ }).click();
+    const request = await requestPromise;
+
+    expect(request.postDataJSON()).toMatchObject({
+      url: 'https://example.test/trips',
+      test_data_refs: ['wetravel-login-users.valid-user'],
+      config: {
+        browser_auth_session_id: 'browser-session-active',
+        test_data_refs: ['wetravel-login-users.valid-user'],
+      },
+      project_id: PROJECT.id,
+    });
+    expect(customRunPayload?.config).toMatchObject({
+      browser_auth_session_id: 'browser-session-active',
+    });
+  });
+
+  test('keeps custom agent run controls reachable on desktop and mobile', async ({ page }) => {
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      definitions: [customAgentDefinition()],
+      browserAuthSessions: [activeBrowserAuthSession()],
+    });
+    const longTargetUrl = 'https://pre.wetravel.to/user/itineraries?view=list&definitionId=2dff6cb2-298d-4053-9fec-492264ec1f96&agent=custom&filter=upcoming-trips-with-extra-long-token-value';
+
+    for (const size of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(size);
+      await page.goto('/agents?agent=custom&definitionId=trip-agent');
+      await page.getByLabel('Target URL').fill(longTargetUrl);
+
+      await expect(page.getByLabel('Runnable Agent')).toBeVisible();
+      await expect(page.getByLabel('Target URL')).toBeVisible();
+      await expect(page.getByLabel('Browser Login Session')).toBeVisible();
+      await expect(page.getByLabel('Task Prompt')).toBeVisible();
+      await expectLocatorWithinViewportWidth(page, page.locator('#agents-run-setup-panel'));
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBeTruthy();
+      const startButton = page.locator('#agents-run-setup-panel').getByRole('button', { name: /Start Agent/ });
+      await expect(startButton).toBeVisible();
+      await startButton.scrollIntoViewIfNeeded();
+      await expectLocatorInViewport(page, startButton);
+
+      const contextTrigger = page.getByRole('button', { name: /Context & Test Data/ });
+      await expect(contextTrigger).toBeVisible();
+      if ((await contextTrigger.getAttribute('aria-expanded')) !== 'true') {
+        await contextTrigger.click();
+      }
+      await expect(page.getByLabel('Project Test Data Refs')).toBeVisible();
+      await expectLocatorWithinViewportWidth(page, page.locator('#agents-run-setup-panel'));
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1)).toBeTruthy();
+    }
   });
 
   test('opens the custom agent builder from the run setup create button', async ({ page }) => {
     await authenticate(page);
     await routeAgentsApi(page);
 
-    await page.goto('/agents?runId=custom-run-reqs');
+    await page.goto('/agents?agent=custom&runId=custom-run-reqs');
     await page.getByRole('button', { name: 'Create custom agent' }).click();
 
     const dialog = page.getByRole('dialog');
@@ -1061,9 +1261,10 @@ test.describe('Agents custom definition menu', () => {
       },
     });
 
-    await page.goto('/agents?agent=custom&definitionId=trip-agent');
+    await page.goto('/agents?view=library&agent=custom&definitionId=trip-agent');
     await expect(page.getByRole('heading', { name: 'Autonomous Agents' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Trip Creator Agent 1 tools' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Agent Library' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Trip Creator Agent' })).toBeVisible();
 
     await page.getByRole('button', { name: 'Open actions for Trip Creator Agent' }).click();
     await page.getByRole('menuitem', { name: 'Edit' }).click();
@@ -1078,7 +1279,7 @@ test.describe('Agents custom definition menu', () => {
     await dialog.getByRole('button', { name: 'Save Agent' }).click();
 
     await expect(dialog).toBeHidden();
-    await expect(page.getByRole('button', { name: 'Trip Planner Agent 1 tools' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Trip Planner Agent' })).toBeVisible();
     expect(updatePayload?.name).toBe('Trip Planner Agent');
     expect(updatePayload?.project_id).toBe(PROJECT.id);
   });
@@ -1094,9 +1295,10 @@ test.describe('Agents custom definition menu', () => {
       },
     });
 
-    await page.goto('/agents?agent=custom&definitionId=trip-agent');
+    await page.goto('/agents?view=library&agent=custom&definitionId=trip-agent');
     await expect(page.getByRole('heading', { name: 'Autonomous Agents' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Trip Creator Agent 1 tools' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Agent Library' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Trip Creator Agent' })).toBeVisible();
 
     await page.getByRole('button', { name: 'Open actions for Trip Creator Agent' }).click();
     await page.getByRole('menuitem', { name: 'Archive' }).click();
@@ -1108,7 +1310,7 @@ test.describe('Agents custom definition menu', () => {
     await dialog.getByRole('button', { name: /^Archive$/ }).click();
 
     await expect(dialog).toBeHidden();
-    await expect(page.getByRole('button', { name: 'Trip Creator Agent 1 tools' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Trip Creator Agent' })).toHaveCount(0);
     await expect(page.getByText('No custom agents yet.')).toBeVisible();
     expect(archivedId).toBe('trip-agent');
   });
@@ -1124,6 +1326,42 @@ test.describe('Agents workspace views', () => {
     await expect(page.getByRole('heading', { name: 'Queue Capacity' })).toBeVisible();
     await expect(page.getByText('1/3')).toBeVisible();
     await expect(page.getByText('task-1')).toBeVisible();
+  });
+
+  test('cleans stale running queue tasks from the queue tab', async ({ page }) => {
+    let cleanCalls = 0;
+
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      queueStatus: {
+        active: 0,
+        raw_running: 1,
+        stale_running: 1,
+        orphaned_tasks: 1,
+        running_tasks: [],
+      },
+      onCleanStaleQueue: () => {
+        cleanCalls += 1;
+        return {
+          cleaned: 1,
+          cancelled_orphaned: 1,
+          timed_out: 0,
+          terminal_owner: 0,
+          orphaned_queued: 0,
+          stale_ownerless_queued: 0,
+          missing_task_refs: 0,
+          skipped_active: 0,
+        };
+      },
+    });
+
+    await page.goto('/agents?view=queue');
+    await expect(page.getByText('1 stale running task')).toBeVisible();
+
+    await page.getByRole('button', { name: /Clean stale tasks/ }).click();
+
+    await expect.poll(() => cleanCalls).toBe(1);
+    await expect(page.getByText(/Cleaned 1 stale queue task/)).toBeVisible();
   });
 
   test('searches structured report items', async ({ page }) => {

@@ -37,10 +37,10 @@ const runs: AgentHistoryRunLike[] = [
 
 describe('agents workspace query state', () => {
     it('initializes from supported URL params and ignores invalid enum values', () => {
-        const state = parseAgentWorkspaceQuery(new URLSearchParams('view=reports&runId=abc&agent=custom&definitionId=def-1&create=1&returnTo=%2Fworkflow&resultTab=findings&traceTab=tools&status=active&type=custom&q=checkout&reportQ=postal&reportStatus=needs_action&reportSeverity=high&reportType=finding&specItemId=T-001&specItemType=test_idea'));
+        const state = parseAgentWorkspaceQuery(new URLSearchParams('view=history&runId=abc&agent=custom&definitionId=def-1&create=1&returnTo=%2Fworkflow&resultTab=findings&traceTab=tools&status=active&type=custom&q=checkout&reportQ=postal&reportStatus=needs_action&reportSeverity=high&reportType=finding&specItemId=T-001&specItemType=test_idea'));
 
         expect(state).toEqual({
-            view: 'reports',
+            view: 'history',
             runId: 'abc',
             agent: 'custom',
             definitionId: 'def-1',
@@ -61,7 +61,7 @@ describe('agents workspace query state', () => {
 
         const fallback = parseAgentWorkspaceQuery(new URLSearchParams('view=bad&agent=bad&resultTab=bad&traceTab=bad&status=bad&type=bad&reportStatus=bad&reportType=bad&specItemType=bad'));
         expect(fallback.view).toBe('run');
-        expect(fallback.agent).toBe('exploratory');
+        expect(fallback.agent).toBe('custom');
         expect(fallback.resultTab).toBe('overview');
         expect(fallback.traceTab).toBe('timeline');
         expect(fallback.status).toBe('all');
@@ -72,10 +72,10 @@ describe('agents workspace query state', () => {
     });
 
     it('updates and clears URL params when values return to defaults', () => {
-        const initial = new URLSearchParams('runId=old&agent=custom&q=api&create=1&view=library&specItemId=F-001&specItemType=finding');
+        const initial = new URLSearchParams('runId=old&agent=exploratory&q=api&create=1&view=library&specItemId=F-001&specItemType=finding');
         const updated = applyAgentWorkspaceQueryPatch(initial, {
             runId: 'new',
-            agent: 'exploratory',
+            agent: 'custom',
             resultTab: 'requirements',
             view: 'reports',
             create: false,

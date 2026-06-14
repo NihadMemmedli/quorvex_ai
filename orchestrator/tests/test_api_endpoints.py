@@ -226,6 +226,109 @@ class TestRunEndpoints:
                     session.commit()
 
 
+class TestAgentRunHistoryEndpoints:
+    def _cleanup(self, run_ids: list[str]) -> None:
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent
+
+        with Session(engine) as session:
+            for run_id in run_ids:
+                for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
+                    session.delete(event)
+                run = session.get(AgentRun, run_id)
+                if run:
+                    session.delete(run)
+            session.commit()
+
+    def _seed_history_runs(self, marker: str) -> list[str]:
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent
+
+        run_ids = [f"agent-history-{marker}-{index}" for index in range(5)]
+        self._cleanup(run_ids)
+        with Session(engine) as session:
+            for index, run_id in enumerate(run_ids):
+                session.add(
+                    AgentRun(
+                        id=run_id,
+                        agent_type="custom" if index % 2 else "exploratory",
+                        runtime="claude_sdk",
+                        status="completed" if index < 3 else "failed",
+                        created_at=datetime(2026, 1, 1, 12, index, 0),
+                        config_json=json.dumps({"url": f"https://example.test/{marker}/{index}", "agent_name": f"{marker} agent"}),
+                        result_json=json.dumps({"summary": "large summary", "payload": "x" * 5000}),
+                        progress_json=json.dumps({"message": f"{marker} progress {index}"}),
+                        project_id=None,
+                    )
+                )
+            session.add(
+                AgentRunEvent(
+                    id=f"agent-history-event-{marker}",
+                    run_id=run_ids[0],
+                    sequence=1,
+                    event_type="completed",
+                    level="info",
+                    message="completed",
+                    payload_json="{}",
+                    created_at=datetime(2026, 1, 1, 12, 10, 0),
+                )
+            )
+            session.commit()
+        return run_ids
+
+    def test_agent_runs_history_is_paged_compact_and_filterable(self, client):
+        marker = f"marker-{uuid4().hex[:8]}"
+        run_ids = self._seed_history_runs(marker)
+        try:
+            response = client.get(f"/api/agents/runs?project_id=default&limit=2&q={marker}&status=completed&agent_type=exploratory")
+            assert response.status_code == 200
+            data = response.json()
+            assert set(data) >= {"items", "total", "counts", "next_cursor"}
+            assert data["total"] == 2
+            assert len(data["items"]) == 2
+            assert data["counts"]["status"]["completed"] == 3
+            assert all(item["agent_type"] == "exploratory" for item in data["items"])
+            assert all(item["status"] == "completed" for item in data["items"])
+            assert all("result" not in item and "artifacts" not in item and "health" not in item for item in data["items"])
+            assert all(item["summary"].startswith(marker) for item in data["items"])
+        finally:
+            self._cleanup(run_ids)
+
+    def test_agent_runs_history_cursor_does_not_duplicate_rows(self, client):
+        marker = f"cursor-{uuid4().hex[:8]}"
+        run_ids = self._seed_history_runs(marker)
+        try:
+            first = client.get(f"/api/agents/runs?project_id=default&limit=2&q={marker}")
+            assert first.status_code == 200
+            first_data = first.json()
+            assert first_data["next_cursor"]
+
+            second = client.get(f"/api/agents/runs?project_id=default&limit=2&q={marker}&cursor={first_data['next_cursor']}")
+            assert second.status_code == 200
+            second_data = second.json()
+            first_ids = [item["id"] for item in first_data["items"]]
+            second_ids = [item["id"] for item in second_data["items"]]
+            assert len(first_ids) == 2
+            assert len(second_ids) == 2
+            assert set(first_ids).isdisjoint(second_ids)
+        finally:
+            self._cleanup(run_ids)
+
+    def test_agent_run_detail_keeps_full_result_and_health(self, client):
+        marker = f"detail-{uuid4().hex[:8]}"
+        run_ids = self._seed_history_runs(marker)
+        try:
+            response = client.get(f"/api/agents/runs/{run_ids[0]}?project_id=default")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["result"]["payload"].startswith("x")
+            assert "artifacts" in data
+            assert "health" in data
+            assert data["health"]["event_count"] >= 1
+        finally:
+            self._cleanup(run_ids)
+
+
 class TestAgentDefinitionEndpoints:
     """Test UI-created custom agent definition endpoints."""
 
@@ -1721,6 +1824,40 @@ class TestQueueEndpoints:
         assert data["orphaned_tasks"] == 1
         assert data["workers_busy"] == 0
         assert data["workers_idle"] == 2
+
+    def test_clean_stale_agent_queue_tasks_returns_cleanup_breakdown(
+        self, client, monkeypatch
+    ):
+        """POST /api/agents/queue-clean-stale should clean stale queue work."""
+        import orchestrator.services.agent_queue as agent_queue_module
+
+        class FakeQueue:
+            async def connect(self):
+                return None
+
+            async def cleanup_orphaned_and_stale_tasks(self):
+                return {
+                    "cancelled_orphaned": 1,
+                    "timed_out": 0,
+                    "terminal_owner": 0,
+                    "orphaned_queued": 0,
+                    "stale_ownerless_queued": 0,
+                    "missing_task_refs": 0,
+                    "skipped_active": 2,
+                }
+
+        monkeypatch.setattr(agent_queue_module, "REDIS_AVAILABLE", True)
+        monkeypatch.setattr(agent_queue_module, "should_use_agent_queue", lambda: True)
+        monkeypatch.setattr(agent_queue_module, "get_agent_queue", lambda: FakeQueue())
+
+        response = client.post("/api/agents/queue-clean-stale")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert data["cleaned"] == 1
+        assert data["cancelled_orphaned"] == 1
+        assert data["skipped_active"] == 2
 
 
 class TestDashboardEndpoints:

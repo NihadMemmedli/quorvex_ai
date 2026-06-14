@@ -371,6 +371,15 @@ def _run_migrations():
             if "agent_task_id" not in agentrun_columns:
                 conn.execute(text("ALTER TABLE agentrun ADD COLUMN agent_task_id VARCHAR"))
                 logger.info("Added column: agentrun.agent_task_id")
+            for index_sql in (
+                "CREATE INDEX IF NOT EXISTS ix_agentrun_project_created_id ON agentrun (project_id, created_at, id)",
+                "CREATE INDEX IF NOT EXISTS ix_agentrun_project_status_created_id ON agentrun (project_id, status, created_at, id)",
+                "CREATE INDEX IF NOT EXISTS ix_agentrun_project_agent_type_created_id ON agentrun (project_id, agent_type, created_at, id)",
+            ):
+                try:
+                    conn.execute(text(index_sql))
+                except Exception as e:
+                    logger.debug(f"Index may already exist on agentrun: {e}")
 
         # Repair agent memory tables created before typed/scoped memory fields.
         if "agent_memories" in inspector.get_table_names():
@@ -1522,11 +1531,32 @@ def _run_migrations():
             logger.info("Created table: agent_run_events")
 
         if "agent_run_events" in inspector.get_table_names():
+            try:
+                conn.execute(
+                    text(
+                        """
+                        WITH ordered AS (
+                            SELECT
+                                id,
+                                row_number() OVER (PARTITION BY run_id ORDER BY sequence, created_at, id) AS new_sequence
+                            FROM agent_run_events
+                        )
+                        UPDATE agent_run_events
+                        SET sequence = ordered.new_sequence
+                        FROM ordered
+                        WHERE agent_run_events.id = ordered.id
+                          AND agent_run_events.sequence <> ordered.new_sequence
+                        """
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Could not normalize agent_run_events sequences before unique index: {e}")
             for index_sql in (
                 "CREATE INDEX IF NOT EXISTS ix_agent_run_events_run_sequence ON agent_run_events (run_id, sequence)",
                 "CREATE INDEX IF NOT EXISTS ix_agent_run_events_project_created ON agent_run_events (project_id, created_at)",
                 "CREATE INDEX IF NOT EXISTS ix_agent_run_events_agent_task ON agent_run_events (agent_task_id)",
                 "CREATE INDEX IF NOT EXISTS ix_agent_run_events_temporal_workflow ON agent_run_events (temporal_workflow_id)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_run_events_run_sequence ON agent_run_events (run_id, sequence)",
             ):
                 try:
                     conn.execute(text(index_sql))
