@@ -1,7 +1,7 @@
 'use client';
 import React, { useState } from 'react';
 import { Folder, FolderOpen, FileCode, Plus, PanelLeftClose, PanelLeft } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 
 interface ApiSpecsFolderTreeProps {
     folders: string[];
@@ -46,10 +46,10 @@ export default function ApiSpecsFolderTree({
     const handleCreateFolder = async () => {
         if (!newFolderName.trim()) return;
         try {
-            const res = await fetch(`${API_BASE}/api-testing/specs/folder`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/specs/folder', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ folder_name: newFolderName.trim(), project_id: projectId }),
+                body: JSON.stringify(withProjectBody({ folder_name: newFolderName.trim() }, projectId)),
             });
             if (res.ok) {
                 setMessage({ type: 'success', text: `Folder "${newFolderName}" created` });

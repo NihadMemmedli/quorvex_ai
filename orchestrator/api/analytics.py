@@ -20,6 +20,7 @@ from .dashboard import categorize_error
 from .db import get_database_type, get_session
 from .models_db import SpecMetadata as DBSpecMetadata
 from .models_db import TestRun as DBTestRun
+from .models_db import get_or_create_spec_metadata, get_spec_metadata as get_db_spec_metadata
 from .project_filters import apply_project_filter
 from .projects import _count_all_specs_for_project
 
@@ -201,9 +202,10 @@ def get_flake_detection(
 # ---------------------------------------------------------------------------
 @router.post("/quarantine/{spec_name:path}")
 def quarantine_spec(spec_name: str, session: Session = Depends(get_session)):
-    meta = session.get(DBSpecMetadata, spec_name)
+    meta = get_db_spec_metadata(session, spec_name)
     if not meta:
-        meta = DBSpecMetadata(spec_name=spec_name, tags_json="[]")
+        meta = get_or_create_spec_metadata(session, spec_name)
+        meta.tags_json = "[]"
         session.add(meta)
 
     try:
@@ -222,7 +224,7 @@ def quarantine_spec(spec_name: str, session: Session = Depends(get_session)):
 
 @router.delete("/quarantine/{spec_name:path}")
 def unquarantine_spec(spec_name: str, session: Session = Depends(get_session)):
-    meta = session.get(DBSpecMetadata, spec_name)
+    meta = get_db_spec_metadata(session, spec_name)
     if not meta:
         raise HTTPException(status_code=404, detail="Spec metadata not found")
 

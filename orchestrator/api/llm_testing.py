@@ -282,7 +282,7 @@ class CreateProviderRequest(BaseModel):
     model_id: str
     default_params: dict | None = None
     custom_pricing: list[float] | None = None  # [input_per_1m, output_per_1m]
-    project_id: str | None = "default"
+    project_id: str
 
 
 class UpdateProviderRequest(BaseModel):
@@ -298,7 +298,7 @@ class UpdateProviderRequest(BaseModel):
 class CreateSpecRequest(BaseModel):
     name: str
     content: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class UpdateSpecRequest(BaseModel):
@@ -308,14 +308,14 @@ class UpdateSpecRequest(BaseModel):
 class RunRequest(BaseModel):
     spec_name: str
     provider_id: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class CompareRequest(BaseModel):
     spec_name: str
     provider_ids: list[str]
     name: str | None = None
-    project_id: str | None = "default"
+    project_id: str
 
 
 class GenerateSuiteRequest(BaseModel):
@@ -323,13 +323,13 @@ class GenerateSuiteRequest(BaseModel):
     app_description: str | None = ""
     focus_areas: list[str] | None = None
     num_cases: int = 10
-    project_id: str | None = "default"
+    project_id: str
 
 
 class OpenRouterDemoRequest(BaseModel):
     api_key: str = Field(min_length=1)
     model_ids: list[str] = Field(min_length=2, max_length=4)
-    project_id: str | None = "default"
+    project_id: str
 
     @field_validator("api_key")
     @classmethod
@@ -359,7 +359,7 @@ class OpenRouterDemoRequest(BaseModel):
 
 
 class DemoContentRequest(BaseModel):
-    project_id: str | None = "default"
+    project_id: str
 
 
 # ========== Helper Functions ==========
@@ -443,6 +443,41 @@ def _build_provider_client(provider: LlmProvider):
 
 def _project_db_id(project_id: str | None) -> str | None:
     return project_id if project_id and project_id != "default" else None
+
+
+def _project_scoped_get(session: Session, model, object_id, project_id: str, not_found: str):
+    obj = session.exec(select(model).where(model.id == object_id, model.project_id == _project_db_id(project_id))).first()
+    if not obj:
+        raise HTTPException(404, not_found)
+    return obj
+
+
+def _get_provider(session: Session, provider_id: str, project_id: str) -> LlmProvider:
+    return _project_scoped_get(session, LlmProvider, provider_id, project_id, "Provider not found")
+
+
+def _get_run(session: Session, run_id: str, project_id: str) -> LlmTestRun:
+    return _project_scoped_get(session, LlmTestRun, run_id, project_id, "Run not found")
+
+
+def _get_comparison(session: Session, comparison_id: str, project_id: str) -> LlmComparisonRun:
+    return _project_scoped_get(session, LlmComparisonRun, comparison_id, project_id, "Comparison not found")
+
+
+def _get_dataset(session: Session, dataset_id: str, project_id: str) -> LlmDataset:
+    return _project_scoped_get(session, LlmDataset, dataset_id, project_id, "Dataset not found")
+
+
+def _get_schedule(session: Session, schedule_id: str, project_id: str) -> LlmSchedule:
+    return _project_scoped_get(session, LlmSchedule, schedule_id, project_id, "Schedule not found")
+
+
+def _get_prompt_iteration(session: Session, iteration_id: str, project_id: str) -> LlmPromptIteration:
+    return _project_scoped_get(session, LlmPromptIteration, iteration_id, project_id, "Iteration not found")
+
+
+def _job_matches_project(job: dict, project_id: str) -> bool:
+    return _project_db_id(job.get("project_id")) == _project_db_id(project_id)
 
 
 def _model_display_name(model: dict) -> str:
@@ -723,12 +758,10 @@ async def list_providers(
 
 
 @router.put("/providers/{provider_id}")
-async def update_provider(provider_id: str, req: UpdateProviderRequest):
+async def update_provider(provider_id: str, req: UpdateProviderRequest, project_id: str = Query(...)):
     """Update a provider."""
     with Session(engine) as session:
-        provider = session.get(LlmProvider, provider_id)
-        if not provider:
-            raise HTTPException(404, "Provider not found")
+        provider = _get_provider(session, provider_id, project_id)
 
         if req.name is not None:
             provider.name = req.name
@@ -753,12 +786,10 @@ async def update_provider(provider_id: str, req: UpdateProviderRequest):
 
 
 @router.delete("/providers/{provider_id}")
-async def delete_provider(provider_id: str):
+async def delete_provider(provider_id: str, project_id: str = Query(...)):
     """Delete a provider."""
     with Session(engine) as session:
-        provider = session.get(LlmProvider, provider_id)
-        if not provider:
-            raise HTTPException(404, "Provider not found")
+        provider = _get_provider(session, provider_id, project_id)
         session.delete(provider)
         session.commit()
 
@@ -766,12 +797,10 @@ async def delete_provider(provider_id: str):
 
 
 @router.post("/providers/{provider_id}/health-check")
-async def health_check_provider(provider_id: str):
+async def health_check_provider(provider_id: str, project_id: str = Query(...)):
     """Test provider connectivity."""
     with Session(engine) as session:
-        provider = session.get(LlmProvider, provider_id)
-        if not provider:
-            raise HTTPException(404, "Provider not found")
+        provider = _get_provider(session, provider_id, project_id)
 
     client = _build_provider_client(provider)
     try:
@@ -876,9 +905,7 @@ async def run_suite(req: RunRequest):
 
     # Validate provider exists
     with Session(engine) as session:
-        provider = session.get(LlmProvider, req.provider_id)
-        if not provider:
-            raise HTTPException(404, "Provider not found")
+        _get_provider(session, req.provider_id, req.project_id or "default")
 
     # Validate spec exists
     specs_dir = _get_specs_dir(req.project_id)
@@ -894,6 +921,7 @@ async def run_suite(req: RunRequest):
     _llm_jobs[job_id] = {
         "job_id": job_id,
         "run_id": run_id,
+        "project_id": req.project_id,
         "type": "run",
         "status": "running",
         "started_at": time.time(),
@@ -949,9 +977,7 @@ async def _execute_run(
 
         # Get provider
         with Session(engine) as session:
-            provider = session.get(LlmProvider, req.provider_id)
-            if not provider:
-                raise RuntimeError("Provider not found")
+            provider = _get_provider(session, req.provider_id, req.project_id)
 
         client = _build_provider_client(provider)
 
@@ -1157,8 +1183,7 @@ async def compare_providers(req: CompareRequest):
     # Validate providers
     with Session(engine) as session:
         for pid in req.provider_ids:
-            if not session.get(LlmProvider, pid):
-                raise HTTPException(404, f"Provider '{pid}' not found")
+            _get_provider(session, pid, req.project_id or "default")
 
     # Validate spec
     specs_dir = _get_specs_dir(req.project_id)
@@ -1187,6 +1212,7 @@ async def compare_providers(req: CompareRequest):
     _llm_jobs[job_id] = {
         "job_id": job_id,
         "comparison_id": comparison_id,
+        "project_id": req.project_id,
         "type": "compare",
         "status": "running",
         "started_at": time.time(),
@@ -1225,6 +1251,7 @@ async def _execute_comparison(
             _llm_jobs[sub_job_id] = {
                 "job_id": sub_job_id,
                 "run_id": run_id,
+                "project_id": req.project_id,
                 "type": "run",
                 "status": "running",
                 "started_at": time.time(),
@@ -1344,10 +1371,10 @@ async def _execute_comparison(
 
 
 @router.get("/jobs/{job_id}")
-async def get_job_status(job_id: str):
+async def get_job_status(job_id: str, project_id: str = Query(...)):
     """Poll job status with progress."""
     job = _llm_jobs.get(job_id)
-    if not job:
+    if not job or not _job_matches_project(job, project_id):
         raise HTTPException(404, "Job not found")
     return job
 
@@ -1398,12 +1425,10 @@ async def list_runs(
 
 
 @router.get("/runs/{run_id}")
-async def get_run(run_id: str):
+async def get_run(run_id: str, project_id: str = Query(...)):
     """Get run details with aggregated metrics."""
     with Session(engine) as session:
-        run = session.get(LlmTestRun, run_id)
-        if not run:
-            raise HTTPException(404, "Run not found")
+        run = _get_run(session, run_id, project_id)
 
         return {
             "id": run.id,
@@ -1437,11 +1462,13 @@ async def get_run(run_id: str):
 @router.get("/runs/{run_id}/results")
 async def get_run_results(
     run_id: str,
+    project_id: str = Query(...),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
 ):
     """Get per-test-case results for a run."""
     with Session(engine) as session:
+        _get_run(session, run_id, project_id)
         results = session.exec(
             select(LlmTestResult).where(LlmTestResult.run_id == run_id).offset(offset).limit(limit)
         ).all()
@@ -1503,12 +1530,10 @@ async def list_comparisons(
 
 
 @router.get("/comparisons/{comparison_id}")
-async def get_comparison(comparison_id: str):
+async def get_comparison(comparison_id: str, project_id: str = Query(...)):
     """Get comparison details with per-provider breakdown."""
     with Session(engine) as session:
-        comp = session.get(LlmComparisonRun, comparison_id)
-        if not comp:
-            raise HTTPException(404, "Comparison not found")
+        comp = _get_comparison(session, comparison_id, project_id)
 
         # Get associated runs
         runs = session.exec(select(LlmTestRun).where(LlmTestRun.comparison_id == comparison_id)).all()
@@ -1540,12 +1565,10 @@ async def get_comparison(comparison_id: str):
 
 
 @router.get("/comparisons/{comparison_id}/matrix")
-async def get_comparison_matrix(comparison_id: str):
+async def get_comparison_matrix(comparison_id: str, project_id: str = Query(...)):
     """Get case-by-case comparison matrix for a comparison run."""
     with Session(engine) as session:
-        comp = session.get(LlmComparisonRun, comparison_id)
-        if not comp:
-            raise HTTPException(404, "Comparison not found")
+        comp = _get_comparison(session, comparison_id, project_id)
 
         runs = session.exec(select(LlmTestRun).where(LlmTestRun.comparison_id == comparison_id)).all()
 
@@ -1593,6 +1616,7 @@ async def generate_suite(req: GenerateSuiteRequest):
     _llm_jobs[job_id] = {
         "job_id": job_id,
         "type": "generate",
+        "project_id": req.project_id,
         "status": "running",
         "started_at": time.time(),
     }
@@ -1653,7 +1677,7 @@ class CreateDatasetRequest(BaseModel):
     name: str
     description: str = ""
     tags: list[str] = []
-    project_id: str | None = "default"
+    project_id: str
 
 
 class UpdateDatasetRequest(BaseModel):
@@ -1680,13 +1704,13 @@ class UpdateDatasetCaseRequest(BaseModel):
 
 class DatasetRunRequest(BaseModel):
     provider_id: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class DatasetCompareRequest(BaseModel):
     provider_ids: list[str]
     name: str | None = None
-    project_id: str | None = "default"
+    project_id: str
 
 
 class AugmentRequest(BaseModel):
@@ -1697,12 +1721,12 @@ class AugmentRequest(BaseModel):
 class BulkRunRequest(BaseModel):
     dataset_ids: list[str]
     provider_id: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class BulkCompareRequest(BaseModel):
     dataset_id: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class CreateScheduleRequest(BaseModel):
@@ -1713,7 +1737,7 @@ class CreateScheduleRequest(BaseModel):
     timezone: str = "UTC"
     notify_on_regression: bool = True
     regression_threshold: float = 20.0
-    project_id: str | None = "default"
+    project_id: str
 
 
 class UpdateScheduleRequest(BaseModel):
@@ -1775,12 +1799,10 @@ async def list_datasets(
 
 
 @router.get("/datasets/{dataset_id}")
-async def get_dataset(dataset_id: str):
+async def get_dataset(dataset_id: str, project_id: str = Query(...)):
     """Get a dataset with its cases."""
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, dataset_id, project_id)
 
         cases = session.exec(
             select(LlmDatasetCase).where(LlmDatasetCase.dataset_id == dataset_id).order_by(LlmDatasetCase.case_index)
@@ -1814,12 +1836,10 @@ async def get_dataset(dataset_id: str):
 
 
 @router.put("/datasets/{dataset_id}")
-async def update_dataset(dataset_id: str, req: UpdateDatasetRequest):
+async def update_dataset(dataset_id: str, req: UpdateDatasetRequest, project_id: str = Query(...)):
     """Update dataset metadata."""
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, dataset_id, project_id)
         if req.name is not None:
             dataset.name = req.name
         if req.description is not None:
@@ -1833,12 +1853,10 @@ async def update_dataset(dataset_id: str, req: UpdateDatasetRequest):
 
 
 @router.delete("/datasets/{dataset_id}")
-async def delete_dataset(dataset_id: str):
+async def delete_dataset(dataset_id: str, project_id: str = Query(...)):
     """Delete dataset and all its cases."""
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, dataset_id, project_id)
         # Delete all cases first
         cases = session.exec(select(LlmDatasetCase).where(LlmDatasetCase.dataset_id == dataset_id)).all()
         for c in cases:
@@ -1849,12 +1867,10 @@ async def delete_dataset(dataset_id: str):
 
 
 @router.post("/datasets/{dataset_id}/cases")
-async def add_dataset_cases(dataset_id: str, cases: list[CreateDatasetCaseRequest]):
+async def add_dataset_cases(dataset_id: str, cases: list[CreateDatasetCaseRequest], project_id: str = Query(...)):
     """Add one or more cases to a dataset."""
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, dataset_id, project_id)
 
         # Get current max index
         existing = session.exec(
@@ -1891,9 +1907,12 @@ async def add_dataset_cases(dataset_id: str, cases: list[CreateDatasetCaseReques
 
 
 @router.put("/datasets/{dataset_id}/cases/{case_id}")
-async def update_dataset_case(dataset_id: str, case_id: int, req: UpdateDatasetCaseRequest):
+async def update_dataset_case(
+    dataset_id: str, case_id: int, req: UpdateDatasetCaseRequest, project_id: str = Query(...)
+):
     """Update a single case."""
     with Session(engine) as session:
+        _get_dataset(session, dataset_id, project_id)
         case = session.get(LlmDatasetCase, case_id)
         if not case or case.dataset_id != dataset_id:
             raise HTTPException(404, "Case not found")
@@ -1915,21 +1934,20 @@ async def update_dataset_case(dataset_id: str, case_id: int, req: UpdateDatasetC
 
 
 @router.delete("/datasets/{dataset_id}/cases/{case_id}")
-async def delete_dataset_case(dataset_id: str, case_id: int):
+async def delete_dataset_case(dataset_id: str, case_id: int, project_id: str = Query(...)):
     """Delete a case and update total."""
     with Session(engine) as session:
+        dataset = _get_dataset(session, dataset_id, project_id)
         case = session.get(LlmDatasetCase, case_id)
         if not case or case.dataset_id != dataset_id:
             raise HTTPException(404, "Case not found")
         session.delete(case)
 
-        dataset = session.get(LlmDataset, dataset_id)
-        if dataset:
-            dataset.total_cases = max(0, dataset.total_cases - 1)
-            dataset.updated_at = datetime.utcnow()
-            session.add(dataset)
+        dataset.total_cases = max(0, dataset.total_cases - 1)
+        dataset.updated_at = datetime.utcnow()
+        session.add(dataset)
 
-            _create_dataset_version_snapshot(session, dataset_id, "cases_removed", f"Removed case #{case_id}")
+        _create_dataset_version_snapshot(session, dataset_id, "cases_removed", f"Removed case #{case_id}")
         session.commit()
     return {"message": "Case deleted"}
 
@@ -1993,12 +2011,10 @@ async def import_csv_dataset(
 
 
 @router.get("/datasets/{dataset_id}/export")
-async def export_dataset(dataset_id: str, format: str = Query("csv")):
+async def export_dataset(dataset_id: str, project_id: str = Query(...), format: str = Query("csv")):
     """Export dataset cases as CSV or JSON."""
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, dataset_id, project_id)
 
         cases = session.exec(
             select(LlmDatasetCase).where(LlmDatasetCase.dataset_id == dataset_id).order_by(LlmDatasetCase.case_index)
@@ -2032,12 +2048,10 @@ async def export_dataset(dataset_id: str, format: str = Query("csv")):
 
 
 @router.post("/datasets/{dataset_id}/to-spec")
-async def dataset_to_spec(dataset_id: str, project_id: str = Query("default")):
+async def dataset_to_spec(dataset_id: str, project_id: str = Query(...)):
     """Generate a markdown spec from a dataset."""
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, dataset_id, project_id)
 
         cases = session.exec(
             select(LlmDatasetCase).where(LlmDatasetCase.dataset_id == dataset_id).order_by(LlmDatasetCase.case_index)
@@ -2143,12 +2157,10 @@ async def dataset_from_spec(spec_name: str, project_id: str = Query("default")):
 
 
 @router.post("/datasets/{dataset_id}/duplicate")
-async def duplicate_dataset(dataset_id: str):
+async def duplicate_dataset(dataset_id: str, project_id: str = Query(...)):
     """Clone a dataset with all its cases."""
     with Session(engine) as session:
-        original = session.get(LlmDataset, dataset_id)
-        if not original:
-            raise HTTPException(404, "Dataset not found")
+        original = _get_dataset(session, dataset_id, project_id)
 
         new_id = f"llmd-{uuid.uuid4().hex[:8]}"
         clone = LlmDataset(
@@ -2195,12 +2207,8 @@ async def run_dataset(dataset_id: str, req: DatasetRunRequest):
     _cleanup_old_jobs()
 
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
-        provider = session.get(LlmProvider, req.provider_id)
-        if not provider:
-            raise HTTPException(404, "Provider not found")
+        dataset = _get_dataset(session, dataset_id, req.project_id or "default")
+        _get_provider(session, req.provider_id, req.project_id or "default")
         cases = session.exec(
             select(LlmDatasetCase).where(LlmDatasetCase.dataset_id == dataset_id).order_by(LlmDatasetCase.case_index)
         ).all()
@@ -2223,6 +2231,7 @@ async def run_dataset(dataset_id: str, req: DatasetRunRequest):
     _llm_jobs[job_id] = {
         "job_id": job_id,
         "run_id": run_id,
+        "project_id": req.project_id,
         "type": "run",
         "status": "running",
         "started_at": time.time(),
@@ -2255,12 +2264,9 @@ async def compare_dataset(dataset_id: str, req: DatasetCompareRequest):
         raise HTTPException(400, "At least 2 providers required for comparison")
 
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, dataset_id, req.project_id or "default")
         for pid in req.provider_ids:
-            if not session.get(LlmProvider, pid):
-                raise HTTPException(404, f"Provider '{pid}' not found")
+            _get_provider(session, pid, req.project_id or "default")
         cases = session.exec(
             select(LlmDatasetCase).where(LlmDatasetCase.dataset_id == dataset_id).order_by(LlmDatasetCase.case_index)
         ).all()
@@ -2296,6 +2302,7 @@ async def compare_dataset(dataset_id: str, req: DatasetCompareRequest):
     _llm_jobs[job_id] = {
         "job_id": job_id,
         "comparison_id": comparison_id,
+        "project_id": req.project_id,
         "type": "compare",
         "status": "running",
         "started_at": time.time(),
@@ -2320,12 +2327,10 @@ async def compare_dataset(dataset_id: str, req: DatasetCompareRequest):
 
 
 @router.post("/datasets/{dataset_id}/golden")
-async def toggle_golden(dataset_id: str, is_golden: bool = Query(True)):
+async def toggle_golden(dataset_id: str, project_id: str = Query(...), is_golden: bool = Query(True)):
     """Toggle the golden flag on a dataset."""
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, dataset_id, project_id)
         dataset.is_golden = is_golden
         dataset.updated_at = datetime.utcnow()
         session.add(dataset)
@@ -2378,14 +2383,13 @@ def _create_dataset_version_snapshot(session: Session, dataset_id: str, change_t
 @router.get("/datasets/{dataset_id}/versions")
 async def list_dataset_versions(
     dataset_id: str,
+    project_id: str = Query(...),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
 ):
     """List version history for a dataset."""
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        _get_dataset(session, dataset_id, project_id)
 
         versions = session.exec(
             select(LlmDatasetVersion)
@@ -2410,9 +2414,12 @@ async def list_dataset_versions(
 
 
 @router.get("/datasets/{dataset_id}/diff")
-async def diff_dataset_versions(dataset_id: str, v1: int = Query(...), v2: int = Query(...)):
+async def diff_dataset_versions(
+    dataset_id: str, project_id: str = Query(...), v1: int = Query(...), v2: int = Query(...)
+):
     """Compare two dataset version snapshots."""
     with Session(engine) as session:
+        _get_dataset(session, dataset_id, project_id)
         ver1 = session.exec(
             select(LlmDatasetVersion).where(LlmDatasetVersion.dataset_id == dataset_id, LlmDatasetVersion.version == v1)
         ).first()
@@ -2448,14 +2455,12 @@ async def diff_dataset_versions(dataset_id: str, v1: int = Query(...), v2: int =
 
 
 @router.post("/datasets/{dataset_id}/augment")
-async def augment_dataset_endpoint(dataset_id: str, req: AugmentRequest):
+async def augment_dataset_endpoint(dataset_id: str, req: AugmentRequest, project_id: str = Query(...)):
     """Generate new cases via AI augmentation (background job)."""
     _cleanup_old_jobs()
 
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, dataset_id, project_id)
         cases = session.exec(
             select(LlmDatasetCase).where(LlmDatasetCase.dataset_id == dataset_id).order_by(LlmDatasetCase.case_index)
         ).all()
@@ -2478,6 +2483,7 @@ async def augment_dataset_endpoint(dataset_id: str, req: AugmentRequest):
     _llm_jobs[job_id] = {
         "job_id": job_id,
         "type": "augment",
+        "project_id": project_id,
         "status": "running",
         "started_at": time.time(),
         "dataset_id": dataset_id,
@@ -2512,13 +2518,14 @@ async def augment_dataset_endpoint(dataset_id: str, req: AugmentRequest):
 async def accept_augmented_cases(
     dataset_id: str,
     job_id: str,
+    project_id: str = Query(...),
     selected_indices: list[int] = None,
 ):
     """Accept selected generated cases from an augmentation job."""
     if selected_indices is None:
         selected_indices = []
     job = _llm_jobs.get(job_id)
-    if not job:
+    if not job or not _job_matches_project(job, project_id):
         raise HTTPException(404, "Job not found")
     if job.get("status") != "completed":
         raise HTTPException(400, "Job not completed yet")
@@ -2536,9 +2543,7 @@ async def accept_augmented_cases(
         raise HTTPException(400, "No valid cases selected")
 
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, dataset_id, project_id)
 
         existing = session.exec(
             select(LlmDatasetCase)
@@ -2578,14 +2583,15 @@ async def bulk_run_datasets(req: BulkRunRequest):
     _cleanup_old_jobs()
 
     with Session(engine) as session:
-        provider = session.get(LlmProvider, req.provider_id)
-        if not provider:
-            raise HTTPException(404, "Provider not found")
+        _get_provider(session, req.provider_id, req.project_id or "default")
+        for dataset_id in req.dataset_ids:
+            _get_dataset(session, dataset_id, req.project_id or "default")
 
     job_id = f"llmj-bulk-{uuid.uuid4().hex[:8]}"
     _llm_jobs[job_id] = {
         "job_id": job_id,
         "type": "bulk_run",
+        "project_id": req.project_id,
         "status": "running",
         "started_at": time.time(),
         "sub_runs": {},
@@ -2600,8 +2606,9 @@ async def bulk_run_datasets(req: BulkRunRequest):
             async def _run_single(dataset_id=ds_id):
                 async with sem:
                     with Session(engine) as session:
-                        dataset = session.get(LlmDataset, dataset_id)
-                        if not dataset:
+                        try:
+                            dataset = _get_dataset(session, dataset_id, req.project_id or "default")
+                        except HTTPException:
                             return
                         cases = session.exec(
                             select(LlmDatasetCase)
@@ -2619,6 +2626,7 @@ async def bulk_run_datasets(req: BulkRunRequest):
                     _llm_jobs[sub_job_id] = {
                         "job_id": sub_job_id,
                         "run_id": sub_run_id,
+                        "project_id": req.project_id,
                         "type": "run",
                         "status": "running",
                         "started_at": time.time(),
@@ -2664,9 +2672,7 @@ async def bulk_compare_dataset(req: BulkCompareRequest):
     _cleanup_old_jobs()
 
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, req.dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, req.dataset_id, req.project_id or "default")
 
         db_project_id = req.project_id if req.project_id != "default" else None
         providers = session.exec(
@@ -2691,12 +2697,9 @@ async def bulk_compare_dataset(req: BulkCompareRequest):
 async def create_schedule(req: CreateScheduleRequest):
     """Create a new recurring dataset test schedule."""
     with Session(engine) as session:
-        dataset = session.get(LlmDataset, req.dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, req.dataset_id, req.project_id or "default")
         for pid in req.provider_ids:
-            if not session.get(LlmProvider, pid):
-                raise HTTPException(404, f"Provider '{pid}' not found")
+            _get_provider(session, pid, req.project_id or "default")
 
     schedule_id = f"llms-{uuid.uuid4().hex[:8]}"
     schedule = LlmSchedule(
@@ -2775,14 +2778,12 @@ async def list_schedules(
 
 
 @router.get("/schedules/{schedule_id}")
-async def get_schedule(schedule_id: str):
+async def get_schedule(schedule_id: str, project_id: str = Query(...)):
     """Get schedule details with execution history."""
     with Session(engine) as session:
-        schedule = session.get(LlmSchedule, schedule_id)
-        if not schedule:
-            raise HTTPException(404, "Schedule not found")
+        schedule = _get_schedule(session, schedule_id, project_id)
 
-        dataset = session.get(LlmDataset, schedule.dataset_id)
+        dataset = _get_dataset(session, schedule.dataset_id, project_id)
         executions = session.exec(
             select(LlmScheduleExecution)
             .where(LlmScheduleExecution.schedule_id == schedule_id)
@@ -2828,12 +2829,13 @@ async def get_schedule(schedule_id: str):
 
 
 @router.put("/schedules/{schedule_id}")
-async def update_schedule(schedule_id: str, req: UpdateScheduleRequest):
+async def update_schedule(schedule_id: str, req: UpdateScheduleRequest, project_id: str = Query(...)):
     """Update a schedule."""
     with Session(engine) as session:
-        schedule = session.get(LlmSchedule, schedule_id)
-        if not schedule:
-            raise HTTPException(404, "Schedule not found")
+        schedule = _get_schedule(session, schedule_id, project_id)
+        if req.provider_ids is not None:
+            for pid in req.provider_ids:
+                _get_provider(session, pid, project_id)
 
         if req.name is not None:
             schedule.name = req.name
@@ -2873,12 +2875,10 @@ async def update_schedule(schedule_id: str, req: UpdateScheduleRequest):
 
 
 @router.delete("/schedules/{schedule_id}")
-async def delete_schedule(schedule_id: str):
+async def delete_schedule(schedule_id: str, project_id: str = Query(...)):
     """Delete a schedule."""
     with Session(engine) as session:
-        schedule = session.get(LlmSchedule, schedule_id)
-        if not schedule:
-            raise HTTPException(404, "Schedule not found")
+        schedule = _get_schedule(session, schedule_id, project_id)
         # Delete execution records
         execs = session.exec(select(LlmScheduleExecution).where(LlmScheduleExecution.schedule_id == schedule_id)).all()
         for ex in execs:
@@ -2897,16 +2897,12 @@ async def delete_schedule(schedule_id: str):
 
 
 @router.post("/schedules/{schedule_id}/run-now")
-async def run_schedule_now(schedule_id: str):
+async def run_schedule_now(schedule_id: str, project_id: str = Query(...)):
     """Manually trigger a schedule execution."""
     with Session(engine) as session:
-        schedule = session.get(LlmSchedule, schedule_id)
-        if not schedule:
-            raise HTTPException(404, "Schedule not found")
+        schedule = _get_schedule(session, schedule_id, project_id)
 
-        dataset = session.get(LlmDataset, schedule.dataset_id)
-        if not dataset:
-            raise HTTPException(404, "Dataset not found")
+        dataset = _get_dataset(session, schedule.dataset_id, project_id)
 
         cases = session.exec(
             select(LlmDatasetCase)
@@ -2920,6 +2916,8 @@ async def run_schedule_now(schedule_id: str):
         ds_name = dataset.name
         ds_version = dataset.version
         provider_ids = schedule.provider_ids
+        for pid in provider_ids:
+            _get_provider(session, pid, project_id)
 
     # Create execution record
     execution = LlmScheduleExecution(
@@ -2938,6 +2936,7 @@ async def run_schedule_now(schedule_id: str):
     _llm_jobs[job_id] = {
         "job_id": job_id,
         "type": "schedule_run",
+        "project_id": project_id,
         "status": "running",
         "started_at": time.time(),
         "schedule_id": schedule_id,
@@ -2958,6 +2957,7 @@ async def run_schedule_now(schedule_id: str):
                         _llm_jobs[sub_job_id] = {
                             "job_id": sub_job_id,
                             "run_id": sub_run_id,
+                            "project_id": project_id,
                             "type": "run",
                             "status": "running",
                             "started_at": time.time(),
@@ -2969,7 +2969,7 @@ async def run_schedule_now(schedule_id: str):
                         inner_req = RunRequest(
                             spec_name=f"dataset:{ds_name}",
                             provider_id=provider_id,
-                            project_id="default",
+                            project_id=project_id,
                         )
                         await _execute_run(
                             sub_job_id,
@@ -3546,7 +3546,7 @@ async def analytics_golden_dashboard(project_id: str = Query("default")):
 
 class SaveVersionRequest(BaseModel):
     change_summary: str = ""
-    project_id: str | None = "default"
+    project_id: str
 
 
 class CreateIterationRequest(BaseModel):
@@ -3555,12 +3555,12 @@ class CreateIterationRequest(BaseModel):
     version_a: int
     version_b: int
     provider_id: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class SuggestImprovementsRequest(BaseModel):
     run_id: str | None = None
-    project_id: str | None = "default"
+    project_id: str
 
 
 @router.post("/specs/{name}/versions")
@@ -3733,9 +3733,7 @@ async def create_prompt_iteration(req: CreateIterationRequest):
         if not vb:
             raise HTTPException(404, f"Version {req.version_b} not found")
 
-        provider = session.get(LlmProvider, req.provider_id)
-        if not provider:
-            raise HTTPException(404, "Provider not found")
+        _get_provider(session, req.provider_id, req.project_id or "default")
 
     iteration_id = f"llmi-{uuid.uuid4().hex[:8]}"
     iteration = LlmPromptIteration(
@@ -3756,6 +3754,7 @@ async def create_prompt_iteration(req: CreateIterationRequest):
     _llm_jobs[job_id] = {
         "job_id": job_id,
         "iteration_id": iteration_id,
+        "project_id": req.project_id,
         "type": "prompt_iteration",
         "status": "running",
         "started_at": time.time(),
@@ -3802,6 +3801,7 @@ async def _execute_prompt_iteration(job_id: str, iteration_id: str, req: CreateI
             _llm_jobs[sub_job_a] = {
                 "job_id": sub_job_a,
                 "run_id": run_id_a,
+                "project_id": req.project_id,
                 "type": "run",
                 "status": "running",
                 "started_at": time.time(),
@@ -3817,6 +3817,7 @@ async def _execute_prompt_iteration(job_id: str, iteration_id: str, req: CreateI
             _llm_jobs[sub_job_b] = {
                 "job_id": sub_job_b,
                 "run_id": run_id_b,
+                "project_id": req.project_id,
                 "type": "run",
                 "status": "running",
                 "started_at": time.time(),
@@ -3934,17 +3935,20 @@ async def list_prompt_iterations(
 
 
 @router.get("/prompt-iterations/{iteration_id}")
-async def get_prompt_iteration(iteration_id: str):
+async def get_prompt_iteration(iteration_id: str, project_id: str = Query(...)):
     """Get iteration details with side-by-side run results."""
     with Session(engine) as session:
-        iteration = session.get(LlmPromptIteration, iteration_id)
-        if not iteration:
-            raise HTTPException(404, "Iteration not found")
+        iteration = _get_prompt_iteration(session, iteration_id, project_id)
 
         run_a_data = None
         run_b_data = None
         if iteration.run_id_a:
-            run_a = session.get(LlmTestRun, iteration.run_id_a)
+            run_a = session.exec(
+                select(LlmTestRun).where(
+                    LlmTestRun.id == iteration.run_id_a,
+                    LlmTestRun.project_id == _project_db_id(project_id),
+                )
+            ).first()
             if run_a:
                 run_a_data = {
                     "id": run_a.id,
@@ -3957,7 +3961,12 @@ async def get_prompt_iteration(iteration_id: str):
                     "avg_scores": run_a.avg_scores,
                 }
         if iteration.run_id_b:
-            run_b = session.get(LlmTestRun, iteration.run_id_b)
+            run_b = session.exec(
+                select(LlmTestRun).where(
+                    LlmTestRun.id == iteration.run_id_b,
+                    LlmTestRun.project_id == _project_db_id(project_id),
+                )
+            ).first()
             if run_b:
                 run_b_data = {
                     "id": run_b.id,

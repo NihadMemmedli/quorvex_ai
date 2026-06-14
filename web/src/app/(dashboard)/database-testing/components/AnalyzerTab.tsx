@@ -8,7 +8,7 @@ import { severityBg, severityColor } from '@/lib/colors';
 import { cardStyle, inputStyle, btnPrimary, btnSecondary } from '@/lib/styles';
 import { getAuthHeaders } from '@/lib/styles';
 import { SeverityBadge, StatusBadge } from '@/components/shared';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import type { DbConnection, SchemaFinding, AiSuggestion, JobStatus } from './types';
 
 interface AnalyzerTabProps {
@@ -67,7 +67,7 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
 
         const poll = async () => {
             try {
-                const res = await fetch(`${API_BASE}/database-testing/jobs/${activeJob}`, {
+                const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/jobs/${activeJob}`, projectId)}`, {
                     headers: getAuthHeaders(),
                 });
                 if (res.ok) {
@@ -91,7 +91,7 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
                                 } else {
                                     setSchemaFindings([]);
                                     try {
-                                        const schemaRes = await fetch(`${API_BASE}/database-testing/runs/${data.run_id}/schema`, {
+                                        const schemaRes = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/runs/${data.run_id}/schema`, projectId)}`, {
                                             headers: getAuthHeaders(),
                                         });
                                         if (schemaRes.ok) {
@@ -125,7 +125,7 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
                                 if (Array.isArray(suggs)) {
                                     setSuggestions(suggs.map((s: Record<string, unknown>) => ({ ...s, approved: true } as AiSuggestion)));
                                 } else if (analyzeRunId) {
-                                    const suggestionsRes = await fetch(`${API_BASE}/database-testing/runs/${analyzeRunId}/suggestions`, {
+                                    const suggestionsRes = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/runs/${analyzeRunId}/suggestions`, projectId)}`, {
                                         headers: getAuthHeaders(),
                                     });
                                     if (suggestionsRes.ok) {
@@ -158,7 +158,7 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
         poll();
         pollRef.current = setInterval(poll, 2000);
         return () => { if (pollRef.current) clearInterval(pollRef.current); };
-    }, [analyzeJobId, suggestJobId, analyzeRunId]);
+    }, [analyzeJobId, suggestJobId, analyzeRunId, projectId]);
 
     const startAnalysis = async () => {
         if (!analyzerConnId) return;
@@ -173,7 +173,7 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
         setExpandedFindingIdx(null);
         setExpandedSqlIdx(null);
         try {
-            const res = await fetch(`${API_BASE}/database-testing/analyze/${analyzerConnId}?project_id=${encodeURIComponent(projectId)}`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/analyze/${analyzerConnId}`, projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
             });
@@ -196,10 +196,10 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
         setIsGeneratingSuggestions(true);
         setSuggestions([]);
         try {
-            const res = await fetch(`${API_BASE}/database-testing/suggest/${analyzeRunId}`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/suggest/${analyzeRunId}`, projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                body: JSON.stringify({ project_id: projectId }),
+                body: JSON.stringify(withProjectBody({}, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -224,10 +224,10 @@ export default function AnalyzerTab({ connections, projectId, onSpecsSaved, pref
         if (approved.length === 0) { alert('Select at least one suggestion'); return; }
         setSavingSpec(true);
         try {
-            const res = await fetch(`${API_BASE}/database-testing/runs/${analyzeRunId}/approve-suggestions`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/runs/${analyzeRunId}/approve-suggestions`, projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                body: JSON.stringify({ suggestions: approved, project_id: projectId, spec_name: `schema-suggestions-${analyzeRunId}` }),
+                body: JSON.stringify(withProjectBody({ suggestions: approved, spec_name: `schema-suggestions-${analyzeRunId}` }, projectId)),
             });
             if (res.ok) {
                 alert('Spec saved successfully');

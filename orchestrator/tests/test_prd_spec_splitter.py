@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.utils.prd_spec_splitter import PRDSpecSplitter
@@ -37,6 +39,128 @@ def _render_rich(case, shared_context=""):
         base_url_origin=PARENT_ORIGIN,
         shared_context=shared_context,
     )
+
+
+def _write_standard_multi_spec(tmp_path: Path) -> Path:
+    spec_path = tmp_path / "multi.md"
+    spec_path.write_text(
+        """# Test: First flow
+
+## Source
+Test ID: TC-001
+Category: Happy Path
+
+## Steps
+1. Navigate to /
+
+## Expected Outcome
+- First flow succeeds
+
+# Test: Second flow
+
+## Source
+Test ID: TC-002
+Category: Happy Path
+
+## Steps
+1. Click Continue
+
+## Expected Outcome
+- Second flow succeeds
+""",
+        encoding="utf-8",
+    )
+    return spec_path
+
+
+def test_regex_split_skips_ai_extraction(tmp_path, monkeypatch):
+    spec_path = _write_standard_multi_spec(tmp_path)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("AI extraction should not be called for regex split")
+
+    monkeypatch.setattr(
+        "orchestrator.utils.ai_spec_splitter.AISpecSplitter.extract_and_group",
+        fail_if_called,
+    )
+
+    files, groups, metadata = PRDSpecSplitter.split_spec(
+        spec_path,
+        use_ai=False,
+        return_metadata=True,
+    )
+
+    assert len(files) == 2
+    assert groups is None
+    assert metadata["extraction_method"] == "regex"
+    assert metadata["ai_used"] is False
+
+
+def test_strict_ai_split_does_not_fall_back_to_regex(tmp_path, monkeypatch):
+    spec_path = _write_standard_multi_spec(tmp_path)
+    regex_called = False
+
+    def fail_ai(*_args, **_kwargs):
+        raise RuntimeError("missing test key")
+
+    def mark_regex_called(*_args, **_kwargs):
+        nonlocal regex_called
+        regex_called = True
+        return []
+
+    monkeypatch.setattr(
+        "orchestrator.utils.ai_spec_splitter.AISpecSplitter.extract_and_group",
+        fail_ai,
+    )
+    monkeypatch.setattr(
+        "orchestrator.utils.prd_spec_splitter.SpecDetector.extract_test_cases",
+        mark_regex_called,
+    )
+
+    with pytest.raises(RuntimeError, match="missing test key"):
+        PRDSpecSplitter.split_spec(
+            spec_path,
+            use_ai=True,
+            ai_fallback=False,
+            return_metadata=True,
+        )
+
+    assert regex_called is False
+
+
+def test_ai_split_receives_settings_backed_runtime_env(tmp_path, monkeypatch):
+    spec_path = _write_standard_multi_spec(tmp_path)
+    captured_env = None
+
+    def fake_extract_and_group(_content, _spec_name="", runtime_env_vars=None):
+        nonlocal captured_env
+        captured_env = runtime_env_vars
+        return (
+            [
+                {"id": "TC-001", "name": "AI first flow", "category": "Happy Path", "content": "First"},
+                {"id": "TC-002", "name": "AI second flow", "category": "Happy Path", "content": "Second"},
+            ],
+            [{"name": "Happy flows", "test_ids": ["TC-001", "TC-002"], "description": "AI grouped flows"}],
+        )
+
+    monkeypatch.setattr(
+        "orchestrator.utils.ai_spec_splitter.AISpecSplitter.extract_and_group",
+        fake_extract_and_group,
+    )
+
+    files, groups, metadata = PRDSpecSplitter.split_spec(
+        spec_path,
+        use_ai=True,
+        runtime_env_vars={"QUORVEX_LLM_API_KEY": "settings-key"},
+        ai_fallback=False,
+        return_metadata=True,
+    )
+
+    assert len(files) == 2
+    assert groups == [{"name": "Happy flows", "test_ids": ["TC-001", "TC-002"], "description": "AI grouped flows"}]
+    assert captured_env == {"QUORVEX_LLM_API_KEY": "settings-key"}
+    assert metadata["extraction_method"] == "ai"
+    assert metadata["ai_used"] is True
 
 
 def test_child_with_dashboard_precondition_starts_at_resolved_deep_link():

@@ -36,6 +36,7 @@ from .models_auth import MemberCreate, MemberResponse, MemberUpdate, ProjectMemb
 from .models_db import Project, RegressionBatch
 from .models_db import SpecMetadata as DBSpecMetadata
 from .models_db import TestRun as DBTestRun
+from .models_db import get_or_create_spec_metadata, get_spec_metadata as get_db_spec_metadata
 
 # Path setup for spec counting
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -73,14 +74,17 @@ def _count_all_specs_for_project(project_id: str, session: Session) -> int:
     count = 0
     for f in SPECS_DIR.glob("**/*.md"):
         name = str(f.relative_to(SPECS_DIR))
-        meta = session.get(DBSpecMetadata, name)
-
         if project_id == DEFAULT_PROJECT_ID:
-            # Default project: include specs with no metadata or NULL/default project_id
-            if meta is None or meta.project_id is None or meta.project_id == DEFAULT_PROJECT_ID:
+            other_project_meta = session.exec(
+                select(DBSpecMetadata).where(
+                    DBSpecMetadata.spec_name == name,
+                    DBSpecMetadata.project_id != DEFAULT_PROJECT_ID,
+                )
+            ).first()
+            if other_project_meta is None:
                 count += 1
         else:
-            # Other projects: only include specs explicitly assigned
+            meta = get_db_spec_metadata(session, name, project_id)
             if meta and meta.project_id == project_id:
                 count += 1
 
@@ -103,14 +107,17 @@ def _count_automated_specs_for_project(project_id: str, session: Session) -> int
             continue
 
         name = str(f.relative_to(SPECS_DIR))
-        meta = session.get(DBSpecMetadata, name)
-
         if project_id == DEFAULT_PROJECT_ID:
-            # Default project: include specs with no metadata or NULL/default project_id
-            if meta is None or meta.project_id is None or meta.project_id == DEFAULT_PROJECT_ID:
+            other_project_meta = session.exec(
+                select(DBSpecMetadata).where(
+                    DBSpecMetadata.spec_name == name,
+                    DBSpecMetadata.project_id != DEFAULT_PROJECT_ID,
+                )
+            ).first()
+            if other_project_meta is None:
                 count += 1
         else:
-            # Other projects: only include specs explicitly assigned
+            meta = get_db_spec_metadata(session, name, project_id)
             if meta and meta.project_id == project_id:
                 count += 1
 
@@ -467,11 +474,7 @@ def assign_spec_to_project(
         raise HTTPException(status_code=404, detail="Project not found")
 
     # Get or create spec metadata
-    spec_meta = session.get(DBSpecMetadata, spec_name)
-    if not spec_meta:
-        spec_meta = DBSpecMetadata(spec_name=spec_name, project_id=project_id)
-    else:
-        spec_meta.project_id = project_id
+    spec_meta = get_or_create_spec_metadata(session, spec_name, project_id)
 
     session.add(spec_meta)
     session.commit()
@@ -490,11 +493,7 @@ def bulk_assign_specs_to_project(project_id: str, spec_names: list[str], session
 
     assigned = []
     for spec_name in spec_names:
-        spec_meta = session.get(DBSpecMetadata, spec_name)
-        if not spec_meta:
-            spec_meta = DBSpecMetadata(spec_name=spec_name, project_id=project_id)
-        else:
-            spec_meta.project_id = project_id
+        spec_meta = get_or_create_spec_metadata(session, spec_name, project_id)
         session.add(spec_meta)
         assigned.append(spec_name)
 

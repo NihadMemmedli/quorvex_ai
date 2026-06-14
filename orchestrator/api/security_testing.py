@@ -67,7 +67,7 @@ def _cleanup_old_jobs():
 class CreateSecuritySpecRequest(BaseModel):
     name: str
     content: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class UpdateSecuritySpecRequest(BaseModel):
@@ -87,7 +87,7 @@ class SecurityAuthConfig(BaseModel):
 
 class BaseScanRequest(BaseModel):
     target_url: str
-    project_id: str | None = "default"
+    project_id: str
     auth_config: SecurityAuthConfig | None = None
     login_url: str | None = None
     username_key: str | None = None
@@ -121,12 +121,12 @@ class UpdateFindingStatusRequest(BaseModel):
 
 
 class AnalyzeRequest(BaseModel):
-    project_id: str | None = "default"
+    project_id: str
 
 
 class GenerateSpecRequest(BaseModel):
     session_id: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 # ========== Helper Functions ==========
@@ -163,6 +163,44 @@ def _scan_security_specs(project_id: str = "default") -> list[dict]:
             logger.warning(f"Error scanning security spec {md_file}: {e}")
 
     return specs
+
+
+def _project_scope(model, project_id: str):
+    if project_id == "default":
+        return (model.project_id == "default") | (model.project_id == None)
+    return model.project_id == project_id
+
+
+def _get_scan_run_for_project(session: Session, run_id: str, project_id: str) -> SecurityScanRun | None:
+    return session.exec(
+        select(SecurityScanRun).where(SecurityScanRun.id == run_id, _project_scope(SecurityScanRun, project_id))
+    ).first()
+
+
+def _get_finding_for_project(session: Session, finding_id: int, project_id: str) -> SecurityFinding | None:
+    return session.exec(
+        select(SecurityFinding).where(SecurityFinding.id == finding_id, _project_scope(SecurityFinding, project_id))
+    ).first()
+
+
+def _get_exploration_session_for_project(
+    session: Session, session_id: str, project_id: str
+) -> ExplorationSession | None:
+    return session.exec(
+        select(ExplorationSession).where(
+            ExplorationSession.id == session_id,
+            _project_scope(ExplorationSession, project_id),
+        )
+    ).first()
+
+
+def _get_spec_path_for_project(name: str, project_id: str) -> Path | None:
+    specs_dir = _get_specs_dir(project_id)
+    if specs_dir.exists():
+        for md_file in specs_dir.rglob("*.md"):
+            if md_file.name == name:
+                return md_file
+    return None
 
 
 def _generate_run_id() -> str:
@@ -426,7 +464,7 @@ async def _run_quick_scan_job(job_id: str, run_id: str, req: QuickScanRequest, p
     try:
         # Update DB status
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "running"
                 run.started_at = datetime.utcnow()
@@ -447,7 +485,7 @@ async def _run_quick_scan_job(job_id: str, run_id: str, req: QuickScanRequest, p
 
         # Save findings to DB
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
 
             for f in findings:
@@ -490,7 +528,7 @@ async def _run_quick_scan_job(job_id: str, run_id: str, req: QuickScanRequest, p
 
     except asyncio.CancelledError:
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "cancelled"
                 run.completed_at = datetime.utcnow()
@@ -504,7 +542,7 @@ async def _run_quick_scan_job(job_id: str, run_id: str, req: QuickScanRequest, p
     except Exception as e:
         logger.error(f"Quick scan failed: {e}")
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "failed"
                 run.error_message = str(e)
@@ -525,7 +563,7 @@ async def _run_nuclei_scan_job(
 
     try:
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "running"
                 run.started_at = datetime.utcnow()
@@ -550,7 +588,7 @@ async def _run_nuclei_scan_job(
 
         # Save findings to DB
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
 
             for f in findings:
@@ -594,7 +632,7 @@ async def _run_nuclei_scan_job(
 
     except asyncio.CancelledError:
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "cancelled"
                 run.completed_at = datetime.utcnow()
@@ -608,7 +646,7 @@ async def _run_nuclei_scan_job(
     except Exception as e:
         logger.error(f"Nuclei scan failed: {e}")
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "failed"
                 run.error_message = str(e)
@@ -627,7 +665,7 @@ async def _run_zap_scan_job(job_id: str, run_id: str, req: ZapScanRequest, proje
 
     try:
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "running"
                 run.started_at = datetime.utcnow()
@@ -655,7 +693,7 @@ async def _run_zap_scan_job(job_id: str, run_id: str, req: ZapScanRequest, proje
 
         # Save findings to DB
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
 
             for f in findings:
@@ -700,7 +738,7 @@ async def _run_zap_scan_job(job_id: str, run_id: str, req: ZapScanRequest, proje
 
     except asyncio.CancelledError:
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "cancelled"
                 run.completed_at = datetime.utcnow()
@@ -714,7 +752,7 @@ async def _run_zap_scan_job(job_id: str, run_id: str, req: ZapScanRequest, proje
     except Exception as e:
         logger.error(f"ZAP scan failed: {e}")
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "failed"
                 run.error_message = str(e)
@@ -738,7 +776,7 @@ async def _run_full_scan_job(job_id: str, run_id: str, req: FullScanRequest, pro
 
     try:
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "running"
                 run.started_at = datetime.utcnow()
@@ -747,7 +785,7 @@ async def _run_full_scan_job(job_id: str, run_id: str, req: FullScanRequest, pro
 
         # Phase 1: Quick scan
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.current_stage = "quick_scan"
                 run.stage_message = "Running security header checks..."
@@ -767,7 +805,7 @@ async def _run_full_scan_job(job_id: str, run_id: str, req: FullScanRequest, pro
                 finding["scanner"] = "quick"
 
             with Session(engine) as session:
-                run = session.get(SecurityScanRun, run_id)
+                run = _get_scan_run_for_project(session, run_id, project_id)
                 if run:
                     run.quick_scan_completed = True
                     session.add(run)
@@ -777,7 +815,7 @@ async def _run_full_scan_job(job_id: str, run_id: str, req: FullScanRequest, pro
 
         # Phase 2: Nuclei scan
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.current_stage = "nuclei_scan"
                 run.stage_message = "Running Nuclei vulnerability scan..."
@@ -802,7 +840,7 @@ async def _run_full_scan_job(job_id: str, run_id: str, req: FullScanRequest, pro
                 finding["scanner"] = "nuclei"
 
             with Session(engine) as session:
-                run = session.get(SecurityScanRun, run_id)
+                run = _get_scan_run_for_project(session, run_id, project_id)
                 if run:
                     run.nuclei_scan_completed = True
                     session.add(run)
@@ -812,7 +850,7 @@ async def _run_full_scan_job(job_id: str, run_id: str, req: FullScanRequest, pro
 
         # Phase 3: ZAP scan
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.current_stage = "zap_spider"
                 run.stage_message = "ZAP spidering target..."
@@ -839,7 +877,7 @@ async def _run_full_scan_job(job_id: str, run_id: str, req: FullScanRequest, pro
                 finding["scanner"] = "zap"
 
             with Session(engine) as session:
-                run = session.get(SecurityScanRun, run_id)
+                run = _get_scan_run_for_project(session, run_id, project_id)
                 if run:
                     run.zap_scan_completed = True
                     session.add(run)
@@ -875,7 +913,7 @@ async def _run_full_scan_job(job_id: str, run_id: str, req: FullScanRequest, pro
                 session.add(finding)
                 severity_counts[f["severity"]] = severity_counts.get(f["severity"], 0) + 1
 
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "completed"
                 run.completed_at = datetime.utcnow()
@@ -896,7 +934,7 @@ async def _run_full_scan_job(job_id: str, run_id: str, req: FullScanRequest, pro
 
     except asyncio.CancelledError:
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "cancelled"
                 run.completed_at = datetime.utcnow()
@@ -910,7 +948,7 @@ async def _run_full_scan_job(job_id: str, run_id: str, req: FullScanRequest, pro
     except Exception as e:
         logger.error(f"Full scan failed: {e}")
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "failed"
                 run.error_message = str(e)
@@ -929,7 +967,7 @@ async def _run_ai_analysis_job(job_id: str, run_id: str, project_id: str):
 
     try:
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.current_stage = "ai_analysis"
                 run.stage_message = "AI analyzing findings for remediation..."
@@ -961,11 +999,11 @@ async def _run_ai_analysis_job(job_id: str, run_id: str, project_id: str):
         # Update findings with AI remediation
         with Session(engine) as session:
             for result in results:
-                finding = session.get(SecurityFinding, result["finding_id"])
+                finding = _get_finding_for_project(session, result["finding_id"], project_id)
                 if finding:
                     finding.remediation = result.get("remediation")
                     session.add(finding)
-            run = session.get(SecurityScanRun, run_id)
+            run = _get_scan_run_for_project(session, run_id, project_id)
             if run:
                 run.current_stage = "done"
                 run.stage_message = "AI analysis complete"
@@ -993,7 +1031,7 @@ async def get_capabilities():
 
 
 @router.get("/targets")
-async def list_security_targets(project_id: str = Query("default"), limit: int = Query(25, ge=1, le=100)):
+async def list_security_targets(project_id: str = Query(...), limit: int = Query(25, ge=1, le=100)):
     """Suggest scan targets from recent exploration sessions and discovered API endpoints."""
     with Session(engine) as session:
         sessions = session.exec(
@@ -1053,21 +1091,16 @@ async def list_security_targets(project_id: str = Query("default"), limit: int =
 
 
 @router.get("/specs")
-async def list_security_specs(project_id: str = Query("default")):
+async def list_security_specs(project_id: str = Query(...)):
     """List all security test specifications."""
     return _scan_security_specs(project_id)
 
 
 @router.get("/specs/{name:path}")
-async def get_security_spec(name: str, project_id: str = Query("default")):
+async def get_security_spec(name: str, project_id: str = Query(...)):
     """Get a single security spec content."""
     specs_dir = _get_specs_dir(project_id)
-    target = None
-    if specs_dir.exists():
-        for md_file in specs_dir.rglob("*.md"):
-            if md_file.name == name:
-                target = md_file
-                break
+    target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():
         raise HTTPException(status_code=404, detail=f"Security spec '{name}' not found")
@@ -1101,15 +1134,10 @@ async def create_security_spec(req: CreateSecuritySpecRequest):
 
 
 @router.put("/specs/{name:path}")
-async def update_security_spec(name: str, req: UpdateSecuritySpecRequest, project_id: str = Query("default")):
+async def update_security_spec(name: str, req: UpdateSecuritySpecRequest, project_id: str = Query(...)):
     """Update an existing security spec."""
     specs_dir = _get_specs_dir(project_id)
-    target = None
-    if specs_dir.exists():
-        for md_file in specs_dir.rglob("*.md"):
-            if md_file.name == name:
-                target = md_file
-                break
+    target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():
         raise HTTPException(status_code=404, detail=f"Security spec '{name}' not found")
@@ -1119,15 +1147,10 @@ async def update_security_spec(name: str, req: UpdateSecuritySpecRequest, projec
 
 
 @router.delete("/specs/{name:path}")
-async def delete_security_spec(name: str, project_id: str = Query("default")):
+async def delete_security_spec(name: str, project_id: str = Query(...)):
     """Delete a security spec."""
     specs_dir = _get_specs_dir(project_id)
-    target = None
-    if specs_dir.exists():
-        for md_file in specs_dir.rglob("*.md"):
-            if md_file.name == name:
-                target = md_file
-                break
+    target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():
         raise HTTPException(status_code=404, detail=f"Security spec '{name}' not found")
@@ -1148,7 +1171,7 @@ async def start_quick_scan(req: QuickScanRequest):
 
     run_id = _generate_run_id()
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    project_id = req.project_id or "default"
+    project_id = req.project_id
 
     # Create DB record
     with Session(engine) as session:
@@ -1172,6 +1195,7 @@ async def start_quick_scan(req: QuickScanRequest):
         "target_url": req.target_url,
         "status": "pending",
         "created_at": time.time(),
+        "project_id": project_id,
     }
 
     # Start background task
@@ -1189,7 +1213,7 @@ async def start_nuclei_scan(req: NucleiScanRequest):
 
     run_id = _generate_run_id()
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    project_id = req.project_id or "default"
+    project_id = req.project_id
 
     with Session(engine) as session:
         run = SecurityScanRun(
@@ -1211,6 +1235,7 @@ async def start_nuclei_scan(req: NucleiScanRequest):
         "target_url": req.target_url,
         "status": "pending",
         "created_at": time.time(),
+        "project_id": project_id,
     }
 
     _track_task(job_id, asyncio.create_task(_run_nuclei_scan_job(job_id, run_id, req, project_id)))
@@ -1227,7 +1252,7 @@ async def start_zap_scan(req: ZapScanRequest):
 
     run_id = _generate_run_id()
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    project_id = req.project_id or "default"
+    project_id = req.project_id
 
     with Session(engine) as session:
         run = SecurityScanRun(
@@ -1249,6 +1274,7 @@ async def start_zap_scan(req: ZapScanRequest):
         "target_url": req.target_url,
         "status": "pending",
         "created_at": time.time(),
+        "project_id": project_id,
     }
 
     _track_task(job_id, asyncio.create_task(_run_zap_scan_job(job_id, run_id, req, project_id)))
@@ -1265,7 +1291,7 @@ async def start_full_scan(req: FullScanRequest):
 
     run_id = _generate_run_id()
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    project_id = req.project_id or "default"
+    project_id = req.project_id
 
     with Session(engine) as session:
         run = SecurityScanRun(
@@ -1287,6 +1313,7 @@ async def start_full_scan(req: FullScanRequest):
         "target_url": req.target_url,
         "status": "pending",
         "created_at": time.time(),
+        "project_id": project_id,
     }
 
     _track_task(job_id, asyncio.create_task(_run_full_scan_job(job_id, run_id, req, project_id)))
@@ -1295,9 +1322,11 @@ async def start_full_scan(req: FullScanRequest):
 
 
 @router.get("/jobs/{job_id}")
-async def get_job_status(job_id: str):
+async def get_job_status(job_id: str, project_id: str = Query(...)):
     """Poll job status."""
     job = _security_jobs.get(job_id)
+    if job and job.get("project_id") and job.get("project_id") != project_id:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     if not job:
         # Fallback: check DB for completed security scan runs
         # Security jobs store run_id in the job dict; after a restart we lose that mapping.
@@ -1305,18 +1334,18 @@ async def get_job_status(job_id: str):
         try:
             with Session(engine) as session:
                 # Direct lookup: job_id itself might be a run_id
-                db_run = session.get(SecurityScanRun, job_id)
+                db_run = _get_scan_run_for_project(session, job_id, project_id)
                 if not db_run:
                     # Security job IDs are "job-<hex8>"; run IDs are "sec-<hex8>".
                     # Try replacing the prefix to find the associated run.
                     hex_part = job_id.replace("job-", "")
                     candidate_run_id = f"sec-{hex_part}"
-                    db_run = session.get(SecurityScanRun, candidate_run_id)
+                    db_run = _get_scan_run_for_project(session, candidate_run_id, project_id)
                 if not db_run:
                     # Last resort: search for runs whose ID contains the hex fragment
                     statement = (
                         select(SecurityScanRun)
-                        .where(SecurityScanRun.id.contains(hex_part))
+                        .where(SecurityScanRun.id.contains(hex_part), _project_scope(SecurityScanRun, project_id))
                         .order_by(SecurityScanRun.created_at.desc())
                         .limit(1)
                     )
@@ -1337,7 +1366,7 @@ async def get_job_status(job_id: str):
     enriched = dict(job)
     try:
         with Session(engine) as session:
-            run = session.get(SecurityScanRun, job.get("run_id"))
+            run = _get_scan_run_for_project(session, job.get("run_id"), project_id)
             if run:
                 enriched.update(
                     {
@@ -1360,10 +1389,10 @@ async def get_job_status(job_id: str):
 
 
 @router.post("/runs/{run_id}/stop")
-async def stop_scan(run_id: str):
+async def stop_scan(run_id: str, project_id: str = Query(...)):
     """Stop a running scan."""
     with Session(engine) as session:
-        run = session.get(SecurityScanRun, run_id)
+        run = _get_scan_run_for_project(session, run_id, project_id)
         if not run:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
         if run.status != "running":
@@ -1393,7 +1422,7 @@ async def stop_scan(run_id: str):
 
 @router.get("/runs")
 async def list_scan_runs(
-    project_id: str = Query("default"),
+    project_id: str = Query(...),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -1416,7 +1445,10 @@ async def list_scan_runs(
 
 
 @router.get("/runs/compare")
-async def compare_runs(run_ids: str = Query(..., description="Comma-separated run IDs")):
+async def compare_runs(
+    run_ids: str = Query(..., description="Comma-separated run IDs"),
+    project_id: str = Query(...),
+):
     """Compare two or more scan runs."""
     ids = [r.strip() for r in run_ids.split(",") if r.strip()]
     if len(ids) < 2:
@@ -1425,11 +1457,14 @@ async def compare_runs(run_ids: str = Query(..., description="Comma-separated ru
     with Session(engine) as session:
         runs_data = []
         for rid in ids:
-            run = session.get(SecurityScanRun, rid)
+            run = _get_scan_run_for_project(session, rid, project_id)
             if not run:
                 raise HTTPException(status_code=404, detail=f"Run '{rid}' not found")
 
-            findings_stmt = select(SecurityFinding).where(SecurityFinding.scan_id == rid)
+            findings_stmt = select(SecurityFinding).where(
+                SecurityFinding.scan_id == rid,
+                _project_scope(SecurityFinding, project_id),
+            )
             findings = session.exec(findings_stmt).all()
 
             by_scanner = {}
@@ -1445,15 +1480,18 @@ async def compare_runs(run_ids: str = Query(..., description="Comma-separated ru
 
 
 @router.get("/runs/{run_id}")
-async def get_scan_run(run_id: str):
+async def get_scan_run(run_id: str, project_id: str = Query(...)):
     """Get scan run with findings summary."""
     with Session(engine) as session:
-        run = session.get(SecurityScanRun, run_id)
+        run = _get_scan_run_for_project(session, run_id, project_id)
         if not run:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
         # Fetch findings
-        statement = select(SecurityFinding).where(SecurityFinding.scan_id == run_id)
+        statement = select(SecurityFinding).where(
+            SecurityFinding.scan_id == run_id,
+            _project_scope(SecurityFinding, project_id),
+        )
         findings = session.exec(statement).all()
 
         data = _run_to_dict(run)
@@ -1466,7 +1504,7 @@ async def get_scan_run(run_id: str):
 
 @router.get("/findings")
 async def list_project_findings(
-    project_id: str = Query("default"),
+    project_id: str = Query(...),
     severity: str | None = Query(None, description="Filter by severity: critical,high,medium,low,info"),
     status: str | None = Query(None, description="Filter by status: open,false_positive,fixed,accepted_risk"),
     scanner: str | None = Query(None, description="Filter by scanner: quick,nuclei,zap"),
@@ -1513,17 +1551,21 @@ async def list_project_findings(
 @router.get("/runs/{run_id}/findings")
 async def get_findings(
     run_id: str,
+    project_id: str = Query(...),
     severity: str | None = Query(None, description="Filter by severity: critical,high,medium,low,info"),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
 ):
     """Get findings for a scan run, optionally filtered by severity."""
     with Session(engine) as session:
-        run = session.get(SecurityScanRun, run_id)
+        run = _get_scan_run_for_project(session, run_id, project_id)
         if not run:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
-        statement = select(SecurityFinding).where(SecurityFinding.scan_id == run_id)
+        statement = select(SecurityFinding).where(
+            SecurityFinding.scan_id == run_id,
+            _project_scope(SecurityFinding, project_id),
+        )
         if severity:
             severity_list = [s.strip().lower() for s in severity.split(",")]
             statement = statement.where(SecurityFinding.severity.in_(severity_list))
@@ -1541,14 +1583,18 @@ async def get_findings(
 
 
 @router.patch("/findings/{finding_id}/status")
-async def update_finding_status(finding_id: int, req: UpdateFindingStatusRequest):
+async def update_finding_status(
+    finding_id: int,
+    req: UpdateFindingStatusRequest,
+    project_id: str = Query(...),
+):
     """Update finding status (mark false_positive, fixed, accepted_risk, open)."""
     valid_statuses = {"open", "false_positive", "fixed", "accepted_risk"}
     if req.status not in valid_statuses:
         raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of: {valid_statuses}")
 
     with Session(engine) as session:
-        finding = session.get(SecurityFinding, finding_id)
+        finding = _get_finding_for_project(session, finding_id, project_id)
         if not finding:
             raise HTTPException(status_code=404, detail=f"Finding '{finding_id}' not found")
 
@@ -1568,7 +1614,7 @@ async def update_finding_status(finding_id: int, req: UpdateFindingStatusRequest
 
 
 @router.get("/findings/summary")
-async def get_findings_summary(project_id: str = Query("default")):
+async def get_findings_summary(project_id: str = Query(...)):
     """Get aggregated severity counts for a project."""
     with Session(engine) as session:
         statement = select(
@@ -1615,14 +1661,14 @@ async def start_ai_analysis(run_id: str, req: AnalyzeRequest):
     _cleanup_old_jobs()
 
     with Session(engine) as session:
-        run = session.get(SecurityScanRun, run_id)
+        run = _get_scan_run_for_project(session, run_id, req.project_id)
         if not run:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
         if run.status not in ("completed", "failed"):
             raise HTTPException(status_code=400, detail="Scan must be completed before analysis")
 
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    project_id = req.project_id or "default"
+    project_id = req.project_id
 
     _security_jobs[job_id] = {
         "job_id": job_id,
@@ -1630,6 +1676,7 @@ async def start_ai_analysis(run_id: str, req: AnalyzeRequest):
         "scan_type": "ai_analysis",
         "status": "pending",
         "created_at": time.time(),
+        "project_id": project_id,
     }
 
     asyncio.create_task(_run_ai_analysis_job(job_id, run_id, project_id))
@@ -1641,6 +1688,11 @@ async def start_ai_analysis(run_id: str, req: AnalyzeRequest):
 async def generate_security_spec(req: GenerateSpecRequest):
     """AI generates security spec from exploration session data."""
     try:
+        with Session(engine) as session:
+            exploration = _get_exploration_session_for_project(session, req.session_id, req.project_id)
+            if not exploration:
+                raise HTTPException(status_code=404, detail=f"Exploration session '{req.session_id}' not found")
+
         from workflows.security_spec_generator import generate_security_spec_from_session
 
         result = await generate_security_spec_from_session(req.session_id, project_id=req.project_id)

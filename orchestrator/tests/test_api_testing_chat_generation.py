@@ -363,7 +363,13 @@ def test_api_batch_job_reconciles_completed_children(api_testing_client):
     assert running_response.status_code == 200
     assert all(job["job_id"] != "batch-api" for job in running_response.json())
 
-    batch_response = client.get("/api-testing/jobs/batch-api")
+    omitted_response = client.get("/api-testing/jobs/batch-api")
+    assert omitted_response.status_code == 422
+
+    wrong_project_response = client.get("/api-testing/jobs/batch-api?project_id=other-project")
+    assert wrong_project_response.status_code == 404
+
+    batch_response = client.get("/api-testing/jobs/batch-api?project_id=chat-project")
     assert batch_response.status_code == 200
     data = batch_response.json()
     assert data["status"] == "completed"
@@ -403,7 +409,7 @@ def test_api_batch_job_reconciles_failed_child(api_testing_client):
         }
     )
 
-    response = client.get("/api-testing/jobs/batch-api")
+    response = client.get("/api-testing/jobs/batch-api?project_id=chat-project")
 
     assert response.status_code == 200
     data = response.json()
@@ -423,7 +429,7 @@ def test_api_batch_job_reconciles_missing_child_as_failed(api_testing_client):
         "project_id": "chat-project",
     }
 
-    response = client.get("/api-testing/jobs/batch-api")
+    response = client.get("/api-testing/jobs/batch-api?project_id=chat-project")
 
     assert response.status_code == 200
     data = response.json()
@@ -584,7 +590,7 @@ def test_direct_api_run_invokes_healer_for_assertion_failure_when_requested(api_
 
 def test_run_direct_endpoint_defaults_to_no_healing_and_accepts_explicit_flag(api_testing_client, monkeypatch):
     client, api_testing, tmp_path = api_testing_client
-    tests_dir = tmp_path / "tests" / "generated"
+    tests_dir = tmp_path / "tests" / "generated" / "chat-project"
     tests_dir.mkdir(parents=True)
     (tests_dir / "demo.api.spec.ts").write_text("import { test } from '@playwright/test';\n", encoding="utf-8")
     calls = []
@@ -597,12 +603,12 @@ def test_run_direct_endpoint_defaults_to_no_healing_and_accepts_explicit_flag(ap
 
     default_response = client.post(
         "/api-testing/run-direct",
-        json={"test_path": "tests/generated/demo.api.spec.ts", "project_id": "chat-project"},
+        json={"test_path": "tests/generated/chat-project/demo.api.spec.ts", "project_id": "chat-project"},
     )
     healing_response = client.post(
         "/api-testing/run-direct",
         json={
-            "test_path": "tests/generated/demo.api.spec.ts",
+            "test_path": "tests/generated/chat-project/demo.api.spec.ts",
             "project_id": "chat-project",
             "heal_on_failure": True,
         },
@@ -715,6 +721,7 @@ def test_import_openapi_rejects_invalid_mode_with_allowed_modes(api_testing_clie
         json={
             "url": "https://example.test/openapi.json",
             "mode": "legacy_import",
+            "project_id": "chat-project",
         },
     )
 
@@ -864,7 +871,7 @@ def test_get_job_status_falls_back_to_import_history(api_testing_client):
         )
         session.commit()
 
-    response = client.get("/api-testing/jobs/expired-job")
+    response = client.get("/api-testing/jobs/expired-job?project_id=chat-project")
 
     assert response.status_code == 200
     data = response.json()
@@ -893,7 +900,7 @@ def test_get_job_status_expires_stale_import_history(api_testing_client):
         )
         session.commit()
 
-    response = client.get("/api-testing/jobs/expired-running-job")
+    response = client.get("/api-testing/jobs/expired-running-job?project_id=chat-project")
 
     assert response.status_code == 200
     data = response.json()

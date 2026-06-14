@@ -13,10 +13,10 @@ import { AssistantRuntimeProvider, useThread, useThreadRuntime, SimpleImageAttac
 import { useChatRuntime } from '@assistant-ui/react-ai-sdk';
 import { DefaultChatTransport, type UIMessage } from 'ai';
 import { fetchWithAuth, useAuth } from '@/contexts/AuthContext';
-import { useProject } from '@/contexts/ProjectContext';
+import { addProjectSwitchListener, useProject } from '@/contexts/ProjectContext';
 import { usePathname } from 'next/navigation';
 import { toast } from 'sonner';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import {
   Conversation,
   ChatMessageRecord,
@@ -321,6 +321,10 @@ function projectQuery(projectId?: string) {
   return projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
 }
 
+function projectStatusPath(path: string, projectId?: string) {
+  return projectId ? withProjectQuery(path, projectId) : path;
+}
+
 function makeTrackedJob(
   toolName: string,
   result: unknown,
@@ -357,22 +361,22 @@ function makeTrackedJob(
   } else if (API_JOB_TOOLS.has(toolName)) {
     kind = 'api-job';
     id = stringValue(data, ['job_id', 'jobId']);
-    statusPath = `/api-testing/jobs/${encodeURIComponent(id || '')}`;
+    statusPath = projectStatusPath(`/api-testing/jobs/${encodeURIComponent(id || '')}`, projectId);
     pagePath = '/api-testing';
   } else if (LOAD_JOB_TOOLS.has(toolName)) {
     kind = 'load-job';
     id = stringValue(data, ['job_id', 'jobId']);
-    statusPath = `/load-testing/jobs/${encodeURIComponent(id || '')}`;
+    statusPath = projectStatusPath(`/load-testing/jobs/${encodeURIComponent(id || '')}`, projectId);
     pagePath = '/load-testing';
   } else if (SECURITY_JOB_TOOLS.has(toolName)) {
     kind = 'security-job';
     id = stringValue(data, ['job_id', 'jobId']);
-    statusPath = `/security-testing/jobs/${encodeURIComponent(id || '')}`;
+    statusPath = projectStatusPath(`/security-testing/jobs/${encodeURIComponent(id || '')}`, projectId);
     pagePath = '/security-testing';
   } else if (DATABASE_JOB_TOOLS.has(toolName)) {
     kind = 'database-job';
     id = stringValue(data, ['job_id', 'jobId']);
-    statusPath = `/database-testing/jobs/${encodeURIComponent(id || '')}`;
+    statusPath = projectStatusPath(`/database-testing/jobs/${encodeURIComponent(id || '')}`, projectId);
     pagePath = '/database-testing';
   } else if (PRD_GENERATION_TOOLS.has(toolName)) {
     kind = 'prd-generation';
@@ -382,17 +386,17 @@ function makeTrackedJob(
   } else if (REGRESSION_BATCH_TOOLS.has(toolName)) {
     kind = 'regression-batch';
     id = stringValue(data, ['batch_id', 'batchId', 'id']);
-    statusPath = `/regression/batches/${encodeURIComponent(id || '')}`;
+    statusPath = projectStatusPath(`/regression/batches/${encodeURIComponent(id || '')}`, projectId);
     pagePath = '/regression';
   } else if (TEST_RUN_TOOLS.has(toolName)) {
     kind = 'test-run';
     id = stringValue(data, ['run_id', 'runId', 'id']) || stringValue(args, ['runId']);
-    statusPath = `/runs/${encodeURIComponent(id || '')}`;
+    statusPath = projectStatusPath(`/runs/${encodeURIComponent(id || '')}`, projectId);
     pagePath = id ? `/runs/${encodeURIComponent(id)}` : '/runs';
   } else if (toolName === 'startWorkflow') {
     kind = 'workflow-run';
     id = stringValue(data, ['run_id', 'runId', 'id']);
-    statusPath = `/workflows/runs/${encodeURIComponent(id || '')}`;
+    statusPath = `/workflows/runs/${encodeURIComponent(id || '')}${projectQuery(projectId)}`;
     pagePath = '/workflow';
   }
 
@@ -813,8 +817,14 @@ function ChatJobWatcher({
 
 const LAST_CONVERSATION_KEY = 'chat-last-conversation-id';
 
+function lastConversationStorageKey(userId: string | undefined, projectId: string | undefined) {
+  if (!userId || !projectId) return null;
+  return `${LAST_CONVERSATION_KEY}:${userId}:${projectId}`;
+}
+
 export function ChatProvider({ children }: { children: ReactNode }) {
   const { currentProject } = useProject();
+  const { user } = useAuth();
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [initialMessages, setInitialMessages] = useState<
@@ -825,14 +835,14 @@ export function ChatProvider({ children }: { children: ReactNode }) {
   const [runtimeKey, setRuntimeKey] = useState<string>('new');
   const conversationCreatedRef = useRef(false);
   const creatingRef = useRef(false);
-  const autoResumedRef = useRef(false);
+  const scopedLastConversationKey = lastConversationStorageKey(user?.id, currentProject?.id);
 
   // Persist conversationId to localStorage whenever it changes
   useEffect(() => {
-    if (conversationId) {
-      try { localStorage.setItem(LAST_CONVERSATION_KEY, conversationId); } catch { /* noop */ }
+    if (conversationId && scopedLastConversationKey) {
+      try { localStorage.setItem(scopedLastConversationKey, conversationId); } catch { /* noop */ }
     }
-  }, [conversationId]);
+  }, [conversationId, scopedLastConversationKey]);
 
   const refreshConversations = useCallback(async () => {
     try {
@@ -845,6 +855,15 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       return [];
     }
   }, [currentProject?.id]);
+
+  const resetAssistantState = useCallback((runtimeKeyPrefix = 'new') => {
+    setConversationId(null);
+    setInitialMessages(undefined);
+    setTrackedJobs([]);
+    setRuntimeKey(`${runtimeKeyPrefix}-${Date.now()}`);
+    conversationCreatedRef.current = false;
+    creatingRef.current = false;
+  }, []);
 
   const switchConversation = useCallback(async (id: string) => {
     setIsLoadingHistory(true);
@@ -874,31 +893,41 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     }
   }, [currentProject?.id]);
 
-  // Load conversations on mount and auto-resume last conversation
+  useEffect(() => addProjectSwitchListener(() => {
+    setConversations([]);
+    resetAssistantState('project');
+  }), [resetAssistantState]);
+
+  // Load conversations for the current project and auto-resume the scoped last conversation.
   useEffect(() => {
+    if (!currentProject?.id || !scopedLastConversationKey) return;
+    let cancelled = false;
+
     (async () => {
       const convos = await refreshConversations();
-      if (autoResumedRef.current) return;
-      autoResumedRef.current = true;
+      if (cancelled) return;
       try {
-        const lastId = localStorage.getItem(LAST_CONVERSATION_KEY);
+        const lastId = localStorage.getItem(scopedLastConversationKey);
         if (lastId && convos.some((c: Conversation) => c.id === lastId)) {
           await switchConversation(lastId);
+        } else {
+          resetAssistantState(`new-${currentProject.id}`);
         }
       } catch (err) {
         console.error('Failed to auto-resume conversation:', err);
       }
     })();
-  }, [refreshConversations, switchConversation]);
+    return () => {
+      cancelled = true;
+    };
+  }, [currentProject?.id, refreshConversations, resetAssistantState, scopedLastConversationKey, switchConversation]);
 
   const createNewConversation = useCallback(() => {
-    setConversationId(null);
-    setInitialMessages(undefined);
-    setTrackedJobs([]);
-    setRuntimeKey(`new-${Date.now()}`);
-    conversationCreatedRef.current = false;
-    try { localStorage.removeItem(LAST_CONVERSATION_KEY); } catch { /* noop */ }
-  }, []);
+    resetAssistantState('new');
+    if (scopedLastConversationKey) {
+      try { localStorage.removeItem(scopedLastConversationKey); } catch { /* noop */ }
+    }
+  }, [resetAssistantState, scopedLastConversationKey]);
 
   const handleDeleteConversation = useCallback(async (id: string) => {
     try {
@@ -909,15 +938,15 @@ export function ChatProvider({ children }: { children: ReactNode }) {
       }
       // Clear stored ID if the deleted conversation was the last one
       try {
-        if (localStorage.getItem(LAST_CONVERSATION_KEY) === id) {
-          localStorage.removeItem(LAST_CONVERSATION_KEY);
+        if (scopedLastConversationKey && localStorage.getItem(scopedLastConversationKey) === id) {
+          localStorage.removeItem(scopedLastConversationKey);
         }
       } catch { /* noop */ }
     } catch (err) {
       console.error('Failed to delete conversation:', err);
       toast.error('Failed to delete conversation');
     }
-  }, [conversationId, createNewConversation]);
+  }, [conversationId, createNewConversation, scopedLastConversationKey]);
 
   // Handle new messages: auto-create conversation and save with content_json
   const handleNewMessages = useCallback(async (messages: SaveableMessage[]) => {

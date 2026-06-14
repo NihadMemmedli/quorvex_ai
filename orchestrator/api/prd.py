@@ -22,11 +22,11 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlmodel import Session, select
 
 from .db import engine
-from .models_db import PrdGenerationEvent, PrdGenerationResult, Project, Requirement, SpecMetadata
+from .models_db import PrdGenerationEvent, PrdGenerationResult, Project, Requirement, SpecMetadata, get_spec_metadata
 
 # Import resource managers - using relative import since we're in orchestrator/api
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -252,6 +252,24 @@ def _is_stale_empty_prd_metadata(meta: dict[str, Any]) -> bool:
     return isinstance(features, list) and len(features) == 0 and total_chunks == 0
 
 
+def _generation_project_filter(project_id: str):
+    if project_id == "default":
+        return or_(PrdGenerationResult.project_id == None, PrdGenerationResult.project_id == "default")
+    return PrdGenerationResult.project_id == project_id
+
+
+def _get_generation_for_project(session: Session, generation_id: int, project_id: str) -> PrdGenerationResult:
+    gen = session.exec(
+        select(PrdGenerationResult).where(
+            PrdGenerationResult.id == generation_id,
+            _generation_project_filter(project_id),
+        )
+    ).first()
+    if not gen:
+        raise HTTPException(status_code=404, detail="Generation not found")
+    return gen
+
+
 @router.post("/upload", response_model=PRDResponse)
 async def upload_prd(
     file: UploadFile = File(...),
@@ -473,8 +491,15 @@ async def get_features(project_id: str, include_context: bool = False):
 
 
 @router.post("/{prd_project_id}/import-requirements", response_model=ImportRequirementsResponse)
-async def import_requirements(prd_project_id: str, tenant_project_id: str | None = Query(default=None)):
+async def import_requirements(
+    prd_project_id: str,
+    project_id: str | None = Query(default=None),
+    tenant_project_id: str | None = Query(default=None),
+):
     """Import extracted PRD feature requirements into the project requirements table."""
+    project_id = project_id if isinstance(project_id, str) else None
+    tenant_project_id = tenant_project_id if isinstance(tenant_project_id, str) else None
+
     metadata_path = BASE_DIR / "prds" / prd_project_id / "metadata.json"
     if not metadata_path.exists():
         raise HTTPException(status_code=404, detail="PRD project metadata not found")
@@ -487,7 +512,10 @@ async def import_requirements(prd_project_id: str, tenant_project_id: str | None
         logger.error("Failed to read PRD metadata for %s: %s", prd_project_id, exc, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to read PRD metadata")
 
-    target_project_id = tenant_project_id or data.get("tenant_project_id") or "default"
+    target_project_id = project_id or tenant_project_id or data.get("tenant_project_id")
+    if not target_project_id:
+        raise HTTPException(status_code=422, detail="project_id is required")
+
     extracted: list[tuple[str, str]] = []
     for feature in data.get("features", []):
         if not isinstance(feature, dict):
@@ -1237,7 +1265,7 @@ def _complete_generation(generation_id: int, spec_path: str):
                     # If not under specs dir, use the full path as fallback
                     spec_name = spec_path
 
-                existing = session.exec(select(SpecMetadata).where(SpecMetadata.spec_name == spec_name)).first()
+                existing = get_spec_metadata(session, spec_name, gen.project_id)
                 if not existing:
                     spec_meta = SpecMetadata(
                         spec_name=spec_name,
@@ -1245,9 +1273,6 @@ def _complete_generation(generation_id: int, spec_path: str):
                         description=f"Generated from PRD: {gen.prd_project} / {gen.feature_name}",
                     )
                     session.add(spec_meta)
-                elif existing.project_id != gen.project_id:
-                    # Update project_id if spec exists but with wrong project
-                    existing.project_id = gen.project_id
                     session.add(existing)
 
             session.add(gen)
@@ -1736,26 +1761,23 @@ async def generate_plan(project_id: str, request: GenerateRequest, background_ta
 
 
 @router.get("/generation/{generation_id}", response_model=GenerationStatusResponse)
-async def get_generation_status(generation_id: int):
+async def get_generation_status(generation_id: int, project_id: str = Query(...)):
     """Get status of a generation task (for polling)"""
     with Session(engine) as session:
-        gen = session.get(PrdGenerationResult, generation_id)
-        if not gen:
-            raise HTTPException(status_code=404, detail="Generation not found")
+        gen = _get_generation_for_project(session, generation_id, project_id)
         return await _generation_status_response_with_queue(gen)
 
 
 @router.get("/generation/{generation_id}/events", response_model=list[PrdGenerationEventResponse])
 async def list_generation_events(
     generation_id: int,
+    project_id: str = Query(...),
     after_sequence: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
 ):
     """List structured generation events after a sequence number."""
     with Session(engine) as session:
-        gen = session.get(PrdGenerationResult, generation_id)
-        if not gen:
-            raise HTTPException(status_code=404, detail="Generation not found")
+        _get_generation_for_project(session, generation_id, project_id)
         events = session.exec(
             select(PrdGenerationEvent)
             .where(PrdGenerationEvent.generation_id == generation_id)
@@ -1769,14 +1791,13 @@ async def list_generation_events(
 @router.get("/generation/{generation_id}/events/stream")
 async def stream_generation_events(
     generation_id: int,
+    project_id: str = Query(...),
     after_sequence: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
 ):
     """Stream structured generation events via SSE."""
     with Session(engine) as session:
-        gen = session.get(PrdGenerationResult, generation_id)
-        if not gen:
-            raise HTTPException(status_code=404, detail="Generation not found")
+        _get_generation_for_project(session, generation_id, project_id)
 
     async def generate():
         last_sequence = after_sequence
@@ -1784,7 +1805,12 @@ async def stream_generation_events(
             yield f"data: {json.dumps({'status': 'connected', 'after_sequence': after_sequence})}\n\n"
             while True:
                 with Session(engine) as check_session:
-                    current_gen = check_session.get(PrdGenerationResult, generation_id)
+                    current_gen = check_session.exec(
+                        select(PrdGenerationResult).where(
+                            PrdGenerationResult.id == generation_id,
+                            _generation_project_filter(project_id),
+                        )
+                    ).first()
                     if not current_gen:
                         yield f"data: {json.dumps({'status': 'error', 'message': 'Generation not found'})}\n\n"
                         break
@@ -1813,16 +1839,14 @@ async def stream_generation_events(
 
 
 @router.post("/generation/{generation_id}/stop")
-async def stop_generation(generation_id: int):
+async def stop_generation(generation_id: int, project_id: str = Query(...)):
     """Stop a running generation task.
 
     Cancels the asyncio task and updates the database status to 'cancelled'.
     """
     # 1. Validate generation exists
     with Session(engine) as session:
-        gen = session.get(PrdGenerationResult, generation_id)
-        if not gen:
-            raise HTTPException(status_code=404, detail="Generation not found")
+        gen = _get_generation_for_project(session, generation_id, project_id)
         agent_task_id = gen.agent_task_id or _generation_agent_task_id(generation_id)
 
         # 2. Check if it's actually running
@@ -1863,7 +1887,12 @@ async def stop_generation(generation_id: int):
 
     # 6. Append cancellation message to log file
     with Session(engine) as session:
-        gen = session.get(PrdGenerationResult, generation_id)
+        gen = session.exec(
+            select(PrdGenerationResult).where(
+                PrdGenerationResult.id == generation_id,
+                _generation_project_filter(project_id),
+            )
+        ).first()
         if gen and gen.log_path:
             log_path = Path(gen.log_path)
             if log_path.exists():
@@ -1875,7 +1904,7 @@ async def stop_generation(generation_id: int):
 
 
 @router.get("/generation/{generation_id}/log/stream")
-async def stream_generation_log(generation_id: int):
+async def stream_generation_log(generation_id: int, project_id: str = Query(...)):
     """Stream generation log in real-time using Server-Sent Events (SSE).
 
     This endpoint streams the generation.log file content as new lines are written.
@@ -1888,9 +1917,7 @@ async def stream_generation_log(generation_id: int):
         data: {"status": "complete", "final_status": "completed"}  -- Generation finished
     """
     with Session(engine) as session:
-        gen = session.get(PrdGenerationResult, generation_id)
-        if not gen:
-            raise HTTPException(status_code=404, detail="Generation not found")
+        _get_generation_for_project(session, generation_id, project_id)
 
     async def generate():
         last_position = 0
@@ -1904,7 +1931,12 @@ async def stream_generation_log(generation_id: int):
                 try:
                     # Check database for current status and log_path
                     with Session(engine) as check_session:
-                        current_gen = check_session.get(PrdGenerationResult, generation_id)
+                        current_gen = check_session.exec(
+                            select(PrdGenerationResult).where(
+                                PrdGenerationResult.id == generation_id,
+                                _generation_project_filter(project_id),
+                            )
+                        ).first()
                         if not current_gen:
                             yield f"data: {json.dumps({'status': 'error', 'message': 'Generation not found'})}\n\n"
                             break
@@ -1976,13 +2008,14 @@ async def stream_generation_log(generation_id: int):
     )
 
 
-@router.get("/{project_id}/generations")
-async def list_generations(project_id: str, limit: int = 50):
+@router.get("/{prd_project_id}/generations")
+async def list_generations(prd_project_id: str, project_id: str = Query(...), limit: int = 50):
     """List generation results for a PRD project (for loading history)"""
     with Session(engine) as session:
         statement = (
             select(PrdGenerationResult)
-            .where(PrdGenerationResult.prd_project == project_id)
+            .where(PrdGenerationResult.prd_project == prd_project_id)
+            .where(_generation_project_filter(project_id))
             .order_by(PrdGenerationResult.created_at.desc())
             .limit(limit)
         )

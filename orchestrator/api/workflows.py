@@ -782,6 +782,12 @@ async def _ensure_write_access(project_id: str | None, user: Any, session: Sessi
         await check_project_access(project_id, user, [ProjectRole.ADMIN, ProjectRole.EDITOR], session)
 
 
+def _project_matches(row_project_id: str | None, project_id: str) -> bool:
+    if project_id == "default":
+        return row_project_id in (None, "default")
+    return row_project_id == project_id
+
+
 def _get_definition_or_404(definition_id: str, project_id: str | None, session: Session) -> WorkflowDefinition:
     definition = session.get(WorkflowDefinition, definition_id)
     if not definition or definition.status == "archived":
@@ -793,6 +799,20 @@ def _get_definition_or_404(definition_id: str, project_id: str | None, session: 
         elif definition.project_id != project_id:
             raise HTTPException(status_code=404, detail="Workflow definition not found")
     return definition
+
+
+def _get_run_or_404(run_id: str, project_id: str, session: Session) -> WorkflowRun:
+    run = session.get(WorkflowRun, run_id)
+    if not run or not _project_matches(run.project_id, project_id):
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    return run
+
+
+def _get_schedule_or_404(schedule_id: str, project_id: str, session: Session) -> WorkflowSchedule:
+    schedule = session.get(WorkflowSchedule, schedule_id)
+    if not schedule or not _project_matches(schedule.project_id, project_id):
+        raise HTTPException(status_code=404, detail="Workflow schedule not found")
+    return schedule
 
 
 def _validate_recovery_policy(policy: dict[str, Any], *, label: str = "recovery_policy") -> dict[str, Any]:
@@ -1180,10 +1200,11 @@ def list_workflow_schedules(
 @router.post("/schedules")
 async def create_workflow_schedule(
     request: WorkflowScheduleRequest,
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
     user=Depends(get_current_user_optional),
 ):
-    definition = _get_definition_or_404(request.definition_id, None, session)
+    definition = _get_definition_or_404(request.definition_id, project_id, session)
     await _ensure_write_access(definition.project_id, user, session)
     next_run = _validate_cron(request.cron_expression, request.timezone)
     if request.start_step_key and not any(step.get("key") == request.start_step_key for step in definition.steps):
@@ -1237,12 +1258,11 @@ async def create_workflow_schedule(
 async def update_workflow_schedule(
     schedule_id: str,
     request: WorkflowScheduleUpdateRequest,
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
     user=Depends(get_current_user_optional),
 ):
-    schedule = session.get(WorkflowSchedule, schedule_id)
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Workflow schedule not found")
+    schedule = _get_schedule_or_404(schedule_id, project_id, session)
     await _ensure_write_access(schedule.project_id, user, session)
     definition = _get_definition_or_404(schedule.definition_id, schedule.project_id, session)
     before = _schedule_event_payload(schedule)
@@ -1312,12 +1332,11 @@ async def update_workflow_schedule(
 @router.delete("/schedules/{schedule_id}")
 async def delete_workflow_schedule(
     schedule_id: str,
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
     user=Depends(get_current_user_optional),
 ):
-    schedule = session.get(WorkflowSchedule, schedule_id)
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Workflow schedule not found")
+    schedule = _get_schedule_or_404(schedule_id, project_id, session)
     await _ensure_write_access(schedule.project_id, user, session)
     try:
         from orchestrator.services.scheduler import remove_schedule_job
@@ -1351,12 +1370,11 @@ async def delete_workflow_schedule(
 async def run_workflow_schedule_now(
     schedule_id: str,
     background_tasks: BackgroundTasks,
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
     user=Depends(get_current_user_optional),
 ):
-    schedule = session.get(WorkflowSchedule, schedule_id)
-    if not schedule:
-        raise HTTPException(status_code=404, detail="Workflow schedule not found")
+    schedule = _get_schedule_or_404(schedule_id, project_id, session)
     await _ensure_write_access(schedule.project_id, user, session)
     execution = WorkflowScheduleExecution(
         schedule_id=schedule.id,
@@ -1392,11 +1410,11 @@ async def run_workflow_schedule_now(
 @router.get("/schedules/{schedule_id}/executions")
 def list_workflow_schedule_executions(
     schedule_id: str,
+    project_id: str = Query(...),
     limit: int = Query(default=20, ge=1, le=100),
     session: Session = Depends(get_session),
 ):
-    if not session.get(WorkflowSchedule, schedule_id):
-        raise HTTPException(status_code=404, detail="Workflow schedule not found")
+    _get_schedule_or_404(schedule_id, project_id, session)
     executions = session.exec(
         select(WorkflowScheduleExecution)
         .where(WorkflowScheduleExecution.schedule_id == schedule_id)
@@ -1470,7 +1488,7 @@ async def create_workflow_definition(
 @router.get("/definitions/{definition_id}")
 def get_workflow_definition(
     definition_id: str,
-    project_id: str | None = Query(default=None),
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
 ):
     return _definition_to_dict(_get_definition_or_404(definition_id, project_id, session))
@@ -1479,7 +1497,7 @@ def get_workflow_definition(
 @router.get("/definitions/{definition_id}/export")
 def export_workflow_definition(
     definition_id: str,
-    project_id: str | None = Query(default=None),
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
 ):
     definition = _get_definition_or_404(definition_id, project_id, session)
@@ -1489,7 +1507,7 @@ def export_workflow_definition(
 @router.post("/definitions/{definition_id}/duplicate")
 async def duplicate_workflow_definition(
     definition_id: str,
-    project_id: str | None = Query(default=None),
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
     user=Depends(get_current_user_optional),
 ):
@@ -1513,7 +1531,7 @@ async def duplicate_workflow_definition(
 @router.get("/definitions/{definition_id}/runs")
 def list_definition_runs(
     definition_id: str,
-    project_id: str | None = Query(default=None),
+    project_id: str = Query(...),
     limit: int = Query(default=20, ge=1, le=100),
     session: Session = Depends(get_session),
 ):
@@ -1530,7 +1548,7 @@ def list_definition_runs(
 @router.get("/definitions/{definition_id}/revisions")
 def list_definition_revisions(
     definition_id: str,
-    project_id: str | None = Query(default=None),
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
 ):
     definition = _get_definition_or_404(definition_id, project_id, session)
@@ -1548,7 +1566,7 @@ def list_definition_revisions(
 def get_definition_revision(
     definition_id: str,
     version: int,
-    project_id: str | None = Query(default=None),
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
 ):
     definition = _get_definition_or_404(definition_id, project_id, session)
@@ -1566,7 +1584,7 @@ def get_definition_revision(
 def preview_definition_revision_rollback(
     definition_id: str,
     version: int,
-    project_id: str | None = Query(default=None),
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
 ):
     definition = _get_definition_or_404(definition_id, project_id, session)
@@ -1608,7 +1626,7 @@ async def rollback_definition_revision(
     definition_id: str,
     version: int,
     request: WorkflowRollbackRequest,
-    project_id: str | None = Query(default=None),
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
     user=Depends(get_current_user_optional),
 ):
@@ -1650,7 +1668,7 @@ async def rollback_definition_revision(
 async def update_workflow_definition(
     definition_id: str,
     request: WorkflowDefinitionUpdateRequest,
-    project_id: str | None = Query(default=None),
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
     user=Depends(get_current_user_optional),
 ):
@@ -1696,7 +1714,7 @@ async def update_workflow_definition(
 @router.delete("/definitions/{definition_id}")
 async def archive_workflow_definition(
     definition_id: str,
-    project_id: str | None = Query(default=None),
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
     user=Depends(get_current_user_optional),
 ):
@@ -1714,7 +1732,7 @@ async def start_workflow_run(
     definition_id: str,
     request: WorkflowRunRequest,
     background_tasks: BackgroundTasks,
-    project_id: str | None = Query(default=None),
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
     user=Depends(get_current_user_optional),
 ):
@@ -1808,18 +1826,22 @@ def list_workflow_runs(
 
 
 @router.get("/runs/{run_id}")
-def get_workflow_run(run_id: str, session: Session = Depends(get_session)):
-    run = session.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+def get_workflow_run(
+    run_id: str,
+    project_id: str = Query(...),
+    session: Session = Depends(get_session),
+):
+    run = _get_run_or_404(run_id, project_id, session)
     return _run_to_dict(run, session)
 
 
 @router.get("/runs/{run_id}/diagnostics")
-async def get_workflow_run_diagnostics(run_id: str, session: Session = Depends(get_session)):
-    run = session.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+async def get_workflow_run_diagnostics(
+    run_id: str,
+    project_id: str = Query(...),
+    session: Session = Depends(get_session),
+):
+    run = _get_run_or_404(run_id, project_id, session)
 
     payload: dict[str, Any] = {
         "run_id": run.id,
@@ -1858,18 +1880,20 @@ async def get_workflow_run_diagnostics(run_id: str, session: Session = Depends(g
 async def get_workflow_run_debug(
     run_id: str,
     include_temporal: bool = Query(default=True),
+    project_id: str = Query(...),
     session: Session = Depends(get_session),
 ):
-    run = session.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+    run = _get_run_or_404(run_id, project_id, session)
     return await _workflow_debug_payload(run, session, include_temporal=include_temporal)
 
 
 @router.get("/runs/{run_id}/steps")
-def list_workflow_run_steps(run_id: str, session: Session = Depends(get_session)):
-    if not session.get(WorkflowRun, run_id):
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+def list_workflow_run_steps(
+    run_id: str,
+    project_id: str = Query(...),
+    session: Session = Depends(get_session),
+):
+    _get_run_or_404(run_id, project_id, session)
     steps = session.exec(
         select(WorkflowRunStep).where(WorkflowRunStep.run_id == run_id).order_by(WorkflowRunStep.step_order)
     ).all()
@@ -1877,10 +1901,14 @@ def list_workflow_run_steps(run_id: str, session: Session = Depends(get_session)
 
 
 @router.post("/runs/{run_id}/steps/{step_id}/retry")
-async def retry_workflow_run_step(run_id: str, step_id: int, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
-    run = session.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+async def retry_workflow_run_step(
+    run_id: str,
+    step_id: int,
+    background_tasks: BackgroundTasks,
+    project_id: str = Query(...),
+    session: Session = Depends(get_session),
+):
+    run = _get_run_or_404(run_id, project_id, session)
     step = session.get(WorkflowRunStep, step_id)
     if not step or step.run_id != run_id:
         raise HTTPException(status_code=404, detail="Workflow run step not found")
@@ -1909,10 +1937,12 @@ async def retry_workflow_run_step(run_id: str, step_id: int, background_tasks: B
 
 
 @router.post("/runs/{run_id}/pause")
-async def pause_workflow_run(run_id: str, session: Session = Depends(get_session)):
-    run = session.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+async def pause_workflow_run(
+    run_id: str,
+    project_id: str = Query(...),
+    session: Session = Depends(get_session),
+):
+    run = _get_run_or_404(run_id, project_id, session)
     if run.status in TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail="Cannot pause a terminal workflow run")
     run.status = "paused"
@@ -1947,10 +1977,13 @@ async def pause_workflow_run(run_id: str, session: Session = Depends(get_session
 
 
 @router.post("/runs/{run_id}/resume")
-async def resume_workflow_run(run_id: str, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
-    run = session.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+async def resume_workflow_run(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    project_id: str = Query(...),
+    session: Session = Depends(get_session),
+):
+    run = _get_run_or_404(run_id, project_id, session)
     if run.status in TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail="Cannot resume a terminal workflow run")
     previous_status = run.status
@@ -1999,10 +2032,12 @@ async def resume_workflow_run(run_id: str, background_tasks: BackgroundTasks, se
 
 
 @router.post("/runs/{run_id}/cancel")
-async def cancel_workflow_run(run_id: str, session: Session = Depends(get_session)):
-    run = session.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+async def cancel_workflow_run(
+    run_id: str,
+    project_id: str = Query(...),
+    session: Session = Depends(get_session),
+):
+    run = _get_run_or_404(run_id, project_id, session)
     if run.status in TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail="Workflow run is already terminal")
     child_cancel = await cancel_workflow_child_agent_runs(run, session, reason="workflow_cancelled")
@@ -2038,10 +2073,14 @@ async def cancel_workflow_run(run_id: str, session: Session = Depends(get_sessio
 
 
 @router.post("/runs/{run_id}/steps/{step_id}/skip")
-async def skip_workflow_run_step(run_id: str, step_id: int, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
-    run = session.get(WorkflowRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Workflow run not found")
+async def skip_workflow_run_step(
+    run_id: str,
+    step_id: int,
+    background_tasks: BackgroundTasks,
+    project_id: str = Query(...),
+    session: Session = Depends(get_session),
+):
+    run = _get_run_or_404(run_id, project_id, session)
     step = session.get(WorkflowRunStep, step_id)
     if not step or step.run_id != run_id:
         raise HTTPException(status_code=404, detail="Workflow run step not found")

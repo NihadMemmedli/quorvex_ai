@@ -3576,10 +3576,11 @@ export default function AgentsPage() {
             if (!res.ok) {
                 throw new Error(data.detail || 'Failed to retry agent run');
             }
+            setActiveRun(data);
             await fetchHistory();
-            selectRun(data.run_id || data.id);
-            setWorkspaceStatus('Retry agent run started.');
-            toast.success('Retry agent run started');
+            selectRun(activeRun.id);
+            setWorkspaceStatus('Retrying in same run using saved browser auth/session artifacts.');
+            toast.success('Retrying in same run');
         } catch (e: any) {
             toast.error(e.message || 'Failed to retry agent run');
         } finally {

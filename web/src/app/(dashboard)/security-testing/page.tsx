@@ -3,8 +3,8 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { ShieldAlert, Play, FileCode, Clock, Bug } from 'lucide-react';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
-import { useProject } from '@/contexts/ProjectContext';
-import { API_BASE } from '@/lib/api';
+import { useRequiredProject } from '@/contexts/ProjectContext';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { applyProjectDefaultUrl, getProjectDefaultUrl, trimUrlInput } from '@/lib/project-url';
 import { createTabStyle, getAuthHeaders, cardStyle } from '@/lib/styles';
 import { severityColor } from '@/lib/colors';
@@ -24,8 +24,7 @@ import HistoryTab from './components/HistoryTab';
 import FindingsTab from './components/FindingsTab';
 
 export default function SecurityTestingPage() {
-    const { currentProject } = useProject();
-    const projectId = currentProject?.id || 'default';
+    const { currentProject, projectId } = useRequiredProject();
     const projectDefaultUrl = getProjectDefaultUrl(currentProject);
     const previousProjectDefaultUrlRef = useRef('');
 
@@ -69,21 +68,21 @@ export default function SecurityTestingPage() {
 
     const fetchSpecs = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/security-testing/specs?project_id=${projectId}`, { headers: getAuthHeaders() });
+            const res = await fetch(`${API_BASE}${withProjectQuery('/security-testing/specs', projectId)}`, { headers: getAuthHeaders() });
             if (res.ok) setSpecs(await res.json());
         } catch (e) { console.error('Failed to fetch specs:', e); }
     }, [projectId]);
 
     const fetchRuns = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/security-testing/runs?project_id=${projectId}&limit=50`, { headers: getAuthHeaders() });
+            const res = await fetch(`${API_BASE}${withProjectQuery('/security-testing/runs?limit=50', projectId)}`, { headers: getAuthHeaders() });
             if (res.ok) { const data = await res.json(); setRuns(data.runs || []); }
         } catch (e) { console.error('Failed to fetch runs:', e); }
     }, [projectId]);
 
     const fetchFindingSummary = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/security-testing/findings/summary?project_id=${projectId}`, { headers: getAuthHeaders() });
+            const res = await fetch(`${API_BASE}${withProjectQuery('/security-testing/findings/summary', projectId)}`, { headers: getAuthHeaders() });
             if (res.ok) {
                 const data = await res.json();
                 const bySev = data.by_severity || {};
@@ -109,7 +108,7 @@ export default function SecurityTestingPage() {
 
     const fetchTargets = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/security-testing/targets?project_id=${projectId}`, { headers: getAuthHeaders() });
+            const res = await fetch(`${API_BASE}${withProjectQuery('/security-testing/targets', projectId)}`, { headers: getAuthHeaders() });
             if (res.ok) {
                 const data = await res.json();
                 setTargets(data.targets || []);
@@ -119,7 +118,7 @@ export default function SecurityTestingPage() {
 
     const fetchCredentials = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/projects/${projectId}/credentials?include_env=true`, { headers: getAuthHeaders() });
+            const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(projectId)}/credentials?include_env=true`, { headers: getAuthHeaders() });
             if (res.ok) {
                 const data = await res.json();
                 setCredentials(data.credentials || []);
@@ -151,7 +150,7 @@ export default function SecurityTestingPage() {
         if (!activeJobId) return;
         const poll = async () => {
             try {
-                const res = await fetch(`${API_BASE}/security-testing/jobs/${activeJobId}`, { headers: getAuthHeaders() });
+                const res = await fetch(`${API_BASE}${withProjectQuery(`/security-testing/jobs/${activeJobId}`, projectId)}`, { headers: getAuthHeaders() });
                 if (res.ok) {
                     const data = await res.json();
                     setJobStatus(data);
@@ -168,7 +167,7 @@ export default function SecurityTestingPage() {
         poll();
         pollRef.current = setInterval(poll, 2000);
         return () => { if (pollRef.current) clearInterval(pollRef.current); };
-    }, [activeJobId, fetchRuns, fetchFindingSummary]);
+    }, [activeJobId, projectId, fetchRuns, fetchFindingSummary]);
 
     // ========== Actions ==========
 
@@ -178,12 +177,11 @@ export default function SecurityTestingPage() {
         setIsScanning(true);
         setJobStatus(null);
         try {
-            const body: Record<string, unknown> = {
+            const body: Record<string, unknown> = withProjectBody({
                 target_url: targetUrl,
-                project_id: projectId,
                 active_scan_level: activeScanLevel,
                 excluded_paths: excludedPaths.split('\n').map(p => p.trim()).filter(Boolean),
-            };
+            }, projectId);
             if (authEnabled) {
                 body.auth_config = {
                     enabled: true,
@@ -214,24 +212,24 @@ export default function SecurityTestingPage() {
 
     const updateFindingStatus = useCallback(async (findingId: number, newStatus: string, notes?: string) => {
         try {
-            await fetch(`${API_BASE}/security-testing/findings/${findingId}/status`, {
+            await fetch(`${API_BASE}${withProjectQuery(`/security-testing/findings/${findingId}/status`, projectId)}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                body: JSON.stringify({ status: newStatus, notes }),
+                body: JSON.stringify(withProjectBody({ status: newStatus, notes }, projectId)),
             });
             fetchFindingSummary();
         } catch (e) { console.error('Update finding status failed:', e); }
-    }, [fetchFindingSummary]);
+    }, [fetchFindingSummary, projectId]);
 
     const stopScan = useCallback(async (runId: string) => {
         try {
-            await fetch(`${API_BASE}/security-testing/runs/${runId}/stop`, {
+            await fetch(`${API_BASE}${withProjectQuery(`/security-testing/runs/${runId}/stop`, projectId)}`, {
                 method: 'POST',
                 headers: getAuthHeaders(),
             });
             fetchRuns();
         } catch (e) { console.error('Stop security scan failed:', e); }
-    }, [fetchRuns]);
+    }, [fetchRuns, projectId]);
 
     // ========== Render ==========
 
@@ -334,6 +332,7 @@ export default function SecurityTestingPage() {
             {activeTab === 'history' && visitedTabs.has('history') && (
                 <HistoryTab
                     runs={runs}
+                    projectId={projectId}
                     fetchRuns={fetchRuns}
                     onStatusChange={updateFindingStatus}
                     onStopScan={stopScan}

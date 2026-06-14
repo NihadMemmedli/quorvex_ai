@@ -1,4 +1,4 @@
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import { fetchWithAuth } from '@/contexts/AuthContext';
 
 export interface Conversation {
@@ -134,9 +134,8 @@ export async function generateSummary(conversationId: string): Promise<{ summary
 }
 
 export async function getProjectContext(projectId?: string): Promise<{ recent_runs: number; recent_failures: number; total_requirements: number; recent_explorations: number }> {
-  const params = new URLSearchParams();
-  if (projectId) params.set('project_id', projectId);
-  const res = await fetchWithAuth(`${API_BASE}/chat/project-context?${params}`);
+  if (!projectId) return { recent_runs: 0, recent_failures: 0, total_requirements: 0, recent_explorations: 0 };
+  const res = await fetchWithAuth(`${API_BASE}${withProjectQuery('/chat/project-context', projectId)}`);
   if (!res.ok) return { recent_runs: 0, recent_failures: 0, total_requirements: 0, recent_explorations: 0 };
   return res.json();
 }

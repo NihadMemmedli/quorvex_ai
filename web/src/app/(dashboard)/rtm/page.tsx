@@ -30,6 +30,7 @@ import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { EmptyState } from '@/components/ui/empty-state';
 import { DashboardPageSkeleton } from '@/components/ui/page-skeleton';
+import { projectQuery, rtmGenerateJobStatusUrl } from './rtm-api';
 
 interface RtmRequirement {
     id: number;
@@ -137,10 +138,6 @@ const priorityStyles: Record<string, { bg: string; color: string }> = {
 
 const rtmCategories = ['accessibility', 'authentication', 'data_display', 'error_handling', 'forms', 'navigation', 'other', 'performance', 'security'];
 const rtmCoverageFilters = ['all', 'covered', 'partial', 'uncovered'] as const;
-
-function projectQuery(projectId?: string) {
-    return projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
-}
 
 function initialCoverageFilter(): typeof rtmCoverageFilters[number] {
     if (typeof window === 'undefined') return 'all';
@@ -411,7 +408,7 @@ export default function RtmPage() {
                         return;
                     }
 
-                    const pollRes = await fetch(`${API_BASE}/rtm/generate-jobs/${data.job_id}`);
+                    const pollRes = await fetch(rtmGenerateJobStatusUrl(API_BASE, data.job_id, projectId));
                     if (!pollRes.ok) {
                         if (generationPollRef.current) clearInterval(generationPollRef.current);
                         generationPollRef.current = null;

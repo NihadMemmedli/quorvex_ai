@@ -2,8 +2,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { Loader2, TrendingUp } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
-import { useProject } from '@/contexts/ProjectContext';
+import { API_BASE, withProjectQuery } from '@/lib/api';
+import { useRequiredProject } from '@/contexts/ProjectContext';
 import { timeAgo } from '@/lib/formatting';
 import { getResponseTimeColor, getErrorRateColor } from '@/lib/colors';
 import type { TrendData } from './types';
@@ -24,8 +24,7 @@ interface TrendViewProps {
 }
 
 export default function TrendView({ specName }: TrendViewProps) {
-    const { currentProject } = useProject();
-    const projectId = currentProject?.id || 'default';
+    const { projectId } = useRequiredProject();
 
     const [runs, setRuns] = useState<TrendData[]>([]);
     const [loading, setLoading] = useState(true);
@@ -34,7 +33,7 @@ export default function TrendView({ specName }: TrendViewProps) {
         setLoading(true);
         try {
             const res = await fetch(
-                `${API_BASE}/load-testing/runs/trends?spec_name=${encodeURIComponent(specName)}&limit=20&project_id=${projectId}`
+                `${API_BASE}${withProjectQuery(`/load-testing/runs/trends?spec_name=${encodeURIComponent(specName)}&limit=20`, projectId)}`
             );
             if (res.ok) {
                 const data = await res.json();

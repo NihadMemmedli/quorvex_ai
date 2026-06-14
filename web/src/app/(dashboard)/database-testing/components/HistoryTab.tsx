@@ -5,16 +5,17 @@ import { formatDate, formatDuration } from '@/lib/formatting';
 import { cardStyle, btnSecondary } from '@/lib/styles';
 import { getAuthHeaders } from '@/lib/styles';
 import { SeverityBadge, StatusBadge } from '@/components/shared';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import CheckResultRow from './CheckResultRow';
 import type { DbTestRun, DbTestCheck, SchemaFinding } from './types';
 
 interface HistoryTabProps {
     runs: DbTestRun[];
+    projectId: string;
     onRefreshRuns: () => void;
 }
 
-export default function HistoryTab({ runs, onRefreshRuns }: HistoryTabProps) {
+export default function HistoryTab({ runs, projectId, onRefreshRuns }: HistoryTabProps) {
     const [selectedRun, setSelectedRun] = useState<DbTestRun | null>(null);
     const [runChecks, setRunChecks] = useState<DbTestCheck[]>([]);
     const [runFindings, setRunFindings] = useState<SchemaFinding[]>([]);
@@ -27,7 +28,7 @@ export default function HistoryTab({ runs, onRefreshRuns }: HistoryTabProps) {
         setRunFindings([]);
         try {
             if (runType === 'schema_analysis') {
-                const res = await fetch(`${API_BASE}/database-testing/runs/${runId}/schema`, {
+                const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/runs/${runId}/schema`, projectId)}`, {
                     headers: getAuthHeaders(),
                 });
                 if (res.ok) {
@@ -39,7 +40,7 @@ export default function HistoryTab({ runs, onRefreshRuns }: HistoryTabProps) {
                     }
                 }
             } else {
-                const res = await fetch(`${API_BASE}/database-testing/runs/${runId}/checks`, {
+                const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/runs/${runId}/checks`, projectId)}`, {
                     headers: getAuthHeaders(),
                 });
                 if (res.ok) {
@@ -49,7 +50,7 @@ export default function HistoryTab({ runs, onRefreshRuns }: HistoryTabProps) {
             }
         } catch (e) { console.error('Failed to fetch run data:', e); }
         setRunDataLoaded(true);
-    }, []);
+    }, [projectId]);
 
     return (
         <div style={cardStyle}>

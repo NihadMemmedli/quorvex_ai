@@ -9,9 +9,9 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { useProject } from '@/contexts/ProjectContext';
+import { useRequiredProject } from '@/contexts/ProjectContext';
 import { LiveBrowserView } from '@/components/LiveBrowserView';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 
@@ -49,7 +49,7 @@ function isStreamingRunData(runData: any): boolean {
 export default function RunDetailPage() {
     const params = useParams();
     const id = params?.id as string;
-    const { currentProject } = useProject();
+    const { currentProject, projectId, isLoading: projectLoading } = useRequiredProject();
     const [data, setData] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [copied, setCopied] = useState(false);
@@ -70,14 +70,13 @@ export default function RunDetailPage() {
     const [creatingIssue, setCreatingIssue] = useState(false);
     const [jiraConfig, setJiraConfig] = useState<{ configured: boolean; project_key?: string; issue_type_id?: string } | null>(null);
 
-    // Build project query param for API calls
-    const projectParam = currentProject?.id ? `?project_id=${encodeURIComponent(currentProject.id)}` : '';
     const currentRunStatus = getRunStatus(data);
     const currentRunIsActive = isActiveRunData(data);
     const currentRunIsStreaming = isStreamingRunData(data);
 
     const fetchRunData = useCallback(() => {
-        return fetch(`${API_BASE}/runs/${id}${projectParam}`)
+        if (!projectId) return Promise.resolve(null);
+        return fetch(`${API_BASE}${withProjectQuery(`/runs/${id}`, projectId)}`)
             .then(res => res.json())
             .then(d => {
                 setData(d);
@@ -89,14 +88,14 @@ export default function RunDetailPage() {
                 setLoading(false);
                 return null;
             });
-    }, [id, projectParam]);
+    }, [id, projectId]);
 
     useEffect(() => {
-        if (!id) return;
+        if (!id || projectLoading || !projectId) return;
         setViewMode('log');
         setAutoSelectedBrowser(false);
         fetchRunData();
-    }, [id, fetchRunData]);
+    }, [id, projectId, projectLoading, fetchRunData]);
 
     useEffect(() => {
         if (!data || autoSelectedBrowser) return;
@@ -107,7 +106,7 @@ export default function RunDetailPage() {
     }, [data, currentRunIsActive, autoSelectedBrowser]);
 
     useEffect(() => {
-        if (!id || !currentRunIsActive) return;
+        if (!id || !projectId || !currentRunIsActive) return;
 
         const interval = window.setInterval(async () => {
             const latest = await fetchRunData();
@@ -117,7 +116,7 @@ export default function RunDetailPage() {
         }, 3000);
 
         return () => window.clearInterval(interval);
-    }, [id, currentRunIsActive, fetchRunData]);
+    }, [id, projectId, currentRunIsActive, fetchRunData]);
 
     // Check if Jira issue exists for this run + load Jira config
     useEffect(() => {
@@ -147,7 +146,7 @@ export default function RunDetailPage() {
         setIsStreaming(true);
         setStreamingLog(''); // Reset streaming log
 
-        const eventSource = new EventSource(`${API_BASE}/runs/${id}/log/stream`);
+        const eventSource = new EventSource(`${API_BASE}${withProjectQuery(`/runs/${id}/log/stream`, projectId)}`);
 
         eventSource.onmessage = (event) => {
             try {
@@ -182,7 +181,7 @@ export default function RunDetailPage() {
         return () => {
             eventSource.close();
         };
-    }, [currentRunIsStreaming, id, fetchRunData]);
+    }, [currentRunIsStreaming, id, projectId, fetchRunData]);
 
     if (loading) return (
         <PageLayout tier="standard">
@@ -284,11 +283,11 @@ export default function RunDetailPage() {
         if (!confirm('Are you sure you want to stop this run?')) return;
 
         try {
-            const res = await fetch(`${API_BASE}/runs/${id}/stop${projectParam}`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/runs/${id}/stop`, projectId)}`, { method: 'POST' });
             const json = await res.json();
             if (json.status === 'stopped') {
                 // Refresh data
-                const res2 = await fetch(`${API_BASE}/runs/${id}${projectParam}`);
+                const res2 = await fetch(`${API_BASE}${withProjectQuery(`/runs/${id}`, projectId)}`);
                 const d = await res2.json();
                 setData(d);
             } else {

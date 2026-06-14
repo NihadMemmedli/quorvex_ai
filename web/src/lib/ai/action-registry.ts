@@ -588,7 +588,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'high',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/security-testing/runs/${encodeURIComponent(String(args.runId))}/stop`,
+    getPath: (args, pid) => `/security-testing/runs/${encodeURIComponent(String(args.runId))}/stop?project_id=${encodeURIComponent(pid || 'default')}`,
   },
   createSecuritySpec: {
     label: 'Create Security Spec',
@@ -795,6 +795,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     requiredRole: 'editor',
     confirmationRequired: true,
     getPath: (args) => `/security-testing/analyze/${args.runId}`,
+    getBody: (_args, pid) => ({ project_id: pid || 'default' }),
   },
   triageSecurityFinding: {
     label: 'Triage Security Finding',
@@ -802,7 +803,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'medium',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/security-testing/findings/${args.findingId}/status`,
+    getPath: (args, pid) => `/security-testing/findings/${args.findingId}/status?project_id=${encodeURIComponent(pid || 'default')}`,
     getBody: (args) => ({ status: args.status, notes: args.notes }),
   },
   suggestLlmSpecImprovements: {
@@ -1040,7 +1041,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'medium',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/workflows/definitions/${encodeURIComponent(String(args.workflowId))}/duplicate`,
+    getPath: (args, pid) => `/workflows/definitions/${encodeURIComponent(String(args.workflowId))}/duplicate?project_id=${encodeURIComponent(pid || 'default')}`,
   },
   archiveWorkflow: {
     label: 'Archive Custom Workflow',
@@ -1082,7 +1083,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'medium',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/steps/${encodeURIComponent(String(args.stepId))}/retry`,
+    getPath: (args, pid) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/steps/${encodeURIComponent(String(args.stepId))}/retry?project_id=${encodeURIComponent(pid || 'default')}`,
   },
   pauseWorkflowRun: {
     label: 'Pause Custom Workflow Run',
@@ -1090,7 +1091,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'high',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/pause`,
+    getPath: (args, pid) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/pause?project_id=${encodeURIComponent(pid || 'default')}`,
   },
   resumeWorkflowRun: {
     label: 'Resume Custom Workflow Run',
@@ -1098,7 +1099,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'medium',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/resume`,
+    getPath: (args, pid) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/resume?project_id=${encodeURIComponent(pid || 'default')}`,
   },
   cancelWorkflowRun: {
     label: 'Cancel Custom Workflow Run',
@@ -1106,7 +1107,7 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
     risk: 'destructive',
     requiredRole: 'editor',
     confirmationRequired: true,
-    getPath: (args) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/cancel`,
+    getPath: (args, pid) => `/workflows/runs/${encodeURIComponent(String(args.runId))}/cancel?project_id=${encodeURIComponent(pid || 'default')}`,
   },
   createProject: {
     label: 'Create Project',

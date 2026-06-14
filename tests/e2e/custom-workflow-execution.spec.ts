@@ -135,7 +135,7 @@ async function startRun(
 }
 
 async function readRun(request: APIRequestContext, token: string, runId: string) {
-  const response = await request.get(`${API_BASE}/workflows/runs/${runId}`, {
+  const response = await request.get(`${API_BASE}/workflows/runs/${runId}?project_id=${PROJECT_ID}`, {
     headers: authHeaders(token),
   });
 
@@ -181,7 +181,7 @@ async function cancelRunIfActive(request: APIRequestContext, token: string, runI
   if (!runId) {
     return;
   }
-  const run = await request.get(`${API_BASE}/workflows/runs/${runId}`, {
+  const run = await request.get(`${API_BASE}/workflows/runs/${runId}?project_id=${PROJECT_ID}`, {
     headers: authHeaders(token),
     failOnStatusCode: false,
   });
@@ -192,7 +192,7 @@ async function cancelRunIfActive(request: APIRequestContext, token: string, runI
   if (['completed', 'failed', 'cancelled'].includes(body.status)) {
     return;
   }
-  await request.post(`${API_BASE}/workflows/runs/${runId}/cancel`, {
+  await request.post(`${API_BASE}/workflows/runs/${runId}/cancel?project_id=${PROJECT_ID}`, {
     headers: authHeaders(token),
     failOnStatusCode: false,
   });
@@ -283,7 +283,7 @@ test.describe('Custom workflow execution e2e', () => {
         expect.arrayContaining(['workflow.run_created', 'workflow.started', 'workflow.review_needed']),
       );
 
-      const resume = await request.post(`${API_BASE}/workflows/runs/${runId}/resume`, {
+      const resume = await request.post(`${API_BASE}/workflows/runs/${runId}/resume?project_id=${PROJECT_ID}`, {
         headers: authHeaders(token),
       });
       expect(resume.ok(), `Workflow resume failed: ${await resume.text()}`).toBeTruthy();
@@ -389,7 +389,7 @@ test.describe('Custom workflow execution e2e', () => {
       runId = started.run_id;
       await pollRunStatus(request, token, runId, ['awaiting_input']);
 
-      const cancel = await request.post(`${API_BASE}/workflows/runs/${runId}/cancel`, {
+      const cancel = await request.post(`${API_BASE}/workflows/runs/${runId}/cancel?project_id=${PROJECT_ID}`, {
         headers: authHeaders(token),
       });
       expect(cancel.ok(), `Workflow cancel failed: ${await cancel.text()}`).toBeTruthy();

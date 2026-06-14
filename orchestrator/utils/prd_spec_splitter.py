@@ -25,7 +25,14 @@ class PRDSpecSplitter:
 
     @classmethod
     def split_spec(
-        cls, spec_path: Path, output_dir: Path | None = None, use_ai: bool = True, mode: str = "individual"
+        cls,
+        spec_path: Path,
+        output_dir: Path | None = None,
+        use_ai: bool = True,
+        mode: str = "individual",
+        runtime_env_vars: dict[str, str] | None = None,
+        ai_fallback: bool = True,
+        return_metadata: bool = False,
     ) -> tuple:
         """
         Split a multi-test spec into individual or grouped test spec files.
@@ -35,9 +42,13 @@ class PRDSpecSplitter:
             output_dir: Directory to save individual specs (default: same directory as input)
             use_ai: Whether to use AI extraction (True = AI-first, False = regex only)
             mode: "individual" for one spec per TC, "grouped" for one spec per group
+            runtime_env_vars: Optional Settings-backed env values for AI runtime resolution
+            ai_fallback: Whether AI failures should fall back to regex extraction
+            return_metadata: Whether to include extraction metadata in the return tuple
 
         Returns:
-            Tuple of (generated_files: List[Path], groups: Optional[List[Dict]])
+            Tuple of (generated_files: List[Path], groups: Optional[List[Dict]]).
+            If return_metadata is True, returns (generated_files, groups, metadata).
             groups is None if regex was used (no grouping info available)
         """
         # Verify it's a splittable spec
@@ -54,6 +65,12 @@ class PRDSpecSplitter:
 
         test_cases = []
         groups = None
+        metadata = {
+            "requested_extraction_method": "ai" if use_ai else "regex",
+            "extraction_method": None,
+            "ai_used": False,
+            "warning": None,
+        }
 
         # 1. AI-first: Try AI extraction as primary method
         if use_ai:
@@ -61,17 +78,32 @@ class PRDSpecSplitter:
             try:
                 from orchestrator.utils.ai_spec_splitter import AISpecSplitter
 
-                test_cases, groups = AISpecSplitter.extract_and_group(content, spec_path.name)
+                test_cases, groups = AISpecSplitter.extract_and_group(
+                    content, spec_path.name, runtime_env_vars=runtime_env_vars
+                )
+                metadata["extraction_method"] = "ai"
+                metadata["ai_used"] = True
                 print(f"   AI extracted {len(test_cases)} test cases in {len(groups or [])} groups")
             except ImportError:
                 try:
                     from utils.ai_spec_splitter import AISpecSplitter
 
-                    test_cases, groups = AISpecSplitter.extract_and_group(content, spec_path.name)
+                    test_cases, groups = AISpecSplitter.extract_and_group(
+                        content, spec_path.name, runtime_env_vars=runtime_env_vars
+                    )
+                    metadata["extraction_method"] = "ai"
+                    metadata["ai_used"] = True
                     print(f"   AI extracted {len(test_cases)} test cases in {len(groups or [])} groups")
                 except ImportError:
+                    message = "AI spec splitter not available"
+                    if not ai_fallback:
+                        raise RuntimeError(message)
+                    metadata["warning"] = f"{message}; used regex extraction instead."
                     print("   Warning: AI spec splitter not available, falling back to regex")
             except RuntimeError as e:
+                if not ai_fallback:
+                    raise
+                metadata["warning"] = f"AI extraction failed: {e}; used regex extraction instead."
                 print(f"   AI extraction failed: {e}")
                 print("   Falling back to regex extraction...")
 
@@ -80,9 +112,13 @@ class PRDSpecSplitter:
             print("   Using regex extraction (fallback)...")
             test_cases = SpecDetector.extract_test_cases(spec_path)
             groups = None  # No grouping info from regex
+            metadata["extraction_method"] = "regex"
+            metadata["ai_used"] = False
 
         if not test_cases:
             print(f"No test cases found in {spec_path}")
+            if return_metadata:
+                return [], None, metadata
             return [], None
 
         # Set output directory
@@ -155,6 +191,8 @@ class PRDSpecSplitter:
                 generated_files.append(output_path)
                 print(f"  {output_path.name}")
 
+        if return_metadata:
+            return generated_files, groups, metadata
         return generated_files, groups
 
     # Category names that contain test cases (these are NOT shared context)

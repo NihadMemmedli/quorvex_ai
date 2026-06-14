@@ -71,7 +71,7 @@ class CreateConnectionRequest(BaseModel):
     ssl_mode: str = "prefer"
     schema_name: str = "public"
     is_read_only: bool = True
-    project_id: str | None = "default"
+    project_id: str
 
 
 class UpdateConnectionRequest(BaseModel):
@@ -89,7 +89,7 @@ class UpdateConnectionRequest(BaseModel):
 class CreateDbSpecRequest(BaseModel):
     name: str
     content: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class UpdateDbSpecRequest(BaseModel):
@@ -98,21 +98,21 @@ class UpdateDbSpecRequest(BaseModel):
 
 class RunChecksRequest(BaseModel):
     spec_name: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class RunFullRequest(BaseModel):
-    project_id: str | None = "default"
+    project_id: str
 
 
 class SuggestRequest(BaseModel):
-    project_id: str | None = "default"
+    project_id: str
 
 
 class ApproveSuggestionsRequest(BaseModel):
     suggestions: list
     spec_name: str | None = None
-    project_id: str | None = "default"
+    project_id: str
 
 
 class GenerateSpecRequest(BaseModel):
@@ -122,13 +122,13 @@ class GenerateSpecRequest(BaseModel):
     focus_areas: list[str] | None = None
     auto_run: bool = False
     preview_only: bool = False
-    project_id: str | None = "default"
+    project_id: str
 
 
 class SaveGeneratedSpecRequest(BaseModel):
     checks: list
     spec_name: str | None = None
-    project_id: str | None = "default"
+    project_id: str
 
 
 class QueryDatabaseRequest(BaseModel):
@@ -271,6 +271,33 @@ def _get_connector(conn: DbConnection):
     )
 
 
+def _project_scope(model, project_id: str):
+    if project_id == "default":
+        return (model.project_id == "default") | (model.project_id == None)
+    return model.project_id == project_id
+
+
+def _get_connection_for_project(session: Session, conn_id: str, project_id: str) -> DbConnection | None:
+    return session.exec(
+        select(DbConnection).where(DbConnection.id == conn_id, _project_scope(DbConnection, project_id))
+    ).first()
+
+
+def _get_run_for_project(session: Session, run_id: str, project_id: str) -> DbTestRun | None:
+    return session.exec(
+        select(DbTestRun).where(DbTestRun.id == run_id, _project_scope(DbTestRun, project_id))
+    ).first()
+
+
+def _get_spec_path_for_project(spec_name: str, project_id: str) -> Path | None:
+    specs_dir = _get_specs_dir(project_id)
+    if specs_dir.exists():
+        for md_file in specs_dir.rglob("*.md"):
+            if md_file.name == spec_name:
+                return md_file
+    return None
+
+
 # ========== Background Job Runners ==========
 
 
@@ -282,7 +309,7 @@ async def _run_schema_analysis_job(job_id: str, run_id: str, conn_id: str, proje
     try:
         # Update DB status
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "running"
                 run.started_at = datetime.utcnow()
@@ -293,14 +320,14 @@ async def _run_schema_analysis_job(job_id: str, run_id: str, conn_id: str, proje
 
         # Get connection details
         with Session(engine) as session:
-            conn = session.get(DbConnection, conn_id)
+            conn = _get_connection_for_project(session, conn_id, project_id)
             if not conn:
                 raise RuntimeError(f"Connection '{conn_id}' not found")
             connector = _get_connector(conn)
 
         # Connect and introspect
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.current_stage = "introspecting"
                 run.stage_message = "Introspecting database schema..."
@@ -315,7 +342,7 @@ async def _run_schema_analysis_job(job_id: str, run_id: str, conn_id: str, proje
 
         # Save schema snapshot
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.schema_snapshot_json = json.dumps(schema_data)
                 run.current_stage = "analyzing"
@@ -332,7 +359,7 @@ async def _run_schema_analysis_job(job_id: str, run_id: str, conn_id: str, proje
             findings = await analyze_schema(schema_data)
 
             with Session(engine) as session:
-                run = session.get(DbTestRun, run_id)
+                run = _get_run_for_project(session, run_id, project_id)
                 if run:
                     run.schema_findings_json = json.dumps(findings)
                     run.ai_summary = findings.get("summary", "") if isinstance(findings, dict) else ""
@@ -362,7 +389,7 @@ async def _run_schema_analysis_job(job_id: str, run_id: str, conn_id: str, proje
         # Mark completed
         tables_found = len(schema_data.get("tables", []))
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "completed"
                 run.completed_at = datetime.utcnow()
@@ -393,7 +420,7 @@ async def _run_schema_analysis_job(job_id: str, run_id: str, conn_id: str, proje
     except Exception as e:
         logger.error(f"Schema analysis failed: {e}")
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "failed"
                 run.error_message = str(e)
@@ -413,7 +440,7 @@ async def _run_data_quality_job(job_id: str, run_id: str, conn_id: str, spec_nam
     try:
         # Update DB status
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "running"
                 run.started_at = datetime.utcnow()
@@ -441,14 +468,14 @@ async def _run_data_quality_job(job_id: str, run_id: str, conn_id: str, spec_nam
 
         # Get connection
         with Session(engine) as session:
-            conn = session.get(DbConnection, conn_id)
+            conn = _get_connection_for_project(session, conn_id, project_id)
             if not conn:
                 raise RuntimeError(f"Connection '{conn_id}' not found")
             connector = _get_connector(conn)
 
         # Connect
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.current_stage = "connecting"
                 run.stage_message = "Connecting to database..."
@@ -466,7 +493,7 @@ async def _run_data_quality_job(job_id: str, run_id: str, conn_id: str, spec_nam
 
             for i, check in enumerate(checks):
                 with Session(engine) as session:
-                    run = session.get(DbTestRun, run_id)
+                    run = _get_run_for_project(session, run_id, project_id)
                     if run:
                         run.current_stage = "executing"
                         run.stage_message = f"Running check {i + 1}/{len(checks)}: {check.get('check_name', 'unknown')}"
@@ -524,7 +551,7 @@ async def _run_data_quality_job(job_id: str, run_id: str, conn_id: str, spec_nam
 
         # Update run with results
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "completed"
                 run.completed_at = datetime.utcnow()
@@ -548,7 +575,7 @@ async def _run_data_quality_job(job_id: str, run_id: str, conn_id: str, spec_nam
     except Exception as e:
         logger.error(f"Data quality job failed: {e}")
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "failed"
                 run.error_message = str(e)
@@ -568,7 +595,7 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
     try:
         # Update DB status
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "running"
                 run.started_at = datetime.utcnow()
@@ -579,14 +606,14 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
 
         # Get connection details
         with Session(engine) as session:
-            conn = session.get(DbConnection, conn_id)
+            conn = _get_connection_for_project(session, conn_id, project_id)
             if not conn:
                 raise RuntimeError(f"Connection '{conn_id}' not found")
             connector = _get_connector(conn)
 
         # Phase 1: Connect and introspect
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.current_stage = "introspecting"
                 run.stage_message = "Introspecting database schema..."
@@ -601,7 +628,7 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
             raise
 
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.schema_snapshot_json = json.dumps(schema_data)
                 session.add(run)
@@ -609,7 +636,7 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
 
         # Phase 2: AI analysis
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.current_stage = "analyzing"
                 run.stage_message = f"AI analyzing {len(schema_data.get('tables', []))} tables..."
@@ -622,7 +649,7 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
 
             findings = await analyze_schema(schema_data)
             with Session(engine) as session:
-                run = session.get(DbTestRun, run_id)
+                run = _get_run_for_project(session, run_id, project_id)
                 if run:
                     run.schema_findings_json = json.dumps(findings)
                     run.ai_summary = findings.get("summary", "") if isinstance(findings, dict) else ""
@@ -635,7 +662,7 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
 
         # Phase 3: Generate test suggestions
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.current_stage = "generating"
                 run.stage_message = "Generating data quality checks..."
@@ -648,7 +675,7 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
             # Pass findings from earlier schema analysis for context
             schema_findings = None
             with Session(engine) as session:
-                run = session.get(DbTestRun, run_id)
+                run = _get_run_for_project(session, run_id, project_id)
                 if run and run.schema_findings_json:
                     try:
                         parsed = json.loads(run.schema_findings_json)
@@ -657,7 +684,7 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
                         pass
             checks = await generate_tests_from_schema(schema_data, findings=schema_findings)
             with Session(engine) as session:
-                run = session.get(DbTestRun, run_id)
+                run = _get_run_for_project(session, run_id, project_id)
                 if run:
                     run.ai_suggestions_json = json.dumps(checks)
                     run.total_checks = len(checks)
@@ -671,7 +698,7 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
         # Phase 4: Execute generated checks
         if checks:
             with Session(engine) as session:
-                run = session.get(DbTestRun, run_id)
+                run = _get_run_for_project(session, run_id, project_id)
                 if run:
                     run.current_stage = "executing"
                     run.stage_message = f"Executing {len(checks)} data quality checks..."
@@ -729,7 +756,7 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
                     session.commit()
 
             with Session(engine) as session:
-                run = session.get(DbTestRun, run_id)
+                run = _get_run_for_project(session, run_id, project_id)
                 if run:
                     run.passed_checks = passed
                     run.failed_checks = failed
@@ -746,7 +773,7 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
 
         # Mark completed
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "completed"
                 run.completed_at = datetime.utcnow()
@@ -762,7 +789,7 @@ async def _run_full_pipeline_job(job_id: str, run_id: str, conn_id: str, project
     except Exception as e:
         logger.error(f"Full pipeline failed: {e}")
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.status = "failed"
                 run.error_message = str(e)
@@ -781,7 +808,7 @@ async def _run_suggestion_job(job_id: str, run_id: str, project_id: str):
 
     try:
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if not run:
                 raise RuntimeError(f"Run '{run_id}' not found")
             if not run.schema_snapshot_json:
@@ -798,7 +825,7 @@ async def _run_suggestion_job(job_id: str, run_id: str, project_id: str):
         # Pass findings for context if available
         schema_findings = None
         with Session(engine) as session:
-            run_obj = session.get(DbTestRun, run_id)
+            run_obj = _get_run_for_project(session, run_id, project_id)
             if run_obj and run_obj.schema_findings_json:
                 try:
                     parsed = json.loads(run_obj.schema_findings_json)
@@ -808,7 +835,7 @@ async def _run_suggestion_job(job_id: str, run_id: str, project_id: str):
         suggestions = await generate_tests_from_schema(schema_data, findings=schema_findings)
 
         with Session(engine) as session:
-            run = session.get(DbTestRun, run_id)
+            run = _get_run_for_project(session, run_id, project_id)
             if run:
                 run.ai_suggestions_json = json.dumps(suggestions)
                 run.current_stage = "done"
@@ -850,7 +877,7 @@ async def _run_generate_spec_job(
         # Stage 1: Connect
         _db_jobs[job_id]["stage_message"] = "Connecting to database..."
         with Session(engine) as session:
-            conn = session.get(DbConnection, conn_id)
+            conn = _get_connection_for_project(session, conn_id, project_id)
             if not conn:
                 raise RuntimeError(f"Connection '{conn_id}' not found")
             connector = _get_connector(conn)
@@ -944,7 +971,7 @@ async def _run_generate_spec_job(
 
                 # Re-connect for execution
                 with Session(engine) as session:
-                    conn = session.get(DbConnection, conn_id)
+                    conn = _get_connection_for_project(session, conn_id, project_id)
                     if not conn:
                         raise RuntimeError(f"Connection '{conn_id}' not found for auto-run")
                     exec_connector = _get_connector(conn)
@@ -997,7 +1024,7 @@ async def _run_generate_spec_job(
                     await exec_connector.close()
 
                 with Session(engine) as session:
-                    run = session.get(DbTestRun, run_id)
+                    run = _get_run_for_project(session, run_id, project_id)
                     if run:
                         run.status = "completed"
                         run.completed_at = datetime.utcnow()
@@ -1039,7 +1066,7 @@ async def _run_generate_spec_job(
 async def create_connection(req: CreateConnectionRequest):
     """Create a new database connection profile."""
     conn_id = _generate_conn_id()
-    project_id = req.project_id or "default"
+    project_id = req.project_id
 
     conn = DbConnection(
         id=conn_id,
@@ -1066,7 +1093,7 @@ async def create_connection(req: CreateConnectionRequest):
 
 @router.get("/connections")
 async def list_connections(
-    project_id: str = Query("default"),
+    project_id: str = Query(...),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -1080,20 +1107,20 @@ async def list_connections(
 
 
 @router.get("/connections/{conn_id}")
-async def get_connection(conn_id: str):
+async def get_connection(conn_id: str, project_id: str = Query(...)):
     """Get a single database connection profile."""
     with Session(engine) as session:
-        conn = session.get(DbConnection, conn_id)
+        conn = _get_connection_for_project(session, conn_id, project_id)
         if not conn:
             raise HTTPException(status_code=404, detail=f"Connection '{conn_id}' not found")
         return _mask_connection(conn)
 
 
 @router.put("/connections/{conn_id}")
-async def update_connection(conn_id: str, req: UpdateConnectionRequest):
+async def update_connection(conn_id: str, req: UpdateConnectionRequest, project_id: str = Query(...)):
     """Update a database connection profile."""
     with Session(engine) as session:
-        conn = session.get(DbConnection, conn_id)
+        conn = _get_connection_for_project(session, conn_id, project_id)
         if not conn:
             raise HTTPException(status_code=404, detail=f"Connection '{conn_id}' not found")
 
@@ -1125,10 +1152,10 @@ async def update_connection(conn_id: str, req: UpdateConnectionRequest):
 
 
 @router.delete("/connections/{conn_id}")
-async def delete_connection(conn_id: str):
+async def delete_connection(conn_id: str, project_id: str = Query(...)):
     """Delete a database connection profile."""
     with Session(engine) as session:
-        conn = session.get(DbConnection, conn_id)
+        conn = _get_connection_for_project(session, conn_id, project_id)
         if not conn:
             raise HTTPException(status_code=404, detail=f"Connection '{conn_id}' not found")
         session.delete(conn)
@@ -1138,10 +1165,10 @@ async def delete_connection(conn_id: str):
 
 
 @router.post("/connections/{conn_id}/test")
-async def test_connection(conn_id: str):
+async def test_connection(conn_id: str, project_id: str = Query(...)):
     """Test a database connection."""
     with Session(engine) as session:
-        conn = session.get(DbConnection, conn_id)
+        conn = _get_connection_for_project(session, conn_id, project_id)
         if not conn:
             raise HTTPException(status_code=404, detail=f"Connection '{conn_id}' not found")
         connector = _get_connector(conn)
@@ -1151,7 +1178,7 @@ async def test_connection(conn_id: str):
         await connector.close()
 
         with Session(engine) as session:
-            conn = session.get(DbConnection, conn_id)
+            conn = _get_connection_for_project(session, conn_id, project_id)
             if conn:
                 conn.last_tested_at = datetime.utcnow()
                 conn.last_test_success = True
@@ -1163,7 +1190,7 @@ async def test_connection(conn_id: str):
 
     except Exception as e:
         with Session(engine) as session:
-            conn = session.get(DbConnection, conn_id)
+            conn = _get_connection_for_project(session, conn_id, project_id)
             if conn:
                 conn.last_tested_at = datetime.utcnow()
                 conn.last_test_success = False
@@ -1178,10 +1205,10 @@ async def test_connection(conn_id: str):
 
 
 @router.get("/connections/{conn_id}/schema")
-async def get_connection_schema(conn_id: str):
+async def get_connection_schema(conn_id: str, project_id: str = Query(...)):
     """Introspect a connection and return its live schema without creating a run."""
     with Session(engine) as session:
-        conn = session.get(DbConnection, conn_id)
+        conn = _get_connection_for_project(session, conn_id, project_id)
         if not conn:
             raise HTTPException(status_code=404, detail=f"Connection '{conn_id}' not found")
         connector = _get_connector(conn)
@@ -1201,10 +1228,10 @@ async def get_connection_schema(conn_id: str):
 
 
 @router.post("/connections/{conn_id}/query")
-async def query_connection(conn_id: str, req: QueryDatabaseRequest):
+async def query_connection(conn_id: str, req: QueryDatabaseRequest, project_id: str = Query(...)):
     """Run a bounded read-only query for the DB viewer."""
     with Session(engine) as session:
-        conn = session.get(DbConnection, conn_id)
+        conn = _get_connection_for_project(session, conn_id, project_id)
         if not conn:
             raise HTTPException(status_code=404, detail=f"Connection '{conn_id}' not found")
         connector = _get_connector(conn)
@@ -1231,18 +1258,17 @@ async def query_connection(conn_id: str, req: QueryDatabaseRequest):
 
 
 @router.post("/analyze/{conn_id}")
-async def start_schema_analysis(conn_id: str, project_id: str = Query("default")):
+async def start_schema_analysis(conn_id: str, project_id: str = Query(...)):
     """Start schema analysis as a background job."""
     _cleanup_old_jobs()
 
     with Session(engine) as session:
-        conn = session.get(DbConnection, conn_id)
+        conn = _get_connection_for_project(session, conn_id, project_id)
         if not conn:
             raise HTTPException(status_code=404, detail=f"Connection '{conn_id}' not found")
 
     run_id = _generate_run_id()
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    project_id = project_id or "default"
 
     with Session(engine) as session:
         run = DbTestRun(
@@ -1264,6 +1290,7 @@ async def start_schema_analysis(conn_id: str, project_id: str = Query("default")
         "connection_id": conn_id,
         "status": "pending",
         "created_at": time.time(),
+        "project_id": project_id,
     }
 
     asyncio.create_task(_run_schema_analysis_job(job_id, run_id, conn_id, project_id))
@@ -1272,10 +1299,10 @@ async def start_schema_analysis(conn_id: str, project_id: str = Query("default")
 
 
 @router.get("/runs/{run_id}/schema")
-async def get_schema_results(run_id: str):
+async def get_schema_results(run_id: str, project_id: str = Query(...)):
     """Get schema snapshot and findings for a run."""
     with Session(engine) as session:
-        run = session.get(DbTestRun, run_id)
+        run = _get_run_for_project(session, run_id, project_id)
         if not run:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
@@ -1294,21 +1321,16 @@ async def get_schema_results(run_id: str):
 
 
 @router.get("/specs")
-async def list_db_specs(project_id: str = Query("default")):
+async def list_db_specs(project_id: str = Query(...)):
     """List all database test specifications."""
     return _scan_db_specs(project_id)
 
 
 @router.get("/specs/{name:path}")
-async def get_db_spec(name: str, project_id: str = Query("default")):
+async def get_db_spec(name: str, project_id: str = Query(...)):
     """Get a single database spec content."""
     specs_dir = _get_specs_dir(project_id)
-    target = None
-    if specs_dir.exists():
-        for md_file in specs_dir.rglob("*.md"):
-            if md_file.name == name:
-                target = md_file
-                break
+    target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():
         raise HTTPException(status_code=404, detail=f"Database spec '{name}' not found")
@@ -1341,15 +1363,10 @@ async def create_db_spec(req: CreateDbSpecRequest):
 
 
 @router.put("/specs/{name:path}")
-async def update_db_spec(name: str, req: UpdateDbSpecRequest, project_id: str = Query("default")):
+async def update_db_spec(name: str, req: UpdateDbSpecRequest, project_id: str = Query(...)):
     """Update an existing database spec."""
     specs_dir = _get_specs_dir(project_id)
-    target = None
-    if specs_dir.exists():
-        for md_file in specs_dir.rglob("*.md"):
-            if md_file.name == name:
-                target = md_file
-                break
+    target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():
         raise HTTPException(status_code=404, detail=f"Database spec '{name}' not found")
@@ -1359,15 +1376,10 @@ async def update_db_spec(name: str, req: UpdateDbSpecRequest, project_id: str = 
 
 
 @router.delete("/specs/{name:path}")
-async def delete_db_spec(name: str, project_id: str = Query("default")):
+async def delete_db_spec(name: str, project_id: str = Query(...)):
     """Delete a database spec."""
     specs_dir = _get_specs_dir(project_id)
-    target = None
-    if specs_dir.exists():
-        for md_file in specs_dir.rglob("*.md"):
-            if md_file.name == name:
-                target = md_file
-                break
+    target = _get_spec_path_for_project(name, project_id)
 
     if not target or not target.exists():
         raise HTTPException(status_code=404, detail=f"Database spec '{name}' not found")
@@ -1385,13 +1397,15 @@ async def start_data_quality_run(conn_id: str, req: RunChecksRequest):
     _cleanup_old_jobs()
 
     with Session(engine) as session:
-        conn = session.get(DbConnection, conn_id)
+        conn = _get_connection_for_project(session, conn_id, req.project_id)
         if not conn:
             raise HTTPException(status_code=404, detail=f"Connection '{conn_id}' not found")
+    if not _get_spec_path_for_project(req.spec_name, req.project_id):
+        raise HTTPException(status_code=404, detail=f"Spec '{req.spec_name}' not found")
 
     run_id = _generate_run_id()
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    project_id = req.project_id or "default"
+    project_id = req.project_id
 
     with Session(engine) as session:
         run = DbTestRun(
@@ -1415,6 +1429,7 @@ async def start_data_quality_run(conn_id: str, req: RunChecksRequest):
         "spec_name": req.spec_name,
         "status": "pending",
         "created_at": time.time(),
+        "project_id": project_id,
     }
 
     asyncio.create_task(_run_data_quality_job(job_id, run_id, conn_id, req.spec_name, project_id))
@@ -1428,13 +1443,13 @@ async def start_full_pipeline(conn_id: str, req: RunFullRequest):
     _cleanup_old_jobs()
 
     with Session(engine) as session:
-        conn = session.get(DbConnection, conn_id)
+        conn = _get_connection_for_project(session, conn_id, req.project_id)
         if not conn:
             raise HTTPException(status_code=404, detail=f"Connection '{conn_id}' not found")
 
     run_id = _generate_run_id()
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    project_id = req.project_id or "default"
+    project_id = req.project_id
 
     with Session(engine) as session:
         run = DbTestRun(
@@ -1456,6 +1471,7 @@ async def start_full_pipeline(conn_id: str, req: RunFullRequest):
         "connection_id": conn_id,
         "status": "pending",
         "created_at": time.time(),
+        "project_id": project_id,
     }
 
     asyncio.create_task(_run_full_pipeline_job(job_id, run_id, conn_id, project_id))
@@ -1467,19 +1483,19 @@ async def start_full_pipeline(conn_id: str, req: RunFullRequest):
 
 
 @router.post("/suggest/{run_id}")
-async def start_suggestions(run_id: str, req: SuggestRequest | None = None):
+async def start_suggestions(run_id: str, req: SuggestRequest):
     """Generate test suggestions from schema findings."""
     _cleanup_old_jobs()
 
     with Session(engine) as session:
-        run = session.get(DbTestRun, run_id)
+        run = _get_run_for_project(session, run_id, req.project_id)
         if not run:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
         if not run.schema_snapshot_json:
             raise HTTPException(status_code=400, detail="No schema snapshot available. Run schema analysis first.")
 
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    project_id = (req.project_id if req else None) or "default"
+    project_id = req.project_id
 
     _db_jobs[job_id] = {
         "job_id": job_id,
@@ -1487,6 +1503,7 @@ async def start_suggestions(run_id: str, req: SuggestRequest | None = None):
         "run_type": "suggestions",
         "status": "pending",
         "created_at": time.time(),
+        "project_id": project_id,
     }
 
     asyncio.create_task(_run_suggestion_job(job_id, run_id, project_id))
@@ -1495,10 +1512,10 @@ async def start_suggestions(run_id: str, req: SuggestRequest | None = None):
 
 
 @router.get("/runs/{run_id}/suggestions")
-async def get_suggestions(run_id: str):
+async def get_suggestions(run_id: str, project_id: str = Query(...)):
     """Get AI-generated test suggestions for a run."""
     with Session(engine) as session:
-        run = session.get(DbTestRun, run_id)
+        run = _get_run_for_project(session, run_id, project_id)
         if not run:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
@@ -1514,11 +1531,11 @@ async def get_suggestions(run_id: str):
 async def approve_suggestions(run_id: str, req: ApproveSuggestionsRequest):
     """Save approved suggestions as a spec file."""
     with Session(engine) as session:
-        run = session.get(DbTestRun, run_id)
+        run = _get_run_for_project(session, run_id, req.project_id)
         if not run:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
-    project_id = req.project_id or "default"
+    project_id = req.project_id
     spec_name = _normalize_spec_name(req.spec_name, run.spec_name or run.connection_id or "suggestions")
     content = _checks_to_markdown(spec_name, req.suggestions)
 
@@ -1545,11 +1562,11 @@ async def generate_spec(req: GenerateSpecRequest):
     """Generate a database test spec using AI: introspect -> analyze -> generate checks -> save."""
     _cleanup_old_jobs()
 
-    project_id = req.project_id or "default"
+    project_id = req.project_id
 
     # Validate connection exists
     with Session(engine) as session:
-        conn = session.get(DbConnection, req.connection_id)
+        conn = _get_connection_for_project(session, req.connection_id, project_id)
         if not conn:
             raise HTTPException(status_code=404, detail=f"Connection '{req.connection_id}' not found")
         conn_name = conn.name
@@ -1571,6 +1588,7 @@ async def generate_spec(req: GenerateSpecRequest):
         "status": "pending",
         "stage_message": "Queued for AI spec generation",
         "created_at": time.time(),
+        "project_id": project_id,
     }
 
     asyncio.create_task(
@@ -1592,7 +1610,7 @@ async def generate_spec(req: GenerateSpecRequest):
 @router.post("/generated-specs/save")
 async def save_generated_spec(req: SaveGeneratedSpecRequest):
     """Save reviewed generated checks as a database spec markdown file."""
-    project_id = req.project_id or "default"
+    project_id = req.project_id
     spec_name = _normalize_spec_name(req.spec_name, "database-spec")
     if not req.checks:
         raise HTTPException(status_code=400, detail="No checks provided")
@@ -1617,17 +1635,19 @@ async def save_generated_spec(req: SaveGeneratedSpecRequest):
 
 
 @router.get("/jobs/{job_id}")
-async def get_job_status(job_id: str):
+async def get_job_status(job_id: str, project_id: str = Query(...)):
     """Poll job status."""
     job = _db_jobs.get(job_id)
     if not job:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
+    if job.get("project_id") and job.get("project_id") != project_id:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     return job
 
 
 @router.get("/runs")
 async def list_runs(
-    project_id: str = Query("default"),
+    project_id: str = Query(...),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -1677,10 +1697,10 @@ async def list_runs(
 
 
 @router.get("/runs/{run_id}")
-async def get_run(run_id: str):
+async def get_run(run_id: str, project_id: str = Query(...)):
     """Get database test run details."""
     with Session(engine) as session:
-        run = session.get(DbTestRun, run_id)
+        run = _get_run_for_project(session, run_id, project_id)
         if not run:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
@@ -1720,17 +1740,18 @@ async def get_run(run_id: str):
 @router.get("/runs/{run_id}/checks")
 async def get_checks(
     run_id: str,
+    project_id: str = Query(...),
     status: str | None = Query(None, description="Filter by status: passed,failed,error,skipped"),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
 ):
     """Get individual check results for a run."""
     with Session(engine) as session:
-        run = session.get(DbTestRun, run_id)
+        run = _get_run_for_project(session, run_id, project_id)
         if not run:
             raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
-        statement = select(DbTestCheck).where(DbTestCheck.run_id == run_id)
+        statement = select(DbTestCheck).where(DbTestCheck.run_id == run_id, _project_scope(DbTestCheck, project_id))
         if status:
             status_list = [s.strip().lower() for s in status.split(",")]
             statement = statement.where(DbTestCheck.status.in_(status_list))
@@ -1763,7 +1784,7 @@ async def get_checks(
 
 
 @router.get("/summary")
-async def get_summary(project_id: str = Query("default")):
+async def get_summary(project_id: str = Query(...)):
     """Get dashboard stats for database testing."""
     with Session(engine) as session:
         # Count connections

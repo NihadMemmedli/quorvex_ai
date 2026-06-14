@@ -24,7 +24,7 @@ import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
@@ -133,6 +133,7 @@ from .models_db import AgentDefinition, AgentRun, AgentRunEvent, AgentToolDefini
 from .models_db import ExecutionSettings as DBExecutionSettings
 from .models_db import SpecMetadata as DBSpecMetadata
 from .models_db import TestRun as DBTestRun
+from .models_db import get_or_create_spec_metadata, get_spec_metadata as get_db_spec_metadata, normalize_project_id
 from .process_manager import ProcessManager, get_process_manager
 
 # Initialize logging
@@ -241,10 +242,12 @@ def sync_spec_metadata_from_file(session: Session, metadata_file: Path = METADAT
             continue
 
         seed_tags = _clean_metadata_tags(data.get("tags", []), lowercase=True)
-        meta = session.get(DBSpecMetadata, spec_name)
-        if not meta:
+        metas = session.exec(select(DBSpecMetadata).where(DBSpecMetadata.spec_name == spec_name)).all()
+        if not metas:
+            meta = get_or_create_spec_metadata(session, spec_name)
             meta = DBSpecMetadata(
                 spec_name=spec_name,
+                project_id=meta.project_id,
                 tags_json=json.dumps(seed_tags),
                 description=data.get("description"),
                 author=data.get("author"),
@@ -259,25 +262,26 @@ def sync_spec_metadata_from_file(session: Session, metadata_file: Path = METADAT
             changed += 1
             continue
 
-        merged_tags = _merge_metadata_tags(meta.tags, seed_tags)
-        if merged_tags != meta.tags:
-            meta.tags = merged_tags
-            changed += 1
-
-        if not meta.description and data.get("description"):
-            meta.description = data.get("description")
-            changed += 1
-        if not meta.author and data.get("author"):
-            meta.author = data.get("author")
-            changed += 1
-        if not meta.last_modified and data.get("lastModified"):
-            try:
-                meta.last_modified = datetime.fromisoformat(data["lastModified"])
+        for meta in metas:
+            merged_tags = _merge_metadata_tags(meta.tags, seed_tags)
+            if merged_tags != meta.tags:
+                meta.tags = merged_tags
                 changed += 1
-            except ValueError:
-                logger.warning(f"Invalid lastModified date format for {spec_name}: {data['lastModified']}")
 
-        session.add(meta)
+            if not meta.description and data.get("description"):
+                meta.description = data.get("description")
+                changed += 1
+            if not meta.author and data.get("author"):
+                meta.author = data.get("author")
+                changed += 1
+            if not meta.last_modified and data.get("lastModified"):
+                try:
+                    meta.last_modified = datetime.fromisoformat(data["lastModified"])
+                    changed += 1
+                except ValueError:
+                    logger.warning(f"Invalid lastModified date format for {spec_name}: {data['lastModified']}")
+
+            session.add(meta)
 
     return changed
 
@@ -2873,7 +2877,7 @@ def get_generated_code(
 
     # Filter by project_id if provided
     if project_id:
-        meta = session.get(DBSpecMetadata, name)
+        meta = get_db_spec_metadata(session, name, project_id)
         if meta and meta.project_id:
             if project_id == "default":
                 if meta.project_id not in (None, "default"):
@@ -2907,7 +2911,7 @@ def update_generated_code(
 
     # Verify project ownership if project_id is provided
     if project_id:
-        meta = session.get(DBSpecMetadata, name)
+        meta = get_db_spec_metadata(session, name, project_id)
         if meta and meta.project_id:
             # If spec has a project_id, it must match (unless checking default project with legacy data)
             if project_id == "default":
@@ -2936,7 +2940,7 @@ def get_spec(
 
     # Filter by project_id if provided
     if project_id:
-        meta = session.get(DBSpecMetadata, name)
+        meta = get_db_spec_metadata(session, name, project_id)
         if meta and meta.project_id:
             if project_id == "default":
                 if meta.project_id not in (None, "default"):
@@ -2967,7 +2971,7 @@ def create_spec(request: CreateSpecRequest, session: Session = Depends(get_sessi
 
     # Register spec in database with project association
     if request.project_id:
-        existing = session.get(DBSpecMetadata, name)
+        existing = get_db_spec_metadata(session, name, request.project_id)
         if not existing:
             meta = DBSpecMetadata(spec_name=name, project_id=request.project_id, tags_json="[]")
             session.add(meta)
@@ -2992,7 +2996,7 @@ def update_spec(
 
     # Verify project ownership if project_id is provided
     if project_id:
-        meta = session.get(DBSpecMetadata, name)
+        meta = get_db_spec_metadata(session, name, project_id)
         if meta and meta.project_id:
             if project_id == "default":
                 if meta.project_id not in (None, "default"):
@@ -3029,7 +3033,7 @@ def delete_folder(
     if project_id:
         for spec_path in spec_files:
             spec_name = str(spec_path.relative_to(SPECS_DIR))
-            meta = session.get(DBSpecMetadata, spec_name)
+            meta = get_db_spec_metadata(session, spec_name, project_id)
             if meta and meta.project_id:
                 if project_id == "default":
                     if meta.project_id not in (None, "default"):
@@ -3053,7 +3057,7 @@ def delete_folder(
                 deleted_tests.append(code_path)
 
         # Delete metadata from DB
-        meta = session.get(DBSpecMetadata, spec_name)
+        meta = get_db_spec_metadata(session, spec_name, project_id)
         if meta:
             session.delete(meta)
 
@@ -3083,7 +3087,7 @@ def delete_spec(
 
     # Verify project ownership if project_id is provided
     if project_id:
-        meta = session.get(DBSpecMetadata, name)
+        meta = get_db_spec_metadata(session, name, project_id)
         if meta and meta.project_id:
             if project_id == "default":
                 if meta.project_id not in (None, "default"):
@@ -3105,7 +3109,7 @@ def delete_spec(
             deleted_files.append(code_path)
 
     # Delete metadata from DB
-    meta = session.get(DBSpecMetadata, name)
+    meta = get_db_spec_metadata(session, name, project_id)
     if meta:
         session.delete(meta)
         session.commit()
@@ -3185,7 +3189,7 @@ def move_spec(request: MoveSpecRequest, session: Session = Depends(get_session))
         if request.project_id:
             for spec_path in spec_files:
                 spec_name = str(spec_path.relative_to(SPECS_DIR))
-                meta = session.get(DBSpecMetadata, spec_name)
+                meta = get_db_spec_metadata(session, spec_name, request.project_id)
                 if meta and meta.project_id:
                     if request.project_id == "default":
                         if meta.project_id not in (None, "default"):
@@ -3207,7 +3211,7 @@ def move_spec(request: MoveSpecRequest, session: Session = Depends(get_session))
             moved_specs.append(MovedItemInfo(old_path=old_spec_name, new_path=new_spec_name))
 
             # Update DB metadata (delete old, create new if exists)
-            old_meta = session.get(DBSpecMetadata, old_spec_name)
+            old_meta = get_db_spec_metadata(session, old_spec_name, request.project_id)
             if old_meta:
                 # Copy metadata to new key
                 new_meta = DBSpecMetadata(
@@ -3244,7 +3248,7 @@ def move_spec(request: MoveSpecRequest, session: Session = Depends(get_session))
 
         # Verify project ownership if project_id is provided
         if request.project_id:
-            meta = session.get(DBSpecMetadata, old_spec_name)
+            meta = get_db_spec_metadata(session, old_spec_name, request.project_id)
             if meta and meta.project_id:
                 if request.project_id == "default":
                     if meta.project_id not in (None, "default"):
@@ -3257,7 +3261,7 @@ def move_spec(request: MoveSpecRequest, session: Session = Depends(get_session))
         moved_specs.append(MovedItemInfo(old_path=old_spec_name, new_path=new_spec_name))
 
         # Update DB metadata
-        old_meta = session.get(DBSpecMetadata, old_spec_name)
+        old_meta = get_db_spec_metadata(session, old_spec_name, request.project_id)
         if old_meta:
             new_meta = DBSpecMetadata(
                 spec_name=new_spec_name,
@@ -3349,7 +3353,7 @@ def rename_spec(request: RenameRequest, session: Session = Depends(get_session))
         if request.project_id:
             for spec_path in spec_files:
                 spec_name = str(spec_path.relative_to(SPECS_DIR))
-                meta = session.get(DBSpecMetadata, spec_name)
+                meta = get_db_spec_metadata(session, spec_name, request.project_id)
                 if meta and meta.project_id:
                     if request.project_id == "default":
                         if meta.project_id not in (None, "default"):
@@ -3370,7 +3374,7 @@ def rename_spec(request: RenameRequest, session: Session = Depends(get_session))
             renamed_specs.append(MovedItemInfo(old_path=old_spec_name, new_path=new_spec_name))
 
             # Update DB metadata (delete old, create new)
-            old_meta = session.get(DBSpecMetadata, old_spec_name)
+            old_meta = get_db_spec_metadata(session, old_spec_name, request.project_id)
             if old_meta:
                 new_meta = DBSpecMetadata(
                     spec_name=new_spec_name,
@@ -3419,7 +3423,7 @@ def rename_spec(request: RenameRequest, session: Session = Depends(get_session))
 
         # Verify project ownership
         if request.project_id:
-            meta = session.get(DBSpecMetadata, old_spec_name)
+            meta = get_db_spec_metadata(session, old_spec_name, request.project_id)
             if meta and meta.project_id:
                 if request.project_id == "default":
                     if meta.project_id not in (None, "default"):
@@ -3432,7 +3436,7 @@ def rename_spec(request: RenameRequest, session: Session = Depends(get_session))
         renamed_specs.append(MovedItemInfo(old_path=old_spec_name, new_path=new_spec_name))
 
         # Update DB metadata
-        old_meta = session.get(DBSpecMetadata, old_spec_name)
+        old_meta = get_db_spec_metadata(session, old_spec_name, request.project_id)
         if old_meta:
             new_meta = DBSpecMetadata(
                 spec_name=new_spec_name,
@@ -3557,18 +3561,13 @@ def register_folder_specs(folder: str, project_id: str, session: Session = Depen
 
     for f in folder_path.glob("**/*.md"):
         spec_name = str(f.relative_to(SPECS_DIR))
-        existing = session.get(DBSpecMetadata, spec_name)
+        existing = get_db_spec_metadata(session, spec_name, project_id)
 
         if not existing:
             # Create new metadata record
-            meta = DBSpecMetadata(spec_name=spec_name, project_id=project_id, tags_json="[]")
+            meta = DBSpecMetadata(spec_name=spec_name, project_id=normalize_project_id(project_id), tags_json="[]")
             session.add(meta)
             registered.append(spec_name)
-        else:
-            # Update existing record if project changed
-            if existing.project_id != project_id:
-                existing.project_id = project_id
-                updated.append(spec_name)
 
     session.commit()
 
@@ -3670,7 +3669,7 @@ def export_testrail(request: ExportTestrailRequest, session: Session = Depends(g
 
         # Load DB metadata for tags
         metadata = None
-        meta = session.get(DBSpecMetadata, spec_name)
+        meta = get_db_spec_metadata(session, spec_name, project_id)
         if meta:
             metadata = {"tags": meta.tags}
 
@@ -3720,6 +3719,7 @@ class SplitSpecRequest(BaseModel):
     output_dir: str | None = None
     project_id: str | None = None  # Project to assign split specs to
     mode: str | None = "individual"  # "individual" or "grouped"
+    extraction_method: Literal["ai", "regex"] = "ai"
 
 
 class SplitSpecResponse(BaseModel):
@@ -3727,6 +3727,9 @@ class SplitSpecResponse(BaseModel):
     files: list[str]
     output_dir: str
     groups: list[dict[str, Any]] | None = None  # AI grouping suggestions
+    extraction_method: str
+    ai_used: bool
+    warning: str | None = None
 
 
 @app.get("/specs/{name:path}/info", response_model=SpecInfoResponse)
@@ -3778,7 +3781,21 @@ def split_prd_spec(request: SplitSpecRequest, session: Session = Depends(get_ses
 
     # Split the spec
     try:
-        split_files, groups = PRDSpecSplitter.split_spec(spec_path, output_dir, mode=request.mode or "individual")
+        from orchestrator.api.settings import runtime_env_vars
+
+        use_ai = request.extraction_method == "ai"
+        if request.mode == "grouped" and not use_ai:
+            raise HTTPException(status_code=400, detail="Smart Groups requires AI extraction.")
+
+        split_files, groups, metadata = PRDSpecSplitter.split_spec(
+            spec_path,
+            output_dir,
+            use_ai=use_ai,
+            mode=request.mode or "individual",
+            runtime_env_vars=runtime_env_vars(session) if use_ai else None,
+            ai_fallback=False if use_ai else True,
+            return_metadata=True,
+        )
 
         # Convert paths to relative names
         file_names = [str(f.relative_to(SPECS_DIR)) for f in split_files]
@@ -3787,10 +3804,10 @@ def split_prd_spec(request: SplitSpecRequest, session: Session = Depends(get_ses
         if request.project_id and file_names:
             for spec_name in file_names:
                 # Create or update spec metadata with project assignment
-                existing = session.exec(select(DBSpecMetadata).where(DBSpecMetadata.spec_name == spec_name)).first()
+                existing = get_db_spec_metadata(session, spec_name, request.project_id)
 
                 if existing:
-                    existing.project_id = request.project_id
+                    session.add(existing)
                 else:
                     new_metadata = DBSpecMetadata(spec_name=spec_name, project_id=request.project_id)
                     session.add(new_metadata)
@@ -3802,7 +3819,15 @@ def split_prd_spec(request: SplitSpecRequest, session: Session = Depends(get_ses
             files=file_names,
             output_dir=str(split_files[0].parent.relative_to(SPECS_DIR)) if split_files else "",
             groups=groups,
+            extraction_method=str(metadata.get("extraction_method") or request.extraction_method),
+            ai_used=bool(metadata.get("ai_used")),
+            warning=metadata.get("warning"),
         )
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        logger.warning(f"Failed to split spec with {request.extraction_method} extraction: {e}")
+        raise HTTPException(status_code=502, detail=f"AI extraction failed: {e}")
     except Exception as e:
         logger.error(f"Failed to split spec: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -6870,18 +6895,9 @@ def get_spec_metadata(
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
     session: Session = Depends(get_session),
 ):
-    m = session.get(DBSpecMetadata, spec_name)
+    m = get_db_spec_metadata(session, spec_name, project_id)
     if not m:
         return {"tags": [], "description": None, "author": None, "lastModified": None}
-
-    # Filter by project_id if provided
-    if project_id:
-        if m.project_id:
-            if project_id == "default":
-                if m.project_id not in (None, "default"):
-                    return {"tags": [], "description": None, "author": None, "lastModified": None}
-            elif m.project_id != project_id:
-                return {"tags": [], "description": None, "author": None, "lastModified": None}
 
     return {
         "tags": m.tags,
@@ -6893,9 +6909,9 @@ def get_spec_metadata(
 
 @app.put("/spec-metadata/{spec_name:path}")
 def update_spec_metadata(spec_name: str, request: UpdateMetadataRequest, session: Session = Depends(get_session)):
-    m = session.get(DBSpecMetadata, spec_name)
+    m = get_db_spec_metadata(session, spec_name, request.project_id)
     if not m:
-        m = DBSpecMetadata(spec_name=spec_name)
+        m = DBSpecMetadata(spec_name=spec_name, project_id=normalize_project_id(request.project_id))
 
     if request.tags is not None:
         m.tags = request.tags
@@ -6903,9 +6919,6 @@ def update_spec_metadata(spec_name: str, request: UpdateMetadataRequest, session
         m.description = request.description
     if request.author is not None:
         m.author = request.author
-    if request.project_id is not None:
-        m.project_id = request.project_id
-
     m.last_modified = datetime.utcnow()
 
     session.add(m)
@@ -7361,6 +7374,142 @@ def _collect_agent_run_artifacts(run_id: str) -> list[dict[str, Any]]:
         return []
 
 
+def _read_run_text_artifact(run_id: str, name: str, max_chars: int | None = None) -> str:
+    path = RUNS_DIR / run_id / name
+    if not path.exists() or not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        logger.debug("Failed to read %s for agent run %s: %s", name, run_id, exc)
+        return ""
+    return text if max_chars is None else text[:max_chars]
+
+
+def _read_run_json_artifact(run_id: str, name: str) -> Any:
+    text = _read_run_text_artifact(run_id, name)
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception as exc:
+        logger.debug("Failed to parse %s for agent run %s: %s", name, run_id, exc)
+        return None
+
+
+def _run_artifact_counts(run_id: str, artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    artifacts = list(artifacts if artifacts is not None else _collect_agent_run_artifacts(run_id))
+    run_dir = RUNS_DIR / run_id
+    raw_output = _read_run_text_artifact(run_id, "raw_output.txt")
+    tool_calls = _read_run_json_artifact(run_id, "tool_calls.json")
+    return {
+        "artifact_count": len(artifacts),
+        "screenshot_count": len([item for item in artifacts if str(item.get("type") or "") == "image"]),
+        "log_count": len([item for item in artifacts if str(item.get("type") or "") == "log"]),
+        "raw_output_chars": len(raw_output),
+        "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else 0,
+        "storage_state_reused": (run_dir / "browser-auth-storage-state.json").exists(),
+    }
+
+
+def _jsonl_latest_url(path: Path) -> str | None:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return None
+    for line in reversed(lines[-500:]):
+        try:
+            event = json.loads(line)
+        except Exception:
+            match = re.search(r"https?://[^\s\"'<>),]+", line)
+            if match:
+                return match.group(0)
+            continue
+        if isinstance(event, dict):
+            for key in ("url", "last_url", "target"):
+                value = event.get(key)
+                if isinstance(value, str) and value.startswith(("http://", "https://")):
+                    return value
+    return None
+
+
+def _latest_observed_url_for_run(run: AgentRun) -> str | None:
+    progress = run.progress or {}
+    for key in ("last_observed_url", "current_url", "last_url", "url"):
+        value = progress.get(key)
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return value
+
+    run_dir = RUNS_DIR / run.id
+    candidates = [
+        run_dir / "exploration_events.jsonl",
+        run_dir / "browser-memory-observations.jsonl",
+        run_dir / "agent_summary.json",
+        run_dir / "tool_calls.json",
+        run_dir / "raw_output.txt",
+    ]
+    existing = [path for path in candidates if path.exists()]
+    for path in sorted(existing, key=lambda item: item.stat().st_mtime, reverse=True):
+        if path.suffix == ".jsonl":
+            url = _jsonl_latest_url(path)
+            if url:
+                return url
+        else:
+            text = _read_run_text_artifact(run.id, path.name, max_chars=250_000)
+            matches = re.findall(r"https?://[^\s\"'<>),]+", text)
+            if matches:
+                return matches[-1]
+    value = (run.config or {}).get("url")
+    return value if isinstance(value, str) and value.startswith(("http://", "https://")) else None
+
+
+def _recover_custom_agent_partial_result(run: AgentRun, error: Exception | str) -> dict[str, Any] | None:
+    artifacts = _collect_agent_run_artifacts(run.id)
+    raw_output = _read_run_text_artifact(run.id, "raw_output.txt")
+    tool_calls = _read_run_json_artifact(run.id, "tool_calls.json")
+    tool_calls = tool_calls if isinstance(tool_calls, list) else []
+    counts = _run_artifact_counts(run.id, artifacts)
+    if not raw_output.strip() and not artifacts and not tool_calls:
+        return None
+
+    try:
+        from orchestrator.services.agent_run_finalizer import AgentRunFinalizer
+
+        finalized = AgentRunFinalizer().finalize(
+            run_id=run.id,
+            agent_type="custom",
+            config=run.config,
+            raw_model_output=raw_output,
+            tool_calls=tool_calls,
+            runtime_diagnostics={
+                "source": "runtime_failure_recovery",
+                "recovered_after_error": True,
+                "error": str(error),
+                **counts,
+            },
+            artifacts=artifacts,
+            existing_result=run.result if isinstance(run.result, dict) else None,
+        )
+    except Exception as exc:
+        logger.debug("Failed to recover custom agent partial result for %s: %s", run.id, exc)
+        return None
+
+    if finalized.status == "failed":
+        return None
+    recovered = dict(finalized.result)
+    recovered["error"] = str(error)
+    recovered["partial_results"] = True
+    recovered["failure_reason"] = "runtime_failed_after_evidence"
+    recovered.setdefault("contract_warnings", [])
+    if isinstance(recovered["contract_warnings"], list):
+        warning = f"Custom agent recovered partial evidence after runtime failure: {error}"
+        if warning not in recovered["contract_warnings"]:
+            recovered["contract_warnings"].append(warning)
+    return recovered
+
+
 def _agent_run_summary(run: AgentRun) -> str | None:
     result = run.result or {}
     structured = result.get("structured_report") if isinstance(result, dict) else None
@@ -7491,6 +7640,24 @@ def _filter_agent_run_project(run: AgentRun, project_id: str | None) -> None:
             raise HTTPException(status_code=404, detail="Run not found")
 
 
+def _agent_report_project_filter(project_id: str):
+    if project_id == "default":
+        return or_(AgentRun.project_id == None, AgentRun.project_id == "default")
+    return AgentRun.project_id == project_id
+
+
+def _get_agent_report_run(session: Session, run_id: str, project_id: str) -> AgentRun:
+    run = session.exec(
+        select(AgentRun).where(
+            AgentRun.id == run_id,
+            _agent_report_project_filter(project_id),
+        )
+    ).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
 AGENT_PARTIAL_STATUS = "completed_partial"
 AGENT_TERMINAL_STATUSES = {"completed", AGENT_PARTIAL_STATUS, "failed", "cancelled", "timeout"}
 AGENT_ACTIVE_STATUSES = {"queued", "pending", "running", "in_progress", "waiting", "paused"}
@@ -7553,7 +7720,7 @@ def _record_agent_run_event(
         logger.debug("Failed to record agent run event for %s: %s", run_id, exc)
 
 
-async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session) -> None:
+async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session, *, workflow_attempt: int | None = None) -> None:
     from orchestrator.config import settings as app_settings
     from orchestrator.services.temporal_client import TemporalUnavailableError, describe_temporal_task_queue, start_agent_run_workflow
 
@@ -7568,7 +7735,10 @@ async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session) -> 
         task_queue_status = {"status": "unknown", "error": str(exc)}
 
     try:
-        temporal = await start_agent_run_workflow(run.id, task_queue=task_queue)
+        if workflow_attempt:
+            temporal = await start_agent_run_workflow(run.id, task_queue=task_queue, attempt=workflow_attempt)
+        else:
+            temporal = await start_agent_run_workflow(run.id, task_queue=task_queue)
     except TemporalUnavailableError as exc:
         run.status = "failed"
         run.completed_at = datetime.utcnow()
@@ -7603,6 +7773,7 @@ async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session) -> 
         payload={
             "workflow_id": temporal.workflow_id,
             "temporal_run_id": temporal.run_id,
+            "attempt": workflow_attempt,
             "task_queue": task_queue,
             "task_queue_status": task_queue_status,
         },
@@ -9351,6 +9522,25 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     prompt_parts.append(f"Target URL: {target_url}")
                 if custom_config:
                     prompt_parts.append(f"Additional config JSON:\n{json.dumps(custom_config, indent=2)}")
+                retry_context = config.get("retry_context") if isinstance(config.get("retry_context"), dict) else {}
+                if retry_context:
+                    context_lines = [
+                        "Retry continuation context:",
+                        f"- This is retry attempt {retry_context.get('attempt')} for the same AgentRun id `{run_id}`.",
+                        "- Resume from the saved browser auth/session artifacts and prior findings; do not restart discovery unless the saved page is unavailable.",
+                    ]
+                    if retry_context.get("last_observed_url"):
+                        context_lines.append(f"- Last observed browser URL: {retry_context['last_observed_url']}")
+                    if retry_context.get("raw_output_chars"):
+                        context_lines.append(f"- Previous raw output artifact contains {retry_context['raw_output_chars']} characters.")
+                    if retry_context.get("artifact_count"):
+                        context_lines.append(
+                            f"- Preserved artifacts: {retry_context['artifact_count']} total, "
+                            f"{retry_context.get('screenshot_count', 0)} screenshots."
+                        )
+                    if retry_context.get("storage_state_reused"):
+                        context_lines.append("- Browser auth storage state is available in the run directory.")
+                    prompt_parts.append("\n".join(context_lines))
                 test_data_refs = config.get("test_data_refs") if isinstance(config.get("test_data_refs"), list) else []
                 resolved_test_data = _resolve_agent_execution_test_data_context(
                     project_id=custom_project_id or config.get("project_id"),
@@ -9661,7 +9851,9 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             run = session.get(AgentRun, run_id)
             if run and run.status not in AGENT_TERMINAL_STATUSES:
                 recovered = None
-                if agent_type == "exploratory":
+                if agent_type == "custom":
+                    recovered = _recover_custom_agent_partial_result(run, e)
+                elif agent_type == "exploratory":
                     if _exploratory_result_has_usable_evidence(run.result):
                         recovered = _merge_agent_failure_into_result(
                             run.result,
@@ -9680,17 +9872,25 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         **(run.progress or {}),
                         "phase": AGENT_PARTIAL_STATUS,
                         "status": AGENT_PARTIAL_STATUS,
-                        "message": recovered.get("summary") or "Recovered partial Explorer evidence after runtime failure.",
+                        "message": recovered.get("summary")
+                        or (
+                            "Recovered partial custom agent evidence after runtime failure."
+                            if agent_type == "custom"
+                            else "Recovered partial Explorer evidence after runtime failure."
+                        ),
                         "updated_at": datetime.utcnow().isoformat(),
                     }
                     event_type = "partial"
                     event_level = "warning"
                     event_message = "Exploratory agent recovered partial evidence after runtime failure."
+                    if agent_type == "custom":
+                        event_message = "Custom agent recovered partial evidence after runtime failure."
                     event_payload = {
                         "status": run.status,
                         "error": str(e),
                         "summary": _agent_run_summary(run),
                         "failure_reason": recovered.get("failure_reason"),
+                        "artifact_recovery": _run_artifact_counts(run_id),
                     }
                 elif should_reraise:
                     run.progress = {
@@ -10430,82 +10630,105 @@ async def retry_agent_run(
     if source.status not in AGENT_TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail=f"Cannot retry a {source.status} run")
 
-    retry_id = str(uuid.uuid4())
     retry_config = dict(source.config or {})
-    previous_attempt = _coerce_progress_int(retry_config.get("retry_attempt"), 0)
+    previous_attempt = max(
+        _coerce_progress_int(retry_config.get("retry_attempt"), 0),
+        _coerce_progress_int((source.progress or {}).get("retry_attempt"), 0),
+    )
+    next_attempt = previous_attempt + 1
+    previous_workflow_id = source.temporal_workflow_id
+    previous_temporal_run_id = source.temporal_run_id
+    last_failure = None
+    if isinstance(source.result, dict):
+        last_failure = source.result.get("error") or source.result.get("summary")
+    last_failure = last_failure or (source.progress or {}).get("message") or source.status
+    last_observed_url = _latest_observed_url_for_run(source)
+    artifacts = _collect_agent_run_artifacts(source.id) if source.agent_type in ("exploratory", "custom") else []
+    artifact_counts = _run_artifact_counts(source.id, artifacts)
     retry_config.update(
         {
-            "runtime": "claude_sdk",
-            "retry_of": source.id,
+            "runtime": normalize_agent_runtime(source.runtime or retry_config.get("runtime")),
+            "retry_in_place": True,
             "source_run_id": source.id,
-            "retry_attempt": previous_attempt + 1,
+            "retry_attempt": next_attempt,
+            "retry_context": {
+                "attempt": next_attempt,
+                "last_failure": str(last_failure)[:1200],
+                "last_observed_url": last_observed_url,
+                **artifact_counts,
+            },
         }
     )
     if source.project_id and not retry_config.get("project_id"):
         retry_config["project_id"] = source.project_id
-
-    retry_run = AgentRun(
-        id=retry_id,
-        agent_type=source.agent_type,
-        runtime="claude_sdk",
-        config_json=json.dumps(retry_config),
-        status="queued",
-        project_id=source.project_id,
-    )
     browser_metadata = browser_runtime_status() if _agent_run_has_browser_tools(source.agent_type, retry_config) else {}
-    retry_run.progress = {
+    previous_status = source.status
+    source.config = retry_config
+    source.runtime = normalize_agent_runtime(retry_config.get("runtime"))
+    source.status = "queued"
+    source.started_at = None
+    source.completed_at = None
+    source.agent_task_id = None
+    source.temporal_workflow_id = None
+    source.temporal_run_id = None
+    source.progress = {
+        **(source.progress or {}),
         **browser_metadata,
         "phase": "queued",
         "status": "queued",
-        "runtime": "claude_sdk",
-        "message": f"Retry queued from agent run {source.id[:8]}.",
-        "retry_of": source.id,
+        "runtime": source.runtime,
+        "message": "Retrying in same run using saved browser auth/session artifacts.",
+        "retry_in_place": True,
+        "retry_attempt": next_attempt,
+        "previous_status": previous_status,
+        "previous_temporal_workflow_id": previous_workflow_id,
+        "previous_temporal_run_id": previous_temporal_run_id,
+        "last_failure": str(last_failure)[:1200],
+        "last_observed_url": last_observed_url,
+        **artifact_counts,
         "updated_at": datetime.utcnow().isoformat(),
     }
-    session.add(retry_run)
+    session.add(source)
     session.commit()
 
     _record_agent_run_event(
-        retry_run.id,
-        event_type="created",
-        message=f"Retry agent run created from {source.id}.",
+        source.id,
+        event_type="retry_started",
+        message="Retrying in same run using saved browser auth/session artifacts.",
         payload={
-            "agent_type": retry_run.agent_type,
-            "runtime": "claude_sdk",
-            "status": retry_run.status,
-            "retry_of": source.id,
-            "source_status": source.status,
+            "agent_type": source.agent_type,
+            "runtime": source.runtime,
+            "status": source.status,
+            "previous_status": previous_status,
+            "retry_attempt": next_attempt,
+            "previous_temporal_workflow_id": previous_workflow_id,
+            "previous_temporal_run_id": previous_temporal_run_id,
+            "last_failure": str(last_failure)[:1200],
+            "last_observed_url": last_observed_url,
+            **artifact_counts,
         },
         session=session,
     )
-    _record_agent_run_event(
-        source.id,
-        event_type="retry_created",
-        message=f"Retry agent run {retry_run.id} created.",
-        payload={"retry_run_id": retry_run.id, "source_status": source.status},
-        session=session,
-    )
 
-    await _start_agent_run_temporal_or_fail(retry_run, session)
-    session.refresh(retry_run)
+    await _start_agent_run_temporal_or_fail(source, session, workflow_attempt=next_attempt)
+    session.refresh(source)
     return {
-        **_serialize_agent_run(retry_run, session),
-        "run_id": retry_run.id,
+        **_serialize_agent_run(source, session),
+        "run_id": source.id,
         "source_run_id": source.id,
-        "retry_of": source.id,
+        "retry_in_place": True,
+        "retry_attempt": next_attempt,
+        "previous_temporal_workflow_id": previous_workflow_id,
     }
 
 
 @app.get("/api/agents/runs/{id}/report")
 def get_agent_run_report(
     id: str,
-    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    project_id: str = Query(..., description="Project ID for filtering"),
     session: Session = Depends(get_session),
 ):
-    run = session.get(AgentRun, id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    _filter_agent_run_project(run, project_id)
+    run = _get_agent_report_run(session, id, project_id)
 
     result = run.result or {}
     artifacts = _collect_agent_run_artifacts(run.id) if run.agent_type in ("exploratory", "custom") else []
@@ -10531,13 +10754,10 @@ def get_agent_run_report(
 def update_agent_run_report_overview(
     run_id: str,
     request: UpdateAgentReportOverviewRequest,
-    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    project_id: str = Query(..., description="Project ID for verification"),
     session: Session = Depends(get_session),
 ):
-    run = session.get(AgentRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    _filter_agent_run_project(run, project_id)
+    run = _get_agent_report_run(session, run_id, project_id)
 
     result, report = _stored_custom_agent_report(run)
     fields_set = getattr(request, "model_fields_set", None)
@@ -10566,13 +10786,10 @@ def update_agent_run_report_item(
     item_id: str,
     request: UpdateAgentReportItemRequest,
     item_type: str = Query(..., description="finding, test_idea, or requirement"),
-    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    project_id: str = Query(..., description="Project ID for verification"),
     session: Session = Depends(get_session),
 ):
-    run = session.get(AgentRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    _filter_agent_run_project(run, project_id)
+    run = _get_agent_report_run(session, run_id, project_id)
 
     normalized_type = _normalize_report_item_type(item_type)
     result, report = _stored_custom_agent_report(run)
@@ -10665,16 +10882,13 @@ def search_agent_reports(
 def import_agent_report_requirements(
     run_id: str,
     request: ImportReportRequirementsRequest,
-    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    project_id: str = Query(..., description="Project ID for verification"),
     session: Session = Depends(get_session),
 ):
     """Import reviewed custom-agent report requirements as candidate requirements."""
     from memory.exploration_store import get_exploration_store
 
-    run = session.get(AgentRun, run_id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    _filter_agent_run_project(run, project_id)
+    run = _get_agent_report_run(session, run_id, project_id)
     if run.agent_type != "custom":
         raise HTTPException(status_code=400, detail="Only custom agent reports can import requirements")
 
@@ -12114,12 +12328,10 @@ async def _run_flow_spec_generation(
 
             with SyncSession(engine) as db_session:
                 spec_name = str(spec_path.relative_to(project_root / "specs"))
-                existing_meta = db_session.get(DBSpecMetadata, spec_name)
+                existing_meta = get_db_spec_metadata(db_session, spec_name, effective_project_id)
                 if not existing_meta:
                     meta = DBSpecMetadata(spec_name=spec_name, project_id=effective_project_id, tags_json="[]")
                     db_session.add(meta)
-                else:
-                    existing_meta.project_id = effective_project_id
                 db_session.commit()
                 logger.info(f"Registered spec in DB: {spec_name} (project: {effective_project_id})")
         except Exception as e:
@@ -12267,7 +12479,7 @@ async def generate_report_item_spec(
     run_id: str,
     item_id: str,
     item_type: str | None = Query(default=None, description="finding or test_idea"),
-    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    project_id: str = Query(..., description="Project ID for verification"),
     request_body: GenerateReportItemSpecRequest | None = None,
     background_tasks: BackgroundTasks = BackgroundTasks(),
     session: Session = Depends(get_session),
@@ -12275,10 +12487,7 @@ async def generate_report_item_spec(
     """Generate a browser-backed spec from a custom agent finding or test idea."""
     import time as _time
 
-    source_run = session.get(AgentRun, run_id)
-    if not source_run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    _filter_agent_run_project(source_run, project_id)
+    source_run = _get_agent_report_run(session, run_id, project_id)
 
     result = source_run.result or {}
     report = result.get("structured_report") if isinstance(result, dict) else None

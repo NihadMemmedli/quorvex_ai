@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { ApiSpec, JobStatus, ApiTestRun } from './types';
 
 const CodeEditor = dynamic(() => import('@/components/CodeEditor'), { ssr: false });
@@ -38,7 +38,7 @@ function StatusDot({ status }: { status: 'passed' | 'failed' | 'running' | null 
 
 // ========== Log Viewer ==========
 
-function LogViewer({ jobId, isRunning }: { jobId: string; isRunning: boolean }) {
+function LogViewer({ jobId, isRunning, projectId }: { jobId: string; isRunning: boolean; projectId: string }) {
     const [logs, setLogs] = useState('');
     const [lineCount, setLineCount] = useState(0);
     const [expanded, setExpanded] = useState(true);
@@ -47,14 +47,14 @@ function LogViewer({ jobId, isRunning }: { jobId: string; isRunning: boolean }) 
 
     const fetchLogs = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/api-testing/jobs/${jobId}/logs?tail=200`);
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/jobs/${jobId}/logs?tail=200`, projectId)}`);
             if (res.ok) {
                 const data = await res.json();
                 setLogs(data.logs || '');
                 setLineCount(data.line_count || 0);
             }
         } catch { /* ignore */ }
-    }, [jobId]);
+    }, [jobId, projectId]);
 
     useEffect(() => {
         fetchLogs();
@@ -108,7 +108,7 @@ function LogViewer({ jobId, isRunning }: { jobId: string; isRunning: boolean }) 
 
 // ========== Job Status Panel ==========
 
-function JobStatusPanel({ job }: { job: JobStatus }) {
+function JobStatusPanel({ job, projectId }: { job: JobStatus; projectId: string }) {
     const isRunning = job.status === 'running';
     const passed = job.result?.passed;
     const healed = job.result?.healed;
@@ -183,7 +183,7 @@ function JobStatusPanel({ job }: { job: JobStatus }) {
                     {job.message}
                 </div>
             )}
-            <LogViewer jobId={job.job_id} isRunning={isRunning} />
+            <LogViewer jobId={job.job_id} isRunning={isRunning} projectId={projectId} />
         </div>
     );
 }
@@ -260,7 +260,7 @@ export default React.memo(function ApiSpecsTable({
     const loadSpecContent = useCallback(async (name: string) => {
         if (specContents[name]) return;
         try {
-            const res = await fetch(`${API_BASE}/api-testing/specs/${name}?project_id=${projectId}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/specs/${name}`, projectId)}`);
             if (res.ok) {
                 const data = await res.json();
                 setSpecContents(prev => ({ ...prev, [name]: data.content }));
@@ -287,10 +287,10 @@ export default React.memo(function ApiSpecsTable({
     // Actions
     const handleGenerateTest = useCallback(async (specName: string) => {
         try {
-            const res = await fetch(`${API_BASE}/api-testing/generate`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/generate', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spec_name: specName, project_id: projectId }),
+                body: JSON.stringify(withProjectBody({ spec_name: specName }, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -304,10 +304,10 @@ export default React.memo(function ApiSpecsTable({
 
     const handleRunTest = useCallback(async (specPath: string) => {
         try {
-            const res = await fetch(`${API_BASE}/api-testing/run`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/run', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spec_path: specPath, project_id: projectId }),
+                body: JSON.stringify(withProjectBody({ spec_path: specPath }, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -332,10 +332,10 @@ export default React.memo(function ApiSpecsTable({
 
     const handleEdgeCases = useCallback(async (specPath: string) => {
         try {
-            const res = await fetch(`${API_BASE}/api-testing/edge-cases`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/edge-cases', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spec_path: specPath, project_id: projectId }),
+                body: JSON.stringify(withProjectBody({ spec_path: specPath }, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -354,15 +354,14 @@ export default React.memo(function ApiSpecsTable({
         healOnFailure = false,
     ) => {
         try {
-            const res = await fetch(`${API_BASE}/api-testing/run-direct`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/run-direct', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+                body: JSON.stringify(withProjectBody({
                     spec_name: specName,
                     test_path: testPath,
-                    project_id: projectId,
                     heal_on_failure: healOnFailure,
-                }),
+                }, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -383,10 +382,10 @@ export default React.memo(function ApiSpecsTable({
 
     const handleUpdateSpec = useCallback(async (name: string) => {
         try {
-            const res = await fetch(`${API_BASE}/api-testing/specs/${name}?project_id=${projectId}`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/specs/${name}`, projectId)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: editContent }),
+                body: JSON.stringify(withProjectBody({ content: editContent }, projectId)),
             });
             if (res.ok) {
                 setMessage({ type: 'success', text: 'Spec updated' });
@@ -401,7 +400,7 @@ export default React.memo(function ApiSpecsTable({
     const handleDeleteSpec = useCallback(async (name: string, path: string) => {
         if (!confirm(`Delete spec "${name}"? This cannot be undone.`)) return;
         try {
-            const res = await fetch(`${API_BASE}/api-testing/specs/${name}?project_id=${projectId}`, { method: 'DELETE' });
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/specs/${name}`, projectId)}`, { method: 'DELETE' });
             if (res.ok) {
                 setMessage({ type: 'success', text: `Deleted ${name}` });
                 // Remove from selection
@@ -711,7 +710,7 @@ export default React.memo(function ApiSpecsTable({
                         {/* Running job status */}
                         {runJob && runJob.status === 'running' && (
                             <div style={{ padding: '0 0.75rem 0.75rem' }}>
-                                <JobStatusPanel job={runJob} />
+                                <JobStatusPanel job={runJob} projectId={projectId} />
                             </div>
                         )}
 

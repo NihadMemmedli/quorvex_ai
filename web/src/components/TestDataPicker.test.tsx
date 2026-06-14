@@ -15,6 +15,8 @@ vi.mock('@/contexts/AuthContext', () => ({
 
 vi.mock('@/lib/api', () => ({
   API_BASE: '',
+  withProjectQuery: (path: string, projectId?: string) =>
+    projectId ? `${path}?project_id=${encodeURIComponent(projectId)}` : path,
 }));
 
 const fetchWithAuthMock = vi.mocked(fetchWithAuth);

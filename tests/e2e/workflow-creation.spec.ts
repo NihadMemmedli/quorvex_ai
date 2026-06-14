@@ -184,7 +184,7 @@ test.describe('Workflow creation dashboard', () => {
       const headers = { Authorization: `Bearer ${token}` };
 
       if (startedRunId) {
-        await request.post(`${API_BASE}/workflows/runs/${startedRunId}/cancel`, {
+        await request.post(`${API_BASE}/workflows/runs/${startedRunId}/cancel?project_id=default`, {
           headers,
           failOnStatusCode: false,
         });

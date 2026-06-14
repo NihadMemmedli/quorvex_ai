@@ -25,7 +25,7 @@ from .db import engine, get_session
 from .middleware.auth import get_current_user_optional
 from .middleware.permissions import EDIT_ROLES, VIEW_ROLES, check_project_access
 from .models_auth import User
-from .models_db import Project, RecordingSession, SpecMetadata
+from .models_db import Project, RecordingSession, SpecMetadata, get_spec_metadata, normalize_project_id
 
 router = APIRouter(prefix="/recordings", tags=["recordings"])
 
@@ -277,11 +277,14 @@ async def import_recording(
     rec.output_code_path = str(code_rel)
     session.add(rec)
 
-    meta = session.get(SpecMetadata, str(spec_rel))
+    meta = get_spec_metadata(session, str(spec_rel), rec.project_id)
     if not meta:
-        meta = SpecMetadata(spec_name=str(spec_rel), project_id=rec.project_id, tags_json='["recorded"]')
+        meta = SpecMetadata(
+            spec_name=str(spec_rel),
+            project_id=normalize_project_id(rec.project_id),
+            tags_json='["recorded"]',
+        )
     else:
-        meta.project_id = rec.project_id
         tags = set(meta.tags)
         tags.add("recorded")
         meta.tags = sorted(tags)
@@ -472,7 +475,9 @@ def _recorder_browser_url() -> str | None:
 def _unique_slug(base_slug: str, project_id: str | None, session: Session) -> str:
     slug = base_slug
     counter = 2
-    while (SPECS_DIR / "recordings" / f"{slug}.md").exists() or session.get(SpecMetadata, f"recordings/{slug}.md"):
+    while (SPECS_DIR / "recordings" / f"{slug}.md").exists() or get_spec_metadata(
+        session, f"recordings/{slug}.md", project_id
+    ):
         slug = f"{base_slug}-{counter}"
         counter += 1
     return slug

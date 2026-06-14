@@ -166,11 +166,11 @@ def upgrade() -> None:
         sa.Column("description", sa.String(), nullable=True),
         sa.Column("author", sa.String(), nullable=True),
         sa.Column("last_modified", sa.DateTime(), nullable=True),
-        sa.Column("project_id", sa.String(), nullable=True),
+        sa.Column("project_id", sa.String(), nullable=False, server_default="default"),
         sa.Column("created_by", sa.String(), nullable=True),
         sa.Column("last_modified_by", sa.String(), nullable=True),
         sa.ForeignKeyConstraint(["project_id"], ["projects.id"]),
-        sa.PrimaryKeyConstraint("spec_name"),
+        sa.PrimaryKeyConstraint("project_id", "spec_name"),
     )
     op.create_index("ix_specmetadata_project_id", "specmetadata", ["project_id"])
 
@@ -193,6 +193,7 @@ def upgrade() -> None:
     op.create_table(
         "coverage_metrics",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("project_id", sa.String(), nullable=False, server_default="default"),
         sa.Column("run_id", sa.String(), nullable=True),
         sa.Column("metric_type", sa.String(), nullable=False),
         sa.Column("metric_name", sa.String(), nullable=False),
@@ -201,15 +202,19 @@ def upgrade() -> None:
         sa.Column("percentage", sa.Float(), nullable=False, server_default="0.0"),
         sa.Column("extra_data", sa.JSON(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=True),
+        sa.ForeignKeyConstraint(["project_id"], ["projects.id"]),
         sa.ForeignKeyConstraint(["run_id"], ["testrun.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_coverage_metrics_metric_type", "coverage_metrics", ["metric_type"])
+    op.create_index("ix_coverage_metrics_project_id", "coverage_metrics", ["project_id"])
+    op.create_index("ix_coverage_metrics_project_metric", "coverage_metrics", ["project_id", "metric_type"])
 
     # Discovered elements
     op.create_table(
         "discovered_elements",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("project_id", sa.String(), nullable=False, server_default="default"),
         sa.Column("url", sa.String(), nullable=False),
         sa.Column("selector_type", sa.String(), nullable=False),
         sa.Column("selector_value", sa.String(), nullable=False),
@@ -218,14 +223,18 @@ def upgrade() -> None:
         sa.Column("first_seen", sa.DateTime(), nullable=True),
         sa.Column("last_seen", sa.DateTime(), nullable=True),
         sa.Column("test_count", sa.Integer(), nullable=False, server_default="0"),
+        sa.ForeignKeyConstraint(["project_id"], ["projects.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
+    op.create_index("ix_discovered_elements_project_id", "discovered_elements", ["project_id"])
+    op.create_index("ix_discovered_elements_project_url", "discovered_elements", ["project_id", "url"])
     op.create_index("ix_discovered_elements_url", "discovered_elements", ["url"])
 
     # Test patterns
     op.create_table(
         "test_patterns",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("project_id", sa.String(), nullable=False, server_default="default"),
         sa.Column("pattern_hash", sa.String(), nullable=False),
         sa.Column("action", sa.String(), nullable=False),
         sa.Column("selector_type", sa.String(), nullable=False),
@@ -235,14 +244,18 @@ def upgrade() -> None:
         sa.Column("avg_duration", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("created_at", sa.DateTime(), nullable=True),
         sa.Column("updated_at", sa.DateTime(), nullable=True),
+        sa.ForeignKeyConstraint(["project_id"], ["projects.id"]),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("project_id", "pattern_hash", name="uq_test_patterns_project_pattern_hash"),
     )
-    op.create_index("ix_test_patterns_pattern_hash", "test_patterns", ["pattern_hash"], unique=True)
+    op.create_index("ix_test_patterns_pattern_hash", "test_patterns", ["pattern_hash"])
+    op.create_index("ix_test_patterns_project_id", "test_patterns", ["project_id"])
 
     # Coverage gaps
     op.create_table(
         "coverage_gaps",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("project_id", sa.String(), nullable=False, server_default="default"),
         sa.Column("gap_type", sa.String(), nullable=False),
         sa.Column("severity", sa.String(), nullable=False, server_default="medium"),
         sa.Column("description", sa.String(), nullable=False),
@@ -251,8 +264,11 @@ def upgrade() -> None:
         sa.Column("extra_data", sa.JSON(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=True),
         sa.Column("resolved", sa.Boolean(), nullable=False, server_default="false"),
+        sa.ForeignKeyConstraint(["project_id"], ["projects.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
+    op.create_index("ix_coverage_gaps_project_id", "coverage_gaps", ["project_id"])
+    op.create_index("ix_coverage_gaps_project_resolved", "coverage_gaps", ["project_id", "resolved"])
 
     # Application map
     op.create_table(

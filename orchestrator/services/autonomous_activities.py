@@ -3354,7 +3354,12 @@ def _merge_app_map_update(session: Session, mission: AutonomousMission, row: dic
         )
     ).first()
     if not existing:
-        existing = session.exec(select(ApplicationMap).where(ApplicationMap.url == url)).first()
+        existing = session.exec(
+            select(ApplicationMap).where(
+                ApplicationMap.project_id == mission.project_id,
+                ApplicationMap.url == url,
+            )
+        ).first()
     now = _utcnow()
     if existing:
         existing.project_id = existing.project_id or mission.project_id

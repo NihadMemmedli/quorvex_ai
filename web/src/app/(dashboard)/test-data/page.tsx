@@ -182,14 +182,14 @@ export default function TestDataPage() {
   }, [currentProject?.id, requestedDatasetKey]);
 
   const loadItems = useCallback(async (datasetId: string) => {
-    if (!datasetId) {
+    if (!datasetId || !currentProject?.id) {
       setItems([]);
       setSelectedItemId('');
       return;
     }
     setItemsLoading(true);
     try {
-      const response = await fetchWithAuth(`${API_BASE}/test-data/datasets/${encodeURIComponent(datasetId)}/items`);
+      const response = await fetchWithAuth(`${API_BASE}/test-data/datasets/${encodeURIComponent(datasetId)}/items?project_id=${encodeURIComponent(currentProject.id)}`);
       if (!response.ok) throw new Error(await readError(response, 'Failed to load items'));
       const data = await response.json();
       const next: TestDataItem[] = data.items || [];
@@ -205,7 +205,7 @@ export default function TestDataPage() {
     } finally {
       setItemsLoading(false);
     }
-  }, [requestedRef]);
+  }, [currentProject?.id, requestedRef]);
 
   useEffect(() => {
     setRequestedRef(new URLSearchParams(window.location.search).get('ref') || '');
@@ -304,9 +304,11 @@ export default function TestDataPage() {
         sensitive_fields: parseSensitiveFields(itemForm.sensitiveFields),
       };
       const isUpdate = Boolean(selectedItem);
+      if (!currentProject?.id) return;
+      const projectParam = `?project_id=${encodeURIComponent(currentProject.id)}`;
       const url = isUpdate
-        ? `${API_BASE}/test-data/datasets/${encodeURIComponent(selectedDataset.id)}/items/${encodeURIComponent(selectedItem!.id)}`
-        : `${API_BASE}/test-data/datasets/${encodeURIComponent(selectedDataset.id)}/items`;
+        ? `${API_BASE}/test-data/datasets/${encodeURIComponent(selectedDataset.id)}/items/${encodeURIComponent(selectedItem!.id)}${projectParam}`
+        : `${API_BASE}/test-data/datasets/${encodeURIComponent(selectedDataset.id)}/items${projectParam}`;
       const response = await fetchWithAuth(url, {
         method: isUpdate ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -327,10 +329,10 @@ export default function TestDataPage() {
   }
 
   async function deleteItem() {
-    if (!selectedDataset || !selectedItem || deletingItem) return;
+    if (!currentProject?.id || !selectedDataset || !selectedItem || deletingItem) return;
     setDeletingItem(true);
     try {
-      const response = await fetchWithAuth(`${API_BASE}/test-data/datasets/${encodeURIComponent(selectedDataset.id)}/items/${encodeURIComponent(selectedItem.id)}`, { method: 'DELETE' });
+      const response = await fetchWithAuth(`${API_BASE}/test-data/datasets/${encodeURIComponent(selectedDataset.id)}/items/${encodeURIComponent(selectedItem.id)}?project_id=${encodeURIComponent(currentProject.id)}`, { method: 'DELETE' });
       if (!response.ok) {
         const message = await readError(response, 'Failed to delete item');
         toast.error(message);
@@ -346,11 +348,11 @@ export default function TestDataPage() {
   }
 
   async function deleteDataset() {
-    if (!selectedDataset || deletingDataset) return;
+    if (!currentProject?.id || !selectedDataset || deletingDataset) return;
     const datasetId = selectedDataset.id;
     setDeletingDataset(true);
     try {
-      const response = await fetchWithAuth(`${API_BASE}/test-data/datasets/${encodeURIComponent(datasetId)}`, { method: 'DELETE' });
+      const response = await fetchWithAuth(`${API_BASE}/test-data/datasets/${encodeURIComponent(datasetId)}?project_id=${encodeURIComponent(currentProject.id)}`, { method: 'DELETE' });
       if (!response.ok) {
         const message = await readError(response, 'Failed to delete dataset');
         toast.error(message);

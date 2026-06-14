@@ -6,10 +6,11 @@ import {
 } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import type { K6Script, K6ExecutionStatus, SystemLimits } from './types';
 
 interface ScriptsTabProps {
+    projectId: string;
     scripts: K6Script[];
     scriptsLoading: boolean;
     k6Status: K6ExecutionStatus | null;
@@ -21,6 +22,7 @@ interface ScriptsTabProps {
 }
 
 export default function ScriptsTab({
+    projectId,
     scripts,
     scriptsLoading,
     k6Status,
@@ -123,7 +125,7 @@ export default function ScriptsTab({
                                             <Play size={12} /> Run
                                         </button>
                                         <a
-                                            href={`${API_BASE}/load-testing/scripts/${script.name}/download`}
+                                            href={`${API_BASE}${withProjectQuery(`/load-testing/scripts/${script.name}/download`, projectId)}`}
                                             style={{
                                                 display: 'flex', alignItems: 'center', gap: '0.25rem',
                                                 padding: '0.3rem 0.6rem', background: 'rgba(156, 163, 175, 0.1)',

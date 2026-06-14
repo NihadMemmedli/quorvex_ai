@@ -2,8 +2,8 @@
 import { useState, useEffect } from 'react';
 import { Clock, CheckCircle2, XCircle, PlayCircle, AlertCircle, FileText, ChevronRight, Timer, Globe, Chrome, Compass, StopCircle, Layers, Hourglass, Trash2, AlertTriangle, Search } from 'lucide-react';
 import Link from 'next/link';
-import { useProject } from '@/contexts/ProjectContext';
-import { API_BASE } from '@/lib/api';
+import { useRequiredProject } from '@/contexts/ProjectContext';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import { toast } from 'sonner';
 import { WorkflowBreadcrumb } from '@/components/workflow/WorkflowBreadcrumb';
 import { PageLayout } from '@/components/ui/page-layout';
@@ -53,7 +53,7 @@ interface QueueStatus {
 const PAGE_SIZE = 20;
 
 export default function RunsPage() {
-    const { currentProject, isLoading: projectLoading } = useProject();
+    const { projectId, isLoading: projectLoading } = useRequiredProject();
     const [runs, setRuns] = useState<Run[]>([]);
     const [loading, setLoading] = useState(true);
     const [loadingMore, setLoadingMore] = useState(false);
@@ -87,6 +87,7 @@ export default function RunsPage() {
     }, [searchQuery]);
 
     const fetchRuns = (offset: number = 0, append: boolean = false) => {
+        if (!projectId) return;
         const isInitialLoad = offset === 0 && !append;
         if (isInitialLoad) {
             setLoading(true);
@@ -95,10 +96,7 @@ export default function RunsPage() {
         }
 
         // Build URL with optional project filter and search/status filters
-        let runsUrl = `${API_BASE}/runs?limit=${PAGE_SIZE}&offset=${offset}`;
-        if (currentProject?.id) {
-            runsUrl += `&project_id=${encodeURIComponent(currentProject.id)}`;
-        }
+        let runsUrl = `${API_BASE}${withProjectQuery(`/runs?limit=${PAGE_SIZE}&offset=${offset}`, projectId)}`;
         if (statusFilter !== 'all') {
             runsUrl += `&status=${encodeURIComponent(statusFilter)}`;
         }
@@ -142,9 +140,10 @@ export default function RunsPage() {
             return;
         }
         fetchRuns();
-    }, [currentProject?.id, projectLoading, statusFilter, debouncedSearch]); // Re-fetch when project or filters change
+    }, [projectId, projectLoading, statusFilter, debouncedSearch]); // Re-fetch when project or filters change
 
     useEffect(() => {
+        if (!projectId) return;
         // Auto-refresh every 3 seconds if there are running or queued tests
         const interval = setInterval(() => {
             const hasRunning = runs.some(r =>
@@ -155,10 +154,7 @@ export default function RunsPage() {
             );
             if (hasRunning) {
                 // Build URL with optional project filter and search/status filters
-                let runsUrl = `${API_BASE}/runs?limit=${PAGE_SIZE}&offset=0`;
-                if (currentProject?.id) {
-                    runsUrl += `&project_id=${encodeURIComponent(currentProject.id)}`;
-                }
+                let runsUrl = `${API_BASE}${withProjectQuery(`/runs?limit=${PAGE_SIZE}&offset=0`, projectId)}`;
                 if (statusFilter !== 'all') {
                     runsUrl += `&status=${encodeURIComponent(statusFilter)}`;
                 }
@@ -191,7 +187,7 @@ export default function RunsPage() {
         }, 3000);
 
         return () => clearInterval(interval);
-    }, [runs.length > 0 ? runs.some(r => ['running', 'in_progress', 'pending', 'queued'].includes(r.status)) : false, currentProject?.id]);
+    }, [runs.length > 0 ? runs.some(r => ['running', 'in_progress', 'pending', 'queued'].includes(r.status)) : false, projectId, statusFilter, debouncedSearch]);
 
     const handleStopRun = async (runId: string, e: React.MouseEvent) => {
         e.preventDefault();
@@ -205,7 +201,7 @@ export default function RunsPage() {
         setStoppingRuns(prev => new Set(prev).add(confirmStop));
 
         try {
-            const res = await fetch(`${API_BASE}/runs/${confirmStop}/stop`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/runs/${confirmStop}/stop`, projectId)}`, {
                 method: 'POST'
             });
 
@@ -230,7 +226,7 @@ export default function RunsPage() {
     const handleStopAll = async () => {
         setStoppingAll(true);
         try {
-            const res = await fetch(`${API_BASE}/stop-all`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/stop-all', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
             });
@@ -254,7 +250,7 @@ export default function RunsPage() {
     const handleClearQueue = async () => {
         setClearingQueue(true);
         try {
-            const res = await fetch(`${API_BASE}/queue/clear`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/queue/clear', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -291,7 +287,7 @@ export default function RunsPage() {
         setDeletingRuns(prev => new Set(prev).add(confirmDelete));
 
         try {
-            const res = await fetch(`${API_BASE}/runs/${confirmDelete}`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/runs/${confirmDelete}`, projectId)}`, {
                 method: 'DELETE'
             });
 

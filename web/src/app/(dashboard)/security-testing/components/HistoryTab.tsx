@@ -6,24 +6,25 @@ import { cardStyle } from '@/lib/styles';
 import { StatusBadge, SeverityBadge } from '@/components/shared';
 import { SecurityScanRun, SecurityFinding } from './types';
 import FindingCard from './FindingCard';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import { getAuthHeaders } from '@/lib/styles';
 
 interface HistoryTabProps {
     runs: SecurityScanRun[];
+    projectId: string;
     fetchRuns: () => Promise<void>;
     onStatusChange: (id: number, status: string, notes?: string) => void;
     onStopScan: (runId: string) => void;
 }
 
-export default function HistoryTab({ runs, fetchRuns, onStatusChange, onStopScan }: HistoryTabProps) {
+export default function HistoryTab({ runs, projectId, fetchRuns, onStatusChange, onStopScan }: HistoryTabProps) {
     const [selectedRun, setSelectedRun] = useState<SecurityScanRun | null>(null);
     const [runFindings, setRunFindings] = useState<SecurityFinding[]>([]);
     const [expandedFinding, setExpandedFinding] = useState<number | null>(null);
 
     const fetchRunFindings = async (runId: string) => {
         try {
-            const url = `${API_BASE}/security-testing/runs/${runId}/findings`;
+            const url = `${API_BASE}${withProjectQuery(`/security-testing/runs/${runId}/findings`, projectId)}`;
             const res = await fetch(url, { headers: getAuthHeaders() });
             if (res.ok) setRunFindings(await res.json());
         } catch (e) { console.error('Failed to fetch run findings:', e); }

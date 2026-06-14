@@ -6,10 +6,10 @@ import {
 import { useRouter, useSearchParams } from 'next/navigation';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
-import { useProject } from '@/contexts/ProjectContext';
+import { useRequiredProject } from '@/contexts/ProjectContext';
 import { createTabStyle } from '@/lib/styles';
 import { getAuthHeaders } from '@/lib/styles';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 
 import ConnectionsTab from './components/ConnectionsTab';
 import DbViewerTab from './components/DbViewerTab';
@@ -21,10 +21,9 @@ import DashboardTab from './components/DashboardTab';
 import type { DbConnection, DbSpec, DbTestRun, TabType } from './components/types';
 
 export default function DatabaseTestingPage() {
-    const { currentProject } = useProject();
+    const { projectId } = useRequiredProject();
     const router = useRouter();
     const searchParams = useSearchParams();
-    const projectId = currentProject?.id || 'default';
 
     const initialTab = (searchParams.get('tab') || 'connections') as TabType;
     const normalizedInitialTab = (
@@ -77,7 +76,7 @@ export default function DatabaseTestingPage() {
 
     const fetchConnections = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/database-testing/connections?project_id=${projectId}`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/database-testing/connections', projectId)}`, {
                 headers: getAuthHeaders(),
             });
             if (res.ok) {
@@ -89,7 +88,7 @@ export default function DatabaseTestingPage() {
 
     const fetchSpecs = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/database-testing/specs?project_id=${projectId}`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/database-testing/specs', projectId)}`, {
                 headers: getAuthHeaders(),
             });
             if (res.ok) {
@@ -101,7 +100,7 @@ export default function DatabaseTestingPage() {
 
     const fetchRuns = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/database-testing/runs?project_id=${projectId}&limit=50`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/database-testing/runs?limit=50', projectId)}`, {
                 headers: getAuthHeaders(),
             });
             if (res.ok) {
@@ -275,6 +274,7 @@ export default function DatabaseTestingPage() {
             {activeTab === 'viewer' && visited.has('viewer') && (
                 <DbViewerTab
                     connections={connections}
+                    projectId={projectId}
                     preferredConnectionId={preferredConnectionId}
                     selectedConnectionId={selectedConnectionId}
                     selectedTableName={selectedTableName}
@@ -306,6 +306,7 @@ export default function DatabaseTestingPage() {
             {activeTab === 'history' && visited.has('history') && (
                 <HistoryTab
                     runs={runs}
+                    projectId={projectId}
                     onRefreshRuns={fetchRuns}
                 />
             )}

@@ -53,6 +53,11 @@ def _cleanup_old_req_jobs():
                 del job_store[job_id]
 
 
+def _ensure_job_project(job_project_id: str | None, project_id: str) -> None:
+    if job_project_id != project_id:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+
 # ========== Pydantic Models ==========
 
 
@@ -436,24 +441,19 @@ async def _cached_requirement_spec_response(
 
     from orchestrator.api.db import get_session
     from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
+    from orchestrator.api.models_db import get_spec_metadata
 
     specs_base_dir = Path(__file__).resolve().parent.parent.parent / "specs"
     try:
         relative_spec_name = str(spec_path.relative_to(specs_base_dir))
         with next(get_session()) as db:
-            existing_meta = db.get(DBSpecMetadata, relative_spec_name)
+            existing_meta = get_spec_metadata(db, relative_spec_name, project_id)
             if not existing_meta:
                 meta = DBSpecMetadata(spec_name=relative_spec_name, project_id=project_id, tags_json="[]")
                 db.add(meta)
                 db.commit()
                 logger.info(
                     f"Registered existing spec in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}"
-                )
-            elif existing_meta.project_id != project_id:
-                existing_meta.project_id = project_id
-                db.commit()
-                logger.info(
-                    f"Updated existing spec project_id in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}"
                 )
     except ValueError:
         logger.warning(f"Spec path {spec_path} is not under specs directory, skipping DBSpecMetadata registration")
@@ -662,6 +662,7 @@ async def _execute_requirement_spec_generation(
     from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.api.db import get_session
     from orchestrator.api.models_db import AgentRun, SpecMetadata as DBSpecMetadata
+    from orchestrator.api.models_db import get_spec_metadata
     from orchestrator.utils.playwright_mcp import browser_runtime_status
     from workflows.native_planner import NativePlanner
 
@@ -786,14 +787,11 @@ async def _execute_requirement_spec_generation(
     specs_base_dir = project_root / "specs"
     relative_spec_name = str(spec_path.relative_to(specs_base_dir))
     with next(get_session()) as db:
-        existing = db.get(DBSpecMetadata, relative_spec_name)
+        existing = get_spec_metadata(db, relative_spec_name, project_id)
         if not existing:
             meta = DBSpecMetadata(spec_name=relative_spec_name, project_id=project_id, tags_json="[]")
             db.add(meta)
             logger.info(f"Registered spec in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}")
-        else:
-            existing.project_id = project_id
-            logger.info(f"Updated spec project_id in DBSpecMetadata: {relative_spec_name} -> project_id={project_id}")
         db.commit()
 
     logger.info(
@@ -1184,7 +1182,7 @@ async def check_requirements_health():
 
 # Parameterized route must come AFTER specific routes
 @router.get("/{req_id}", response_model=RequirementResponse)
-async def get_requirement(req_id: int, project_id: str = Query(default="default")):
+async def get_requirement(req_id: int, project_id: str = Query(...)):
     """Get a specific requirement by ID."""
     from orchestrator.memory.exploration_store import get_exploration_store
 
@@ -1198,7 +1196,7 @@ async def get_requirement(req_id: int, project_id: str = Query(default="default"
 
 
 @router.post("", response_model=RequirementResponse)
-async def create_requirement(request: RequirementCreate, project_id: str = Query(default="default")):
+async def create_requirement(request: RequirementCreate, project_id: str = Query(...)):
     """Create a new requirement manually."""
     from orchestrator.memory.exploration_store import get_exploration_store
 
@@ -1236,7 +1234,7 @@ class BulkCreateResponse(BaseModel):
 
 
 @router.post("/bulk", response_model=BulkCreateResponse)
-async def bulk_create_requirements(request: BulkRequirementCreate, project_id: str = Query(default="default")):
+async def bulk_create_requirements(request: BulkRequirementCreate, project_id: str = Query(...)):
     """Bulk create multiple requirements in a single request."""
     from orchestrator.memory.exploration_store import get_exploration_store
 
@@ -1263,7 +1261,7 @@ async def bulk_create_requirements(request: BulkRequirementCreate, project_id: s
 
 
 @router.put("/{req_id}", response_model=RequirementResponse)
-async def update_requirement(req_id: int, request: RequirementUpdate, project_id: str = Query(default="default")):
+async def update_requirement(req_id: int, request: RequirementUpdate, project_id: str = Query(...)):
     """Update an existing requirement."""
     from orchestrator.memory.exploration_store import get_exploration_store
 
@@ -1427,7 +1425,7 @@ def _update_requirement_truth_decision(
 @router.post("/review/decisions", response_model=RequirementReviewDecisionsResponse)
 async def review_requirement_decisions(
     request: RequirementReviewDecisionsRequest,
-    project_id: str = Query(default="default"),
+    project_id: str = Query(...),
 ):
     """Apply multiple human truth-state decisions to requirements."""
 
@@ -1479,7 +1477,7 @@ async def review_requirement_decisions(
 async def confirm_requirement(
     req_id: int,
     request: RequirementTruthDecisionRequest | None = None,
-    project_id: str = Query(default="default"),
+    project_id: str = Query(...),
 ):
     payload = request or RequirementTruthDecisionRequest()
     requirement = _update_requirement_truth_decision(
@@ -1497,7 +1495,7 @@ async def confirm_requirement(
 async def reject_requirement(
     req_id: int,
     request: RequirementTruthDecisionRequest | None = None,
-    project_id: str = Query(default="default"),
+    project_id: str = Query(...),
 ):
     payload = request or RequirementTruthDecisionRequest()
     requirement = _update_requirement_truth_decision(
@@ -1515,7 +1513,7 @@ async def reject_requirement(
 async def mark_requirement_stale(
     req_id: int,
     request: RequirementTruthDecisionRequest | None = None,
-    project_id: str = Query(default="default"),
+    project_id: str = Query(...),
 ):
     payload = request or RequirementTruthDecisionRequest()
     requirement = _update_requirement_truth_decision(
@@ -1530,7 +1528,7 @@ async def mark_requirement_stale(
 
 
 @router.delete("/{req_id}")
-async def delete_requirement(req_id: int, project_id: str = Query(default="default")):
+async def delete_requirement(req_id: int, project_id: str = Query(...)):
     """Delete a requirement."""
     from sqlmodel import select
 
@@ -1661,7 +1659,7 @@ async def _run_requirements_generation(
 
 @router.post("/generate")
 async def generate_requirements(
-    request: GenerateRequirementsRequest, project_id: str = Query(default="default")
+    request: GenerateRequirementsRequest, project_id: str = Query(...)
 ):
     """
     Generate requirements from an exploration session (async).
@@ -1738,17 +1736,19 @@ async def generate_requirements(
 
 
 @router.get("/generate-jobs/{job_id}")
-async def get_generate_job_status(job_id: str):
+async def get_generate_job_status(job_id: str, project_id: str = Query(...)):
     """Poll requirements generation job status."""
     from orchestrator.services.domain_jobs import domain_job_to_dict, get_domain_job
 
     durable_job = get_domain_job(job_id)
     if durable_job and durable_job.job_type == "requirements_generate":
+        _ensure_job_project(durable_job.project_id, project_id)
         return domain_job_to_dict(durable_job)
 
     job = _req_gen_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _ensure_job_project(job.get("project_id"), project_id)
 
     response = {
         "job_id": job_id,
@@ -1954,7 +1954,7 @@ async def _run_bulk_spec_generation(
 
 @router.post("/bulk-generate-specs")
 async def bulk_generate_specs(
-    request: BulkGenerateSpecsRequest, project_id: str = Query(default="default")
+    request: BulkGenerateSpecsRequest, project_id: str = Query(...)
 ):
     """
     Generate specs for all uncovered requirements (async).
@@ -2030,12 +2030,13 @@ async def bulk_generate_specs(
 
 
 @router.get("/bulk-generate-jobs/{job_id}")
-async def get_bulk_generate_job_status(job_id: str):
+async def get_bulk_generate_job_status(job_id: str, project_id: str = Query(...)):
     """Poll bulk spec generation job status."""
     from orchestrator.services.domain_jobs import domain_job_to_dict, get_domain_job
 
     durable_job = get_domain_job(job_id)
     if durable_job and durable_job.job_type == "requirements_bulk_generate":
+        _ensure_job_project(durable_job.project_id, project_id)
         response = domain_job_to_dict(durable_job)
         response.setdefault("total", 0)
         response.setdefault("completed", 0)
@@ -2047,6 +2048,7 @@ async def get_bulk_generate_job_status(job_id: str):
     job = _bulk_gen_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _ensure_job_project(job.get("project_id"), project_id)
 
     return {
         "job_id": job_id,
@@ -2126,7 +2128,7 @@ async def check_duplicate(request: CheckDuplicateRequest, project_id: str = Quer
 
 
 @router.post("/merge", response_model=MergeResponse)
-async def merge_requirements(request: MergeRequest, project_id: str = Query(default="default")):
+async def merge_requirements(request: MergeRequest, project_id: str = Query(...)):
     """
     Merge duplicate requirements into a canonical one.
 
@@ -2150,7 +2152,7 @@ async def merge_requirements(request: MergeRequest, project_id: str = Query(defa
             raise HTTPException(status_code=404, detail="Canonical requirement not found")
 
         if canonical.project_id != project_id:
-            raise HTTPException(status_code=403, detail="Canonical requirement belongs to different project")
+            raise HTTPException(status_code=404, detail="Canonical requirement not found")
 
         # Get duplicate requirements
         duplicates = []
@@ -2159,7 +2161,7 @@ async def merge_requirements(request: MergeRequest, project_id: str = Query(defa
             if not dup:
                 raise HTTPException(status_code=404, detail=f"Duplicate requirement {dup_id} not found")
             if dup.project_id != project_id:
-                raise HTTPException(status_code=403, detail=f"Requirement {dup_id} belongs to different project")
+                raise HTTPException(status_code=404, detail=f"Duplicate requirement {dup_id} not found")
             if dup_id == request.canonical_id:
                 raise HTTPException(status_code=400, detail="Cannot merge canonical with itself")
             duplicates.append(dup)
@@ -2214,7 +2216,7 @@ async def merge_requirements(request: MergeRequest, project_id: str = Query(defa
 
 
 @router.get("/{req_id}/spec-status", response_model=SpecStatusResponse)
-async def get_spec_status(req_id: int, project_id: str = Query(default="default")):
+async def get_spec_status(req_id: int, project_id: str = Query(...)):
     """
     Check if a spec has been generated for this requirement.
 
@@ -2267,7 +2269,7 @@ async def start_generate_spec_job(
     req_id: int,
     request: GenerateSpecFromRequirementRequest,
     background_tasks: BackgroundTasks,
-    project_id: str = Query(default="default"),
+    project_id: str = Query(...),
 ):
     """Start async browser-backed spec generation for the RTM/requirements modal."""
     from orchestrator.memory.exploration_store import get_exploration_store
@@ -2379,7 +2381,7 @@ async def start_generate_spec_job(
 
 
 @router.get("/generate-spec-jobs/{job_id}")
-async def get_generate_spec_job_status(job_id: str):
+async def get_generate_spec_job_status(job_id: str, project_id: str = Query(...)):
     """Poll async requirement spec generation status."""
     from orchestrator.api.db import get_session
     from orchestrator.api.models_db import AgentRun
@@ -2387,6 +2389,7 @@ async def get_generate_spec_job_status(job_id: str):
     job = _req_spec_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _ensure_job_project(job.get("project_id"), project_id)
 
     response = {
         "job_id": job_id,
@@ -2422,7 +2425,7 @@ async def get_generate_spec_job_status(job_id: str):
 
 @router.post("/{req_id}/generate-spec", response_model=GenerateSpecFromRequirementResponse)
 async def generate_spec_from_requirement(
-    req_id: int, request: GenerateSpecFromRequirementRequest, project_id: str = Query(default="default")
+    req_id: int, request: GenerateSpecFromRequirementRequest, project_id: str = Query(...)
 ):
     """
     Generate a test spec from a requirement using AI browser exploration.

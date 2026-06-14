@@ -6,7 +6,7 @@ import {
 import { formatDate } from '@/lib/formatting';
 import { cardStyle, inputStyle, btnPrimary, btnSecondary } from '@/lib/styles';
 import { getAuthHeaders } from '@/lib/styles';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import type { DbConnection } from './types';
 
 interface ConnectionsTabProps {
@@ -32,7 +32,7 @@ export default function ConnectionsTab({ connections, projectId, onRefresh }: Co
             const res = await fetch(`${API_BASE}/database-testing/connections`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                body: JSON.stringify({ ...connForm, project_id: projectId }),
+                body: JSON.stringify(withProjectBody(connForm, projectId)),
             });
             if (res.ok) {
                 setShowConnForm(false);
@@ -49,7 +49,7 @@ export default function ConnectionsTab({ connections, projectId, onRefresh }: Co
         setTestingConnId(connId);
         setConnTestResult(null);
         try {
-            const res = await fetch(`${API_BASE}/database-testing/connections/${connId}/test`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/connections/${connId}/test`, projectId)}`, {
                 method: 'POST',
                 headers: getAuthHeaders(),
             });
@@ -65,7 +65,7 @@ export default function ConnectionsTab({ connections, projectId, onRefresh }: Co
     const deleteConnection = async (connId: string) => {
         if (!confirm('Delete this connection?')) return;
         try {
-            await fetch(`${API_BASE}/database-testing/connections/${connId}`, {
+            await fetch(`${API_BASE}${withProjectQuery(`/database-testing/connections/${connId}`, projectId)}`, {
                 method: 'DELETE', headers: getAuthHeaders(),
             });
             onRefresh();

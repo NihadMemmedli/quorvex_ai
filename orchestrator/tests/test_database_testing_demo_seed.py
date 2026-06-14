@@ -101,7 +101,15 @@ def test_database_demo_seed_creates_endpoint_visible_content(database_testing_cl
     assert run_rows[0]["failed_checks"] == 4
     assert run_rows[0]["pass_rate"] == 50.0
 
-    checks = database_testing_client.get(f"/database-testing/runs/{run_id}/checks")
+    omitted_checks = database_testing_client.get(f"/database-testing/runs/{run_id}/checks")
+    assert omitted_checks.status_code == 422
+
+    wrong_project_checks = database_testing_client.get(
+        f"/database-testing/runs/{run_id}/checks?project_id=wrong-project"
+    )
+    assert wrong_project_checks.status_code == 404
+
+    checks = database_testing_client.get(f"/database-testing/runs/{run_id}/checks?project_id={project_id}")
     assert checks.status_code == 200
     assert len(checks.json()) == 8
     assert any(check["status"] == "failed" and check["sample_data"] for check in checks.json())
@@ -122,7 +130,7 @@ def test_database_demo_seed_is_idempotent(database_testing_client, demo_seed):
 
     connections = database_testing_client.get(f"/database-testing/connections?project_id={project_id}")
     runs = database_testing_client.get(f"/database-testing/runs?project_id={project_id}")
-    checks = database_testing_client.get(f"/database-testing/runs/{run_id}/checks")
+    checks = database_testing_client.get(f"/database-testing/runs/{run_id}/checks?project_id={project_id}")
 
     assert connections.status_code == 200
     assert len(connections.json()) == 1

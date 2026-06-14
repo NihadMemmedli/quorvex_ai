@@ -812,6 +812,84 @@ class TestSpecEndpoints:
         response = client.get("/specs/list?project_id=default")
         assert response.status_code == 200
 
+    def test_split_spec_regex_returns_extraction_metadata(self, client, tmp_path, monkeypatch):
+        """POST /specs/split should report regex extraction when explicitly selected."""
+        from orchestrator.api import main as main_module
+
+        specs_dir = tmp_path / "specs"
+        specs_dir.mkdir()
+        (specs_dir / "multi.md").write_text(
+            """# Test: First flow
+
+## Source
+Test ID: TC-001
+Category: Happy Path
+
+## Steps
+1. Navigate to /
+
+## Expected Outcome
+- First flow succeeds
+
+# Test: Second flow
+
+## Source
+Test ID: TC-002
+Category: Happy Path
+
+## Steps
+1. Click Continue
+
+## Expected Outcome
+- Second flow succeeds
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+
+        response = client.post(
+            "/specs/split",
+            json={"spec_name": "multi.md", "mode": "individual", "extraction_method": "regex"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 2
+        assert data["extraction_method"] == "regex"
+        assert data["ai_used"] is False
+        assert data["warning"] is None
+
+    def test_split_spec_rejects_regex_grouped_mode(self, client, tmp_path, monkeypatch):
+        """Smart Groups require AI extraction."""
+        from orchestrator.api import main as main_module
+
+        specs_dir = tmp_path / "specs"
+        specs_dir.mkdir()
+        (specs_dir / "multi.md").write_text(
+            """# Test: First flow
+
+## Source
+Test ID: TC-001
+Category: Happy Path
+
+# Test: Second flow
+
+## Source
+Test ID: TC-002
+Category: Happy Path
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+
+        response = client.post(
+            "/specs/split",
+            json={"spec_name": "multi.md", "mode": "grouped", "extraction_method": "regex"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Smart Groups requires AI extraction."
+
     def test_list_specs_excludes_templates_by_default_and_can_return_templates(self, client, tmp_path, monkeypatch):
         """GET /specs/list should keep templates separate unless templates_only=true."""
         from orchestrator.api import main as main_module
@@ -839,6 +917,7 @@ class TestSpecEndpoints:
         from orchestrator.api import main as main_module
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
+        from orchestrator.api.models_db import get_spec_metadata
 
         project_id = f"template-project-{uuid4()}"
         included_name = f"templates/{uuid4()}.md"
@@ -864,7 +943,7 @@ class TestSpecEndpoints:
         finally:
             with Session(engine) as session:
                 for spec_name in (included_name, excluded_name):
-                    meta = session.get(DBSpecMetadata, spec_name)
+                    meta = get_spec_metadata(session, spec_name, project_id if spec_name == included_name else f"other-{project_id}")
                     if meta:
                         session.delete(meta)
                 session.commit()
@@ -873,7 +952,7 @@ class TestSpecEndpoints:
         """Autopilot specs are visible only through the project recorded in SpecMetadata."""
         from orchestrator.api import main as main_module
         from orchestrator.api.db import engine
-        from orchestrator.api.models_db import Project, SpecMetadata
+        from orchestrator.api.models_db import Project, SpecMetadata, get_spec_metadata
 
         project_id = f"wetravel-project-{uuid4().hex}"
         session_id = f"autopilot_{uuid4().hex}"
@@ -900,7 +979,7 @@ class TestSpecEndpoints:
             assert spec_name not in default_names
         finally:
             with Session(engine) as session:
-                meta = session.get(SpecMetadata, spec_name)
+                meta = get_spec_metadata(session, spec_name, project_id)
                 if meta:
                     session.delete(meta)
                 project = session.get(Project, project_id)
@@ -1053,6 +1132,7 @@ class TestProjectEndpoints:
             RegressionBatch,
             SpecMetadata,
             TestRun,
+            get_spec_metadata,
         )
         from orchestrator.api.projects import ensure_default_project
 
@@ -1132,7 +1212,7 @@ class TestProjectEndpoints:
 
             with Session(engine) as session:
                 assert session.get(Project, project_id) is None
-                assert session.get(SpecMetadata, spec_name).project_id == "default"
+                assert get_spec_metadata(session, spec_name, "default").project_id == "default"
                 assert session.get(TestRun, run_id).project_id == "default"
                 assert session.get(RegressionBatch, batch_id).project_id == "default"
                 membership = session.exec(
@@ -1156,13 +1236,16 @@ class TestProjectEndpoints:
                 if membership:
                     session.delete(membership)
 
+                spec_meta = get_spec_metadata(session, spec_name, "default")
+                if spec_meta:
+                    session.delete(spec_meta)
+
                 for model, key in (
                     (FlowStep, step_id),
                     (DiscoveredFlow, flow_id),
                     (ExplorationSession, exploration_id),
                     (TestRun, run_id),
                     (RegressionBatch, batch_id),
-                    (SpecMetadata, spec_name),
                     (Project, project_id),
                     (User, user_id),
                 ):

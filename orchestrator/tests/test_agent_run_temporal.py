@@ -54,6 +54,7 @@ from orchestrator.api.requirements import get_bulk_generate_job_status, get_gene
 from orchestrator.api.rtm import get_rtm_generate_job_status
 from orchestrator.services.agent_run_activities import (
     execute_agent_run,
+    finalize_agent_run_workflow,
     mark_agent_run_temporal_started,
     set_agent_run_control_status,
 )
@@ -1316,59 +1317,138 @@ def test_agent_run_temporal_activity_records_started_metadata():
         _cleanup_run(run_id)
 
 
-@pytest.mark.asyncio
-async def test_retry_agent_run_creates_linked_claude_sdk_run(monkeypatch):
-    run_id = "agent-temporal-retry-source"
-    created_workflows: list[str] = []
+def test_finalize_agent_run_workflow_recovers_custom_raw_output_as_partial(tmp_path, monkeypatch):
+    run_id = "agent-temporal-partial-custom"
     _ensure_tables()
     _cleanup_run(run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(
+        main_module.exploration,
+        "_collect_exploration_artifacts",
+        lambda session_id: [{"name": "live-step-001.png", "path": f"/artifacts/{session_id}/live-step-001.png", "type": "image"}],
+    )
+    run_dir = main_module.RUNS_DIR / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "raw_output.txt").write_text(
+        "Checked https://example.test/checkout and found a validation error.",
+        encoding="utf-8",
+    )
+    (run_dir / "live-step-001.png").write_bytes(b"png")
 
-    async def fake_start_agent_run_temporal_or_fail(run, session):
-        run.temporal_workflow_id = f"agent-run-{run.id}"
+    try:
+        with Session(engine) as session:
+            run = AgentRun(
+                id=run_id,
+                agent_type="custom",
+                runtime="claude_sdk",
+                status="running",
+                config_json=json.dumps({"prompt": "Inspect checkout", "url": "https://example.test"}),
+            )
+            session.add(run)
+            session.commit()
+
+        result = finalize_agent_run_workflow(
+            {
+                "run_id": run_id,
+                "result": {
+                    "status": "failed",
+                    "error": "Activity task failed",
+                    "activity_failed": True,
+                },
+            }
+        )
+
+        assert result["status"] == "completed_partial"
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            assert run.status == "completed_partial"
+            assert run.result["failure_reason"] == "runtime_failed_after_evidence"
+            assert run.result["output"].startswith("Checked https://example.test/checkout")
+            assert run.result["structured_report"]["evidence"]
+            assert run.progress["raw_output_chars"] > 0
+            assert run.progress["artifact_count"] >= 1
+    finally:
+        _cleanup_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_retry_agent_run_requeues_same_run_with_unique_temporal_workflow(monkeypatch, tmp_path):
+    run_id = "agent-temporal-retry-source"
+    created_workflows: list[tuple[str, int | None]] = []
+    _ensure_tables()
+    _cleanup_run(run_id)
+    monkeypatch.setattr(main_module, "RUNS_DIR", tmp_path / "runs")
+    run_dir = main_module.RUNS_DIR / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "browser-auth-storage-state.json").write_text("{}", encoding="utf-8")
+    (run_dir / "raw_output.txt").write_text("Saw https://example.com/dashboard before timeout.", encoding="utf-8")
+
+    async def fake_start_agent_run_temporal_or_fail(run, session, *, workflow_attempt=None):
+        run.temporal_workflow_id = f"agent-run-{run.id}-attempt-{workflow_attempt}"
         run.temporal_run_id = "temporal-retry-run"
         session.add(run)
         session.commit()
-        created_workflows.append(run.id)
+        created_workflows.append((run.id, workflow_attempt))
 
     monkeypatch.setattr(main_module, "_start_agent_run_temporal_or_fail", fake_start_agent_run_temporal_or_fail)
 
-    retry_run_id = None
     try:
         with Session(engine) as session:
             source = AgentRun(
                 id=run_id,
-                agent_type="exploratory",
-                runtime="claude_sdk",
+                agent_type="custom",
+                runtime="hermes",
                 status="failed",
                 config_json=json.dumps(
                     {
                         "url": "https://example.com",
-                        "runtime": "claude_sdk",
+                        "runtime": "hermes",
                         "browser_auth_session_id": "session-1",
+                        "use_project_default_browser_auth": True,
+                        "test_data_refs": ["login.valid-user"],
+                        "allowed_tools": ["mcp__playwright-test__browser_navigate"],
                     }
                 ),
             )
+            source.agent_task_id = "old-task"
+            source.temporal_workflow_id = "agent-run-old-workflow"
+            source.temporal_run_id = "old-temporal-run"
             source.result = {"error": "zero evidence"}
+            source.progress = {"phase": "failed", "retry_attempt": 1, "last_url": "https://example.com/checkout"}
             session.add(source)
             session.commit()
 
             response = await retry_agent_run(run_id, session=session, current_user=None)
-            retry_run_id = response["run_id"]
 
             session.refresh(source)
-            retry_run = session.get(AgentRun, retry_run_id)
-            assert source.status == "failed"
-            assert retry_run is not None
-            assert retry_run.status == "queued"
-            assert retry_run.runtime == "claude_sdk"
-            assert retry_run.config["retry_of"] == run_id
-            assert retry_run.config["source_run_id"] == run_id
-            assert retry_run.config["browser_auth_session_id"] == "session-1"
-            assert created_workflows == [retry_run_id]
+            assert response["run_id"] == run_id
+            assert response["id"] == run_id
+            assert response["retry_in_place"] is True
+            assert source.status == "queued"
+            assert source.runtime == "hermes"
+            assert source.agent_task_id is None
+            assert source.temporal_workflow_id == "agent-run-agent-temporal-retry-source-attempt-2"
+            assert source.temporal_run_id == "temporal-retry-run"
+            assert source.config["source_run_id"] == run_id
+            assert source.config["retry_in_place"] is True
+            assert source.config["retry_attempt"] == 2
+            assert source.config["browser_auth_session_id"] == "session-1"
+            assert source.config["use_project_default_browser_auth"] is True
+            assert source.config["test_data_refs"] == ["login.valid-user"]
+            assert source.config["retry_context"]["last_observed_url"] == "https://example.com/checkout"
+            assert source.progress["previous_temporal_workflow_id"] == "agent-run-old-workflow"
+            assert source.progress["storage_state_reused"] is True
+            assert created_workflows == [(run_id, 2)]
+            event = session.exec(
+                select(AgentRunEvent).where(
+                    AgentRunEvent.run_id == run_id,
+                    AgentRunEvent.event_type == "retry_started",
+                )
+            ).first()
+            assert event is not None
+            assert event.payload["retry_attempt"] == 2
     finally:
         _cleanup_run(run_id)
-        if retry_run_id:
-            _cleanup_run(retry_run_id)
 
 
 def test_agent_run_control_activity_updates_status():

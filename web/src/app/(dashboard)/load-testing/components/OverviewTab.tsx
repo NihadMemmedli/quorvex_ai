@@ -2,8 +2,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { Activity, CheckCircle, Clock, Zap, Loader2, TrendingUp } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
-import { useProject } from '@/contexts/ProjectContext';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import { timeAgo } from '@/lib/formatting';
 import { getResponseTimeColor } from '@/lib/colors';
 import type { DashboardData } from './types';
@@ -32,13 +31,11 @@ const LazyLineChart = dynamic(
 );
 
 interface OverviewTabProps {
+    projectId: string;
     onNavigateToRun: (runId: string) => void;
 }
 
-export default function OverviewTab({ onNavigateToRun }: OverviewTabProps) {
-    const { currentProject } = useProject();
-    const projectId = currentProject?.id || 'default';
-
+export default function OverviewTab({ projectId, onNavigateToRun }: OverviewTabProps) {
     const [data, setData] = useState<DashboardData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -47,7 +44,7 @@ export default function OverviewTab({ onNavigateToRun }: OverviewTabProps) {
         setLoading(true);
         setError(null);
         try {
-            const res = await fetch(`${API_BASE}/load-testing/dashboard?project_id=${projectId}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery('/load-testing/dashboard', projectId)}`);
             if (res.ok) {
                 setData(await res.json());
             } else {

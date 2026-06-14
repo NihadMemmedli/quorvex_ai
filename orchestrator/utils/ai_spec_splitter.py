@@ -69,7 +69,9 @@ class AISpecSplitter:
         return "\n".join(part for part in text_parts if part)
 
     @classmethod
-    def extract_test_cases(cls, content: str, spec_name: str = "") -> list[dict]:
+    def extract_test_cases(
+        cls, content: str, spec_name: str = "", runtime_env_vars: dict[str, str] | None = None
+    ) -> list[dict]:
         """
         Use AI to extract test cases from any markdown spec format.
 
@@ -89,7 +91,7 @@ class AISpecSplitter:
         Raises:
             RuntimeError: If API credentials are missing or AI call fails
         """
-        selection = resolve_runtime_ai_selection("standard")
+        selection = resolve_runtime_ai_selection("standard", env_vars=runtime_env_vars)
         api_key = selection.api_key
         base_url = selection.base_url
         model = selection.model
@@ -131,7 +133,9 @@ class AISpecSplitter:
         return cls._convert_to_legacy_format(test_cases, content)
 
     @classmethod
-    def extract_and_group(cls, content: str, spec_name: str = "") -> tuple:
+    def extract_and_group(
+        cls, content: str, spec_name: str = "", runtime_env_vars: dict[str, str] | None = None
+    ) -> tuple:
         """
         Use AI to extract test cases AND suggest logical groupings.
 
@@ -143,7 +147,7 @@ class AISpecSplitter:
         Raises:
             RuntimeError: If API credentials are missing or AI call fails
         """
-        selection = resolve_runtime_ai_selection("standard")
+        selection = resolve_runtime_ai_selection("standard", env_vars=runtime_env_vars)
         api_key = selection.api_key
         base_url = selection.base_url
         model = selection.model

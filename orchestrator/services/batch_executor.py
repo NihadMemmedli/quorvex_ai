@@ -21,6 +21,7 @@ from orchestrator.api.models_db import (
 )
 from orchestrator.api.models_db import (
     SpecMetadata as DBSpecMetadata,
+    get_spec_metadata,
 )
 from orchestrator.api.models_db import (
     TestRun as DBTestRun,
@@ -184,7 +185,7 @@ def select_regression_specs(config: BatchConfig, session: Session) -> list[str]:
     if config.tags and len(config.tags) > 0:
         filtered: list[str] = []
         for spec_name in spec_names_to_run:
-            meta = session.get(DBSpecMetadata, spec_name)
+            meta = get_spec_metadata(session, spec_name, config.project_id)
             if meta and meta.tags:
                 if any(tag in meta.tags for tag in config.tags):
                     filtered.append(spec_name)

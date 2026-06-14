@@ -33,6 +33,7 @@ from .middleware.auth import get_current_user_optional
 from .middleware.permissions import EDIT_ROLES, VIEW_ROLES, check_project_access
 from .models_auth import User
 from .models_db import CiAuditEvent, CiPipelineMapping, CiTestSubset, CiTestSubsetItem, CiWorkflowChangeRequest, SpecMetadata
+from .models_db import get_spec_metadata as get_db_spec_metadata
 from ..services.github_client import GithubError
 from ..services.batch_executor import BASE_DIR, SPECS_DIR, _get_try_code_path
 
@@ -328,6 +329,14 @@ def _spec_allowed_for_project(meta: SpecMetadata | None, project_id: str) -> boo
     return meta.project_id in (project_id, "default")
 
 
+def _lookup_spec_metadata_for_project(session: Session, spec_name: str, project_id: str) -> SpecMetadata | None:
+    return (
+        get_db_spec_metadata(session, spec_name, project_id)
+        or get_db_spec_metadata(session, spec_name, "default")
+        or session.exec(select(SpecMetadata).where(SpecMetadata.spec_name == spec_name)).first()
+    )
+
+
 def _resolve_generated_test(
     *,
     project_id: str,
@@ -341,7 +350,7 @@ def _resolve_generated_test(
     spec_path = SPECS_DIR / cleaned
     if not spec_path.exists() or not spec_path.is_file():
         raise HTTPException(status_code=404, detail=f"Spec not found: {cleaned}")
-    meta = session.get(SpecMetadata, cleaned)
+    meta = _lookup_spec_metadata_for_project(session, cleaned, project_id)
     if not _spec_allowed_for_project(meta, project_id):
         raise HTTPException(status_code=404, detail=f"Spec not found in this project: {cleaned}")
     code = _get_try_code_path(cleaned, spec_path)
@@ -374,7 +383,7 @@ def _generated_ci_tests(project_id: str, session: Session) -> list[dict[str, Any
         return records
     for spec_path in sorted(SPECS_DIR.glob("**/*.md")):
         spec_name = spec_path.relative_to(SPECS_DIR).as_posix()
-        meta = session.get(SpecMetadata, spec_name)
+        meta = _lookup_spec_metadata_for_project(session, spec_name, project_id)
         if not _spec_allowed_for_project(meta, project_id):
             continue
         code = _get_try_code_path(spec_name, spec_path)

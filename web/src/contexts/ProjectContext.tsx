@@ -2,7 +2,7 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 import { fetchWithAuth, useAuth } from './AuthContext';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, assertProjectId } from '@/lib/api';
 
 export interface Project {
     id: string;
@@ -31,6 +31,36 @@ interface ProjectContextType {
 const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
 
 const STORAGE_KEY = 'we-test-current-project-id';
+export const PROJECT_SWITCH_EVENT = 'quorvex:project-switch';
+
+export interface ProjectSwitchDetail {
+    previousProjectId: string | null;
+    nextProjectId: string | null;
+}
+
+export function addProjectSwitchListener(listener: (detail: ProjectSwitchDetail) => void): () => void {
+    if (typeof window === 'undefined') return () => {};
+
+    const handler = (event: Event) => {
+        listener((event as CustomEvent<ProjectSwitchDetail>).detail);
+    };
+    window.addEventListener(PROJECT_SWITCH_EVENT, handler);
+    return () => window.removeEventListener(PROJECT_SWITCH_EVENT, handler);
+}
+
+export function createProjectSwitchAbortController(): AbortController {
+    const controller = new AbortController();
+    const removeListener = addProjectSwitchListener(() => controller.abort());
+    controller.signal.addEventListener('abort', removeListener, { once: true });
+    return controller;
+}
+
+function emitProjectSwitch(previousProjectId: string | null, nextProjectId: string | null) {
+    if (previousProjectId === nextProjectId || typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent<ProjectSwitchDetail>(PROJECT_SWITCH_EVENT, {
+        detail: { previousProjectId, nextProjectId },
+    }));
+}
 
 async function readProjectError(response: Response, fallback: string): Promise<string> {
     const text = (await response.text()).trim();
@@ -76,13 +106,14 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
     // Set current project and persist to localStorage
     const setCurrentProject = useCallback((project: Project | null) => {
+        emitProjectSwitch(currentProject?.id || null, project?.id || null);
         setCurrentProjectState(project);
         if (project) {
             localStorage.setItem(STORAGE_KEY, project.id);
         } else {
             localStorage.removeItem(STORAGE_KEY);
         }
-    }, []);
+    }, [currentProject?.id]);
 
     // Create a new project
     const createProject = useCallback(async (name: string, description?: string | null, base_url?: string | null): Promise<Project> => {
@@ -219,4 +250,19 @@ export function useProject() {
         throw new Error('useProject must be used within a ProjectProvider');
     }
     return context;
+}
+
+export function useRequiredProject() {
+    const context = useProject();
+    if (!context.isLoading) {
+        assertProjectId(context.currentProject?.id);
+    }
+    const projectId = context.currentProject?.id || '';
+    return {
+        ...context,
+        project: context.currentProject,
+        projectId,
+        encodedProjectId: projectId ? encodeURIComponent(projectId) : '',
+        projectKey: projectId || 'unscoped',
+    };
 }

@@ -266,7 +266,14 @@ async def _reattach_agent_task(run_id: str, agent_task_id: str) -> dict[str, Any
             run = session.get(AgentRun, run_id)
             if run and run.status not in TERMINAL_STATUSES:
                 recovered = None
-                if run.agent_type == "exploratory":
+                if run.agent_type == "custom":
+                    try:
+                        from orchestrator.api.main import _recover_custom_agent_partial_result
+
+                        recovered = _recover_custom_agent_partial_result(run, exc)
+                    except Exception:
+                        recovered = None
+                elif run.agent_type == "exploratory":
                     try:
                         from orchestrator.api.main import (
                             _exploratory_result_has_usable_evidence,
@@ -292,12 +299,21 @@ async def _reattach_agent_task(run_id: str, agent_task_id: str) -> dict[str, Any
                         **(run.progress or {}),
                         "phase": PARTIAL_STATUS,
                         "status": PARTIAL_STATUS,
-                        "message": recovered.get("summary") or "Recovered partial Explorer evidence after task reattach failed.",
+                        "message": recovered.get("summary")
+                        or (
+                            "Recovered partial custom agent evidence after task reattach failed."
+                            if run.agent_type == "custom"
+                            else "Recovered partial Explorer evidence after task reattach failed."
+                        ),
                         "updated_at": datetime.utcnow().isoformat(),
                     }
                     event_type = "partial"
                     event_level = "warning"
-                    event_message = "Agent task reattach failed, but partial Explorer evidence was recovered."
+                    event_message = (
+                        "Agent task reattach failed, but partial custom agent evidence was recovered."
+                        if run.agent_type == "custom"
+                        else "Agent task reattach failed, but partial Explorer evidence was recovered."
+                    )
                     payload = {"error": str(exc), "status": run.status, "failure_reason": recovered.get("failure_reason")}
                 else:
                     run.progress = {
@@ -449,15 +465,52 @@ def finalize_agent_run_workflow(payload: dict[str, Any]) -> dict[str, Any]:
         result = payload.get("result") or {}
         if run.status not in TERMINAL_STATUSES and isinstance(result, dict) and result.get("status") == "failed":
             error_message = str(result.get("error") or result.get("error_message") or "Agent Temporal activity failed")
-            run.status = "failed"
+            recovered = None
+            if run.agent_type in {"custom", "exploratory"}:
+                try:
+                    from orchestrator.api.main import (
+                        _exploratory_result_has_usable_evidence,
+                        _merge_agent_failure_into_result,
+                        _recover_custom_agent_partial_result,
+                        _recover_exploratory_partial_result,
+                        _run_artifact_counts,
+                    )
+
+                    if run.agent_type == "custom":
+                        recovered = _recover_custom_agent_partial_result(run, error_message)
+                    elif _exploratory_result_has_usable_evidence(run.result):
+                        recovered = _merge_agent_failure_into_result(
+                            run.result,
+                            error_message,
+                            failure_reason="runtime_failed_after_evidence",
+                        )
+                    else:
+                        recovered = _recover_exploratory_partial_result(run_id, run.config, error_message)
+                    artifact_counts = _run_artifact_counts(run_id)
+                except Exception:
+                    recovered = None
+                    artifact_counts = {}
+            else:
+                artifact_counts = {}
+
+            run.status = PARTIAL_STATUS if recovered is not None else "failed"
             run.completed_at = datetime.utcnow()
-            existing_result = run.result if isinstance(run.result, dict) else {}
-            run.result = {**existing_result, "error": error_message}
+            if recovered is not None:
+                run.result = recovered
+            else:
+                existing_result = run.result if isinstance(run.result, dict) else {}
+                run.result = {**existing_result, "error": error_message}
             run.progress = {
                 **(run.progress or {}),
-                "phase": "failed",
-                "status": "failed",
-                "message": error_message,
+                **artifact_counts,
+                "phase": run.status,
+                "status": run.status,
+                "message": (
+                    (recovered or {}).get("summary")
+                    if recovered is not None
+                    else error_message
+                )
+                or "Recovered partial agent evidence after Temporal activity failure.",
                 "updated_at": datetime.utcnow().isoformat(),
             }
             session.add(run)

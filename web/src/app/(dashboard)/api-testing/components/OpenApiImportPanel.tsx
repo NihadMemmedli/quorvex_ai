@@ -15,7 +15,7 @@ import {
     Upload,
     X,
 } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -687,7 +687,7 @@ export default function OpenApiImportPanel({
         setHistoryLoading(true);
         setHistoryError(null);
         try {
-            const res = await fetch(`${API_BASE}/api-testing/import-history?project_id=${projectId}&limit=${HISTORY_PAGE_SIZE}&offset=${offset}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/import-history?limit=${HISTORY_PAGE_SIZE}&offset=${offset}`, projectId)}`);
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.detail || data.error || `Import history failed with ${res.status}`);
             if (data.error) setHistoryError(data.error);
@@ -781,16 +781,15 @@ export default function OpenApiImportPanel({
         setIsImporting(true);
         if (importMode === 'url') {
             try {
-                const res = await fetch(`${API_BASE}/api-testing/import-openapi`, {
+                const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/import-openapi', projectId)}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
+                    body: JSON.stringify(withProjectBody({
                         url: importUrl,
                         base_url: serverUrl,
                         feature_filter: featureFilter || undefined,
                         mode: DEFAULT_OPENAPI_IMPORT_MODE,
-                        project_id: projectId,
-                    }),
+                    }, projectId)),
                 });
                 if (res.ok) {
                     const data = await res.json();
@@ -864,16 +863,15 @@ export default function OpenApiImportPanel({
         setIsImporting(true);
 
         try {
-            const res = await fetch(`${API_BASE}/api-testing/import-openapi`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/import-openapi', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+                body: JSON.stringify(withProjectBody({
                     url: record.source_url,
                     base_url: record.base_url,
                     feature_filter: record.feature_filter || undefined,
                     mode: DEFAULT_OPENAPI_IMPORT_MODE,
-                    project_id: projectId,
-                }),
+                }, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -896,10 +894,10 @@ export default function OpenApiImportPanel({
         setGeneratingSpecs(prev => new Set(prev).add(specPath));
         setMessage(null);
         try {
-            const res = await fetch(`${API_BASE}/api-testing/generate`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/generate', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spec_name: specName, project_id: projectId }),
+                body: JSON.stringify(withProjectBody({ spec_name: specName }, projectId)),
             });
             if (!res.ok) {
                 setMessage({ type: 'error', text: await readError(res, 'Failed to start test generation') });

@@ -518,10 +518,11 @@ Now generate the specs based on the exploration results above."""
 
             from orchestrator.api.db import engine
             from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
+            from orchestrator.api.models_db import get_spec_metadata
 
             with Session(engine) as session:
                 # Check if spec already exists
-                existing = session.get(DBSpecMetadata, spec_name)
+                existing = get_spec_metadata(session, spec_name, project_id)
                 if not existing:
                     # Create new metadata record
                     meta = DBSpecMetadata(spec_name=spec_name, project_id=project_id, tags_json="[]")

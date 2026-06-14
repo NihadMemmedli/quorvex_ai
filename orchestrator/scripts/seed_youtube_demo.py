@@ -30,6 +30,7 @@ from api.models_db import (
     RtmEntry,
     SpecMetadata,
     TestRun,
+    get_spec_metadata,
 )
 
 DEMO_PROJECT_ID = "quorvex-demo-shop"
@@ -410,9 +411,9 @@ def _seed_specs(project_id: str) -> list[str]:
 
     with Session(engine) as session:
         for spec in _specs(project_id):
-            meta = session.get(SpecMetadata, spec.path)
+            meta = get_spec_metadata(session, spec.path, project_id)
             if not meta:
-                meta = SpecMetadata(spec_name=spec.path)
+                meta = SpecMetadata(spec_name=spec.path, project_id=project_id)
             meta.project_id = project_id
             meta.description = spec.description
             meta.author = "Quorvex AI Demo Seed"

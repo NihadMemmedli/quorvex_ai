@@ -2,8 +2,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Clock, CheckCircle2, XCircle, PlayCircle, ChevronRight, Calendar, Tag, Percent, Layers, RefreshCw, AlertTriangle, Edit3, Check, X, TrendingUp } from 'lucide-react';
 import Link from 'next/link';
-import { useProject } from '@/contexts/ProjectContext';
-import { API_BASE } from '@/lib/api';
+import { useRequiredProject } from '@/contexts/ProjectContext';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -61,7 +61,7 @@ interface FlakyTest {
 const PAGE_SIZE = 15;
 
 export default function BatchListPage() {
-    const { currentProject, isLoading: projectLoading } = useProject();
+    const { projectId, isLoading: projectLoading } = useRequiredProject();
     const [batches, setBatches] = useState<RegressionBatch[]>([]);
     const [loading, setLoading] = useState(true);
     const [loadingMore, setLoadingMore] = useState(false);
@@ -81,6 +81,7 @@ export default function BatchListPage() {
     const [showFlakyModal, setShowFlakyModal] = useState(false);
 
     const fetchBatches = useCallback((offset: number = 0, append: boolean = false) => {
+        if (!projectId) return;
         const isInitialLoad = offset === 0 && !append;
         if (isInitialLoad) {
             setLoading(true);
@@ -88,12 +89,9 @@ export default function BatchListPage() {
             setLoadingMore(true);
         }
 
-        let url = `${API_BASE}/regression/batches?limit=${PAGE_SIZE}&offset=${offset}`;
+        let url = `${API_BASE}${withProjectQuery(`/regression/batches?limit=${PAGE_SIZE}&offset=${offset}`, projectId)}`;
         if (statusFilter) {
             url += `&status=${statusFilter}`;
-        }
-        if (currentProject?.id) {
-            url += `&project_id=${encodeURIComponent(currentProject.id)}`;
         }
 
         fetch(url)
@@ -114,7 +112,7 @@ export default function BatchListPage() {
                 setLoading(false);
                 setLoadingMore(false);
             });
-    }, [statusFilter, currentProject?.id]);
+    }, [statusFilter, projectId]);
 
     const loadMore = () => {
         if (!loadingMore && hasMore) {
@@ -124,27 +122,23 @@ export default function BatchListPage() {
 
     // D4: fetch trend
     const fetchTrend = useCallback(() => {
-        let url = `${API_BASE}/regression/batches/trend?limit=20`;
-        if (currentProject?.id) {
-            url += `&project_id=${encodeURIComponent(currentProject.id)}`;
-        }
+        if (!projectId) return;
+        const url = `${API_BASE}${withProjectQuery('/regression/batches/trend?limit=20', projectId)}`;
         fetch(url)
             .then(res => res.json())
             .then((data: TrendPoint[]) => setTrendData(data))
             .catch(() => {});
-    }, [currentProject?.id]);
+    }, [projectId]);
 
     // D8: fetch flaky tests
     const fetchFlakyTests = useCallback(() => {
-        let url = `${API_BASE}/regression/flaky-tests?window=10&min_batches=3`;
-        if (currentProject?.id) {
-            url += `&project_id=${encodeURIComponent(currentProject.id)}`;
-        }
+        if (!projectId) return;
+        const url = `${API_BASE}${withProjectQuery('/regression/flaky-tests?window=10&min_batches=3', projectId)}`;
         fetch(url)
             .then(res => res.json())
             .then((data: { flaky_tests: FlakyTest[] }) => setFlakyTests(data.flaky_tests || []))
             .catch(() => {});
-    }, [currentProject?.id]);
+    }, [projectId]);
 
     useEffect(() => {
         if (projectLoading) return;
@@ -160,7 +154,7 @@ export default function BatchListPage() {
         }, 5000);
 
         return () => clearInterval(interval);
-    }, [statusFilter, currentProject?.id, projectLoading]);
+    }, [statusFilter, projectId, projectLoading]);
 
     // D3: save name
     const saveName = async (batchId: string) => {
@@ -168,7 +162,7 @@ export default function BatchListPage() {
             const res = await fetch(`${API_BASE}/regression/batches/${batchId}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: editName }),
+                body: JSON.stringify(withProjectBody({ name: editName }, projectId)),
             });
             if (res.ok) {
                 setBatches(prev => prev.map(b => b.id === batchId ? { ...b, name: editName } : b));

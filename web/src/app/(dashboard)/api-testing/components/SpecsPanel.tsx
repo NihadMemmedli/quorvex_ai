@@ -1,7 +1,7 @@
 'use client';
 import React, { useState, useCallback, useMemo } from 'react';
 import { Loader2, Zap } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { ApiSpec, ApiSpecsSummary, ApiSpecSortOption, ApiSpecStatusFilter, JobStatus, ApiTestRun } from './types';
 
 import ApiSpecsSummaryBar from './ApiSpecsSummaryBar';
@@ -187,10 +187,10 @@ export default function SpecsPanel({
         const specPaths = apiSpecs.filter(s => selectedSpecs.has(s.path)).map(s => s.path);
         if (specPaths.length === 0) return;
         try {
-            const res = await fetch(`${API_BASE}/api-testing/specs/bulk-run`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/specs/bulk-run', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spec_paths: specPaths, project_id: projectId }),
+                body: JSON.stringify(withProjectBody({ spec_paths: specPaths }, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -256,10 +256,10 @@ export default function SpecsPanel({
         const specNames = apiSpecs.filter(s => selectedSpecs.has(s.path)).map(s => s.name);
         if (specNames.length === 0) return;
         try {
-            const res = await fetch(`${API_BASE}/api-testing/specs/bulk-generate`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/specs/bulk-generate', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spec_names: specNames, project_id: projectId }),
+                body: JSON.stringify(withProjectBody({ spec_names: specNames }, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -284,7 +284,7 @@ export default function SpecsPanel({
         let deleted = 0;
         for (const spec of toDelete) {
             try {
-                const res = await fetch(`${API_BASE}/api-testing/specs/${spec.name}?project_id=${projectId}`, { method: 'DELETE' });
+                const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/specs/${spec.name}`, projectId)}`, { method: 'DELETE' });
                 if (res.ok) deleted++;
             } catch { /* continue */ }
         }

@@ -265,10 +265,11 @@ async def start_agent_run_workflow(
     run_id: str,
     *,
     task_queue: str | None = None,
+    attempt: int | None = None,
 ) -> TemporalWorkflowStart:
     """Start a durable Temporal workflow for a standalone agent run."""
     client = await _connect_client()
-    workflow_id = f"agent-run-{run_id}"
+    workflow_id = f"agent-run-{run_id}-attempt-{attempt}" if attempt else f"agent-run-{run_id}"
     selected_task_queue = task_queue or settings.temporal_workflow_task_queue
     handle = await client.start_workflow(
         "AgentRunWorkflow",

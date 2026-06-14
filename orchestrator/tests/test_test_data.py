@@ -53,6 +53,7 @@ def test_data_client(tmp_path):
 
     with Session(test_engine) as session:
         session.add(Project(id="project-1", name="Project One"))
+        session.add(Project(id="project-2", name="Project Two"))
         session.commit()
 
     app = FastAPI()
@@ -67,11 +68,11 @@ def test_data_client(tmp_path):
         yield client
 
 
-def _create_dataset(client: TestClient, *, key: str = "auth-users") -> dict:
+def _create_dataset(client: TestClient, *, key: str = "auth-users", project_id: str = "project-1") -> dict:
     response = client.post(
         "/test-data/datasets",
         json={
-            "project_id": "project-1",
+            "project_id": project_id,
             "key": key,
             "name": "Auth Users",
             "description": "Login fixtures",
@@ -85,10 +86,10 @@ def _create_dataset(client: TestClient, *, key: str = "auth-users") -> dict:
 
 
 def _create_item(
-    client: TestClient, dataset_id: str, *, key: str = "valid-admin"
+    client: TestClient, dataset_id: str, *, key: str = "valid-admin", project_id: str = "project-1"
 ) -> dict:
     response = client.post(
-        f"/test-data/datasets/{dataset_id}/items",
+        f"/test-data/datasets/{dataset_id}/items?project_id={project_id}",
         json={
             "key": key,
             "name": "Valid admin",
@@ -118,7 +119,7 @@ def test_create_dataset_and_item_masks_sensitive_fields(test_data_client):
     )
     assert "replace-me" not in str(item)
 
-    listed = test_data_client.get(f"/test-data/datasets/{dataset['id']}/items")
+    listed = test_data_client.get(f"/test-data/datasets/{dataset['id']}/items?project_id=project-1")
     assert listed.status_code == 200
     assert (
         listed.json()["items"][0]["data"]["password"]
@@ -128,6 +129,43 @@ def test_create_dataset_and_item_masks_sensitive_fields(test_data_client):
     datasets = test_data_client.get("/test-data/datasets?project_id=project-1")
     assert datasets.status_code == 200
     assert datasets.json()["datasets"][0]["item_count"] == 1
+
+
+def test_dataset_object_routes_require_matching_project(test_data_client):
+    project_one = _create_dataset(test_data_client, project_id="project-1")
+    project_two = _create_dataset(test_data_client, project_id="project-2")
+    project_two_item = _create_item(test_data_client, project_two["id"], project_id="project-2")
+
+    assert (
+        test_data_client.get(f"/test-data/datasets/{project_one['id']}/items").status_code
+        == 422
+    )
+    assert (
+        test_data_client.get(
+            f"/test-data/datasets/{project_two['id']}?project_id=project-1"
+        ).status_code
+        == 404
+    )
+    assert (
+        test_data_client.get(
+            f"/test-data/datasets/{project_two['id']}/items?project_id=project-1"
+        ).status_code
+        == 404
+    )
+    assert (
+        test_data_client.delete(
+            f"/test-data/datasets/{project_two['id']}/items/{project_two_item['id']}?project_id=project-1"
+        ).status_code
+        == 404
+    )
+    assert (
+        test_data_client.delete(
+            f"/test-data/datasets/{project_two['id']}?project_id=project-1"
+        ).status_code
+        == 404
+    )
+    assert test_data_client.get("/test-data/datasets?project_id=project-1").json()["total"] == 1
+    assert test_data_client.get("/test-data/datasets?project_id=project-2").json()["total"] == 1
 
 
 def test_duplicate_keys_return_conflict(test_data_client):
@@ -140,7 +178,7 @@ def test_duplicate_keys_return_conflict(test_data_client):
 
     _create_item(test_data_client, dataset["id"])
     duplicate_item = test_data_client.post(
-        f"/test-data/datasets/{dataset['id']}/items",
+        f"/test-data/datasets/{dataset['id']}/items?project_id=project-1",
         json={
             "key": "valid-admin",
             "name": "Duplicate",
@@ -160,7 +198,7 @@ def test_invalid_keys_and_filters_return_422(test_data_client):
 
     dataset = _create_dataset(test_data_client)
     invalid_item = test_data_client.post(
-        f"/test-data/datasets/{dataset['id']}/items",
+        f"/test-data/datasets/{dataset['id']}/items?project_id=project-1",
         json={"key": "bad key", "name": "Bad", "data": {}},
     )
     assert invalid_item.status_code == 422

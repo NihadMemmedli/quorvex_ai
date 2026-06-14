@@ -9,8 +9,8 @@ import {
     GitCompare, History, ChevronDown, ChevronUp
 } from 'lucide-react';
 import Link from 'next/link';
-import { API_BASE } from '@/lib/api';
-import { useProject } from '@/contexts/ProjectContext';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
+import { useRequiredProject } from '@/contexts/ProjectContext';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
@@ -133,7 +133,7 @@ export default function BatchDetailPage() {
     const params = useParams();
     const router = useRouter();
     const batchId = params.id as string;
-    const { currentProject } = useProject();
+    const { projectId, isLoading: projectLoading } = useRequiredProject();
 
     const [batch, setBatch] = useState<BatchDetail | null>(null);
     const [loading, setLoading] = useState(true);
@@ -167,7 +167,8 @@ export default function BatchDetailPage() {
     const [specHistory, setSpecHistory] = useState<Record<string, SpecHistoryEntry[]>>({});
 
     const fetchBatch = useCallback(() => {
-        fetch(`${API_BASE}/regression/batches/${batchId}`)
+        if (!projectId) return;
+        fetch(`${API_BASE}${withProjectQuery(`/regression/batches/${batchId}`, projectId)}`)
             .then(res => {
                 if (!res.ok) throw new Error('Batch not found');
                 return res.json();
@@ -180,9 +181,10 @@ export default function BatchDetailPage() {
                 setError(err.message);
                 setLoading(false);
             });
-    }, [batchId]);
+    }, [batchId, projectId]);
 
     useEffect(() => {
+        if (projectLoading || !projectId) return;
         fetchBatch();
         const interval = setInterval(() => {
             if (batch?.status === 'running' || batch?.status === 'pending') {
@@ -190,22 +192,22 @@ export default function BatchDetailPage() {
             }
         }, 5000);
         return () => clearInterval(interval);
-    }, [batch?.status, fetchBatch]);
+    }, [batch?.status, projectId, projectLoading, fetchBatch]);
 
     // Load TestRail config
     useEffect(() => {
-        const pid = currentProject?.id || batch?.project_id;
+        const pid = projectId || batch?.project_id;
         if (!pid) return;
         fetch(`${API_BASE}/testrail/${pid}/config`)
             .then(res => res.ok ? res.json() : null)
             .then(data => { if (data) setTrConfig(data); })
             .catch(() => {});
-    }, [currentProject?.id, batch?.project_id]);
+    }, [projectId, batch?.project_id]);
 
     // D5: Load error analysis when batch is complete and has failures
     useEffect(() => {
         if (batch?.status === 'completed' && batch.failed > 0) {
-            fetch(`${API_BASE}/regression/batches/${batchId}/error-summary`)
+            fetch(`${API_BASE}${withProjectQuery(`/regression/batches/${batchId}/error-summary`, projectId)}`)
                 .then(res => res.json())
                 .then(data => {
                     setErrorCategories(data.categories || []);
@@ -213,16 +215,16 @@ export default function BatchDetailPage() {
                 })
                 .catch(() => {});
         }
-    }, [batch?.status, batch?.failed, batchId]);
+    }, [batch?.status, batch?.failed, batchId, projectId]);
 
     // D6: Load recent batches for compare
     const loadedBatchId = batch?.id;
     const batchProjectId = batch?.project_id;
     useEffect(() => {
         if (!loadedBatchId) return;
-        const pid = currentProject?.id || batchProjectId;
-        let url = `${API_BASE}/regression/batches?limit=10&status=completed`;
-        if (pid) url += `&project_id=${encodeURIComponent(pid)}`;
+        const pid = projectId || batchProjectId;
+        if (!pid) return;
+        const url = `${API_BASE}${withProjectQuery('/regression/batches?limit=10&status=completed', pid)}`;
         fetch(url)
             .then(res => res.json())
             .then(data => {
@@ -233,13 +235,13 @@ export default function BatchDetailPage() {
                 );
             })
             .catch(() => {});
-    }, [batchId, batchProjectId, currentProject?.id, loadedBatchId]);
+    }, [batchId, batchProjectId, projectId, loadedBatchId]);
 
     // D2: Re-run failed handler
     const handleRerunFailed = async () => {
         setRerunning(true);
         try {
-            const res = await fetch(`${API_BASE}/regression/batches/${batchId}/rerun-failed`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/regression/batches/${batchId}/rerun-failed`, projectId)}`, { method: 'POST' });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({ detail: 'Failed' }));
                 alert(err.detail || 'Failed to re-run');
@@ -260,9 +262,8 @@ export default function BatchDetailPage() {
         if (!batch) return;
         setCancelling(true);
         try {
-            const pid = currentProject?.id || batch.project_id;
-            let url = `${API_BASE}/regression/batches/${batchId}/cancel`;
-            if (pid) url += `?project_id=${encodeURIComponent(pid)}`;
+            const pid = projectId || batch.project_id;
+            const url = `${API_BASE}${withProjectQuery(`/regression/batches/${batchId}/cancel`, pid)}`;
             const res = await fetch(url, { method: 'POST' });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({ detail: 'Failed to cancel runs' }));
@@ -285,7 +286,7 @@ export default function BatchDetailPage() {
             const res = await fetch(`${API_BASE}/regression/batches/compare`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ batch_ids: [otherId, batchId] }),
+                body: JSON.stringify(withProjectBody({ batch_ids: [otherId, batchId] }, projectId)),
             });
             if (res.ok) {
                 setCompareResult(await res.json());
@@ -305,9 +306,9 @@ export default function BatchDetailPage() {
         setExpandedSpec(specName);
         if (specHistory[specName]) return;
 
-        const pid = currentProject?.id || batch?.project_id;
-        let url = `${API_BASE}/regression/spec-history?spec_name=${encodeURIComponent(specName)}&limit=10`;
-        if (pid) url += `&project_id=${encodeURIComponent(pid)}`;
+        const pid = projectId || batch?.project_id;
+        if (!pid) return;
+        const url = `${API_BASE}${withProjectQuery(`/regression/spec-history?spec_name=${encodeURIComponent(specName)}&limit=10`, pid)}`;
         try {
             const res = await fetch(url);
             const data = await res.json();
@@ -318,7 +319,7 @@ export default function BatchDetailPage() {
     };
 
     const handleOpenSyncModal = async () => {
-        const pid = currentProject?.id || batch?.project_id;
+        const pid = projectId || batch?.project_id;
         if (!pid) return;
         setSyncResult(null);
         setSyncError(null);
@@ -338,7 +339,7 @@ export default function BatchDetailPage() {
     };
 
     const handleSyncToTestrail = async () => {
-        const pid = currentProject?.id || batch?.project_id;
+        const pid = projectId || batch?.project_id;
         if (!pid || !trConfig?.project_id || !trConfig?.suite_id) return;
         setSyncing(true);
         setSyncError(null);
@@ -362,7 +363,7 @@ export default function BatchDetailPage() {
     };
 
     const handleExport = async (format: 'json' | 'csv' | 'html') => {
-        const url = `${API_BASE}/regression/batches/${batchId}/export?format=${format}`;
+        const url = `${API_BASE}${withProjectQuery(`/regression/batches/${batchId}/export?format=${format}`, projectId)}`;
         if (format === 'csv' || format === 'html') {
             window.open(url, '_blank');
         } else {

@@ -5,7 +5,7 @@ import {
     Play, Loader2, ChevronDown, ChevronRight, RefreshCw, Edit2, Save, X, Search,
     CheckCircle, XCircle, MoreVertical, Trash2, Copy, Circle, Heart,
 } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { GeneratedTest, GeneratedTestsSummary, JobStatus } from './types';
 
 const CodeEditor = dynamic(() => import('@/components/CodeEditor'), { ssr: false });
@@ -146,7 +146,7 @@ export default React.memo(function GeneratedTestsList({
     const loadTestContent = useCallback(async (name: string) => {
         if (testContents[name]) return testContents[name];
         try {
-            const res = await fetch(`${API_BASE}/api-testing/generated-tests/${name}?project_id=${projectId}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/generated-tests/${name}`, projectId)}`);
             if (res.ok) {
                 const data = await res.json();
                 setTestContents(prev => ({ ...prev, [name]: data.content }));
@@ -166,10 +166,10 @@ export default React.memo(function GeneratedTestsList({
     const handleSaveTest = async (testName: string) => {
         setSavingTest(true);
         try {
-            const res = await fetch(`${API_BASE}/api-testing/generated-tests/${testName}?project_id=${projectId}`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/generated-tests/${testName}`, projectId)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: editTestContent }),
+                body: JSON.stringify(withProjectBody({ content: editTestContent }, projectId)),
             });
             if (res.ok) {
                 setTestContents(prev => ({ ...prev, [testName]: editTestContent }));
@@ -186,15 +186,14 @@ export default React.memo(function GeneratedTestsList({
     // Run a single test
     const handleRunTest = useCallback(async (test: GeneratedTest, healOnFailure = false) => {
         try {
-            const res = await fetch(`${API_BASE}/api-testing/run-direct`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/run-direct', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+                body: JSON.stringify(withProjectBody({
                     test_path: test.path,
                     spec_name: test.source_spec || test.name,
-                    project_id: projectId,
                     heal_on_failure: healOnFailure,
-                }),
+                }, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -244,7 +243,7 @@ export default React.memo(function GeneratedTestsList({
     const handleDeleteTest = useCallback(async (test: GeneratedTest) => {
         if (!confirm(`Delete ${test.name}? This cannot be undone.`)) return;
         try {
-            const res = await fetch(`${API_BASE}/api-testing/generated-tests/${test.name}?project_id=${projectId}`, { method: 'DELETE' });
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/generated-tests/${test.name}`, projectId)}`, { method: 'DELETE' });
             if (res.ok) {
                 setMessage({ type: 'success', text: `Deleted ${test.name}` });
                 refreshTests(0);

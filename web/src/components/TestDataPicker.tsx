@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Database, Edit, Plus } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import { fetchWithAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -57,7 +57,7 @@ export function TestDataPicker({
 
   useEffect(() => {
     if (!projectId) return;
-    fetchWithAuth(`${API_BASE}/test-data/datasets?project_id=${encodeURIComponent(projectId)}&status=active`)
+    fetchWithAuth(`${API_BASE}${withProjectQuery('/test-data/datasets?status=active', projectId)}`)
       .then(async response => (response.ok ? response.json() : { datasets: [] }))
       .then(data => {
         const next = data.datasets || [];
@@ -68,12 +68,12 @@ export function TestDataPicker({
   }, [projectId]);
 
   useEffect(() => {
-    if (!datasetId) {
+    if (!datasetId || !projectId) {
       setItems([]);
       setItemRef('');
       return;
     }
-    fetchWithAuth(`${API_BASE}/test-data/datasets/${encodeURIComponent(datasetId)}/items?status=active`)
+    fetchWithAuth(`${API_BASE}${withProjectQuery(`/test-data/datasets/${encodeURIComponent(datasetId)}/items?status=active`, projectId)}`)
       .then(async response => (response.ok ? response.json() : { items: [] }))
       .then(data => {
         const next = data.items || [];
@@ -81,7 +81,7 @@ export function TestDataPicker({
         setItemRef(next[0]?.ref || '');
       })
       .catch(() => setItems([]));
-  }, [datasetId]);
+  }, [datasetId, projectId]);
 
   const handleInsert = () => {
     onInsert(mode === 'directive' ? `@testdata "${itemRef}"` : itemRef);

@@ -8,6 +8,7 @@ import { getResponseTimeColor } from '@/lib/colors';
 import type { LoadTestRun, ComparisonData } from './types';
 
 interface HistoryTabProps {
+    projectId: string;
     runs: LoadTestRun[];
     runsLoading: boolean;
     runsHasMore: boolean;
@@ -28,12 +29,13 @@ interface HistoryTabProps {
     onAnalyzeRun?: (runId: string) => void;
     analyzingRunId?: string | null;
     /** Lazy-loaded ResultsView component */
-    ResultsView: React.ComponentType<{ run: LoadTestRun; onAnalyze?: () => void; analyzing?: boolean }>;
+    ResultsView: React.ComponentType<{ run: LoadTestRun; projectId: string; onAnalyze?: () => void; analyzing?: boolean }>;
     /** Lazy-loaded ComparisonView component */
     ComparisonView: React.ComponentType<{ data: ComparisonData; onBack: () => void }>;
 }
 
 export default function HistoryTab({
+    projectId,
     runs,
     runsLoading,
     runsHasMore,
@@ -267,6 +269,7 @@ export default function HistoryTab({
                                         {expandedRunData ? (
                                             <ResultsView
                                                 run={expandedRunData}
+                                                projectId={projectId}
                                                 onAnalyze={onAnalyzeRun ? () => onAnalyzeRun(expandedRunData.id) : undefined}
                                                 analyzing={analyzingRunId === expandedRunData.id}
                                             />

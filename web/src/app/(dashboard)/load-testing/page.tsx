@@ -8,8 +8,8 @@ import {
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
 import { Terminal, ChevronDown, ChevronRight } from 'lucide-react';
-import { useProject } from '@/contexts/ProjectContext';
-import { API_BASE } from '@/lib/api';
+import { useRequiredProject } from '@/contexts/ProjectContext';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { timeAgo } from '@/lib/formatting';
 import { createTabStyle } from '@/lib/styles';
 import type {
@@ -30,7 +30,7 @@ const OverviewTab = dynamic(() => import('./components/OverviewTab'), { ssr: fal
 
 // ========== Log Viewer (kept inline -- small, tightly coupled to job polling) ==========
 
-function LogViewer({ jobId, isRunning }: { jobId: string; isRunning: boolean }) {
+function LogViewer({ jobId, projectId, isRunning }: { jobId: string; projectId: string; isRunning: boolean }) {
     const [logs, setLogs] = useState('');
     const [lineCount, setLineCount] = useState(0);
     const [expanded, setExpanded] = useState(true);
@@ -39,7 +39,7 @@ function LogViewer({ jobId, isRunning }: { jobId: string; isRunning: boolean }) 
 
     const fetchLogs = useCallback(async () => {
         try {
-            const res = await fetch(`${API_BASE}/load-testing/jobs/${jobId}/logs?tail=200`);
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/jobs/${jobId}/logs?tail=200`, projectId)}`);
             if (res.ok) {
                 const data = await res.json();
                 setLogs(data.logs || '');
@@ -48,7 +48,7 @@ function LogViewer({ jobId, isRunning }: { jobId: string; isRunning: boolean }) 
         } catch {
             // ignore
         }
-    }, [jobId]);
+    }, [jobId, projectId]);
 
     useEffect(() => {
         fetchLogs();
@@ -104,7 +104,7 @@ function LogViewer({ jobId, isRunning }: { jobId: string; isRunning: boolean }) 
 
 // ========== Job Status Panel ==========
 
-function JobStatusPanel({ job, onStop }: { job: JobStatus; onStop?: () => void }) {
+function JobStatusPanel({ job, projectId, onStop }: { job: JobStatus; projectId: string; onStop?: () => void }) {
     const isRunning = job.status === 'running' || job.status === 'pending';
     const isCompleted = job.status === 'completed';
 
@@ -179,7 +179,7 @@ function JobStatusPanel({ job, onStop }: { job: JobStatus; onStop?: () => void }
                     {job.message}
                 </div>
             )}
-            <LogViewer jobId={job.job_id} isRunning={isRunning} />
+            <LogViewer jobId={job.job_id} projectId={projectId} isRunning={isRunning} />
         </div>
     );
 }
@@ -187,8 +187,7 @@ function JobStatusPanel({ job, onStop }: { job: JobStatus; onStop?: () => void }
 // ========== Main Page ==========
 
 export default function LoadTestingPage() {
-    const { currentProject } = useProject();
-    const projectId = currentProject?.id || 'default';
+    const { projectId } = useRequiredProject();
 
     const [activeTab, setActiveTab] = useState<TabType>('overview');
     const [visited, setVisited] = useState(new Set<string>(['overview']));
@@ -238,9 +237,10 @@ export default function LoadTestingPage() {
     // ========== Data Fetching ==========
 
     const fetchSpecs = useCallback(async () => {
+        if (!projectId) return;
         setSpecsLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/load-testing/specs?project_id=${projectId}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery('/load-testing/specs', projectId)}`);
             if (res.ok) setSpecs(await res.json());
         } catch (e) {
             console.error('Failed to fetch load test specs:', e);
@@ -250,21 +250,23 @@ export default function LoadTestingPage() {
     }, [projectId]);
 
     const fetchScripts = useCallback(async () => {
+        if (!projectId) return;
         setScriptsLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/load-testing/scripts`);
+            const res = await fetch(`${API_BASE}${withProjectQuery('/load-testing/scripts', projectId)}`);
             if (res.ok) setScripts(await res.json());
         } catch (e) {
             console.error('Failed to fetch K6 scripts:', e);
         } finally {
             setScriptsLoading(false);
         }
-    }, []);
+    }, [projectId]);
 
     const fetchRuns = useCallback(async (offset = 0, append = false) => {
+        if (!projectId) return;
         setRunsLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/load-testing/runs?project_id=${projectId}&limit=${RUNS_PAGE_SIZE}&offset=${offset}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/runs?limit=${RUNS_PAGE_SIZE}&offset=${offset}`, projectId)}`);
             if (res.ok) {
                 const data = await res.json();
                 if (append) {
@@ -287,7 +289,7 @@ export default function LoadTestingPage() {
     const pollJob = useCallback((jobId: string, onComplete?: () => void) => {
         const interval = setInterval(async () => {
             try {
-                const res = await fetch(`${API_BASE}/load-testing/jobs/${jobId}`);
+                const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/jobs/${jobId}`, projectId)}`);
                 if (res.ok) {
                     const data: JobStatus = await res.json();
                     setActiveJobs(prev => ({ ...prev, [jobId]: data }));
@@ -309,7 +311,7 @@ export default function LoadTestingPage() {
             }
         }, 3000);
         return () => clearInterval(interval);
-    }, [fetchSpecs, fetchScripts, fetchRuns]);
+    }, [projectId, fetchSpecs, fetchScripts, fetchRuns]);
 
     useEffect(() => {
         fetchSpecs();
@@ -324,7 +326,7 @@ export default function LoadTestingPage() {
     useEffect(() => {
         const fetchStatus = async () => {
             try {
-                const res = await fetch(`${API_BASE}/load-testing/status`);
+                const res = await fetch(`${API_BASE}${withProjectQuery('/load-testing/status', projectId)}`);
                 if (res.ok) setK6Status(await res.json());
             } catch {
                 // Silently fail
@@ -333,19 +335,19 @@ export default function LoadTestingPage() {
         fetchStatus();
         const interval = setInterval(fetchStatus, 5000);
         return () => clearInterval(interval);
-    }, []);
+    }, [projectId]);
 
     // Fetch system limits once on mount
     useEffect(() => {
         (async () => {
             try {
-                const res = await fetch(`${API_BASE}/load-testing/system-limits`);
+                const res = await fetch(`${API_BASE}${withProjectQuery('/load-testing/system-limits', projectId)}`);
                 if (res.ok) setSystemLimits(await res.json());
             } catch {
                 // Non-critical
             }
         })();
-    }, []);
+    }, [projectId]);
 
     // ========== Actions ==========
 
@@ -353,7 +355,7 @@ export default function LoadTestingPage() {
         const res = await fetch(`${API_BASE}/load-testing/specs`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, content, project_id: projectId }),
+            body: JSON.stringify(withProjectBody({ name, content }, projectId)),
         });
         if (res.ok) {
             setMessage({ type: 'success', text: 'Load test spec created' });
@@ -367,10 +369,10 @@ export default function LoadTestingPage() {
 
     const handleUpdateSpec = useCallback(async (name: string, content: string) => {
         try {
-            const res = await fetch(`${API_BASE}/load-testing/specs/${name}`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/specs/${name}`, projectId)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content }),
+                body: JSON.stringify(withProjectBody({ content }, projectId)),
             });
             if (res.ok) {
                 setMessage({ type: 'success', text: 'Spec updated' });
@@ -379,12 +381,12 @@ export default function LoadTestingPage() {
         } catch {
             setMessage({ type: 'error', text: 'Failed to update spec' });
         }
-    }, []);
+    }, [projectId]);
 
     const handleDeleteSpec = useCallback(async (name: string) => {
         if (!confirm('Delete this load test spec?')) return;
         try {
-            const res = await fetch(`${API_BASE}/load-testing/specs/${name}`, { method: 'DELETE' });
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/specs/${name}`, projectId)}`, { method: 'DELETE' });
             if (res.ok) {
                 setMessage({ type: 'success', text: 'Spec deleted' });
                 fetchSpecs();
@@ -392,14 +394,14 @@ export default function LoadTestingPage() {
         } catch {
             setMessage({ type: 'error', text: 'Failed to delete spec' });
         }
-    }, [fetchSpecs]);
+    }, [projectId, fetchSpecs]);
 
     const handleGenerateScript = useCallback(async (name: string) => {
         try {
             const res = await fetch(`${API_BASE}/load-testing/generate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ spec_name: name, project_id: projectId }),
+                body: JSON.stringify(withProjectBody({ spec_name: name }, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -427,7 +429,7 @@ export default function LoadTestingPage() {
             if (!confirmed) return;
         }
         try {
-            const body: Record<string, unknown> = { spec_name: name, project_id: projectId };
+            const body: Record<string, unknown> = withProjectBody({ spec_name: name }, projectId);
             if (vus) body.vus = parseInt(vus, 10);
             if (duration) body.duration = duration;
             const res = await fetch(`${API_BASE}/load-testing/run-from-spec`, {
@@ -469,7 +471,7 @@ export default function LoadTestingPage() {
             if (!confirmed) return;
         }
         try {
-            const body: Record<string, unknown> = { script_path: scriptPath, project_id: projectId };
+            const body: Record<string, unknown> = withProjectBody({ script_path: scriptPath }, projectId);
             if (vus) body.vus = parseInt(vus, 10);
             if (duration) body.duration = duration;
             const res = await fetch(`${API_BASE}/load-testing/run`, {
@@ -499,13 +501,13 @@ export default function LoadTestingPage() {
         if (stoppingRunId) return;
         setStoppingRunId(runId);
         try {
-            const res = await fetch(`${API_BASE}/load-testing/runs/${runId}/stop`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/runs/${runId}/stop`, projectId)}`, { method: 'POST' });
             if (res.ok) {
                 const data = await res.json();
                 setMessage({ type: 'success', text: data.message || `Load test ${runId} stopped` });
             } else {
                 const err = await res.json().catch(() => ({}));
-                const forceRes = await fetch(`${API_BASE}/load-testing/force-unlock`, { method: 'POST' });
+                const forceRes = await fetch(`${API_BASE}${withProjectQuery('/load-testing/force-unlock', projectId)}`, { method: 'POST' });
                 if (forceRes.ok) {
                     setMessage({ type: 'success', text: 'Load test lock force-released' });
                 } else {
@@ -517,13 +519,13 @@ export default function LoadTestingPage() {
         } finally {
             setStoppingRunId(null);
         }
-    }, [stoppingRunId]);
+    }, [projectId, stoppingRunId]);
 
     const handleForceUnlock = useCallback(async () => {
         if (stoppingRunId) return;
         setStoppingRunId('force-unlock');
         try {
-            const res = await fetch(`${API_BASE}/load-testing/force-unlock`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}${withProjectQuery('/load-testing/force-unlock', projectId)}`, { method: 'POST' });
             if (res.ok) {
                 const data = await res.json();
                 setMessage({ type: 'success', text: data.message || 'Lock released' });
@@ -536,12 +538,12 @@ export default function LoadTestingPage() {
         } finally {
             setStoppingRunId(null);
         }
-    }, [stoppingRunId]);
+    }, [projectId, stoppingRunId]);
 
     const loadSpecContent = useCallback(async (name: string) => {
         if (specContents[name]) return;
         try {
-            const res = await fetch(`${API_BASE}/load-testing/specs/${name}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/specs/${name}`, projectId)}`);
             if (res.ok) {
                 const data = await res.json();
                 setSpecContents(prev => ({ ...prev, [name]: data.content }));
@@ -549,12 +551,12 @@ export default function LoadTestingPage() {
         } catch {
             // ignore
         }
-    }, [specContents]);
+    }, [projectId, specContents]);
 
     const loadScriptContent = useCallback(async (name: string) => {
         if (scriptContents[name]) return;
         try {
-            const res = await fetch(`${API_BASE}/load-testing/scripts/${name}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/scripts/${name}`, projectId)}`);
             if (res.ok) {
                 const data = await res.json();
                 setScriptContents(prev => ({ ...prev, [name]: data.content }));
@@ -562,24 +564,24 @@ export default function LoadTestingPage() {
         } catch {
             // ignore
         }
-    }, [scriptContents]);
+    }, [projectId, scriptContents]);
 
     const loadRunDetails = useCallback(async (runId: string) => {
         setExpandedRunData(null);
         try {
-            const res = await fetch(`${API_BASE}/load-testing/runs/${runId}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/runs/${runId}`, projectId)}`);
             if (res.ok) setExpandedRunData(await res.json());
         } catch {
             // ignore
         }
-    }, []);
+    }, [projectId]);
 
     const loadComparison = useCallback(async () => {
         const ids = Array.from(compareIds);
         if (ids.length !== 2) return;
         setComparisonLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/load-testing/runs/compare?run_a=${ids[0]}&run_b=${ids[1]}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/runs/compare?run_a=${ids[0]}&run_b=${ids[1]}`, projectId)}`);
             if (res.ok) {
                 setComparisonData(await res.json());
             } else {
@@ -590,7 +592,7 @@ export default function LoadTestingPage() {
         } finally {
             setComparisonLoading(false);
         }
-    }, [compareIds]);
+    }, [compareIds, projectId]);
 
     const toggleCompareId = useCallback((id: string) => {
         setCompareIds(prev => {
@@ -609,9 +611,10 @@ export default function LoadTestingPage() {
     const handleAnalyzeRun = useCallback(async (runId: string) => {
         setAnalyzingRunId(runId);
         try {
-            const res = await fetch(`${API_BASE}/load-testing/runs/${runId}/analyze`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/runs/${runId}/analyze`, projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(withProjectBody({}, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -635,7 +638,7 @@ export default function LoadTestingPage() {
             setMessage({ type: 'error', text: 'Failed to start AI analysis' });
             setAnalyzingRunId(null);
         }
-    }, [pollJob, loadRunDetails]);
+    }, [projectId, pollJob, loadRunDetails]);
 
     const handleNavigateToRun = useCallback((runId: string) => {
         setActiveTab('history');
@@ -819,6 +822,7 @@ export default function LoadTestingPage() {
                             <JobStatusPanel
                                 key={job.job_id}
                                 job={job}
+                                projectId={projectId}
                                 onStop={() => handleStopRun(job.job_id)}
                             />
                         ))}
@@ -827,7 +831,7 @@ export default function LoadTestingPage() {
 
             {/* Tab Content */}
             {activeTab === 'overview' && (
-                <OverviewTab onNavigateToRun={handleNavigateToRun} />
+                <OverviewTab projectId={projectId} onNavigateToRun={handleNavigateToRun} />
             )}
 
             {activeTab === 'scenarios' && (
@@ -849,6 +853,7 @@ export default function LoadTestingPage() {
 
             {activeTab === 'scripts' && (
                 <ScriptsTab
+                    projectId={projectId}
                     scripts={scripts}
                     scriptsLoading={scriptsLoading}
                     k6Status={k6Status}
@@ -862,6 +867,7 @@ export default function LoadTestingPage() {
 
             {activeTab === 'history' && (
                 <HistoryTab
+                    projectId={projectId}
                     runs={runs}
                     runsLoading={runsLoading}
                     runsHasMore={runsHasMore}

@@ -5,7 +5,7 @@ import {
     X, Loader2, Clock, CheckCircle, AlertCircle, ChevronDown, ChevronRight,
     RefreshCw, Heart, Code, FileText, Activity, Play,
 } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import { timeAgo } from '@/lib/formatting';
 import { ApiRunDetail, TestResultDetail, TestResultsSummary, HealingAttempt } from './types';
 
@@ -13,6 +13,7 @@ const CodeEditor = dynamic(() => import('@/components/CodeEditor'), { ssr: false
 
 interface ApiRunDetailModalProps {
     runId: string;
+    projectId: string;
     onClose: () => void;
     onRetry?: (jobId: string) => void;
 }
@@ -44,7 +45,7 @@ function getCategoryColor(category: string): string {
     return ERROR_CATEGORY_COLORS[category] || 'var(--text-tertiary)';
 }
 
-export default function ApiRunDetailModal({ runId, onClose, onRetry }: ApiRunDetailModalProps) {
+export default function ApiRunDetailModal({ runId, projectId, onClose, onRetry }: ApiRunDetailModalProps) {
     const [data, setData] = useState<ApiRunDetail | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -60,7 +61,7 @@ export default function ApiRunDetailModal({ runId, onClose, onRetry }: ApiRunDet
             setLoading(true);
             setError(null);
             try {
-                const res = await fetch(`${API_BASE}/api-testing/runs/${runId}`);
+                const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/runs/${runId}`, projectId)}`);
                 if (res.ok) {
                     const d = await res.json();
                     setData(d);
@@ -75,12 +76,12 @@ export default function ApiRunDetailModal({ runId, onClose, onRetry }: ApiRunDet
             }
         };
         fetchDetail();
-    }, [runId]);
+    }, [projectId, runId]);
 
     const handleRetry = async () => {
         setRetrying(true);
         try {
-            const res = await fetch(`${API_BASE}/api-testing/runs/${runId}/retry`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/runs/${runId}/retry`, projectId)}`, { method: 'POST' });
             if (res.ok) {
                 const d = await res.json();
                 onRetry?.(d.job_id);

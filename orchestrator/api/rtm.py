@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
+from sqlmodel import select
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -44,6 +45,11 @@ def _cleanup_old_rtm_jobs():
         )
         for job_id, _ in evictable[: len(_rtm_gen_jobs) - MAX_TRACKED_JOBS]:
             del _rtm_gen_jobs[job_id]
+
+
+def _ensure_job_project(job_project_id: str | None, project_id: str) -> None:
+    if job_project_id != project_id:
+        raise HTTPException(status_code=404, detail="Job not found")
 
 
 # ========== Pydantic Models ==========
@@ -271,7 +277,7 @@ async def _run_rtm_generation(job_id: str, project_id: str, specs_paths: list[st
 
 @router.post("/generate")
 async def generate_rtm(
-    request: GenerateRtmRequest, project_id: str = Query(default="default")
+    request: GenerateRtmRequest, project_id: str = Query(...)
 ):
     """
     Generate or refresh the RTM (async).
@@ -338,17 +344,19 @@ async def generate_rtm(
 
 
 @router.get("/generate-jobs/{job_id}")
-async def get_rtm_generate_job_status(job_id: str):
+async def get_rtm_generate_job_status(job_id: str, project_id: str = Query(...)):
     """Poll RTM generation job status."""
     from orchestrator.services.domain_jobs import domain_job_to_dict, get_domain_job
 
     durable_job = get_domain_job(job_id)
     if durable_job and durable_job.job_type == "rtm_generate":
+        _ensure_job_project(durable_job.project_id, project_id)
         return domain_job_to_dict(durable_job)
 
     job = _rtm_gen_jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    _ensure_job_project(job.get("project_id"), project_id)
 
     response = {
         "job_id": job_id,
@@ -463,7 +471,7 @@ async def export_rtm(format: str, project_id: str = Query(default="default")):
 
 
 @router.post("/snapshot", response_model=RtmSnapshotResponse)
-async def create_snapshot(project_id: str = Query(default="default"), name: str | None = Query(default=None)):
+async def create_snapshot(project_id: str = Query(...), name: str | None = Query(default=None)):
     """Create a snapshot of the current RTM for historical tracking."""
     from memory.exploration_store import get_exploration_store
 
@@ -484,7 +492,7 @@ async def create_snapshot(project_id: str = Query(default="default"), name: str 
 
 
 @router.get("/snapshots", response_model=list[RtmSnapshotResponse])
-async def list_snapshots(project_id: str = Query(default="default"), limit: int = Query(default=20, ge=1, le=100)):
+async def list_snapshots(project_id: str = Query(...), limit: int = Query(default=20, ge=1, le=100)):
     """List RTM snapshots."""
     from sqlmodel import col, select
 
@@ -574,7 +582,7 @@ async def get_coverage_trend(project_id: str = Query(default="default"), limit: 
 
 
 @router.get("/snapshot/{snapshot_id}", response_model=RtmSnapshotDetailResponse)
-async def get_snapshot_detail(snapshot_id: int, project_id: str = Query(default="default")):
+async def get_snapshot_detail(snapshot_id: int, project_id: str = Query(...)):
     """Get full snapshot detail including the RTM data at that point in time."""
     import json
 
@@ -582,12 +590,11 @@ async def get_snapshot_detail(snapshot_id: int, project_id: str = Query(default=
     from api.models_db import RtmSnapshot
 
     with next(get_session()) as db:
-        snapshot = db.get(RtmSnapshot, snapshot_id)
+        snapshot = db.exec(
+            select(RtmSnapshot).where(RtmSnapshot.id == snapshot_id, RtmSnapshot.project_id == project_id)
+        ).first()
         if not snapshot:
             raise HTTPException(status_code=404, detail="Snapshot not found")
-
-        if snapshot.project_id != project_id:
-            raise HTTPException(status_code=403, detail="Snapshot belongs to different project")
 
         # Parse the stored JSON data
         try:
@@ -609,7 +616,7 @@ async def get_snapshot_detail(snapshot_id: int, project_id: str = Query(default=
 
 
 @router.get("/requirement/{req_id}/tests", response_model=list[RtmEntryResponse])
-async def get_requirement_tests(req_id: int, project_id: str = Query(default="default")):
+async def get_requirement_tests(req_id: int, project_id: str = Query(...)):
     """Get all tests mapped to a specific requirement."""
     from memory.exploration_store import get_exploration_store
 
@@ -639,7 +646,7 @@ async def get_requirement_tests(req_id: int, project_id: str = Query(default="de
 
 
 @router.get("/test/{test_name}/requirements")
-async def get_test_requirements(test_name: str, project_id: str = Query(default="default")):
+async def get_test_requirements(test_name: str, project_id: str = Query(...)):
     """Get all requirements covered by a specific test."""
     from sqlmodel import select
 
@@ -653,7 +660,9 @@ async def get_test_requirements(test_name: str, project_id: str = Query(default=
 
         results = []
         for entry in entries:
-            req = db.get(Requirement, entry.requirement_id)
+            req = db.exec(
+                select(Requirement).where(Requirement.id == entry.requirement_id, Requirement.project_id == project_id)
+            ).first()
             if req:
                 results.append(
                     {
@@ -674,7 +683,7 @@ async def get_test_requirements(test_name: str, project_id: str = Query(default=
 
 
 @router.post("/entry", response_model=RtmEntryResponse)
-async def create_rtm_entry(request: CreateRtmEntryRequest, project_id: str = Query(default="default")):
+async def create_rtm_entry(request: CreateRtmEntryRequest, project_id: str = Query(...)):
     """
     Create an RTM entry to link a requirement to a test spec.
 
@@ -715,18 +724,15 @@ async def create_rtm_entry(request: CreateRtmEntryRequest, project_id: str = Que
 
 
 @router.delete("/entry/{entry_id}")
-async def delete_rtm_entry(entry_id: int, project_id: str = Query(default="default")):
+async def delete_rtm_entry(entry_id: int, project_id: str = Query(...)):
     """Delete an RTM entry."""
     from api.db import get_session
     from api.models_db import RtmEntry
 
     with next(get_session()) as db:
-        entry = db.get(RtmEntry, entry_id)
+        entry = db.exec(select(RtmEntry).where(RtmEntry.id == entry_id, RtmEntry.project_id == project_id)).first()
         if not entry:
             raise HTTPException(status_code=404, detail="RTM entry not found")
-
-        if entry.project_id != project_id:
-            raise HTTPException(status_code=403, detail="RTM entry belongs to different project")
 
         db.delete(entry)
         db.commit()

@@ -3,8 +3,8 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { Zap, FileCode, Play, Upload, Clock, Loader2, AlertCircle, CheckCircle, X } from 'lucide-react';
 import { PageLayout } from '@/components/ui/page-layout';
 import { PageHeader } from '@/components/ui/page-header';
-import { useProject } from '@/contexts/ProjectContext';
-import { API_BASE } from '@/lib/api';
+import { useRequiredProject } from '@/contexts/ProjectContext';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import { createTabStyle } from '@/lib/styles';
 import { ApiSpec, ApiSpecsSummary, GeneratedTest, GeneratedTestsSummary, JobStatus, ApiTestRun, TabType } from './components/types';
 import SpecsPanel from './components/SpecsPanel';
@@ -17,8 +17,7 @@ const PAGE_SIZE = 50;
 const RUNS_PAGE_SIZE = 20;
 
 export default function ApiTestingPage() {
-    const { currentProject } = useProject();
-    const projectId = currentProject?.id || 'default';
+    const { projectId, isLoading: projectLoading } = useRequiredProject();
 
     // Tab state
     const [activeTab, setActiveTab] = useState<TabType>('specs');
@@ -70,9 +69,10 @@ export default function ApiTestingPage() {
         offset = 0, append = false, search?: string,
         sort?: string, statusFilter?: string, folder?: string, tags?: string
     ) => {
+        if (!projectId) return;
         setSpecsLoading(!append);
         try {
-            let url = `${API_BASE}/api-testing/specs?project_id=${projectId}&limit=${PAGE_SIZE}&offset=${offset}`;
+            let url = `${API_BASE}${withProjectQuery(`/api-testing/specs?limit=${PAGE_SIZE}&offset=${offset}`, projectId)}`;
             if (search) url += `&search=${encodeURIComponent(search)}`;
             if (sort) url += `&sort=${encodeURIComponent(sort)}`;
             if (statusFilter) url += `&status_filter=${encodeURIComponent(statusFilter)}`;
@@ -100,10 +100,11 @@ export default function ApiTestingPage() {
     }, [projectId]);
 
     const fetchGeneratedTests = useCallback(async (offset = 0, append = false, search?: string, sort?: string, statusFilter?: string) => {
+        if (!projectId) return;
         if (!append && !testsLoaded) setTestsLoading(true);
         else setTestsRefreshing(true);
         try {
-            let url = `${API_BASE}/api-testing/generated-tests?project_id=${projectId}&limit=${PAGE_SIZE}&offset=${offset}`;
+            let url = `${API_BASE}${withProjectQuery(`/api-testing/generated-tests?limit=${PAGE_SIZE}&offset=${offset}`, projectId)}`;
             if (search) url += `&search=${encodeURIComponent(search)}`;
             if (sort) url += `&sort=${encodeURIComponent(sort)}`;
             if (statusFilter) url += `&status_filter=${encodeURIComponent(statusFilter)}`;
@@ -129,8 +130,9 @@ export default function ApiTestingPage() {
     }, [projectId, testsLoaded]);
 
     const fetchRecentJobs = useCallback(async () => {
+        if (!projectId) return;
         try {
-            const res = await fetch(`${API_BASE}/api-testing/jobs?status=running&project_id=${projectId}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/jobs?status=running', projectId)}`);
             if (res.ok) {
                 const data = await res.json();
                 const jobMap: Record<string, JobStatus> = {};
@@ -163,16 +165,18 @@ export default function ApiTestingPage() {
     }, [projectId]);
 
     const fetchLatestRuns = useCallback(async () => {
+        if (!projectId) return;
         try {
-            const res = await fetch(`${API_BASE}/api-testing/runs/latest-by-spec?project_id=${projectId}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/runs/latest-by-spec', projectId)}`);
             if (res.ok) { const data = await res.json(); setLatestRuns(data.specs || {}); }
         } catch { /* ignore */ }
     }, [projectId]);
 
     const fetchApiRuns = useCallback(async (offset = 0, append = false) => {
+        if (!projectId) return;
         setRunsLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/api-testing/runs?project_id=${projectId}&limit=${RUNS_PAGE_SIZE}&offset=${offset}`);
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/runs?limit=${RUNS_PAGE_SIZE}&offset=${offset}`, projectId)}`);
             if (res.ok) {
                 const data = await res.json();
                 if (append) setApiRuns(prev => [...prev, ...data.runs]);
@@ -190,8 +194,9 @@ export default function ApiTestingPage() {
     const pollJob = useCallback((jobId: string, onComplete?: () => void) => {
         let missCount = 0;
         const interval = setInterval(async () => {
+            if (!projectId) return;
             try {
-                const res = await fetch(`${API_BASE}/api-testing/jobs/${jobId}`);
+                const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/jobs/${jobId}`, projectId)}`);
                 if (res.ok) {
                     missCount = 0;
                     const data: JobStatus = await res.json();
@@ -239,15 +244,19 @@ export default function ApiTestingPage() {
             }
         }, 3000);
         return () => clearInterval(interval);
-    }, [fetchApiSpecs, fetchGeneratedTests, fetchLatestRuns]);
+    }, [projectId, fetchApiSpecs, fetchGeneratedTests, fetchLatestRuns]);
 
     pollJobRef.current = pollJob;
     const hasRunningJobs = Object.values(activeJobs).some(j => j.status === 'running');
 
     // ========== Effects ==========
 
-    useEffect(() => { fetchApiSpecs(); fetchRecentJobs(); fetchLatestRuns(); },
-        [fetchApiSpecs, fetchRecentJobs, fetchLatestRuns]);
+    useEffect(() => {
+        if (projectLoading || !projectId) return;
+        fetchApiSpecs();
+        fetchRecentJobs();
+        fetchLatestRuns();
+    }, [projectId, projectLoading, fetchApiSpecs, fetchRecentJobs, fetchLatestRuns]);
 
     useEffect(() => {
         if (!hasRunningJobs) return;
@@ -286,8 +295,9 @@ export default function ApiTestingPage() {
     }, []);
 
     const handleRetryRun = useCallback(async (runId: string) => {
+        if (!projectId) return;
         try {
-            const res = await fetch(`${API_BASE}/api-testing/runs/${runId}/retry`, { method: 'POST' });
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/api-testing/runs/${runId}/retry`, projectId)}`, { method: 'POST' });
             if (res.ok) {
                 const data = await res.json();
                 setActiveJobs(prev => ({ ...prev, [data.job_id]: { job_id: data.job_id, status: 'running', message: data.message } }));
@@ -301,7 +311,7 @@ export default function ApiTestingPage() {
         } catch {
             setMessage({ type: 'error', text: 'Failed to start retry' });
         }
-    }, [pollJob, fetchApiRuns]);
+    }, [projectId, pollJob, fetchApiRuns]);
 
     // ========== Tab Styles ==========
 
@@ -449,6 +459,7 @@ export default function ApiTestingPage() {
             {detailRunId && (
                 <ApiRunDetailModal
                     runId={detailRunId}
+                    projectId={projectId}
                     onClose={() => setDetailRunId(null)}
                     onRetry={(jobId) => {
                         setActiveJobs(prev => ({ ...prev, [jobId]: { job_id: jobId, status: 'running', message: 'Retrying...' } }));

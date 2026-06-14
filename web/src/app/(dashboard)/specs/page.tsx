@@ -476,6 +476,7 @@ function SpecsPageContent() {
     const [splitSpecName, setSplitSpecName] = useState<string | null>(null);
     const [splitting, setSplitting] = useState(false);
     const [splitMode, setSplitMode] = useState<'individual' | 'grouped'>('individual');
+    const [splitExtractionMethod, setSplitExtractionMethod] = useState<'ai' | 'regex'>('ai');
 
     const [deleteModalOpen, setDeleteModalOpen] = useState(false);
     const [deleteSpecName, setDeleteSpecName] = useState<string | null>(null);
@@ -710,7 +711,8 @@ function SpecsPageContent() {
                 body: JSON.stringify({
                     spec_name: splitSpecName,
                     project_id: currentProject?.id,
-                    mode: splitMode
+                    mode: splitMode,
+                    extraction_method: splitExtractionMethod
                 })
             });
             const data = await res.json();
@@ -728,7 +730,11 @@ function SpecsPageContent() {
                 const groupInfo = data.groups?.length
                     ? `\n\nGroups: ${data.groups.map((g: any) => `${g.name} (${g.test_ids?.length || 0} tests)`).join(', ')}`
                     : '';
-                alert(`${modeText}${groupInfo}\n\nOutput: ${data.output_dir}`);
+                const extractionInfo = data.ai_used
+                    ? '\n\nExtraction: AI'
+                    : `\n\nExtraction: ${data.extraction_method === 'regex' ? 'Regex' : 'Non-AI'}`;
+                const warningInfo = data.warning ? `\n\nWarning: ${data.warning}` : '';
+                alert(`${modeText}${groupInfo}${extractionInfo}${warningInfo}\n\nOutput: ${data.output_dir}`);
 
                 // Refresh specs list
                 await refetchSpecs();
@@ -736,6 +742,7 @@ function SpecsPageContent() {
                 setSplitModalOpen(false);
                 setSplitSpecName(null);
                 setSplitMode('individual');
+                setSplitExtractionMethod('ai');
             } else {
                 alert('No test cases found in this spec to split.');
             }
@@ -2257,8 +2264,8 @@ function SpecsPageContent() {
 
             {/* Split Multi-Test Spec Modal */}
             {splitModalOpen && (
-                <div className="modal-overlay" onClick={() => { if (!splitting) { setSplitModalOpen(false); setSplitMode('individual'); } }}>
-                    <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '500px' }}>
+                <div className="modal-overlay" onClick={() => { if (!splitting) { setSplitModalOpen(false); setSplitMode('individual'); setSplitExtractionMethod('ai'); } }}>
+                    <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '500px', maxHeight: '90vh', overflowY: 'auto' }}>
                         <h2 style={{ marginBottom: '1.5rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                             <Split size={24} />
                             Split Multi-Test Spec
@@ -2284,7 +2291,83 @@ function SpecsPageContent() {
                                 <strong>What is splitting?</strong>
                             </div>
                             <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: '1.6' }}>
-                                This spec contains multiple test cases. Splitting will create individual test files for each test case, allowing you to run and debug them separately. AI-powered extraction is used when the format is non-standard.
+                                This spec contains multiple test cases. Choose AI extraction for semantic parsing and Smart Groups, or regex extraction for a fast deterministic split.
+                            </div>
+                        </div>
+
+                        {/* Extraction Method Selection */}
+                        <div style={{ marginBottom: '1.5rem' }}>
+                            <label style={{ display: 'block', marginBottom: '0.75rem', color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                Extraction Method
+                            </label>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                                <label
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'flex-start',
+                                        gap: '0.75rem',
+                                        padding: '0.75rem',
+                                        border: `1px solid ${splitExtractionMethod === 'ai' ? 'var(--accent)' : 'var(--border)'}`,
+                                        borderRadius: '8px',
+                                        cursor: splitting ? 'default' : 'pointer',
+                                        background: splitExtractionMethod === 'ai' ? 'rgba(192, 132, 252, 0.06)' : 'transparent',
+                                        transition: 'all 0.15s ease',
+                                        opacity: splitting ? 0.6 : 1
+                                    }}
+                                >
+                                    <input
+                                        type="radio"
+                                        name="splitExtractionMethod"
+                                        value="ai"
+                                        checked={splitExtractionMethod === 'ai'}
+                                        onChange={() => setSplitExtractionMethod('ai')}
+                                        disabled={splitting}
+                                        style={{ marginTop: '2px' }}
+                                    />
+                                    <div>
+                                        <div style={{ fontWeight: 500, fontSize: '0.9rem', color: 'var(--text)' }}>
+                                            AI Extraction
+                                        </div>
+                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                                            Use configured AI settings for semantic test case extraction
+                                        </div>
+                                    </div>
+                                </label>
+                                <label
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'flex-start',
+                                        gap: '0.75rem',
+                                        padding: '0.75rem',
+                                        border: `1px solid ${splitExtractionMethod === 'regex' ? 'var(--accent)' : 'var(--border)'}`,
+                                        borderRadius: '8px',
+                                        cursor: splitting ? 'default' : 'pointer',
+                                        background: splitExtractionMethod === 'regex' ? 'rgba(192, 132, 252, 0.06)' : 'transparent',
+                                        transition: 'all 0.15s ease',
+                                        opacity: splitting ? 0.6 : 1
+                                    }}
+                                >
+                                    <input
+                                        type="radio"
+                                        name="splitExtractionMethod"
+                                        value="regex"
+                                        checked={splitExtractionMethod === 'regex'}
+                                        onChange={() => {
+                                            setSplitExtractionMethod('regex');
+                                            setSplitMode('individual');
+                                        }}
+                                        disabled={splitting}
+                                        style={{ marginTop: '2px' }}
+                                    />
+                                    <div>
+                                        <div style={{ fontWeight: 500, fontSize: '0.9rem', color: 'var(--text)' }}>
+                                            Regex Extraction
+                                        </div>
+                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                                            Use deterministic parsing without calling an AI model
+                                        </div>
+                                    </div>
+                                </label>
                             </div>
                         </div>
 
@@ -2334,10 +2417,10 @@ function SpecsPageContent() {
                                         padding: '0.75rem',
                                         border: `1px solid ${splitMode === 'grouped' ? 'var(--accent)' : 'var(--border)'}`,
                                         borderRadius: '8px',
-                                        cursor: splitting ? 'default' : 'pointer',
+                                        cursor: splitting || splitExtractionMethod === 'regex' ? 'default' : 'pointer',
                                         background: splitMode === 'grouped' ? 'rgba(192, 132, 252, 0.06)' : 'transparent',
                                         transition: 'all 0.15s ease',
-                                        opacity: splitting ? 0.6 : 1
+                                        opacity: splitting || splitExtractionMethod === 'regex' ? 0.6 : 1
                                     }}
                                 >
                                     <input
@@ -2346,7 +2429,7 @@ function SpecsPageContent() {
                                         value="grouped"
                                         checked={splitMode === 'grouped'}
                                         onChange={() => setSplitMode('grouped')}
-                                        disabled={splitting}
+                                        disabled={splitting || splitExtractionMethod === 'regex'}
                                         style={{ marginTop: '2px' }}
                                     />
                                     <div>
@@ -2371,7 +2454,9 @@ function SpecsPageContent() {
                             }}>
                                 <div className="loading-spinner" style={{ width: '24px', height: '24px', margin: '0 auto 0.5rem' }}></div>
                                 <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                                    {splitMode === 'grouped' ? 'Grouping and splitting tests...' : 'Splitting tests...'}
+                                    {splitExtractionMethod === 'ai'
+                                        ? splitMode === 'grouped' ? 'Extracting, grouping, and splitting tests with AI...' : 'Extracting and splitting tests with AI...'
+                                        : 'Splitting tests with regex...'}
                                 </div>
                             </div>
                         )}
@@ -2379,7 +2464,7 @@ function SpecsPageContent() {
                         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '1rem' }}>
                             <button
                                 className="btn btn-secondary"
-                                onClick={() => { setSplitModalOpen(false); setSplitMode('individual'); }}
+                                onClick={() => { setSplitModalOpen(false); setSplitMode('individual'); setSplitExtractionMethod('ai'); }}
                                 disabled={splitting}
                             >
                                 Cancel

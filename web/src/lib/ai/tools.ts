@@ -801,7 +801,8 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         jobId: z.string(),
       }),
       execute: async ({ jobId }): Promise<ToolResult> => {
-        return fetchTool(`/rtm/generate-jobs/${encodeURIComponent(jobId)}`);
+        const params = projectParams();
+        return fetchTool(`/rtm/generate-jobs/${encodeURIComponent(jobId)}?${params}`);
       },
     }),
 
@@ -943,7 +944,8 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         jobId: z.string(),
       }),
       execute: async ({ jobId }): Promise<ToolResult> => {
-        return fetchTool(`/security-testing/jobs/${encodeURIComponent(jobId)}`);
+        const params = projectParams();
+        return fetchTool(`/security-testing/jobs/${encodeURIComponent(jobId)}?${params}`);
       },
     }),
 
@@ -1369,7 +1371,8 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         runId: z.string().describe('The security scan run ID'),
       }),
       execute: async ({ runId }): Promise<ToolResult> => {
-        return fetchTool(`/security-testing/runs/${runId}`);
+        const params = projectParams();
+        return fetchTool(`/security-testing/runs/${runId}?${params}`);
       },
     }),
 
@@ -1379,7 +1382,8 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         runId: z.string().describe('The security scan run ID'),
       }),
       execute: async ({ runId }): Promise<ToolResult> => {
-        return fetchTool(`/security-testing/runs/${encodeURIComponent(runId)}/findings`);
+        const params = projectParams();
+        return fetchTool(`/security-testing/runs/${encodeURIComponent(runId)}/findings?${params}`);
       },
     }),
 
@@ -2786,7 +2790,8 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         jobId: z.string().describe('The API job ID returned by generation/import/run actions'),
       }),
       execute: async ({ jobId }): Promise<ToolResult> => {
-        return fetchTool(`/api-testing/jobs/${encodeURIComponent(jobId)}`);
+        const params = projectParams();
+        return fetchTool(`/api-testing/jobs/${encodeURIComponent(jobId)}?${params}`);
       },
     }),
 
@@ -2823,7 +2828,8 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         jobId: z.string().describe('The database testing job ID returned by generation or run actions'),
       }),
       execute: async ({ jobId }): Promise<ToolResult> => {
-        return fetchTool(`/database-testing/jobs/${encodeURIComponent(jobId)}`);
+        const params = projectParams();
+        return fetchTool(`/database-testing/jobs/${encodeURIComponent(jobId)}?${params}`);
       },
     }),
 
@@ -3170,7 +3176,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         runIds: z.array(z.string()).min(2).describe('Array of security scan run IDs to compare'),
       }),
       execute: async ({ runIds }): Promise<ToolResult> => {
-        const params = new URLSearchParams();
+        const params = projectParams();
         params.set('run_ids', runIds.join(','));
         return fetchTool(`/security-testing/runs/compare?${params}`);
       },
@@ -3262,7 +3268,8 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         runId: z.string().describe('The database test run ID'),
       }),
       execute: async ({ runId }): Promise<ToolResult> => {
-        return fetchTool(`/database-testing/runs/${runId}/schema`);
+        const params = projectParams();
+        return fetchTool(`/database-testing/runs/${runId}/schema?${params}`);
       },
     }),
 
@@ -3273,7 +3280,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         status: z.enum(['passed', 'failed', 'error']).optional().describe('Filter checks by status'),
       }),
       execute: async ({ runId, status }): Promise<ToolResult> => {
-        const params = new URLSearchParams();
+        const params = projectParams();
         if (status) params.set('status', status);
         return fetchTool(`/database-testing/runs/${runId}/checks?${params}`);
       },
@@ -3690,7 +3697,7 @@ export function createAssistantTools(authToken?: string, projectId?: string) {
         const runList = runs && (runs as any).runs;
         if (Array.isArray(runList) && runList.length >= 2) {
           const ids = runList.slice(0, 2).map((r: any) => r.id || r.run_id);
-          const compareParams = new URLSearchParams();
+          const compareParams = projectParams();
           compareParams.set('run_ids', ids.join(','));
           comparison = await fetchTool(`/security-testing/runs/compare?${compareParams}`);
         }

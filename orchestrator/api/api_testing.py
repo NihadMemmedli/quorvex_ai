@@ -24,6 +24,7 @@ from sqlmodel import Session, select
 from .db import engine, get_session
 from .models_db import OpenApiImportHistory, SpecMetadata
 from .models_db import TestRun as DBTestRun
+from .models_db import normalize_project_id
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -297,7 +298,7 @@ def _import_history_result(record: OpenApiImportHistory) -> dict:
 class CreateApiSpecRequest(BaseModel):
     name: str
     content: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class UpdateApiSpecRequest(BaseModel):
@@ -306,13 +307,13 @@ class UpdateApiSpecRequest(BaseModel):
 
 class GenerateTestRequest(BaseModel):
     spec_name: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class CreateAndGenerateApiSpecRequest(BaseModel):
     name: str
     content: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class ImportOpenApiRequest(BaseModel):
@@ -322,23 +323,23 @@ class ImportOpenApiRequest(BaseModel):
     feature_filter: str | None = None
     method_filter: list[str] | None = None
     mode: str | None = DEFAULT_OPENAPI_IMPORT_MODE
-    project_id: str | None = "default"
+    project_id: str
 
 
 class RunApiTestRequest(BaseModel):
     spec_path: str  # relative path like "specs/api/test.md"
-    project_id: str | None = "default"
+    project_id: str
 
 
 class EdgeCaseRequest(BaseModel):
     spec_path: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 class RunDirectRequest(BaseModel):
     test_path: str  # relative path like "tests/generated/my-api.api.spec.ts"
     spec_name: str | None = None
-    project_id: str | None = "default"
+    project_id: str
     heal_on_failure: bool = False
 
 
@@ -353,22 +354,22 @@ class JobStatusResponse(BaseModel):
 
 class UpdateTagsRequest(BaseModel):
     tags: list[str]
-    project_id: str | None = "default"
+    project_id: str
 
 
 class BulkRunRequest(BaseModel):
     spec_paths: list[str]
-    project_id: str | None = "default"
+    project_id: str
 
 
 class BulkGenerateRequest(BaseModel):
     spec_names: list[str]
-    project_id: str | None = "default"
+    project_id: str
 
 
 class CreateFolderRequest(BaseModel):
     folder_name: str
-    project_id: str | None = "default"
+    project_id: str
 
 
 # ========== Helper Functions ==========
@@ -437,11 +438,73 @@ def _get_tests_dir(project_id: str = "default") -> Path:
     return TESTS_DIR
 
 
+def _project_scope(model, project_id: str):
+    if project_id == "default":
+        return (model.project_id == "default") | (model.project_id == None)
+    return model.project_id == project_id
+
+
+def _get_api_run_for_project(session: Session, run_id: str, project_id: str) -> DBTestRun | None:
+    return session.exec(
+        select(DBTestRun).where(
+            DBTestRun.id == run_id,
+            DBTestRun.test_type == "api",
+            _project_scope(DBTestRun, project_id),
+        )
+    ).first()
+
+
+def _get_import_history_for_project(
+    session: Session, history_id: str, project_id: str
+) -> OpenApiImportHistory | None:
+    return session.exec(
+        select(OpenApiImportHistory).where(
+            OpenApiImportHistory.id == history_id,
+            _project_scope(OpenApiImportHistory, project_id),
+        )
+    ).first()
+
+
+def _get_import_history_by_job_for_project(
+    session: Session, job_id: str, project_id: str
+) -> OpenApiImportHistory | None:
+    return session.exec(
+        select(OpenApiImportHistory).where(
+            OpenApiImportHistory.job_id == job_id,
+            _project_scope(OpenApiImportHistory, project_id),
+        )
+    ).first()
+
+
+def _is_under_path(path: Path, base: Path) -> bool:
+    try:
+        path.resolve().relative_to(base.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_project_file_path(relative_path: str, project_id: str, root: Path, label: str) -> Path:
+    target = (BASE_DIR / relative_path).resolve()
+    allowed_root = root.resolve()
+    if not _is_under_path(target, allowed_root):
+        raise HTTPException(status_code=404, detail=f"{label} not found: {relative_path}")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"{label} not found: {relative_path}")
+    return target
+
+
+def _resolve_project_spec_path(relative_path: str, project_id: str) -> Path:
+    return _resolve_project_file_path(relative_path, project_id, _get_specs_dir(project_id), "Spec file")
+
+
+def _resolve_project_test_path(relative_path: str, project_id: str) -> Path:
+    return _resolve_project_file_path(relative_path, project_id, _get_tests_dir(project_id), "Test file")
+
+
 def _find_api_spec_by_name(name: str, project_id: str = "default") -> Path | None:
-    """Find an API spec by file name, preferring project-scoped specs."""
+    """Find an API spec by file name within the requested project scope."""
     search_dirs = [_get_specs_dir(project_id)]
-    if project_id and project_id != "default":
-        search_dirs.append(SPECS_DIR)
 
     for specs_dir in search_dirs:
         if not specs_dir.exists():
@@ -981,7 +1044,7 @@ async def _run_import_openapi(
         # Update history record
         try:
             with Session(engine) as session:
-                h = session.get(OpenApiImportHistory, history_id)
+                h = _get_import_history_for_project(session, history_id, project_id)
                 if h:
                     h.status = status
                     h.base_url = result.base_url or base_url
@@ -1020,7 +1083,7 @@ async def _run_import_openapi(
         # Update history record on failure
         try:
             with Session(engine) as session:
-                h = session.get(OpenApiImportHistory, history_id)
+                h = _get_import_history_for_project(session, history_id, project_id)
                 if h:
                     h.status = "failed"
                     h.error_message = str(e)
@@ -1101,7 +1164,7 @@ async def _run_import_openapi_file(
         # Update history record
         try:
             with Session(engine) as session:
-                h = session.get(OpenApiImportHistory, history_id)
+                h = _get_import_history_for_project(session, history_id, project_id)
                 if h:
                     h.status = status
                     h.base_url = result.base_url or base_url
@@ -1140,7 +1203,7 @@ async def _run_import_openapi_file(
         # Update history record on failure
         try:
             with Session(engine) as session:
-                h = session.get(OpenApiImportHistory, history_id)
+                h = _get_import_history_for_project(session, history_id, project_id)
                 if h:
                     h.status = "failed"
                     h.error_message = str(e)
@@ -1378,7 +1441,7 @@ def _run_api_test_sync(job_id: str, spec_path: str, project_id: str):
         # Update DB record
         try:
             with Session(engine) as session:
-                db_run = session.get(DBTestRun, run_id)
+                db_run = _get_api_run_for_project(session, run_id, project_id)
                 if db_run:
                     db_run.status = "passed" if passed else "failed"
                     db_run.completed_at = datetime.utcnow()
@@ -1404,7 +1467,7 @@ def _run_api_test_sync(job_id: str, spec_path: str, project_id: str):
         # Update DB record on failure
         try:
             with Session(engine) as session:
-                db_run = session.get(DBTestRun, run_id)
+                db_run = _get_api_run_for_project(session, run_id, project_id)
                 if db_run:
                     db_run.status = "failed"
                     db_run.completed_at = datetime.utcnow()
@@ -1560,7 +1623,7 @@ def _run_direct_test_sync(
                 # Update DB stage
                 try:
                     with Session(engine) as session:
-                        db_run = session.get(DBTestRun, run_id)
+                        db_run = _get_api_run_for_project(session, run_id, project_id)
                         if db_run:
                             db_run.current_stage = "healing"
                             db_run.stage_message = f"Healing attempt {attempt}/{max_heal}..."
@@ -1748,7 +1811,7 @@ def _run_direct_test_sync(
         # Update DB record
         try:
             with Session(engine) as session:
-                db_run = session.get(DBTestRun, run_id)
+                db_run = _get_api_run_for_project(session, run_id, project_id)
                 if db_run:
                     db_run.status = "passed" if passed else "failed"
                     db_run.completed_at = datetime.utcnow()
@@ -1784,7 +1847,7 @@ def _run_direct_test_sync(
         )
         try:
             with Session(engine) as session:
-                db_run = session.get(DBTestRun, run_id)
+                db_run = _get_api_run_for_project(session, run_id, project_id)
                 if db_run:
                     db_run.status = "failed"
                     db_run.completed_at = datetime.utcnow()
@@ -1801,7 +1864,7 @@ def _run_direct_test_sync(
 
 @router.get("/specs")
 async def list_api_specs(
-    project_id: str = Query("default"),
+    project_id: str = Query(...),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     search: str | None = Query(None),
@@ -1824,17 +1887,16 @@ async def list_api_specs(
 
 
 @router.get("/specs/{name:path}")
-async def get_api_spec(name: str, project_id: str = Query("default")):
+async def get_api_spec(name: str, project_id: str = Query(...)):
     """Get a single API spec content."""
-    # Search for the spec file in project-scoped directory first, then global
+    # Search for the spec file in the requested project scope.
     target = None
-    for specs_dir in [_get_specs_dir(project_id), SPECS_DIR]:
+    specs_dir = _get_specs_dir(project_id)
+    if specs_dir.exists():
         for md_file in specs_dir.rglob("*.md"):
             if md_file.name == name:
                 target = md_file
                 break
-        if target:
-            break
 
     if not target or not target.exists():
         raise HTTPException(status_code=404, detail=f"Spec '{name}' not found")
@@ -1887,17 +1949,23 @@ async def create_api_spec(req: CreateApiSpecRequest):
 @router.put("/specs/{name:path}/tags")
 async def update_spec_tags(name: str, req: UpdateTagsRequest):
     """Update tags for an API spec using SpecMetadata."""
+    if not _find_api_spec_by_name(name, req.project_id):
+        raise HTTPException(status_code=404, detail=f"Spec '{name}' not found")
     try:
         with Session(engine) as session:
-            meta = session.get(SpecMetadata, name)
+            meta = session.exec(
+                select(SpecMetadata).where(
+                    SpecMetadata.spec_name == name,
+                    _project_scope(SpecMetadata, req.project_id),
+                )
+            ).first()
             if meta:
                 meta.tags = req.tags
-                meta.project_id = req.project_id
             else:
                 meta = SpecMetadata(
                     spec_name=name,
                     tags_json=json.dumps(req.tags),
-                    project_id=req.project_id,
+                    project_id=normalize_project_id(req.project_id),
                 )
             session.add(meta)
             session.commit()
@@ -1909,10 +1977,10 @@ async def update_spec_tags(name: str, req: UpdateTagsRequest):
 
 
 @router.put("/specs/{name:path}")
-async def update_api_spec(name: str, req: UpdateApiSpecRequest, project_id: str = Query("default")):
+async def update_api_spec(name: str, req: UpdateApiSpecRequest, project_id: str = Query(...)):
     """Update an existing API spec."""
     target = None
-    for specs_dir in [_get_specs_dir(project_id), SPECS_DIR]:
+    for specs_dir in [_get_specs_dir(project_id)]:
         for md_file in specs_dir.rglob("*.md"):
             if md_file.name == name:
                 target = md_file
@@ -1932,7 +2000,7 @@ async def generate_api_test(req: GenerateTestRequest, background_tasks: Backgrou
     """Generate a Playwright API test from a spec. Returns job ID for polling."""
     _cleanup_old_jobs()
 
-    project_id = req.project_id or "default"
+    project_id = req.project_id
     target = _find_api_spec_by_name(req.spec_name, project_id)
     if not target or not target.exists():
         raise HTTPException(status_code=404, detail=f"Spec '{req.spec_name}' not found")
@@ -1949,7 +2017,7 @@ async def create_and_generate_api_test(req: CreateAndGenerateApiSpecRequest, bac
     """Create an API spec and immediately enqueue Playwright API test generation."""
     _cleanup_old_jobs()
 
-    project_id = req.project_id or "default"
+    project_id = req.project_id
     name = req.name if req.name.endswith(".md") else f"{req.name}.md"
 
     specs_base = _get_specs_dir(project_id)
@@ -2007,7 +2075,7 @@ async def import_openapi(req: ImportOpenApiRequest, background_tasks: Background
         "started_at": time.time(),
         "result": None,
         "completed_at": None,
-        "project_id": req.project_id or "default",
+            "project_id": req.project_id,
     }
     background_tasks.add_task(
         _run_async_background,
@@ -2018,7 +2086,7 @@ async def import_openapi(req: ImportOpenApiRequest, background_tasks: Background
         req.feature_filter,
         method_filter,
         mode,
-        req.project_id or "default",
+        req.project_id,
     )
     return {"job_id": job_id, "status": "running", "message": "OpenAPI import started"}
 
@@ -2032,7 +2100,7 @@ async def import_openapi_file(
     feature_filter: str | None = Query(None),
     method_filter: list[str] | None = Query(None),
     mode: str | None = Query(DEFAULT_OPENAPI_IMPORT_MODE),
-    project_id: str = Query("default"),
+    project_id: str = Query(...),
 ):
     """Import OpenAPI spec from uploaded file and generate tests."""
     _cleanup_old_jobs()
@@ -2080,9 +2148,7 @@ async def generate_edge_cases(req: EdgeCaseRequest, background_tasks: Background
     """Generate edge case and security tests from an API spec."""
     _cleanup_old_jobs()
 
-    spec_path = BASE_DIR / req.spec_path
-    if not spec_path.exists():
-        raise HTTPException(status_code=404, detail=f"Spec file not found: {req.spec_path}")
+    spec_path = _resolve_project_spec_path(req.spec_path, req.project_id)
 
     import uuid
 
@@ -2096,9 +2162,7 @@ async def run_api_test(req: RunApiTestRequest, background_tasks: BackgroundTasks
     """Run an API test spec through generate + run + heal pipeline."""
     _cleanup_old_jobs()
 
-    spec_path = BASE_DIR / req.spec_path
-    if not spec_path.exists():
-        raise HTTPException(status_code=404, detail=f"Spec file not found: {req.spec_path}")
+    spec_path = _resolve_project_spec_path(req.spec_path, req.project_id)
 
     # Check for placeholder URLs before launching the pipeline
     import re
@@ -2156,9 +2220,7 @@ async def run_direct_test(req: RunDirectRequest):
     """Run an already-generated test file directly (no generation/healing pipeline)."""
     _cleanup_old_jobs()
 
-    test_file = BASE_DIR / req.test_path
-    if not test_file.exists():
-        raise HTTPException(status_code=404, detail=f"Test file not found: {req.test_path}")
+    test_file = _resolve_project_test_path(req.test_path, req.project_id)
 
     import uuid
 
@@ -2203,14 +2265,14 @@ async def run_direct_test(req: RunDirectRequest):
 
 
 @router.get("/jobs")
-async def list_jobs(status: str | None = Query(None), project_id: str | None = Query(None)):
+async def list_jobs(status: str | None = Query(None), project_id: str = Query(...)):
     """List all tracked API test jobs (for recovery on page refresh)."""
     _cleanup_old_jobs()
     jobs = []
     for job_id, job in _api_jobs.items():
         if status and job["status"] != status:
             continue
-        if project_id and job.get("project_id") and job["project_id"] != project_id:
+        if job.get("project_id") and job["project_id"] != project_id:
             continue
         jobs.append(
             {
@@ -2230,18 +2292,18 @@ async def list_jobs(status: str | None = Query(None), project_id: str | None = Q
 
 
 @router.get("/jobs/{job_id}")
-async def get_job_status(job_id: str):
+async def get_job_status(job_id: str, project_id: str = Query(...)):
     """Get the status of a background job."""
     _reconcile_api_batch_job(job_id)
     job = _api_jobs.get(job_id)
+    if job and job.get("project_id") and job.get("project_id") != project_id:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     if not job:
         # Fallback: check DB for completed runs that match the job_id
         # The run_id is typically "api-{job_id}" or "api-direct-{job_id}"
         try:
             with Session(engine) as session:
-                history = session.exec(
-                    select(OpenApiImportHistory).where(OpenApiImportHistory.job_id == job_id)
-                ).first()
+                history = _get_import_history_by_job_for_project(session, job_id, project_id)
                 if history:
                     if _expire_stale_import_history_record(history):
                         session.add(history)
@@ -2256,7 +2318,7 @@ async def get_job_status(job_id: str):
                     )
 
                 for candidate_run_id in [f"api-{job_id}", f"api-direct-{job_id}", job_id]:
-                    db_run = session.get(DBTestRun, candidate_run_id)
+                    db_run = _get_api_run_for_project(session, candidate_run_id, project_id)
                     if db_run:
                         return JobStatusResponse(
                             job_id=job_id,
@@ -2282,16 +2344,18 @@ async def get_job_status(job_id: str):
 
 
 @router.get("/jobs/{job_id}/logs")
-async def get_job_logs(job_id: str, tail: int = Query(200, ge=1, le=5000)):
+async def get_job_logs(job_id: str, project_id: str = Query(...), tail: int = Query(200, ge=1, le=5000)):
     """Get execution logs for a running or completed job."""
     job = _api_jobs.get(job_id)
+    if job and job.get("project_id") and job.get("project_id") != project_id:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found")
     if not job:
         # Fallback: try to find run directory from DB
         run_dir = None
         try:
             with Session(engine) as session:
                 for candidate_run_id in [f"api-{job_id}", f"api-direct-{job_id}", job_id]:
-                    db_run = session.get(DBTestRun, candidate_run_id)
+                    db_run = _get_api_run_for_project(session, candidate_run_id, project_id)
                     if db_run:
                         run_dir = str(RUNS_DIR / db_run.id)
                         break
@@ -2348,7 +2412,7 @@ async def list_generated_tests(
     search: str | None = Query(None),
     sort: str = Query("modified"),
     status_filter: str | None = Query(None),
-    project_id: str = Query("default"),
+    project_id: str = Query(...),
 ):
     """List all generated API test files with pagination, search, sorting, and status."""
     return _scan_generated_tests(
@@ -2362,20 +2426,17 @@ async def list_generated_tests(
 
 
 @router.get("/generated-tests/summary")
-async def generated_tests_summary(project_id: str = Query("default")):
+async def generated_tests_summary(project_id: str = Query(...)):
     """Get aggregate status counts for generated API tests."""
     data = _scan_generated_tests(limit=1, project_id=project_id)
     return data["summary"]
 
 
 @router.get("/generated-tests/{name:path}")
-async def get_generated_test(name: str, project_id: str = Query("default")):
+async def get_generated_test(name: str, project_id: str = Query(...)):
     """Read a generated API test file."""
     tests_dir = _get_tests_dir(project_id)
-    # Search in project-scoped dir first, then fallback to global
     search_bases = [tests_dir, tests_dir / "api"]
-    if project_id and project_id != "default":
-        search_bases.extend([TESTS_DIR, TESTS_DIR / "api"])
     for base in search_bases:
         target = base / name
         if target.exists():
@@ -2394,12 +2455,10 @@ class UpdateGeneratedTestRequest(BaseModel):
 
 
 @router.put("/generated-tests/{name:path}")
-async def update_generated_test(name: str, req: UpdateGeneratedTestRequest, project_id: str = Query("default")):
+async def update_generated_test(name: str, req: UpdateGeneratedTestRequest, project_id: str = Query(...)):
     """Save edited content to an existing generated API test file."""
     tests_dir = _get_tests_dir(project_id)
     search_bases = [tests_dir, tests_dir / "api"]
-    if project_id and project_id != "default":
-        search_bases.extend([TESTS_DIR, TESTS_DIR / "api"])
     for base in search_bases:
         target = base / name
         if target.exists():
@@ -2414,12 +2473,10 @@ async def update_generated_test(name: str, req: UpdateGeneratedTestRequest, proj
 
 
 @router.delete("/generated-tests/{name:path}")
-async def delete_generated_test(name: str, project_id: str = Query("default")):
+async def delete_generated_test(name: str, project_id: str = Query(...)):
     """Delete a generated API test file."""
     tests_dir = _get_tests_dir(project_id)
     search_bases = [tests_dir, tests_dir / "api"]
-    if project_id and project_id != "default":
-        search_bases.extend([TESTS_DIR, TESTS_DIR / "api"])
     for base in search_bases:
         target = base / name
         if target.exists():
@@ -2432,7 +2489,7 @@ async def delete_generated_test(name: str, project_id: str = Query("default")):
 
 @router.get("/runs")
 async def list_api_runs(
-    project_id: str | None = Query(None),
+    project_id: str = Query(...),
     spec_name: str | None = Query(None),
     status: str | None = Query(None),
     limit: int = Query(20, ge=1, le=100),
@@ -2442,11 +2499,7 @@ async def list_api_runs(
     """List API test runs from DB with pagination and filters."""
     query = select(DBTestRun).where(DBTestRun.test_type == "api")
 
-    if project_id:
-        if project_id == "default":
-            query = query.where((DBTestRun.project_id == "default") | (DBTestRun.project_id == None))
-        else:
-            query = query.where(DBTestRun.project_id == project_id)
+    query = query.where(_project_scope(DBTestRun, project_id))
     if spec_name:
         query = query.where(DBTestRun.spec_name == spec_name)
     if status:
@@ -2485,7 +2538,7 @@ async def list_api_runs(
 
 @router.get("/runs/latest-by-spec")
 async def latest_runs_by_spec(
-    project_id: str | None = Query(None),
+    project_id: str = Query(...),
     limit: int = Query(100, ge=1, le=500),
     session: Session = Depends(get_session),
 ):
@@ -2495,11 +2548,7 @@ async def latest_runs_by_spec(
         DBTestRun.spec_name,
         func.max(DBTestRun.created_at).label("max_created"),
     ).where(DBTestRun.test_type == "api")
-    if project_id:
-        if project_id == "default":
-            subq = subq.where((DBTestRun.project_id == "default") | (DBTestRun.project_id == None))
-        else:
-            subq = subq.where(DBTestRun.project_id == project_id)
+    subq = subq.where(_project_scope(DBTestRun, project_id))
     subq = subq.group_by(DBTestRun.spec_name).subquery()
 
     query = (
@@ -2512,6 +2561,7 @@ async def latest_runs_by_spec(
             ),
         )
         .where(DBTestRun.test_type == "api")
+        .where(_project_scope(DBTestRun, project_id))
         .limit(limit)
     )
     runs = session.exec(query).all()
@@ -2533,9 +2583,13 @@ async def latest_runs_by_spec(
 
 
 @router.get("/runs/{run_id}")
-async def get_api_run_detail(run_id: str, session: Session = Depends(get_session)):
+async def get_api_run_detail(
+    run_id: str,
+    project_id: str = Query(...),
+    session: Session = Depends(get_session),
+):
     """Get rich details for a single API test run."""
-    db_run = session.get(DBTestRun, run_id)
+    db_run = _get_api_run_for_project(session, run_id, project_id)
     if not db_run:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
@@ -2630,9 +2684,13 @@ async def get_api_run_detail(run_id: str, session: Session = Depends(get_session
 
 
 @router.post("/runs/{run_id}/retry")
-async def retry_api_run(run_id: str, session: Session = Depends(get_session)):
+async def retry_api_run(
+    run_id: str,
+    project_id: str = Query(...),
+    session: Session = Depends(get_session),
+):
     """Retry a failed API test run by creating a new job."""
-    db_run = session.get(DBTestRun, run_id)
+    db_run = _get_api_run_for_project(session, run_id, project_id)
     if not db_run:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
@@ -2652,7 +2710,7 @@ async def retry_api_run(run_id: str, session: Session = Depends(get_session)):
         spec_path = str(spec_in_run)
     else:
         # Search in specs directories
-        for search_dir in [SPECS_DIR, SPECS_DIR / "api", _get_specs_dir(db_run.project_id or "default")]:
+        for search_dir in [_get_specs_dir(project_id), _get_specs_dir(project_id) / "api"]:
             candidate = search_dir / spec_name
             if candidate.exists():
                 spec_path = str(candidate)
@@ -2671,7 +2729,6 @@ async def retry_api_run(run_id: str, session: Session = Depends(get_session)):
     import uuid
 
     job_id = str(uuid.uuid4())[:8]
-    project_id = db_run.project_id or "default"
 
     _api_jobs[job_id] = {
         "status": "running",
@@ -2681,6 +2738,7 @@ async def retry_api_run(run_id: str, session: Session = Depends(get_session)):
         "result": None,
         "completed_at": None,
         "spec_path": spec_path,
+        "project_id": project_id,
     }
 
     loop = asyncio.get_event_loop()
@@ -2700,7 +2758,7 @@ async def bulk_run_specs(req: BulkRunRequest):
     _cleanup_old_jobs()
     import uuid
 
-    project_id = req.project_id or "default"
+    project_id = req.project_id
     batch_id = f"batch-{str(uuid.uuid4())[:8]}"
     child_job_ids = []
     child_jobs = []
@@ -2708,8 +2766,9 @@ async def bulk_run_specs(req: BulkRunRequest):
     loop = asyncio.get_event_loop()
 
     for spec_path in req.spec_paths:
-        abs_path = BASE_DIR / spec_path
-        if not abs_path.exists():
+        try:
+            abs_path = _resolve_project_spec_path(spec_path, project_id)
+        except HTTPException:
             logger.warning(f"Bulk run: spec not found, skipping: {spec_path}")
             skipped.append({"spec_path": spec_path, "reason": "spec_not_found"})
             continue
@@ -2858,10 +2917,10 @@ async def create_spec_folder(req: CreateFolderRequest):
 
 
 @router.delete("/specs/{name:path}")
-async def delete_api_spec(name: str, project_id: str = Query("default")):
+async def delete_api_spec(name: str, project_id: str = Query(...)):
     """Delete an API spec file."""
     target = None
-    for specs_dir in [_get_specs_dir(project_id), SPECS_DIR]:
+    for specs_dir in [_get_specs_dir(project_id)]:
         for md_file in specs_dir.rglob("*.md"):
             if md_file.name == name or str(md_file.relative_to(BASE_DIR)) == name:
                 target = md_file
@@ -2882,7 +2941,7 @@ async def delete_api_spec(name: str, project_id: str = Query("default")):
 
 @router.get("/import-history")
 async def list_import_history(
-    project_id: str = Query("default"),
+    project_id: str = Query(...),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     session: Session = Depends(get_session),

@@ -4,8 +4,8 @@ import { Play, Search, Tag, X, CheckCircle, Clock, XCircle, RefreshCw, Zap, Aler
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { fetchWithAuth } from '@/contexts/AuthContext';
-import { useProject } from '@/contexts/ProjectContext';
-import { API_BASE } from '@/lib/api';
+import { useRequiredProject } from '@/contexts/ProjectContext';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { PageLayout } from '@/components/ui/page-layout';
 import { ListPageSkeleton } from '@/components/ui/page-skeleton';
 import type { BrowserAuthSession } from '@/lib/browser-auth-sessions';
@@ -210,7 +210,7 @@ function FolderTree({
 export default function RegressionPage() {
     const router = useRouter();
     const searchParams = useSearchParams();
-    const { currentProject, isLoading: projectLoading } = useProject();
+    const { projectId, isLoading: projectLoading } = useRequiredProject();
 
     // Core state
     const [specs, setSpecs] = useState<AutomatedSpec[]>([]);
@@ -268,20 +268,20 @@ export default function RegressionPage() {
         if (!projectLoading) {
             fetchFolders();
         }
-    }, [currentProject?.id, projectLoading]);
+    }, [projectId, projectLoading]);
 
     // Fetch recent batches when project changes
     useEffect(() => {
         if (!projectLoading) {
             fetchRecentBatches();
         }
-    }, [currentProject?.id, projectLoading]);
+    }, [projectId, projectLoading]);
 
     useEffect(() => {
         let cancelled = false;
         setRunSetupError(null);
         setSelectedTestDataRefs(new Set());
-        if (!currentProject?.id || projectLoading) {
+        if (!projectId || projectLoading) {
             setBrowserAuthSessions([]);
             setBrowserAuthMode('none');
             setBrowserAuthSessionId('');
@@ -290,7 +290,7 @@ export default function RegressionPage() {
             return;
         }
 
-        fetchProjectBrowserAuthSessions(currentProject.id)
+        fetchProjectBrowserAuthSessions(projectId)
             .then(sessions => {
                 if (cancelled) return;
                 setBrowserAuthSessions(sessions);
@@ -305,7 +305,7 @@ export default function RegressionPage() {
                 setBrowserAuthSessionId('');
             });
 
-        fetchWithAuth(`${API_BASE}/test-data/datasets?project_id=${encodeURIComponent(currentProject.id)}&status=active`)
+        fetchWithAuth(`${API_BASE}${withProjectQuery('/test-data/datasets?status=active', projectId)}`)
             .then(async response => (response.ok ? response.json() : { datasets: [] }))
             .then(async data => {
                 if (cancelled) return;
@@ -313,7 +313,7 @@ export default function RegressionPage() {
                 setTestDataDatasets(datasets);
                 const itemGroups = await Promise.all(
                     datasets.map(dataset =>
-                        fetchWithAuth(`${API_BASE}/test-data/datasets/${encodeURIComponent(dataset.id)}/items?status=active`)
+                        fetchWithAuth(`${API_BASE}${withProjectQuery(`/test-data/datasets/${encodeURIComponent(dataset.id)}/items?status=active`, projectId)}`)
                             .then(async response => (response.ok ? response.json() : { items: [] }))
                             .then(itemsData => (itemsData.items || []) as TestDataItem[])
                             .catch(() => [])
@@ -330,7 +330,7 @@ export default function RegressionPage() {
         return () => {
             cancelled = true;
         };
-    }, [currentProject?.id, projectLoading]);
+    }, [projectId, projectLoading]);
 
     // Fetch specs when folder/tags/search/project changes (reset pagination)
     // Wait for project context to finish loading before fetching
@@ -353,7 +353,7 @@ export default function RegressionPage() {
             url.searchParams.delete('folder');
         }
         window.history.replaceState({}, '', url.toString());
-    }, [selectedFolder, selectedTags, currentProject?.id, projectLoading]);
+    }, [selectedFolder, selectedTags, projectId, projectLoading]);
 
     // Intersection Observer for infinite scroll
     useEffect(() => {
@@ -376,9 +376,8 @@ export default function RegressionPage() {
     const fetchFolders = async () => {
         try {
             let url = `${API_BASE}/specs/folders`;
-            if (currentProject?.id) {
-                url += `?project_id=${encodeURIComponent(currentProject.id)}`;
-            }
+            if (!projectId) return;
+            url = `${API_BASE}${withProjectQuery('/specs/folders', projectId)}`;
             const res = await fetch(url);
             const data = await res.json();
             setFolders(data.folders || []);
@@ -405,9 +404,8 @@ export default function RegressionPage() {
             if (selectedTags.length > 0) {
                 params.set('tags', selectedTags.join(','));
             }
-            if (currentProject?.id) {
-                params.set('project_id', currentProject.id);
-            }
+            if (!projectId) return;
+            params.set('project_id', projectId);
 
             const res = await fetch(`${API_BASE}/specs/automated?${params}`);
             const data = await res.json();
@@ -438,9 +436,8 @@ export default function RegressionPage() {
     const fetchRecentBatches = async () => {
         try {
             let url = `${API_BASE}/regression/batches?limit=3`;
-            if (currentProject?.id) {
-                url += `&project_id=${encodeURIComponent(currentProject.id)}`;
-            }
+            if (!projectId) return;
+            url = `${API_BASE}${withProjectQuery('/regression/batches?limit=3', projectId)}`;
             const res = await fetch(url);
             const data = await res.json();
             setRecentBatches(data.batches || []);
@@ -604,14 +601,13 @@ export default function RegressionPage() {
             const res = await fetch(`${API_BASE}/runs/bulk`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
+                body: JSON.stringify(withProjectBody({
                     spec_names: pendingRunSpecs,
                     browser: selectedBrowser,
                     hybrid: hybridHealing,
-                    project_id: currentProject?.id,
                     test_data_refs: selectedRefsArray,
                     ...browserAuthRequestBody(browserAuthMode, browserAuthSessionId)
-                })
+                }, projectId))
             });
 
             const data = await res.json();

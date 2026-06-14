@@ -1520,7 +1520,7 @@ export default function WorkflowPage() {
   const getRunDiagnostics = useCallback(async (runId: string) => {
     setRunDiagnosticsLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/diagnostics`);
+      const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/diagnostics${projectParam}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.detail || data?.error || 'Failed to load workflow diagnostics');
       setRunDiagnosticsById(prev => ({ ...prev, [runId]: data }));
@@ -1528,11 +1528,13 @@ export default function WorkflowPage() {
     } finally {
       setRunDiagnosticsLoading(false);
     }
-  }, []);
+  }, [projectParam]);
 
   const getRunDebug = useCallback(async (runId: string, options?: { includeTemporal?: boolean }) => {
     const includeTemporal = options?.includeTemporal ?? true;
-    const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/debug?include_temporal=${includeTemporal ? 'true' : 'false'}`);
+    const params = new URLSearchParams({ include_temporal: includeTemporal ? 'true' : 'false' });
+    if (currentProject?.id) params.set('project_id', currentProject.id);
+    const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/debug?${params.toString()}`);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data?.detail || data?.error || 'Failed to load workflow debug details');
     const debug = data as WorkflowRunDebug;
@@ -1542,7 +1544,7 @@ export default function WorkflowPage() {
     if (Array.isArray(debug.events)) setRunEventsById(prev => ({ ...prev, [runId]: debug.events }));
     if (debug.temporal) setRunDiagnosticsById(prev => ({ ...prev, [runId]: debug.temporal as WorkflowDiagnostics }));
     return debug;
-  }, []);
+  }, [currentProject?.id]);
 
   const refreshRunObservability = useCallback((runId: string) => {
     void getRunDebug(runId).catch(() => {
@@ -2240,7 +2242,7 @@ export default function WorkflowPage() {
     const definition = scheduleDialogDefinition;
     if (!definition) return;
     const editing = editingSchedule;
-    const res = await fetch(editing ? `${API_BASE}/workflows/schedules/${encodeURIComponent(editing.id)}` : `${API_BASE}/workflows/schedules`, {
+    const res = await fetch(editing ? `${API_BASE}/workflows/schedules/${encodeURIComponent(editing.id)}${projectParam}` : `${API_BASE}/workflows/schedules${projectParam}`, {
       method: editing ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2273,7 +2275,7 @@ export default function WorkflowPage() {
 
   async function runScheduleNow(schedule: WorkflowSchedule) {
     if (!ensureTemporalReady()) return;
-    const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(schedule.id)}/run-now`, { method: 'POST' });
+    const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(schedule.id)}/run-now${projectParam}`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       setError(data.detail || data.error || 'Failed to run workflow schedule');
@@ -2286,7 +2288,7 @@ export default function WorkflowPage() {
 
   async function toggleSchedule(schedule: WorkflowSchedule) {
     const nextEnabled = !schedule.enabled;
-    const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(schedule.id)}`, {
+    const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(schedule.id)}${projectParam}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: nextEnabled }),
@@ -2303,7 +2305,7 @@ export default function WorkflowPage() {
 
   async function deleteSchedule(schedule: WorkflowSchedule) {
     if (typeof window !== 'undefined' && !window.confirm(`Delete schedule "${schedule.name}"?`)) return;
-    const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(schedule.id)}`, { method: 'DELETE' });
+    const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(schedule.id)}${projectParam}`, { method: 'DELETE' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       setError(data.detail || data.error || 'Failed to delete workflow schedule');
@@ -2321,7 +2323,7 @@ export default function WorkflowPage() {
 
   async function controlRun(runId: string, action: 'pause' | 'resume' | 'cancel') {
     if (action === 'resume' && !ensureTemporalReady()) return;
-    const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/${action}`, { method: 'POST' });
+    const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/${action}${projectParam}`, { method: 'POST' });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       setError(data.detail || data.error || `Failed to ${action} workflow`);
@@ -2334,7 +2336,7 @@ export default function WorkflowPage() {
   async function skipStep(run: WorkflowRun, step: WorkflowRunStep) {
     if (!ensureTemporalReady()) return;
     setError(null);
-    const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(run.id)}/steps/${step.id}/skip`, { method: 'POST' });
+    const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(run.id)}/steps/${step.id}/skip${projectParam}`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       setError(data.detail || data.error || 'Failed to skip workflow step');
@@ -2351,7 +2353,7 @@ export default function WorkflowPage() {
   }
 
   async function loadScheduleExecutions(scheduleId: string) {
-    const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(scheduleId)}/executions`);
+    const res = await fetch(`${API_BASE}/workflows/schedules/${encodeURIComponent(scheduleId)}/executions${projectParam}`);
     const data = await res.json().catch(() => []);
     if (!res.ok) {
       setError(data.detail || data.error || 'Failed to load schedule executions');
@@ -2511,7 +2513,7 @@ export default function WorkflowPage() {
 
   async function getRunSteps(runId: string, options?: { force?: boolean }) {
     if (!options?.force && runStepsById[runId]) return runStepsById[runId];
-    const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/steps`);
+    const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}/steps${projectParam}`);
     const data = await res.json().catch(() => []);
     if (!res.ok) {
       const detail = data?.detail || data?.error || 'Failed to load workflow steps';
@@ -2526,7 +2528,7 @@ export default function WorkflowPage() {
   async function getRunDetail(runId: string, options?: { quiet?: boolean }) {
     if (!options?.quiet) setRunDetailLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}`);
+      const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(runId)}${projectParam}`);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         const detail = data?.detail || data?.error || 'Failed to load workflow run';
@@ -2553,7 +2555,7 @@ export default function WorkflowPage() {
         setError('No failed step found for this workflow run');
         return;
       }
-      const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(run.id)}/steps/${failedStep.id}/retry`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/workflows/runs/${encodeURIComponent(run.id)}/steps/${failedStep.id}/retry${projectParam}`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setError(data.detail || data.error || 'Failed to retry workflow step');

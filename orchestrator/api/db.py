@@ -355,6 +355,16 @@ def _run_migrations():
             if "project_id" not in spec_columns:
                 conn.execute(text("ALTER TABLE specmetadata ADD COLUMN project_id VARCHAR"))
                 logger.info("Added column: specmetadata.project_id")
+            conn.execute(text("UPDATE specmetadata SET project_id = 'default' WHERE project_id IS NULL"))
+            try:
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_specmetadata_project_spec "
+                        "ON specmetadata (project_id, spec_name)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Spec metadata project index migration note: {e}")
 
         # Add project_id to agentrun table
         if "agentrun" in inspector.get_table_names():
@@ -1252,18 +1262,94 @@ def _run_migrations():
             if "project_id" not in app_map_columns:
                 conn.execute(text("ALTER TABLE application_map ADD COLUMN project_id VARCHAR"))
                 logger.info("Added column: application_map.project_id")
+            conn.execute(text("UPDATE application_map SET project_id = 'default' WHERE project_id IS NULL"))
             if "app_surface_key" not in app_map_columns:
                 conn.execute(text("ALTER TABLE application_map ADD COLUMN app_surface_key VARCHAR"))
                 logger.info("Added column: application_map.app_surface_key")
             try:
+                conn.execute(text("DROP INDEX IF EXISTS ix_application_map_url"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_application_map_url ON application_map (url)"))
                 conn.execute(
                     text(
                         "CREATE INDEX IF NOT EXISTS ix_application_map_project_surface "
                         "ON application_map (project_id, app_surface_key)"
                     )
                 )
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM application_map
+                        WHERE id NOT IN (
+                            SELECT MIN(id)
+                            FROM application_map
+                            GROUP BY project_id, url
+                        )
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_application_map_project_url "
+                        "ON application_map (project_id, url)"
+                    )
+                )
             except Exception as e:
                 logger.debug(f"Application map index migration note: {e}")
+
+        for table_name, index_sql in {
+            "coverage_metrics": (
+                "CREATE INDEX IF NOT EXISTS ix_coverage_metrics_project_metric "
+                "ON coverage_metrics (project_id, metric_type)"
+            ),
+            "discovered_elements": (
+                "CREATE INDEX IF NOT EXISTS ix_discovered_elements_project_url "
+                "ON discovered_elements (project_id, url)"
+            ),
+            "coverage_gaps": (
+                "CREATE INDEX IF NOT EXISTS ix_coverage_gaps_project_resolved "
+                "ON coverage_gaps (project_id, resolved)"
+            ),
+        }.items():
+            if table_name in inspector.get_table_names():
+                columns = {col["name"] for col in inspector.get_columns(table_name)}
+                if "project_id" not in columns:
+                    conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN project_id VARCHAR NOT NULL DEFAULT 'default'"))
+                    logger.info("Added column: %s.project_id", table_name)
+                conn.execute(text(f"UPDATE {table_name} SET project_id = 'default' WHERE project_id IS NULL"))
+                try:
+                    conn.execute(text(index_sql))
+                except Exception as e:
+                    logger.debug("Project index migration note for %s: %s", table_name, e)
+
+        if "test_patterns" in inspector.get_table_names():
+            pattern_columns = {col["name"] for col in inspector.get_columns("test_patterns")}
+            if "project_id" not in pattern_columns:
+                conn.execute(text("ALTER TABLE test_patterns ADD COLUMN project_id VARCHAR NOT NULL DEFAULT 'default'"))
+                logger.info("Added column: test_patterns.project_id")
+            conn.execute(text("UPDATE test_patterns SET project_id = 'default' WHERE project_id IS NULL"))
+            try:
+                conn.execute(text("DROP INDEX IF EXISTS ix_test_patterns_pattern_hash"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_test_patterns_pattern_hash ON test_patterns (pattern_hash)"))
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM test_patterns
+                        WHERE id NOT IN (
+                            SELECT MIN(id)
+                            FROM test_patterns
+                            GROUP BY project_id, pattern_hash
+                        )
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_test_patterns_project_pattern_hash "
+                        "ON test_patterns (project_id, pattern_hash)"
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"Test pattern project index migration note: {e}")
 
         if "autonomous_agent_work_items" in inspector.get_table_names():
             work_item_columns = {col["name"] for col in inspector.get_columns("autonomous_agent_work_items")}

@@ -41,3 +41,26 @@ export const API_BASE = getApiBase();
 export function apiUrl(path: string): string {
   return `${API_BASE}${path.startsWith('/') ? '' : '/'}${path}`;
 }
+
+export function assertProjectId(projectId: string | null | undefined): string {
+  const normalized = projectId?.trim();
+  if (!normalized) {
+    throw new Error('A project must be selected before calling this endpoint');
+  }
+  return normalized;
+}
+
+export function withProjectQuery(path: string, projectId: string | null | undefined): string {
+  const pid = assertProjectId(projectId);
+  const isAbsolute = /^https?:\/\//i.test(path);
+  const url = isAbsolute ? new URL(path) : new URL(path, 'http://quorvex.local');
+  url.searchParams.set('project_id', pid);
+  return isAbsolute ? url.toString() : `${url.pathname}${url.search}${url.hash}`;
+}
+
+export function withProjectBody<T extends Record<string, unknown>>(
+  body: T,
+  projectId: string | null | undefined
+): T & { project_id: string } {
+  return { ...body, project_id: assertProjectId(projectId) };
+}

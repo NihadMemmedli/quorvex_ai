@@ -260,6 +260,7 @@ async function routeAgentsApi(page: Page, options: {
   onCancelRun?: (id: string) => void;
   onStartExploratory?: (payload: Record<string, unknown>) => void;
   onStartCustom?: (payload: Record<string, unknown>) => void;
+  onRetryRun?: (id: string) => void;
   onGenerateReportSpec?: (payload: { itemId: string; itemType: string | null; body: Record<string, unknown> }) => void;
   onPatchReport?: (payload: Record<string, unknown>) => void;
   onPatchReportItem?: (payload: { itemId: string; itemType: string | null; body: Record<string, unknown> }) => void;
@@ -309,7 +310,7 @@ async function routeAgentsApi(page: Page, options: {
         },
       });
     }
-    if (path === '/test-data/datasets/test-data-dataset-1/items') {
+    if (path.startsWith('/test-data/datasets/test-data-dataset-1/items')) {
       return route.fulfill({
         status: 200,
         json: {
@@ -567,6 +568,24 @@ async function routeAgentsApi(page: Page, options: {
     options.onCancelRun?.(run.id);
     run = { ...run, status: 'cancelled', progress: { ...(run.progress || {}), phase: 'cancelled' } };
     return route.fulfill({ status: 200, json: run });
+  });
+  await page.route(`${API_BASE}/api/agents/runs/${run.id}/retry**`, async route => {
+    options.onRetryRun?.(run.id);
+    run = {
+      ...run,
+      status: 'queued',
+      temporal_workflow_id: `agent-run-${run.id}-attempt-1`,
+      temporal_run_id: 'temporal-retry-run',
+      progress: {
+        ...(run.progress || {}),
+        phase: 'queued',
+        status: 'queued',
+        retry_in_place: true,
+        retry_attempt: 1,
+        message: 'Retrying in same run using saved browser auth/session artifacts.',
+      },
+    };
+    return route.fulfill({ status: 200, json: { ...run, run_id: run.id, retry_in_place: true, retry_attempt: 1 } });
   });
   await page.route(`${API_BASE}/api/agents/runs/${run.id}**`, route => {
     if (apiPath(route.request().url()) !== `/api/agents/runs/${run.id}`) return route.fallback();
@@ -1417,6 +1436,32 @@ test.describe('Agents workspace views', () => {
     await page.getByRole('dialog', { name: 'Cancel Agent Run' }).getByRole('button', { name: 'Cancel Run' }).click();
     await expect(page.getByRole('dialog', { name: 'Cancel Agent Run' })).toBeHidden();
     expect(cancelCalls).toBe(1);
+  });
+
+  test('retries failed agent runs in place and keeps the selected run URL', async ({ page }) => {
+    let retryCalls = 0;
+
+    await authenticate(page);
+    await routeAgentsApi(page, {
+      runOverride: {
+        status: 'failed',
+        result: { error: 'Activity task failed' },
+        progress: { phase: 'failed', message: 'Activity task failed' },
+      },
+      onRetryRun: id => {
+        expect(id).toBe('custom-run-reqs');
+        retryCalls += 1;
+      },
+    });
+
+    await page.goto('/agents?runId=custom-run-reqs');
+    await expect(page.getByTestId('agents-retry-run')).toBeVisible();
+    await page.getByTestId('agents-retry-run').click();
+
+    await expect.poll(() => retryCalls).toBe(1);
+    await expect(page).toHaveURL(/runId=custom-run-reqs/);
+    await expect(page).not.toHaveURL(/custom-run-started/);
+    await expect(page.getByTestId('agents-action-status')).toContainText('Retrying in same run using saved browser auth/session artifacts.');
   });
 
   test('opens the custom agent builder from create intent and returns to workflow after save', async ({ page }) => {

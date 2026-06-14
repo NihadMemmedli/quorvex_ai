@@ -6,7 +6,7 @@ from pathlib import Path
 from sqlmodel import Session, SQLModel, create_engine
 
 from orchestrator.api.main import sync_spec_metadata_from_file
-from orchestrator.api.models_db import SpecMetadata
+from orchestrator.api.models_db import SpecMetadata, get_spec_metadata
 
 
 def _session():
@@ -34,7 +34,7 @@ def test_seed_sync_creates_missing_metadata_row(tmp_path):
         changed = sync_spec_metadata_from_file(session, metadata_file)
         session.commit()
 
-        meta = session.get(SpecMetadata, "example.md")
+        meta = get_spec_metadata(session, "example.md", "default")
 
     assert changed == 1
     assert meta is not None

@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import dynamic from 'next/dynamic';
 import { X, Loader2 } from 'lucide-react';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import { API_SPEC_TEMPLATE } from './types';
 
 const ApiSpecBuilder = dynamic(() => import('@/components/ApiSpecBuilder'), { ssr: false });
@@ -29,10 +29,10 @@ export default function ApiSpecsCreateModal({
         if (!newSpecName.trim()) return;
         setCreating(true);
         try {
-            const res = await fetch(`${API_BASE}/api-testing/specs`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/api-testing/specs', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: newSpecName, content: newSpecContent, project_id: projectId }),
+                body: JSON.stringify(withProjectBody({ name: newSpecName, content: newSpecContent }, projectId)),
             });
             if (res.ok) {
                 setMessage({ type: 'success', text: 'API spec created successfully' });

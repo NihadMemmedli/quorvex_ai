@@ -3,11 +3,12 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Database, Loader2, Play, RefreshCw, Table2 } from 'lucide-react';
 import { cardStyle, inputStyle, btnPrimary, btnSecondary } from '@/lib/styles';
 import { getAuthHeaders } from '@/lib/styles';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import type { DbConnection, DbSchema, DbTable } from './types';
 
 interface DbViewerTabProps {
     connections: DbConnection[];
+    projectId: string;
     preferredConnectionId?: string;
     selectedConnectionId?: string;
     selectedTableName?: string;
@@ -21,6 +22,7 @@ function quoteIdent(value: string) {
 
 export default function DbViewerTab({
     connections,
+    projectId,
     preferredConnectionId,
     selectedConnectionId,
     selectedTableName,
@@ -48,7 +50,7 @@ export default function DbViewerTab({
         setLoadingSchema(true);
         setSchemaError('');
         try {
-            const res = await fetch(`${API_BASE}/database-testing/connections/${connId}/schema`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/connections/${connId}/schema`, projectId)}`, {
                 headers: getAuthHeaders(),
             });
             const data = await res.json().catch(() => ({}));
@@ -83,10 +85,10 @@ export default function DbViewerTab({
         setQueryRows([]);
         setQueryMeta(null);
         try {
-            const res = await fetch(`${API_BASE}/database-testing/connections/${connectionId}/query`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/connections/${connectionId}/query`, projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                body: JSON.stringify({ sql, limit: queryLimit }),
+                body: JSON.stringify(withProjectBody({ sql, limit: queryLimit }, projectId)),
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.detail || 'Query failed');

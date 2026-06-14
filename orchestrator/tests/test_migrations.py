@@ -60,6 +60,8 @@ class TestDatabaseInit:
         assert len(revisions.get("049", [])) == 1
         assert len(revisions.get("050", [])) == 1
         assert len(revisions.get("051", [])) == 1
+        assert len(revisions.get("052", [])) == 1
+        assert len(revisions.get("053", [])) == 1
         assert down_revisions["032"] == "031"
         assert down_revisions["033"] == "032"
         assert down_revisions["034"] == "033"
@@ -80,10 +82,12 @@ class TestDatabaseInit:
         assert down_revisions["049"] == "048"
         assert down_revisions["050"] == "049"
         assert down_revisions["051"] == "050"
+        assert down_revisions["052"] == "051"
+        assert down_revisions["053"] == "052"
 
         referenced = {revision for revision in down_revisions.values() if revision}
         heads = sorted(set(revisions) - referenced)
-        assert heads == ["051"]
+        assert heads == ["053"]
 
     def test_init_db_fresh_sqlite(self, tmp_path):
         """init_db() should run cleanly on a fresh SQLite database."""

@@ -8,7 +8,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { cardStyle, inputStyle, btnPrimary, btnSecondary } from '@/lib/styles';
 import { getAuthHeaders } from '@/lib/styles';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectBody, withProjectQuery } from '@/lib/api';
 import type { DbConnection, DbSpec } from './types';
 
 const CodeEditor = dynamic(() => import('@/components/CodeEditor'), { ssr: false });
@@ -73,7 +73,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
 
         const poll = async () => {
             try {
-                const res = await fetch(`${API_BASE}/database-testing/jobs/${activeJob}`, {
+                const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/jobs/${activeJob}`, projectId)}`, {
                     headers: getAuthHeaders(),
                 });
                 if (res.ok) {
@@ -133,15 +133,15 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
         poll();
         pollRef.current = setInterval(poll, 2000);
         return () => { if (pollRef.current) clearInterval(pollRef.current); };
-    }, [specJobId, aiGenJobId, onRefreshRuns, aiGenConnId]);
+    }, [specJobId, aiGenJobId, projectId, onRefreshRuns, aiGenConnId]);
 
     const createSpec = async () => {
         if (!newSpecName.trim() || !newSpecContent.trim()) return;
         try {
-            const res = await fetch(`${API_BASE}/database-testing/specs`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/database-testing/specs', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                body: JSON.stringify({ name: newSpecName, content: newSpecContent, project_id: projectId }),
+                body: JSON.stringify(withProjectBody({ name: newSpecName, content: newSpecContent }, projectId)),
             });
             if (res.ok) {
                 setIsCreatingSpec(false);
@@ -155,7 +155,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
     const deleteSpec = async (name: string) => {
         if (!confirm(`Delete spec "${name}"?`)) return;
         try {
-            await fetch(`${API_BASE}/database-testing/specs/${encodeURIComponent(name)}?project_id=${projectId}`, {
+            await fetch(`${API_BASE}${withProjectQuery(`/database-testing/specs/${encodeURIComponent(name)}`, projectId)}`, {
                 method: 'DELETE', headers: getAuthHeaders(),
             });
             onRefreshSpecs();
@@ -166,10 +166,10 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
     const updateSpec = async () => {
         if (!selectedSpec) return;
         try {
-            await fetch(`${API_BASE}/database-testing/specs/${encodeURIComponent(selectedSpec.name)}?project_id=${projectId}`, {
+            await fetch(`${API_BASE}${withProjectQuery(`/database-testing/specs/${encodeURIComponent(selectedSpec.name)}`, projectId)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                body: JSON.stringify({ content: specContent }),
+                body: JSON.stringify(withProjectBody({ content: specContent }, projectId)),
             });
             setEditingSpec(false);
             onRefreshSpecs();
@@ -178,7 +178,7 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
 
     const loadSpecContent = async (spec: DbSpec) => {
         try {
-            const res = await fetch(`${API_BASE}/database-testing/specs/${encodeURIComponent(spec.name)}?project_id=${projectId}`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/specs/${encodeURIComponent(spec.name)}`, projectId)}`, {
                 headers: getAuthHeaders(),
             });
             if (res.ok) {
@@ -194,10 +194,10 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
         if (!specConnId) { alert('Select a connection first'); return; }
         setRunningSpec(specName);
         try {
-            const res = await fetch(`${API_BASE}/database-testing/run/${specConnId}`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery(`/database-testing/run/${specConnId}`, projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                body: JSON.stringify({ spec_name: specName, project_id: projectId }),
+                body: JSON.stringify(withProjectBody({ spec_name: specName }, projectId)),
             });
             if (res.ok) {
                 const data = await res.json();
@@ -223,15 +223,14 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
         setGeneratedChecks([]);
         setAiGenProgress('Starting AI spec generation...');
         try {
-            const body: Record<string, unknown> = {
+            const body: Record<string, unknown> = withProjectBody({
                 connection_id: aiGenConnId,
                 instructions: aiGenInstructions.trim(),
                 auto_run: false,
                 preview_only: true,
-                project_id: projectId,
-            };
+            }, projectId);
             if (aiGenSpecName.trim()) body.spec_name = aiGenSpecName.trim();
-            const res = await fetch(`${API_BASE}/database-testing/generate-spec`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/database-testing/generate-spec', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
                 body: JSON.stringify(body),
@@ -254,14 +253,13 @@ export default function SpecsTab({ specs, connections, projectId, onRefreshSpecs
         if (generatedChecks.length === 0) { alert('Generate checks first'); return; }
         setIsSavingGeneratedSpec(true);
         try {
-            const res = await fetch(`${API_BASE}/database-testing/generated-specs/save`, {
+            const res = await fetch(`${API_BASE}${withProjectQuery('/database-testing/generated-specs/save', projectId)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                body: JSON.stringify({
+                body: JSON.stringify(withProjectBody({
                     checks: generatedChecks,
                     spec_name: aiGenSpecName || undefined,
-                    project_id: projectId,
-                }),
+                }, projectId)),
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.detail || 'Failed to save generated spec');

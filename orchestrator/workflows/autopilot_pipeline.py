@@ -3209,7 +3209,7 @@ test.describe({suite}, () => {{
     def _register_generated_spec_metadata(self, spec_path: Path, project_id: str) -> None:
         """Associate an AutoPilot-generated spec file with the active project."""
         from orchestrator.api.db import engine
-        from orchestrator.api.models_db import SpecMetadata
+        from orchestrator.api.models_db import SpecMetadata, get_spec_metadata
 
         specs_base_dir = Path(__file__).resolve().parents[2] / "specs"
         try:
@@ -3220,7 +3220,7 @@ test.describe({suite}, () => {{
 
         now = datetime.utcnow()
         with Session(engine) as db:
-            metadata = db.get(SpecMetadata, relative_name)
+            metadata = get_spec_metadata(db, relative_name, project_id)
             if metadata is None:
                 metadata = SpecMetadata(
                     spec_name=relative_name,

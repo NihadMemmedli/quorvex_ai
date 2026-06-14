@@ -142,9 +142,15 @@ async def _ensure_project_access(
     await check_project_access(project_id, user, roles, session)
 
 
-def _get_dataset_or_404(dataset_id: str, session: Session) -> TestDataSet:
+def _project_matches(row_project_id: str | None, project_id: str) -> bool:
+    if project_id == "default":
+        return row_project_id in (None, "default")
+    return row_project_id == project_id
+
+
+def _get_dataset_or_404(dataset_id: str, project_id: str, session: Session) -> TestDataSet:
     dataset = session.get(TestDataSet, dataset_id)
-    if not dataset:
+    if not dataset or not _project_matches(dataset.project_id, project_id):
         raise HTTPException(status_code=404, detail="Test data dataset not found")
     return dataset
 
@@ -242,10 +248,11 @@ async def create_dataset(
 @router.get("/datasets/{dataset_id}")
 async def get_dataset(
     dataset_id: str,
+    project_id: str = Query(...),
     user: User | None = Depends(get_current_user_optional),
     session: Session = Depends(get_session),
 ):
-    dataset = _get_dataset_or_404(dataset_id, session)
+    dataset = _get_dataset_or_404(dataset_id, project_id, session)
     await _ensure_project_access(dataset.project_id, user, VIEW_ROLES, session)
     items = session.exec(select(TestDataItem).where(TestDataItem.dataset_id == dataset.id).order_by(TestDataItem.key)).all()
     return {**_dataset_to_dict(dataset, item_count=len(items)), "items": [_item_to_dict(dataset, item, session) for item in items]}
@@ -255,10 +262,11 @@ async def get_dataset(
 async def update_dataset(
     dataset_id: str,
     request: TestDataSetUpdateRequest,
+    project_id: str = Query(...),
     user: User | None = Depends(get_current_user_optional),
     session: Session = Depends(get_session),
 ):
-    dataset = _get_dataset_or_404(dataset_id, session)
+    dataset = _get_dataset_or_404(dataset_id, project_id, session)
     await _ensure_project_access(dataset.project_id, user, EDIT_ROLES, session)
     if request.key is not None:
         dataset.key = _normalize_key(request.key)
@@ -282,10 +290,11 @@ async def update_dataset(
 @router.delete("/datasets/{dataset_id}")
 async def delete_dataset(
     dataset_id: str,
+    project_id: str = Query(...),
     user: User | None = Depends(get_current_user_optional),
     session: Session = Depends(get_session),
 ):
-    dataset = _get_dataset_or_404(dataset_id, session)
+    dataset = _get_dataset_or_404(dataset_id, project_id, session)
     await _ensure_project_access(dataset.project_id, user, EDIT_ROLES, session)
     for item in session.exec(select(TestDataItem).where(TestDataItem.dataset_id == dataset.id)).all():
         session.delete(item)
@@ -297,11 +306,12 @@ async def delete_dataset(
 @router.get("/datasets/{dataset_id}/items")
 async def list_items(
     dataset_id: str,
+    project_id: str = Query(...),
     status: str | None = Query(default=None),
     user: User | None = Depends(get_current_user_optional),
     session: Session = Depends(get_session),
 ):
-    dataset = _get_dataset_or_404(dataset_id, session)
+    dataset = _get_dataset_or_404(dataset_id, project_id, session)
     await _ensure_project_access(dataset.project_id, user, VIEW_ROLES, session)
     stmt = select(TestDataItem).where(TestDataItem.dataset_id == dataset.id).order_by(TestDataItem.key)
     if status:
@@ -314,10 +324,11 @@ async def list_items(
 async def create_item(
     dataset_id: str,
     request: TestDataItemRequest,
+    project_id: str = Query(...),
     user: User | None = Depends(get_current_user_optional),
     session: Session = Depends(get_session),
 ):
-    dataset = _get_dataset_or_404(dataset_id, session)
+    dataset = _get_dataset_or_404(dataset_id, project_id, session)
     await _ensure_project_access(dataset.project_id, user, EDIT_ROLES, session)
     storage = prepare_test_data_item_storage(
         data=request.data,
@@ -347,10 +358,11 @@ async def update_item(
     dataset_id: str,
     item_id: str,
     request: TestDataItemUpdateRequest,
+    project_id: str = Query(...),
     user: User | None = Depends(get_current_user_optional),
     session: Session = Depends(get_session),
 ):
-    dataset = _get_dataset_or_404(dataset_id, session)
+    dataset = _get_dataset_or_404(dataset_id, project_id, session)
     await _ensure_project_access(dataset.project_id, user, EDIT_ROLES, session)
     item = _get_item_or_404(item_id, dataset.id, session)
     if request.key is not None:
@@ -384,10 +396,11 @@ async def update_item(
 async def delete_item(
     dataset_id: str,
     item_id: str,
+    project_id: str = Query(...),
     user: User | None = Depends(get_current_user_optional),
     session: Session = Depends(get_session),
 ):
-    dataset = _get_dataset_or_404(dataset_id, session)
+    dataset = _get_dataset_or_404(dataset_id, project_id, session)
     await _ensure_project_access(dataset.project_id, user, EDIT_ROLES, session)
     item = _get_item_or_404(item_id, dataset.id, session)
     session.delete(item)

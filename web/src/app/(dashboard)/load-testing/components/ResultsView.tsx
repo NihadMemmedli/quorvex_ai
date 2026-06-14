@@ -8,17 +8,18 @@ import {
 } from 'recharts';
 import { formatBytes, formatTimestamp } from '@/lib/formatting';
 import { getResponseTimeColor, getErrorRateColor, getStatusColor } from '@/lib/colors';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, withProjectQuery } from '@/lib/api';
 import type { LoadTestRun, TimeseriesPoint, TimeseriesData } from './types';
 import AIAnalysisView from './AIAnalysisView';
 
 interface ResultsViewProps {
     run: LoadTestRun;
+    projectId: string;
     onAnalyze?: () => void;
     analyzing?: boolean;
 }
 
-export default React.memo(function ResultsView({ run, onAnalyze, analyzing }: ResultsViewProps) {
+export default React.memo(function ResultsView({ run, projectId, onAnalyze, analyzing }: ResultsViewProps) {
     const [timeseries, setTimeseries] = useState<TimeseriesPoint[]>([]);
     const [tsLoading, setTsLoading] = useState(false);
 
@@ -27,7 +28,7 @@ export default React.memo(function ResultsView({ run, onAnalyze, analyzing }: Re
         const fetchTs = async () => {
             setTsLoading(true);
             try {
-                const res = await fetch(`${API_BASE}/load-testing/runs/${run.id}/timeseries`);
+                const res = await fetch(`${API_BASE}${withProjectQuery(`/load-testing/runs/${run.id}/timeseries`, projectId)}`);
                 if (res.ok && !cancelled) {
                     const data: TimeseriesData = await res.json();
                     setTimeseries(data.timeseries || []);
@@ -40,7 +41,7 @@ export default React.memo(function ResultsView({ run, onAnalyze, analyzing }: Re
         };
         fetchTs();
         return () => { cancelled = true; };
-    }, [run.id]);
+    }, [projectId, run.id]);
 
     const errorRate = run.error_rate ?? (run.total_requests ? ((run.failed_requests || 0) / run.total_requests) * 100 : 0);
     const dataReceived = run.data_received_bytes || 0;

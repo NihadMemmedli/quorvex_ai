@@ -6,6 +6,28 @@ from typing import Any
 from sqlalchemy import JSON, Index, Text, UniqueConstraint
 from sqlmodel import Column, Field, SQLModel
 
+DEFAULT_PROJECT_ID = "default"
+
+
+def normalize_project_id(project_id: str | None) -> str:
+    """Return the explicit project key used for historically unscoped rows."""
+    return project_id or DEFAULT_PROJECT_ID
+
+
+def spec_metadata_key(project_id: str | None, spec_name: str) -> tuple[str, str]:
+    return (normalize_project_id(project_id), spec_name)
+
+
+def get_spec_metadata(session: Any, spec_name: str, project_id: str | None = None) -> "SpecMetadata | None":
+    return session.get(SpecMetadata, spec_metadata_key(project_id, spec_name))
+
+
+def get_or_create_spec_metadata(session: Any, spec_name: str, project_id: str | None = None) -> "SpecMetadata":
+    meta = get_spec_metadata(session, spec_name, project_id)
+    if meta:
+        return meta
+    return SpecMetadata(spec_name=spec_name, project_id=normalize_project_id(project_id))
+
 
 class TestRun(SQLModel, table=True):
     __table_args__ = (
@@ -85,14 +107,18 @@ class SpecMetadata(SQLModel, table=True):
         {"extend_existing": True},
     )
 
+    project_id: str = Field(
+        default=DEFAULT_PROJECT_ID,
+        primary_key=True,
+        foreign_key="projects.id",
+        index=True,
+        nullable=False,
+    )
     spec_name: str = Field(primary_key=True)
     tags_json: str = "[]"  # Stored as JSON string
     description: str | None = None
     author: str | None = None
     last_modified: datetime | None = None
-
-    # Project isolation
-    project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
 
     @property
     def tags(self) -> list[str]:
@@ -996,9 +1022,13 @@ class CoverageMetric(SQLModel, table=True):
     """Coverage metrics for test runs"""
 
     __tablename__ = "coverage_metrics"
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        Index("ix_coverage_metrics_project_metric", "project_id", "metric_type"),
+        {"extend_existing": True},
+    )
 
     id: int | None = Field(default=None, primary_key=True)
+    project_id: str = Field(default=DEFAULT_PROJECT_ID, foreign_key="projects.id", index=True, nullable=False)
     run_id: str | None = Field(default=None, foreign_key="testrun.id", index=True)
     metric_type: str = Field(index=True)  # 'api_coverage', 'element_coverage', 'flow_coverage'
     metric_name: str  # e.g., 'login_page_elements'
@@ -1013,9 +1043,13 @@ class DiscoveredElement(SQLModel, table=True):
     """Discovered UI elements from application crawling"""
 
     __tablename__ = "discovered_elements"
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        Index("ix_discovered_elements_project_url", "project_id", "url"),
+        {"extend_existing": True},
+    )
 
     id: int | None = Field(default=None, primary_key=True)
+    project_id: str = Field(default=DEFAULT_PROJECT_ID, foreign_key="projects.id", index=True, nullable=False)
     url: str = Field(index=True)
     selector_type: str  # 'role', 'text', 'label', 'placeholder', 'selector'
     selector_value: str
@@ -1030,10 +1064,14 @@ class TestPattern(SQLModel, table=True):
     """Successful test patterns for reuse"""
 
     __tablename__ = "test_patterns"
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        UniqueConstraint("project_id", "pattern_hash", name="uq_test_patterns_project_pattern_hash"),
+        {"extend_existing": True},
+    )
 
     id: int | None = Field(default=None, primary_key=True)
-    pattern_hash: str = Field(unique=True, index=True)
+    project_id: str = Field(default=DEFAULT_PROJECT_ID, foreign_key="projects.id", index=True, nullable=False)
+    pattern_hash: str = Field(index=True)
     action: str  # 'click', 'fill', etc.
     selector_type: str
     selector_template: str  # Template for the selector
@@ -1053,9 +1091,13 @@ class CoverageGap(SQLModel, table=True):
     """Identified gaps in test coverage"""
 
     __tablename__ = "coverage_gaps"
-    __table_args__ = {"extend_existing": True}
+    __table_args__ = (
+        Index("ix_coverage_gaps_project_resolved", "project_id", "resolved"),
+        {"extend_existing": True},
+    )
 
     id: int | None = Field(default=None, primary_key=True)
+    project_id: str = Field(default=DEFAULT_PROJECT_ID, foreign_key="projects.id", index=True, nullable=False)
     gap_type: str  # 'untested_element', 'untested_flow', 'missing_edge_case'
     severity: str = Field(default="medium")  # 'low', 'medium', 'high', 'critical'
     description: str
@@ -1072,13 +1114,14 @@ class ApplicationMap(SQLModel, table=True):
     __tablename__ = "application_map"
     __table_args__ = (
         Index("ix_application_map_project_surface", "project_id", "app_surface_key"),
+        UniqueConstraint("project_id", "url", name="uq_application_map_project_url"),
         {"extend_existing": True},
     )
 
     id: int | None = Field(default=None, primary_key=True)
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
     app_surface_key: str | None = Field(default=None, index=True)
-    url: str = Field(unique=True, index=True)
+    url: str = Field(index=True)
     page_title: str | None = None
     linked_urls: list[str] | None = Field(default=None, sa_column=Column(JSON))
     elements: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
