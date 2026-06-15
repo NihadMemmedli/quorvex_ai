@@ -1273,6 +1273,26 @@ class TestExecutionSettings:
         # Should either reject or clamp to valid range
         assert response.status_code in (200, 422)
 
+    def test_update_execution_settings_updates_browser_pool_max(self, client, monkeypatch):
+        """PUT /execution-settings should push saved parallelism into the browser pool."""
+        import orchestrator.api.main as main_module
+
+        class FakePool:
+            def __init__(self):
+                self.updated_to = None
+
+            async def update_max_browsers(self, value):
+                self.updated_to = value
+
+        pool = FakePool()
+        monkeypatch.setattr(main_module, "BROWSER_POOL", pool)
+        monkeypatch.setattr(main_module, "is_parallel_mode_available", lambda: True)
+
+        response = client.put("/execution-settings", json={"parallelism": 3})
+
+        assert response.status_code == 200, response.text
+        assert pool.updated_to == response.json()["parallelism"]
+
 
 class TestAISettings:
     """Test runtime AI settings endpoints."""
@@ -1842,6 +1862,49 @@ class TestQueueEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "running_count" in data or "running" in data
+
+    def test_get_queue_status_uses_browser_pool_totals(self, client, monkeypatch):
+        """GET /queue-status should expose BrowserResourcePool running/queued counts."""
+        import orchestrator.api.main as main_module
+
+        class FakeQueueManager:
+            def get_queue_status(self):
+                return {
+                    "running_count": 0,
+                    "queued_count": 0,
+                    "parallelism_limit": 2,
+                    "database_type": "postgresql",
+                    "parallel_mode_enabled": True,
+                    "orphaned_running_count": 0,
+                    "active_process_count": 0,
+                    "orphaned_queued_count": 0,
+                    "auto_cleaned_count": 0,
+                }
+
+        class FakePool:
+            async def get_status(self):
+                return {
+                    "max_browsers": 3,
+                    "running": 2,
+                    "queued": 1,
+                    "available": 1,
+                    "running_requests": ["run-a", "agent:b"],
+                    "queued_requests": ["security:c"],
+                    "by_type": {"test_run": 1, "agent": 1, "security": 0},
+                }
+
+        monkeypatch.setattr(main_module, "QUEUE_MANAGER", FakeQueueManager())
+        monkeypatch.setattr(main_module, "BROWSER_POOL", FakePool())
+
+        response = client.get("/queue-status")
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["running_count"] == 2
+        assert data["queued_count"] == 1
+        assert data["parallelism_limit"] == 3
+        assert data["legacy_running_count"] == 0
+        assert data["browser_pool"]["by_type"]["agent"] == 1
 
     def test_agent_queue_status_excludes_stale_running_tasks(
         self, client, monkeypatch

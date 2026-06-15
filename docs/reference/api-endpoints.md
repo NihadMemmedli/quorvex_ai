@@ -366,8 +366,8 @@ Source: `orchestrator/api/main.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
-| GET | `/execution-settings` | Get parallelism, headless mode, memory, DB type | Optional |
-| PUT | `/execution-settings` | Update execution settings | Optional |
+| GET | `/execution-settings` | Get the persisted global browser concurrency cap (`parallelism`), headless mode, memory, DB type | Optional |
+| PUT | `/execution-settings` | Update execution settings and the active browser pool max | Optional |
 
 ## Queue Management
 
@@ -375,7 +375,7 @@ Source: `orchestrator/api/main.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
-| GET | `/queue-status` | Running, queued counts and parallelism limit | Optional |
+| GET | `/queue-status` | Browser pool running/queued/max totals plus legacy test-run queue diagnostics | Optional |
 | POST | `/queue/clear` | Clear stuck queue entries | Optional |
 
 ## Browser Pool
@@ -384,7 +384,7 @@ Source: `orchestrator/api/main.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
-| GET | `/api/browser-pool/status` | Current pool utilization and slot details | Optional |
+| GET | `/api/browser-pool/status` | Source-of-truth pool utilization, queued work, and `by_type` slot usage | Optional |
 | GET | `/api/browser-pool/recent` | Recently completed browser operations | Optional |
 | POST | `/api/browser-pool/cleanup` | Clean up stale browser slots | Optional |
 

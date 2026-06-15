@@ -58,6 +58,10 @@ def _ensure_job_project(job_project_id: str | None, project_id: str) -> None:
         raise HTTPException(status_code=404, detail="Job not found")
 
 
+def _normalize_direct_project_id(project_id: Any) -> str:
+    return project_id if isinstance(project_id, str) else "default"
+
+
 # ========== Pydantic Models ==========
 
 
@@ -1740,6 +1744,8 @@ async def get_generate_job_status(job_id: str, project_id: str = Query(...)):
     """Poll requirements generation job status."""
     from orchestrator.services.domain_jobs import domain_job_to_dict, get_domain_job
 
+    project_id = _normalize_direct_project_id(project_id)
+
     durable_job = get_domain_job(job_id)
     if durable_job and durable_job.job_type == "requirements_generate":
         _ensure_job_project(durable_job.project_id, project_id)
@@ -2033,6 +2039,8 @@ async def bulk_generate_specs(
 async def get_bulk_generate_job_status(job_id: str, project_id: str = Query(...)):
     """Poll bulk spec generation job status."""
     from orchestrator.services.domain_jobs import domain_job_to_dict, get_domain_job
+
+    project_id = _normalize_direct_project_id(project_id)
 
     durable_job = get_domain_job(job_id)
     if durable_job and durable_job.job_type == "requirements_bulk_generate":
@@ -2385,6 +2393,8 @@ async def get_generate_spec_job_status(job_id: str, project_id: str = Query(...)
     """Poll async requirement spec generation status."""
     from orchestrator.api.db import get_session
     from orchestrator.api.models_db import AgentRun
+
+    project_id = _normalize_direct_project_id(project_id)
 
     job = _req_spec_jobs.get(job_id)
     if not job:

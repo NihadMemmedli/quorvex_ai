@@ -228,6 +228,7 @@ async def test_operation_types_tracked():
     await pool.acquire("explore1", OperationType.EXPLORATION, timeout=1)
     await pool.acquire("agent1", OperationType.AGENT, timeout=1)
     await pool.acquire("prd1", OperationType.PRD, timeout=1)
+    await pool.acquire("auth1", OperationType.BROWSER_AUTH, timeout=1)
 
     status = await pool.get_status()
 
@@ -235,8 +236,36 @@ async def test_operation_types_tracked():
     assert status["by_type"]["exploration"] == 1
     assert status["by_type"]["agent"] == 1
     assert status["by_type"]["prd"] == 1
-    assert status["running"] == 4
-    assert status["available"] == 1
+    assert status["by_type"]["browser_auth"] == 1
+    assert "security" in status["by_type"]
+    assert "autonomous" in status["by_type"]
+    assert status["running"] == 5
+    assert status["available"] == 0
+
+
+@pytest.mark.asyncio
+async def test_fifo_waiter_acquires_after_release():
+    InMemoryBrowserPool._instance = None
+    InMemoryBrowserPool._lock = None
+    pool = InMemoryBrowserPool(max_browsers=1)
+    await pool._initialize()
+
+    assert await pool.acquire("running", OperationType.TEST_RUN, timeout=1)
+    first_waiter = asyncio.create_task(pool.acquire("queued-first", OperationType.SECURITY, timeout=1))
+    second_waiter = asyncio.create_task(pool.acquire("queued-second", OperationType.BROWSER_AUTH, timeout=1))
+    await asyncio.sleep(0.1)
+
+    assert await pool.get_queue_position("queued-first") == 1
+    assert await pool.get_queue_position("queued-second") == 2
+
+    await pool.release("running")
+    assert await first_waiter is True
+    assert await pool.is_running("queued-first") is True
+    assert not second_waiter.done()
+
+    await pool.release("queued-first")
+    assert await second_waiter is True
+    assert await pool.is_running("queued-second") is True
 
 
 @pytest.mark.asyncio

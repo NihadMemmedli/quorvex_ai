@@ -159,6 +159,11 @@ class QueueStatusResponse(BaseModel):
     active_process_count: int = 0  # Actually tracked processes
     orphaned_queued_count: int = 0  # Queued in DB but no backing asyncio task
     agent_worker_health: AgentWorkerHealth | None = None
+    browser_pool: dict[str, Any] | None = None
+    browser_pool_by_type: dict[str, int] = Field(default_factory=dict)
+    legacy_running_count: int | None = None
+    legacy_queued_count: int | None = None
+    legacy_parallelism_limit: int | None = None
 
 
 class ClearQueueRequest(BaseModel):

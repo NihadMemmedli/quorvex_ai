@@ -25,6 +25,9 @@ from sqlmodel import Session, select
 from .db import engine
 from .models_db import DiscoveredApiEndpoint, ExplorationSession, SecurityFinding, SecurityScanRun
 
+from orchestrator.services.browser_pool import OperationType
+from orchestrator.services.browser_slots import browser_operation_slot
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 logger = logging.getLogger(__name__)
@@ -290,54 +293,61 @@ async def _build_auth_headers(req: BaseScanRequest, project_id: str, proxy_url: 
         'button:has-text("Login")',
     ]
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        try:
-            context_kwargs = {"ignore_https_errors": True}
-            if proxy_url:
-                context_kwargs["proxy"] = {"server": proxy_url}
-            context = await browser.new_context(**context_kwargs)
-            page = await context.new_page()
-            await page.goto(auth.login_url or req.target_url, wait_until="domcontentloaded", timeout=30_000)
+    slot_request_id = f"security-auth:{project_id}:{uuid.uuid4().hex[:8]}"
+    async with browser_operation_slot(
+        request_id=slot_request_id,
+        operation_type=OperationType.SECURITY,
+        description=f"Security auth preflight for {req.target_url}",
+        max_operation_duration=180,
+    ):
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                context_kwargs = {"ignore_https_errors": True}
+                if proxy_url:
+                    context_kwargs["proxy"] = {"server": proxy_url}
+                context = await browser.new_context(**context_kwargs)
+                page = await context.new_page()
+                await page.goto(auth.login_url or req.target_url, wait_until="domcontentloaded", timeout=30_000)
 
-            async def fill_first(selectors: list[str | None], value: str, label: str) -> None:
-                for selector in selectors:
+                async def fill_first(selectors: list[str | None], value: str, label: str) -> None:
+                    for selector in selectors:
+                        if not selector:
+                            continue
+                        locator = page.locator(selector).first
+                        try:
+                            if await locator.count():
+                                await locator.fill(value, timeout=5_000)
+                                return
+                        except Exception:
+                            continue
+                    raise RuntimeError(f"Could not find {label} field during login preflight")
+
+                await fill_first(username_selectors, username, "username")
+                await fill_first(password_selectors, password, "password")
+
+                clicked = False
+                for selector in submit_selectors:
                     if not selector:
                         continue
                     locator = page.locator(selector).first
                     try:
                         if await locator.count():
-                            await locator.fill(value, timeout=5_000)
-                            return
+                            await locator.click(timeout=5_000)
+                            clicked = True
+                            break
                     except Exception:
                         continue
-                raise RuntimeError(f"Could not find {label} field during login preflight")
+                if not clicked:
+                    await page.keyboard.press("Enter")
 
-            await fill_first(username_selectors, username, "username")
-            await fill_first(password_selectors, password, "password")
-
-            clicked = False
-            for selector in submit_selectors:
-                if not selector:
-                    continue
-                locator = page.locator(selector).first
-                try:
-                    if await locator.count():
-                        await locator.click(timeout=5_000)
-                        clicked = True
-                        break
-                except Exception:
-                    continue
-            if not clicked:
-                await page.keyboard.press("Enter")
-
-            await page.wait_for_load_state("networkidle", timeout=20_000)
-            await page.goto(req.target_url, wait_until="networkidle", timeout=30_000)
-            cookies = await context.cookies()
-            cookie_header = _cookie_header_from_playwright(cookies)
-            return {"Cookie": cookie_header} if cookie_header else {}
-        finally:
-            await browser.close()
+                await page.wait_for_load_state("networkidle", timeout=20_000)
+                await page.goto(req.target_url, wait_until="networkidle", timeout=30_000)
+                cookies = await context.cookies()
+                cookie_header = _cookie_header_from_playwright(cookies)
+                return {"Cookie": cookie_header} if cookie_header else {}
+            finally:
+                await browser.close()
 
 
 def _run_to_dict(run: SecurityScanRun) -> dict:

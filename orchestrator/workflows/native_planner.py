@@ -391,6 +391,7 @@ The following requirements were extracted from the Product Requirements Document
 - Add durable waits after navigations or async actions with `await expect(page).toHaveURL(...)`, `await page.waitForURL(...)`, web-first assertions, or `page.waitForResponse(...)` when API evidence supports it.
 - Do not use `page.waitForTimeout()` or arbitrary sleeps.
 - Keep credential values as `process.env.VAR_NAME!` or project test-data fixture placeholders; never hardcode secrets.
+- Make the draft script executable as a standalone Playwright spec. After the saved plan is accepted, the orchestrator extracts the draft to a `.draft.spec.ts` file and runs `test_debug` on it before handing it to the generator.
 
 {save_section}
 

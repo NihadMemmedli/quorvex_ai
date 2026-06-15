@@ -442,8 +442,9 @@ class BaseAgent:
     def _resolved_tool_config(self) -> dict[str, Any]:
         """Return tool configuration for this agent.
 
-        Known agents get an explicit availability/approval list. Unknown legacy
-        agents retain wildcard access to avoid changing behavior silently.
+        Known agents get an explicit availability/approval list. Unknown agents
+        fall back to read-only repository tools unless a caller explicitly
+        supplied a broader allowlist.
         """
         mcp_config_dir = Path(self.agent_cwd) if self.agent_cwd else None
         if self.allowed_tools is not None:
@@ -457,7 +458,8 @@ class BaseAgent:
         if profile_config:
             return profile_config
 
-        return {"allowed_tools": ["*"], "tools": self.tools}
+        readonly_tools = ["Glob", "Grep", "Read", "LS"]
+        return {"allowed_tools": readonly_tools, "tools": self.tools or readonly_tools}
 
     def _requires_live_browser_worker(self, tool_config: dict[str, Any]) -> bool:
         """Return whether queued execution must run on a live browser worker."""
@@ -486,6 +488,8 @@ class BaseAgent:
     def _resolved_permission_mode(self) -> str:
         tool_config = self._resolved_tool_config()
         if tool_config.get("tools") == [] or tool_config.get("allowed_tools") == []:
+            return "dontAsk"
+        if set(tool_config.get("allowed_tools") or []) <= {"Glob", "Grep", "Read", "LS"}:
             return "dontAsk"
         return "bypassPermissions"
 

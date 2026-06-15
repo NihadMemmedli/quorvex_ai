@@ -53,7 +53,10 @@ async def test_native_healer_uses_agent_runner_with_tool_deep(monkeypatch):
     assert captured["owner_id"] == "run-1"
     assert captured["memory_agent_type"] == "NativeHealer"
     assert captured["inject_memory"] is False
+    assert captured["preserve_browser_on_failure"] is True
     assert "test_run" in ",".join(captured["allowed_tools"])
+    assert "test_debug" in ",".join(captured["allowed_tools"])
+    assert "browser_close" not in ",".join(captured["allowed_tools"])
 
 
 @pytest.mark.asyncio
@@ -181,8 +184,10 @@ def test_healer_prompt_includes_failed_test_metadata(monkeypatch):
     assert "## Failed Test Target" in prompt
     assert "Browser/project: `chromium`" in prompt
     assert "Title: `can submit form`" in prompt
-    assert "Your first MCP tool call must be `test_run`" in prompt
-    assert "use `browser_resume` if it is available" in prompt
+    assert "call `test_debug` scoped to this file" in prompt
+    assert "Only after `test_debug` has paused" in prompt
+    assert "Run the test again with `test_run`" in prompt
+    assert "browser_close" not in prompt
 
 
 def test_healer_prompt_uses_failed_code_frame_by_default(monkeypatch):

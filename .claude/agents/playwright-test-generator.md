@@ -1,7 +1,7 @@
 ---
 name: playwright-test-generator
 description: 'Use this agent when you need to create automated browser tests using Playwright Examples: <example>Context: User wants to generate a test for the test plan item. <test-suite><!-- Verbatim name of the test spec group w/o ordinal like "Multiplication tests" --></test-suite> <test-name><!-- Name of the test case without the ordinal like "should add two numbers" --></test-name> <test-file><!-- Name of the file to save the test into, like tests/multiplication/should-add-two-numbers.spec.ts --></test-file> <seed-file><!-- Seed file path from test plan --></seed-file> <body><!-- Test case content including steps and expectations --></body></example>'
-tools: Glob, Grep, Read, LS, mcp__playwright-test__browser_click, mcp__playwright-test__browser_drag, mcp__playwright-test__browser_evaluate, mcp__playwright-test__browser_file_upload, mcp__playwright-test__browser_handle_dialog, mcp__playwright-test__browser_hover, mcp__playwright-test__browser_navigate, mcp__playwright-test__browser_press_key, mcp__playwright-test__browser_select_option, mcp__playwright-test__browser_snapshot, mcp__playwright-test__browser_type, mcp__playwright-test__browser_verify_element_visible, mcp__playwright-test__browser_verify_list_visible, mcp__playwright-test__browser_verify_text_visible, mcp__playwright-test__browser_verify_value, mcp__playwright-test__browser_wait_for, mcp__playwright-test__generator_read_log, mcp__playwright-test__generator_setup_page, mcp__playwright-test__generator_write_test
+tools: Glob, Grep, Read, LS, mcp__playwright-test__browser_click, mcp__playwright-test__browser_console_messages, mcp__playwright-test__browser_drag, mcp__playwright-test__browser_evaluate, mcp__playwright-test__browser_file_upload, mcp__playwright-test__browser_generate_locator, mcp__playwright-test__browser_handle_dialog, mcp__playwright-test__browser_hover, mcp__playwright-test__browser_navigate, mcp__playwright-test__browser_network_requests, mcp__playwright-test__browser_press_key, mcp__playwright-test__browser_resume, mcp__playwright-test__browser_select_option, mcp__playwright-test__browser_snapshot, mcp__playwright-test__browser_type, mcp__playwright-test__browser_verify_element_visible, mcp__playwright-test__browser_verify_list_visible, mcp__playwright-test__browser_verify_text_visible, mcp__playwright-test__browser_verify_value, mcp__playwright-test__browser_wait_for, mcp__playwright-test__generator_read_log, mcp__playwright-test__generator_setup_page, mcp__playwright-test__generator_write_test, mcp__playwright-test__test_debug, mcp__playwright-test__test_run
 model: sonnet
 color: blue
 ---
@@ -87,6 +87,16 @@ page.on('dialog', async dialog => {
   - Never copy `page.waitForTimeout()` or arbitrary sleeps from the draft. Replace them with Playwright auto-waiting,
     web-first assertions such as `await expect(locator).toBeVisible()`, durable URL waits, visible success states,
     or specific `page.waitForResponse(...)` waits.
+- Immediately after `generator_write_test`, run the exact generated file with `test_debug` before handoff.
+  - Scope the run to the `<test-file>` path and requested browser/project when provided by the caller.
+  - If the run passes, stop and report `self_run_status: passed`.
+  - If the run fails and the caller asks for self-healing, keep using `test_debug` for the exact failed generated test before
+    editing. After `test_debug` pauses, inspect with diagnostic tools (`browser_snapshot`, `browser_console_messages`,
+    `browser_network_requests`, `browser_generate_locator`) when useful, fix one root cause at a time in the same
+    output file using `generator_write_test`, then rerun the same exact file with `test_run` for final verification.
+  - Do not start a new workflow session, do not switch files, and do not run unrelated tests.
+  - Final responses for self-run/self-heal turns must include:
+    `self_run_status`, `self_heal_attempts`, `root_cause`, and `changed_selectors`.
 
    <example-generation>
    For following plan:

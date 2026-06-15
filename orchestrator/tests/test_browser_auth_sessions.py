@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 import os
 import sys
 import types
@@ -937,6 +938,37 @@ def test_capture_storage_state_via_mcp_agent_reads_and_validates_storage_state(t
     secrets = run_dir / "browser-auth-secrets.env"
     assert secrets.exists()
     assert oct(secrets.stat().st_mode & 0o777) == "0o600"
+
+
+def test_run_async_capture_acquires_browser_auth_pool_slot(monkeypatch, tmp_path):
+    from orchestrator.services import browser_auth_sessions as service
+    from orchestrator.services.browser_pool import OperationType
+
+    captured: dict[str, object] = {}
+
+    @asynccontextmanager
+    async def fake_browser_operation_slot(**kwargs):
+        captured["slot_kwargs"] = kwargs
+        yield
+
+    async def fake_run_capture_agent(prompt, *, run_dir, timeout_seconds, session_id):
+        captured["prompt"] = prompt
+        return AgentResult(success=True, output="captured")
+
+    monkeypatch.setattr(service, "browser_operation_slot", fake_browser_operation_slot)
+    monkeypatch.setattr(service, "_run_capture_agent", fake_run_capture_agent)
+
+    result = service._run_async_capture(
+        "capture prompt",
+        run_dir=tmp_path,
+        timeout_seconds=30,
+        session_id="session-123",
+    )
+
+    assert result.success is True
+    slot_kwargs = captured["slot_kwargs"]
+    assert slot_kwargs["request_id"] == "browser-auth:session-123"
+    assert slot_kwargs["operation_type"] == OperationType.BROWSER_AUTH
 
 
 def test_capture_storage_state_via_mcp_agent_accepts_run_dir_storage_state(tmp_path, monkeypatch):

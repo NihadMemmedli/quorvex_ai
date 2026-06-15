@@ -8,10 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from memory.manager import get_memory_manager
+from orchestrator.memory.manager import get_memory_manager
 
 # Import using absolute path (sys.path is set in base_agent.py)
-from utils.json_utils import extract_json_from_markdown
+from orchestrator.utils.json_utils import extract_json_from_markdown
 
 from .base_agent import CLAUDE_AUTH_FAILURE_MESSAGE, BaseAgent
 from .explorer_result_synthesizer import (

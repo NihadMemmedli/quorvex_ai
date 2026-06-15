@@ -47,6 +47,17 @@ Important behaviors:
 
 This queue is used by autonomous mission work items and any flow that needs isolated agent execution outside the API process.
 
+### Agent Worker Observability
+
+Agent tasks forward the Claude Code and OpenTelemetry environment variables that control SDK/CLI telemetry to the worker process. Configure these in the API process environment, task environment, or worker deployment:
+
+- `CLAUDE_CODE_ENABLE_TELEMETRY=1` enables Claude Code telemetry.
+- `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER`, and `OTEL_TRACES_EXPORTER` choose metrics, log/event, and trace exporters.
+- `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`, and `OTEL_EXPORTER_OTLP_HEADERS` configure the common OTLP target.
+- Trace export also requires `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1` or `ENABLE_ENHANCED_TELEMETRY_BETA=1`.
+
+Keep `OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS`, and `OTEL_LOG_TOOL_CONTENT` disabled unless your telemetry backend is approved to receive prompt and tool payload data.
+
 ## Distributed Playwright Job Queue
 
 The job queue is a Redis priority queue for browser worker containers. The API enqueues test jobs with execution configuration. Workers atomically dequeue jobs, update status, and submit results.

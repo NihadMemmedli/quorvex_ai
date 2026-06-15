@@ -1033,7 +1033,8 @@ def test_browser_diagnostics_count_real_chromium_process(monkeypatch):
     assert diagnostics["browser_window_count"] == 1
 
 
-def test_custom_agent_browser_preflight_fails_without_installing(monkeypatch):
+@pytest.mark.asyncio
+async def test_custom_agent_browser_preflight_fails_without_installing(monkeypatch):
     progress: list[dict] = []
     monkeypatch.setattr(main_module, "_custom_agent_browser_runs_via_queue", lambda: False)
     monkeypatch.setattr(main_module, "_resolve_playwright_chromium_executable", lambda: None)
@@ -1057,7 +1058,7 @@ def test_custom_agent_browser_preflight_fails_without_installing(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="rebuild/recreate the backend image"):
-        _ensure_custom_agent_browser_available("custom-agent-browser-missing")
+        await _ensure_custom_agent_browser_available("custom-agent-browser-missing")
 
     assert progress[0]["phase"] == "browser_setup"
     assert progress[0]["message"] == "Checking local Playwright browser availability"
@@ -1065,7 +1066,8 @@ def test_custom_agent_browser_preflight_fails_without_installing(monkeypatch):
     assert "browser_probe_output" in progress[-1]
 
 
-def test_custom_agent_browser_preflight_skips_local_probe_when_queue_enabled(monkeypatch):
+@pytest.mark.asyncio
+async def test_custom_agent_browser_preflight_skips_local_probe_when_queue_enabled(monkeypatch):
     progress: list[dict] = []
     monkeypatch.setattr(main_module, "_custom_agent_browser_runs_via_queue", lambda: True)
     monkeypatch.setattr(
@@ -1089,7 +1091,7 @@ def test_custom_agent_browser_preflight_skips_local_probe_when_queue_enabled(mon
         lambda _run_id, patch: progress.append(patch),
     )
 
-    _ensure_custom_agent_browser_available("custom-agent-browser-queued")
+    await _ensure_custom_agent_browser_available("custom-agent-browser-queued")
 
     assert progress == [
         {
@@ -1103,7 +1105,8 @@ def test_custom_agent_browser_preflight_skips_local_probe_when_queue_enabled(mon
     ]
 
 
-def test_custom_agent_browser_preflight_probes_when_direct_vnc_forced(monkeypatch):
+@pytest.mark.asyncio
+async def test_custom_agent_browser_preflight_probes_when_direct_vnc_forced(monkeypatch):
     progress: list[dict] = []
     monkeypatch.setattr(main_module, "_custom_agent_browser_runs_via_queue", lambda: True)
     monkeypatch.setattr(main_module, "_probe_custom_agent_browser", lambda: (True, ""))
@@ -1113,7 +1116,7 @@ def test_custom_agent_browser_preflight_probes_when_direct_vnc_forced(monkeypatc
         lambda _run_id, patch: progress.append(patch),
     )
 
-    _ensure_custom_agent_browser_available(
+    await _ensure_custom_agent_browser_available(
         "custom-agent-browser-direct",
         force_direct_execution=True,
     )
@@ -1121,6 +1124,34 @@ def test_custom_agent_browser_preflight_probes_when_direct_vnc_forced(monkeypatc
     phases = [patch["phase"] for patch in progress if "phase" in patch]
     assert "browser_delegated" not in phases
     assert phases[0] == "browser_setup"
+    assert phases[-1] == "browser_ready"
+
+
+@pytest.mark.asyncio
+async def test_custom_agent_browser_preflight_reuses_active_agent_slot(monkeypatch):
+    progress: list[dict] = []
+
+    class FakePool:
+        async def is_running(self, request_id):
+            return request_id == "custom-agent-active"
+
+    monkeypatch.setattr(main_module, "_custom_agent_browser_runs_via_queue", lambda: False)
+    monkeypatch.setattr(main_module, "BROWSER_POOL", FakePool())
+    monkeypatch.setattr(main_module, "_probe_custom_agent_browser", lambda: (True, ""))
+    monkeypatch.setattr(
+        main_module,
+        "browser_operation_slot",
+        lambda **_kwargs: pytest.fail("active agent slot should be reused for browser probe"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_update_agent_run_progress",
+        lambda _run_id, patch: progress.append(patch),
+    )
+
+    await _ensure_custom_agent_browser_available("custom-agent-active")
+
+    phases = [patch["phase"] for patch in progress if "phase" in patch]
     assert phases[-1] == "browser_ready"
 
 
@@ -1540,7 +1571,7 @@ async def test_exploratory_background_marks_zero_evidence_parse_fallback_failed(
         session.add(run)
         session.commit()
 
-    from agents.exploratory_agent import ExploratoryAgent
+    from orchestrator.agents.exploratory_agent import ExploratoryAgent
 
     async def fake_run(self, config: dict):
         return {
@@ -1587,7 +1618,7 @@ async def test_exploratory_background_marks_runtime_auth_failed(monkeypatch):
         session.add(run)
         session.commit()
 
-    from agents.exploratory_agent import ExploratoryAgent
+    from orchestrator.agents.exploratory_agent import ExploratoryAgent
 
     async def fake_run(self, config: dict):
         return {

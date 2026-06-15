@@ -48,8 +48,10 @@ def test_agent_allowlist_uses_playwright_test_prefix(tmp_path, monkeypatch):
     tools = get_agent_allowed_tools("playwright-test-healer")
 
     assert "mcp__playwright-test__test_run" in tools
+    assert "mcp__playwright-test__test_debug" in tools
     assert "mcp__playwright-test__browser_start_tracing" in tools
     assert "mcp__playwright-test__browser_resume" in tools
+    assert "mcp__playwright-test__browser_close" not in tools
 
 
 def test_agent_allowlist_uses_root_playwright_prefix(tmp_path, monkeypatch):
@@ -99,6 +101,7 @@ def test_agent_allowlist_can_use_run_local_mcp_config(tmp_path, monkeypatch):
 
     assert "mcp__playwright-test__planner_setup_page" in tools
     assert "mcp__playwright-test__planner_save_plan" in tools
+    assert "mcp__playwright-test__test_debug" in tools
     assert "mcp__playwright__planner_setup_page" not in tools
 
 
@@ -119,6 +122,7 @@ def test_prd_live_planner_allows_only_prd_browser_tools(tmp_path, monkeypatch):
     assert "mcp__playwright-test__planner_save_plan" in tools
     assert "mcp__playwright-test__browser_navigate" in tools
     assert "mcp__playwright-test__browser_snapshot" in tools
+    assert "mcp__playwright-test__test_debug" in tools
     assert "mcp__playwright-test__browser_close" not in tools
     assert "Glob" not in tools
     assert "Grep" not in tools
@@ -201,6 +205,44 @@ def test_base_agent_known_profile_uses_explicit_tools(tmp_path, monkeypatch):
     assert config["allowed_tools"] == config["tools"]
     assert "mcp__playwright-test__test_run" in config["allowed_tools"]
     assert "*" not in config["allowed_tools"]
+
+
+def test_generator_and_healer_profiles_allow_debug_without_browser_close(tmp_path, monkeypatch):
+    _write_mcp_config(tmp_path, "playwright-test")
+    monkeypatch.chdir(tmp_path)
+
+    for profile_name in ("playwright-test-generator", "playwright-test-healer"):
+        config = get_agent_tool_config(profile_name)
+        allowed_tools = set(config["allowed_tools"])
+        visible_tools = set(config["tools"])
+
+        assert "mcp__playwright-test__test_debug" in allowed_tools
+        assert "mcp__playwright-test__test_run" in allowed_tools
+        assert "mcp__playwright-test__browser_close" not in allowed_tools
+        assert "mcp__playwright-test__browser_close" not in visible_tools
+
+
+def test_base_agent_unknown_profile_falls_back_to_read_only_tools():
+    agent = BaseAgent()
+    agent.agent_tool_profile = "unknown-profile"
+
+    config = agent._resolved_tool_config()
+
+    assert config == {
+        "allowed_tools": ["Glob", "Grep", "Read", "LS"],
+        "tools": ["Glob", "Grep", "Read", "LS"],
+    }
+    assert agent._resolved_permission_mode() == "dontAsk"
+
+
+def test_base_agent_explicit_wildcard_is_preserved():
+    agent = BaseAgent()
+    agent.allowed_tools = ["*"]
+
+    config = agent._resolved_tool_config()
+
+    assert config["allowed_tools"] == ["*"]
+    assert config["tools"] is None
 
 
 def test_base_agent_known_profile_uses_run_local_mcp_config(tmp_path, monkeypatch):
@@ -414,10 +456,11 @@ async def test_base_agent_queue_fails_fast_without_claude_auth(tmp_path, monkeyp
         await agent._query_agent_via_queue("explore", timeout_seconds=30)
 
 
-def test_base_agent_unknown_profile_keeps_legacy_fallback():
+def test_base_agent_unknown_profile_uses_conservative_fallback():
     agent = BaseAgent()
 
-    assert agent._resolved_tool_config()["allowed_tools"] == ["*"]
+    assert agent._resolved_tool_config()["allowed_tools"] == ["Glob", "Grep", "Read", "LS"]
+    assert agent._resolved_permission_mode() == "dontAsk"
 
 
 def test_no_runtime_agent_wildcard_call_sites():
@@ -432,4 +475,12 @@ def test_no_runtime_agent_wildcard_call_sites():
         text = path.read_text()
         assert 'allowed_tools=["*"]' not in text, path
         assert "mcp__*__*" not in text, path
-        assert "test_debug" not in text, path
+        if path.name not in {
+            "playwright-test-generator.md",
+            "playwright-test-planner.md",
+            "full_native_pipeline.py",
+            "native_generator.py",
+            "native_planner.py",
+            "native_healer.py",
+        }:
+            assert "test_debug" not in text, path

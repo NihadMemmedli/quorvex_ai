@@ -41,6 +41,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from logging_config import get_logger, request_id_var, setup_logging
 from services.browser_pool import AbstractBrowserPool, get_browser_pool
 from services.browser_pool import OperationType as BrowserOpType
+from orchestrator.services.browser_slots import browser_operation_slot
 from services.resource_manager import ResourceManager, ResourceType, get_resource_manager
 from orchestrator.services.browser_auth_sessions import (
     BrowserAuthSessionError,
@@ -2235,13 +2236,26 @@ async def update_execution_settings(request: UpdateExecutionSettingsRequest, ses
 
 @app.get("/queue-status", response_model=QueueStatusResponse)
 async def get_queue_status():
-    """Get current queue status with running and queued counts."""
+    """Get current browser-capacity queue status with legacy test-run diagnostics."""
     global QUEUE_MANAGER
 
     if QUEUE_MANAGER is None:
         QUEUE_MANAGER = await QueueManager.get_instance()
 
-    status = QUEUE_MANAGER.get_queue_status()
+    legacy_status = QUEUE_MANAGER.get_queue_status()
+    pool = BROWSER_POOL or await get_browser_pool()
+    browser_pool_status = await pool.get_status()
+    status = {
+        **legacy_status,
+        "legacy_running_count": legacy_status.get("running_count"),
+        "legacy_queued_count": legacy_status.get("queued_count"),
+        "legacy_parallelism_limit": legacy_status.get("parallelism_limit"),
+        "running_count": int(browser_pool_status.get("running", 0) or 0),
+        "queued_count": int(browser_pool_status.get("queued", 0) or 0),
+        "parallelism_limit": int(browser_pool_status.get("max_browsers", 0) or 0),
+        "browser_pool": browser_pool_status,
+        "browser_pool_by_type": browser_pool_status.get("by_type", {}),
+    }
 
     # Add agent worker health if Redis agent queue is available
     agent_health = None
@@ -7567,6 +7581,39 @@ def _recover_custom_agent_partial_result(run: AgentRun, error: Exception | str) 
     if not raw_output.strip() and not artifacts and not tool_calls:
         return None
 
+    def fallback_recovery() -> dict[str, Any]:
+        structured = _build_custom_agent_structured_report(raw_output, run.config, artifacts)
+        warnings = [
+            "Structured JSON was not returned; a minimal report was synthesized from available evidence.",
+            f"Custom agent recovered partial evidence after runtime failure: {error}",
+        ]
+        return {
+            "summary": structured.get("summary") or _clean_text(raw_output, 500),
+            "output": raw_output,
+            "structured_report": structured,
+            "error": str(error),
+            "partial_results": True,
+            "failure_reason": "runtime_failed_after_evidence",
+            "contract_status": "partial",
+            "repair_attempts": [
+                {
+                    "attempt": 1,
+                    "strategy": "synthesize_minimal_report_from_evidence",
+                    "status": "success",
+                }
+            ],
+            "contract_warnings": warnings,
+            "diagnostics": {
+                "finalizer": {
+                    "agent_type": "custom",
+                    "source": "runtime_failure_recovery_fallback",
+                    "recovered_after_error": True,
+                    "error": str(error),
+                    **counts,
+                }
+            },
+        }
+
     try:
         from orchestrator.services.agent_run_finalizer import AgentRunFinalizer
 
@@ -7587,10 +7634,10 @@ def _recover_custom_agent_partial_result(run: AgentRun, error: Exception | str) 
         )
     except Exception as exc:
         logger.debug("Failed to recover custom agent partial result for %s: %s", run.id, exc)
-        return None
+        return fallback_recovery()
 
     if finalized.status == "failed":
-        return None
+        return fallback_recovery()
     recovered = dict(finalized.result)
     recovered["error"] = str(error)
     recovered["partial_results"] = True
@@ -7684,7 +7731,7 @@ def _merge_agent_failure_into_result(result: Any, error: Exception | str, *, fai
 
 def _recover_exploratory_partial_result(run_id: str, config: dict[str, Any], error: Exception | str) -> dict[str, Any] | None:
     try:
-        from agents.exploratory_agent import ExplorationState, ExploratoryAgent
+        from orchestrator.agents.exploratory_agent import ExplorationState, ExploratoryAgent
 
         run_dir = RUNS_DIR / run_id
         runtime_tool_calls: list[Any] = []
@@ -7736,7 +7783,7 @@ def _filter_agent_run_project(run: AgentRun, project_id: str | None) -> None:
 def _agent_report_project_filter(project_id: str):
     if project_id == "default":
         return or_(AgentRun.project_id == None, AgentRun.project_id == "default")
-    return AgentRun.project_id == project_id
+    return or_(AgentRun.project_id == None, AgentRun.project_id == project_id)
 
 
 def _get_agent_report_run(session: Session, run_id: str, project_id: str) -> AgentRun:
@@ -8934,6 +8981,30 @@ def _probe_custom_agent_browser(timeout_seconds: int = 30) -> tuple[bool, str]:
     return result.returncode == 0, combined_output
 
 
+async def _probe_custom_agent_browser_with_slot(run_id: str, timeout_seconds: int = 30) -> tuple[bool, str]:
+    async def _run_probe() -> tuple[bool, str]:
+        loop = asyncio.get_running_loop()
+        if timeout_seconds == 30:
+            return await loop.run_in_executor(None, _probe_custom_agent_browser)
+        return await loop.run_in_executor(None, _probe_custom_agent_browser, timeout_seconds)
+
+    try:
+        pool = BROWSER_POOL or await get_browser_pool()
+        if await pool.is_running(run_id):
+            return await _run_probe()
+    except Exception as exc:
+        logger.debug("Could not verify existing agent browser slot for %s: %s", run_id, exc)
+
+    async with browser_operation_slot(
+        request_id=f"agent-probe:{run_id}",
+        operation_type=BrowserOpType.AGENT,
+        description=f"Custom agent browser readiness probe {run_id}",
+        timeout=timeout_seconds,
+        max_operation_duration=timeout_seconds + 15,
+    ):
+        return await _run_probe()
+
+
 def _custom_agent_uses_browser_tools(allowed_tools: list[Any]) -> bool:
     """Return whether selected custom-agent tools require Playwright Chromium."""
     return any(str(tool).startswith("mcp__playwright") for tool in allowed_tools)
@@ -8959,7 +9030,7 @@ def _agent_run_has_browser_tools(agent_type: str, config: dict[str, Any]) -> boo
     return agent_type in ("exploratory", "spec_generation")
 
 
-def _ensure_custom_agent_browser_available(run_id: str, *, force_direct_execution: bool = False) -> None:
+async def _ensure_custom_agent_browser_available(run_id: str, *, force_direct_execution: bool = False) -> None:
     """Fail fast if the Playwright browser required by @playwright/mcp is unavailable."""
     if _custom_agent_browser_runs_via_queue() and not force_direct_execution:
         _update_agent_run_progress(
@@ -8981,7 +9052,7 @@ def _ensure_custom_agent_browser_available(run_id: str, *, force_direct_executio
     )
     _update_agent_run_progress(run_id, browser_runtime_status())
 
-    available, output = _probe_custom_agent_browser()
+    available, output = await _probe_custom_agent_browser_with_slot(run_id)
     if not available:
         _update_agent_run_progress(
             run_id,
@@ -9066,7 +9137,7 @@ def _generic_agent_runtime_prompt(agent_type: str, config: dict[str, Any]) -> st
     """Build a Quorvex-owned prompt for non-Claude runtime adapters."""
 
     if agent_type == "exploratory":
-        from agents.exploratory_agent import ExploratoryAgent
+        from orchestrator.agents.exploratory_agent import ExploratoryAgent
 
         agent = ExploratoryAgent()
         return agent._build_exploration_prompt(
@@ -9219,9 +9290,9 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             logger.info(f"Browser slot acquired for agent {run_id}")
 
             # Use relative imports since server runs from orchestrator/ directory
-            from agents.exploratory_agent import ExplorationState, ExploratoryAgent
-            from agents.spec_synthesis_agent import SpecSynthesisAgent
-            from agents.spec_writer_agent import SpecWriterAgent
+            from orchestrator.agents.exploratory_agent import ExplorationState, ExploratoryAgent
+            from orchestrator.agents.spec_synthesis_agent import SpecSynthesisAgent
+            from orchestrator.agents.spec_writer_agent import SpecWriterAgent
 
             result = {}
             if runtime_name == "hermes" and agent_type in {"exploratory", "writer", "spec-synthesis"}:
@@ -9569,7 +9640,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     custom_project_id = custom_run.project_id if custom_run else None
                 if any(str(tool).startswith("mcp__") for tool in allowed_tools):
                     if has_browser_tools:
-                        _ensure_custom_agent_browser_available(
+                        await _ensure_custom_agent_browser_available(
                             run_id,
                             force_direct_execution=force_direct_execution,
                         )

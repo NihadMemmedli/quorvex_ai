@@ -8,6 +8,7 @@ This workflow uses the Playwright Test Generator agent to:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -58,11 +59,11 @@ from orchestrator.utils.agent_runner import (
     get_default_timeout,
 )
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
+from orchestrator.utils.text_utils import truncate_middle
 from orchestrator.utils.token_budget import (
     context_budget_for_stage,
     truncate_text_to_tokens,
 )
-from orchestrator.utils.text_utils import truncate_middle
 
 
 class NativeGenerator:
@@ -105,6 +106,10 @@ class NativeGenerator:
         self.last_handoff_consumption: dict[str, Any] = {}
         self.last_coverage_warnings: list[str] = []
         self.last_agent_result: AgentResult | None = None
+        self.last_self_run_result: dict[str, Any] | None = None
+        self.last_self_heal_attempts: int = 0
+        self.last_self_heal_passed: bool = False
+        self.last_self_heal_artifact_path: Path | None = None
         # Use absolute path to project's tests directory (not relative to cwd)
         # This fixes Docker issue where cwd changes to run directory
         self.tests_dir = BASE_DIR / "tests" / "generated"
@@ -122,6 +127,10 @@ class NativeGenerator:
         plan_path: Path | None = None,
         planner_draft_script_path: Path | None = None,
         handoff_manifest_path: Path | None = None,
+        self_run_browser: str | None = None,
+        self_run_output_dir: Path | None = None,
+        self_heal_max_attempts: int = 3,
+        enable_self_run: bool = True,
     ) -> Path:
         """
         Generate a Playwright test from a markdown spec.
@@ -137,6 +146,10 @@ class NativeGenerator:
         spec_path_obj = Path(spec_path)
         if not spec_path_obj.exists():
             raise FileNotFoundError(f"Spec file not found: {spec_path}")
+        self.last_self_run_result = None
+        self.last_self_heal_attempts = 0
+        self.last_self_heal_passed = False
+        self.last_self_heal_artifact_path = None
 
         spec_content = spec_path_obj.read_text()
         # Use provided output_name or fall back to spec file stem
@@ -237,18 +250,20 @@ class NativeGenerator:
             if not validation_error:
                 logger.info(f"Test generated: {output_path}")
                 self._record_generation_coverage(spec_content, output_path)
-                if handoff_manifest_path:
-                    record_artifact(
-                        handoff_manifest_path,
-                        "generated_test",
-                        output_path,
-                        kind="playwright_test",
-                        producer_stage="generator",
-                        required=True,
-                        consumers=["test_run", "healer"],
-                        validation_status="valid",
-                        metadata=handoff_consumption,
-                    )
+                await self._self_run_generated_test_if_enabled(
+                    output_path=output_path,
+                    browser=self_run_browser,
+                    output_dir=self_run_output_dir,
+                    self_heal_max_attempts=self_heal_max_attempts,
+                    enable_self_run=enable_self_run,
+                    previous_result=agent_result,
+                    handoff_manifest_path=handoff_manifest_path,
+                )
+                self._record_generated_test_handoff(
+                    handoff_manifest_path=handoff_manifest_path,
+                    output_path=output_path,
+                    handoff_consumption=handoff_consumption,
+                )
                 return output_path
             logger.warning(
                 "Generated test failed format validation: %s", validation_error
@@ -260,18 +275,21 @@ class NativeGenerator:
                 previous_result=agent_result,
             ):
                 self._record_generation_coverage(spec_content, output_path)
-                if handoff_manifest_path:
-                    record_artifact(
-                        handoff_manifest_path,
-                        "generated_test",
-                        output_path,
-                        kind="playwright_test",
-                        producer_stage="generator",
-                        required=True,
-                        consumers=["test_run", "healer"],
-                        validation_status="valid",
-                        metadata={**handoff_consumption, "source": "schema_retry"},
-                    )
+                await self._self_run_generated_test_if_enabled(
+                    output_path=output_path,
+                    browser=self_run_browser,
+                    output_dir=self_run_output_dir,
+                    self_heal_max_attempts=self_heal_max_attempts,
+                    enable_self_run=enable_self_run,
+                    previous_result=agent_result,
+                    handoff_manifest_path=handoff_manifest_path,
+                )
+                self._record_generated_test_handoff(
+                    handoff_manifest_path=handoff_manifest_path,
+                    output_path=output_path,
+                    handoff_consumption=handoff_consumption,
+                    source="schema_retry",
+                )
                 return output_path
 
         # Fallback: If agent returned code but didn't write it
@@ -280,21 +298,21 @@ class NativeGenerator:
             logger.info(f"Saving generated code to: {output_path}")
             output_path.write_text(fixed_code)
             self._record_generation_coverage(spec_content, output_path)
-            if handoff_manifest_path:
-                record_artifact(
-                    handoff_manifest_path,
-                    "generated_test",
-                    output_path,
-                    kind="playwright_test",
-                    producer_stage="generator",
-                    required=True,
-                    consumers=["test_run", "healer"],
-                    validation_status="valid",
-                    metadata={
-                        **handoff_consumption,
-                        "source": "agent_response_fallback",
-                    },
-                )
+            await self._self_run_generated_test_if_enabled(
+                output_path=output_path,
+                browser=self_run_browser,
+                output_dir=self_run_output_dir,
+                self_heal_max_attempts=self_heal_max_attempts,
+                enable_self_run=enable_self_run,
+                previous_result=agent_result,
+                handoff_manifest_path=handoff_manifest_path,
+            )
+            self._record_generated_test_handoff(
+                handoff_manifest_path=handoff_manifest_path,
+                output_path=output_path,
+                handoff_consumption=handoff_consumption,
+                source="agent_response_fallback",
+            )
             return output_path
 
         validation_error = "agent did not write a valid Playwright TypeScript test or return one in a code block"
@@ -305,22 +323,63 @@ class NativeGenerator:
             previous_result=agent_result,
         ):
             self._record_generation_coverage(spec_content, output_path)
-            if handoff_manifest_path:
-                record_artifact(
-                    handoff_manifest_path,
-                    "generated_test",
-                    output_path,
-                    kind="playwright_test",
-                    producer_stage="generator",
-                    required=True,
-                    consumers=["test_run", "healer"],
-                    validation_status="valid",
-                    metadata={**handoff_consumption, "source": "schema_retry"},
-                )
+            await self._self_run_generated_test_if_enabled(
+                output_path=output_path,
+                browser=self_run_browser,
+                output_dir=self_run_output_dir,
+                self_heal_max_attempts=self_heal_max_attempts,
+                enable_self_run=enable_self_run,
+                previous_result=agent_result,
+                handoff_manifest_path=handoff_manifest_path,
+            )
+            self._record_generated_test_handoff(
+                handoff_manifest_path=handoff_manifest_path,
+                output_path=output_path,
+                handoff_consumption=handoff_consumption,
+                source="schema_retry",
+            )
             return output_path
 
         logger.warning(f"Generator finished but test file not found at: {output_path}")
         return output_path
+
+    def _record_generated_test_handoff(
+        self,
+        *,
+        handoff_manifest_path: Path | None,
+        output_path: Path,
+        handoff_consumption: dict[str, Any],
+        source: str | None = None,
+    ) -> None:
+        if not handoff_manifest_path:
+            return
+        metadata = dict(handoff_consumption)
+        if source:
+            metadata["source"] = source
+        if self.last_self_run_result:
+            metadata["generator_self_run_status"] = self.last_self_run_result.get(
+                "final_status"
+            )
+            metadata["generator_self_heal_attempts"] = self.last_self_heal_attempts
+            if self.last_self_heal_artifact_path:
+                metadata["generator_self_heal_artifact"] = str(
+                    self.last_self_heal_artifact_path
+                )
+        else:
+            metadata["generator_self_run_status"] = "disabled"
+            metadata["generator_self_heal_attempts"] = 0
+
+        record_artifact(
+            handoff_manifest_path,
+            "generated_test",
+            output_path,
+            kind="playwright_test",
+            producer_stage="generator",
+            required=True,
+            consumers=["test_run", "healer"],
+            validation_status="valid",
+            metadata=metadata,
+        )
 
     def _generated_test_validation_error(self, output_path: Path) -> str | None:
         try:
@@ -474,6 +533,388 @@ Rules:
             force_direct_execution=True,
         )
         return await runner.run(prompt)
+
+    @staticmethod
+    def _file_sha256(path: Path) -> str | None:
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+    @staticmethod
+    def _generator_self_heal_max_attempts(requested: int = 3) -> int:
+        raw_value = os.environ.get("GENERATOR_SELF_HEAL_MAX_ATTEMPTS")
+        try:
+            value = int(raw_value) if raw_value is not None else int(requested)
+        except (TypeError, ValueError):
+            value = 3
+        return min(3, max(0, value))
+
+    async def _self_run_generated_test_if_enabled(
+        self,
+        *,
+        output_path: Path,
+        browser: str | None,
+        output_dir: Path | None,
+        self_heal_max_attempts: int,
+        enable_self_run: bool,
+        previous_result: AgentResult | None,
+        handoff_manifest_path: Path | None = None,
+    ) -> None:
+        if not enable_self_run:
+            self.last_self_run_result = {"status": "disabled"}
+            self.last_self_heal_attempts = 0
+            self.last_self_heal_passed = False
+            return
+        if not output_path.exists():
+            return
+
+        run_dir = Path(output_dir) if output_dir else output_path.parent
+        run_dir.mkdir(parents=True, exist_ok=True)
+        artifact_path = run_dir / "generator_self_heal.json"
+        self.last_self_heal_artifact_path = artifact_path
+        max_attempts = self._generator_self_heal_max_attempts(self_heal_max_attempts)
+        browser_project = browser or "chromium"
+        session_id = getattr(previous_result, "session_id", None)
+        use_continue = bool(previous_result and not session_id)
+        session_ids: list[str] = []
+        records: list[dict[str, Any]] = []
+        previous_fixes: list[str] = []
+
+        artifact: dict[str, Any] = {
+            "test_path": str(output_path),
+            "browser": browser_project,
+            "output_dir": str(run_dir),
+            "max_self_heal_attempts": max_attempts,
+            "initial_session_id": session_id,
+            "session_ids": session_ids,
+            "attempt_count": 0,
+            "attempts": records,
+            "original_file_hash": self._file_sha256(output_path),
+            "final_file_hash": self._file_sha256(output_path),
+            "final_status": "running",
+        }
+
+        def write_artifact() -> None:
+            artifact["attempt_count"] = self.last_self_heal_attempts
+            artifact["final_file_hash"] = self._file_sha256(output_path)
+            try:
+                artifact_path.write_text(json.dumps(artifact, indent=2, default=str))
+            except OSError as exc:
+                logger.debug("Could not write generator self-heal artifact: %s", exc)
+
+        logger.info(
+            "Generator self-run: running generated test %s on %s",
+            output_path,
+            browser_project,
+        )
+        first_prompt = self._build_generator_self_run_prompt(
+            output_path=output_path,
+            browser=browser_project,
+            output_dir=run_dir,
+        )
+        first_result = await self._query_generator_self_heal_agent(
+            first_prompt,
+            resume_session_id=session_id,
+            continue_conversation=use_continue,
+        )
+        session_id = first_result.session_id or session_id
+        if session_id:
+            session_ids.append(session_id)
+        status = self._parse_generator_self_run_status(first_result)
+        failure_summary = self._summarize_agent_run_result(first_result)
+        records.append(
+            {
+                "phase": "self_run",
+                "status": status,
+                "session_id": first_result.session_id,
+                "run_result_summary": failure_summary,
+                "accepted_file_hash": self._file_sha256(output_path)
+                if status == "passed"
+                else None,
+            }
+        )
+        if status == "passed":
+            artifact["final_status"] = "passed"
+            self.last_self_run_result = artifact
+            self.last_self_heal_attempts = 0
+            self.last_self_heal_passed = True
+            write_artifact()
+            self._record_self_heal_artifact(
+                handoff_manifest_path=handoff_manifest_path,
+                artifact_path=artifact_path,
+                status="passed",
+            )
+            return
+
+        for attempt_number in range(1, max_attempts + 1):
+            before_content = output_path.read_text()
+            before_hash = self._file_sha256(output_path)
+            prompt = self._build_generator_self_heal_prompt(
+                output_path=output_path,
+                browser=browser_project,
+                output_dir=run_dir,
+                attempt_number=attempt_number,
+                max_attempts=max_attempts,
+                failure_summary=failure_summary,
+                previous_fixes=previous_fixes,
+                current_file_content=before_content,
+            )
+            logger.info(
+                "Generator self-heal attempt %s/%s for %s",
+                attempt_number,
+                max_attempts,
+                output_path,
+            )
+            repair_result = await self._query_generator_self_heal_agent(
+                prompt,
+                resume_session_id=session_id,
+                continue_conversation=bool(not session_id),
+            )
+            session_id = repair_result.session_id or session_id
+            if session_id and session_id not in session_ids:
+                session_ids.append(session_id)
+            after_hash = self._file_sha256(output_path)
+            validation_error = self._generated_test_validation_error(output_path)
+            status = self._parse_generator_self_run_status(repair_result)
+            summary = self._summarize_agent_run_result(repair_result)
+            record: dict[str, Any] = {
+                "phase": "self_heal",
+                "attempt": attempt_number,
+                "status": status,
+                "session_id": repair_result.session_id,
+                "run_result_summary": summary,
+                "before_file_hash": before_hash,
+                "after_file_hash": after_hash,
+                "accepted_file_hash": after_hash,
+                "rejected_file_hash": None,
+                "validation_error": validation_error,
+            }
+            self.last_self_heal_attempts = attempt_number
+
+            if validation_error:
+                record["status"] = "rejected_invalid_code"
+                record["accepted_file_hash"] = before_hash
+                record["rejected_file_hash"] = after_hash
+                output_path.write_text(before_content)
+                failure_summary = (
+                    "Generator self-heal produced invalid Playwright code: "
+                    f"{validation_error}"
+                )
+                previous_fixes.append(f"Attempt {attempt_number}: rejected invalid code.")
+                records.append(record)
+                artifact["final_status"] = "running"
+                write_artifact()
+                continue
+
+            previous_fixes.append(
+                f"Attempt {attempt_number}: {self._extract_self_heal_field(repair_result.output, 'root_cause') or summary[:300]}"
+            )
+            records.append(record)
+            failure_summary = summary
+            if status == "passed":
+                artifact["final_status"] = "passed_after_self_heal"
+                self.last_self_run_result = artifact
+                self.last_self_heal_passed = True
+                write_artifact()
+                self._record_self_heal_artifact(
+                    handoff_manifest_path=handoff_manifest_path,
+                    artifact_path=artifact_path,
+                    status="passed_after_self_heal",
+                )
+                return
+            write_artifact()
+
+        artifact["final_status"] = "exhausted"
+        self.last_self_run_result = artifact
+        self.last_self_heal_passed = False
+        write_artifact()
+        self._record_self_heal_artifact(
+            handoff_manifest_path=handoff_manifest_path,
+            artifact_path=artifact_path,
+            status="exhausted",
+        )
+
+    def _record_self_heal_artifact(
+        self,
+        *,
+        handoff_manifest_path: Path | None,
+        artifact_path: Path,
+        status: str,
+    ) -> None:
+        if not handoff_manifest_path or not artifact_path.exists():
+            return
+        record_artifact(
+            handoff_manifest_path,
+            "generator_self_heal",
+            artifact_path,
+            kind="generator_self_heal",
+            producer_stage="generator",
+            required=False,
+            consumers=["test_run", "healer", "reporting"],
+            validation_status=status,
+            metadata={"status": status},
+        )
+
+    def _build_generator_self_run_prompt(
+        self,
+        *,
+        output_path: Path,
+        browser: str,
+        output_dir: Path,
+    ) -> str:
+        return f"""Run the generated Playwright test file now in this same generator conversation.
+
+Test path: {output_path}
+Browser/project: {browser}
+Output directory: {output_dir}
+
+Instructions:
+- Call `test_debug` for exactly this file and browser/project before handoff. Do not run any other test file.
+- Do not edit the file in this turn.
+- If the test fails, leave it paused long enough to inspect only the failure summary needed to report the result.
+- Stop immediately after the debug result is known.
+
+Final response fields:
+self_run_status: passed | failed
+self_heal_attempts: 0
+root_cause: one concise sentence, or "none" if passed
+changed_selectors: []
+"""
+
+    def _build_generator_self_heal_prompt(
+        self,
+        *,
+        output_path: Path,
+        browser: str,
+        output_dir: Path,
+        attempt_number: int,
+        max_attempts: int,
+        failure_summary: str,
+        previous_fixes: list[str],
+        current_file_content: str,
+    ) -> str:
+        prior = "\n".join(f"- {item}" for item in previous_fixes) or "- none"
+        return f"""Correct the generated Playwright test inside the same generator conversation.
+
+Test path: {output_path}
+Browser/project: {browser}
+Output directory: {output_dir}
+Self-heal attempt: {attempt_number} of {max_attempts}
+
+Failure summary from the previous run:
+```text
+{truncate_middle(failure_summary or "No failure summary captured.", head=3500, tail=3500)}
+```
+
+Previous attempted fixes:
+{prior}
+
+Current file content:
+```typescript
+{truncate_middle(current_file_content, head=7000, tail=7000)}
+```
+
+Instructions:
+- Fix exactly one root cause in the same output file: {output_path}
+- Use `test_debug` scoped to this exact file and browser/project `{browser}` to reproduce the failed generated test state before editing. `test_debug` is the failure-state capture path because it pauses on the failed test state.
+- Use diagnostic tools only after `test_debug` has paused: `browser_snapshot`,
+  `browser_console_messages`, `browser_network_requests`, or `browser_generate_locator`.
+- Use `generator_write_test` to rewrite that same file with the complete corrected test.
+- Rerun the same generated test with `test_run` scoped to this exact file and browser/project `{browser}` only after editing, for final verification.
+- Stop immediately when the run passes.
+- Do not start a new workflow session, do not switch files, and do not run unrelated tests.
+- If your correction would make the file invalid TypeScript/Playwright, do not write it.
+
+Final response fields:
+self_run_status: passed | failed
+self_heal_attempts: {attempt_number}
+root_cause: concise root cause fixed or still suspected
+changed_selectors: JSON array of selector changes, or []
+"""
+
+    async def _query_generator_self_heal_agent(
+        self,
+        prompt: str,
+        *,
+        resume_session_id: str | None = None,
+        continue_conversation: bool = False,
+    ) -> AgentResult:
+        timeout = int(os.environ.get("GENERATOR_SELF_HEAL_TIMEOUT_SECONDS", "300"))
+        runner = AgentRunner(
+            timeout_seconds=timeout,
+            allowed_tools=get_agent_allowed_tools(
+                "playwright-test-generator", mcp_config_dir=self.cwd
+            ),
+            log_tools=True,
+            on_tool_use=self.on_tool_use,
+            on_progress=self.on_progress,
+            on_task_enqueued=self.on_task_enqueued,
+            owner_type=self.owner_type,
+            owner_id=self.owner_id,
+            owner_label=self.owner_label,
+            model_tier=self.model_tier,
+            max_budget_usd=_optional_env_float("GENERATOR_MAX_BUDGET_USD"),
+            memory_agent_type="NativeGenerator",
+            memory_source_type="spec",
+            memory_stage="native_generator_self_heal",
+            inject_memory=False,
+            capture_memory=False,
+            env_vars=self.env_vars,
+            cwd=self.cwd,
+            resume_session_id=resume_session_id,
+            continue_conversation=continue_conversation,
+            force_direct_execution=True,
+            preserve_browser_on_failure=True,
+        )
+        return await runner.run(prompt)
+
+    @staticmethod
+    def _extract_self_heal_field(output: str | None, field: str) -> str | None:
+        if not output:
+            return None
+        json_match = re.search(r"\{.*\}", output, flags=re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(0))
+                value = data.get(field)
+                if value is not None:
+                    return json.dumps(value) if isinstance(value, (list, dict)) else str(value)
+            except Exception:
+                pass
+        match = re.search(rf"(?im)^\s*{re.escape(field)}\s*:\s*(.+?)\s*$", output)
+        return match.group(1).strip() if match else None
+
+    def _parse_generator_self_run_status(self, result: AgentResult) -> str:
+        raw_status = (
+            self._extract_self_heal_field(result.output, "self_run_status")
+            or self._extract_self_heal_field(result.output, "status")
+            or ""
+        ).strip().strip("\"'").lower()
+        if raw_status in {"passed", "pass", "success", "fixed"}:
+            return "passed"
+        if raw_status in {"failed", "fail", "failure", "exhausted"}:
+            return "failed"
+        output_lower = (result.output or "").lower()
+        if result.success and re.search(r"\bself_run_status\s*:\s*passed\b", output_lower):
+            return "passed"
+        if "self_run_status" in output_lower and "passed" in output_lower and "failed" not in output_lower:
+            return "passed"
+        return "failed"
+
+    @staticmethod
+    def _summarize_agent_run_result(result: AgentResult) -> str:
+        pieces: list[str] = []
+        if result.error:
+            pieces.append(result.error)
+        if result.output:
+            pieces.append(result.output)
+        if not pieces:
+            pieces.append(
+                f"Agent result success={result.success}, timed_out={result.timed_out}, "
+                f"tool_calls={len(result.tool_calls)}"
+            )
+        return truncate_middle("\n\n".join(pieces), head=5000, tail=5000)
 
     def _extract_code(self, text: str) -> str | None:
         """Extract only TypeScript test code from an agent response."""
@@ -756,9 +1197,6 @@ When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dia
 - Wait for loading indicators to become hidden only when they are part of the verified page behavior; do not wait for generic network idle unless the page has no better durable signal.
 - If a control is disabled until data loads or validation completes, assert `await expect(control).toBeEnabled()` before interacting.
 - Keep assertions tied to user-visible outcomes from the spec or verified plan; do not replace missing assertions with generic `body` visibility.
-
-## Cleanup (IMPORTANT)
-After writing the test file, call `browser_close` to close the browser before finishing.
 
 ## Output
 

@@ -1458,6 +1458,38 @@ def test_agent_runner_includes_guardrail_sdk_options_when_supported(monkeypatch)
     assert kwargs["max_turns"] == 3
 
 
+def test_agent_runner_maps_advanced_sdk_options_when_supported(tmp_path):
+    sandbox = {"enabled": True, "allowUnsandboxedCommands": False}
+    runner = _AgentRunner(
+        allowed_tools=["Read"],
+        cwd=tmp_path,
+        fallback_model="claude-fallback",
+        reasoning_budget=2048,
+        include_partial_messages=True,
+        max_buffer_size=123456,
+        betas=["context-1m-2025-08-07"],
+        user="operator@example.test",
+        permission_prompt_tool_name="permission_prompt",
+        enable_file_checkpointing=True,
+        sandbox=sandbox,
+        log_tools=False,
+    )
+
+    kwargs = runner._claude_options_kwargs()
+
+    assert kwargs["cwd"] == tmp_path
+    assert kwargs["fallback_model"] == "claude-fallback"
+    assert kwargs["max_thinking_tokens"] == 2048
+    assert kwargs["include_partial_messages"] is True
+    assert kwargs["max_buffer_size"] == 123456
+    assert kwargs["betas"] == ["context-1m-2025-08-07"]
+    assert kwargs["user"] == "operator@example.test"
+    assert kwargs["permission_prompt_tool_name"] == "permission_prompt"
+    assert kwargs["enable_file_checkpointing"] is True
+    assert kwargs["sandbox"] is sandbox
+    assert runner._requires_direct_sdk_execution() is True
+
+
 @pytest.mark.asyncio
 async def test_agent_runner_adds_browser_dialog_policy_to_direct_prompt(monkeypatch):
     captured: dict[str, str] = {}

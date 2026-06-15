@@ -829,8 +829,8 @@ async def _check_target_connectivity(url: str) -> str | None:
 
 async def run_exploration_session(session_id: str, request_body: ExplorationStartRequest, user_key: str = "system") -> None:
     """Run the persisted exploration pipeline for an already-created session."""
-    from agents.exploratory_agent import ExploratoryAgent
-    from memory.exploration_store import get_exploration_store
+    from orchestrator.agents.exploratory_agent import ExploratoryAgent
+    from orchestrator.memory.exploration_store import get_exploration_store
 
     store = get_exploration_store(project_id=request_body.project_id)
     pool = await get_browser_pool()
@@ -1071,7 +1071,7 @@ async def start_exploration(
     - Rate: 5 requests/minute
     - Global: bounded by BrowserResourcePool slots
     """
-    from agents.exploratory_agent import ExploratoryAgent
+    from orchestrator.agents.exploratory_agent import ExploratoryAgent
 
     # Sweep completed tasks before any checks
     _sweep_done_tasks()

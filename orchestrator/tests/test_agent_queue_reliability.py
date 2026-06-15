@@ -212,6 +212,16 @@ def test_agent_task_round_trips_execution_telemetry():
         max_budget_usd=0.25,
         task_budget={"total": 25000},
         include_hook_events=True,
+        include_partial_messages=True,
+        output_format={"type": "json_schema", "schema": {"type": "object"}},
+        fallback_model="claude-fallback",
+        reasoning_budget=2048,
+        max_buffer_size=123456,
+        betas=["context-1m-2025-08-07"],
+        user="operator@example.test",
+        permission_prompt_tool_name="permission_prompt",
+        enable_file_checkpointing=True,
+        sandbox={"enabled": True, "allowUnsandboxedCommands": False},
         owner_type="autopilot",
         owner_id="autopilot-test",
         owner_label="AutoPilot test",
@@ -237,6 +247,16 @@ def test_agent_task_round_trips_execution_telemetry():
     assert restored.max_budget_usd == 0.25
     assert restored.task_budget == {"total": 25000}
     assert restored.include_hook_events is True
+    assert restored.include_partial_messages is True
+    assert restored.output_format == {"type": "json_schema", "schema": {"type": "object"}}
+    assert restored.fallback_model == "claude-fallback"
+    assert restored.reasoning_budget == 2048
+    assert restored.max_buffer_size == 123456
+    assert restored.betas == ["context-1m-2025-08-07"]
+    assert restored.user == "operator@example.test"
+    assert restored.permission_prompt_tool_name == "permission_prompt"
+    assert restored.enable_file_checkpointing is True
+    assert restored.sandbox == {"enabled": True, "allowUnsandboxedCommands": False}
     assert restored.owner_type == "autopilot"
     assert restored.owner_id == "autopilot-test"
     assert restored.owner_label == "AutoPilot test"
@@ -285,6 +305,96 @@ def test_agent_worker_filters_mcp_tools_from_claude_cli_tools():
     ) == ["Read", "Bash"]
     assert AgentWorker._builtin_cli_tools(["mcp__playwright-test__planner_setup_page"]) == []
     assert AgentWorker._builtin_cli_tools([]) == []
+
+
+def test_agent_worker_reports_sdk_only_options_unsupported_in_cli_queue():
+    task = AgentTask(
+        id="agent-sdk-only",
+        prompt="run",
+        reasoning_budget=1024,
+        max_buffer_size=4096,
+        user="user@example.test",
+        permission_prompt_tool_name="permission_prompt",
+        enable_file_checkpointing=True,
+        sandbox={"enabled": True},
+    )
+
+    assert AgentWorker._unsupported_cli_options(task) == [
+        "reasoning_budget/max_thinking_tokens",
+        "max_buffer_size",
+        "user",
+        "permission_prompt_tool_name",
+        "enable_file_checkpointing",
+        "sandbox",
+    ]
+
+
+def test_agent_worker_cli_args_preserve_supported_sdk_options(monkeypatch, tmp_path):
+    from orchestrator.services import agent_worker as worker_module
+
+    captured: dict[str, list[str]] = {}
+
+    class _Stdout:
+        def readline(self):
+            return b""
+
+        def close(self):
+            return None
+
+    class _FakeProc:
+        pid = 12345
+        returncode = 0
+        stdout = _Stdout()
+
+        def poll(self):
+            return 0
+
+        def wait(self):
+            return 0
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = list(args)
+        captured["cwd"] = kwargs.get("cwd")
+        return _FakeProc()
+
+    worker = AgentWorker.__new__(AgentWorker)
+    worker.cwd = str(tmp_path)
+    worker._process_lock = threading.Lock()
+    worker._running_processes = {}
+    worker._cancelled_task_ids = set()
+    worker._pause_lock = threading.Lock()
+    worker._paused_task_ids = set()
+    worker._pause_started_at = {}
+    worker._paused_duration_seconds = {}
+    worker._progress_lock = threading.Lock()
+    worker._current_progress = AgentWorker._empty_progress()
+    worker._last_execution_telemetry = {}
+    worker._parse_cli_output = lambda raw: "parsed"
+
+    monkeypatch.setattr(worker_module.subprocess, "Popen", fake_popen)
+
+    result = worker._run_cli_sync(
+        task_id="agent-cli-options",
+        prompt="return json",
+        cwd=str(tmp_path),
+        allowed_tools=["Read"],
+        tools=["Read"],
+        permission_mode="dontAsk",
+        include_hook_events=True,
+        include_partial_messages=True,
+        output_format={"type": "json_schema", "schema": {"type": "object"}},
+        fallback_model="claude-fallback",
+        betas=["context-1m-2025-08-07"],
+    )
+
+    args = captured["args"]
+    assert result == "parsed"
+    assert captured["cwd"] == str(tmp_path)
+    assert args[args.index("--fallback-model") + 1] == "claude-fallback"
+    assert args[args.index("--betas") + 1] == "context-1m-2025-08-07"
+    assert "--include-hook-events" in args
+    assert "--include-partial-messages" in args
+    assert json.loads(args[args.index("--json-schema") + 1]) == {"type": "object"}
 
 
 @pytest.mark.asyncio

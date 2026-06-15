@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.workflows.full_native_pipeline import FullNativePipeline, TestResult
 from orchestrator.services.handoff_manifest import init_manifest, record_artifact
+from orchestrator.utils.agent_runner import AgentResult
 
 
 def _bare_pipeline() -> FullNativePipeline:
@@ -36,6 +37,57 @@ def test_build_attempt_context_summarizes_attempts():
 
     assert "Attempt 1: changed the test file (+3 -1); still failed [selector]." in context
     assert "Most recent healer summary: Replaced #submit with getByRole" in context
+
+
+@pytest.mark.asyncio
+async def test_pipeline_debug_validates_planner_draft_before_handoff(
+    tmp_path, monkeypatch
+):
+    captured: dict = {}
+    draft_path = tmp_path / "plan.draft.spec.ts"
+    draft_path.write_text(
+        "import { test, expect } from '@playwright/test';\n"
+        "test('draft', async ({ page }) => {\n"
+        "  await expect(page.locator('body')).toBeVisible();\n"
+        "});\n"
+    )
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def run(self, prompt):
+            captured["prompt"] = prompt
+            return AgentResult(
+                success=True,
+                output="planner_draft_debug_status: passed\nroot_cause: none",
+            )
+
+    monkeypatch.setattr(
+        "orchestrator.workflows.full_native_pipeline.AgentRunner", FakeRunner
+    )
+    pipeline = _bare_pipeline()
+    pipeline.on_tool_use = None
+    pipeline.on_progress = None
+    pipeline.on_task_enqueued = None
+    pipeline.owner_type = "test_run"
+    pipeline.owner_id = "run-1"
+    pipeline.owner_label = "Run 1"
+    pipeline.model_tier = "tool_deep"
+    pipeline.test_data_env_vars = {}
+
+    result = await pipeline._debug_validate_planner_draft_script(
+        draft_path=draft_path,
+        run_dir=tmp_path,
+        browser="chromium",
+    )
+
+    assert result["attempted"] is True
+    assert result["status"] == "passed"
+    assert "test_debug" in captured["prompt"]
+    assert any(tool.endswith("__test_debug") for tool in captured["allowed_tools"])
+    assert captured["cwd"] == tmp_path
+    assert captured["preserve_browser_on_failure"] is True
 
 
 def test_build_attempt_context_warns_on_repeated_category():
@@ -218,7 +270,7 @@ async def test_native_healing_includes_manifest_draft_context(tmp_path, monkeypa
     assert "getByRole('button', { name: 'Save' })" in heal_calls[0]["error_log"]
 
 
-def test_selector_guardrail_requires_test_run_and_snapshot_or_locator():
+def test_selector_guardrail_requires_failure_debug_and_snapshot_or_locator():
     pipeline = _bare_pipeline()
     before = "import { test, expect } from '@playwright/test';\ntest('x', async ({ page }) => { await expect(page.locator('#old')).toBeVisible(); });"
     after = before.replace("#old", "#new")
@@ -230,12 +282,12 @@ def test_selector_guardrail_requires_test_run_and_snapshot_or_locator():
         error_category="selector",
     )
     assert missing_test_run["guardrail_status"] == "failed"
-    assert "test_run" in missing_test_run["missing_required_tools"]
+    assert "test_debug_or_test_run" in missing_test_run["missing_required_tools"]
 
     missing_snapshot = pipeline._evaluate_healer_guardrails(
         content_before=before,
         content_after=after,
-        tool_calls=[{"name": "mcp__playwright-test__test_run", "tool": "test_run"}],
+        tool_calls=[{"name": "mcp__playwright-test__test_debug", "tool": "test_debug"}],
         error_category="selector",
     )
     assert missing_snapshot["guardrail_status"] == "failed"
@@ -245,12 +297,24 @@ def test_selector_guardrail_requires_test_run_and_snapshot_or_locator():
         content_before=before,
         content_after=after,
         tool_calls=[
-            {"name": "mcp__playwright-test__test_run", "tool": "test_run"},
+            {"name": "mcp__playwright-test__test_debug", "tool": "test_debug"},
             {"name": "mcp__playwright-test__browser_generate_locator", "tool": "browser_generate_locator"},
         ],
         error_category="selector",
     )
     assert ok["guardrail_status"] == "passed"
+    assert ok["used_failure_state_tool"] is True
+
+    legacy_test_run_ok = pipeline._evaluate_healer_guardrails(
+        content_before=before,
+        content_after=after,
+        tool_calls=[
+            {"name": "mcp__playwright-test__test_run", "tool": "test_run"},
+            {"name": "mcp__playwright-test__browser_generate_locator", "tool": "browser_generate_locator"},
+        ],
+        error_category="selector",
+    )
+    assert legacy_test_run_ok["guardrail_status"] == "passed"
 
 
 def test_selector_guardrail_requires_scoped_test_run_when_metadata_exists():
@@ -267,7 +331,7 @@ def test_selector_guardrail_requires_scoped_test_run_when_metadata_exists():
         content_before=before,
         content_after=after,
         tool_calls=[
-            {"name": "mcp__playwright-test__test_run", "tool": "test_run", "input": {"file": "tests/generated/foo.spec.ts"}},
+            {"name": "mcp__playwright-test__test_debug", "tool": "test_debug", "input": {"file": "tests/generated/foo.spec.ts"}},
             {"name": "mcp__playwright-test__browser_snapshot", "tool": "browser_snapshot"},
         ],
         error_category="selector",
@@ -282,8 +346,8 @@ def test_selector_guardrail_requires_scoped_test_run_when_metadata_exists():
         content_after=after,
         tool_calls=[
             {
-                "name": "mcp__playwright-test__test_run",
-                "tool": "test_run",
+                "name": "mcp__playwright-test__test_debug",
+                "tool": "test_debug",
                 "input": {
                     "file": "tests/generated/foo.spec.ts",
                     "project": "chromium",

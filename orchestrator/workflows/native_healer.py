@@ -65,8 +65,8 @@ class NativeHealer:
     Playwright Test Healer that automatically fixes failing tests.
 
     Flow:
-    1. Run test_run to identify failing tests
-    2. Analyze the error output from test_run
+    1. Use test_debug to reproduce the exact failing test state
+    2. Analyze the paused failure state with browser evidence
     3. Use diagnostic tools (browser_snapshot, console_messages, network_requests) if needed
     4. Edit the test code to fix the issue
     5. Re-run to verify the fix
@@ -434,19 +434,20 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 
 ## Your Workflow
 
-1. **Reproduce the exact failed state first**: Your first MCP tool call must be `test_run`, scoped to this file, browser/project `{browser or "the failed project"}`, and title `{failed_title or "the failed title"}` when the tool supports a title/grep filter.
-2. **Capture failure-state evidence before editing**: After the failing `test_run`, use `browser_resume` if it is available. If it is not available or cannot attach to the failed browser state, use `browser_snapshot`.
-3. **Use category-specific evidence before editing**:
+1. **Identify the exact failed test first**: If the failed test id/title is present in the metadata above, use it. If it is unknown or ambiguous, call `test_list` scoped to this file and browser/project `{browser or "the failed project"}` to find the matching failed test id/title before debugging.
+2. **Reproduce the exact failed state with `test_debug`**: When an exact failed test id/title is known, call `test_debug` scoped to this file, browser/project `{browser or "the failed project"}`, and title/id `{failed_title or "the failed title"}`. `test_debug` is the failure-state capture path because it pauses on the failed test state.
+3. **Capture failure-state evidence before editing**: Only after `test_debug` has paused, use `browser_snapshot`, `browser_console_messages`, `browser_network_requests`, `browser_generate_locator`, or tracing tools as needed. Use `browser_resume` only if the debug session asks you to continue from the paused state.
+4. **Use category-specific evidence before editing**:
    - Selector or timing failures: use `browser_snapshot` or `browser_generate_locator` before changing selectors, waits, or assertions.
    - Authentication, test-data, API, or server failures: use `browser_network_requests` or `browser_console_messages` before changing setup, data, navigation, or assertions.
-4. **Analyze the error**: Parse the error output from `test_run` (error message, stack trace, failed assertions) and compare it to the browser evidence.
-5. **Diagnose**: Determine the root cause:
+5. **Analyze the error**: Parse the previous error output and `test_debug` failure details (error message, stack trace, failed assertions) and compare them to the paused browser evidence.
+6. **Diagnose**: Determine the root cause:
    - Element selectors that may have changed
    - Timing and synchronization issues
    - Assertion failures
    - Data dependencies
-6. **Fix the code**: Use `Edit` or `MultiEdit` to update the test only after the evidence above is captured.
-7. **Verify**: Run the test again with `test_run` to confirm the fix.
+7. **Fix the code**: Use `Edit` or `MultiEdit` to update the test only after the evidence above is captured.
+8. **Verify**: Run the test again with `test_run` to confirm the fix.
 
 ## Dialog Handling (CRITICAL)
 When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dialogs):
@@ -464,11 +465,7 @@ When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dia
 - If a test cannot be fixed, mark it with `test.fixme()` and explain why
 - Never use deprecated APIs like `waitForNetworkIdle`
 
-## Cleanup (IMPORTANT)
-After you have finished verifying the fix (or determined the test cannot be fixed),
-call `browser_close` to close the browser before finishing.
-
-Start with the exact scoped `test_run`.
+Start with `test_list` only if needed to identify the failed test. Otherwise start with the exact scoped `test_debug`.
 """
         metadata = build_prompt_metadata(
             prompt_id="native_healer.playwright",
@@ -742,6 +739,7 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
                 inject_memory=False,
                 env_vars=self.env_vars,
                 cwd=self.cwd,
+                preserve_browser_on_failure=True,
             )
             result = await runner.run(prompt)
             self.last_agent_result = result

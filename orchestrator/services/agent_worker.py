@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 import time
+from importlib.util import find_spec
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -51,8 +52,26 @@ from orchestrator.services.browser_pool import get_browser_pool
 from orchestrator.utils.browser_cleanup import kill_autopilot_process_tree, kill_test_run_process_tree
 from orchestrator.utils.token_budget import build_agent_token_telemetry, extract_provider_usage
 
+def _resolve_claude_cli_path() -> str:
+    """Resolve the bundled Claude CLI from the active Python environment."""
+    try:
+        import claude_agent_sdk
+
+        cli_path = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
+        if cli_path.exists():
+            return str(cli_path)
+    except Exception:
+        pass
+    spec = find_spec("claude_agent_sdk")
+    if spec and spec.origin:
+        cli_path = Path(spec.origin).parent / "_bundled" / "claude"
+        if cli_path.exists():
+            return str(cli_path)
+    return "/usr/local/lib/python3.10/dist-packages/claude_agent_sdk/_bundled/claude"
+
+
 # Claude CLI path
-CLAUDE_CLI_PATH = "/usr/local/lib/python3.10/dist-packages/claude_agent_sdk/_bundled/claude"
+CLAUDE_CLI_PATH = _resolve_claude_cli_path()
 
 # State-changing tools that count as logical "interactions"
 # (vs. observation tools like snapshot/evaluate/screenshot)
@@ -905,6 +924,23 @@ class AgentWorker:
         """Return Claude CLI built-in tools, excluding MCP tool names."""
         return [str(tool) for tool in tools if not str(tool).startswith("mcp__")]
 
+    @staticmethod
+    def _unsupported_cli_options(task: AgentTask) -> list[str]:
+        unsupported: list[str] = []
+        if task.reasoning_budget is not None:
+            unsupported.append("reasoning_budget/max_thinking_tokens")
+        if task.max_buffer_size is not None:
+            unsupported.append("max_buffer_size")
+        if task.user:
+            unsupported.append("user")
+        if task.permission_prompt_tool_name:
+            unsupported.append("permission_prompt_tool_name")
+        if task.enable_file_checkpointing:
+            unsupported.append("enable_file_checkpointing")
+        if task.sandbox:
+            unsupported.append("sandbox")
+        return unsupported
+
     def _parent_test_run_slot_id(self, task: AgentTask) -> str | None:
         """Return the parent test-run slot id for a queued child agent, if any."""
         parent_owner_type = (
@@ -975,6 +1011,18 @@ class AgentWorker:
         browser_slot_request_id = None
         browser_slot_acquired = False
         try:
+            unsupported_cli_options = self._unsupported_cli_options(task)
+            if unsupported_cli_options:
+                error = (
+                    "Queued Claude CLI execution does not support SDK-only option(s): "
+                    + ", ".join(unsupported_cli_options)
+                    + ". Route this run through direct SDK execution."
+                )
+                telemetry = self._build_task_telemetry(task, 0, error_type="unsupported_cli_options")
+                await self.queue.submit_result(task.id, "", success=False, error=error, telemetry=telemetry)
+                _result_submitted = True
+                return
+
             if self._task_requires_browser_slot(task):
                 browser_pool = await get_browser_pool()
                 parent_slot_id = self._parent_test_run_slot_id(task)
@@ -1149,9 +1197,13 @@ class AgentWorker:
                         max_budget_usd=task.max_budget_usd,
                         task_budget=task.task_budget,
                         include_hook_events=task.include_hook_events,
+                        include_partial_messages=task.include_partial_messages,
+                        output_format=task.output_format,
                         resume_session_id=task.resume_session_id,
                         continue_conversation=task.continue_conversation,
                         max_turns=task.max_turns,
+                        fallback_model=task.fallback_model,
+                        betas=task.betas,
                         owner_type=task.owner_type,
                         owner_id=task.owner_id,
                     )
@@ -1591,9 +1643,13 @@ class AgentWorker:
         max_budget_usd: float | None = None,
         task_budget: dict[str, int] | None = None,
         include_hook_events: bool = False,
+        include_partial_messages: bool = False,
+        output_format: dict[str, object] | None = None,
         resume_session_id: str | None = None,
         continue_conversation: bool = False,
         max_turns: int | None = None,
+        fallback_model: str | None = None,
+        betas: list[str] | None = None,
         owner_type: str | None = None,
         owner_id: str | None = None,
     ) -> str:
@@ -1619,9 +1675,13 @@ class AgentWorker:
             max_budget_usd,
             task_budget,
             include_hook_events,
+            include_partial_messages,
+            output_format,
             resume_session_id,
             continue_conversation,
             max_turns,
+            fallback_model,
+            betas,
             owner_type,
             owner_id,
         )
@@ -1643,9 +1703,13 @@ class AgentWorker:
         max_budget_usd: float | None = None,
         task_budget: dict[str, int] | None = None,
         include_hook_events: bool = False,
+        include_partial_messages: bool = False,
+        output_format: dict[str, object] | None = None,
         resume_session_id: str | None = None,
         continue_conversation: bool = False,
         max_turns: int | None = None,
+        fallback_model: str | None = None,
+        betas: list[str] | None = None,
         owner_type: str | None = None,
         owner_id: str | None = None,
     ) -> str:
@@ -1741,6 +1805,11 @@ class AgentWorker:
         if selected_model:
             cli_args.extend(["--model", selected_model])
             logger.info(f"[CLI]   Model: {selected_model}")
+        if fallback_model:
+            cli_args.extend(["--fallback-model", fallback_model])
+            logger.info("[CLI]   Fallback model configured")
+        if betas:
+            cli_args.extend(["--betas", ",".join(str(beta) for beta in betas)])
         if resume_session_id:
             cli_args.extend(["--resume", resume_session_id])
             logger.info("[CLI]   Resuming Claude session")
@@ -1766,6 +1835,13 @@ class AgentWorker:
             )
         if include_hook_events:
             cli_args.append("--include-hook-events")
+        if include_partial_messages:
+            cli_args.append("--include-partial-messages")
+        if output_format:
+            schema = output_format.get("schema") if isinstance(output_format, dict) else None
+            if not schema:
+                raise RuntimeError("Queued Claude CLI structured output requires output_format.schema")
+            cli_args.extend(["--json-schema", json.dumps(schema)])
         cli_args.extend(
             [
                 "--permission-mode",

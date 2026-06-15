@@ -336,6 +336,7 @@ class AgentRunner:
         max_budget_usd: float | None = None,
         task_budget: dict[str, int] | None = None,
         include_hook_events: bool = False,
+        include_partial_messages: bool = False,
         output_format: dict[str, Any] | None = None,
         resume_session_id: str | None = None,
         continue_conversation: bool = False,
@@ -362,12 +363,20 @@ class AgentRunner:
         capture_memory: bool = True,
         force_direct_execution: bool = False,
         model: str | None = None,
+        fallback_model: str | None = None,
         model_tier: RuntimeModelTier | None = None,
         reasoning_budget: int | None = None,
+        max_buffer_size: int | None = None,
+        betas: list[str] | None = None,
+        user: str | None = None,
+        permission_prompt_tool_name: str | None = None,
+        enable_file_checkpointing: bool = False,
+        sandbox: dict[str, Any] | None = None,
         env_vars: dict[str, str] | None = None,
         trace_id: str | None = None,
         trace_prompt_hash: str | None = None,
         trace_agent_run_id: str | None = None,
+        preserve_browser_on_failure: bool = False,
     ):
         """
         Initialize the agent runner.
@@ -384,6 +393,7 @@ class AgentRunner:
             max_budget_usd: Optional per-run spend cap passed to Claude Code
             task_budget: Optional token budget, e.g. {"total": 50000}
             include_hook_events: Include hook lifecycle events in the SDK stream
+            include_partial_messages: Include partial stream chunks when supported
             output_format: Optional native SDK output format contract.
             resume_session_id: Optional Claude session ID to resume.
             continue_conversation: Continue the most recent Claude conversation when supported.
@@ -411,12 +421,21 @@ class AgentRunner:
             force_direct_execution: Bypass the Redis queue for this run even
                 when global queue mode is enabled.
             model: Optional model override for this run.
+            fallback_model: Optional fallback model for overloaded/unavailable primary models.
             model_tier: Optional canonical model tier for this run.
             reasoning_budget: Optional provider reasoning budget for compatible models.
+            max_buffer_size: Optional SDK stream buffer limit.
+            betas: Optional SDK/API beta headers.
+            user: Optional SDK user identifier for attribution.
+            permission_prompt_tool_name: Optional SDK permission prompt tool.
+            enable_file_checkpointing: Enable SDK file checkpoints for rewind-capable runs.
+            sandbox: Optional SDK sandbox settings.
             env_vars: Explicit environment variables to expose to direct and queued execution.
             trace_id: Optional deep trace ID for agent observability.
             trace_prompt_hash: Optional upstream prompt hash.
             trace_agent_run_id: AgentRun ID to link trace records and memory injection telemetry.
+            preserve_browser_on_failure: Leave child browser/MCP processes running
+                after failed or timed-out browser debug runs for post-failure inspection.
         """
         self.timeout_seconds = timeout_seconds
         self.allowed_tools = ["*"] if allowed_tools is None else allowed_tools
@@ -427,6 +446,7 @@ class AgentRunner:
         self.max_budget_usd = max_budget_usd
         self.task_budget = task_budget
         self.include_hook_events = include_hook_events
+        self.include_partial_messages = include_partial_messages
         self.output_format = output_format
         self.resume_session_id = resume_session_id
         self.continue_conversation = continue_conversation
@@ -453,12 +473,20 @@ class AgentRunner:
         self.capture_memory = capture_memory
         self.force_direct_execution = force_direct_execution
         self.model = model
+        self.fallback_model = fallback_model
         self.model_tier = model_tier if model_tier in {"light", "standard", "deep", "tool_deep", "chat", "embedding"} else self._infer_model_tier()
         self.reasoning_budget = reasoning_budget
+        self.max_buffer_size = max_buffer_size
+        self.betas = list(betas or [])
+        self.user = user
+        self.permission_prompt_tool_name = permission_prompt_tool_name
+        self.enable_file_checkpointing = enable_file_checkpointing
+        self.sandbox = sandbox
         self.env_vars = {str(key): str(value) for key, value in (env_vars or {}).items() if key and value is not None}
         self.trace_id = trace_id
         self.trace_prompt_hash = trace_prompt_hash
         self.trace_agent_run_id = trace_agent_run_id or owner_id
+        self.preserve_browser_on_failure = preserve_browser_on_failure
         self._last_memory_injected = False
         self._last_memory_context = ""
 
@@ -523,7 +551,19 @@ class AgentRunner:
                 "source_id": self.memory_source_id,
             },
             "requires_live_browser": self.requires_live_browser,
+            "preserve_browser_on_failure": self.preserve_browser_on_failure,
             "tool_permission_guard": bool(self.tool_permission_guard),
+            "sdk_options": {
+                "fallback_model": self.fallback_model,
+                "reasoning_budget": self.reasoning_budget,
+                "include_partial_messages": self.include_partial_messages,
+                "max_buffer_size": self.max_buffer_size,
+                "betas": list(self.betas),
+                "user": self.user,
+                "permission_prompt_tool_name": self.permission_prompt_tool_name,
+                "enable_file_checkpointing": self.enable_file_checkpointing,
+                "sandbox": bool(self.sandbox),
+            },
             "prompt": {
                 "provided": prompt is not None,
                 "hash": prompt_hash,
@@ -558,6 +598,18 @@ class AgentRunner:
                     str(tool) for tool in source if str(tool).startswith("mcp__")
                 )
         return requested
+
+    def _is_browser_mcp_run(self) -> bool:
+        if self.requires_live_browser:
+            return True
+        return any(str(tool).startswith("mcp__playwright") for tool in self._requested_mcp_tools())
+
+    def _should_preserve_browser_processes(self, result: AgentResult | None) -> bool:
+        if not self.preserve_browser_on_failure or not result:
+            return False
+        if result.cancelled or result.success:
+            return False
+        return self._is_browser_mcp_run()
 
     def _emit_progress(self, progress: dict[str, Any]) -> None:
         if not self.on_progress:
@@ -634,8 +686,12 @@ class AgentRunner:
             kwargs["max_budget_usd"] = self.max_budget_usd
         if self.task_budget is not None:
             kwargs["task_budget"] = self.task_budget
+        if self.cwd is not None and self._claude_options_accepts("cwd"):
+            kwargs["cwd"] = self.cwd
         if self.include_hook_events:
             kwargs["include_hook_events"] = True
+        if self.include_partial_messages and self._claude_options_accepts("include_partial_messages"):
+            kwargs["include_partial_messages"] = True
         if self.output_format is not None and self._claude_options_accepts("output_format"):
             kwargs["output_format"] = self.output_format
         if self.resume_session_id and self._claude_options_accepts("resume"):
@@ -646,6 +702,22 @@ class AgentRunner:
             kwargs["max_turns"] = self.max_turns
         if self.model:
             kwargs["model"] = self.model
+        if self.fallback_model and self._claude_options_accepts("fallback_model"):
+            kwargs["fallback_model"] = self.fallback_model
+        if self.reasoning_budget is not None and self._claude_options_accepts("max_thinking_tokens"):
+            kwargs["max_thinking_tokens"] = self.reasoning_budget
+        if self.max_buffer_size is not None and self._claude_options_accepts("max_buffer_size"):
+            kwargs["max_buffer_size"] = self.max_buffer_size
+        if self.betas and self._claude_options_accepts("betas"):
+            kwargs["betas"] = self.betas
+        if self.user and self._claude_options_accepts("user"):
+            kwargs["user"] = self.user
+        if self.permission_prompt_tool_name and self._claude_options_accepts("permission_prompt_tool_name"):
+            kwargs["permission_prompt_tool_name"] = self.permission_prompt_tool_name
+        if self.enable_file_checkpointing and self._claude_options_accepts("enable_file_checkpointing"):
+            kwargs["enable_file_checkpointing"] = True
+        if self.sandbox and self._claude_options_accepts("sandbox"):
+            kwargs["sandbox"] = self.sandbox
         if self.tool_permission_guard and self._claude_options_accepts("can_use_tool"):
             kwargs["can_use_tool"] = self.tool_permission_guard
 
@@ -669,6 +741,18 @@ class AgentRunner:
         if option_name in signature.parameters:
             return True
         return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+
+    def _requires_direct_sdk_execution(self) -> bool:
+        """Return true when a requested option has no queue/CLI equivalent."""
+        return bool(
+            self.tool_permission_guard
+            or self.reasoning_budget is not None
+            or self.max_buffer_size is not None
+            or self.user
+            or self.permission_prompt_tool_name
+            or self.enable_file_checkpointing
+            or self.sandbox
+        )
 
     def _infer_model_tier(self) -> RuntimeModelTier:
         tools = self._effective_tools()
@@ -825,6 +909,7 @@ class AgentRunner:
             AGENT_QUEUE_AVAILABLE
             and should_use_agent_queue()
             and not self.force_direct_execution
+            and not self._requires_direct_sdk_execution()
         ):
             logger.info(f"Using agent queue for execution (timeout={timeout}s)")
             queued_result = await self._run_via_queue(prompt, timeout)
@@ -1287,13 +1372,19 @@ class AgentRunner:
                 )
 
         finally:
-            # Always clean up orphaned browser/MCP processes after query
-            try:
-                killed = kill_new_children(pre_query_pids, grace_seconds=2.0)
-                if killed > 0:
-                    logger.info(f"Cleaned up {killed} orphaned browser/MCP process(es)")
-            except Exception:
-                pass  # Non-fatal - don't let cleanup errors mask real results
+            if self._should_preserve_browser_processes(agent_result):
+                logger.info(
+                    "Preserving browser/MCP child processes for failed debug inspection"
+                )
+            else:
+                # Clean up orphaned browser/MCP processes after successful, cancelled,
+                # and non-browser runs.
+                try:
+                    killed = kill_new_children(pre_query_pids, grace_seconds=2.0)
+                    if killed > 0:
+                        logger.info(f"Cleaned up {killed} orphaned browser/MCP process(es)")
+                except Exception:
+                    pass  # Non-fatal - don't let cleanup errors mask real results
 
         if self.session_dir and agent_result and not debug_output_saved:
             self._save_debug_output(agent_result.output, agent_result.tool_calls, agent_result.messages_received)
@@ -1425,6 +1516,32 @@ class AgentRunner:
             "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
             "PLAYWRIGHT_MCP_EXECUTABLE_PATH",
             "QUORVEX_TEST_DATA_FILE",
+            "CLAUDE_CODE_ENABLE_TELEMETRY",
+            "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
+            "ENABLE_ENHANCED_TELEMETRY_BETA",
+            "CLAUDE_CODE_PROPAGATE_TRACEPARENT",
+            "TRACEPARENT",
+            "TRACESTATE",
+            "OTEL_METRICS_EXPORTER",
+            "OTEL_LOGS_EXPORTER",
+            "OTEL_TRACES_EXPORTER",
+            "OTEL_EXPORTER_OTLP_PROTOCOL",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL",
+            "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+            "OTEL_METRIC_EXPORT_INTERVAL",
+            "OTEL_LOGS_EXPORT_INTERVAL",
+            "OTEL_TRACES_EXPORT_INTERVAL",
+            "OTEL_SERVICE_NAME",
+            "OTEL_RESOURCE_ATTRIBUTES",
+            "OTEL_LOG_USER_PROMPTS",
+            "OTEL_LOG_TOOL_DETAILS",
+            "OTEL_LOG_TOOL_CONTENT",
         ]
         env_vars: dict[str, str] = {}
         for key in keys:
@@ -1579,10 +1696,13 @@ class AgentRunner:
                 max_budget_usd=self.max_budget_usd,
                 task_budget=self.task_budget,
                 include_hook_events=self.include_hook_events,
+                include_partial_messages=self.include_partial_messages,
                 output_format=self.output_format,
                 resume_session_id=self.resume_session_id,
                 continue_conversation=self.continue_conversation,
                 max_turns=self.max_turns,
+                fallback_model=self.fallback_model,
+                betas=self.betas,
                 owner_type=owner_type,
                 owner_id=owner_id,
                 owner_label=owner_label,

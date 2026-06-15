@@ -1812,14 +1812,14 @@ export default function SettingsPage() {
                             </span>
                         </div>
                         <p className="helper-text">
-                            Maximum concurrent browser operations across tests, agents, exploration, PRD, and autonomous missions (1-5).
+                            Hard cap for Quorvex-owned browser sessions across tests, agents, exploration, PRD, security, browser auth, AutoPilot, and autonomous missions (1-5).
                             {!executionSettings.parallel_mode_available && executionSettings.parallelism > 1 && (
                                 <span style={{ color: 'var(--warning)', display: 'block', marginTop: '0.25rem' }}>
                                     PostgreSQL required for parallelism &gt; 1
                                 </span>
                             )}
                             <span style={{ display: 'block', marginTop: '0.25rem' }}>
-                                Worker process and container counts are deployment capacity and are not scaled by this control.
+                                Feature-specific parallelism controls schedule local work only; worker process and container counts are deployment capacity.
                             </span>
                         </p>
                     </div>

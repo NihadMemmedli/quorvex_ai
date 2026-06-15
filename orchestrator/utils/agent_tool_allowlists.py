@@ -57,6 +57,7 @@ EXPLORER_MCP_TOOLS: tuple[str, ...] = EXPLORER_ADVANCED_MCP_TOOLS
 PLANNER_MCP_TOOLS: tuple[str, ...] = EXPLORER_MCP_TOOLS + (
     "planner_setup_page",
     "planner_save_plan",
+    "test_debug",
 )
 
 PRD_LIVE_PLANNER_MCP_TOOLS: tuple[str, ...] = (
@@ -69,6 +70,7 @@ PRD_LIVE_PLANNER_MCP_TOOLS: tuple[str, ...] = (
     "browser_wait_for",
     "browser_handle_dialog",
     "browser_take_screenshot",
+    "test_debug",
 )
 
 PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS: tuple[str, ...] = (
@@ -86,14 +88,17 @@ PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS: tuple[str, ...] = (
 
 GENERATOR_MCP_TOOLS: tuple[str, ...] = (
     "browser_click",
-    "browser_close",
+    "browser_console_messages",
     "browser_drag",
     "browser_evaluate",
     "browser_file_upload",
+    "browser_generate_locator",
     "browser_handle_dialog",
     "browser_hover",
     "browser_navigate",
+    "browser_network_requests",
     "browser_press_key",
+    "browser_resume",
     "browser_select_option",
     "browser_snapshot",
     "browser_type",
@@ -105,10 +110,11 @@ GENERATOR_MCP_TOOLS: tuple[str, ...] = (
     "generator_read_log",
     "generator_setup_page",
     "generator_write_test",
+    "test_debug",
+    "test_run",
 )
 
 HEALER_MCP_TOOLS: tuple[str, ...] = (
-    "browser_close",
     "browser_console_messages",
     "browser_evaluate",
     "browser_generate_locator",
@@ -118,6 +124,7 @@ HEALER_MCP_TOOLS: tuple[str, ...] = (
     "browser_snapshot",
     "browser_start_tracing",
     "browser_stop_tracing",
+    "test_debug",
     "test_list",
     "test_run",
 )

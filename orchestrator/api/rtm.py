@@ -52,6 +52,10 @@ def _ensure_job_project(job_project_id: str | None, project_id: str) -> None:
         raise HTTPException(status_code=404, detail="Job not found")
 
 
+def _normalize_direct_project_id(project_id) -> str:
+    return project_id if isinstance(project_id, str) else "default"
+
+
 # ========== Pydantic Models ==========
 
 
@@ -347,6 +351,8 @@ async def generate_rtm(
 async def get_rtm_generate_job_status(job_id: str, project_id: str = Query(...)):
     """Poll RTM generation job status."""
     from orchestrator.services.domain_jobs import domain_job_to_dict, get_domain_job
+
+    project_id = _normalize_direct_project_id(project_id)
 
     durable_job = get_domain_job(job_id)
     if durable_job and durable_job.job_type == "rtm_generate":

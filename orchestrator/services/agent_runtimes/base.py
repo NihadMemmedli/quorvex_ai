@@ -43,6 +43,7 @@ class AgentRuntimeContext:
     max_budget_usd: float | None = None
     task_budget: dict[str, int] | None = None
     include_hook_events: bool = False
+    include_partial_messages: bool = False
     output_format: dict[str, Any] | None = None
     resume_session_id: str | None = None
     continue_conversation: bool = False
@@ -61,8 +62,15 @@ class AgentRuntimeContext:
     capture_memory: bool = True
     force_direct_execution: bool = False
     model: str | None = None
+    fallback_model: str | None = None
     model_tier: str | None = None
     reasoning_budget: int | None = None
+    max_buffer_size: int | None = None
+    betas: list[str] | None = None
+    user: str | None = None
+    permission_prompt_tool_name: str | None = None
+    enable_file_checkpointing: bool = False
+    sandbox: dict[str, Any] | None = None
     env_vars: dict[str, str] | None = None
     agent_name: str | None = None
     hermes_profile: str | None = None
@@ -73,6 +81,7 @@ class AgentRuntimeContext:
     agent_run_id: str | None = None
     on_task_enqueued: Callable[[str], None] | None = None
     on_tool_use: Callable[[str, dict[str, Any]], None] | None = None
+    tool_permission_guard: Callable[[str, dict[str, Any], Any], Any] | None = None
     on_progress: Callable[[dict[str, Any]], None] | None = None
     is_cancelled: Callable[[], Any] | None = None
 

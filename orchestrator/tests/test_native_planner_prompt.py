@@ -24,6 +24,7 @@ def test_planner_prompt_instructs_seed_file_for_setup():
     assert "## Draft Playwright Script" in prompt
     assert "Do not use `page.waitForTimeout()`" in prompt
     assert "await expect(...).toBeVisible()" in prompt
+    assert "runs `test_debug` on it before handing it to the generator" in prompt
     assert "Do not call `browser_close`" in prompt
     assert "handle browser cleanup after acceptance or final failure" in prompt
 
@@ -57,3 +58,4 @@ def test_planner_agent_definition_requires_draft_playwright_script():
     assert "## Draft Playwright Script" in content
     assert "Use Playwright web-first assertions" in content
     assert "Do not include `page.waitForTimeout()`" in content
+    assert "runs `test_debug` on it before generator handoff" in content

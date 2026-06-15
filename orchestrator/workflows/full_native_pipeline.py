@@ -47,8 +47,6 @@ config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
 if config_dir:
     os.chdir(config_dir)
 
-from utils.browser_cleanup import cleanup_orphaned_browsers
-from utils.agent_runner import AgentRunner
 from orchestrator.services.handoff_manifest import (
     init_manifest,
     load_manifest,
@@ -57,6 +55,8 @@ from orchestrator.services.handoff_manifest import (
     record_stage,
     validate_artifact,
 )
+from utils.agent_runner import AgentRunner, build_allowed_tools
+from utils.browser_cleanup import cleanup_orphaned_browsers
 from utils.playwright_mcp import (
     playwright_config_cli_arg,
     prepare_run_playwright_config_content,
@@ -196,6 +196,81 @@ class FullNativePipeline:
             env_vars = getattr(agent, "env_vars", None)
             if isinstance(env_vars, dict):
                 env_vars["AGENT_COST_LOG"] = cost_log
+
+    async def _debug_validate_planner_draft_script(
+        self,
+        *,
+        draft_path: Path,
+        run_dir: Path,
+        browser: str,
+    ) -> dict[str, Any]:
+        """Run test_debug on the planner draft before generator handoff."""
+        if not draft_path.exists():
+            return {"attempted": False, "status": "missing", "path": str(draft_path)}
+
+        prompt = f"""Run `test_debug` on this planner draft Playwright script before generator handoff.
+
+Test path: {draft_path}
+Browser/project: {browser}
+
+Rules:
+- Call `test_debug` for exactly this file and browser/project.
+- Do not edit files.
+- Do not run unrelated tests.
+- If it fails, inspect only the paused failure summary needed for handoff metadata.
+
+Final response fields:
+planner_draft_debug_status: passed | failed
+root_cause: one concise sentence, or "none" if passed
+"""
+        timeout = int(os.environ.get("PLANNER_DRAFT_DEBUG_TIMEOUT_SECONDS", "180"))
+        try:
+            runner = AgentRunner(
+                timeout_seconds=timeout,
+                allowed_tools=build_allowed_tools(
+                    ["Read"],
+                    ["test_debug"],
+                    mcp_config_dir=run_dir,
+                ),
+                log_tools=True,
+                on_tool_use=self.on_tool_use,
+                on_progress=self.on_progress,
+                on_task_enqueued=self.on_task_enqueued,
+                cwd=run_dir,
+                owner_type=self.owner_type,
+                owner_id=self.owner_id,
+                owner_label=self.owner_label,
+                requires_live_browser=True,
+                model_tier=self.model_tier,
+                env_vars=getattr(self, "test_data_env_vars", {}),
+                inject_memory=False,
+                capture_memory=False,
+                force_direct_execution=True,
+                preserve_browser_on_failure=True,
+            )
+            result = await runner.run(prompt)
+            output = result.output or ""
+            status = "passed" if result.success and "failed" not in output.lower() else "failed"
+            return {
+                "attempted": True,
+                "status": status,
+                "path": str(draft_path),
+                "browser": browser,
+                "timed_out": result.timed_out,
+                "success": result.success,
+                "tool_calls": [call.name for call in result.tool_calls],
+                "output_preview": truncate_middle(output, head=1000, tail=1000),
+                **({"error": result.error} if result.error else {}),
+            }
+        except Exception as exc:
+            logger.warning("Planner draft test_debug validation failed: %s", exc)
+            return {
+                "attempted": True,
+                "status": "error",
+                "path": str(draft_path),
+                "browser": browser,
+                "error": str(exc),
+            }
 
     def _load_project_credentials(self):
         """Load project credentials into os.environ.
@@ -652,6 +727,11 @@ class FullNativePipeline:
                                 "Planner draft script created: %s",
                                 planner_draft_script_path,
                             )
+                            draft_debug = await self._debug_validate_planner_draft_script(
+                                draft_path=planner_draft_script_path,
+                                run_dir=run_dir,
+                                browser=browser,
+                            )
                             record_artifact(
                                 handoff_manifest_path,
                                 "planner_draft_script",
@@ -661,6 +741,7 @@ class FullNativePipeline:
                                 required=True,
                                 consumers=["generator", "healer"],
                                 validation_status="valid",
+                                metadata={"debug_validation": draft_debug},
                             )
                     planner_selectors = []
                     planner_selectors = extract_plan_selectors(plan_text, limit=30) if plan_text else []
@@ -802,6 +883,8 @@ class FullNativePipeline:
                 spec_path=str(resolved_spec_path),
                 target_url=target_url,
                 output_name=original_spec_name,
+                run_dir=run_dir,
+                browser=browser,
                 design_context=design_context,
                 memory_run_id=getattr(self, "_memory_run_id", None),
                 auth_context=auth_context,
@@ -841,6 +924,23 @@ class FullNativePipeline:
                 browser=browser,
                 test_type="browser",
             )
+            generated_test_metadata = dict(
+                getattr(self.native_generator, "last_handoff_consumption", {}) or {}
+            )
+            generator_self_run = (
+                getattr(self.native_generator, "last_self_run_result", None) or {}
+            )
+            if generator_self_run:
+                generated_test_metadata["generator_self_run_status"] = (
+                    generator_self_run.get("final_status")
+                )
+                generated_test_metadata["generator_self_heal_attempts"] = getattr(
+                    self.native_generator, "last_self_heal_attempts", 0
+                )
+                if getattr(self.native_generator, "last_self_heal_artifact_path", None):
+                    generated_test_metadata["generator_self_heal_artifact"] = str(
+                        self.native_generator.last_self_heal_artifact_path
+                    )
             record_artifact(
                 handoff_manifest_path,
                 "generated_test",
@@ -850,7 +950,7 @@ class FullNativePipeline:
                 required=True,
                 consumers=["test_run", "healer", "reporting"],
                 validation_status="pending_validation",
-                metadata=getattr(self.native_generator, "last_handoff_consumption", {}),
+                metadata=generated_test_metadata,
             )
             validation_status = validate_artifact(
                 handoff_manifest_path,
@@ -959,6 +1059,12 @@ class FullNativePipeline:
             self._write_run_metrics(
                 run_dir,
                 generation_success=True,
+                generator_self_run_status=(
+                    getattr(self.native_generator, "last_self_run_result", {}) or {}
+                ).get("final_status"),
+                generator_self_heal_attempts=getattr(
+                    self.native_generator, "last_self_heal_attempts", 0
+                ),
                 **generation_repair_metadata,
             )
             self._attribute_memory_outcome(
@@ -989,6 +1095,57 @@ class FullNativePipeline:
 
             # Safety-net: clean up any orphaned browsers from generator stage
             cleanup_orphaned_browsers()
+
+            generator_self_run = (
+                getattr(self.native_generator, "last_self_run_result", None) or {}
+            )
+            if getattr(self.native_generator, "last_self_heal_passed", False):
+                logger.info("Skipping initial pipeline test run; generator self-run already passed.")
+                record_stage(
+                    handoff_manifest_path,
+                    "test_run",
+                    status="passed",
+                    metadata={
+                        "exit_code": 0,
+                        "source": "generator_self_run",
+                        "generator_self_run_status": generator_self_run.get("final_status"),
+                        "generator_self_heal_attempts": getattr(
+                            self.native_generator, "last_self_heal_attempts", 0
+                        ),
+                    },
+                )
+                self._write_run_metrics(
+                    run_dir,
+                    initial_run_passed=True,
+                    healing_started=False,
+                    healing_attempts=0,
+                    heal_rescued=False,
+                    generator_self_run_status=generator_self_run.get("final_status"),
+                    generator_self_heal_attempts=getattr(
+                        self.native_generator, "last_self_heal_attempts", 0
+                    ),
+                )
+                stability_result = await self._verify_stability_or_harden(
+                    test_path=test_path,
+                    run_dir=run_dir,
+                    browser=browser,
+                    success_stage="completed",
+                    attempts=getattr(self.native_generator, "last_self_heal_attempts", 0),
+                )
+                if stability_result:
+                    self._write_run_metrics(run_dir, stable_first_pass=False)
+                    return stability_result
+                self._record_passing_selectors(test_path)
+                (run_dir / "status.txt").write_text("passed")
+                self._write_run_metrics(run_dir, stable_first_pass=True)
+                self._publish_agentic_summary(run_dir)
+                return {
+                    "success": True,
+                    "test_path": str(test_path),
+                    "attempts": getattr(self.native_generator, "last_self_heal_attempts", 0),
+                    "stage": "completed",
+                    "generator_self_run": generator_self_run,
+                }
 
             # Stage 3: Run test
             logger.info("Stage 3: Running test...")
@@ -1236,6 +1393,8 @@ class FullNativePipeline:
         spec_path: str,
         target_url: str,
         output_name: str | None = None,
+        run_dir: Path | None = None,
+        browser: str | None = None,
         design_context: str | None = None,
         memory_run_id: str | None = None,
         auth_context: dict[str, Any] | None = None,
@@ -1277,6 +1436,8 @@ class FullNativePipeline:
                 spec_path=spec_path,
                 target_url=target_url,
                 output_name=output_name,
+                self_run_browser=browser,
+                self_run_output_dir=run_dir,
                 design_context=design_context,
                 memory_run_id=memory_run_id,
                 auth_context=auth_context,
@@ -2047,6 +2208,7 @@ Requirements:
         changed = content_before != content_after
         missing: list[str] = []
         category = self._guardrail_category(error_category)
+        failure_state_tools = {"test_debug", "test_run"}
         scoped_test_run = self._scoped_test_run_status(
             tool_calls=tool_calls,
             failure_metadata=failure_metadata or {},
@@ -2054,10 +2216,10 @@ Requirements:
 
         if not changed:
             missing.append("non_noop_edit")
-        if changed and "test_run" not in tool_set:
-            missing.append("test_run")
-        if changed and tools and tools[0] != "test_run":
-            missing.append("first_tool_test_run")
+        if changed and not (failure_state_tools & tool_set):
+            missing.append("test_debug_or_test_run")
+        if changed and tools and tools[0] not in failure_state_tools:
+            missing.append("first_tool_test_debug_or_test_run")
         if changed and scoped_test_run["required"] and not scoped_test_run["scoped"]:
             missing.append("scoped_test_run")
         if changed and category in {"selector", "timing"} and not (
@@ -2087,6 +2249,7 @@ Requirements:
             if tool
             in {
                 "test_run",
+                "test_debug",
                 "browser_resume",
                 "browser_snapshot",
                 "browser_generate_locator",
@@ -2101,7 +2264,9 @@ Requirements:
             "first_tool": tools[0] if tools else None,
             "scoped_test_run": scoped_test_run,
             "mcp_evidence_tools_used": evidence_tools,
-            "used_failure_state_tool": bool({"browser_resume", "browser_snapshot"} & tool_set),
+            "used_failure_state_tool": bool(
+                {"test_debug", "browser_resume", "browser_snapshot"} & tool_set
+            ),
             "assertion_removed": assertion_removed,
             "test_fixme_explicit": fixme_explicit,
             "newly_introduced_test_fixme": newly_introduced_fixme,
@@ -2124,18 +2289,19 @@ Requirements:
         if not required_values:
             return {"required": False, "scoped": True, "missing": []}
 
-        test_run_call = next(
+        failure_state_call = next(
             (
                 call
                 for call in tool_calls
-                if self._normalized_tool_name(call.get("tool") or call.get("name")) == "test_run"
+                if self._normalized_tool_name(call.get("tool") or call.get("name"))
+                in {"test_debug", "test_run"}
             ),
             None,
         )
-        if not test_run_call:
+        if not failure_state_call:
             return {"required": True, "scoped": False, "missing": sorted(required_values)}
 
-        call_input = test_run_call.get("input") or test_run_call.get("arguments") or {}
+        call_input = failure_state_call.get("input") or failure_state_call.get("arguments") or {}
         missing = [
             key
             for key, value in required_values.items()
@@ -2277,7 +2443,12 @@ Requirements:
             stages = manifest.get("stages") if isinstance(manifest, dict) else {}
             if isinstance(artifacts, dict):
                 lines.append("## Handoff Manifest Context")
-                for artifact_id in ("planner_plan", "planner_draft_script", "generated_test"):
+                for artifact_id in (
+                    "planner_plan",
+                    "planner_draft_script",
+                    "generated_test",
+                    "generator_self_heal",
+                ):
                     artifact = artifacts.get(artifact_id)
                     if not isinstance(artifact, dict):
                         continue
@@ -2521,6 +2692,7 @@ Requirements:
                             if call.get("tool")
                             in {
                                 "test_run",
+                                "test_debug",
                                 "browser_resume",
                                 "browser_snapshot",
                                 "browser_generate_locator",
@@ -2529,7 +2701,8 @@ Requirements:
                             }
                         ],
                         "used_failure_state_tool": any(
-                            call.get("tool") in {"browser_resume", "browser_snapshot"}
+                            call.get("tool")
+                            in {"test_debug", "browser_resume", "browser_snapshot"}
                             for call in tool_calls
                         ),
                         "scoped_test_run": {"required": False, "scoped": True, "missing": []},

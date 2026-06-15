@@ -66,6 +66,9 @@ class OperationType(str, Enum):
     PRD = "prd"
     AUTOPILOT = "autopilot"
     COVERAGE = "coverage"
+    BROWSER_AUTH = "browser_auth"
+    SECURITY = "security"
+    AUTONOMOUS = "autonomous"
 
 
 class SlotStatus(str, Enum):
@@ -831,7 +834,7 @@ class RedisBrowserResourcePool(AbstractBrowserPool):
         queue_len = len(queue)
 
         # Get types for running requests
-        by_type = {}
+        by_type = {op_type.value: 0 for op_type in OperationType}
         # This part is a bit expensive (N lookups). Limit to logging/debug usage.
         # Use pipeline for efficiency.
         running_details = []

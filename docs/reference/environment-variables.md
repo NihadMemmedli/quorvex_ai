@@ -92,7 +92,7 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `MAX_BROWSER_INSTANCES` | `5` | No | Hard limit on concurrent browser instances |
+| `MAX_BROWSER_INSTANCES` | `5` | No | Environment default for the global browser pool hard cap; the persisted Settings `parallelism` value becomes the runtime source of truth after DB initialization |
 | `BROWSER_SLOT_TIMEOUT` | `3600` | No | Maximum seconds to wait for a browser slot |
 
 ## Agent Timeouts
@@ -139,11 +139,11 @@ Settings can manage backend agent runtime and dashboard assistant runtime separa
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `MAX_CONCURRENT_AGENTS` | `8` | No | Maximum concurrent AI agent processes |
-| `MAX_CONCURRENT_EXPLORATIONS` | `5` | No | Maximum concurrent app explorations |
-| `MAX_CONCURRENT_PRD` | `3` | No | Maximum concurrent PRD processing jobs |
-| `DEFAULT_PARALLELISM` | `4` | No | Default number of parallel browser workers |
-| `PARALLEL_MODE_ENABLED` | `true` | No | Enable parallel test execution |
+| `MAX_CONCURRENT_AGENTS` | `8` | No | Local agent work scheduling hint; browser launches are still capped by the global browser pool |
+| `MAX_CONCURRENT_EXPLORATIONS` | `5` | No | Local exploration scheduling hint; browser launches are still capped by the global browser pool |
+| `MAX_CONCURRENT_PRD` | `3` | No | Local PRD scheduling hint; browser launches are still capped by the global browser pool |
+| `DEFAULT_PARALLELISM` | `4` | No | Legacy initial execution setting used when DB settings do not exist |
+| `PARALLEL_MODE_ENABLED` | `true` | No | Legacy test-run parallel-mode default; it does not replace the browser pool cap |
 
 ## Memory System
 

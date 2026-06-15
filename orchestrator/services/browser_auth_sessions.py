@@ -18,6 +18,8 @@ from orchestrator.api.credentials import decrypt_credential, encrypt_credential,
 from orchestrator.api.models_db import BrowserAuthSession, Project
 from orchestrator.api.settings import runtime_env_vars
 from orchestrator.services.ai_runtime_config import apply_runtime_env_aliases, infer_display_provider
+from orchestrator.services.browser_pool import OperationType
+from orchestrator.services.browser_slots import BrowserSlotAcquisitionError, browser_operation_slot
 from orchestrator.utils.agent_runner import AgentResult, AgentRunner
 from orchestrator.utils.playwright_mcp import browser_live_worker_enabled, write_playwright_mcp_config
 
@@ -647,6 +649,24 @@ async def _run_capture_agent(prompt: str, *, run_dir: Path, timeout_seconds: int
     return await runner.run(prompt, timeout_override=timeout_seconds)
 
 
+async def _run_capture_agent_with_browser_slot(
+    prompt: str, *, run_dir: Path, timeout_seconds: int, session_id: str
+) -> AgentResult:
+    async with browser_operation_slot(
+        request_id=f"browser-auth:{session_id}",
+        operation_type=OperationType.BROWSER_AUTH,
+        description=f"Browser auth capture {session_id}",
+        timeout=timeout_seconds,
+        max_operation_duration=timeout_seconds + 60,
+    ):
+        return await _run_capture_agent(
+            prompt,
+            run_dir=run_dir,
+            timeout_seconds=timeout_seconds,
+            session_id=session_id,
+        )
+
+
 def _run_async_capture(prompt: str, *, run_dir: Path, timeout_seconds: int, session_id: str) -> AgentResult:
     result: AgentResult | None = None
     error: BaseException | None = None
@@ -655,7 +675,12 @@ def _run_async_capture(prompt: str, *, run_dir: Path, timeout_seconds: int, sess
         nonlocal result, error
         try:
             result = asyncio.run(
-                _run_capture_agent(prompt, run_dir=run_dir, timeout_seconds=timeout_seconds, session_id=session_id)
+                _run_capture_agent_with_browser_slot(
+                    prompt,
+                    run_dir=run_dir,
+                    timeout_seconds=timeout_seconds,
+                    session_id=session_id,
+                )
             )
         except BaseException as exc:
             error = exc
@@ -666,6 +691,8 @@ def _run_async_capture(prompt: str, *, run_dir: Path, timeout_seconds: int, sess
     if thread.is_alive():
         raise BrowserAuthSessionError(_normalize_capture_error(f"capture timed out after {timeout_seconds} seconds"))
     if error:
+        if isinstance(error, BrowserSlotAcquisitionError):
+            raise BrowserAuthSessionError(str(error)) from error
         raise BrowserAuthSessionError(_normalize_capture_error(str(error))) from error
     if result is None:
         raise BrowserAuthSessionError("MCP browser auth capture failed without returning a result.")

@@ -78,10 +78,19 @@ class AgentTask:
     max_budget_usd: float | None = None  # Optional spend cap
     task_budget: dict[str, int] | None = None  # Optional token budget
     include_hook_events: bool = False  # Stream hook lifecycle events
+    include_partial_messages: bool = False  # Stream partial message chunks
     output_format: dict[str, Any] | None = None  # Optional native SDK output contract
     resume_session_id: str | None = None  # Optional Claude session to resume
     continue_conversation: bool = False
     max_turns: int | None = None
+    fallback_model: str | None = None
+    reasoning_budget: int | None = None
+    max_buffer_size: int | None = None
+    betas: list[str] | None = None
+    user: str | None = None
+    permission_prompt_tool_name: str | None = None
+    enable_file_checkpointing: bool = False
+    sandbox: dict[str, Any] | None = None
     owner_type: str | None = None  # Logical owner, e.g. autopilot or agent_run
     owner_id: str | None = None
     owner_label: str | None = None
@@ -120,10 +129,19 @@ class AgentTask:
             "max_budget_usd": self.max_budget_usd,
             "task_budget": self.task_budget,
             "include_hook_events": self.include_hook_events,
+            "include_partial_messages": self.include_partial_messages,
             "output_format": self.output_format,
             "resume_session_id": self.resume_session_id,
             "continue_conversation": self.continue_conversation,
             "max_turns": self.max_turns,
+            "fallback_model": self.fallback_model,
+            "reasoning_budget": self.reasoning_budget,
+            "max_buffer_size": self.max_buffer_size,
+            "betas": self.betas,
+            "user": self.user,
+            "permission_prompt_tool_name": self.permission_prompt_tool_name,
+            "enable_file_checkpointing": self.enable_file_checkpointing,
+            "sandbox": self.sandbox,
             "owner_type": self.owner_type,
             "owner_id": self.owner_id,
             "owner_label": self.owner_label,
@@ -172,10 +190,19 @@ class AgentTask:
             max_budget_usd=data.get("max_budget_usd"),
             task_budget=data.get("task_budget"),
             include_hook_events=bool(data.get("include_hook_events", False)),
+            include_partial_messages=bool(data.get("include_partial_messages", False)),
             output_format=data.get("output_format"),
             resume_session_id=data.get("resume_session_id"),
             continue_conversation=bool(data.get("continue_conversation", False)),
             max_turns=data.get("max_turns"),
+            fallback_model=data.get("fallback_model"),
+            reasoning_budget=data.get("reasoning_budget"),
+            max_buffer_size=data.get("max_buffer_size"),
+            betas=data.get("betas"),
+            user=data.get("user"),
+            permission_prompt_tool_name=data.get("permission_prompt_tool_name"),
+            enable_file_checkpointing=bool(data.get("enable_file_checkpointing", False)),
+            sandbox=data.get("sandbox"),
             owner_type=data.get("owner_type"),
             owner_id=data.get("owner_id"),
             owner_label=data.get("owner_label"),
@@ -329,10 +356,19 @@ class AgentQueue:
         max_budget_usd: float | None = None,
         task_budget: dict[str, int] | None = None,
         include_hook_events: bool = False,
+        include_partial_messages: bool = False,
         output_format: dict[str, Any] | None = None,
         resume_session_id: str | None = None,
         continue_conversation: bool = False,
         max_turns: int | None = None,
+        fallback_model: str | None = None,
+        reasoning_budget: int | None = None,
+        max_buffer_size: int | None = None,
+        betas: list[str] | None = None,
+        user: str | None = None,
+        permission_prompt_tool_name: str | None = None,
+        enable_file_checkpointing: bool = False,
+        sandbox: dict[str, Any] | None = None,
         owner_type: str | None = None,
         owner_id: str | None = None,
         owner_label: str | None = None,
@@ -359,10 +395,19 @@ class AgentQueue:
             max_budget_usd: Optional spend cap
             task_budget: Optional token budget
             include_hook_events: Whether hook events should be emitted
+            include_partial_messages: Whether partial message chunks should be emitted
             output_format: Optional native SDK output contract
             resume_session_id: Optional Claude session to resume
             continue_conversation: Continue the most recent conversation when supported
             max_turns: Optional maximum turn count
+            fallback_model: Optional fallback model for overloaded/unavailable primary models
+            reasoning_budget: Optional SDK thinking token budget
+            max_buffer_size: Optional SDK stream buffer limit
+            betas: Optional SDK/API beta headers
+            user: Optional SDK user identifier
+            permission_prompt_tool_name: Optional SDK permission prompt tool
+            enable_file_checkpointing: Enable SDK file checkpoints
+            sandbox: Optional SDK sandbox settings
             requires_live_browser: Whether this task requires a headed/VNC browser worker
 
         Returns:
@@ -387,10 +432,19 @@ class AgentQueue:
             max_budget_usd=max_budget_usd,
             task_budget=task_budget,
             include_hook_events=include_hook_events,
+            include_partial_messages=include_partial_messages,
             output_format=output_format,
             resume_session_id=resume_session_id,
             continue_conversation=continue_conversation,
             max_turns=max_turns,
+            fallback_model=fallback_model,
+            reasoning_budget=reasoning_budget,
+            max_buffer_size=max_buffer_size,
+            betas=betas,
+            user=user,
+            permission_prompt_tool_name=permission_prompt_tool_name,
+            enable_file_checkpointing=enable_file_checkpointing,
+            sandbox=sandbox,
             owner_type=owner_type,
             owner_id=owner_id,
             owner_label=owner_label,

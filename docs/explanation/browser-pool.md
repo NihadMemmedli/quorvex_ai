@@ -11,7 +11,7 @@ Browser automation is the most resource-intensive operation in Quorvex AI. Each 
 
 Before the browser pool, different features managed browser resources independently: test runs used one semaphore, explorations used another, and PRD processing had no limits at all. This led to situations where 5 test runs, 3 explorations, and 2 PRD jobs all launched browsers simultaneously -- 10 Chromium instances on a machine that could handle 5.
 
-The `BrowserResourcePool` singleton provides a single point of control. Every operation that needs a browser -- test runs, explorations, agent tasks, PRD processing, coverage analysis -- must acquire a slot from the same pool.
+The `BrowserResourcePool` singleton provides a single point of control. Every Quorvex-owned operation that needs a browser -- test runs, explorations, agent tasks, PRD processing, coverage analysis, AutoPilot, autonomous mission work, browser auth capture, and security login probes -- must acquire a slot from the same pool.
 
 ```mermaid
 graph TB
@@ -20,6 +20,8 @@ graph TB
     AG["Agent Task"] --> BP
     PRD["PRD Processing"] --> BP
     COV["Coverage Analysis"] --> BP
+    SEC["Security/Auth Probes"] --> BP
+    AUTO["AutoPilot/Autonomous"] --> BP
 
     BP -->|"slot 1"| B1["Browser"]
     BP -->|"slot 2"| B2["Browser"]
@@ -186,7 +188,7 @@ Browser worker pods auto-scale based on CPU utilization (2-20 pods, 70% threshol
 Best for enterprise deployments with variable load patterns.
 
 !!! note "Pool limit vs worker count"
-    `MAX_BROWSER_INSTANCES` controls the pool's concurrency limit, not the number of physical workers. In Docker Workers mode, you might have 8 worker containers but set `MAX_BROWSER_INSTANCES=5` to leave headroom for system resources. The pool enforces the limit regardless of how many workers exist.
+    The Settings page's Global Browser Concurrency value is persisted as `execution_settings.parallelism` and is the runtime hard cap for Quorvex browser sessions. `MAX_BROWSER_INSTANCES` is the environment default used before DB settings are available. These values control the pool's concurrency limit, not the number of physical workers. In Docker Workers mode, you might have 8 worker containers but set the browser cap to 5 to leave headroom for system resources. The pool enforces the limit regardless of how many workers exist.
 
 ## Monitoring
 
@@ -195,6 +197,7 @@ The pool exposes its status through the API:
 - `GET /api/browser-pool/status` -- Current slot usage, queue depth, breakdown by operation type
 - `GET /api/browser-pool/recent` -- Recent slot activity with wait times and run durations
 - `POST /api/browser-pool/cleanup` -- Trigger manual stale slot cleanup
+- `GET /queue-status` -- Compatibility endpoint whose visible running/queued counts are derived from the browser pool and whose `legacy_*` fields expose old test-run queue diagnostics
 
 The dashboard displays pool status in real time, showing which operations are running, how many slots are available, and what is waiting in the queue.
 
