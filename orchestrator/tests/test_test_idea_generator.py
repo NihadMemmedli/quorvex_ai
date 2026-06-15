@@ -1388,6 +1388,135 @@ def test_agent_runner_accepts_matching_local_mcp_config(tmp_path):
     runner._validate_mcp_config_for_allowed_tools(tmp_path)
 
 
+def test_agent_runner_rejects_root_playwright_mcp_for_native_custom_tools(tmp_path):
+    (tmp_path / ".mcp.json").write_text(
+        """
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp", "--browser", "chromium"]
+    }
+  }
+}
+"""
+    )
+    runner = _AgentRunner(
+        allowed_tools=[
+            "mcp__playwright__planner_setup_page",
+            "mcp__playwright__planner_save_plan",
+            "mcp__playwright__browser_navigate",
+            "mcp__playwright__browser_snapshot",
+            "mcp__playwright__test_debug",
+        ],
+        session_dir=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="run-local `playwright-test` MCP server"):
+        runner._validate_mcp_config_for_allowed_tools(tmp_path)
+
+
+def test_agent_runner_requires_complete_native_generator_tool_profile(tmp_path):
+    (tmp_path / ".mcp.json").write_text(
+        """
+{
+  "mcpServers": {
+    "playwright-test": {
+      "command": "npx",
+      "args": ["playwright", "run-test-mcp-server", "-c", "playwright.config.ts"]
+    }
+  }
+}
+"""
+    )
+    runner = _AgentRunner(
+        allowed_tools=[
+            "mcp__playwright-test__generator_setup_page",
+            "mcp__playwright-test__generator_write_test",
+            "mcp__playwright-test__test_debug",
+        ],
+        session_dir=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="Native generator MCP tool profile is incomplete"):
+        runner._validate_mcp_config_for_allowed_tools(tmp_path)
+
+
+def _native_heavy_mcp_tools() -> list[str]:
+    return [
+        "mcp__playwright-test__generator_setup_page",
+        "mcp__playwright-test__generator_read_log",
+        "mcp__playwright-test__generator_write_test",
+        "mcp__playwright-test__test_debug",
+        "mcp__playwright-test__test_run",
+    ]
+
+
+def test_agent_runner_defaults_tool_search_for_first_party_native_mcp_heavy_runs(tmp_path, monkeypatch):
+    monkeypatch.delenv("ENABLE_TOOL_SEARCH", raising=False)
+    runner = _AgentRunner(
+        allowed_tools=_native_heavy_mcp_tools(),
+        env_vars={
+            "QUORVEX_LLM_PROVIDER": "anthropic",
+            "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        },
+        session_dir=tmp_path,
+    )
+
+    assert runner.env_vars["ENABLE_TOOL_SEARCH"] == "auto:5"
+    assert runner._collect_api_env_vars()["ENABLE_TOOL_SEARCH"] == "auto:5"
+    assert runner.diagnostics()["tool_search"]["enable_tool_search"] == "auto:5"
+    assert runner.diagnostics()["tool_search"]["source"] == "auto"
+
+
+def test_agent_runner_disables_default_tool_search_for_non_first_party_proxy(tmp_path, monkeypatch):
+    monkeypatch.delenv("ENABLE_TOOL_SEARCH", raising=False)
+    runner = _AgentRunner(
+        allowed_tools=_native_heavy_mcp_tools(),
+        env_vars={
+            "QUORVEX_LLM_PROVIDER": "zai",
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        },
+        session_dir=tmp_path,
+    )
+
+    assert "ENABLE_TOOL_SEARCH" not in runner.env_vars
+    assert "ENABLE_TOOL_SEARCH" not in (runner._collect_api_env_vars() or {})
+    assert runner.diagnostics()["tool_search"]["enable_tool_search"] is None
+    assert runner.diagnostics()["tool_search"]["reason"] == "provider_not_first_party"
+
+
+def test_agent_runner_tool_search_policy_honors_explicit_off_and_force(tmp_path, monkeypatch):
+    monkeypatch.setenv("ENABLE_TOOL_SEARCH", "true")
+    disabled = _AgentRunner(
+        allowed_tools=_native_heavy_mcp_tools(),
+        tool_search_policy="off",
+        session_dir=tmp_path,
+    )
+    assert disabled._effective_tool_search_env() is None
+    assert disabled.diagnostics()["tool_search"]["reason"] == "explicit_disabled"
+
+    forced = _AgentRunner(
+        allowed_tools=[],
+        tool_search_policy="force",
+        session_dir=tmp_path,
+    )
+    assert forced.env_vars["ENABLE_TOOL_SEARCH"] == "true"
+    assert forced.diagnostics()["tool_search"]["reason"] == "explicit_enabled"
+
+
+def test_agent_runner_tool_search_policy_accepts_explicit_auto_count(tmp_path, monkeypatch):
+    monkeypatch.delenv("ENABLE_TOOL_SEARCH", raising=False)
+    runner = _AgentRunner(
+        allowed_tools=[],
+        tool_search_policy="auto:7",
+        session_dir=tmp_path,
+    )
+
+    assert runner.env_vars["ENABLE_TOOL_SEARCH"] == "auto:7"
+    assert runner.diagnostics()["tool_search"]["enable_tool_search"] == "auto:7"
+
+
 def test_agent_runner_disables_tools_for_explicit_no_tool_calls():
     runner = _AgentRunner(allowed_tools=[], log_tools=False)
 
@@ -1460,6 +1589,16 @@ def test_agent_runner_includes_guardrail_sdk_options_when_supported(monkeypatch)
 
 def test_agent_runner_maps_advanced_sdk_options_when_supported(tmp_path):
     sandbox = {"enabled": True, "allowUnsandboxedCommands": False}
+    hooks = {"PreToolUse": []}
+    agents = {
+        "research-reviewer": {
+            "description": "Read-only research reviewer",
+            "prompt": "Review with read-only tools.",
+            "tools": ["Read", "Grep", "Glob"],
+        }
+    }
+    plugins = [{"type": "local", "path": "./.claude/plugins/reviewer"}]
+    session_store = object()
     runner = _AgentRunner(
         allowed_tools=["Read"],
         cwd=tmp_path,
@@ -1472,6 +1611,12 @@ def test_agent_runner_maps_advanced_sdk_options_when_supported(tmp_path):
         permission_prompt_tool_name="permission_prompt",
         enable_file_checkpointing=True,
         sandbox=sandbox,
+        hooks=hooks,
+        agents=agents,
+        skills=["playwright"],
+        plugins=plugins,
+        session_store=session_store,
+        fork_session=True,
         log_tools=False,
     )
 
@@ -1487,6 +1632,12 @@ def test_agent_runner_maps_advanced_sdk_options_when_supported(tmp_path):
     assert kwargs["permission_prompt_tool_name"] == "permission_prompt"
     assert kwargs["enable_file_checkpointing"] is True
     assert kwargs["sandbox"] is sandbox
+    assert kwargs["hooks"] is hooks
+    assert kwargs["agents"] is agents
+    assert kwargs["skills"] == ["playwright"]
+    assert kwargs["plugins"] is plugins
+    assert kwargs["session_store"] is session_store
+    assert kwargs["fork_session"] is True
     assert runner._requires_direct_sdk_execution() is True
 
 

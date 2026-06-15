@@ -128,7 +128,7 @@ def test_autonomous_work_item_prompt_includes_testdata_and_delegation_instructio
         mission_type="coverage",
         status="running",
         target_urls_json='["https://example.com"]',
-        config_json='{"runtime": "hermes", "test_data_refs": ["wetravel-auth.valid-user"]}',
+        config_json='{"runtime": "claude_sdk", "test_data_refs": ["wetravel-auth.valid-user"]}',
     )
     item = AutonomousAgentWorkItem(
         id="work-1",
@@ -166,7 +166,7 @@ def test_autonomous_browser_prompt_includes_handoff_and_validation_rules(tmp_pat
         mission_type="exploration",
         status="running",
         target_urls_json='["https://example.com"]',
-        config_json='{"runtime": "hermes"}',
+        config_json='{"runtime": "claude_sdk"}',
     )
     item = AutonomousAgentWorkItem(
         id="work-browser-prompt",
@@ -204,7 +204,7 @@ def test_child_browser_handoff_gets_isolated_mcp_config(tmp_path, monkeypatch):
         mission_type="exploration",
         status="running",
         target_urls_json='["https://example.com"]',
-        config_json='{"runtime": "hermes", "hermes_max_concurrent_children": 1}',
+        config_json='{"runtime": "claude_sdk"}',
     )
     item = AutonomousAgentWorkItem(
         id="work-child-browser",

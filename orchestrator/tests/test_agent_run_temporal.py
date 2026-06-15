@@ -1456,7 +1456,7 @@ async def test_retry_agent_run_requeues_same_run_with_unique_temporal_workflow(m
             assert response["id"] == run_id
             assert response["retry_in_place"] is True
             assert source.status == "queued"
-            assert source.runtime == "hermes"
+            assert source.runtime == "claude_sdk"
             assert source.agent_task_id is None
             assert source.temporal_workflow_id == "agent-run-agent-temporal-retry-source-attempt-2"
             assert source.temporal_run_id == "temporal-retry-run"

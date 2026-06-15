@@ -156,7 +156,7 @@ RECORDER_BROWSER_URL=
 QUORVEX_PUBLIC_API_URL=
 NEXT_PUBLIC_API_URL=
 INTERNAL_API_URL=http://backend:8001
-NO_PROXY=localhost,127.0.0.1,db,redis,minio,zap,backend,frontend,temporal,hermes
+NO_PROXY=localhost,127.0.0.1,db,redis,minio,zap,backend,frontend,temporal
 ```
 
 If provider credentials are not already stored in the private repo, pass the

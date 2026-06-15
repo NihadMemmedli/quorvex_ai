@@ -223,16 +223,14 @@ async def test_query_live_planner_uses_restricted_tool_config(tmp_path, monkeypa
         target_url="https://example.test/checkout",
     )
 
-    denied = {
-        "mcp__playwright-test__browser_run_code",
-        "mcp__playwright-test__browser_evaluate",
-        "mcp__playwright-test__browser_close",
-    }
     assert "mcp__playwright-test__planner_setup_page" in captured["allowed_tools"]
+    assert "mcp__playwright-test__generator_write_test" in captured["allowed_tools"]
+    assert "mcp__playwright-test__test_run" in captured["allowed_tools"]
     assert "mcp__playwright-test__browser_snapshot" in captured["tools"]
-    assert denied <= set(captured["disallowed_tools"])
-    assert denied.isdisjoint(set(captured["allowed_tools"]))
-    assert denied.isdisjoint(set(captured["tools"]))
+    assert "mcp__playwright-test__browser_run_code" not in captured["allowed_tools"]
+    assert "mcp__playwright-test__browser_evaluate" not in captured["tools"]
+    assert "mcp__playwright-test__browser_close" not in captured["allowed_tools"]
+    assert "mcp__playwright-test__browser_close" not in captured["tools"]
 
 
 @pytest.mark.asyncio
@@ -741,6 +739,69 @@ def test_tool_call_debug_output_includes_redacted_truncated_input_metadata(tmp_p
     assert "truncated" in first["input_preview"]["content"]
 
 
+def test_session_jsonl_recovery_produces_valid_live_planner_sequence(tmp_path):
+    session_id = "sdk-session-jsonl"
+    project_dir = tmp_path / "projects" / "checkout"
+    project_dir.mkdir(parents=True)
+
+    def tool_use(tool_id, name, tool_input=None):
+        return {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_id,
+                        "name": f"mcp__playwright-test__{name}",
+                        "input": tool_input or {},
+                    }
+                ]
+            },
+        }
+
+    def tool_result(tool_id, content="ok"):
+        return {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_id,
+                        "content": content,
+                    }
+                ]
+            },
+        }
+
+    events = [
+        tool_use("setup", "planner_setup_page", {"seedFile": "tests/seed.spec.ts"}),
+        tool_result("setup"),
+        tool_use("nav", "browser_navigate", {"url": "https://example.test/checkout"}),
+        tool_result("nav"),
+        tool_use("snapshot", "browser_snapshot"),
+        tool_result("snapshot", 'https://example.test/checkout\n- heading "Checkout"'),
+        tool_use("save", "planner_save_plan", {"content": VALID_PLAN}),
+        tool_result("save"),
+    ]
+    (project_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events)
+    )
+
+    runner = AgentRunner(session_dir=tmp_path, cwd=tmp_path)
+    tool_calls = runner._recover_tool_calls_from_session_jsonl(session_id)
+    result = AgentResult(success=True, output=VALID_PLAN, tool_calls=tool_calls)
+
+    assert [NativePlanner._tool_call_short_name(call) for call in tool_calls] == [
+        "planner_setup_page",
+        "browser_navigate",
+        "browser_snapshot",
+        "planner_save_plan",
+    ]
+    NativePlanner._validate_live_plan_tool_sequence(
+        result, "https://example.test/checkout"
+    )
+
+
 def test_live_plan_rejected_when_saved_before_target_navigation():
     result = AgentResult(
         success=True,
@@ -1066,11 +1127,12 @@ async def test_live_plan_permission_guard_blocks_save_until_contract(tmp_path):
 
     denied_run_code = await guard("mcp__playwright-test__browser_run_code", {}, None)
     assert denied_run_code.behavior == "deny"
-    assert "safe visible browser interactions" in denied_run_code.message
 
-    denied_evaluate = await guard("mcp__playwright-test__browser_evaluate", {}, None)
-    assert denied_evaluate.behavior == "deny"
-    assert "safe visible browser interactions" in denied_evaluate.message
+    denied_upload = await guard("mcp__playwright-test__browser_file_upload", {}, None)
+    assert denied_upload.behavior == "deny"
+
+    allowed_evaluate = await guard("mcp__playwright-test__browser_evaluate", {}, None)
+    assert allowed_evaluate.behavior == "allow"
 
     await guard(
         "mcp__playwright-test__planner_setup_page",

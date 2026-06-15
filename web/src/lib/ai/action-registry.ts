@@ -1275,11 +1275,6 @@ export const ASSISTANT_ACTION_CONFIGS: Record<string, AssistantActionConfig> = {
       embedding_model: args.embeddingModel || undefined,
       agent_runtime: args.agentRuntime || undefined,
       assistant_runtime: args.assistantRuntime || undefined,
-      hermes_enabled: typeof args.hermesEnabled === 'boolean' ? args.hermesEnabled : undefined,
-      hermes_api_url: args.hermesApiUrl || undefined,
-      hermes_api_key: args.hermesApiKey || undefined,
-      hermes_model: args.hermesModel || undefined,
-      hermes_sync_provider: typeof args.hermesSyncProvider === 'boolean' ? args.hermesSyncProvider : undefined,
     }),
   },
   generatePrdPlan: {

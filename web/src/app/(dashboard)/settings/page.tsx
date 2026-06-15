@@ -71,19 +71,6 @@ interface AssistantSettings {
     embedding_model: string;
     agent_runtime: string;
     assistant_runtime: string;
-    hermes_enabled: boolean;
-    hermes_api_url: string;
-    hermes_api_key: string;
-    hermes_model: string;
-    hermes_sync_provider: boolean;
-    hermes_upstream_provider: string;
-    hermes_upstream_model: string;
-    hermes_home: string;
-    hermes_config_path: string;
-    hermes_env_path: string;
-    hermes_reachable?: boolean;
-    hermes_status?: string;
-    hermes_status_message?: string;
 }
 
 function githubActionsQualityGateYaml(owner: string, repo: string): string {
@@ -138,17 +125,7 @@ export default function SettingsPage() {
         chat_model: 'glm-5-turbo',
         embedding_model: 'text-embedding-3-small',
         agent_runtime: 'claude_sdk',
-        assistant_runtime: 'claude_sdk',
-        hermes_enabled: false,
-        hermes_api_url: 'http://hermes:8642',
-        hermes_api_key: '',
-        hermes_model: 'hermes-agent',
-        hermes_sync_provider: true,
-        hermes_upstream_provider: '',
-        hermes_upstream_model: '',
-        hermes_home: '',
-        hermes_config_path: '',
-        hermes_env_path: ''
+        assistant_runtime: 'claude_sdk'
     });
     const [executionSettings, setExecutionSettings] = useState<ExecutionSettings>({
         parallelism: 2,
@@ -161,12 +138,10 @@ export default function SettingsPage() {
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [testingConnection, setTestingConnection] = useState(false);
-    const [testingHermes, setTestingHermes] = useState(false);
     const [savingExecution, setSavingExecution] = useState(false);
     const [browserPoolStatus, setBrowserPoolStatus] = useState<BrowserPoolStatus | null>(null);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
     const [showApiKey, setShowApiKey] = useState(false);
-    const [showHermesApiKey, setShowHermesApiKey] = useState(false);
 
     // TestRail integration state
     const [trUrl, setTrUrl] = useState('');
@@ -550,11 +525,6 @@ export default function SettingsPage() {
         }
     };
 
-    const handleSettingsToggle = (name: 'hermes_enabled' | 'hermes_sync_provider', checked: boolean) => {
-        setSettings(prev => ({ ...prev, [name]: checked }));
-    };
-
-
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setSaving(true);
@@ -634,49 +604,6 @@ export default function SettingsPage() {
             setMessage({ type: 'error', text: err.message || 'Connection test failed' });
         } finally {
             setTestingConnection(false);
-            setTimeout(() => setMessage(null), 6000);
-        }
-    };
-
-    const handleTestHermes = async () => {
-        setTestingHermes(true);
-        setMessage(null);
-
-        try {
-            const saveRes = await fetch(`${API_BASE}/settings`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(settings)
-            });
-            const saveData = await saveRes.json();
-            if (!saveRes.ok) {
-                throw new Error(saveData.detail || 'Failed to apply settings before testing Hermes');
-            }
-            if (saveData.settings) {
-                setSettings(prev => ({
-                    ...prev,
-                    ...saveData.settings,
-                    assistant_runtime: saveData.settings.assistant_runtime || prev.assistant_runtime,
-                }));
-            }
-
-            const testRes = await fetch(`${API_BASE}/settings/test-hermes`, {
-                method: 'POST',
-            });
-            const testData = await testRes.json();
-            if (!testRes.ok) {
-                throw new Error(testData.detail || 'Hermes test failed');
-            }
-
-            const suffix = typeof testData.latency_ms === 'number' ? ` (${testData.latency_ms}ms)` : '';
-            setMessage({
-                type: testData.ok ? 'success' : 'error',
-                text: testData.message || (testData.ok ? `Hermes connection verified.${suffix}` : 'Hermes test failed'),
-            });
-        } catch (err: any) {
-            setMessage({ type: 'error', text: err.message || 'Hermes test failed' });
-        } finally {
-            setTestingHermes(false);
             setTimeout(() => setMessage(null), 6000);
         }
     };
@@ -1497,7 +1424,6 @@ export default function SettingsPage() {
                             >
                                 <option value="claude_sdk">Claude Agent SDK</option>
                                 <option value="openai">OpenAI SDK</option>
-                                <option value="hermes">Hermes Agent</option>
                             </select>
                         </div>
                     </div>
@@ -1524,146 +1450,8 @@ export default function SettingsPage() {
                                 className="input has-icon"
                             >
                                 <option value="claude_sdk">Claude Agent SDK</option>
-                                <option value="hermes">Hermes Agent</option>
                             </select>
                         </div>
-                    </div>
-                </div>
-
-                <div style={{ paddingTop: '1.5rem', borderTop: '1px solid var(--border)', display: 'grid', gap: '1rem' }}>
-                    <div>
-                        <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>Hermes Gateway</h3>
-                        <p className="helper-text" style={{ marginTop: '0.35rem' }}>
-                            Configure Hermes as a local OpenAI-compatible gateway for assistant chat or agent execution.
-                        </p>
-                    </div>
-
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', fontWeight: 600 }}>
-                        <input
-                            type="checkbox"
-                            checked={settings.hermes_enabled}
-                            onChange={event => handleSettingsToggle('hermes_enabled', event.target.checked)}
-                        />
-                        Enable Hermes backend
-                    </label>
-
-                    <div className="form-group">
-                        <label className="label">Hermes API URL</label>
-                        <div className="input-group">
-                            <div className="input-icon">
-                                <Link2 size={18} />
-                            </div>
-                            <input
-                                type="text"
-                                name="hermes_api_url"
-                                value={settings.hermes_api_url}
-                                onChange={handleChange}
-                                placeholder="http://hermes:8642"
-                                className="input has-icon"
-                            />
-                        </div>
-                    </div>
-
-                    <div className="form-group">
-                        <label className="label">Hermes API Key</label>
-                        <div className="input-group">
-                            <div className="input-icon">
-                                <Key size={18} />
-                            </div>
-                            <input
-                                type={showHermesApiKey ? "text" : "password"}
-                                name="hermes_api_key"
-                                value={settings.hermes_api_key}
-                                onChange={handleChange}
-                                placeholder="local Hermes bearer token"
-                                className="input has-icon"
-                                style={{ paddingRight: '2.5rem' }}
-                            />
-                            <button
-                                type="button"
-                                className="visibility-toggle"
-                                onClick={() => setShowHermesApiKey(!showHermesApiKey)}
-                                title={showHermesApiKey ? "Hide Hermes API Key" : "Show Hermes API Key"}
-                            >
-                                {showHermesApiKey ? <EyeOff size={18} /> : <Eye size={18} />}
-                            </button>
-                        </div>
-                    </div>
-
-                    <div className="form-group">
-                        <label className="label">Hermes API Model ID</label>
-                        <div className="input-group">
-                            <div className="input-icon">
-                                <Box size={18} />
-                            </div>
-                            <input
-                                type="text"
-                                name="hermes_model"
-                                value={settings.hermes_model}
-                                onChange={handleChange}
-                                placeholder="hermes-agent"
-                                className="input has-icon"
-                            />
-                        </div>
-                        <p className="helper-text" style={{ marginTop: '0.5rem' }}>
-                            The real Hermes LLM provider is configured in the generated Hermes home below.
-                        </p>
-                    </div>
-
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', fontWeight: 600 }}>
-                        <input
-                            type="checkbox"
-                            checked={settings.hermes_sync_provider}
-                            onChange={event => handleSettingsToggle('hermes_sync_provider', event.target.checked)}
-                        />
-                        Mirror this LLM provider into Hermes config
-                    </label>
-
-                    {(settings.hermes_config_path || settings.hermes_env_path) && (
-                        <div style={{
-                            display: 'grid',
-                            gap: '0.35rem',
-                            padding: '0.85rem',
-                            border: '1px solid var(--border)',
-                            borderRadius: 'var(--radius)',
-                            background: 'var(--surface-muted)'
-                        }}>
-                            <div style={{ fontWeight: 600 }}>
-                                Hermes provider: {settings.hermes_upstream_provider || 'pending'} {settings.hermes_upstream_model ? `(${settings.hermes_upstream_model})` : ''}
-                            </div>
-                            <code style={{ fontSize: '0.78rem', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                                HERMES_HOME={settings.hermes_home || 'data/hermes'}
-                            </code>
-                            <code style={{ fontSize: '0.78rem', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                                {settings.hermes_config_path}
-                            </code>
-                        </div>
-                    )}
-
-                    <div>
-                        <button
-                            type="button"
-                            className="btn btn-secondary"
-                            disabled={saving || testingConnection || testingHermes}
-                            onClick={handleTestHermes}
-                            style={{
-                                minWidth: '150px',
-                                justifyContent: 'center',
-                                opacity: saving || testingConnection || testingHermes ? 0.7 : 1
-                            }}
-                        >
-                            {testingHermes ? (
-                                <>
-                                    <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} />
-                                    Testing Hermes...
-                                </>
-                            ) : (
-                                <>
-                                    <Zap size={18} />
-                                    Test Hermes
-                                </>
-                            )}
-                        </button>
                     </div>
                 </div>
 
@@ -1671,12 +1459,12 @@ export default function SettingsPage() {
                     <button
                         type="button"
                         className="btn btn-secondary"
-                        disabled={saving || testingConnection || testingHermes}
+                        disabled={saving || testingConnection}
                         onClick={handleTestConnection}
                         style={{
                             minWidth: '150px',
                             justifyContent: 'center',
-                            opacity: saving || testingConnection || testingHermes ? 0.7 : 1
+                            opacity: saving || testingConnection ? 0.7 : 1
                         }}
                     >
                         {testingConnection ? (
@@ -1694,11 +1482,11 @@ export default function SettingsPage() {
                     <button
                         type="submit"
                         className="btn btn-primary"
-                        disabled={saving || testingConnection || testingHermes}
+                        disabled={saving || testingConnection}
                         style={{
                             minWidth: '140px',
                             justifyContent: 'center',
-                            opacity: saving || testingConnection || testingHermes ? 0.7 : 1
+                            opacity: saving || testingConnection ? 0.7 : 1
                         }}
                     >
                         {saving ? (

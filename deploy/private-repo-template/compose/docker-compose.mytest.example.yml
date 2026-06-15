@@ -184,17 +184,6 @@ services:
     ports: !override
       - "${TEMPORAL_UI_BIND:-127.0.0.1:8233}:8080"
 
-  hermes:
-    container_name: ${HERMES_CONTAINER_NAME:-quorvex-hermes}
-    ports: !override
-      - "${HERMES_API_BIND:-127.0.0.1:8642}:8642"
-      - "${HERMES_DASHBOARD_BIND:-127.0.0.1:9119}:9119"
-    volumes:
-      - ${QUORVEX_DATA_ROOT:-./data}/app-data:/opt/data
-      - ${QUORVEX_DATA_ROOT:-./data}/runs:/workspace/runs
-      - ${SPECS_DIR:?Set SPECS_DIR}:/workspace/specs
-      - ${TESTS_DIR:?Set TESTS_DIR}:/workspace/tests
-
   zap:
     ports: !override
       - "${ZAP_BIND:-127.0.0.1:8090}:8090"

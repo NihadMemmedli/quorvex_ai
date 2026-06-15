@@ -51,6 +51,7 @@ from orchestrator.services.handoff_manifest import (
     init_manifest,
     load_manifest,
     record_artifact,
+    record_attempt,
     record_consumption,
     record_stage,
     validate_artifact,
@@ -132,6 +133,7 @@ class FullNativePipeline:
             model_tier or os.environ.get("QUORVEX_RUN_MODEL_TIER") or "tool_deep"
         )
         self._memory_run_id: str | None = None
+        self._last_native_generator_exception: str | None = None
         self.test_data_execution_context: dict[str, Any] = {}
         self.test_data_env_vars: dict[str, str] = {}
         self._load_project_credentials()
@@ -217,7 +219,9 @@ Rules:
 - Call `test_debug` for exactly this file and browser/project.
 - Do not edit files.
 - Do not run unrelated tests.
-- If it fails, inspect only the paused failure summary needed for handoff metadata.
+- If it fails, keep the paused browser state open long enough to inspect the failure summary needed for handoff metadata.
+- Do not call `browser_close`; the orchestrator owns cleanup after validation.
+- Use `browser_snapshot`, console/network diagnostics, locator generation, or `browser_resume` only when needed to summarize the failed paused state.
 
 Final response fields:
 planner_draft_debug_status: passed | failed
@@ -668,6 +672,26 @@ root_cause: one concise sentence, or "none" if passed
                 except SpecGenerationError as exc:
                     error_msg = str(exc)
                     logger.error("Native planner failed validation: %s", error_msg)
+                    planner_result = getattr(self.native_planner, "last_agent_result", None)
+                    record_attempt(
+                        handoff_manifest_path,
+                        "planner",
+                        stage_attempt=1,
+                        status="failed",
+                        agent_session_id=getattr(planner_result, "session_id", None),
+                        executor_mode="queue_or_direct",
+                        model_tier=getattr(self.native_planner, "model_tier", None),
+                        timeout_seconds=int(os.environ.get("PLANNER_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))),
+                        error_type=getattr(planner_result, "error_type", None) or "planner_validation",
+                        tool_call_summary={
+                            "count": len(getattr(planner_result, "tool_calls", []) or []),
+                            "tools": [
+                                getattr(call, "name", None)
+                                for call in (getattr(planner_result, "tool_calls", []) or [])
+                            ],
+                        },
+                        metadata={"diagnostics": exc.diagnostics},
+                    )
                     (run_dir / "status.txt").write_text("error")
                     self._write_pipeline_error(
                         run_dir,
@@ -740,7 +764,11 @@ root_cause: one concise sentence, or "none" if passed
                                 producer_stage="planner",
                                 required=True,
                                 consumers=["generator", "healer"],
-                                validation_status="valid",
+                                validation_status=(
+                                    "valid"
+                                    if draft_debug.get("status") == "passed"
+                                    else "debug_failed"
+                                ),
                                 metadata={"debug_validation": draft_debug},
                             )
                     planner_selectors = []
@@ -769,6 +797,37 @@ root_cause: one concise sentence, or "none" if passed
                         required=False,
                         consumers=["generator", "healer", "reporting"],
                         validation_status="valid",
+                    )
+                    planner_result = getattr(self.native_planner, "last_agent_result", None)
+                    record_attempt(
+                        handoff_manifest_path,
+                        "planner",
+                        stage_attempt=1,
+                        status="passed",
+                        agent_session_id=getattr(planner_result, "session_id", None),
+                        executor_mode="queue_or_direct",
+                        model_tier=getattr(self.native_planner, "model_tier", None),
+                        timeout_seconds=int(os.environ.get("PLANNER_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))),
+                        error_type=getattr(planner_result, "error_type", None),
+                        tool_call_summary={
+                            "count": len(getattr(planner_result, "tool_calls", []) or []),
+                            "tools": [
+                                getattr(call, "name", None)
+                                for call in (getattr(planner_result, "tool_calls", []) or [])
+                            ],
+                        },
+                        input_artifact_hashes=self._manifest_artifact_hashes(
+                            handoff_manifest_path,
+                            ["resolved_spec"],
+                        ),
+                        output_artifact_hash=self._file_sha256(
+                            run_plan_md_path if run_plan_md_path.exists() else plan_path
+                        ),
+                        metadata={
+                            "planner_draft_script_path": str(planner_draft_script_path)
+                            if planner_draft_script_path
+                            else None,
+                        },
                     )
                     record_stage(
                         handoff_manifest_path,
@@ -895,15 +954,47 @@ root_cause: one concise sentence, or "none" if passed
             )
 
             if not test_path or not test_path.exists():
-                error_msg = "Native generator failed to create test file"
+                diagnostics = self._generator_failure_diagnostics()
+                error_msg = (
+                    diagnostics.get("last_agent_result", {}).get("error")
+                    or diagnostics.get("exception")
+                    or "Native generator failed to create test file"
+                )
+                generator_result = getattr(self.native_generator, "last_agent_result", None)
+                record_attempt(
+                    handoff_manifest_path,
+                    "generator",
+                    stage_attempt=1,
+                    status="failed",
+                    agent_session_id=getattr(generator_result, "session_id", None),
+                    executor_mode="queue_or_direct",
+                    model_tier=getattr(self.native_generator, "model_tier", None),
+                    timeout_seconds=int(os.environ.get("GENERATOR_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))),
+                    error_type=getattr(generator_result, "error_type", None) or "no_generated_test",
+                    tool_call_summary={
+                        "count": len(getattr(generator_result, "tool_calls", []) or []),
+                        "tools": [
+                            getattr(call, "name", None)
+                            for call in (getattr(generator_result, "tool_calls", []) or [])
+                        ],
+                    },
+                    input_artifact_hashes=self._manifest_artifact_hashes(
+                        handoff_manifest_path,
+                        ["planner_plan", "planner_draft_script"],
+                    ),
+                    metadata=diagnostics,
+                )
                 (run_dir / "status.txt").write_text("error")
-                self._write_pipeline_error(run_dir, error_msg, "generation")
+                self._write_pipeline_error(run_dir, error_msg, "generation", diagnostics)
                 record_stage(
                     handoff_manifest_path,
                     "generator",
                     status="failed",
                     failure_reason=error_msg,
-                    metadata=getattr(self.native_generator, "last_handoff_consumption", {}),
+                    metadata={
+                        **getattr(self.native_generator, "last_handoff_consumption", {}),
+                        **diagnostics,
+                    },
                 )
                 self._write_run_metrics(run_dir, generation_success=False)
                 self._publish_agentic_summary(run_dir)
@@ -952,6 +1043,31 @@ root_cause: one concise sentence, or "none" if passed
                 validation_status="pending_validation",
                 metadata=generated_test_metadata,
             )
+            generator_result = getattr(self.native_generator, "last_agent_result", None)
+            record_attempt(
+                handoff_manifest_path,
+                "generator",
+                stage_attempt=1,
+                status="passed",
+                agent_session_id=getattr(generator_result, "session_id", None),
+                executor_mode="queue_or_direct",
+                model_tier=getattr(self.native_generator, "model_tier", None),
+                timeout_seconds=int(os.environ.get("GENERATOR_TIMEOUT_SECONDS", os.environ.get("AGENT_TIMEOUT_SECONDS", "1800"))),
+                error_type=getattr(generator_result, "error_type", None),
+                tool_call_summary={
+                    "count": len(getattr(generator_result, "tool_calls", []) or []),
+                    "tools": [
+                        getattr(call, "name", None)
+                        for call in (getattr(generator_result, "tool_calls", []) or [])
+                    ],
+                },
+                input_artifact_hashes=self._manifest_artifact_hashes(
+                    handoff_manifest_path,
+                    ["planner_plan", "planner_draft_script"],
+                ),
+                output_artifact_hash=self._file_sha256(test_path),
+                metadata=generated_test_metadata,
+            )
             validation_status = validate_artifact(
                 handoff_manifest_path,
                 "generated_test",
@@ -970,6 +1086,21 @@ root_cause: one concise sentence, or "none" if passed
                     plan_path=plan_path,
                     planner_draft_script_path=planner_draft_script_path,
                 )
+                repair_artifact_path = generation_repair_metadata.get(
+                    "generation_repair_artifact_path"
+                )
+                if repair_artifact_path:
+                    record_artifact(
+                        handoff_manifest_path,
+                        "generation_repair_attempt",
+                        Path(str(repair_artifact_path)),
+                        kind="generation_repair_attempt",
+                        producer_stage="generator",
+                        required=False,
+                        consumers=["reporting"],
+                        validation_status="valid",
+                        metadata=generation_repair_metadata,
+                    )
                 if generation_repair_metadata.get("generation_repair_accepted"):
                     record_artifact(
                         handoff_manifest_path,
@@ -1411,6 +1542,7 @@ root_cause: one concise sentence, or "none" if passed
             output_name: Override for output test file name (without extension)
         """
         try:
+            self._last_native_generator_exception = None
             if handoff_manifest_path:
                 if plan_path:
                     record_consumption(
@@ -1449,7 +1581,31 @@ root_cause: one concise sentence, or "none" if passed
             return test_path
         except Exception as e:
             logger.error(f"Native generator error: {e}")
+            self._last_native_generator_exception = str(e)
             return None
+
+    def _generator_failure_diagnostics(self) -> dict[str, Any]:
+        result = getattr(getattr(self, "native_generator", None), "last_agent_result", None)
+        diagnostics: dict[str, Any] = {}
+        if self._last_native_generator_exception:
+            diagnostics["exception"] = self._last_native_generator_exception
+        if result is not None:
+            diagnostics["last_agent_result"] = {
+                "error": getattr(result, "error", None),
+                "error_type": getattr(result, "error_type", None),
+                "api_error_status": getattr(result, "api_error_status", None),
+                "messages_received": getattr(result, "messages_received", 0),
+                "text_blocks_received": getattr(result, "text_blocks_received", 0),
+                "tool_calls": len(getattr(result, "tool_calls", []) or []),
+                "last_tool": (
+                    getattr((getattr(result, "tool_calls", []) or [])[-1], "name", None)
+                    if getattr(result, "tool_calls", None)
+                    else None
+                ),
+                "session_id": getattr(result, "session_id", None),
+                "stop_reason": getattr(result, "stop_reason", None),
+            }
+        return diagnostics
 
     def _run_failure_triage(
         self,
@@ -1641,6 +1797,7 @@ root_cause: one concise sentence, or "none" if passed
             }
             path = run_dir / "generation_repair_attempt.json"
             path.write_text(json.dumps(artifact, indent=2))
+            metadata["generation_repair_artifact_path"] = str(path)
             return path
         except OSError as exc:
             logger.debug("Could not write generation repair artifact: %s", exc)
@@ -2116,6 +2273,19 @@ Requirements:
         return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
 
     @staticmethod
+    def _file_sha256(path: Path | str | None) -> str | None:
+        if not path:
+            return None
+        file_path = Path(path)
+        if not file_path.exists() or not file_path.is_file():
+            return None
+        digest = hashlib.sha256()
+        with file_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
     def _diff_stat(before: str, after: str) -> str:
         added = removed = 0
         for line in difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm=""):
@@ -2429,6 +2599,21 @@ Requirements:
             }
         return payload
 
+    @staticmethod
+    def _manifest_artifact_hashes(manifest_file: Path, artifact_ids: list[str]) -> dict[str, str | None]:
+        manifest = load_manifest(manifest_file)
+        artifacts = manifest.get("artifacts") if isinstance(manifest, dict) else {}
+        if not isinstance(artifacts, dict):
+            return {artifact_id: None for artifact_id in artifact_ids}
+        return {
+            artifact_id: (
+                artifacts.get(artifact_id, {}).get("hash")
+                if isinstance(artifacts.get(artifact_id), dict)
+                else None
+            )
+            for artifact_id in artifact_ids
+        }
+
     def _build_healer_handoff_context(
         self,
         *,
@@ -2582,6 +2767,51 @@ Requirements:
             or categorize_error(result.error_summary or result.output[-2000:])
         )
         attempt_records: list[dict] = []
+
+        def record_healer_manifest_attempt(
+            *,
+            attempt_number: int,
+            status: str,
+            attempt_record: dict[str, Any] | None = None,
+            tool_calls: list[dict[str, Any]] | None = None,
+            error_type: str | None = None,
+        ) -> None:
+            if not handoff_manifest_path:
+                return
+            record = attempt_record or {}
+            calls = tool_calls or []
+            record_attempt(
+                handoff_manifest_path,
+                "healer",
+                stage_attempt=attempt_number,
+                status=status,
+                agent_session_id=getattr(
+                    getattr(self.native_healer, "last_agent_result", None),
+                    "session_id",
+                    None,
+                ),
+                executor_mode="queue_or_direct",
+                model_tier=getattr(self, "model_tier", None),
+                timeout_seconds=int(os.environ.get("HEALER_ATTEMPT_TIMEOUT_SECONDS", "600")),
+                error_type=error_type
+                or getattr(getattr(self.native_healer, "last_agent_result", None), "error_type", None)
+                or record.get("error_category"),
+                tool_call_summary={
+                    "count": len(calls),
+                    "tools": [call.get("tool") or call.get("name") for call in calls],
+                },
+                input_artifact_hashes={
+                    "generated_test_before": record.get("content_hash_before"),
+                },
+                output_artifact_hash=record.get("content_hash_after"),
+                metadata={
+                    "guardrail_status": record.get("guardrail_status"),
+                    "failure_evidence_packet": record.get("failure_evidence_packet"),
+                    "passed_after": record.get("passed_after"),
+                    "error_summary": record.get("error_summary"),
+                },
+            )
+
         if handoff_manifest_path:
             record_stage(
                 handoff_manifest_path,
@@ -2600,6 +2830,24 @@ Requirements:
                 status="used" if test_path.exists() else "missing",
                 metadata={"path": str(test_path)},
             )
+            for artifact_id in (
+                "planner_plan",
+                "planner_draft_script",
+                "generator_self_heal",
+            ):
+                artifact = load_manifest(handoff_manifest_path).get("artifacts", {}).get(artifact_id)
+                if isinstance(artifact, dict):
+                    artifact_path = Path(str(artifact.get("path") or ""))
+                    record_consumption(
+                        handoff_manifest_path,
+                        "healer",
+                        artifact_id,
+                        status="used" if artifact_path.exists() else "missing",
+                        metadata={
+                            "path": str(artifact_path),
+                            "validation_status": artifact.get("validation_status"),
+                        },
+                    )
             self._emit_handoff_event(
                 "healer_handoff_ready",
                 "Healer handoff context is ready.",
@@ -2757,6 +3005,12 @@ Requirements:
                     "broad_rewrite": guardrail.get("broad_rewrite", False),
                     "failure_evidence_packet": evidence_path,
                 }
+                record_healer_manifest_attempt(
+                    attempt_number=attempt,
+                    status="running",
+                    attempt_record=attempt_record,
+                    tool_calls=tool_calls,
+                )
 
                 if guardrail.get("guardrail_status") == "failed":
                     if content_after != content_before:
@@ -2772,6 +3026,13 @@ Requirements:
                             "error_summary": f"Healer edit rejected by evidence guardrail: {missing}"[:500],
                             "passed_after": False,
                         }
+                    )
+                    record_healer_manifest_attempt(
+                        attempt_number=attempt,
+                        status="guardrail_failed",
+                        attempt_record=attempt_record,
+                        tool_calls=tool_calls,
+                        error_type="guardrail_failed",
                     )
                     self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
                     self._emit_healer_event(
@@ -2815,7 +3076,32 @@ Requirements:
                         attempt_record.update(
                             {"error_category": "passed", "error_summary": "", "passed_after": True}
                         )
+                        record_healer_manifest_attempt(
+                            attempt_number=attempt,
+                            status="passed",
+                            attempt_record=attempt_record,
+                            tool_calls=tool_calls,
+                        )
                         self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
+                        if handoff_manifest_path:
+                            attempts_path = run_dir / "healing_attempts.json"
+                            if attempts_path.exists():
+                                record_artifact(
+                                    handoff_manifest_path,
+                                    "healing_attempts",
+                                    attempts_path,
+                                    kind="healing_attempts",
+                                    producer_stage="healer",
+                                    required=False,
+                                    consumers=["reporting"],
+                                    validation_status="valid",
+                                )
+                            record_stage(
+                                handoff_manifest_path,
+                                "healer",
+                                status="passed",
+                                metadata={"attempt": attempt},
+                            )
                         self._write_run_metrics(
                             run_dir,
                             healing_started=True,
@@ -2868,6 +3154,12 @@ Requirements:
                                 "passed_after": False,
                             }
                         )
+                        record_healer_manifest_attempt(
+                            attempt_number=attempt,
+                            status="failed",
+                            attempt_record=attempt_record,
+                            tool_calls=tool_calls,
+                        )
                         self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
                         self._emit_healer_event(
                             "healer_verification_failed",
@@ -2900,6 +3192,13 @@ Requirements:
                             "passed_after": False,
                         }
                     )
+                    record_healer_manifest_attempt(
+                        attempt_number=attempt,
+                        status="failed",
+                        attempt_record=attempt_record,
+                        tool_calls=tool_calls,
+                        error_type="no_fix_produced",
+                    )
                     self._record_healing_attempt(run_dir, test_path, attempt_records, attempt_record)
                     logger.warning("Healer returned no code")
 
@@ -2918,23 +3217,57 @@ Requirements:
                     },
                 )
                 logger.error(
-                    f"Healer timed out on attempt {attempt}/{max_attempts} - stopping retries"
+                    f"Healer timed out on attempt {attempt}/{max_attempts} - continuing if attempts remain"
                 )
-                break
+                if handoff_manifest_path:
+                    record_attempt(
+                        handoff_manifest_path,
+                        "healer",
+                        stage_attempt=attempt,
+                        status="timeout",
+                        agent_session_id=getattr(
+                            getattr(self.native_healer, "last_agent_result", None),
+                            "session_id",
+                            None,
+                        ),
+                        executor_mode="queue_or_direct",
+                        model_tier=getattr(self, "model_tier", None),
+                        timeout_seconds=int(
+                            os.environ.get("HEALER_ATTEMPT_TIMEOUT_SECONDS", "600")
+                        ),
+                        error_type="timeout",
+                        tool_call_summary={
+                            "count": len(getattr(self.native_healer, "last_tool_calls", []) or []),
+                        },
+                        input_artifact_hashes={
+                            "generated_test": self._content_hash(
+                                test_path.read_text() if test_path.exists() else ""
+                            )
+                        },
+                    )
+                continue
 
             except Exception as e:
+                error_attempt_record = {
+                    "attempt": attempt,
+                    "timestamp": datetime.now().isoformat(),
+                    "error_category": "healer_error",
+                    "error_summary": str(e)[:500],
+                    "changed": False,
+                    "passed_after": False,
+                }
+                record_healer_manifest_attempt(
+                    attempt_number=attempt,
+                    status="failed",
+                    attempt_record=error_attempt_record,
+                    tool_calls=getattr(self.native_healer, "last_tool_calls", []) or [],
+                    error_type="healer_error",
+                )
                 self._record_healing_attempt(
                     run_dir,
                     test_path,
                     attempt_records,
-                    {
-                        "attempt": attempt,
-                        "timestamp": datetime.now().isoformat(),
-                        "error_category": "healer_error",
-                        "error_summary": str(e)[:500],
-                        "changed": False,
-                        "passed_after": False,
-                    },
+                    error_attempt_record,
                 )
                 logger.warning(f"Healing error: {e}")
 
@@ -2959,6 +3292,26 @@ Requirements:
             json.dumps(validation_result, indent=2)
         )
         self._publish_agentic_summary(run_dir)
+        if handoff_manifest_path:
+            attempts_path = run_dir / "healing_attempts.json"
+            if attempts_path.exists():
+                record_artifact(
+                    handoff_manifest_path,
+                    "healing_attempts",
+                    attempts_path,
+                    kind="healing_attempts",
+                    producer_stage="healer",
+                    required=False,
+                    consumers=["reporting"],
+                    validation_status="valid",
+                )
+            record_stage(
+                handoff_manifest_path,
+                "healer",
+                status="exhausted",
+                failure_reason=f"Failed after {max_attempts} native healing attempts",
+                metadata={"attempts": max_attempts},
+            )
 
         return {
             "success": False,

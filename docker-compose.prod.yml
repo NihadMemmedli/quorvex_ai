@@ -96,11 +96,6 @@ services:
       API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
       QUORVEX_SETTINGS_ENV_FILE: ${QUORVEX_SETTINGS_ENV_FILE:-/app/data/runtime.env}
       QUORVEX_AGENT_RUNTIME: ${QUORVEX_AGENT_RUNTIME:-claude_sdk}
-      HERMES_ENABLED: ${HERMES_ENABLED:-false}
-      HERMES_API_URL: ${HERMES_API_URL:-http://hermes:8642}
-      HERMES_API_KEY: ${HERMES_API_KEY:-}
-      HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
-      HERMES_HOME: ${HERMES_HOME:-/app/data/hermes}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -160,8 +155,6 @@ services:
       redis:
         condition: service_healthy
       temporal:
-        condition: service_started
-      hermes:
         condition: service_started
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
@@ -223,11 +216,6 @@ services:
       API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
       QUORVEX_SETTINGS_ENV_FILE: ${QUORVEX_SETTINGS_ENV_FILE:-/app/data/runtime.env}
       QUORVEX_AGENT_RUNTIME: ${QUORVEX_AGENT_RUNTIME:-claude_sdk}
-      HERMES_ENABLED: ${HERMES_ENABLED:-false}
-      HERMES_API_URL: ${HERMES_API_URL:-http://hermes:8642}
-      HERMES_API_KEY: ${HERMES_API_KEY:-}
-      HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
-      HERMES_HOME: ${HERMES_HOME:-/app/data/hermes}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -264,8 +252,6 @@ services:
         condition: service_healthy
       browser-workers:
         condition: service_healthy
-      hermes:
-        condition: service_started
     deploy:
       mode: replicated
       replicas: ${AGENT_WORKER_REPLICAS:-2}
@@ -322,11 +308,6 @@ services:
       API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
       QUORVEX_SETTINGS_ENV_FILE: ${QUORVEX_SETTINGS_ENV_FILE:-/app/data/runtime.env}
       QUORVEX_AGENT_RUNTIME: ${QUORVEX_AGENT_RUNTIME:-claude_sdk}
-      HERMES_ENABLED: ${HERMES_ENABLED:-false}
-      HERMES_API_URL: ${HERMES_API_URL:-http://hermes:8642}
-      HERMES_API_KEY: ${HERMES_API_KEY:-}
-      HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
-      HERMES_HOME: ${HERMES_HOME:-/app/data/hermes}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -348,8 +329,6 @@ services:
       redis:
         condition: service_healthy
       temporal:
-        condition: service_started
-      hermes:
         condition: service_started
     networks:
       - playwright-network
@@ -400,11 +379,6 @@ services:
       API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
       QUORVEX_SETTINGS_ENV_FILE: ${QUORVEX_SETTINGS_ENV_FILE:-/app/data/runtime.env}
       QUORVEX_AGENT_RUNTIME: ${QUORVEX_AGENT_RUNTIME:-claude_sdk}
-      HERMES_ENABLED: ${HERMES_ENABLED:-false}
-      HERMES_API_URL: ${HERMES_API_URL:-http://hermes:8642}
-      HERMES_API_KEY: ${HERMES_API_KEY:-}
-      HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
-      HERMES_HOME: ${HERMES_HOME:-/app/data/hermes}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -426,8 +400,6 @@ services:
       redis:
         condition: service_healthy
       temporal:
-        condition: service_started
-      hermes:
         condition: service_started
     networks:
       - playwright-network
@@ -638,11 +610,6 @@ services:
       API_TIMEOUT_MS: ${API_TIMEOUT_MS:-3000000}
       QUORVEX_SETTINGS_ENV_FILE: ${QUORVEX_SETTINGS_ENV_FILE:-/app/data/runtime.env}
       QUORVEX_AGENT_RUNTIME: ${QUORVEX_AGENT_RUNTIME:-claude_sdk}
-      HERMES_ENABLED: ${HERMES_ENABLED:-false}
-      HERMES_API_URL: ${HERMES_API_URL:-http://hermes:8642}
-      HERMES_API_KEY: ${HERMES_API_KEY:-}
-      HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
-      HERMES_HOME: ${HERMES_HOME:-/app/data/hermes}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -740,8 +707,6 @@ services:
         condition: service_healthy
       temporal:
         condition: service_started
-      hermes:
-        condition: service_started
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8001/health" ]
       interval: 30s
@@ -763,44 +728,6 @@ services:
       options:
         max-size: "100m"
         max-file: "5"
-
-  hermes:
-    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:latest}
-    container_name: quorvex-hermes
-    command: ${HERMES_COMMAND:-gateway run}
-    restart: unless-stopped
-    ports:
-      - "${HERMES_API_PORT:-8642}:8642"
-      - "${HERMES_DASHBOARD_PORT:-9119}:9119"
-    environment:
-      HERMES_HOME: ${HERMES_CONTAINER_HOME:-/opt/data/hermes}
-      API_SERVER_ENABLED: "true"
-      API_SERVER_HOST: 0.0.0.0
-      API_SERVER_PORT: "8642"
-      API_SERVER_KEY: ${HERMES_API_KEY:-}
-      HERMES_DASHBOARD: ${HERMES_DASHBOARD:-1}
-      HERMES_DASHBOARD_HOST: 0.0.0.0
-      HERMES_DASHBOARD_TUI: ${HERMES_DASHBOARD_TUI:-1}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}
-      GLM_API_KEY: ${GLM_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}
-    volumes:
-      - data_dir:/opt/data
-      - runs_data:/workspace/runs
-      - ${SPECS_DIR:-./specs}:/workspace/specs
-      - ${TESTS_DIR:-./tests}:/workspace/tests
-    networks:
-      - playwright-network
-    profiles:
-      - standard
-      - workers
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "3"
 
   frontend:
     image: ${QUORVEX_FRONTEND_IMAGE:-quorvex-frontend:prod}
@@ -824,10 +751,6 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       QUORVEX_AGENT_RUNTIME: ${QUORVEX_AGENT_RUNTIME:-claude_sdk}
       QUORVEX_ASSISTANT_RUNTIME: ${QUORVEX_ASSISTANT_RUNTIME:-claude_sdk}
-      HERMES_ENABLED: ${HERMES_ENABLED:-false}
-      HERMES_API_URL: ${HERMES_API_URL:-http://hermes:8642}
-      HERMES_API_KEY: ${HERMES_API_KEY:-}
-      HERMES_MODEL: ${HERMES_MODEL:-hermes-agent}
       OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-4o-mini}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://api.z.ai/api/anthropic}

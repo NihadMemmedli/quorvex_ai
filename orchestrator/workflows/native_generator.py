@@ -51,6 +51,7 @@ from orchestrator.ai.prompt_registry import (
 )
 from orchestrator.services.handoff_manifest import (
     record_artifact,
+    record_attempt,
     record_consumption,
 )
 from orchestrator.utils.agent_runner import (
@@ -58,7 +59,7 @@ from orchestrator.utils.agent_runner import (
     AgentRunner,
     get_default_timeout,
 )
-from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
+from orchestrator.utils.agent_tool_allowlists import get_agent_tool_config
 from orchestrator.utils.text_utils import truncate_middle
 from orchestrator.utils.token_budget import (
     context_budget_for_stage,
@@ -296,7 +297,7 @@ class NativeGenerator:
         fixed_code = self._extract_code(result or "")
         if fixed_code:
             logger.info(f"Saving generated code to: {output_path}")
-            output_path.write_text(fixed_code)
+            output_path.write_text(fixed_code.rstrip() + "\n")
             self._record_generation_coverage(spec_content, output_path)
             await self._self_run_generated_test_if_enabled(
                 output_path=output_path,
@@ -314,6 +315,45 @@ class NativeGenerator:
                 source="agent_response_fallback",
             )
             return output_path
+
+        recovered_tool_code = self._recover_generator_write_test_code(agent_result)
+        if recovered_tool_code:
+            logger.info(
+                "Recovering generated code from generator_write_test telemetry: %s",
+                output_path,
+            )
+            output_path.write_text(recovered_tool_code.rstrip() + "\n")
+            validation_error = self._generated_test_validation_error(output_path)
+            if not validation_error:
+                self._record_generation_coverage(spec_content, output_path)
+                await self._self_run_generated_test_if_enabled(
+                    output_path=output_path,
+                    browser=self_run_browser,
+                    output_dir=self_run_output_dir,
+                    self_heal_max_attempts=self_heal_max_attempts,
+                    enable_self_run=enable_self_run,
+                    previous_result=agent_result,
+                    handoff_manifest_path=handoff_manifest_path,
+                )
+                self._record_generated_test_handoff(
+                    handoff_manifest_path=handoff_manifest_path,
+                    output_path=output_path,
+                    handoff_consumption=handoff_consumption,
+                    source="generator_write_test_telemetry",
+                )
+                return output_path
+            logger.warning(
+                "Recovered generator_write_test content failed validation: %s",
+                validation_error,
+            )
+
+        if self._is_provider_overload_result(agent_result):
+            status = getattr(agent_result, "api_error_status", None)
+            error = getattr(agent_result, "error", None) or "provider overloaded"
+            raise RuntimeError(
+                "Native generator failed because the LLM provider was temporarily "
+                f"unavailable{f' (status {status})' if status else ''}: {error}"
+            )
 
         validation_error = "agent did not write a valid Playwright TypeScript test or return one in a code block"
         if await self._retry_generator_format(
@@ -342,6 +382,32 @@ class NativeGenerator:
 
         logger.warning(f"Generator finished but test file not found at: {output_path}")
         return output_path
+
+    @staticmethod
+    def _is_provider_overload_result(agent_result: AgentResult | None) -> bool:
+        if agent_result is None:
+            return False
+        error_type = getattr(agent_result, "error_type", None)
+        status = getattr(agent_result, "api_error_status", None)
+        return error_type == "provider_overloaded" or status == 529 or (
+            isinstance(status, int) and 500 <= status <= 599
+        )
+
+    def _recover_generator_write_test_code(self, agent_result: AgentResult | None) -> str | None:
+        if agent_result is None:
+            return None
+        for call in reversed(getattr(agent_result, "tool_calls", []) or []):
+            name = str(getattr(call, "name", "") or "")
+            if not name.endswith("generator_write_test"):
+                continue
+            tool_input = getattr(call, "input", None)
+            if not isinstance(tool_input, dict):
+                continue
+            for key in ("code", "source", "content", "test_code", "testCode"):
+                value = tool_input.get(key)
+                if isinstance(value, str) and self._looks_like_playwright_test(value):
+                    return value
+        return None
 
     def _record_generated_test_handoff(
         self,
@@ -419,7 +485,6 @@ class NativeGenerator:
             except OSError:
                 previous_file = ""
 
-        resume_session_id = getattr(previous_result, "session_id", None)
         current_error = validation_error
         current_output = previous_output or ""
 
@@ -437,10 +502,7 @@ class NativeGenerator:
             )
             retry_result = await self._query_generator_format_retry_agent(
                 prompt,
-                resume_session_id=resume_session_id,
-                continue_conversation=bool(not resume_session_id and previous_result),
             )
-            resume_session_id = retry_result.session_id or resume_session_id
             current_output = retry_result.output or ""
             fixed_code = self._extract_code(current_output)
             if not fixed_code:
@@ -482,8 +544,8 @@ class NativeGenerator:
         )
         return f"""You are correcting a rejected Playwright test generation result.
 
-This is a schema/format correction turn in the same task, not a new browser-generation run.
-Do not browse, do not call tools, do not start or close a browser, and do not create a new session.
+This is a clean artifact-driven schema/format correction turn, not a browser-generation run.
+Do not browse, do not call tools, do not start or close a browser, and do not depend on prior Claude conversation state.
 
 Validation failure:
 {validation_error}
@@ -528,8 +590,8 @@ Rules:
             env_vars=self.env_vars,
             cwd=self.cwd,
             requires_live_browser=False,
-            resume_session_id=resume_session_id,
-            continue_conversation=continue_conversation,
+            resume_session_id=None,
+            continue_conversation=False,
             force_direct_execution=True,
         )
         return await runner.run(prompt)
@@ -575,8 +637,7 @@ Rules:
         self.last_self_heal_artifact_path = artifact_path
         max_attempts = self._generator_self_heal_max_attempts(self_heal_max_attempts)
         browser_project = browser or "chromium"
-        session_id = getattr(previous_result, "session_id", None)
-        use_continue = bool(previous_result and not session_id)
+        generator_session_id = getattr(previous_result, "session_id", None)
         session_ids: list[str] = []
         records: list[dict[str, Any]] = []
         previous_fixes: list[str] = []
@@ -586,7 +647,8 @@ Rules:
             "browser": browser_project,
             "output_dir": str(run_dir),
             "max_self_heal_attempts": max_attempts,
-            "initial_session_id": session_id,
+            "initial_session_id": generator_session_id,
+            "session_resume_policy": "clean_artifact_turns",
             "session_ids": session_ids,
             "attempt_count": 0,
             "attempts": records,
@@ -615,12 +677,9 @@ Rules:
         )
         first_result = await self._query_generator_self_heal_agent(
             first_prompt,
-            resume_session_id=session_id,
-            continue_conversation=use_continue,
         )
-        session_id = first_result.session_id or session_id
-        if session_id:
-            session_ids.append(session_id)
+        if first_result.session_id:
+            session_ids.append(first_result.session_id)
         status = self._parse_generator_self_run_status(first_result)
         failure_summary = self._summarize_agent_run_result(first_result)
         records.append(
@@ -668,12 +727,9 @@ Rules:
             )
             repair_result = await self._query_generator_self_heal_agent(
                 prompt,
-                resume_session_id=session_id,
-                continue_conversation=bool(not session_id),
             )
-            session_id = repair_result.session_id or session_id
-            if session_id and session_id not in session_ids:
-                session_ids.append(session_id)
+            if repair_result.session_id and repair_result.session_id not in session_ids:
+                session_ids.append(repair_result.session_id)
             after_hash = self._file_sha256(output_path)
             validation_error = self._generated_test_validation_error(output_path)
             status = self._parse_generator_self_run_status(repair_result)
@@ -755,6 +811,25 @@ Rules:
             validation_status=status,
             metadata={"status": status},
         )
+        try:
+            data = json.loads(artifact_path.read_text())
+            for index, attempt in enumerate(data.get("attempts") or [], start=1):
+                if isinstance(attempt, dict):
+                    record_attempt(
+                        handoff_manifest_path,
+                        "generator_self_heal",
+                        stage_attempt=index,
+                        status=str(attempt.get("status") or data.get("final_status") or "unknown"),
+                        agent_session_id=attempt.get("session_id"),
+                        executor_mode="direct",
+                        model_tier=self.model_tier,
+                        error_type=attempt.get("status") if str(attempt.get("status", "")).startswith("failed") else None,
+                        input_artifact_hashes={"generated_test": data.get("original_file_hash")},
+                        output_artifact_hash=attempt.get("accepted_file_hash"),
+                        metadata={key: value for key, value in attempt.items() if key != "run_result_summary"},
+                    )
+        except Exception as exc:
+            logger.debug("Could not record generator self-heal attempts in manifest: %s", exc)
 
     def _build_generator_self_run_prompt(
         self,
@@ -763,7 +838,7 @@ Rules:
         browser: str,
         output_dir: Path,
     ) -> str:
-        return f"""Run the generated Playwright test file now in this same generator conversation.
+        return f"""Run the generated Playwright test file now using the artifact context below.
 
 Test path: {output_path}
 Browser/project: {browser}
@@ -772,8 +847,10 @@ Output directory: {output_dir}
 Instructions:
 - Call `test_debug` for exactly this file and browser/project before handoff. Do not run any other test file.
 - Do not edit the file in this turn.
-- If the test fails, leave it paused long enough to inspect only the failure summary needed to report the result.
+- If the test fails, keep the paused browser state open long enough to inspect the failure summary needed to report the result.
+- Do not call `browser_close`; the orchestrator owns cleanup after this turn.
 - Stop immediately after the debug result is known.
+- This is a clean execution turn. Do not rely on previous Claude conversation state.
 
 Final response fields:
 self_run_status: passed | failed
@@ -795,7 +872,7 @@ changed_selectors: []
         current_file_content: str,
     ) -> str:
         prior = "\n".join(f"- {item}" for item in previous_fixes) or "- none"
-        return f"""Correct the generated Playwright test inside the same generator conversation.
+        return f"""Correct the generated Playwright test using the artifact context below.
 
 Test path: {output_path}
 Browser/project: {browser}
@@ -819,11 +896,15 @@ Instructions:
 - Fix exactly one root cause in the same output file: {output_path}
 - Use `test_debug` scoped to this exact file and browser/project `{browser}` to reproduce the failed generated test state before editing. `test_debug` is the failure-state capture path because it pauses on the failed test state.
 - Use diagnostic tools only after `test_debug` has paused: `browser_snapshot`,
-  `browser_console_messages`, `browser_network_requests`, or `browser_generate_locator`.
+  `browser_console_messages`, `browser_network_requests`, `browser_generate_locator`,
+  `browser_evaluate`, or tracing tools. Use `browser_resume` only after capturing
+  paused-state evidence and only when you need the same paused script to continue
+  to the next action, assertion, or failure.
+- Do not call `browser_close`; preserve the paused browser state until you have captured the evidence needed for the fix.
 - Use `generator_write_test` to rewrite that same file with the complete corrected test.
-- Rerun the same generated test with `test_run` scoped to this exact file and browser/project `{browser}` only after editing, for final verification.
+- Rerun the same generated test with `test_debug` when you still need paused-state evidence, or `test_run` scoped to this exact file and browser/project `{browser}` for final verification.
 - Stop immediately when the run passes.
-- Do not start a new workflow session, do not switch files, and do not run unrelated tests.
+- Do not switch files, do not run unrelated tests, and do not rely on prior Claude conversation state.
 - If your correction would make the file invalid TypeScript/Playwright, do not write it.
 
 Final response fields:
@@ -841,11 +922,14 @@ changed_selectors: JSON array of selector changes, or []
         continue_conversation: bool = False,
     ) -> AgentResult:
         timeout = int(os.environ.get("GENERATOR_SELF_HEAL_TIMEOUT_SECONDS", "300"))
+        tool_config = get_agent_tool_config(
+            "playwright-test-generator", mcp_config_dir=self.cwd
+        )
         runner = AgentRunner(
             timeout_seconds=timeout,
-            allowed_tools=get_agent_allowed_tools(
-                "playwright-test-generator", mcp_config_dir=self.cwd
-            ),
+            allowed_tools=tool_config.get("allowed_tools"),
+            tools=tool_config.get("tools"),
+            disallowed_tools=tool_config.get("disallowed_tools"),
             log_tools=True,
             on_tool_use=self.on_tool_use,
             on_progress=self.on_progress,
@@ -862,8 +946,8 @@ changed_selectors: JSON array of selector changes, or []
             capture_memory=False,
             env_vars=self.env_vars,
             cwd=self.cwd,
-            resume_session_id=resume_session_id,
-            continue_conversation=continue_conversation,
+            resume_session_id=None,
+            continue_conversation=False,
             force_direct_execution=True,
             preserve_browser_on_failure=True,
         )
@@ -1163,6 +1247,12 @@ For each test case in the spec:
 3. Execute each step interactively using `browser_*` tools to validate selectors
 4. Retrieve the execution log using `generator_read_log`
 5. Write the final test using `generator_write_test`
+6. Immediately run the generated file with the correct verification tools:
+   - Use `test_debug` scoped to `<test-file>{output_path}</test-file>` first when you need paused browser evidence.
+   - After `test_debug` pauses, inspect with `browser_snapshot`, `browser_console_messages`, `browser_network_requests`, `browser_generate_locator`, and `browser_evaluate`.
+   - Use `browser_resume` only after capturing paused-state evidence and only to continue the same debug run to the next action, assertion, or failure.
+   - Use `test_run` scoped to `<test-file>{output_path}</test-file>` for final pass/fail verification.
+   - Do not call `browser_close`; the runner owns browser cleanup.
 
 ## Dialog Handling (CRITICAL)
 When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dialogs):
@@ -1443,11 +1533,14 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
 
         logger.info(f"Timeout: {timeout}s ({timeout // 60} minutes)")
 
+        tool_config = get_agent_tool_config(
+            "playwright-test-generator", mcp_config_dir=self.cwd
+        )
         runner = AgentRunner(
             timeout_seconds=timeout,
-            allowed_tools=get_agent_allowed_tools(
-                "playwright-test-generator", mcp_config_dir=self.cwd
-            ),
+            allowed_tools=tool_config.get("allowed_tools"),
+            tools=tool_config.get("tools"),
+            disallowed_tools=tool_config.get("disallowed_tools"),
             log_tools=True,
             on_tool_use=self.on_tool_use,
             on_progress=self.on_progress,
@@ -1463,6 +1556,7 @@ Use this memory only as advisory context. Validate remembered selectors, routes,
             inject_memory=False,
             env_vars=self.env_vars,
             cwd=self.cwd,
+            requires_live_browser=True,
         )
 
         result = await runner.run(prompt)

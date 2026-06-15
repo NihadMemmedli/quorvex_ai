@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 RuntimeModelTier = Literal["light", "standard", "deep", "tool_deep", "chat", "embedding"]
-RuntimeProvider = Literal["anthropic_compatible", "openai_compatible", "hermes"]
+RuntimeProvider = Literal["anthropic_compatible", "openai_compatible"]
 
 DEFAULT_BASE_URL = "https://api.z.ai/api/anthropic"
 DEFAULT_LIGHT_MODEL = "glm-4.5-air"
@@ -20,7 +20,6 @@ DEFAULT_STANDARD_MODEL = "glm-5-turbo"
 DEFAULT_DEEP_MODEL = "glm-5.1"
 DEFAULT_OPENAI_CHAT_MODEL = "gpt-4o-mini"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
-DEFAULT_HERMES_MODEL = "hermes-agent"
 
 CANONICAL_MODEL_ENV: dict[RuntimeModelTier, str] = {
     "light": "QUORVEX_LLM_LIGHT_MODEL",
@@ -51,6 +50,7 @@ DEFAULT_MODEL_BY_TIER: dict[RuntimeModelTier, str] = {
 
 ANTHROPIC_COMPATIBLE_KEY_ENV = (
     "QUORVEX_LLM_API_KEY",
+    "QUORVEX_LLM_API_KEYS",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
 )
@@ -96,13 +96,35 @@ def _first_env(env_vars: dict[str, str] | None, keys: tuple[str, ...], default: 
     return default, None
 
 
+def _api_key_value(key: str, value: str) -> str:
+    if key == "QUORVEX_LLM_API_KEYS":
+        return value.split(",", 1)[0].strip()
+    return value
+
+
+def _first_api_key(env_vars: dict[str, str] | None, keys: tuple[str, ...], default: str = "") -> tuple[str, str | None]:
+    if env_vars is not None:
+        found_in_env_vars = False
+        for key in keys:
+            if key in env_vars:
+                found_in_env_vars = True
+            value = _api_key_value(key, env_vars.get(key, ""))
+            if value:
+                return value, key
+        if found_in_env_vars:
+            return default, None
+    for key in keys:
+        value = _api_key_value(key, os.environ.get(key, ""))
+        if value:
+            return value, key
+    return default, None
+
+
 def normalize_runtime_provider(value: str | None, base_url: str | None = None) -> RuntimeProvider:
     raw = (value or "").strip().lower()
     if raw in {"openai", "openai_compatible", "openai-compatible"}:
         return "openai_compatible"
-    if raw in {"hermes", "hermes_agent", "hermes-agent"}:
-        return "hermes"
-    if raw in {"anthropic", "anthropic_compatible", "anthropic-compatible", "zai", "openrouter", "custom"}:
+    if raw in {"anthropic", "anthropic_compatible", "anthropic-compatible", "zai", "openrouter", "custom", "hermes", "hermes_agent", "hermes-agent"}:
         return "anthropic_compatible"
 
     url = (base_url or "").lower()
@@ -166,14 +188,12 @@ def resolve_runtime_ai_selection(
         model = model_override or _env_get(env_vars, CANONICAL_MODEL_ENV[tier]) or _env_get(
             env_vars, "OPENAI_MODEL_ID", fallback_model
         )
-        api_key, api_key_env = _first_env(env_vars, ("QUORVEX_LLM_API_KEY", "OPENAI_API_KEY"))
-    elif provider == "hermes":
-        base_url = _env_get(env_vars, "HERMES_API_URL", "http://hermes:8642")
-        model = model_override or _env_get(env_vars, "HERMES_MODEL", DEFAULT_HERMES_MODEL)
-        api_key, api_key_env = _first_env(env_vars, ("HERMES_API_KEY",), "local-hermes")
+        api_key, api_key_env = _first_api_key(
+            env_vars, ("QUORVEX_LLM_API_KEY", "QUORVEX_LLM_API_KEYS", "OPENAI_API_KEY")
+        )
     else:
         model = resolve_model(tier, env_vars, model_override)
-        api_key, api_key_env = _first_env(env_vars, anthropic_compatible_key_env(base_url))
+        api_key, api_key_env = _first_api_key(env_vars, anthropic_compatible_key_env(base_url))
 
     temperature_by_tier = {
         "light": 0.0,

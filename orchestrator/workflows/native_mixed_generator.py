@@ -28,7 +28,7 @@ if config_dir:
 import logging
 
 from orchestrator.utils.agent_runner import AgentRunner, get_default_timeout
-from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
+from orchestrator.utils.agent_tool_allowlists import get_agent_tool_config
 
 logger = logging.getLogger(__name__)
 
@@ -194,10 +194,13 @@ Write the file to: {output_path}
         """Query the agent."""
         timeout = int(os.environ.get("GENERATOR_TIMEOUT_SECONDS", get_default_timeout()))
         logger.info(f"   Timeout: {timeout}s ({timeout // 60} minutes)")
+        tool_config = get_agent_tool_config("playwright-test-generator")
 
         runner = AgentRunner(
             timeout_seconds=timeout,
-            allowed_tools=get_agent_allowed_tools("playwright-test-generator"),
+            allowed_tools=tool_config.get("allowed_tools"),
+            tools=tool_config.get("tools"),
+            disallowed_tools=tool_config.get("disallowed_tools"),
             log_tools=True,
             model_tier=self.model_tier,
         )

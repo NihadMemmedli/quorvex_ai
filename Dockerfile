@@ -1,7 +1,7 @@
 # ============================================
-# Stage 1: Base image with Python + Node + Playwright
+# Stage 1: Base image with Python + Node + Playwright runtime deps
 # ============================================
-FROM mcr.microsoft.com/playwright/python:v1.57.0-jammy AS base
+FROM python:3.10-slim-bookworm AS base
 
 # Set working directory
 WORKDIR /app
@@ -17,7 +17,7 @@ RUN apt-get update && \
     apt-get install -y ca-certificates curl gnupg && \
     mkdir -p /etc/apt/keyrings && \
     curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list && \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | tee /etc/apt/sources.list.d/nodesource.list && \
     apt-get update && \
     apt-get install -y \
         nodejs \
@@ -128,12 +128,11 @@ COPY orchestrator/requirements.txt /app/orchestrator/requirements.txt
 COPY package.json package-lock.json /app/
 RUN npm ci
 
-# Ensure the Node Playwright browser cache matches package.json.
-# The base image has browsers, but this keeps the debug image aligned with npm deps.
+# Ensure the Node Playwright browser cache and OS dependencies match package.json.
 ENV PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=300000
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV TEMPORAL_BROWSER_WORKFLOW_TASK_QUEUE=quorvex-browser-workflows
-RUN npx playwright install chromium && \
+RUN npx playwright install --with-deps chromium && \
     if [ -f /app/node_modules/@playwright/mcp/node_modules/playwright/cli.js ]; then \
       node /app/node_modules/@playwright/mcp/node_modules/playwright/cli.js install chromium; \
     fi
@@ -150,8 +149,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Clone noVNC for websockify --web option (HTML5 VNC client)
 RUN git clone --depth 1 https://github.com/novnc/noVNC.git /opt/noVNC
 
-# Reuse the Playwright image's UID/GID 1000 user so shared volumes have the
-# same numeric owner in both full and slim backend images.
+# Use UID/GID 1000 so shared volumes have the same numeric owner in both full
+# and slim backend images.
 RUN if id -u pwuser >/dev/null 2>&1; then \
       usermod --login agent --home /home/agent --move-home pwuser && \
       groupmod --new-name agent pwuser; \

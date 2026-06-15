@@ -1,6 +1,7 @@
 import json
 import hashlib
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from orchestrator.services.handoff_manifest import (
     load_manifest,
     record_artifact,
 )
-from orchestrator.utils.agent_runner import AgentResult
+from orchestrator.utils.agent_runner import AgentResult, ToolCall
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
 from orchestrator.workflows.native_generator import NativeGenerator
 
@@ -288,6 +289,131 @@ def test_generator_extract_code_rejects_narrative_without_import():
     assert generator._extract_code("test('x', async () => {});") is None
 
 
+@pytest.mark.asyncio
+async def test_generator_recovers_code_from_write_test_telemetry_after_provider_failure(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("MEMORY_ENABLED", "false")
+    valid_code = (
+        "import { test, expect } from '@playwright/test';\n"
+        "test('generated', async ({ page }) => {\n"
+        "  await expect(page.locator('body')).toBeVisible();\n"
+        "});\n"
+    )
+
+    generator = NativeGenerator()
+    generator.tests_dir = tmp_path
+    generator._extract_credential_placeholders = lambda _content: {}
+
+    async def fake_query(_prompt):
+        generator.last_agent_result = AgentResult(
+            success=False,
+            output="provider failed after writing",
+            error="LLM provider is temporarily unavailable",
+            error_type="provider_overloaded",
+            api_error_status=529,
+            tool_calls=[
+                ToolCall(
+                    name="mcp__playwright-test__generator_write_test",
+                    timestamp=datetime.now(),
+                    input={"code": valid_code},
+                )
+            ],
+        )
+        return ""
+
+    generator._query_generator_agent = fake_query
+    spec_path = tmp_path / "spec.md"
+    spec_path.write_text("# Test\n1. Navigate to https://example.test")
+
+    output = await generator.generate_test(
+        str(spec_path),
+        target_url="https://example.test",
+        output_name="generated",
+        enable_self_run=False,
+    )
+
+    assert output == tmp_path / "generated.spec.ts"
+    assert output.read_text() == valid_code
+
+
+@pytest.mark.asyncio
+async def test_generator_uses_existing_valid_output_after_provider_failure(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("MEMORY_ENABLED", "false")
+    valid_code = (
+        "import { test, expect } from '@playwright/test';\n"
+        "test('generated', async ({ page }) => {\n"
+        "  await expect(page.locator('body')).toBeVisible();\n"
+        "});\n"
+    )
+
+    generator = NativeGenerator()
+    generator.tests_dir = tmp_path
+    generator._extract_credential_placeholders = lambda _content: {}
+
+    async def fake_query(_prompt):
+        (tmp_path / "generated.spec.ts").write_text(valid_code)
+        generator.last_agent_result = AgentResult(
+            success=False,
+            error="HTTP status 529: service unavailable",
+            error_type="provider_overloaded",
+            api_error_status=529,
+        )
+        return ""
+
+    generator._query_generator_agent = fake_query
+    spec_path = tmp_path / "spec.md"
+    spec_path.write_text("# Test\n1. Navigate to https://example.test")
+
+    output = await generator.generate_test(
+        str(spec_path),
+        target_url="https://example.test",
+        output_name="generated",
+        enable_self_run=False,
+    )
+
+    assert output.read_text() == valid_code
+
+
+@pytest.mark.asyncio
+async def test_generator_skips_format_retry_for_unrecoverable_provider_overload(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("MEMORY_ENABLED", "false")
+    monkeypatch.setenv("GENERATOR_SCHEMA_MAX_ATTEMPTS", "2")
+    generator = NativeGenerator()
+    generator.tests_dir = tmp_path
+    generator._extract_credential_placeholders = lambda _content: {}
+
+    async def fake_query(_prompt):
+        generator.last_agent_result = AgentResult(
+            success=False,
+            output="",
+            error="HTTP status 529: temporarily overloaded",
+            error_type="provider_overloaded",
+            api_error_status=529,
+        )
+        return ""
+
+    async def fail_retry(**_kwargs):
+        raise AssertionError("format retry should not run for provider overload")
+
+    generator._query_generator_agent = fake_query
+    generator._retry_generator_format = fail_retry
+    spec_path = tmp_path / "spec.md"
+    spec_path.write_text("# Test\n1. Navigate to https://example.test")
+
+    with pytest.raises(RuntimeError, match="provider was temporarily unavailable"):
+        await generator.generate_test(
+            str(spec_path),
+            target_url="https://example.test",
+            output_name="generated",
+            enable_self_run=False,
+        )
+
+
 def test_generator_agent_definition_requires_seed_file():
     content = (
         Path(__file__).resolve().parents[2]
@@ -357,8 +483,8 @@ def test_generator_self_heal_prompt_uses_test_debug_before_diagnostics(tmp_path)
 
     assert "Use `test_debug` scoped to this exact file" in prompt
     assert "Use diagnostic tools only after `test_debug` has paused" in prompt
-    assert "with `test_run` scoped to this exact file" in prompt
-    assert "browser_close" not in prompt
+    assert "`test_run` scoped to this exact file" in prompt
+    assert "Do not call `browser_close`" in prompt
 
 
 def test_generator_self_run_prompt_uses_test_debug_before_handoff(tmp_path):
@@ -406,10 +532,17 @@ async def test_generator_runner_does_not_inject_memory_twice(monkeypatch):
     assert captured["model_tier"] == "tool_deep"
     assert captured["memory_agent_type"] == "NativeGenerator"
     assert captured["inject_memory"] is False
+    assert captured["requires_live_browser"] is True
+    assert captured["allowed_tools"] == captured["tools"]
+    assert any(tool.endswith("__browser_snapshot") for tool in captured["tools"])
+    assert any(tool.endswith("__browser_verify_value") for tool in captured["tools"])
+    assert not any(tool.endswith("__browser_run_code") for tool in captured["tools"])
+    assert not any(tool.endswith("__browser_file_upload") for tool in captured["tools"])
+    assert not any(tool.endswith("__browser_close") for tool in captured["tools"])
 
 
 @pytest.mark.asyncio
-async def test_generator_format_retry_reuses_session_without_browser_tools(
+async def test_generator_format_retry_uses_clean_turn_without_browser_tools(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("MEMORY_ENABLED", "false")
@@ -462,11 +595,12 @@ async def test_generator_format_retry_reuses_session_without_browser_tools(
     assert retry_kwargs["tools"] == []
     assert retry_kwargs["requires_live_browser"] is False
     assert retry_kwargs["force_direct_execution"] is True
-    assert retry_kwargs["resume_session_id"] == "sdk-session-1"
+    assert retry_kwargs["resume_session_id"] is None
+    assert retry_kwargs["continue_conversation"] is False
 
 
 @pytest.mark.asyncio
-async def test_generator_self_run_passes_first_try_reuses_original_session(
+async def test_generator_self_run_passes_first_try_uses_clean_turn(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("MEMORY_ENABLED", "false")
@@ -523,7 +657,7 @@ async def test_generator_self_run_passes_first_try_reuses_original_session(
 
     assert output == tmp_path / "generated.spec.ts"
     assert len(calls) == 2
-    assert calls[1]["resume_session_id"] == "gen-session"
+    assert calls[1]["resume_session_id"] is None
     assert calls[1]["continue_conversation"] is False
     assert calls[1]["owner_type"] == "test_run"
     assert calls[1]["owner_id"] == "run-123"
@@ -536,7 +670,7 @@ async def test_generator_self_run_passes_first_try_reuses_original_session(
 
 
 @pytest.mark.asyncio
-async def test_generator_self_heal_reuses_latest_session_until_pass(
+async def test_generator_self_heal_uses_clean_turns_until_pass(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("MEMORY_ENABLED", "false")
@@ -596,9 +730,12 @@ async def test_generator_self_heal_reuses_latest_session_until_pass(
     )
 
     assert len(calls) == 4
-    assert calls[1]["resume_session_id"] == "gen-session"
-    assert calls[2]["resume_session_id"] == "run-session"
-    assert calls[3]["resume_session_id"] == "heal-session-1"
+    assert calls[1]["resume_session_id"] is None
+    assert calls[2]["resume_session_id"] is None
+    assert calls[3]["resume_session_id"] is None
+    assert calls[1]["continue_conversation"] is False
+    assert calls[2]["continue_conversation"] is False
+    assert calls[3]["continue_conversation"] is False
     assert calls[2]["preserve_browser_on_failure"] is True
     assert calls[3]["preserve_browser_on_failure"] is True
     assert generator.last_self_heal_passed is True
@@ -606,7 +743,7 @@ async def test_generator_self_heal_reuses_latest_session_until_pass(
 
 
 @pytest.mark.asyncio
-async def test_generator_self_run_uses_continue_when_no_session_id(
+async def test_generator_self_run_never_uses_continue_when_no_session_id(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("MEMORY_ENABLED", "false")
@@ -647,7 +784,7 @@ async def test_generator_self_run_uses_continue_when_no_session_id(
     )
 
     assert calls[1]["resume_session_id"] is None
-    assert calls[1]["continue_conversation"] is True
+    assert calls[1]["continue_conversation"] is False
 
 
 @pytest.mark.asyncio

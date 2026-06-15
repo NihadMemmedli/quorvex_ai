@@ -38,8 +38,6 @@ MINIO_API_PORT="$(pick_port)"
 MINIO_CONSOLE_PORT="$(pick_port)"
 TEMPORAL_PORT="$(pick_port)"
 TEMPORAL_UI_PORT="$(pick_port)"
-HERMES_API_PORT="$(pick_port)"
-HERMES_DASHBOARD_PORT="$(pick_port)"
 ZAP_PORT="$(pick_port)"
 
 make_git_repo() {
@@ -100,7 +98,6 @@ cat > "${PRIVATE_SOURCE}/README.md" <<'EOF'
 # Test private deploy repo
 EOF
 cp "${ROOT_DIR}/deploy/private-repo-template/compose/docker-compose.mytest.example.yml" "${PRIVATE_SOURCE}/compose/docker-compose.company.yml"
-sed -i.bak '/HERMES_CONTAINER_NAME/d' "${PRIVATE_SOURCE}/compose/docker-compose.company.yml"
 sed -i.bak 's/^    ports: !override$/    ports:/' "${PRIVATE_SOURCE}/compose/docker-compose.company.yml"
 rm -f "${PRIVATE_SOURCE}/compose/docker-compose.company.yml.bak"
 make_git_repo "${PRIVATE_SOURCE}"
@@ -130,10 +127,7 @@ MINIO_API_BIND="127.0.0.1:${MINIO_API_PORT}" \
 MINIO_CONSOLE_BIND="127.0.0.1:${MINIO_CONSOLE_PORT}" \
 TEMPORAL_BIND="127.0.0.1:${TEMPORAL_PORT}" \
 TEMPORAL_UI_BIND="127.0.0.1:${TEMPORAL_UI_PORT}" \
-HERMES_API_BIND="127.0.0.1:${HERMES_API_PORT}" \
-HERMES_DASHBOARD_BIND="127.0.0.1:${HERMES_DASHBOARD_PORT}" \
 ZAP_BIND="127.0.0.1:${ZAP_PORT}" \
-HERMES_CONTAINER_NAME="quorvex-test-hermes" \
 QUORVEX_MIN_FREE_GB=0 \
 QUORVEX_SKIP_REGISTRY_CHECK=true \
 QUORVEX_SKIP_PUBLIC_CHECK=true \
@@ -143,7 +137,6 @@ log "Checking installer reported and created missing files."
 grep -q "Private env file missing: ${DEPLOY_DIR}/env/quorvex.prod.env" "${LOG_FILE}"
 grep -q "Created private env file" "${LOG_FILE}"
 grep -q "Private compose overlay present: ${DEPLOY_DIR}/compose/docker-compose.company.yml" "${LOG_FILE}"
-grep -q "Added Hermes container-name override to private compose overlay" "${LOG_FILE}"
 grep -q "Added private compose port-list overrides" "${LOG_FILE}"
 grep -q "Private reverse proxy config missing: ${DEPLOY_DIR}/reverse-proxy/quorvex.test.internal.conf" "${LOG_FILE}"
 grep -q "Created private reverse proxy config from template" "${LOG_FILE}"
@@ -169,13 +162,11 @@ grep -q '^QUORVEX_PRIVATE_CONTENT_DIR='"${DEPLOY_DIR}"'$' "${DEPLOY_DIR}/env/quo
 grep -q '^SPECS_DIR='"${DEPLOY_DIR}"'/specs$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^TESTS_DIR='"${DEPLOY_DIR}"'/tests$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^PRDS_DIR='"${DEPLOY_DIR}"'/prds$' "${DEPLOY_DIR}/env/quorvex.prod.env"
-grep -q '^HERMES_CONTAINER_NAME=quorvex-test-hermes$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^INITIAL_ADMIN_EMAIL=ops-admin@quorvex.test.internal$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^POSTGRES_PASSWORD=TestPostgresPassword123$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^DATABASE_URL=postgresql://quorvex:TestPostgresPassword123@db:5432/quorvex$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^MINIO_ROOT_PASSWORD=TestMinioPassword123$' "${DEPLOY_DIR}/env/quorvex.prod.env"
 grep -q '^JWT_SECRET_KEY=test-jwt-secret-key-64-bytes-minimum-0000000000000000000000$' "${DEPLOY_DIR}/env/quorvex.prod.env"
-grep -q 'container_name: ${HERMES_CONTAINER_NAME:-quorvex-hermes}' "${DEPLOY_DIR}/compose/docker-compose.company.yml"
 grep -q 'ports: !override' "${DEPLOY_DIR}/compose/docker-compose.company.yml"
 grep -q 'server_name quorvex.test.internal;' "${DEPLOY_DIR}/reverse-proxy/quorvex.test.internal.conf"
 

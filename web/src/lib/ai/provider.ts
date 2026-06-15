@@ -2,7 +2,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 
 export interface ChatRuntimeSettings {
-  route_provider?: 'anthropic' | 'openai' | 'hermes' | string;
+  route_provider?: 'anthropic' | 'openai' | string;
   llm_provider?: string;
   assistant_runtime?: string;
   agent_runtime?: string;
@@ -12,10 +12,6 @@ export interface ChatRuntimeSettings {
   chat_model?: string;
   standard_model?: string;
   model_tiers?: Record<string, string>;
-  hermes_enabled?: boolean;
-  hermes_api_url?: string;
-  hermes_api_key?: string;
-  hermes_model?: string;
 }
 
 /**
@@ -126,8 +122,7 @@ export function hasDirectAnthropicChatCredential(runtime?: ChatRuntimeSettings) 
     return runtime.route_provider === 'anthropic' && Boolean((runtime.api_key || process.env.CLAUDE_CODE_OAUTH_TOKEN || '').trim());
   }
   const explicitAssistantRuntime = getExplicitAssistantRuntime(runtime);
-  const assistantRuntime = getAssistantRuntime(runtime);
-  if (assistantRuntime === 'hermes' || explicitAssistantRuntime === 'openai') return false;
+  if (explicitAssistantRuntime === 'openai') return false;
 
   return Boolean(
     (
@@ -146,8 +141,7 @@ export function hasOpenAIChatCredential(runtime?: ChatRuntimeSettings) {
     return runtime.route_provider === 'openai' && Boolean((runtime.api_key || process.env.OPENAI_API_KEY || '').trim());
   }
   const explicitAssistantRuntime = getExplicitAssistantRuntime(runtime);
-  const assistantRuntime = getAssistantRuntime(runtime);
-  if (assistantRuntime === 'hermes' || explicitAssistantRuntime === 'claude_sdk') return false;
+  if (explicitAssistantRuntime === 'claude_sdk') return false;
   return Boolean((process.env.OPENAI_API_KEY || process.env.QUORVEX_LLM_API_KEY || '').trim());
 }
 
@@ -165,32 +159,11 @@ export function getAssistantRuntime(runtime?: ChatRuntimeSettings) {
   ).trim().toLowerCase();
 }
 
-export function hasHermesChatRuntime(runtime?: ChatRuntimeSettings) {
-  if (runtime) {
-    return runtime.route_provider === 'hermes'
-      || (runtime.hermes_enabled === true && getAssistantRuntime(runtime) === 'hermes');
-  }
-  return (process.env.HERMES_ENABLED || '').toLowerCase() === 'true'
-    && getAssistantRuntime(runtime) === 'hermes';
-}
-
 export function getActiveOpenAIProvider(runtime?: ChatRuntimeSettings) {
   const apiKey = (runtime?.api_key || process.env.OPENAI_API_KEY || process.env.QUORVEX_LLM_API_KEY || '').trim();
   const provider = createOpenAI({
     apiKey,
     baseURL: normalizeOpenAIBaseURL(runtime?.base_url || process.env.OPENAI_BASE_URL || process.env.QUORVEX_LLM_BASE_URL),
-  });
-
-  return { provider };
-}
-
-export function getActiveHermesProvider(runtime?: ChatRuntimeSettings) {
-  const apiKey = (runtime?.hermes_api_key || process.env.HERMES_API_KEY || 'local-hermes').trim();
-  const rawBaseURL = normalizeOpenAIBaseURL(runtime?.hermes_api_url || process.env.HERMES_API_URL || 'http://hermes:8642') || 'http://hermes:8642';
-  const baseURL = rawBaseURL.endsWith('/v1') ? rawBaseURL : `${rawBaseURL}/v1`;
-  const provider = createOpenAI({
-    apiKey,
-    baseURL,
   });
 
   return { provider };
@@ -223,7 +196,3 @@ export const OPENAI_MODEL_ID =
   process.env.OPENAI_CHAT_MODEL ||
   process.env.OPENAI_MODEL ||
   'gpt-4o-mini';
-
-export const HERMES_MODEL_ID =
-  process.env.HERMES_MODEL ||
-  'hermes-agent';

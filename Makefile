@@ -1,4 +1,4 @@
-.PHONY: setup setup-skills start restart dev run run-skill clean help docker-up docker-down docker-build check-env logs stop \
+.PHONY: setup setup-skills start restart restart-agent-worker dev run run-skill clean help docker-up docker-down docker-build check-env logs stop \
         autopilot-stable-up autopilot-stable-down autopilot-dev-up autopilot-status autopilot-logs \
         prod prod-up prod-down prod-down-safe prod-restart prod-logs prod-build prod-build-no-cache prod-status prod-dev prod-dev-build prod-env-bootstrap \
         backup backup-full backup-status restore-list restore restore-from-minio \
@@ -27,6 +27,7 @@ help:
 	@echo "    make start          - Start company/server runtime for external-nginx deployment"
 	@echo "    make stop           - Stop local dev and server-runtime Compose stacks"
 	@echo "    make restart        - Restart the company/server runtime"
+	@echo "    make restart-agent-worker - Restart backend uvicorn and queued agent workers only"
 	@echo "    make logs           - Tail backend and frontend logs"
 	@echo "    make deploy-check   - Verify local external-nginx runtime readiness"
 	@echo "    make company-rehearsal - Simulate company nginx and run browser proxy smoke"
@@ -210,7 +211,7 @@ start:
 	@echo "Company nginx should proxy the public subdomain to frontend :3000 and /websockify to backend :6080."
 	@echo "This target does not start the repo-managed nginx or ZAP security scanner containers."
 	@echo ""
-	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(PROD_COMPOSE) $(RUNTIME_PROFILES) up -d --build db redis minio hermes
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(PROD_COMPOSE) $(RUNTIME_PROFILES) up -d --build db redis minio
 	@python3 scripts/reconcile_prod_postgres.py
 	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(PROD_COMPOSE) $(RUNTIME_PROFILES) up -d --build
 	@$(MAKE) agent-runtime-ready
@@ -230,6 +231,12 @@ restart:
 	@$(MAKE) stop
 	@$(MAKE) start
 
+restart-agent-worker:
+	@echo "Restarting backend API and queued agent workers inside the existing backend container..."
+	@$(APP_COMPOSE) $(RUNTIME_PROFILES) exec -T backend supervisorctl restart uvicorn agent_worker:* || \
+		$(PROD_COMPOSE) $(RUNTIME_PROFILES) exec -T backend supervisorctl restart uvicorn agent_worker:*
+	@echo "Backend API and agent workers restarted."
+
 dev:
 	@$(MAKE) prod-env-bootstrap
 	@echo "Starting full Docker development stack with local code mounts..."
@@ -238,9 +245,10 @@ dev:
 	@echo "Frontend hot reload is enabled. Backend source is mounted, but uvicorn reload is disabled in Docker."
 	@echo "ZAP/security scanning is opt-in: run 'make zap-up' when needed."
 	@echo ""
-	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) $(RUNTIME_PROFILES) up -d --build db redis minio hermes
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) $(RUNTIME_PROFILES) up -d --build db redis minio
 	@python3 scripts/reconcile_prod_postgres.py
-	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) $(RUNTIME_PROFILES) up -d --build
+	@$(MAKE) prod-dev-build
+	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) $(RUNTIME_PROFILES) up -d
 	@$(MAKE) agent-runtime-ready
 	@echo ""
 	@echo "Docker dev stack started:"
@@ -382,7 +390,11 @@ prod-dev:
 
 prod-dev-build:
 	@echo "Rebuilding production development images..."
-	@COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) $(RUNTIME_PROFILES) build --progress=plain
+	@set -e; \
+	for service in frontend backend autonomous-mission-worker custom-workflow-worker; do \
+		echo "Building $$service..."; \
+		COMPOSE_BAKE=false BUILDX_CONFIG=$(BUILDX_CONFIG) $(APP_COMPOSE) --progress=plain $(RUNTIME_PROFILES) build $$service; \
+	done
 
 prod-env-bootstrap:
 	@echo "Bootstrapping production environment..."

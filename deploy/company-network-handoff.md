@@ -66,7 +66,7 @@ Use this note when continuing the company-network deployment. The intended topol
    ```env
    # HTTP_PROXY=http://proxy.company.internal:8080
    # HTTPS_PROXY=http://proxy.company.internal:8080
-   NO_PROXY=localhost,127.0.0.1,db,redis,minio,zap,backend,frontend,temporal,hermes
+   NO_PROXY=localhost,127.0.0.1,db,redis,minio,zap,backend,frontend,temporal
    ```
 
 5. Configure company nginx.

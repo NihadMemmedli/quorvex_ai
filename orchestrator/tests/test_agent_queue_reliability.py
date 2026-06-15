@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import orchestrator.api.db as db_module
 from orchestrator.api.models_db import BrowserAuthSession, PrdGenerationResult, Project
 from orchestrator.services.agent_queue import AgentQueue, AgentTask, AgentTaskStatus
-from orchestrator.services.agent_worker import AgentWorker, BrowserObservationRecorder, _event_tool_uses
+from orchestrator.services.agent_worker import (
+    AgentWorker,
+    BrowserObservationRecorder,
+    BrowserToolTimeoutError,
+    _event_tool_uses,
+)
 from orchestrator.utils.agent_runner import AgentRunner
 from orchestrator.utils import browser_cleanup
 
@@ -270,6 +276,111 @@ def test_agent_task_round_trips_execution_telemetry():
     assert restored.telemetry["error_type"] == "timeout"
 
 
+@pytest.mark.asyncio
+async def test_agent_runner_retries_transient_sdk_provider_error_without_key_cooldown(monkeypatch):
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    calls = {"query": 0, "rate_limit": 0}
+
+    class _Slot:
+        masked = "test...slot"
+
+    class _FakeRotator:
+        key_count = 2
+
+        def get_active_key(self):
+            return _Slot()
+
+        def activate_key(self, _slot):
+            return None
+
+        def report_success(self, _slot):
+            return None
+
+        def report_rate_limit(self, _slot, _retry_after=None):
+            calls["rate_limit"] += 1
+
+    async def fake_query(**_kwargs):
+        calls["query"] += 1
+        if calls["query"] == 1:
+            raise RuntimeError("529 temporarily overloaded, try again later")
+        yield SimpleNamespace(type="text", text="Recovered response")
+
+    monkeypatch.setenv("AGENT_PROVIDER_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("AGENT_PROVIDER_RETRY_BASE_SECONDS", "0")
+    monkeypatch.setattr(agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(agent_runner_module, "get_api_key_rotator", lambda: _FakeRotator())
+
+    runner = AgentRunner(
+        allowed_tools=[],
+        tools=[],
+        inject_memory=False,
+        capture_memory=False,
+        force_direct_execution=True,
+    )
+    result = await runner.run("hello")
+
+    assert result.success is True
+    assert result.output == "Recovered response"
+    assert result.api_error_status == 529
+    assert calls["query"] == 2
+    assert calls["rate_limit"] == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_returns_provider_overloaded_after_sdk_retries_exhausted(monkeypatch):
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    calls = {"query": 0, "rate_limit": 0}
+
+    class _Slot:
+        masked = "test...slot"
+
+    class _FakeRotator:
+        key_count = 2
+
+        def get_active_key(self):
+            return _Slot()
+
+        def activate_key(self, _slot):
+            return None
+
+        def report_success(self, _slot):
+            return None
+
+        def report_rate_limit(self, _slot, _retry_after=None):
+            calls["rate_limit"] += 1
+
+    async def fake_query(**_kwargs):
+        calls["query"] += 1
+        if calls["query"] == 1:
+            yield SimpleNamespace(type="text", text="partial")
+        raise RuntimeError("HTTP status 529: service unavailable")
+
+    monkeypatch.setenv("AGENT_PROVIDER_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("AGENT_PROVIDER_RETRY_BASE_SECONDS", "0")
+    monkeypatch.setattr(agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(agent_runner_module, "get_api_key_rotator", lambda: _FakeRotator())
+
+    runner = AgentRunner(
+        allowed_tools=[],
+        tools=[],
+        inject_memory=False,
+        capture_memory=False,
+        force_direct_execution=True,
+    )
+    result = await runner.run("hello")
+
+    assert result.success is False
+    assert result.error_type == "provider_overloaded"
+    assert result.api_error_status == 529
+    assert result.output == ""
+    assert calls["query"] == 2
+    assert calls["rate_limit"] == 0
+
+
 def test_agent_worker_detects_browser_capable_tasks():
     worker = AgentWorker.__new__(AgentWorker)
 
@@ -327,6 +438,280 @@ def test_agent_worker_reports_sdk_only_options_unsupported_in_cli_queue():
         "enable_file_checkpointing",
         "sandbox",
     ]
+
+
+def test_agent_runner_treats_hooks_agents_skills_plugins_as_direct_sdk_only():
+    runner = AgentRunner(
+        allowed_tools=["Read"],
+        hooks={"PreToolUse": []},
+        agents={"reviewer": {"prompt": "review", "tools": ["Read"]}},
+        skills=["playwright"],
+        plugins=[{"type": "local", "path": "./plugin"}],
+        session_store=object(),
+        fork_session=True,
+    )
+
+    assert runner._requires_direct_sdk_execution() is True
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_records_sdk_object_tool_calls_by_tool_use_id(monkeypatch, tmp_path):
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    async def fake_query(**_kwargs):
+        yield SimpleNamespace(
+            type="assistant",
+            message=SimpleNamespace(
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id="toolu_nav",
+                        name="mcp__playwright-test__browser_navigate",
+                        input={"url": "https://example.test/checkout"},
+                    ),
+                    SimpleNamespace(
+                        type="tool_use",
+                        id="toolu_snapshot",
+                        name="mcp__playwright-test__browser_snapshot",
+                        input={},
+                    ),
+                ]
+            ),
+        )
+        yield SimpleNamespace(
+            type="user",
+            message=SimpleNamespace(
+                content=[
+                    SimpleNamespace(
+                        type="tool_result",
+                        tool_use_id="toolu_nav",
+                        content="Navigated",
+                    ),
+                    SimpleNamespace(
+                        type="tool_result",
+                        tool_use_id="toolu_snapshot",
+                        content=[{"type": "text", "text": "Checkout page"}],
+                    ),
+                ]
+            ),
+        )
+        yield SimpleNamespace(
+            type="assistant",
+            message=SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="done")]
+            ),
+            session_id="sdk-session-stream",
+        )
+
+    seen_tools: list[tuple[str, dict]] = []
+    progress_events: list[dict] = []
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "playwright-test": {
+                        "command": "true",
+                        "args": ["run-test-mcp-server"],
+                    }
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(agent_runner_module, "get_api_key_rotator", lambda: None)
+
+    runner = AgentRunner(
+        allowed_tools=["mcp__playwright-test__browser_navigate"],
+        tools=["mcp__playwright-test__browser_navigate"],
+        log_tools=False,
+        on_tool_use=lambda name, tool_input: seen_tools.append((name, tool_input)),
+        on_progress=lambda event: progress_events.append(event),
+        session_dir=tmp_path,
+        cwd=tmp_path,
+        inject_memory=False,
+        capture_memory=False,
+        force_direct_execution=True,
+    )
+
+    result = await runner.run("inspect checkout")
+
+    assert result.success is True
+    assert result.output == "done"
+    assert [name for name, _input in seen_tools] == [
+        "mcp__playwright-test__browser_navigate",
+        "mcp__playwright-test__browser_snapshot",
+    ]
+    assert [call.name for call in result.tool_calls] == [
+        "mcp__playwright-test__browser_navigate",
+        "mcp__playwright-test__browser_snapshot",
+    ]
+    assert result.tool_calls[0].input == {"url": "https://example.test/checkout"}
+    assert any(event["phase"] == "tool_use" and event["tool_calls"] == 2 for event in progress_events)
+    persisted = json.loads((tmp_path / "tool_calls.json").read_text())
+    assert [item["name"] for item in persisted] == [call.name for call in result.tool_calls]
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_recovers_tool_calls_from_session_jsonl(monkeypatch, tmp_path):
+    from orchestrator.utils import agent_runner as agent_runner_module
+
+    session_id = "sdk-session-fallback"
+    project_dir = tmp_path / "projects" / "fallback"
+    project_dir.mkdir(parents=True)
+    events = [
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "setup",
+                        "name": "mcp__playwright-test__planner_setup_page",
+                        "input": {"seedFile": "tests/seed.spec.ts"},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "setup",
+                        "content": "ready",
+                    }
+                ]
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "nav",
+                        "name": "mcp__playwright-test__browser_navigate",
+                        "input": {"url": "https://example.test/checkout"},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "nav",
+                        "content": "navigated",
+                    }
+                ]
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "snapshot",
+                        "name": "mcp__playwright-test__browser_snapshot",
+                        "input": {},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "snapshot",
+                        "content": 'https://example.test/checkout\n- heading "Checkout"',
+                    }
+                ]
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "save",
+                        "name": "mcp__playwright-test__planner_save_plan",
+                        "input": {"content": "# Test Plan"},
+                    }
+                ]
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "save",
+                        "content": "saved",
+                    }
+                ]
+            },
+        },
+    ]
+    (project_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events)
+    )
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "playwright-test": {
+                        "command": "true",
+                        "args": ["run-test-mcp-server"],
+                    }
+                }
+            }
+        )
+    )
+
+    async def fake_query(**_kwargs):
+        yield SimpleNamespace(
+            type="assistant",
+            message=SimpleNamespace(
+                content=[SimpleNamespace(type="text", text="finished")]
+            ),
+            session_id=session_id,
+        )
+
+    monkeypatch.setattr(agent_runner_module, "query", fake_query)
+    monkeypatch.setattr(agent_runner_module, "ClaudeAgentOptions", lambda **kwargs: kwargs)
+    monkeypatch.setattr(agent_runner_module, "get_api_key_rotator", lambda: None)
+
+    runner = AgentRunner(
+        allowed_tools=[],
+        tools=[],
+        log_tools=False,
+        session_dir=tmp_path,
+        cwd=tmp_path,
+        inject_memory=False,
+        capture_memory=False,
+        force_direct_execution=True,
+    )
+
+    result = await runner.run("make a plan")
+
+    assert [call.name for call in result.tool_calls] == [
+        "mcp__playwright-test__planner_setup_page",
+        "mcp__playwright-test__browser_navigate",
+        "mcp__playwright-test__browser_snapshot",
+        "mcp__playwright-test__planner_save_plan",
+    ]
+    persisted = json.loads((tmp_path / "tool_calls.json").read_text())
+    assert [item["name"] for item in persisted] == [call.name for call in result.tool_calls]
+    assert persisted[-1]["input_content_length"] == len("# Test Plan")
 
 
 def test_agent_worker_cli_args_preserve_supported_sdk_options(monkeypatch, tmp_path):
@@ -395,6 +780,338 @@ def test_agent_worker_cli_args_preserve_supported_sdk_options(monkeypatch, tmp_p
     assert "--include-hook-events" in args
     assert "--include-partial-messages" in args
     assert json.loads(args[args.index("--json-schema") + 1]) == {"type": "object"}
+
+
+def test_agent_worker_browser_tool_watchdog_kills_hung_process(monkeypatch, tmp_path):
+    from orchestrator.services import agent_worker as worker_module
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "playwright-test": {
+                        "command": "npx",
+                        "args": ["@playwright/mcp"],
+                    }
+                }
+            }
+        )
+    )
+
+    class _HungStdout:
+        def __init__(self, proc):
+            self.proc = proc
+            self.sent_tool = False
+
+        def readline(self):
+            if not self.sent_tool:
+                self.sent_tool = True
+                return (
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "content": [
+                                    {
+                                        "type": "tool_use",
+                                        "id": "toolu_hung",
+                                        "name": "mcp__playwright-test__browser_run_code",
+                                        "input": {"code": "while (true) {}"},
+                                    }
+                                ]
+                            },
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            while not self.proc.killed:
+                time.sleep(0.01)
+            return b""
+
+        def close(self):
+            self.proc.killed = True
+
+    class _FakeProc:
+        pid = 12345
+
+        def __init__(self):
+            self.killed = False
+            self.returncode = None
+            self.stdout = _HungStdout(self)
+
+        def poll(self):
+            return -9 if self.killed else None
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        def terminate(self):
+            self.kill()
+
+        def wait(self):
+            self.killed = True
+            self.returncode = -9
+            return self.returncode
+
+    proc = _FakeProc()
+
+    def fake_popen(*_args, **_kwargs):
+        return proc
+
+    worker = AgentWorker.__new__(AgentWorker)
+    worker.worker_id = "worker-test"
+    worker.cwd = str(tmp_path)
+    worker._process_lock = threading.Lock()
+    worker._running_processes = {}
+    worker._cancelled_task_ids = set()
+    worker._pause_lock = threading.Lock()
+    worker._paused_task_ids = set()
+    worker._pause_started_at = {}
+    worker._paused_duration_seconds = {}
+    worker._progress_lock = threading.Lock()
+    worker._current_progress = AgentWorker._empty_progress()
+    worker._last_execution_telemetry = {}
+
+    monkeypatch.setenv("AGENT_BROWSER_TOOL_TIMEOUT_SECONDS", "0.01")
+    monkeypatch.setattr(worker_module.subprocess, "Popen", fake_popen)
+
+    with pytest.raises(BrowserToolTimeoutError) as exc_info:
+        worker._run_cli_sync(
+            task_id="agent-hung-browser-tool",
+            prompt="run browser code",
+            cwd=str(tmp_path),
+            allowed_tools=["mcp__playwright-test__browser_run_code"],
+            tools=["mcp__playwright-test__browser_run_code"],
+        )
+
+    assert proc.killed is True
+    assert exc_info.value.tool_name == "mcp__playwright-test__browser_run_code"
+    assert exc_info.value.tool_use_id == "toolu_hung"
+    with worker._progress_lock:
+        records = worker._current_progress["tool_call_records"]
+        progress = dict(worker._current_progress)
+    assert records[0]["success"] is False
+    assert records[0]["error_type"] == "browser_tool_timeout"
+    assert progress["browser_tool_timeout"] is True
+    assert worker._last_execution_telemetry["error_type"] == "browser_tool_timeout"
+
+
+@pytest.mark.asyncio
+async def test_agent_worker_submits_browser_tool_timeout_result(monkeypatch):
+    from orchestrator.services import agent_worker as worker_module
+
+    submitted: dict[str, object] = {}
+
+    class _FakeQueue:
+        async def update_heartbeat(self, *_args, **_kwargs):
+            return None
+
+        async def is_cancelled(self, *_args, **_kwargs):
+            return False
+
+        async def is_paused(self, *_args, **_kwargs):
+            return False
+
+        async def submit_result(self, task_id, result, success=True, error=None, telemetry=None):
+            submitted.update(
+                {
+                    "task_id": task_id,
+                    "result": result,
+                    "success": success,
+                    "error": error,
+                    "telemetry": telemetry,
+                }
+            )
+
+    class _FakeRotator:
+        key_count = 0
+
+        def initialize(self):
+            return None
+
+        def get_active_key(self):
+            return None
+
+    worker = AgentWorker.__new__(AgentWorker)
+    worker.worker_id = "worker-test"
+    worker.queue = _FakeQueue()
+    worker.cwd = str(Path(__file__).resolve().parents[2])
+    worker._progress_lock = threading.RLock()
+    worker._current_progress = AgentWorker._empty_progress()
+    worker._process_lock = threading.Lock()
+    worker._running_processes = {}
+    worker._cancelled_task_ids = set()
+    worker._pause_lock = threading.Lock()
+    worker._paused_task_ids = set()
+    worker._pause_started_at = {}
+    worker._paused_duration_seconds = {}
+    worker._last_execution_telemetry = {}
+
+    async def fake_run_claude_cli(**_kwargs):
+        with worker._progress_lock:
+            worker._current_progress.update(
+                {
+                    "tool_calls": 1,
+                    "browser_tool_calls": 1,
+                    "last_tool": "mcp__playwright-test__browser_run_code",
+                    "tool_names": ["mcp__playwright-test__browser_run_code"],
+                    "tool_call_records": [
+                        {
+                            "name": "mcp__playwright-test__browser_run_code",
+                            "tool_use_id": "toolu_hung",
+                            "input": {"code": "while (true) {}"},
+                            "success": None,
+                            "started_at": time.time() - 121,
+                        }
+                    ],
+                }
+            )
+        raise BrowserToolTimeoutError(
+            tool_name="mcp__playwright-test__browser_run_code",
+            tool_use_id="toolu_hung",
+            elapsed_seconds=121.0,
+            timeout_seconds=120.0,
+        )
+
+    monkeypatch.setattr(worker_module, "get_api_key_rotator", lambda: _FakeRotator())
+    worker._run_claude_cli = fake_run_claude_cli
+
+    task = AgentTask(
+        id="agent-browser-timeout",
+        prompt="run browser code",
+        allowed_tools=["mcp__playwright-test__browser_run_code"],
+        tools=["mcp__playwright-test__browser_run_code"],
+        timeout_seconds=300,
+    )
+
+    await worker._execute_task(task)
+
+    assert submitted["task_id"] == task.id
+    assert submitted["success"] is False
+    assert "Browser tool timed out" in submitted["error"]
+    telemetry = submitted["telemetry"]
+    assert telemetry["error_type"] == "browser_tool_timeout"
+    assert telemetry["timed_out_tool_name"] == "mcp__playwright-test__browser_run_code"
+    assert telemetry["timed_out_tool_use_id"] == "toolu_hung"
+    assert telemetry["browser_tool_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_worker_retries_provider_overload_and_submits_telemetry(monkeypatch):
+    from orchestrator.services import agent_worker as worker_module
+
+    submitted: dict[str, object] = {}
+    calls = {"run": 0, "rate_limit": 0}
+
+    class _FakeQueue:
+        async def update_heartbeat(self, *_args, **_kwargs):
+            return None
+
+        async def is_cancelled(self, *_args, **_kwargs):
+            return False
+
+        async def is_paused(self, *_args, **_kwargs):
+            return False
+
+        async def submit_result(self, task_id, result, success=True, error=None, telemetry=None):
+            submitted.update(
+                {
+                    "task_id": task_id,
+                    "result": result,
+                    "success": success,
+                    "error": error,
+                    "telemetry": telemetry,
+                }
+            )
+
+    class _Slot:
+        masked = "test...slot"
+
+    class _FakeRotator:
+        key_count = 2
+
+        def initialize(self):
+            return None
+
+        def get_active_key(self):
+            return _Slot()
+
+        def activate_key(self, _slot):
+            return None
+
+        def report_success(self, _slot):
+            return None
+
+        def report_rate_limit(self, _slot, _retry_after=None):
+            calls["rate_limit"] += 1
+
+    worker = AgentWorker.__new__(AgentWorker)
+    worker.worker_id = "worker-test"
+    worker.queue = _FakeQueue()
+    worker.cwd = str(Path(__file__).resolve().parents[2])
+    worker._progress_lock = threading.RLock()
+    worker._current_progress = AgentWorker._empty_progress()
+    worker._process_lock = threading.Lock()
+    worker._running_processes = {}
+    worker._cancelled_task_ids = set()
+    worker._pause_lock = threading.Lock()
+    worker._paused_task_ids = set()
+    worker._pause_started_at = {}
+    worker._paused_duration_seconds = {}
+    worker._last_execution_telemetry = {}
+
+    async def fake_run_claude_cli(**_kwargs):
+        calls["run"] += 1
+        with worker._progress_lock:
+            worker._current_progress.update(
+                {
+                    "tool_calls": 1,
+                    "last_tool": "mcp__playwright-test__generator_write_test",
+                    "tool_names": ["mcp__playwright-test__generator_write_test"],
+                    "tool_call_records": [
+                        {
+                            "name": "mcp__playwright-test__generator_write_test",
+                            "input": {"code": "import { test, expect } from '@playwright/test';\ntest('x', async ({ page }) => { await expect(page.locator('body')).toBeVisible(); });"},
+                            "success": True,
+                        }
+                    ],
+                }
+            )
+            worker._last_execution_telemetry = {
+                "api_error_status": 529,
+                "tool_calls": 1,
+                "last_tool": "mcp__playwright-test__generator_write_test",
+                "tool_names": ["mcp__playwright-test__generator_write_test"],
+                "tool_call_records": worker._current_progress["tool_call_records"],
+            }
+        raise RuntimeError("CLI returned error (status 529): temporarily overloaded")
+
+    monkeypatch.setenv("AGENT_PROVIDER_RETRY_ATTEMPTS", "2")
+    monkeypatch.setenv("AGENT_PROVIDER_RETRY_BASE_SECONDS", "0")
+    monkeypatch.setattr(worker_module, "get_api_key_rotator", lambda: _FakeRotator())
+    worker._run_claude_cli = fake_run_claude_cli
+
+    task = AgentTask(
+        id="agent-provider-overload",
+        prompt="generate",
+        allowed_tools=["mcp__playwright-test__generator_write_test"],
+        tools=["mcp__playwright-test__generator_write_test"],
+        timeout_seconds=300,
+    )
+
+    await worker._execute_task(task)
+
+    assert calls["run"] == 2
+    assert calls["rate_limit"] == 0
+    assert submitted["task_id"] == task.id
+    assert submitted["success"] is False
+    telemetry = submitted["telemetry"]
+    assert telemetry["error_type"] == "provider_overloaded"
+    assert telemetry["api_error_status"] == 529
+    assert telemetry["attempt"] == 2
+    assert telemetry["last_tool"] == "mcp__playwright-test__generator_write_test"
+    assert telemetry["tool_names"] == ["mcp__playwright-test__generator_write_test"]
+    assert telemetry["tool_call_records"][0]["input"]["code"].startswith("import { test, expect }")
 
 
 @pytest.mark.asyncio
@@ -767,6 +1484,42 @@ async def test_wait_for_result_fails_live_task_when_workers_have_no_live_browser
 
     cancelled = await queue.get_task(task.id)
     assert cancelled.status == AgentTaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_dequeue_routes_live_browser_task_only_to_live_browser_worker(monkeypatch):
+    redis = _MemoryRedis()
+    queue = _MemoryQueue(redis)
+    task = AgentTask(
+        id="agent-live-browser",
+        prompt="inspect",
+        status=AgentTaskStatus.QUEUED,
+        requires_live_browser=True,
+    )
+    await redis.hset(queue.TASKS_KEY, task.id, json.dumps(task.to_dict()))
+    await redis.rpush(queue.QUEUE_KEY, task.id)
+
+    monkeypatch.setattr(
+        AgentQueue, "_worker_supports_live_browser", staticmethod(lambda: False)
+    )
+
+    assert await queue.dequeue_task(timeout=1) is None
+    skipped = await queue.get_task(task.id)
+    assert skipped.status == AgentTaskStatus.QUEUED
+    assert redis.lists[queue.QUEUE_KEY] == [task.id]
+
+    queue._worker_id = "live-worker"
+    monkeypatch.setattr(
+        AgentQueue, "_worker_supports_live_browser", staticmethod(lambda: True)
+    )
+
+    dequeued = await queue.dequeue_task(timeout=1)
+
+    assert dequeued.id == task.id
+    assert dequeued.status == AgentTaskStatus.RUNNING
+    assert dequeued.worker_id == "live-worker"
+    assert redis.lists[queue.QUEUE_KEY] == []
+    assert await redis.sismember(queue.RUNNING_KEY, task.id) is True
 
 
 @pytest.mark.asyncio

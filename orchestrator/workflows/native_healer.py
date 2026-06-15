@@ -52,7 +52,7 @@ from orchestrator.ai.prompt_registry import (
     build_prompt_metadata,
 )
 from orchestrator.utils.agent_runner import AgentResult, AgentRunner
-from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
+from orchestrator.utils.agent_tool_allowlists import get_agent_tool_config
 from orchestrator.utils.token_budget import (
     context_budget_for_stage,
     truncate_text_to_tokens,
@@ -226,7 +226,6 @@ class NativeHealer:
         if max_attempts <= 1 or previous_result is None:
             return None
 
-        resume_session_id = getattr(previous_result, "session_id", None)
         current_error = validation_error
         current_output = previous_output or ""
         for attempt_number in range(2, max_attempts + 1):
@@ -243,10 +242,7 @@ class NativeHealer:
             )
             retry_result = await self._query_healer_format_retry_agent(
                 prompt,
-                resume_session_id=resume_session_id,
-                continue_conversation=bool(not resume_session_id and previous_result),
             )
-            resume_session_id = retry_result.session_id or resume_session_id
             current_output = retry_result.output or ""
             fixed_code = self._extract_code(current_output)
             if not fixed_code or not self._looks_like_playwright_test(fixed_code):
@@ -276,8 +272,8 @@ class NativeHealer:
     ) -> str:
         return f"""You are correcting a rejected Playwright healing result.
 
-This is a schema/format correction turn in the same task, not a new healing investigation.
-Do not browse, do not call tools, do not run tests, do not start or close a browser, and do not create a new session.
+This is a clean artifact-driven schema/format correction turn, not a new healing investigation.
+Do not browse, do not call tools, do not run tests, do not start or close a browser, and do not depend on prior Claude conversation state.
 
 Validation failure:
 {validation_error}
@@ -329,8 +325,8 @@ Rules:
             env_vars=self.env_vars,
             cwd=self.cwd,
             requires_live_browser=False,
-            resume_session_id=resume_session_id,
-            continue_conversation=continue_conversation,
+            resume_session_id=None,
+            continue_conversation=False,
             force_direct_execution=True,
         )
         return await runner.run(prompt)
@@ -436,18 +432,19 @@ Use this diagnosis to focus your investigation. If your live debugging contradic
 
 1. **Identify the exact failed test first**: If the failed test id/title is present in the metadata above, use it. If it is unknown or ambiguous, call `test_list` scoped to this file and browser/project `{browser or "the failed project"}` to find the matching failed test id/title before debugging.
 2. **Reproduce the exact failed state with `test_debug`**: When an exact failed test id/title is known, call `test_debug` scoped to this file, browser/project `{browser or "the failed project"}`, and title/id `{failed_title or "the failed title"}`. `test_debug` is the failure-state capture path because it pauses on the failed test state.
-3. **Capture failure-state evidence before editing**: Only after `test_debug` has paused, use `browser_snapshot`, `browser_console_messages`, `browser_network_requests`, `browser_generate_locator`, or tracing tools as needed. Use `browser_resume` only if the debug session asks you to continue from the paused state.
-4. **Use category-specific evidence before editing**:
+3. **Keep the paused debug browser open**: Do not call `browser_close`. Test runs may close automatically after completion, but a paused `test_debug` browser is evidence and must remain available until you have inspected it. The orchestrator owns cleanup after the attempt.
+4. **Capture failure-state evidence before editing**: Only after `test_debug` has paused, use `browser_snapshot`, `browser_console_messages`, `browser_network_requests`, `browser_generate_locator`, `browser_evaluate`, or tracing tools as needed. Use `browser_resume` only after capturing paused-state evidence and only when you need the same paused script to continue to the next action, assertion, or failure.
+5. **Use category-specific evidence before editing**:
    - Selector or timing failures: use `browser_snapshot` or `browser_generate_locator` before changing selectors, waits, or assertions.
    - Authentication, test-data, API, or server failures: use `browser_network_requests` or `browser_console_messages` before changing setup, data, navigation, or assertions.
-5. **Analyze the error**: Parse the previous error output and `test_debug` failure details (error message, stack trace, failed assertions) and compare them to the paused browser evidence.
-6. **Diagnose**: Determine the root cause:
+6. **Analyze the error**: Parse the previous error output and `test_debug` failure details (error message, stack trace, failed assertions) and compare them to the paused browser evidence.
+7. **Diagnose**: Determine the root cause:
    - Element selectors that may have changed
    - Timing and synchronization issues
    - Assertion failures
    - Data dependencies
-7. **Fix the code**: Use `Edit` or `MultiEdit` to update the test only after the evidence above is captured.
-8. **Verify**: Run the test again with `test_run` to confirm the fix.
+8. **Fix the code**: Use `Edit` or `MultiEdit` to update the test only after the evidence above is captured.
+9. **Verify**: Run the test again with `test_debug` when you still need paused-state evidence, or `test_run` for final pass/fail confirmation.
 
 ## Dialog Handling (CRITICAL)
 When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dialogs):
@@ -460,6 +457,7 @@ When browser dialogs appear (alerts, confirms, or "Leave site?" beforeunload dia
 - Be systematic - fix one error at a time
 - Prefer robust, maintainable solutions
 - Use Playwright best practices
+- Preserve the debug browser state; do not close it manually after `test_debug`.
 - Preserve test intent. Do not remove assertions to make the test pass. If the behavior is genuinely not testable, use an explicit `test.fixme()` with a reason.
 - In your final response, include `strategy: ...`, `root_cause: ...`, and `changed_selectors: ...`.
 - If a test cannot be fixed, mark it with `test.fixme()` and explain why
@@ -718,12 +716,14 @@ Use this memory as advisory debugging context. If remembered selectors, routes, 
         )
 
         try:
+            tool_config = get_agent_tool_config(
+                "playwright-test-healer", mcp_config_dir=self.cwd
+            )
             runner = AgentRunner(
                 timeout_seconds=effective_timeout,
-                allowed_tools=get_agent_allowed_tools(
-                    "playwright-test-healer", mcp_config_dir=self.cwd
-                )
-                or [],
+                allowed_tools=tool_config.get("allowed_tools") or [],
+                tools=tool_config.get("tools"),
+                disallowed_tools=tool_config.get("disallowed_tools"),
                 log_tools=True,
                 on_tool_use=self.on_tool_use,
                 on_progress=self.on_progress,

@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+from typing import Any
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,78 @@ def is_rate_limit_error(text: str) -> bool:
     lower = text.lower()
     indicators = ["429", "rate limit", "rate_limit", "usage limit", "too many requests", "quota"]
     return any(ind in lower for ind in indicators)
+
+
+def parse_api_error_status(error: Any) -> int | None:
+    """Extract an HTTP/provider status code from common SDK/CLI error shapes."""
+    for attr in ("api_error_status", "status_code", "status", "error_status"):
+        value = getattr(error, attr, None)
+        if value is None and isinstance(error, dict):
+            value = error.get(attr)
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            pass
+
+    text = str(error or "")
+    for pattern in (
+        r"\bstatus(?:_code)?\D{0,12}([45]\d\d)\b",
+        r"\bHTTP\D{0,8}([45]\d\d)\b",
+        r"\b([45]\d\d)\b",
+    ):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def is_transient_provider_error(error: Any) -> bool:
+    """Return True for retryable provider-side failures that are not 429s."""
+    text = str(error or "")
+    if is_rate_limit_error(text):
+        return False
+    status = parse_api_error_status(error)
+    if status == 429:
+        return False
+    if status == 529 or (status is not None and 500 <= status <= 599):
+        return True
+    lower = text.lower()
+    indicators = (
+        "temporarily overloaded",
+        "service unavailable",
+        "overloaded",
+        "try again later",
+        "upstream error",
+        "bad gateway",
+        "gateway timeout",
+    )
+    return any(indicator in lower for indicator in indicators)
+
+
+def provider_retry_attempts() -> int:
+    """Total attempts for transient provider errors, including the first try."""
+    raw_value = os.environ.get("AGENT_PROVIDER_RETRY_ATTEMPTS", "6")
+    try:
+        return min(10, max(1, int(raw_value)))
+    except (TypeError, ValueError):
+        return 6
+
+
+def provider_retry_delay_seconds(attempt: int) -> float:
+    """Exponential backoff for transient provider retries."""
+    try:
+        base = max(0.0, float(os.environ.get("AGENT_PROVIDER_RETRY_BASE_SECONDS", "2")))
+    except (TypeError, ValueError):
+        base = 2.0
+    try:
+        max_delay = max(0.0, float(os.environ.get("AGENT_PROVIDER_RETRY_MAX_SECONDS", "30")))
+    except (TypeError, ValueError):
+        max_delay = 30.0
+    return min(max_delay, base * (2 ** max(0, attempt - 1)))
 
 
 def parse_retry_after(text: str) -> float | None:

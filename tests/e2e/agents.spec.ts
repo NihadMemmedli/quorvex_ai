@@ -809,7 +809,7 @@ test.describe('Agents create and report spec actions', () => {
     await expect(page).toHaveURL(/create=1/);
   });
 
-  test('opens and updates the custom agent runtime dropdown', async ({ page }) => {
+  test('custom agent runtime dropdown only offers Claude SDK', async ({ page }) => {
     await authenticate(page);
     await routeAgentsApi(page);
 
@@ -819,10 +819,10 @@ test.describe('Agents create and report spec actions', () => {
 
     const runtimeSelect = dialog.getByLabel('Runtime');
     await runtimeSelect.click();
-    await expect(page.getByRole('option', { name: 'Hermes' })).toBeVisible();
-    await page.getByRole('option', { name: 'Hermes' }).click();
+    await expect(page.getByRole('option', { name: 'Claude SDK' })).toBeVisible();
+    await expect(page.getByRole('option', { name: 'Hermes' })).toHaveCount(0);
 
-    await expect(runtimeSelect).toContainText('Hermes');
+    await expect(runtimeSelect).toContainText('Claude SDK');
     await expectDialogInViewport(page, dialog);
   });
 

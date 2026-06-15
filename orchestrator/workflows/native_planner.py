@@ -102,6 +102,7 @@ class NativePlanner:
         self.cwd = Path(cwd) if cwd else self.session_dir
         self.env_vars = dict(env_vars or {})
         self.last_draft_script_path: Path | None = None
+        self.last_agent_result = None
         self.memory_manager = get_memory_manager(project_id=project_id)
         # Use absolute path relative to project root (up from orchestrator/workflows/native_planner.py)
         self.specs_dir = Path(__file__).resolve().parent.parent.parent / "specs"
@@ -289,6 +290,8 @@ The test steps should be generalized and will need selector updates during code 
 Do not use browser tools or repository inspection tools for this PRD-only plan.
 """
 
+        draft_output_path = Path(output_path).with_suffix(".draft.spec.ts")
+
         if target_url:
             save_section = f"""
 ## Save the Plan
@@ -296,8 +299,10 @@ After creating the test plan:
 1. Save it using `planner_save_plan` tool to: **{output_path}**
 2. Include a `## Draft Playwright Script` section in the saved markdown plan
 3. In that section, include one fenced `typescript` code block with a draft Playwright test script
-4. ALSO output the COMPLETE test plan as text in your response (not just a summary)
-5. Do not call `browser_close`; the system will validate the saved plan and handle browser cleanup after acceptance or final failure
+4. Write the same draft script to **{draft_output_path}** using `generator_write_test`
+5. Run/debug the draft with `test_debug` first, then use `test_run` scoped to **{draft_output_path}** for final pass/fail evidence when practical
+6. ALSO output the COMPLETE test plan as text in your response (not just a summary)
+7. Do not call `browser_close`; the system will validate the saved plan and handle browser cleanup after acceptance or final failure
 """
         else:
             save_section = f"""
@@ -391,7 +396,15 @@ The following requirements were extracted from the Product Requirements Document
 - Add durable waits after navigations or async actions with `await expect(page).toHaveURL(...)`, `await page.waitForURL(...)`, web-first assertions, or `page.waitForResponse(...)` when API evidence supports it.
 - Do not use `page.waitForTimeout()` or arbitrary sleeps.
 - Keep credential values as `process.env.VAR_NAME!` or project test-data fixture placeholders; never hardcode secrets.
-- Make the draft script executable as a standalone Playwright spec. After the saved plan is accepted, the orchestrator extracts the draft to a `.draft.spec.ts` file and runs `test_debug` on it before handing it to the generator.
+- Make the draft script executable as a standalone Playwright spec. Use the correct MCP tools for each phase:
+  - `generator_write_test` creates or updates `{draft_output_path}` with the draft TypeScript spec.
+  - `test_debug` runs the draft in paused debug mode and is the required tool when you need failure-state evidence.
+  - After `test_debug` pauses, inspect with `browser_snapshot`, `browser_console_messages`, `browser_network_requests`, `browser_generate_locator`, and `browser_evaluate` as needed.
+  - Use `browser_resume` only after you have captured paused-state evidence and need the same run to continue to the next action, assertion, or failure.
+  - Use `test_run` scoped to `{draft_output_path}` for final pass/fail evidence when practical before handing it to the generator.
+- Plan for paused-state debugging: the generator/healer will use the same `test_debug` -> browser diagnostic tools -> optional `browser_resume` flow when failures need investigation.
+- Do not include script cleanup that closes the browser. The runner owns cleanup; preserving the paused debug browser state is part of the handoff.
+- If a draft flow may fail because of dynamic data or app state, describe the expected paused-state evidence and the diagnostic tool that should confirm it.
 
 {save_section}
 
@@ -504,6 +517,7 @@ The input is an already split single test-case spec (`{tc_id}`). Enhance only th
         )
 
         result = await runner.run(prompt)
+        self.last_agent_result = result
 
         # Log diagnostics
         logger.info(
@@ -905,15 +919,22 @@ Original task follows. Obey it, but correct the failure above.
         ):
             short_name = tool_name.split("__")[-1] if "__" in tool_name else tool_name
 
-            if short_name in PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS:
-                if short_name == "browser_close":
-                    return PermissionResultDeny(
-                        message=(
-                            "browser_close is system-owned for live planner runs. Save the plan "
-                            "with planner_save_plan and finish; the orchestrator validates the plan "
-                            "and handles browser cleanup after acceptance or final failure."
-                        )
+            if short_name == "browser_close":
+                return PermissionResultDeny(
+                    message=(
+                        "browser_close is system-owned for live planner runs. Save the plan "
+                        "with planner_save_plan and finish; the orchestrator validates the plan "
+                        "and handles browser cleanup after acceptance or final failure."
                     )
+                )
+            if short_name in {"browser_run_code", "browser_file_upload"}:
+                return PermissionResultDeny(
+                    message=(
+                        f"{short_name} is not available in live planner runs. Use visible "
+                        "browser interactions, snapshots, locator generation, and verification tools."
+                    )
+                )
+            if short_name in PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS:
                 return PermissionResultDeny(
                     message=(
                         f"{short_name} is not available in live planner runs. Use safe visible "

@@ -9,8 +9,8 @@ from typing import Any, Callable, Literal
 
 from orchestrator.utils.agent_runner import AgentResult
 
-AgentRuntimeName = Literal["claude_sdk", "hermes"]
-SUPPORTED_AGENT_RUNTIMES = {"claude_sdk", "hermes"}
+AgentRuntimeName = Literal["claude_sdk"]
+SUPPORTED_AGENT_RUNTIMES = {"claude_sdk"}
 
 
 def normalize_agent_runtime(value: str | None, *, default: str | None = None) -> AgentRuntimeName:
@@ -21,8 +21,9 @@ def normalize_agent_runtime(value: str | None, *, default: str | None = None) ->
         "claude": "claude_sdk",
         "claude-agent-sdk": "claude_sdk",
         "claude_agent_sdk": "claude_sdk",
-        "hermes-agent": "hermes",
-        "hermes_agent": "hermes",
+        "hermes": "claude_sdk",
+        "hermes-agent": "claude_sdk",
+        "hermes_agent": "claude_sdk",
     }
     normalized = aliases.get(raw, raw)
     if normalized not in SUPPORTED_AGENT_RUNTIMES:
@@ -71,10 +72,15 @@ class AgentRuntimeContext:
     permission_prompt_tool_name: str | None = None
     enable_file_checkpointing: bool = False
     sandbox: dict[str, Any] | None = None
+    hooks: dict[str, Any] | None = None
+    agents: dict[str, Any] | None = None
+    skills: list[str] | str | None = None
+    plugins: list[Any] | None = None
+    session_store: Any | None = None
+    fork_session: bool = False
+    tool_search_policy: str | None = None
     env_vars: dict[str, str] | None = None
     agent_name: str | None = None
-    hermes_profile: str | None = None
-    hermes_conversation: str | None = None
     metadata: dict[str, Any] | None = None
     trace_id: str | None = None
     prompt_hash: str | None = None

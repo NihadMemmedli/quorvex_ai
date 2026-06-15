@@ -37,8 +37,7 @@ if "slowapi" not in sys.modules:
 
 from orchestrator.api import recordings
 from orchestrator.api import settings as settings_api
-from orchestrator.services.ai_runtime_config import resolve_runtime_ai_selection
-from orchestrator.services.agent_runtimes.hermes import HermesClient
+from orchestrator.services.ai_runtime_config import DEFAULT_BASE_URL, resolve_runtime_ai_selection
 
 
 def test_recorder_browser_url_does_not_expose_local_vnc_by_default(monkeypatch):
@@ -72,18 +71,18 @@ def test_recorder_browser_url_derives_vnc_page_from_public_vnc_url(monkeypatch):
     )
 
 
-def test_hermes_defaults_use_compose_service_url(tmp_path, monkeypatch):
+def test_legacy_hermes_provider_uses_direct_default_provider(tmp_path, monkeypatch):
     empty_runtime_env = tmp_path / "runtime.env"
     empty_runtime_env.write_text("")
     monkeypatch.setenv("QUORVEX_SETTINGS_ENV_FILE", str(empty_runtime_env))
+    monkeypatch.delenv("QUORVEX_LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.delenv("HERMES_API_URL", raising=False)
     monkeypatch.delenv("HERMES_API_KEY", raising=False)
 
     active = settings_api._active_settings({})
-    assert active["hermes_api_url"] == "http://hermes:8642"
+    assert "hermes_api_url" not in active
 
     selection = resolve_runtime_ai_selection("chat", env_vars={"QUORVEX_LLM_PROVIDER": "hermes"})
-    assert selection.base_url == "http://hermes:8642"
-
-    client = HermesClient()
-    assert client.base_url == "http://hermes:8642"
+    assert selection.provider == "anthropic_compatible"
+    assert selection.base_url == DEFAULT_BASE_URL

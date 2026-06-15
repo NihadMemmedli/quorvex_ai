@@ -32,19 +32,19 @@
   "license": "MIT",
   "type": "commonjs",
   "devDependencies": {
-    "@playwright/test": "1.57.0",
+    "@playwright/test": "1.61.0",
     "@types/node": "^25.6.0",
-    "appium": "^3.4.2",
-    "appium-mcp": "^1.73.0",
+    "appium": "3.5.0",
+    "appium-mcp": "1.85.6",
     "appium-xcuitest-driver": "^11.4.0",
     "dotenv": "^17.3.1",
     "webdriverio": "^9.27.1"
   },
   "dependencies": {
-    "@anthropic-ai/claude-code": "^2.1.141",
-    "@playwright/mcp": "^0.0.76",
-    "playwright": "1.57.0",
-    "playwright-core": "1.57.0",
+    "@anthropic-ai/claude-code": "2.1.177",
+    "@playwright/mcp": "0.0.76",
+    "playwright": "1.61.0",
+    "playwright-core": "1.61.0",
     "undici-types": "^7.16.0"
   },
   "repository": {

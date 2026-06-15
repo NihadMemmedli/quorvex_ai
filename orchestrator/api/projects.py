@@ -7,6 +7,7 @@ for specs, runs, and batches in a multi-tenant environment.
 Also includes project membership management for multi-user support.
 """
 
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import or_
 from sqlalchemy import select as sa_select
 from sqlalchemy.sql.elements import ColumnElement
-from sqlmodel import SQLModel, Session, func, select
+from sqlmodel import Session, SQLModel, func, select
 
 from .credentials import delete_project_credential, list_project_credentials, set_project_credential
 from .db import get_session
@@ -33,14 +34,15 @@ from .models import (
     ProjectUpdate,
 )
 from .models_auth import MemberCreate, MemberResponse, MemberUpdate, ProjectMember, User
-from .models_db import Project, RegressionBatch
+from .models_db import AgentMemory, Project, RegressionBatch, get_or_create_spec_metadata
 from .models_db import SpecMetadata as DBSpecMetadata
 from .models_db import TestRun as DBTestRun
-from .models_db import get_or_create_spec_metadata, get_spec_metadata as get_db_spec_metadata
+from .models_db import get_spec_metadata as get_db_spec_metadata
 
 # Path setup for spec counting
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SPECS_DIR = BASE_DIR / "specs"
+logger = logging.getLogger(__name__)
 
 
 def _get_code_path_fast(spec_path: Path) -> str | None:
@@ -129,6 +131,8 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 # Default project ID - used for migration and as fallback
 DEFAULT_PROJECT_ID = "default"
 DEFAULT_PROJECT_NAME = "Default Project"
+PROJECT_DESCRIPTION_MEMORY_SOURCE_TYPE = "project_description"
+PROJECT_DESCRIPTION_MEMORY_TAGS = ["project", "description"]
 PRESERVED_PROJECT_TABLES = {
     DBSpecMetadata.__table__.name,
     DBTestRun.__table__.name,
@@ -166,6 +170,75 @@ def ensure_default_project(session: Session) -> Project:
         session.commit()
         session.refresh(project)
     return project
+
+
+def _active_project_description_memories(session: Session, project_id: str) -> list[AgentMemory]:
+    return session.exec(
+        select(AgentMemory)
+        .where(AgentMemory.project_id == project_id)
+        .where(AgentMemory.source_type == PROJECT_DESCRIPTION_MEMORY_SOURCE_TYPE)
+        .where(AgentMemory.source_id == project_id)
+        .where(AgentMemory.status == "active")
+        .order_by(AgentMemory.updated_at.desc())
+    ).all()
+
+
+def _set_project_description_memory_status(
+    session: Session, memories: list[AgentMemory], status: str
+) -> None:
+    if not memories:
+        return
+
+    now = datetime.utcnow()
+    for memory in memories:
+        memory.status = status
+        memory.updated_at = now
+        session.add(memory)
+    session.commit()
+
+
+def _sync_project_description_memory(session: Session, project: Project) -> None:
+    """Best-effort derived memory sync for project descriptions."""
+    if not project.id:
+        return
+
+    description = (project.description or "").strip()
+
+    try:
+        from orchestrator.memory.agent_memory import get_agent_memory_service
+
+        active_memories = _active_project_description_memories(session, project.id)
+        if not description:
+            _set_project_description_memory_status(session, active_memories, "archived")
+            return
+
+        current = next((memory for memory in active_memories if memory.content.strip() == description), None)
+        if current:
+            stale = [memory for memory in active_memories if memory.id != current.id]
+            _set_project_description_memory_status(session, stale, "superseded")
+            return
+
+        supersedes_id = active_memories[0].id if active_memories else None
+        _set_project_description_memory_status(session, active_memories, "superseded")
+
+        get_agent_memory_service(session=session).create_memory(
+            kind="project_fact",
+            memory_type="semantic",
+            scope="project",
+            content=description,
+            summary=description,
+            project_id=project.id,
+            tags=PROJECT_DESCRIPTION_MEMORY_TAGS,
+            confidence=0.9,
+            importance=0.8,
+            source_type=PROJECT_DESCRIPTION_MEMORY_SOURCE_TYPE,
+            source_id=project.id,
+            supersedes_id=supersedes_id,
+            review_required=False,
+        )
+    except Exception:
+        session.rollback()
+        logger.warning("Failed to sync project description memory for project %s", project.id, exc_info=True)
 
 
 def _delete_ancillary_project_rows(session: Session, project_id: str) -> dict[str, int]:
@@ -323,6 +396,7 @@ def create_project(request: ProjectCreate, session: Session = Depends(get_sessio
     session.add(project)
     session.commit()
     session.refresh(project)
+    _sync_project_description_memory(session, project)
 
     return _project_to_response(project)
 
@@ -382,7 +456,7 @@ def update_project(project_id: str, request: ProjectUpdate, session: Session = D
     if "base_url" in request.model_fields_set:
         project.base_url = request.base_url
 
-    if request.description is not None:
+    if "description" in request.model_fields_set:
         project.description = request.description
 
     project.last_active = datetime.utcnow()
@@ -390,6 +464,8 @@ def update_project(project_id: str, request: ProjectUpdate, session: Session = D
     session.add(project)
     session.commit()
     session.refresh(project)
+    if "description" in request.model_fields_set:
+        _sync_project_description_memory(session, project)
 
     return _project_to_response(project)
 

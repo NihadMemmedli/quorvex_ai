@@ -137,6 +137,15 @@ def test_agent_runner_queue_env_collection_includes_runtime_fixture_file(monkeyp
     assert env_vars["QUORVEX_TEST_DATA_FILE"] == str(fixture_file)
 
 
+def test_agent_runner_classifies_invalid_session_resume():
+    from orchestrator.utils.agent_runner import classify_agent_error_type
+
+    assert (
+        classify_agent_error_type("No conversation found with session ID abc123")
+        == "invalid_session_resume"
+    )
+
+
 def test_wetravel_seed_upserts_canonical_project_ref(monkeypatch, tmp_path):
     from orchestrator.scripts.seed_wetravel_test_data import (
         DEFAULT_PROJECT_ID,

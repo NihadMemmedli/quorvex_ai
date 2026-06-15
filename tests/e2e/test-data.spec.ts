@@ -204,7 +204,19 @@ async function authenticate(page: Page) {
   });
 }
 
+async function fillJsonEditor(page: Page, content: string) {
+  const editor = page.getByTestId('test-data-item-json');
+  await expect(editor.locator('.monaco-editor')).toBeVisible({ timeout: 15000 });
+  await editor.evaluate((element, value) => {
+    const instance = (element as HTMLElement & { __monacoEditor?: { setValue: (next: string) => void } }).__monacoEditor;
+    if (!instance) throw new Error('Monaco editor instance is not available');
+    instance.setValue(value);
+  }, content);
+}
+
 test.describe('Test data', () => {
+  test.describe.configure({ mode: 'serial' });
+
   test('creates, reloads, edits, and deletes an item from the default editor values', async ({ page }) => {
     await authenticate(page);
     await routeCoreApi(page);
@@ -226,7 +238,7 @@ test.describe('Test data', () => {
     const itemCard = page.getByTestId('test-data-item-card').filter({ hasText: 'auth-users.valid-admin' });
     await expect(itemCard).toBeVisible();
     await expect(page.getByTestId('test-data-password-sensitive')).toHaveAttribute('data-state', 'unchecked');
-    await expect(page.locator('textarea')).toContainText('"password": "replace-me"');
+    await expect(page.getByTestId('test-data-item-json')).toContainText('"password": "replace-me"');
     await expect(page.getByText('{{TESTDATA_AUTH_USERS_VALID_ADMIN_PASSWORD}}')).toHaveCount(0);
     await expect(page.getByTestId('test-data-dataset-card').filter({ hasText: '1 items' })).toBeVisible();
 
@@ -264,7 +276,71 @@ test.describe('Test data', () => {
 
     await expect(page.getByTestId('test-data-item-card').filter({ hasText: 'auth-users.valid-admin' })).toBeVisible();
     await expect(page.getByText('{{TESTDATA_AUTH_USERS_VALID_ADMIN_PASSWORD}}')).toBeVisible();
-    await expect(page.locator('textarea')).not.toContainText('"password": "replace-me"');
+    await expect(page.getByTestId('test-data-item-json')).not.toContainText('"password": "replace-me"');
+  });
+
+  test('prevents saving invalid JSON with an inline editor error', async ({ page }) => {
+    await authenticate(page);
+    await routeCoreApi(page);
+    await routeTestDataApi(page, {
+      datasets: [{
+        id: 'dataset-1',
+        project_id: PROJECT.id,
+        key: 'auth-users',
+        name: 'Auth Users',
+        description: '',
+        tags: [],
+        status: 'active',
+        format: 'json',
+        item_count: 0,
+      }],
+      items: [],
+    });
+
+    await page.goto('/test-data');
+    await expect(page.getByRole('heading', { name: 'Test Data' })).toBeVisible();
+    await expect(page.getByTestId('test-data-dataset-card').filter({ hasText: 'Auth Users' })).toBeVisible();
+
+    await fillJsonEditor(page, '{\n  "email": "admin@example.com",\n}');
+
+    await expect(page.getByTestId('test-data-json-error')).toContainText('Invalid JSON');
+    await expect(page.getByTestId('test-data-save-item')).toBeDisabled();
+    await expect(page.getByTestId('test-data-item-card')).toHaveCount(0);
+  });
+
+  test('repairs JSON-like pasted values before saving', async ({ page }) => {
+    await authenticate(page);
+    await routeCoreApi(page);
+    await routeTestDataApi(page, {
+      datasets: [{
+        id: 'dataset-1',
+        project_id: PROJECT.id,
+        key: 'auth-users',
+        name: 'Auth Users',
+        description: '',
+        tags: [],
+        status: 'active',
+        format: 'json',
+        item_count: 0,
+      }],
+      items: [],
+    });
+
+    await page.goto('/test-data');
+    await expect(page.getByRole('heading', { name: 'Test Data' })).toBeVisible();
+    await expect(page.getByTestId('test-data-dataset-card').filter({ hasText: 'Auth Users' })).toBeVisible();
+
+    await fillJsonEditor(page, '{\n  “email”: “admin@example.com”,\n  “roles”: [“admin”,],\n}');
+    await expect(page.getByTestId('test-data-save-item')).toBeDisabled();
+
+    await page.getByTestId('test-data-repair-json').click();
+
+    await expect(page.getByTestId('test-data-json-error')).toHaveCount(0);
+    await expect(page.getByTestId('test-data-item-json')).toContainText('"roles": [');
+    await expect(page.getByTestId('test-data-save-item')).toBeEnabled();
+
+    await page.getByTestId('test-data-save-item').click();
+    await expect(page.getByTestId('test-data-item-card').filter({ hasText: 'auth-users.valid-admin' })).toBeVisible();
   });
 
   test('deletes a dataset and all of its items from the UI', async ({ page }) => {

@@ -237,7 +237,7 @@ Do not use Auto Pilot for Discovery/Explorer Agent requests unless the user expl
 ## Custom Agent Report Workflow
 
 When users ask to create a reusable browser QA agent from chat, prepare createCustomAgentDefinition as an approval action. When users ask to create and run an agent now, prepare startAdhocCustomAgent. The action card must be the approval boundary; do not claim the agent has started or been saved until the action result returns.
-If the user explicitly asks for Hermes, Hermes Agent, agents/subagents, or autonomous delegation, set runtime to "hermes" on the custom-agent action. Otherwise omit runtime and let the backend default apply.
+Omit custom-agent runtime unless the user explicitly asks for the supported Claude SDK runtime; the backend default applies otherwise.
 
 When users ask to create a reusable workflow/process/pipeline from chat, prepare createWorkflow as an approval action. Prefer this workflow shape: start_custom_agent -> wait_for_status -> review_gate -> materialize_agent_report -> review_gate. If the saved custom agent definition ID or target URL is not known, use runtime inputs such as {{inputs.agent_definition_id}} and {{inputs.target_url}} rather than inventing IDs.
 

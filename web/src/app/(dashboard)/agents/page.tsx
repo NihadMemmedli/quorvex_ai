@@ -3755,7 +3755,7 @@ export default function AgentsPage() {
         const timeout = `${Math.ceil((selectedDefinition?.timeout_seconds || 1800) / 60)} minutes`;
         return [
             ['Agent', selectedDefinition?.name || 'Custom agent required'],
-            ['Runtime', runtime === 'hermes' ? 'Hermes' : 'Claude SDK'],
+            ['Runtime', 'Claude SDK'],
             ['Target', url.trim() || 'Optional'],
             ['Auth', authMode],
             ['Timeout', timeout],
@@ -4170,18 +4170,51 @@ export default function AgentsPage() {
                     min-width: 0;
                 }
                 .agents-run-empty-compact {
-                    display: grid;
-                    gap: 0.75rem;
-                    padding: 0.85rem;
-                    border: 1px dashed var(--border);
+                    display: flex;
+                    align-items: center;
+                    flex-wrap: wrap;
+                    gap: 0.65rem;
+                    padding: 0.65rem;
+                    border: 1px solid var(--border);
                     border-radius: 8px;
-                    background: var(--surface-hover);
+                    background: var(--surface);
+                    min-width: 0;
+                }
+                .agents-run-empty-icon {
+                    width: 36px;
+                    height: 36px;
+                    border-radius: 8px;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    color: var(--primary);
+                    background: var(--primary-glow);
+                    border: 1px solid rgba(59, 130, 246, 0.22);
+                    flex: 0 0 auto;
+                }
+                .agents-run-empty-copy {
+                    flex: 1 1 170px;
+                    min-width: 0;
+                }
+                .agents-run-empty-copy strong {
+                    display: block;
+                    color: var(--text);
+                    font-size: 0.82rem;
+                    font-weight: 750;
+                    line-height: 1.2;
                 }
                 .agents-run-empty-compact p {
-                    margin: 0.25rem 0 0;
+                    margin: 0.18rem 0 0;
                     color: var(--text-secondary);
-                    font-size: 0.82rem;
-                    line-height: 1.45;
+                    font-size: 0.72rem;
+                    line-height: 1.35;
+                    overflow-wrap: anywhere;
+                }
+                .agents-run-empty-action {
+                    margin-left: auto;
+                    min-height: 36px;
+                    padding-left: 0.65rem;
+                    padding-right: 0.65rem;
                 }
                 .agents-custom-picker-row {
                     display: grid;
@@ -4837,6 +4870,17 @@ export default function AgentsPage() {
                     .agents-run-details-grid {
                         grid-template-columns: minmax(0, 1fr);
                     }
+                    .agents-run-empty-compact {
+                        align-items: flex-start;
+                    }
+                    .agents-run-empty-icon {
+                        width: 32px;
+                        height: 32px;
+                    }
+                    .agents-run-empty-action {
+                        width: 100%;
+                        margin-left: 0;
+                    }
                     .agents-builder-grid {
                         grid-template-columns: minmax(0, 1fr);
                     }
@@ -4944,11 +4988,14 @@ export default function AgentsPage() {
                         <div className="agents-run-field agents-run-field-wide">
                             {agentDefinitions.length === 0 ? (
                                 <div className="agents-run-empty-compact">
-                                    <div>
+                                    <span className="agents-run-empty-icon" aria-hidden="true">
+                                        <PackageOpen size={16} />
+                                    </span>
+                                    <div className="agents-run-empty-copy">
                                         <strong>No runnable agents yet.</strong>
                                         <p>Create a saved custom agent to run it from this workspace.</p>
                                     </div>
-                                    <Button type="button" size="sm" onClick={openCreateAgentBuilder}>
+                                    <Button type="button" size="sm" variant="outline" className="agents-run-empty-action" onClick={openCreateAgentBuilder} aria-label="Create custom agent">
                                         <Plus size={14} /> Create Agent
                                     </Button>
                                 </div>
@@ -4970,7 +5017,7 @@ export default function AgentsPage() {
                                         </select>
                                         {selectedDefinition && (
                                             <p className="agents-run-field-note">
-                                                {selectedDefinition.description || `${selectedDefinition.tool_ids.length} selected tools`} · Runtime: {selectedDefinition.runtime === 'hermes' ? 'Hermes' : 'Claude SDK'}
+                                                {selectedDefinition.description || `${selectedDefinition.tool_ids.length} selected tools`} · Runtime: Claude SDK
                                             </p>
                                         )}
                                     </div>
@@ -5940,7 +5987,6 @@ export default function AgentsPage() {
                                             </SelectTrigger>
                                             <SelectContent className="agents-runtime-select-content" sideOffset={8}>
                                                 <SelectItem value="claude_sdk">Claude SDK</SelectItem>
-                                                <SelectItem value="hermes">Hermes</SelectItem>
                                             </SelectContent>
                                         </Select>
                                     </div>
@@ -6702,7 +6748,7 @@ export default function AgentsPage() {
                                     </div>
                                     <div className="agents-library-card-meta">
                                         <Badge variant="secondary">{definition.tool_ids.length} tools</Badge>
-                                        <Badge variant="secondary">{definition.runtime === 'hermes' ? 'Hermes' : 'Claude SDK'}</Badge>
+                                        <Badge variant="secondary">Claude SDK</Badge>
                                         <Badge variant="secondary">{Math.ceil((definition.timeout_seconds || 1800) / 60)}m</Badge>
                                     </div>
                                     <div>

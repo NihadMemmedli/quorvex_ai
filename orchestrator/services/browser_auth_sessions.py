@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -14,23 +15,44 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
-from orchestrator.api.credentials import decrypt_credential, encrypt_credential, get_merged_credentials
+from orchestrator.api.credentials import (
+    decrypt_credential,
+    encrypt_credential,
+    get_merged_credentials,
+)
 from orchestrator.api.models_db import BrowserAuthSession, Project
 from orchestrator.api.settings import runtime_env_vars
-from orchestrator.services.ai_runtime_config import apply_runtime_env_aliases, infer_display_provider
+from orchestrator.services.ai_runtime_config import (
+    apply_runtime_env_aliases,
+    infer_display_provider,
+)
 from orchestrator.services.browser_pool import OperationType
-from orchestrator.services.browser_slots import BrowserSlotAcquisitionError, browser_operation_slot
+from orchestrator.services.browser_slots import (
+    BrowserSlotAcquisitionError,
+    browser_operation_slot,
+)
 from orchestrator.utils.agent_runner import AgentResult, AgentRunner
-from orchestrator.utils.playwright_mcp import browser_live_worker_enabled, write_playwright_mcp_config
+from orchestrator.utils.playwright_mcp import (
+    browser_live_worker_enabled,
+    write_playwright_mcp_config,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-AUTH_SESSIONS_DIR = Path(os.environ.get("BROWSER_AUTH_SESSIONS_DIR", str(BASE_DIR / "runs" / "auth_sessions")))
+AUTH_SESSIONS_DIR = Path(
+    os.environ.get(
+        "BROWSER_AUTH_SESSIONS_DIR", str(BASE_DIR / "runs" / "auth_sessions")
+    )
+)
 BROWSER_AUTH_CAPTURE_VERSION = "mcp-storage-v1"
 
 
 class BrowserAuthSessionError(RuntimeError):
     """Raised when a browser auth session cannot be created or used."""
+
+
+class BrowserAuthStorageStateMissingError(BrowserAuthSessionError):
+    """Raised when MCP capture reports success but does not write storage state."""
 
 
 @dataclass(frozen=True)
@@ -57,24 +79,34 @@ def _validate_storage_state(value: dict[str, Any]) -> None:
     cookies = value.get("cookies", [])
     origins = value.get("origins", [])
     if not isinstance(cookies, list) or not isinstance(origins, list):
-        raise BrowserAuthSessionError("Storage state must include cookies and origins arrays")
+        raise BrowserAuthSessionError(
+            "Storage state must include cookies and origins arrays"
+        )
 
 
 def encrypt_storage_state(storage_state: dict[str, Any]) -> str:
     _validate_storage_state(storage_state)
-    return encrypt_credential(json.dumps(storage_state, separators=(",", ":"), sort_keys=True))
+    return encrypt_credential(
+        json.dumps(storage_state, separators=(",", ":"), sort_keys=True)
+    )
 
 
 def decrypt_storage_state(encrypted: str | None) -> dict[str, Any]:
     if not encrypted:
-        raise BrowserAuthSessionError("Browser auth session has no stored browser state")
+        raise BrowserAuthSessionError(
+            "Browser auth session has no stored browser state"
+        )
     plaintext = decrypt_credential(encrypted)
     if not plaintext:
-        raise BrowserAuthSessionError("Browser auth session state could not be decrypted")
+        raise BrowserAuthSessionError(
+            "Browser auth session state could not be decrypted"
+        )
     try:
         state = json.loads(plaintext)
     except json.JSONDecodeError as exc:
-        raise BrowserAuthSessionError("Browser auth session state is not valid JSON") from exc
+        raise BrowserAuthSessionError(
+            "Browser auth session state is not valid JSON"
+        ) from exc
     _validate_storage_state(state)
     return state
 
@@ -96,24 +128,35 @@ def serialize_browser_auth_session(row: BrowserAuthSession) -> dict[str, Any]:
         "status": row.status,
         "is_default": row.is_default,
         "created_at": row.created_at.isoformat() if row.created_at else None,
-        "last_validated_at": row.last_validated_at.isoformat() if row.last_validated_at else None,
+        "last_validated_at": (
+            row.last_validated_at.isoformat() if row.last_validated_at else None
+        ),
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
         "failure_reason": row.failure_reason,
         "capture_backend_version": BROWSER_AUTH_CAPTURE_VERSION,
     }
 
 
-def list_browser_auth_sessions(session: Session, project_id: str) -> list[BrowserAuthSession]:
+def list_browser_auth_sessions(
+    session: Session, project_id: str
+) -> list[BrowserAuthSession]:
     _ensure_project(session, project_id)
     stmt = (
         select(BrowserAuthSession)
-        .where(BrowserAuthSession.project_id == project_id, BrowserAuthSession.status != "revoked")
-        .order_by(BrowserAuthSession.is_default.desc(), BrowserAuthSession.created_at.desc())
+        .where(
+            BrowserAuthSession.project_id == project_id,
+            BrowserAuthSession.status != "revoked",
+        )
+        .order_by(
+            BrowserAuthSession.is_default.desc(), BrowserAuthSession.created_at.desc()
+        )
     )
     return list(session.exec(stmt).all())
 
 
-def get_browser_auth_session_or_error(session: Session, project_id: str, session_id: str) -> BrowserAuthSession:
+def get_browser_auth_session_or_error(
+    session: Session, project_id: str, session_id: str
+) -> BrowserAuthSession:
     row = session.get(BrowserAuthSession, session_id)
     if not row or row.project_id != project_id:
         raise BrowserAuthSessionError("Browser auth session was not found")
@@ -128,7 +171,9 @@ def resolve_browser_auth_session_row(
     use_default: bool = False,
 ) -> BrowserAuthSession | None:
     if browser_auth_session_id:
-        return get_browser_auth_session_or_error(session, project_id, browser_auth_session_id)
+        return get_browser_auth_session_or_error(
+            session, project_id, browser_auth_session_id
+        )
     if use_default:
         stmt = select(BrowserAuthSession).where(
             BrowserAuthSession.project_id == project_id,
@@ -142,11 +187,14 @@ def resolve_browser_auth_session_row(
 def ensure_browser_auth_session_usable(row: BrowserAuthSession) -> None:
     if row.status in {"revoked", "invalid", "expired"}:
         raise BrowserAuthSessionError(
-            row.failure_reason or "Browser auth session is not usable. Refresh browser auth session."
+            row.failure_reason
+            or "Browser auth session is not usable. Refresh browser auth session."
         )
     if row.expires_at and row.expires_at <= _utcnow():
         row.status = "expired"
-        row.failure_reason = "Browser auth session has expired. Refresh browser auth session."
+        row.failure_reason = (
+            "Browser auth session has expired. Refresh browser auth session."
+        )
         raise BrowserAuthSessionError(row.failure_reason)
     decrypt_storage_state(row.storage_state_json_encrypted)
 
@@ -173,7 +221,9 @@ def resolve_browser_auth_for_run(
     use_default: bool = False,
 ) -> ResolvedBrowserAuthSession | None:
     if not project_id:
-        raise BrowserAuthSessionError("Browser auth session selection requires a project")
+        raise BrowserAuthSessionError(
+            "Browser auth session selection requires a project"
+        )
     row = resolve_browser_auth_session_row(
         session,
         project_id,
@@ -182,17 +232,25 @@ def resolve_browser_auth_for_run(
     )
     if not row:
         if use_default:
-            raise BrowserAuthSessionError("Project default browser auth session was not found")
+            raise BrowserAuthSessionError(
+                "Project default browser auth session was not found"
+            )
         return None
     path = write_run_storage_state_file(row, run_dir)
     return ResolvedBrowserAuthSession(row.id, path, row.name)
 
 
-def set_default_browser_auth_session(session: Session, project_id: str, session_id: str) -> BrowserAuthSession:
+def set_default_browser_auth_session(
+    session: Session, project_id: str, session_id: str
+) -> BrowserAuthSession:
     row = get_browser_auth_session_or_error(session, project_id, session_id)
     if row.status == "revoked":
-        raise BrowserAuthSessionError("Revoked browser auth sessions cannot be made default")
-    for other in session.exec(select(BrowserAuthSession).where(BrowserAuthSession.project_id == project_id)).all():
+        raise BrowserAuthSessionError(
+            "Revoked browser auth sessions cannot be made default"
+        )
+    for other in session.exec(
+        select(BrowserAuthSession).where(BrowserAuthSession.project_id == project_id)
+    ).all():
         other.is_default = other.id == row.id
         session.add(other)
     session.commit()
@@ -200,7 +258,9 @@ def set_default_browser_auth_session(session: Session, project_id: str, session_
     return row
 
 
-def revoke_browser_auth_session(session: Session, project_id: str, session_id: str) -> BrowserAuthSession:
+def revoke_browser_auth_session(
+    session: Session, project_id: str, session_id: str
+) -> BrowserAuthSession:
     row = get_browser_auth_session_or_error(session, project_id, session_id)
     row.status = "revoked"
     row.is_default = False
@@ -211,7 +271,9 @@ def revoke_browser_auth_session(session: Session, project_id: str, session_id: s
     return row
 
 
-def validate_browser_auth_session(session: Session, project_id: str, session_id: str) -> BrowserAuthSession:
+def validate_browser_auth_session(
+    session: Session, project_id: str, session_id: str
+) -> BrowserAuthSession:
     row = get_browser_auth_session_or_error(session, project_id, session_id)
     try:
         ensure_browser_auth_session_usable(row)
@@ -478,10 +540,67 @@ def create_storage_state_via_playwright(
     submit_selector: str | None = None,
     success_url_pattern: str | None = None,
     timeout_seconds: int = 120,
+    run_dir: Path | None = None,
 ) -> dict[str, Any]:
-    raise BrowserAuthSessionError(
-        "Direct Playwright login helper is disabled. Browser auth capture now uses MCP storage capture."
+    del base_url
+    run_dir = run_dir or _capture_run_dir("direct-playwright")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    helper_path = run_dir / "browser-auth-login-helper.js"
+    output_path = run_dir / "storage-state.json"
+    helper_path.write_text(_login_helper_script(), encoding="utf-8")
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "BROWSER_AUTH_LOGIN_URL": login_url,
+            "BROWSER_AUTH_USERNAME": username,
+            "BROWSER_AUTH_PASSWORD": password,
+            "BROWSER_AUTH_OUTPUT_PATH": str(output_path),
+            "BROWSER_AUTH_USERNAME_SELECTOR": username_selector or "",
+            "BROWSER_AUTH_PASSWORD_SELECTOR": password_selector or "",
+            "BROWSER_AUTH_USERNAME_CONTINUE_SELECTOR": username_continue_selector or "",
+            "BROWSER_AUTH_SUBMIT_SELECTOR": submit_selector or "",
+            "BROWSER_AUTH_SUCCESS_URL_PATTERN": success_url_pattern or "",
+        }
     )
+    try:
+        completed = subprocess.run(
+            ["node", str(helper_path)],
+            cwd=BASE_DIR,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BrowserAuthSessionError(
+            f"Direct Playwright browser auth capture timed out after {timeout_seconds} seconds."
+        ) from exc
+    except OSError as exc:
+        raise BrowserAuthSessionError(
+            f"Direct Playwright browser auth capture could not start: {exc}"
+        ) from exc
+
+    if completed.returncode != 0:
+        message = "\n".join(
+            part for part in [completed.stderr, completed.stdout] if part
+        ).strip()
+        raise BrowserAuthSessionError(
+            message or "Direct Playwright browser auth capture failed."
+        )
+    if not output_path.exists():
+        raise BrowserAuthSessionError(
+            "Direct Playwright storage state file was not produced."
+        )
+    try:
+        state = json.loads(output_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise BrowserAuthSessionError(
+            "Direct Playwright storage state file is not valid JSON."
+        ) from exc
+    _validate_storage_state(state)
+    return state
 
 
 def _capture_base_dir() -> Path:
@@ -494,7 +613,12 @@ def _capture_run_dir(session_id: str) -> Path:
 
 
 def _dotenv_escape(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
     return f'"{escaped}"'
 
 
@@ -535,7 +659,9 @@ def _build_capture_prompt(
         [
             _selector_hint("username selector hint", username_selector),
             _selector_hint("password selector hint", password_selector),
-            _selector_hint("username continue selector hint", username_continue_selector),
+            _selector_hint(
+                "username continue selector hint", username_continue_selector
+            ),
             _selector_hint("submit selector hint", submit_selector),
             _selector_hint("success URL regex", success_url_pattern),
         ]
@@ -583,20 +709,49 @@ def _normalize_capture_error(message: str | None) -> str:
             "LLM runtime is not authenticated. Configure the provider API key in Settings or deployment "
             "environment secrets, then restart the backend and worker services if using environment secrets."
         )
-    if any(token in lower for token in ["security challenge", "cloudflare", "anti-bot", "captcha", "turnstile", "verify you are human", "checking your browser"]):
+    if any(
+        token in lower
+        for token in [
+            "security challenge",
+            "cloudflare",
+            "anti-bot",
+            "captcha",
+            "turnstile",
+            "verify you are human",
+            "checking your browser",
+        ]
+    ):
         return (
             "Security challenge detected during MCP browser auth capture. Automated capture cannot bypass "
             "Cloudflare, CAPTCHA, or anti-bot checks; allowlist the capture browser or disable the challenge "
             "for this environment."
         )
-    if any(token in lower for token in ["login form not found", "username or password input", "no login form"]):
+    if any(
+        token in lower
+        for token in [
+            "login form not found",
+            "username or password input",
+            "no login form",
+        ]
+    ):
         return "Login form not found during MCP browser auth capture. Check the login URL or add selector hints."
-    if any(token in lower for token in ["password field not found", "password step", "password selector", "password input"]):
+    if any(
+        token in lower
+        for token in [
+            "password field not found",
+            "password step",
+            "password selector",
+            "password input",
+        ]
+    ):
         return (
             "Password step not reachable during MCP browser auth capture. Add a password selector or username "
             "continue selector hint for this login flow."
         )
-    if any(token in lower for token in ["storage-state", "storage state", "browser_storage_state"]):
+    if any(
+        token in lower
+        for token in ["storage-state", "storage state", "browser_storage_state"]
+    ):
         return "Storage state file not produced by MCP browser auth capture."
     if "[eval]" in lower or "locator.fill" in lower or "login helper" in lower:
         return "MCP browser auth capture failed before login completed. Check the login URL or selector hints."
@@ -605,11 +760,22 @@ def _normalize_capture_error(message: str | None) -> str:
     return raw[-1200:]
 
 
-async def _run_capture_agent(prompt: str, *, run_dir: Path, timeout_seconds: int, session_id: str) -> AgentResult:
-    selection = apply_runtime_env_aliases(runtime_env_vars(), tier="tool_deep")
-    if infer_display_provider(selection.base_url) == "zai" and not selection.api_key:
+async def _run_capture_agent(
+    prompt: str,
+    *,
+    run_dir: Path,
+    timeout_seconds: int,
+    session_id: str,
+    runtime_env: dict[str, str] | None = None,
+) -> AgentResult:
+    selection = apply_runtime_env_aliases(
+        runtime_env if runtime_env is not None else runtime_env_vars(),
+        tier="tool_deep",
+    )
+    display_provider = infer_display_provider(selection.base_url)
+    if not selection.api_key:
         raise BrowserAuthSessionError(
-            "LLM provider API key is not configured for Z.ai/GLM. Configure the provider API key in "
+            f"LLM provider API key is not configured for {display_provider}. Configure the provider API key in "
             "Settings or deployment environment secrets, then restart the backend and worker services "
             "if using environment secrets."
         )
@@ -650,7 +816,12 @@ async def _run_capture_agent(prompt: str, *, run_dir: Path, timeout_seconds: int
 
 
 async def _run_capture_agent_with_browser_slot(
-    prompt: str, *, run_dir: Path, timeout_seconds: int, session_id: str
+    prompt: str,
+    *,
+    run_dir: Path,
+    timeout_seconds: int,
+    session_id: str,
+    runtime_env: dict[str, str] | None = None,
 ) -> AgentResult:
     async with browser_operation_slot(
         request_id=f"browser-auth:{session_id}",
@@ -664,10 +835,18 @@ async def _run_capture_agent_with_browser_slot(
             run_dir=run_dir,
             timeout_seconds=timeout_seconds,
             session_id=session_id,
+            runtime_env=runtime_env,
         )
 
 
-def _run_async_capture(prompt: str, *, run_dir: Path, timeout_seconds: int, session_id: str) -> AgentResult:
+def _run_async_capture(
+    prompt: str,
+    *,
+    run_dir: Path,
+    timeout_seconds: int,
+    session_id: str,
+    runtime_env: dict[str, str] | None = None,
+) -> AgentResult:
     result: AgentResult | None = None
     error: BaseException | None = None
 
@@ -680,22 +859,31 @@ def _run_async_capture(prompt: str, *, run_dir: Path, timeout_seconds: int, sess
                     run_dir=run_dir,
                     timeout_seconds=timeout_seconds,
                     session_id=session_id,
+                    runtime_env=runtime_env,
                 )
             )
         except BaseException as exc:
             error = exc
 
-    thread = threading.Thread(target=target, name=f"browser-auth-capture-{session_id[:8]}", daemon=True)
+    thread = threading.Thread(
+        target=target, name=f"browser-auth-capture-{session_id[:8]}", daemon=True
+    )
     thread.start()
     thread.join(timeout_seconds + 30)
     if thread.is_alive():
-        raise BrowserAuthSessionError(_normalize_capture_error(f"capture timed out after {timeout_seconds} seconds"))
+        raise BrowserAuthSessionError(
+            _normalize_capture_error(
+                f"capture timed out after {timeout_seconds} seconds"
+            )
+        )
     if error:
         if isinstance(error, BrowserSlotAcquisitionError):
             raise BrowserAuthSessionError(str(error)) from error
         raise BrowserAuthSessionError(_normalize_capture_error(str(error))) from error
     if result is None:
-        raise BrowserAuthSessionError("MCP browser auth capture failed without returning a result.")
+        raise BrowserAuthSessionError(
+            "MCP browser auth capture failed without returning a result."
+        )
     return result
 
 
@@ -712,6 +900,7 @@ def capture_storage_state_via_mcp_agent(
     submit_selector: str | None = None,
     success_url_pattern: str | None = None,
     timeout_seconds: int = 300,
+    runtime_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     run_dir = _capture_run_dir(session_id)
     artifacts_dir = run_dir / "artifacts"
@@ -737,11 +926,25 @@ def capture_storage_state_via_mcp_agent(
         storage_filename=storage_filename,
     )
     (run_dir / "capture-prompt.md").write_text(prompt)
-    (run_dir / "capture-runtime.json").write_text(json.dumps({**runtime, "capture_version": BROWSER_AUTH_CAPTURE_VERSION}, indent=2, default=str))
+    (run_dir / "capture-runtime.json").write_text(
+        json.dumps(
+            {**runtime, "capture_version": BROWSER_AUTH_CAPTURE_VERSION},
+            indent=2,
+            default=str,
+        )
+    )
 
-    result = _run_async_capture(prompt, run_dir=run_dir, timeout_seconds=timeout_seconds, session_id=session_id)
+    result = _run_async_capture(
+        prompt,
+        run_dir=run_dir,
+        timeout_seconds=timeout_seconds,
+        session_id=session_id,
+        runtime_env=runtime_env,
+    )
     if not result.success:
-        raise BrowserAuthSessionError(_normalize_capture_error(result.error or result.output))
+        raise BrowserAuthSessionError(
+            _normalize_capture_error(result.error or result.output)
+        )
     if not storage_path.exists():
         alternatives = sorted(
             [
@@ -752,33 +955,50 @@ def capture_storage_state_via_mcp_agent(
         if alternatives:
             storage_path = alternatives[0]
         else:
-            raise BrowserAuthSessionError(_normalize_capture_error("storage state file not produced"))
+            raise BrowserAuthStorageStateMissingError(
+                _normalize_capture_error("storage state file not produced")
+            )
     try:
         state = json.loads(storage_path.read_text())
     except Exception as exc:
-        raise BrowserAuthSessionError("Storage state file not produced by MCP browser auth capture.") from exc
+        raise BrowserAuthSessionError(
+            "Storage state file not produced by MCP browser auth capture."
+        ) from exc
     _validate_storage_state(state)
     return state
 
 
-def refresh_browser_auth_session(session: Session, project_id: str, session_id: str) -> BrowserAuthSession:
+def refresh_browser_auth_session(
+    session: Session, project_id: str, session_id: str
+) -> BrowserAuthSession:
     row = get_browser_auth_session_or_error(session, project_id, session_id)
     credentials = get_merged_credentials(project_id, session)
     username = _credential_value(credentials, row.username_key, "username")
     password = _credential_value(credentials, row.password_key, "password")
+    capture_kwargs = {
+        "base_url": row.base_url,
+        "login_url": row.login_url,
+        "username": username,
+        "password": password,
+        "username_selector": row.username_selector,
+        "password_selector": row.password_selector,
+        "username_continue_selector": row.username_continue_selector,
+        "submit_selector": row.submit_selector,
+        "success_url_pattern": row.success_url_pattern,
+    }
+    capture_runtime_env = runtime_env_vars(session)
     try:
-        state = capture_storage_state_via_mcp_agent(
-            session_id=row.id,
-            base_url=row.base_url,
-            login_url=row.login_url,
-            username=username,
-            password=password,
-            username_selector=row.username_selector,
-            password_selector=row.password_selector,
-            username_continue_selector=row.username_continue_selector,
-            submit_selector=row.submit_selector,
-            success_url_pattern=row.success_url_pattern,
-        )
+        try:
+            state = capture_storage_state_via_mcp_agent(
+                session_id=row.id,
+                runtime_env=capture_runtime_env,
+                **capture_kwargs,
+            )
+        except BrowserAuthStorageStateMissingError:
+            state = create_storage_state_via_playwright(
+                **capture_kwargs,
+                run_dir=_capture_run_dir(f"{row.id}-playwright"),
+            )
         row.storage_state_json_encrypted = encrypt_storage_state(state)
         row.status = "active"
         row.failure_reason = None

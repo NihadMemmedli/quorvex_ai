@@ -21,6 +21,7 @@ import logging
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 
+from utils.agent_tool_allowlists import get_agent_tool_config
 from utils.json_utils import extract_json_from_markdown
 
 logger = logging.getLogger(__name__)
@@ -67,8 +68,15 @@ class CoverageAnalyzer:
         # Build prompt for the agent
         prompt = self._build_browser_prompt(url, existing_tests)
 
-        # Query the coverage analyzer agent with Playwright access
-        report = await self._query_coverage_agent(prompt=prompt, allowed_tools=["Read", "mcp__playwright__*"])
+        # Query the coverage analyzer agent with an explicit profile. Tool
+        # search can choose among these tools, but it does not expand access.
+        tool_config = get_agent_tool_config("test-coverage-analyzer")
+        report = await self._query_coverage_agent(
+            prompt=prompt,
+            allowed_tools=tool_config.get("allowed_tools") or ["Glob", "Grep", "Read", "LS"],
+            tools=tool_config.get("tools"),
+            disallowed_tools=tool_config.get("disallowed_tools"),
+        )
 
         # Add metadata
         report["analyzed_at"] = datetime.now().isoformat()
@@ -83,7 +91,7 @@ class CoverageAnalyzer:
         prompt = self._build_spec_prompt(url, existing_tests)
 
         # Query the coverage analyzer agent (read-only)
-        report = await self._query_coverage_agent(prompt=prompt, allowed_tools=["Read"])
+        report = await self._query_coverage_agent(prompt=prompt, allowed_tools=["Read"], tools=["Read"])
 
         # Add metadata
         report["analyzed_at"] = datetime.now().isoformat()
@@ -166,15 +174,27 @@ Output ONLY the coverage report JSON in a code block.
 """
         return prompt
 
-    async def _query_coverage_agent(self, prompt: str, allowed_tools: list[str]) -> dict:
+    async def _query_coverage_agent(
+        self,
+        prompt: str,
+        allowed_tools: list[str],
+        *,
+        tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
+    ) -> dict:
         """Query the coverage analyzer agent"""
         try:
+            kwargs: dict[str, Any] = {
+                "allowed_tools": allowed_tools,
+                "setting_sources": ["project"],
+            }
+            if tools is not None:
+                kwargs["tools"] = tools
+            if disallowed_tools:
+                kwargs["disallowed_tools"] = disallowed_tools
             async for message in query(
                 prompt=prompt,
-                options=ClaudeAgentOptions(
-                    allowed_tools=allowed_tools,
-                    setting_sources=["project"],
-                ),
+                options=ClaudeAgentOptions(**kwargs),
             ):
                 if hasattr(message, "result"):
                     result = message.result

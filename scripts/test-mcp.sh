@@ -38,7 +38,7 @@ echo ""
 
 # Check if @playwright/mcp can be invoked
 echo "4. Testing @playwright/mcp invocation:"
-timeout 10 npx @playwright/mcp@latest --help 2>&1 | head -20 || echo "   MCP help command completed or timed out"
+timeout 10 npx @playwright/mcp@0.0.76 --help 2>&1 | head -20 || echo "   MCP help command completed or timed out"
 echo ""
 
 # Check if appium-mcp can be invoked
@@ -63,8 +63,8 @@ echo ""
 # Quick MCP server start test
 echo "7. Testing Playwright MCP Server Start (5 second timeout):"
 cd "$APP_DIR"
-echo "   Starting MCP server with: npx @playwright/mcp@latest --browser chromium --headless"
-timeout 5 npx @playwright/mcp@latest --browser chromium --headless 2>&1 &
+echo "   Starting MCP server with: npx @playwright/mcp@0.0.76 --browser chromium --headless"
+timeout 5 npx @playwright/mcp@0.0.76 --browser chromium --headless 2>&1 &
 MCP_PID=$!
 sleep 3
 if kill -0 $MCP_PID 2>/dev/null; then

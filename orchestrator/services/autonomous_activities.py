@@ -1984,18 +1984,6 @@ Revision request:
 - revision attempt: {revision_context.get("revision_attempt") or 1}
 Address the reviewer feedback directly and explain what changed from the prior output.
 """
-    hermes_note = ""
-    if str((mission.config or {}).get("runtime") or "").lower() in {"hermes", "hermes-agent", "hermes_agent"}:
-        max_children = _config_int(mission.config, "hermes_max_concurrent_children", 3)
-        max_depth = _config_int(mission.config, "hermes_max_spawn_depth", 1)
-        hermes_note = f"""
-Hermes delegation policy:
-- You may delegate bounded subtasks to subagents when it improves coverage or parallelism.
-- Give each subagent all context it needs; subagents do not inherit this full prompt automatically.
-- If a subagent needs test data, copy the relevant test-data ref/value/env-var context into its prompt.
-- Use at most {max_children} concurrent child agents and do not exceed delegation depth {max_depth}.
-- Aggregate subagent findings into the required final JSON shape.
-"""
     return f"""You are the {item.role} agent in a Quorvex autonomous QA team.
 
 Mission: {mission.name}
@@ -2005,7 +1993,6 @@ Target surfaces: {", ".join(surfaces or ["project data and known app artifacts"]
 {browser_note}
 {test_data_note}
 {revision_note}
-{hermes_note}
 
 Work only by inspecting the app/project through available tools. Do not write repository files.
 Return JSON only, preferably in a ```json fenced block, with this exact top-level shape:
@@ -2740,15 +2727,6 @@ def _execute_agent_work_item_direct(
             auth_session_id=browser_runtime.get("auth_session_id"),
             auth_session_name=browser_runtime.get("auth_session_name"),
         )
-        if str((mission.config or {}).get("runtime") or "").lower() in {"hermes", "hermes-agent", "hermes_agent"}:
-            child_browser_handoffs = _prepare_child_browser_handoffs(
-                mission=mission,
-                item=item,
-                allowed_tools=allowed_tools,
-                parent_auth_session_id=browser_runtime.get("auth_session_id"),
-                parent_auth_session_name=browser_runtime.get("auth_session_name"),
-                max_children=_config_int(mission.config, "hermes_max_concurrent_children", 3),
-            )
     item.agent_task_id = None
     item.status = "running"
     item.attempt_count += 1
@@ -2892,9 +2870,8 @@ def _execute_agent_work_item_direct(
                     **(current.progress or {}),
                     "runtime": runtime_name,
                     "agent_task_id": task_id,
-                    "hermes_run_id": task_id if runtime_name == "hermes" else None,
-                    "phase": "queued" if runtime_name == "hermes" else "running",
-                    "message": "Hermes run started." if runtime_name == "hermes" else "Agent task started.",
+                    "phase": "running",
+                    "message": "Agent task started.",
                     "has_browser_tools": has_browser_tools,
                     "browser_context_handoff": browser_handoff,
                     "browser_child_handoffs": child_browser_handoffs,
@@ -2967,7 +2944,6 @@ def _execute_agent_work_item_direct(
                     model=(mission.config or {}).get("model"),
                     model_tier=(mission.config or {}).get("model_tier") or "tool_deep",
                     agent_name=item.role,
-                    hermes_conversation=item.id,
                     metadata={
                         "mission_id": mission.id,
                         "mission_run_id": item.run_id,

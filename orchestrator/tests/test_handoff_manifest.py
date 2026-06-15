@@ -5,6 +5,7 @@ from orchestrator.services.handoff_manifest import (
     init_manifest,
     load_manifest,
     record_artifact,
+    record_attempt,
     record_consumption,
     record_stage,
     validate_artifact,
@@ -35,6 +36,7 @@ def test_manifest_records_stage_artifact_and_consumption(tmp_path: Path):
     assert len(recorded["hash"]) == 64
     assert data["stages"]["generator"]["artifacts_consumed"]["planner_plan"]["status"] == "used"
     assert "generator" in data["artifacts"]["planner_plan"]["consumers"]
+    assert len(data["artifact_history"]["planner_plan"]) == 1
 
 
 def test_manifest_validation_reports_missing_invalid_stale_and_valid(tmp_path: Path):
@@ -111,3 +113,41 @@ def test_manifest_optional_missing_artifact_is_explicit(tmp_path: Path):
     result = validate_artifact(manifest_path, "planner_draft_script")
 
     assert result["validation_status"] == "optional_missing"
+
+
+def test_manifest_records_append_only_attempt_history(tmp_path: Path):
+    manifest_path = init_manifest(tmp_path)
+
+    first = record_attempt(
+        manifest_path,
+        "generator",
+        stage_attempt=1,
+        status="timeout",
+        agent_session_id="queued-session",
+        executor_mode="queue",
+        model_tier="tool_deep",
+        timeout_seconds=300,
+        error_type="timeout",
+        tool_call_summary={"count": 2},
+        input_artifact_hashes={"planner_plan": "abc"},
+        output_artifact_hash=None,
+    )
+    second = record_attempt(
+        manifest_path,
+        "generator",
+        stage_attempt=2,
+        status="passed",
+        executor_mode="direct",
+        parent_attempt_id=first["id"],
+        output_artifact_hash="def",
+    )
+
+    data = load_manifest(tmp_path)
+
+    assert [attempt["id"] for attempt in data["attempt_history"]] == [
+        first["id"],
+        second["id"],
+    ]
+    assert data["attempt_history"][0]["agent_session_id"] == "queued-session"
+    assert data["attempt_history"][1]["parent_attempt_id"] == first["id"]
+    assert data["stages"]["generator"]["attempts"] == [first["id"], second["id"]]

@@ -64,7 +64,7 @@ and PRDs stay private while the public checkout supplies only application code
 and deployment scripts.
 
 Set `QUORVEX_ACTIVE_LLM_PROVIDER` in `env/quorvex.prod.env` to one of
-`zai`, `openrouter`, `openai`, `anthropic`, or `hermes`, then fill the matching
+`zai`, `openrouter`, `openai`, `anthropic`,, then fill the matching
 provider key (`ZAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, or
 `ANTHROPIC_API_KEY`). The scripts derive `QUORVEX_LLM_API_KEY` and SDK aliases
 from the active provider before rendering Docker Compose.

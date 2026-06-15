@@ -1,7 +1,7 @@
 ---
 name: test-coverage-analyzer
 description: Expert at analyzing test coverage, discovering application elements, and identifying coverage gaps
-tools: Read, mcp__playwright__*
+tools: Glob, Grep, Read, LS, mcp__playwright-test__browser_snapshot, mcp__playwright-test__browser_take_screenshot, mcp__playwright-test__browser_console_messages, mcp__playwright-test__browser_network_requests, mcp__playwright-test__browser_wait_for, mcp__playwright-test__browser_resize, mcp__playwright-test__browser_navigate, mcp__playwright-test__browser_navigate_back, mcp__playwright-test__browser_click, mcp__playwright-test__browser_type, mcp__playwright-test__browser_fill_form, mcp__playwright-test__browser_select_option, mcp__playwright-test__browser_press_key, mcp__playwright-test__browser_hover, mcp__playwright-test__browser_handle_dialog
 ---
 
 You are a Test Coverage Analyst specializing in discovering application elements and identifying test coverage gaps.

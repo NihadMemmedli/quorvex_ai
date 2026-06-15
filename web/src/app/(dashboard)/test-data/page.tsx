@@ -33,6 +33,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
+import CodeEditor from '@/components/CodeEditor';
+import { formatJsonContent, repairJsonPasteContent, validateJsonContent, type JsonValidationResult } from '@/lib/test-data-json';
 
 type DataFormat = 'json' | 'text' | 'mixed';
 type DataStatus = 'active' | 'archived';
@@ -131,6 +133,7 @@ export default function TestDataPage() {
   const [datasetForm, setDatasetForm] = useState(emptyDataset);
   const [itemForm, setItemForm] = useState(emptyItem);
   const itemKeyInputRef = useRef<HTMLInputElement | null>(null);
+  const jsonEditorRef = useRef<HTMLDivElement | null>(null);
   const [requestedRef, setRequestedRef] = useState('');
   const requestedDatasetKey = requestedRef.includes('.') ? requestedRef.split('.', 1)[0] : '';
 
@@ -153,7 +156,15 @@ export default function TestDataPage() {
     () => datasets.reduce((total, dataset) => total + (dataset.item_count || 0), 0),
     [datasets],
   );
-  const canSaveItem = Boolean(selectedDataset) && !savingItem && Boolean(itemForm.key.trim()) && Boolean(itemForm.name.trim());
+  const jsonValidation = useMemo<JsonValidationResult>(
+    () => (itemForm.format === 'text' ? { valid: true, value: null } : validateJsonContent(itemForm.dataText)),
+    [itemForm.dataText, itemForm.format],
+  );
+  const canSaveItem = Boolean(selectedDataset)
+    && !savingItem
+    && Boolean(itemForm.key.trim())
+    && Boolean(itemForm.name.trim())
+    && jsonValidation.valid;
   const sensitiveFieldList = useMemo(() => parseSensitiveFields(itemForm.sensitiveFields), [itemForm.sensitiveFields]);
   const passwordProtected = sensitiveFieldList.includes('password');
 
@@ -283,12 +294,13 @@ export default function TestDataPage() {
 
     let parsedData: unknown = null;
     if (itemForm.format !== 'text') {
-      try {
-        parsedData = itemForm.dataText.trim() ? JSON.parse(itemForm.dataText) : null;
-      } catch {
-        toast.error('JSON content is invalid');
+      const validation = validateJsonContent(itemForm.dataText);
+      if (!validation.valid) {
+        focusJsonEditor();
+        toast.error(validation.error?.message || 'JSON content is invalid');
         return;
       }
+      parsedData = validation.value;
     }
 
     setSavingItem(true);
@@ -378,6 +390,33 @@ export default function TestDataPage() {
       ...prev,
       sensitiveFields: formatSensitiveFields(toggleSensitiveField(prev.sensitiveFields, 'password', checked)),
     }));
+  }
+
+  function focusJsonEditor() {
+    jsonEditorRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const input = jsonEditorRef.current?.querySelector<HTMLTextAreaElement>('textarea');
+    input?.focus();
+  }
+
+  function formatJson() {
+    if (!itemForm.dataText.trim()) return;
+    const result = formatJsonContent(itemForm.dataText);
+    if (!result.valid) {
+      focusJsonEditor();
+      toast.error(result.error?.message || 'JSON content is invalid');
+      return;
+    }
+    setItemForm(prev => ({ ...prev, dataText: result.content }));
+  }
+
+  function repairJsonPaste() {
+    const result = repairJsonPasteContent(itemForm.dataText);
+    if (!result.valid) {
+      focusJsonEditor();
+      toast.error(result.error?.message || 'JSON content is invalid');
+      return;
+    }
+    setItemForm(prev => ({ ...prev, dataText: result.content }));
   }
 
   return (
@@ -664,15 +703,42 @@ export default function TestDataPage() {
                     </div>
 
                     {itemForm.format !== 'text' ? (
-                      <Field id="item-json" label="JSON">
-                        <textarea
-                          id="item-json"
-                          data-testid="test-data-item-json"
-                          className={cn(textareaClass, 'test-data-json-editor')}
-                          value={itemForm.dataText}
-                          onChange={event => setItemForm(prev => ({ ...prev, dataText: event.target.value }))}
-                          spellCheck={false}
-                        />
+                      <Field
+                        id="item-json"
+                        label="JSON"
+                        labelActions={(
+                          <div className="test-data-editor-actions">
+                            <Button type="button" variant="outline" size="sm" onClick={formatJson} data-testid="test-data-format-json">
+                              Format
+                            </Button>
+                            <Button type="button" variant="outline" size="sm" onClick={repairJsonPaste} data-testid="test-data-repair-json">
+                              Repair paste
+                            </Button>
+                          </div>
+                        )}
+                      >
+                        <div
+                          className={cn('test-data-json-editor-frame', !jsonValidation.valid ? 'test-data-json-editor-frame-error' : '')}
+                          aria-invalid={!jsonValidation.valid}
+                          aria-describedby={!jsonValidation.valid ? 'item-json-error' : undefined}
+                        >
+                          <CodeEditor
+                            ref={jsonEditorRef}
+                            value={itemForm.dataText}
+                            onChange={value => setItemForm(prev => ({ ...prev, dataText: value }))}
+                            language="json"
+                            height={260}
+                            ariaLabel="JSON"
+                            wrapperClassName="test-data-json-editor"
+                            wrapperTestId="test-data-item-json"
+                            options={{ tabSize: 2 }}
+                          />
+                        </div>
+                        {!jsonValidation.valid ? (
+                          <p id="item-json-error" className="test-data-json-error" data-testid="test-data-json-error" aria-live="polite">
+                            {jsonValidation.error?.message || 'Invalid JSON'}
+                          </p>
+                        ) : null}
                       </Field>
                     ) : null}
 
@@ -1107,6 +1173,14 @@ export default function TestDataPage() {
           min-width: 0;
         }
 
+        .test-data-field-label-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 0.75rem;
+          min-width: 0;
+        }
+
         .test-data-label {
           color: var(--text);
           font-size: 0.85rem;
@@ -1118,6 +1192,14 @@ export default function TestDataPage() {
           color: var(--text-secondary);
           font-size: 0.78rem;
           line-height: 1.35;
+        }
+
+        .test-data-editor-actions {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 0.5rem;
         }
 
         .test-data-textarea {
@@ -1138,9 +1220,35 @@ export default function TestDataPage() {
           opacity: 0.7;
         }
 
+        .test-data-json-editor-frame {
+          width: 100%;
+          height: 260px;
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          background: var(--background-raised);
+          overflow: hidden;
+          box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+          transition: border-color 0.16s var(--ease-smooth), box-shadow 0.16s var(--ease-smooth);
+        }
+
+        .test-data-json-editor-frame:focus-within {
+          outline: 2px solid var(--primary);
+          outline-offset: 2px;
+        }
+
+        .test-data-json-editor-frame-error {
+          border-color: rgba(248, 113, 113, 0.8);
+        }
+
         .test-data-json-editor {
-          min-height: 260px;
+          height: 260px;
           font-family: var(--font-mono);
+        }
+
+        .test-data-json-error {
+          color: #fca5a5;
+          font-size: 0.78rem;
+          line-height: 1.35;
         }
 
         .test-data-text-editor {
@@ -1366,10 +1474,25 @@ function ItemCard({ item, selected, onSelect }: { item: TestDataItem; selected: 
   );
 }
 
-function Field({ id, label, hint, children }: { id: string; label: string; hint?: string; children: ReactNode }) {
+function Field({
+  id,
+  label,
+  hint,
+  labelActions,
+  children,
+}: {
+  id: string;
+  label: string;
+  hint?: string;
+  labelActions?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <div className="test-data-field">
-      <Label htmlFor={id} className="test-data-label">{label}</Label>
+      <div className="test-data-field-label-row">
+        <Label htmlFor={id} className="test-data-label">{label}</Label>
+        {labelActions}
+      </div>
       {children}
       {hint ? <p className="test-data-hint">{hint}</p> : null}
     </div>

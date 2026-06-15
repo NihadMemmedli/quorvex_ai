@@ -11,7 +11,7 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `QUORVEX_ACTIVE_LLM_PROVIDER` | `zai` | Deploy only | Active deploy-time provider selector. Supported values: `zai`, `openrouter`, `openai`, `anthropic`, `hermes` |
+| `QUORVEX_ACTIVE_LLM_PROVIDER` | `zai` | Deploy only | Active deploy-time provider selector. Supported values: `zai`, `openrouter`, `openai`, `anthropic` |
 | `ZAI_API_KEY` | -- | Provider-specific | Z.ai GLM API key used when `QUORVEX_ACTIVE_LLM_PROVIDER=zai` |
 | `OPENROUTER_API_KEY` | -- | Provider-specific | OpenRouter API key used when `QUORVEX_ACTIVE_LLM_PROVIDER=openrouter` |
 | `OPENAI_API_KEY` | -- | Provider-specific | OpenAI API key used for memory embeddings and when `QUORVEX_ACTIVE_LLM_PROVIDER=openai` |
@@ -109,22 +109,11 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
-| `QUORVEX_AGENT_RUNTIME` | `claude_sdk` | No | Default runtime for agent runs. Supported values: `claude_sdk`, `hermes` |
-| `QUORVEX_ASSISTANT_RUNTIME` | `QUORVEX_AGENT_RUNTIME` | No | Optional dashboard assistant runtime override. Supported values: `claude_sdk`, `openai`, `hermes` |
+| `QUORVEX_AGENT_RUNTIME` | `claude_sdk` | No | Default runtime for agent runs. Supported value: `claude_sdk` |
+| `QUORVEX_ASSISTANT_RUNTIME` | `QUORVEX_AGENT_RUNTIME` | No | Optional dashboard assistant runtime override. Supported values: `claude_sdk`, `openai` |
 | `AGENT_COST_LOG` | -- | No | Optional JSONL path for appending agent usage and cost records during native pipeline runs |
-| `HERMES_ENABLED` | `false` | No | Enables dispatching selected Quorvex agent runs to Hermes |
-| `HERMES_API_URL` | `http://127.0.0.1:8642` | No | Hermes API server base URL |
-| `HERMES_API_KEY` | -- | No | Bearer token for the Hermes API server |
-| `HERMES_MODEL` | `hermes-agent` | No | Model name sent to Hermes API requests |
-| `HERMES_PROFILE_PREFIX` | `quorvex` | No | Prefix used when provisioning external Hermes profiles |
-| `HERMES_SYNC_PROVIDER` | `true` | No | When Settings are saved, write a generated Hermes home under `data/hermes` using Quorvex's active LLM provider |
-| `HERMES_HOME` | `data/hermes` when generated | No | Hermes configuration directory to use when launching `hermes gateway` for Quorvex |
-| `HERMES_UPSTREAM_PROVIDER` | derived | No | Provider mirrored into the generated Hermes config, such as `zai`, `anthropic`, `openrouter`, `openai`, or `custom` |
-| `HERMES_UPSTREAM_MODEL` | derived | No | Model mirrored into the generated Hermes config |
 
-Hermes reads its actual LLM provider from its own server-side `config.yaml` and `.env`; the OpenAI-compatible API `model` field is only the public API model id. Saving Quorvex Settings with provider mirroring enabled creates `data/hermes/config.yaml` and `data/hermes/.env`. Launch Hermes with `HERMES_HOME=<project>/data/hermes hermes gateway` so Hermes uses the same provider and API key as Quorvex.
-
-Settings can manage backend agent runtime and dashboard assistant runtime separately. Backend agent runtime controls autonomous missions, custom agents, and subagents. Assistant runtime controls dashboard chat routing; when it is set to `hermes`, the frontend process must also receive `HERMES_ENABLED=true`, `HERMES_API_URL`, `HERMES_API_KEY`, and `HERMES_MODEL`.
+Settings can manage backend agent runtime and dashboard assistant runtime separately. Backend agent runtime controls autonomous missions and custom agents. Assistant runtime controls dashboard chat routing.
 
 ## Autonomous Validation and Queue Recovery
 
@@ -317,7 +306,7 @@ These variables are read by source code paths but are usually set by Docker Comp
 | `PLAYWRIGHT_AGENT_API_URL` | `http://localhost:8001` | No | Backend URL used by progress reporters and subprocesses |
 | `PLAYWRIGHT_MCP_ARGS` | `--browser chromium` | No | Arguments for the Playwright MCP server |
 | `PLAYWRIGHT_MCP_COMMAND` | -- | No | Command override for the Playwright MCP server |
-| `PLAYWRIGHT_MCP_MIN_VERSION` | `0.0.75` | No | Minimum Playwright MCP package version |
+| `PLAYWRIGHT_MCP_MIN_VERSION` | `0.0.76` | No | Minimum Playwright MCP package version |
 | `PLAYWRIGHT_MCP_PACKAGE` | derived | No | Package spec for Playwright MCP |
 | `PRD_TIMEOUT_MINUTES` | feature default | No | Minute-based timeout accepted by legacy PRD paths |
 | `PROJECT_ID` | `default` | No | Project scope passed into subprocesses |

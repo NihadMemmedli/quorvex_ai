@@ -27,8 +27,18 @@ from typing import Any
 from orchestrator.services.ai_runtime_config import (
     RuntimeModelTier,
     apply_runtime_env_aliases,
+    resolve_runtime_ai_selection,
 )
 from orchestrator.utils.browser_dialog_policy import append_browser_dialog_recovery_policy
+from orchestrator.utils.claude_stream import (
+    ParsedToolResult,
+    ParsedToolUse,
+    event_text_blocks,
+    event_tool_results,
+    event_tool_uses,
+    event_type,
+    tool_result_text,
+)
 from orchestrator.utils.token_budget import (
     build_agent_token_telemetry,
     estimate_tokens,
@@ -51,14 +61,22 @@ try:
     from orchestrator.services.api_key_rotator import (
         get_api_key_rotator,
         is_rate_limit_error,
+        is_transient_provider_error,
+        parse_api_error_status,
         parse_retry_after,
+        provider_retry_attempts,
+        provider_retry_delay_seconds,
     )
 except ImportError:
     try:
         from services.api_key_rotator import (
             get_api_key_rotator,
             is_rate_limit_error,
+            is_transient_provider_error,
+            parse_api_error_status,
             parse_retry_after,
+            provider_retry_attempts,
+            provider_retry_delay_seconds,
         )
     except ImportError:
         get_api_key_rotator = None
@@ -66,8 +84,20 @@ except ImportError:
         def is_rate_limit_error(text):
             return False
 
+        def is_transient_provider_error(error):
+            return False
+
+        def parse_api_error_status(error):
+            return None
+
         def parse_retry_after(text):
             return None
+
+        def provider_retry_attempts():
+            return 1
+
+        def provider_retry_delay_seconds(attempt):
+            return 0.0
 
 
 # Import agent queue for Redis-based execution
@@ -212,6 +242,111 @@ SENSITIVE_INPUT_KEY_PARTS = (
     "private_key",
 )
 
+NATIVE_TEST_MCP_TOOL_SUFFIXES = {
+    "planner_setup_page",
+    "planner_save_plan",
+    "generator_setup_page",
+    "generator_read_log",
+    "generator_write_test",
+    "test_debug",
+    "test_run",
+    "test_list",
+}
+
+
+@dataclass(frozen=True)
+class AgentSdkFeaturePolicy:
+    """Resolve Claude Agent SDK feature flags against provider capabilities."""
+
+    tool_search: str | None = None
+
+    _DISABLED = frozenset({"", "0", "false", "no", "off", "disabled", "none"})
+    _FORCED = frozenset({"1", "true", "yes", "on", "force", "forced"})
+
+    def resolve_tool_search(
+        self,
+        *,
+        env_vars: dict[str, str] | None,
+        heavy_mcp_run: bool,
+    ) -> tuple[str | None, dict[str, Any]]:
+        explicit = self.tool_search
+        explicit_source = "constructor" if explicit is not None else None
+        if explicit is None:
+            if env_vars and "ENABLE_TOOL_SEARCH" in env_vars:
+                explicit = env_vars.get("ENABLE_TOOL_SEARCH")
+                explicit_source = "env_vars"
+            elif "ENABLE_TOOL_SEARCH" in os.environ:
+                explicit = os.environ.get("ENABLE_TOOL_SEARCH")
+                explicit_source = "environment"
+
+        if explicit is not None:
+            normalized = str(explicit).strip()
+            lowered = normalized.lower()
+            if lowered in self._DISABLED:
+                return None, {
+                    "policy": normalized or "off",
+                    "source": explicit_source,
+                    "reason": "explicit_disabled",
+                    "provider_supported": None,
+                    "heavy_mcp_run": heavy_mcp_run,
+                }
+            if lowered in self._FORCED:
+                return "true", {
+                    "policy": normalized,
+                    "source": explicit_source,
+                    "reason": "explicit_enabled",
+                    "provider_supported": None,
+                    "heavy_mcp_run": heavy_mcp_run,
+                }
+            return normalized, {
+                "policy": normalized,
+                "source": explicit_source,
+                "reason": "explicit_enabled",
+                "provider_supported": None,
+                "heavy_mcp_run": heavy_mcp_run,
+            }
+
+        provider_supported = self._supports_tool_references(env_vars)
+        if heavy_mcp_run and provider_supported:
+            return "auto:5", {
+                "policy": "auto:5",
+                "source": "auto",
+                "reason": "heavy_mcp_first_party",
+                "provider_supported": True,
+                "heavy_mcp_run": heavy_mcp_run,
+            }
+        return None, {
+            "policy": "auto:5",
+            "source": "auto",
+            "reason": "not_heavy_mcp_run" if not heavy_mcp_run else "provider_not_first_party",
+            "provider_supported": provider_supported,
+            "heavy_mcp_run": heavy_mcp_run,
+        }
+
+    @staticmethod
+    def _supports_tool_references(env_vars: dict[str, str] | None) -> bool:
+        try:
+            selection = resolve_runtime_ai_selection("tool_deep", env_vars=env_vars)
+        except Exception:
+            return False
+        if selection.provider != "anthropic_compatible":
+            return False
+        return "anthropic.com" in (selection.base_url or "").lower()
+
+
+def classify_agent_error_type(error: Any, fallback: str | None = None) -> str | None:
+    text = str(error or "")
+    lowered = text.lower()
+    if "no conversation found" in lowered and "session id" in lowered:
+        return "invalid_session_resume"
+    if "heartbeat lost" in lowered:
+        return "heartbeat_lost"
+    if "browser" in lowered and "timeout" in lowered:
+        return "browser_tool_timeout"
+    if is_transient_provider_error(error):
+        return "provider_overloaded"
+    return fallback
+
 
 def _is_sensitive_input_key(key: str | None) -> bool:
     lowered = str(key or "").lower()
@@ -298,6 +433,7 @@ class AgentResult:
     success: bool
     output: str = ""
     error: str | None = None
+    error_type: str | None = None
     duration_seconds: float = 0.0
     tool_calls: list[ToolCall] = field(default_factory=list)
     messages_received: int = 0
@@ -372,6 +508,13 @@ class AgentRunner:
         permission_prompt_tool_name: str | None = None,
         enable_file_checkpointing: bool = False,
         sandbox: dict[str, Any] | None = None,
+        hooks: dict[str, Any] | None = None,
+        agents: dict[str, Any] | None = None,
+        skills: list[str] | str | None = None,
+        plugins: list[Any] | None = None,
+        session_store: Any | None = None,
+        fork_session: bool = False,
+        tool_search_policy: str | None = None,
         env_vars: dict[str, str] | None = None,
         trace_id: str | None = None,
         trace_prompt_hash: str | None = None,
@@ -430,6 +573,13 @@ class AgentRunner:
             permission_prompt_tool_name: Optional SDK permission prompt tool.
             enable_file_checkpointing: Enable SDK file checkpoints for rewind-capable runs.
             sandbox: Optional SDK sandbox settings.
+            hooks: Optional SDK hook configuration.
+            agents: Optional SDK subagent definitions.
+            skills: Optional SDK skill allowlist or "all".
+            plugins: Optional SDK plugin configuration.
+            session_store: Optional SDK durable session store.
+            fork_session: Fork a resumed SDK session when supported.
+            tool_search_policy: Tool search policy: off, auto, auto:N, or force.
             env_vars: Explicit environment variables to expose to direct and queued execution.
             trace_id: Optional deep trace ID for agent observability.
             trace_prompt_hash: Optional upstream prompt hash.
@@ -482,11 +632,28 @@ class AgentRunner:
         self.permission_prompt_tool_name = permission_prompt_tool_name
         self.enable_file_checkpointing = enable_file_checkpointing
         self.sandbox = sandbox
+        self.hooks = hooks
+        self.agents = agents
+        self.skills = skills
+        self.plugins = plugins
+        self.session_store = session_store
+        self.fork_session = fork_session
+        self.tool_search_policy = tool_search_policy
         self.env_vars = {str(key): str(value) for key, value in (env_vars or {}).items() if key and value is not None}
         self.trace_id = trace_id
         self.trace_prompt_hash = trace_prompt_hash
         self.trace_agent_run_id = trace_agent_run_id or owner_id
         self.preserve_browser_on_failure = preserve_browser_on_failure
+        (
+            self._resolved_tool_search_env,
+            self._resolved_tool_search_details,
+        ) = AgentSdkFeaturePolicy(self.tool_search_policy).resolve_tool_search(
+            env_vars=self.env_vars,
+            heavy_mcp_run=self._native_mcp_heavy_run(),
+        )
+        tool_search = self._effective_tool_search_env()
+        if tool_search and "ENABLE_TOOL_SEARCH" not in self.env_vars:
+            self.env_vars["ENABLE_TOOL_SEARCH"] = tool_search
         self._last_memory_injected = False
         self._last_memory_context = ""
 
@@ -563,7 +730,14 @@ class AgentRunner:
                 "permission_prompt_tool_name": self.permission_prompt_tool_name,
                 "enable_file_checkpointing": self.enable_file_checkpointing,
                 "sandbox": bool(self.sandbox),
+                "hooks": bool(self.hooks),
+                "agents": sorted(self.agents.keys()) if isinstance(self.agents, dict) else None,
+                "skills": self.skills,
+                "plugins": bool(self.plugins),
+                "session_store": bool(self.session_store),
+                "fork_session": self.fork_session,
             },
+            "tool_search": self._tool_search_diagnostics(),
             "prompt": {
                 "provided": prompt is not None,
                 "hash": prompt_hash,
@@ -598,6 +772,31 @@ class AgentRunner:
                     str(tool) for tool in source if str(tool).startswith("mcp__")
                 )
         return requested
+
+    def _native_mcp_heavy_run(self) -> bool:
+        mcp_tools = self._requested_mcp_tools()
+        if len(mcp_tools) < 5:
+            return False
+        for tool in mcp_tools:
+            parts = str(tool).split("__", 2)
+            if len(parts) >= 3 and parts[1] == "playwright-test":
+                return True
+            if len(parts) >= 3 and parts[2] in NATIVE_TEST_MCP_TOOL_SUFFIXES:
+                return True
+        return False
+
+    def _effective_tool_search_env(self) -> str | None:
+        return self._resolved_tool_search_env
+
+    def _tool_search_diagnostics(self) -> dict[str, Any]:
+        value = self._resolved_tool_search_env
+        details = self._resolved_tool_search_details
+        return {
+            "requested": bool(value),
+            "enable_tool_search": value,
+            "accepted": "unknown_until_sdk_or_cli_start",
+            **details,
+        }
 
     def _is_browser_mcp_run(self) -> bool:
         if self.requires_live_browser:
@@ -650,6 +849,7 @@ class AgentRunner:
             success=False,
             output="\n".join(output_parts or []),
             error="Agent run cancelled",
+            error_type="cancelled",
             duration_seconds=(datetime.now() - start_time).total_seconds(),
             tool_calls=tool_calls or [],
             messages_received=messages_received,
@@ -720,6 +920,18 @@ class AgentRunner:
             kwargs["sandbox"] = self.sandbox
         if self.tool_permission_guard and self._claude_options_accepts("can_use_tool"):
             kwargs["can_use_tool"] = self.tool_permission_guard
+        if self.hooks and self._claude_options_accepts("hooks"):
+            kwargs["hooks"] = self.hooks
+        if self.agents and self._claude_options_accepts("agents"):
+            kwargs["agents"] = self.agents
+        if self.skills is not None and self._claude_options_accepts("skills"):
+            kwargs["skills"] = self.skills
+        if self.plugins and self._claude_options_accepts("plugins"):
+            kwargs["plugins"] = self.plugins
+        if self.fork_session and self._claude_options_accepts("fork_session"):
+            kwargs["fork_session"] = True
+        if self.session_store and self._claude_options_accepts("session_store"):
+            kwargs["session_store"] = self.session_store
 
         if self._should_attach_mcp_config(self.cwd):
             kwargs["mcp_servers"] = (self.cwd or Path.cwd()) / ".mcp.json"
@@ -752,6 +964,12 @@ class AgentRunner:
             or self.permission_prompt_tool_name
             or self.enable_file_checkpointing
             or self.sandbox
+            or self.hooks
+            or self.agents
+            or self.skills is not None
+            or self.plugins
+            or self.session_store
+            or self.fork_session
         )
 
     def _infer_model_tier(self) -> RuntimeModelTier:
@@ -839,6 +1057,82 @@ class AgentRunner:
                 raise RuntimeError(
                     f"MCP server '{server_name}' command does not exist: {command}. "
                     "Install dependencies or set PLAYWRIGHT_MCP_COMMAND."
+                )
+
+        suffixes_by_server: dict[str, set[str]] = {}
+        for tool in mcp_tools:
+            parts = str(tool).split("__", 2)
+            if len(parts) >= 3:
+                suffixes_by_server.setdefault(parts[1], set()).add(parts[2])
+
+        for server_name, suffixes in suffixes_by_server.items():
+            custom_suffixes = suffixes & NATIVE_TEST_MCP_TOOL_SUFFIXES
+            if not custom_suffixes:
+                continue
+            server = servers.get(server_name) or {}
+            args_text = " ".join(str(arg) for arg in server.get("args") or [])
+            if server_name != "playwright-test" or "run-test-mcp-server" not in args_text:
+                raise RuntimeError(
+                    "Native planner/generator/healer tools require the run-local "
+                    "`playwright-test` MCP server created by write_playwright_test_mcp_config(). "
+                    f"Requested custom tools {sorted(custom_suffixes)} on server '{server_name}' "
+                    f"from {mcp_path}; this looks like root @playwright/mcp."
+                )
+
+        suffixes = {suffix for values in suffixes_by_server.values() for suffix in values}
+        required_groups: list[tuple[str, set[str]]] = []
+        if {"planner_setup_page", "planner_save_plan"} & suffixes:
+            required_groups.append(
+                (
+                    "planner",
+                    {
+                        "planner_setup_page",
+                        "planner_save_plan",
+                        "generator_write_test",
+                        "browser_navigate",
+                        "browser_snapshot",
+                        "test_debug",
+                        "test_run",
+                    },
+                )
+            )
+        generator_profile_requested = bool(
+            {"generator_setup_page", "generator_read_log"} & suffixes
+            or ("generator_write_test" in suffixes and "planner_setup_page" not in suffixes)
+        )
+        if generator_profile_requested:
+            required_groups.append(
+                (
+                    "generator",
+                    {
+                        "generator_setup_page",
+                        "generator_read_log",
+                        "generator_write_test",
+                        "test_debug",
+                        "test_run",
+                    },
+                )
+            )
+        if ({"Edit", "MultiEdit", "Write"} & {str(tool) for tool in self.allowed_tools}) and {"test_debug", "test_run"} & suffixes:
+            required_groups.append(
+                (
+                    "healer",
+                    {
+                        "test_debug",
+                        "test_run",
+                        "test_list",
+                        "browser_snapshot",
+                        "browser_console_messages",
+                        "browser_network_requests",
+                    },
+                )
+            )
+        for stage, required in required_groups:
+            missing = sorted(required - suffixes)
+            if missing:
+                raise RuntimeError(
+                    f"Native {stage} MCP tool profile is incomplete for {mcp_path}. "
+                    f"Missing required tools: {', '.join(missing)}"
                 )
 
     async def run(
@@ -939,9 +1233,8 @@ class AgentRunner:
         session_id: str | None = None
         total_cost_usd: float | None = None
         provider_usage: dict[str, Any] = {}
-        current_tool_start: datetime | None = None
-        current_tool_name: str | None = None
-        current_tool_input: dict[str, Any] | None = None
+        pending_tools: dict[str, tuple[str, datetime, dict[str, Any]]] = {}
+        pending_tool_counter = 0
 
         # Snapshot child PIDs before query for orphan cleanup
         pre_query_pids = snapshot_child_pids()
@@ -951,8 +1244,9 @@ class AgentRunner:
         try:
             # Wrap the query in a timeout
             async def _run_query():
+                nonlocal pending_tool_counter
                 nonlocal messages_received, text_blocks_received, result_parts
-                nonlocal tool_calls, current_tool_start, current_tool_name, current_tool_input
+                nonlocal tool_calls, pending_tools
                 nonlocal hook_events_received, api_error_status, stop_reason, session_id, total_cost_usd, provider_usage
 
                 def _field(item: Any, name: str, default: Any = None) -> Any:
@@ -960,26 +1254,27 @@ class AgentRunner:
                         return item.get(name, default)
                     return getattr(item, name, default)
 
-                def _message_payload(message: Any) -> Any:
-                    return _field(message, "message", None)
+                def _browser_tool_count(include_pending: bool = False) -> int:
+                    completed = len(
+                        [tc for tc in tool_calls if tc.name.startswith("mcp__playwright")]
+                    )
+                    if not include_pending:
+                        return completed
+                    return completed + len(
+                        [
+                            name
+                            for name, _started_at, _tool_input in pending_tools.values()
+                            if name.startswith("mcp__playwright")
+                        ]
+                    )
 
-                def _as_content_items(message: Any) -> list[Any]:
-                    content = _field(message, "content", None)
-                    if content is None:
-                        content = _field(_message_payload(message), "content", [])
-                    return content if isinstance(content, list) else []
-
-                def _message_type(message: Any) -> str:
-                    return str(_field(message, "type", "unknown"))
-
-                def _block_text(block: Any) -> str:
-                    return str(_field(block, "text", "") or "")
-
-                def _handle_tool_use(tool_name: str, tool_input: dict[str, Any] | None) -> None:
-                    nonlocal current_tool_name, current_tool_start, current_tool_input
-                    current_tool_name = tool_name
-                    current_tool_start = datetime.now()
-                    current_tool_input = tool_input or {}
+                def _handle_tool_use(tool_use: ParsedToolUse) -> None:
+                    nonlocal pending_tool_counter
+                    tool_name = tool_use.name
+                    tool_input = dict(tool_use.input or {})
+                    pending_tool_counter += 1
+                    tool_use_id = tool_use.id or f"pending-tool-{pending_tool_counter}"
+                    pending_tools[tool_use_id] = (tool_name, datetime.now(), tool_input)
 
                     if self.log_tools:
                         if tool_name.startswith("mcp__playwright"):
@@ -989,34 +1284,39 @@ class AgentRunner:
                             print(f"   🔧 {tool_name}...", flush=True)
 
                     if self.on_tool_use:
-                        self.on_tool_use(tool_name, current_tool_input)
+                        self.on_tool_use(tool_name, tool_input)
                     self._emit_progress(
                         {
                             "phase": "tool_use",
-                            "tool_calls": len(tool_calls) + 1,
-                            "browser_tool_calls": len(
-                                [tc for tc in tool_calls if tc.name.startswith("mcp__playwright")]
-                            )
-                            + (1 if str(tool_name).startswith("mcp__playwright") else 0),
-                            "interactions": len(tool_calls) + 1,
+                            "tool_calls": len(tool_calls) + len(pending_tools),
+                            "browser_tool_calls": _browser_tool_count(include_pending=True),
+                            "interactions": len(tool_calls) + len(pending_tools),
                             "last_tool": tool_name,
                             "updated_at": datetime.utcnow().isoformat(),
                         }
                     )
 
-                def _handle_tool_result(message: Any) -> None:
-                    nonlocal current_tool_name, current_tool_start, current_tool_input
-                    if current_tool_name and current_tool_start:
-                        duration = (datetime.now() - current_tool_start).total_seconds() * 1000
-                        is_error = bool(_field(message, "is_error", False))
+                def _pop_pending_tool(tool_result: ParsedToolResult) -> tuple[str, datetime, dict[str, Any]] | None:
+                    if tool_result.tool_use_id and tool_result.tool_use_id in pending_tools:
+                        return pending_tools.pop(tool_result.tool_use_id)
+                    if not tool_result.tool_use_id and len(pending_tools) == 1:
+                        key = next(iter(pending_tools))
+                        return pending_tools.pop(key)
+                    return None
+
+                def _handle_tool_result(tool_result: ParsedToolResult) -> None:
+                    pending_tool = _pop_pending_tool(tool_result)
+                    if pending_tool:
+                        tool_name, tool_start, tool_input = pending_tool
+                        duration = (datetime.now() - tool_start).total_seconds() * 1000
                         tool_calls.append(
                             ToolCall(
-                                name=current_tool_name,
-                                timestamp=current_tool_start,
+                                name=tool_name,
+                                timestamp=tool_start,
                                 duration_ms=duration,
-                                success=not is_error,
-                                error=str(_field(message, "content", ""))[:200] if is_error else None,
-                                input=current_tool_input,
+                                success=not tool_result.is_error,
+                                error=tool_result_text(tool_result.content)[:200] if tool_result.is_error else None,
+                                input=tool_input,
                             )
                         )
                         completed_browser_calls = len(
@@ -1030,11 +1330,9 @@ class AgentRunner:
                             {
                                 "phase": "tool_result",
                                 "tool_calls": len(tool_calls),
-                                "browser_tool_calls": len(
-                                    [tc for tc in tool_calls if tc.name.startswith("mcp__playwright")]
-                                ),
+                                "browser_tool_calls": _browser_tool_count(),
                                 "interactions": len(tool_calls),
-                                "last_tool": current_tool_name,
+                                "last_tool": tool_name,
                                 "updated_at": datetime.utcnow().isoformat(),
                             }
                         )
@@ -1046,9 +1344,6 @@ class AgentRunner:
                                 f"Browser tool budget reached ({completed_browser_calls}/"
                                 f"{self.max_browser_tool_calls})"
                             )
-                    current_tool_name = None
-                    current_tool_start = None
-                    current_tool_input = None
 
                 options_kwargs = self._claude_options_kwargs()
 
@@ -1071,11 +1366,11 @@ class AgentRunner:
                     messages_received += 1
 
                     # Log message type for debugging
-                    msg_type = _message_type(message)
+                    msg_type = event_type(message)
                     logger.debug(
                         f"Message #{messages_received}: type={msg_type}, "
                         f"has_result={hasattr(message, 'result')}, "
-                        f"has_content={hasattr(message, 'content') or bool(_message_payload(message))}"
+                        f"has_content={hasattr(message, 'content') or hasattr(message, 'message')}"
                     )
 
                     # Print periodic progress for long-running agents
@@ -1096,54 +1391,25 @@ class AgentRunner:
                         if msg_type == "hook_event":
                             hook_events_received += 1
 
-                        if msg_type == "tool_use":
-                            _handle_tool_use(
-                                str(_field(message, "name", "unknown")),
-                                _field(message, "input", None),
-                            )
+                        for tool_use in event_tool_uses(message):
+                            _handle_tool_use(tool_use)
 
-                        elif msg_type == "tool_result":
-                            # Record completed tool call
-                            _handle_tool_result(message)
+                        for tool_result in event_tool_results(message):
+                            _handle_tool_result(tool_result)
 
-                        elif msg_type == "text":
-                            text_content = _block_text(message)
-                            if text_content:
-                                result_parts.append(text_content)
-                                text_blocks_received += 1
-
-                        elif msg_type == "assistant":
-                            for item in _as_content_items(message):
-                                item_type = _field(item, "type")
-                                if item_type == "tool_use":
-                                    _handle_tool_use(
-                                        str(_field(item, "name", "unknown")),
-                                        _field(item, "input", {}) or {},
-                                    )
-                                elif item_type == "text":
-                                    text_content = _block_text(item)
-                                    if text_content:
-                                        result_parts.append(text_content)
-                                        text_blocks_received += 1
-
-                        elif msg_type == "user":
-                            for item in _as_content_items(message):
-                                if _field(item, "type") == "tool_result":
-                                    _handle_tool_result(item)
-                                if text_blocks_received == 1:
-                                    logger.info(
-                                        f"Agent: first text output received at msg #{messages_received}"
-                                    )
+                        text_blocks = event_text_blocks(message)
+                        if text_blocks:
+                            result_parts.extend(text_blocks)
+                            text_blocks_received += len(text_blocks)
+                            if text_blocks_received == len(text_blocks):
+                                logger.info(
+                                    f"Agent: first text output received at msg #{messages_received}"
+                                )
 
                     # Capture content blocks
                     if hasattr(message, "content"):
                         content = message.content
-                        if isinstance(content, list):
-                            for block in content:
-                                if hasattr(block, "text"):
-                                    result_parts.append(block.text)
-                                    text_blocks_received += 1
-                        elif isinstance(content, str):
+                        if isinstance(content, str):
                             result_parts.append(content)
                             text_blocks_received += 1
 
@@ -1182,7 +1448,9 @@ class AgentRunner:
             max_rotation_attempts = (
                 rotator.key_count if rotator and rotator.key_count > 1 else 0
             )
+            max_provider_attempts = provider_retry_attempts()
             slot = None
+            query_completed = False
 
             for _rotation_attempt in range(max_rotation_attempts + 1):
                 if rotator and rotator.key_count > 0:
@@ -1190,44 +1458,102 @@ class AgentRunner:
                     if slot:
                         rotator.activate_key(slot)
 
-                try:
-                    with self._scoped_explicit_env():
-                        await asyncio.wait_for(_run_query(), timeout=timeout)
+                provider_attempt = 1
+                rotate_key = False
+                while provider_attempt <= max_provider_attempts:
+                    try:
+                        with self._scoped_explicit_env():
+                            await asyncio.wait_for(_run_query(), timeout=timeout)
 
-                    # Report success
-                    if rotator and rotator.key_count > 0:
-                        rotator.get_active_key()
-                        # We already advanced round-robin, report on the slot we used
-                        if slot:
-                            rotator.report_success(slot)
+                        # Report success
+                        if rotator and rotator.key_count > 0:
+                            rotator.get_active_key()
+                            # We already advanced round-robin, report on the slot we used
+                            if slot:
+                                rotator.report_success(slot)
 
-                    break  # Success — exit rotation loop
-                except Exception as rotation_exc:
-                    error_text = str(rotation_exc)
-                    if (
-                        is_rate_limit_error(error_text)
-                        and rotator
-                        and rotator.key_count > 1
-                        and _rotation_attempt < max_rotation_attempts
-                    ):
-                        retry_after = parse_retry_after(error_text)
-                        rotator.report_rate_limit(slot, retry_after)
-                        logger.warning(
-                            f"Rate limit hit on key {slot.masked}, "
-                            f"rotating to next key (attempt {_rotation_attempt + 2}/{max_rotation_attempts + 1})"
-                        )
-                        # Reset accumulators for fresh attempt with new key
-                        result_parts.clear()
-                        tool_calls.clear()
-                        messages_received = 0
-                        text_blocks_received = 0
-                        hook_events_received = 0
-                        api_error_status = None
-                        stop_reason = None
-                        session_id = None
-                        total_cost_usd = None
-                        continue
-                    raise  # Non-429 error or no more keys — propagate
+                        query_completed = True
+                        break  # Success — exit provider retry loop
+                    except Exception as rotation_exc:
+                        error_text = str(rotation_exc)
+                        parsed_status = parse_api_error_status(rotation_exc)
+                        if parsed_status is not None:
+                            api_error_status = parsed_status
+                        if (
+                            is_transient_provider_error(rotation_exc)
+                            and provider_attempt < max_provider_attempts
+                        ):
+                            result_parts.clear()
+                            tool_calls.clear()
+                            messages_received = 0
+                            text_blocks_received = 0
+                            hook_events_received = 0
+                            api_error_status = parsed_status
+                            stop_reason = None
+                            session_id = None
+                            total_cost_usd = None
+                            provider_usage.clear()
+                            pending_tools.clear()
+                            wait_seconds = provider_retry_delay_seconds(provider_attempt)
+                            logger.warning(
+                                "Transient provider error during SDK agent run "
+                                "(status=%s, attempt %s/%s); retrying in %.1fs",
+                                api_error_status,
+                                provider_attempt + 1,
+                                max_provider_attempts,
+                                wait_seconds,
+                            )
+                            self._emit_progress(
+                                {
+                                    "phase": "llm_retry",
+                                    "status": "running",
+                                    "message": (
+                                        "LLM provider is temporarily unavailable; "
+                                        f"retrying in {int(wait_seconds)}s."
+                                    ),
+                                    "retry_attempt": provider_attempt + 1,
+                                    "retry_max_attempts": max_provider_attempts,
+                                    "retry_reason": "provider_overloaded",
+                                    "retry_error_status": api_error_status,
+                                    "retry_wait_seconds": wait_seconds,
+                                    "updated_at": datetime.utcnow().isoformat(),
+                                }
+                            )
+                            await asyncio.sleep(wait_seconds)
+                            provider_attempt += 1
+                            continue
+                        if (
+                            is_rate_limit_error(error_text)
+                            and rotator
+                            and rotator.key_count > 1
+                            and _rotation_attempt < max_rotation_attempts
+                        ):
+                            retry_after = parse_retry_after(error_text)
+                            rotator.report_rate_limit(slot, retry_after)
+                            logger.warning(
+                                f"Rate limit hit on key {slot.masked}, "
+                                f"rotating to next key (attempt {_rotation_attempt + 2}/{max_rotation_attempts + 1})"
+                            )
+                            # Reset accumulators for fresh attempt with new key
+                            result_parts.clear()
+                            tool_calls.clear()
+                            messages_received = 0
+                            text_blocks_received = 0
+                            hook_events_received = 0
+                            api_error_status = None
+                            stop_reason = None
+                            session_id = None
+                            total_cost_usd = None
+                            pending_tools.clear()
+                            rotate_key = True
+                            break
+                        raise  # Non-retryable error or no more retries — propagate
+                if query_completed:
+                    break
+                if rotate_key:
+                    continue
+                if provider_attempt > max_provider_attempts:
+                    continue
 
             # Calculate duration
             duration = (datetime.now() - start_time).total_seconds()
@@ -1272,6 +1598,7 @@ class AgentRunner:
                 success=False,
                 output="\n".join(result_parts),  # Return partial output
                 error=error_msg,
+                error_type="timeout",
                 duration_seconds=duration,
                 tool_calls=tool_calls,
                 messages_received=messages_received,
@@ -1312,6 +1639,17 @@ class AgentRunner:
         except Exception as e:
             duration = (datetime.now() - start_time).total_seconds()
             error_str = str(e).lower()
+            parsed_status = parse_api_error_status(e)
+            if parsed_status is not None:
+                api_error_status = parsed_status
+            error_type = (
+                classify_agent_error_type(e)
+                or (
+                    "provider_overloaded"
+                    if is_transient_provider_error(e)
+                    else type(e).__name__
+                )
+            )
 
             # Handle known SDK cleanup errors gracefully
             if "cancel scope" in error_str or "cancelled" in error_str:
@@ -1331,6 +1669,7 @@ class AgentRunner:
                         if has_output
                         else "Agent completed via cancel scope but produced no text output"
                     ),
+                    error_type=None if has_output else "sdk_cleanup_empty_output",
                     duration_seconds=duration,
                     tool_calls=tool_calls,
                     messages_received=messages_received,
@@ -1355,6 +1694,7 @@ class AgentRunner:
                     success=False,
                     output="\n".join(result_parts),
                     error=str(e),
+                    error_type=error_type,
                     duration_seconds=duration,
                     tool_calls=tool_calls,
                     messages_received=messages_received,
@@ -1386,12 +1726,134 @@ class AgentRunner:
                 except Exception:
                     pass  # Non-fatal - don't let cleanup errors mask real results
 
+        if agent_result and not agent_result.tool_calls and agent_result.session_id:
+            recovered_tool_calls = self._recover_tool_calls_from_session_jsonl(
+                agent_result.session_id
+            )
+            if recovered_tool_calls:
+                agent_result.tool_calls = recovered_tool_calls
+                tool_calls[:] = recovered_tool_calls
+                debug_output_saved = False
+                logger.info(
+                    "Recovered %d tool call(s) from Claude session JSONL for %s",
+                    len(recovered_tool_calls),
+                    agent_result.session_id,
+                )
+
         if self.session_dir and agent_result and not debug_output_saved:
             self._save_debug_output(agent_result.output, agent_result.tool_calls, agent_result.messages_received)
 
         self._append_cost_log(agent_result)
         self._capture_agent_memory(original_prompt, agent_result)
         return agent_result
+
+    def _recover_tool_calls_from_session_jsonl(self, session_id: str) -> list[ToolCall]:
+        """Recover SDK tool calls from Claude's session JSONL when streaming omitted them."""
+        for path in self._session_jsonl_candidates(session_id):
+            recovered = self._parse_tool_calls_from_jsonl(path)
+            if recovered:
+                return recovered
+        return []
+
+    def _session_jsonl_candidates(self, session_id: str) -> list[Path]:
+        roots: list[Path] = []
+        for value in (
+            self.session_dir,
+            self.cwd,
+            self.env_vars.get("CLAUDE_CONFIG_DIR"),
+            os.environ.get("CLAUDE_CONFIG_DIR"),
+            Path.cwd(),
+        ):
+            if not value:
+                continue
+            path = Path(value)
+            if path not in roots:
+                roots.append(path)
+
+        home_projects = Path.home() / ".claude" / "projects"
+        if home_projects.exists() and home_projects not in roots:
+            roots.append(home_projects)
+
+        candidates: list[Path] = []
+        seen: set[Path] = set()
+        for root in roots:
+            search_roots = [root / "projects"] if (root / "projects").exists() else []
+            if root.name == "projects" and root.exists():
+                search_roots.append(root)
+            for search_root in search_roots:
+                try:
+                    matches = list(search_root.rglob(f"{session_id}.jsonl"))
+                except OSError:
+                    continue
+                for match in matches:
+                    resolved = match.resolve()
+                    if resolved not in seen:
+                        seen.add(resolved)
+                        candidates.append(match)
+        return candidates
+
+    def _parse_tool_calls_from_jsonl(self, path: Path) -> list[ToolCall]:
+        pending: dict[str, tuple[str, datetime, dict[str, Any]]] = {}
+        completed: list[ToolCall] = []
+        fallback_counter = 0
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                event = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+
+            for tool_use in event_tool_uses(event):
+                fallback_counter += 1
+                tool_use_id = tool_use.id or f"recovered-tool-{fallback_counter}"
+                pending[tool_use_id] = (
+                    tool_use.name,
+                    datetime.now(),
+                    dict(tool_use.input or {}),
+                )
+
+            for tool_result in event_tool_results(event):
+                pending_item = None
+                if tool_result.tool_use_id and tool_result.tool_use_id in pending:
+                    pending_item = pending.pop(tool_result.tool_use_id)
+                elif not tool_result.tool_use_id and len(pending) == 1:
+                    key = next(iter(pending))
+                    pending_item = pending.pop(key)
+                if not pending_item:
+                    continue
+                tool_name, started_at, tool_input = pending_item
+                completed.append(
+                    ToolCall(
+                        name=tool_name,
+                        timestamp=started_at,
+                        duration_ms=0.0,
+                        success=not tool_result.is_error,
+                        error=tool_result_text(tool_result.content)[:200]
+                        if tool_result.is_error
+                        else None,
+                        input=tool_input,
+                    )
+                )
+
+        for tool_name, started_at, tool_input in pending.values():
+            completed.append(
+                ToolCall(
+                    name=tool_name,
+                    timestamp=started_at,
+                    duration_ms=None,
+                    success=True,
+                    input=tool_input,
+                )
+            )
+
+        return completed
 
     def _append_cost_log(self, result: AgentResult | None) -> None:
         """Best-effort per-agent cost telemetry for pipeline run artifacts."""
@@ -1542,6 +2004,7 @@ class AgentRunner:
             "OTEL_LOG_USER_PROMPTS",
             "OTEL_LOG_TOOL_DETAILS",
             "OTEL_LOG_TOOL_CONTENT",
+            "ENABLE_TOOL_SEARCH",
         ]
         env_vars: dict[str, str] = {}
         for key in keys:
@@ -1571,15 +2034,24 @@ class AgentRunner:
                     env_vars["ANTHROPIC_API_KEY"] = selection.api_key
         except Exception as exc:
             logger.debug("Unable to collect resolved model env vars: %s", exc)
+        tool_search = self._effective_tool_search_env()
+        if tool_search:
+            env_vars["ENABLE_TOOL_SEARCH"] = tool_search
+        else:
+            env_vars.pop("ENABLE_TOOL_SEARCH", None)
         return env_vars if env_vars else None
 
     @contextmanager
     def _scoped_explicit_env(self):
-        if not self.env_vars:
+        effective_env = dict(self.env_vars)
+        tool_search = self._effective_tool_search_env()
+        if tool_search:
+            effective_env.setdefault("ENABLE_TOOL_SEARCH", tool_search)
+        if not effective_env:
             yield
             return
         saved_env: dict[str, str | None] = {}
-        for key, value in self.env_vars.items():
+        for key, value in effective_env.items():
             if key.startswith("TESTDATA_"):
                 continue
             saved_env[key] = os.environ.get(key)
@@ -1625,6 +2097,8 @@ class AgentRunner:
         runs outside of uvicorn's context, solving subprocess I/O issues.
         """
         start_time = datetime.now()
+        queue = None
+        task_id: str | None = None
 
         try:
             queue = get_agent_queue()
@@ -1776,6 +2250,7 @@ class AgentRunner:
                 marker in stripped_output.lower()
                 for marker in ("error", "failed", "exception", "traceback")
             )
+            invalid_session_output = classify_agent_error_type(stripped_output) == "invalid_session_resume"
 
             tool_call_count = int(telemetry.get("tool_calls", 0) or 0)
             tool_names = telemetry.get("tool_names") or []
@@ -1833,6 +2308,11 @@ class AgentRunner:
                 except (TypeError, ValueError):
                     api_error_status = None
             hook_events_received = int(telemetry.get("hook_events", 0) or 0)
+            error_type = (
+                str(telemetry.get("error_type"))
+                if telemetry.get("error_type")
+                else classify_agent_error_type(output)
+            )
             total_cost_usd = telemetry.get("total_cost_usd")
             try:
                 total_cost_usd = (
@@ -1871,7 +2351,7 @@ class AgentRunner:
             if self.session_dir:
                 self._save_debug_output(output, synthetic_tool_calls, messages_received)
 
-            if has_error_markers:
+            if has_error_markers or invalid_session_output:
                 logger.warning(
                     f"Short output appears to be an error message ({len(stripped_output)} chars): "
                     f"{stripped_output[:100]}"
@@ -1880,6 +2360,7 @@ class AgentRunner:
                     success=False,
                     output=output,
                     error=f"Agent returned error-like output: {stripped_output[:200]}",
+                    error_type=error_type or classify_agent_error_type(stripped_output) or "error_like_output",
                     duration_seconds=duration,
                     tool_calls=synthetic_tool_calls,
                     messages_received=messages_received,
@@ -1913,6 +2394,7 @@ class AgentRunner:
                     if has_output
                     else "Agent queue returned empty result — worker may have failed"
                 ),
+                error_type=None if has_output else (error_type or "empty_queue_result"),
                 duration_seconds=duration,
                 tool_calls=synthetic_tool_calls,
                 messages_received=messages_received,
@@ -1943,6 +2425,7 @@ class AgentRunner:
                 success=False,
                 output="",
                 error=error_msg,
+                error_type="timeout",
                 duration_seconds=duration,
                 timed_out=True,
             )
@@ -1955,9 +2438,48 @@ class AgentRunner:
                     success=False,
                     output="",
                     error=error_msg,
+                    error_type="cancelled",
                     duration_seconds=duration,
                     cancelled=True,
                 )
+            telemetry: dict[str, Any] = {}
+            if queue is not None and task_id:
+                try:
+                    completed_task = await queue.get_task(task_id)
+                    telemetry = completed_task.telemetry if completed_task else {}
+                except Exception as exc:
+                    logger.debug("Could not load failed queue task telemetry: %s", exc)
+            api_error_status = telemetry.get("api_error_status") or parse_api_error_status(error_msg)
+            if api_error_status is not None:
+                try:
+                    api_error_status = int(api_error_status)
+                except (TypeError, ValueError):
+                    api_error_status = None
+            error_type = (
+                str(telemetry.get("error_type"))
+                if telemetry.get("error_type")
+                else (
+                    classify_agent_error_type(error_msg)
+                    or (
+                        "provider_overloaded"
+                        if is_transient_provider_error(error_msg)
+                        else "queue_runtime_error"
+                    )
+                )
+            )
+            tool_call_records = telemetry.get("tool_call_records") or []
+            if not isinstance(tool_call_records, list):
+                tool_call_records = []
+            synthetic_tool_calls = [
+                ToolCall(
+                    name=str(record.get("name") or "queue_tool_call"),
+                    timestamp=start_time,
+                    success=bool(record.get("success", True)),
+                    input=record.get("input") if isinstance(record.get("input"), dict) else None,
+                )
+                for record in tool_call_records
+                if isinstance(record, dict)
+            ]
 
             # Classify the error for clearer user feedback
             if (
@@ -1980,7 +2502,22 @@ class AgentRunner:
                 success=False,
                 output="",
                 error=error_msg,
+                error_type=error_type,
                 duration_seconds=duration,
+                tool_calls=synthetic_tool_calls,
+                messages_received=int(telemetry.get("assistant_messages") or telemetry.get("stream_events") or 0),
+                text_blocks_received=int(telemetry.get("text_blocks") or 0),
+                api_error_status=api_error_status,
+                stop_reason=(
+                    str(telemetry.get("stop_reason"))
+                    if telemetry.get("stop_reason")
+                    else None
+                ),
+                session_id=(
+                    str(telemetry.get("session_id"))
+                    if telemetry.get("session_id")
+                    else None
+                ),
             )
 
         except Exception as e:
@@ -1992,6 +2529,7 @@ class AgentRunner:
                 success=False,
                 output="",
                 error=str(e),
+                error_type=classify_agent_error_type(e) or type(e).__name__,
                 duration_seconds=duration,
             )
 

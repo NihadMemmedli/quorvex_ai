@@ -57,8 +57,8 @@ QUORVEX_CONFIRM_DEPLOY=true \
   bash -c "$(curl -fsSL https://raw.githubusercontent.com/NihadMemmedli/quorvex_ai/main/deploy/install-server.sh)"
 ```
 
-Supported active providers are `zai`, `openrouter`, `openai`, `anthropic`, and
-`hermes`. The installer maps the selected provider key into
+Supported active providers are `zai`, `openrouter`, `openai`, and
+`anthropic`. The installer maps the selected provider key into
 `QUORVEX_LLM_API_KEY` for the app runtime.
 
 Missing private files are created from templates and logged before creation.

@@ -1450,7 +1450,6 @@ These routes are included in the generated public-route drift check and are grou
 | GET | `/requirements/generate-spec-jobs/{job_id}` | `orchestrator/api/requirements.py` |
 | POST | `/requirements/{req_id}/generate-spec-jobs` | `orchestrator/api/requirements.py` |
 | GET | `/settings/runtime-chat` | `orchestrator/api/settings.py` |
-| POST | `/settings/test-hermes` | `orchestrator/api/settings.py` |
 | GET | `/test-data/datasets` | `orchestrator/api/test_data.py` |
 | POST | `/test-data/datasets` | `orchestrator/api/test_data.py` |
 | GET | `/test-data/datasets/{dataset_id}` | `orchestrator/api/test_data.py` |

@@ -62,7 +62,7 @@ def build_playwright_mcp_server_config(project_root: Path | None = None) -> dict
         root / "node_modules" / ".bin" / "mcp-server-playwright",
     ]
     local_pkg = root / "node_modules" / "@playwright" / "mcp" / "package.json"
-    min_version = os.environ.get("PLAYWRIGHT_MCP_MIN_VERSION", "0.0.75")
+    min_version = os.environ.get("PLAYWRIGHT_MCP_MIN_VERSION", "0.0.76")
     if is_package_version_at_least(local_pkg, min_version):
         for local_bin in local_bins:
             if local_bin.exists():

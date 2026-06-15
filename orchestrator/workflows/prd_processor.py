@@ -81,12 +81,6 @@ class _PRDExtractionClient:
     def complete_json(self, prompt: str) -> str:
         if self.selection.provider == "anthropic_compatible":
             return self._anthropic_compatible_completion(prompt)
-        if self.selection.provider == "hermes":
-            raise PRDProcessingError(
-                "PRD extraction does not support the Hermes runtime directly. "
-                "Select Z.ai or an OpenAI-compatible provider in Settings and retry.",
-                status_code=400,
-            )
         return self._openai_compatible_completion(prompt)
 
     def _anthropic_compatible_completion(self, prompt: str) -> str:

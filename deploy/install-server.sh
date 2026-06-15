@@ -196,22 +196,6 @@ replace_file_token() {
   rm -f "${file}.bak"
 }
 
-ensure_hermes_container_name_override() {
-  local file="$1"
-
-  if grep -q 'HERMES_CONTAINER_NAME' "${file}"; then
-    return
-  fi
-
-  if grep -q '^  hermes:' "${file}"; then
-    sed -i.bak '/^  hermes:$/a\
-    container_name: ${HERMES_CONTAINER_NAME:-quorvex-hermes}
-' "${file}"
-    rm -f "${file}.bak"
-    log "Added Hermes container-name override to private compose overlay: ${file}"
-  fi
-}
-
 ensure_private_overlay_port_overrides() {
   local file="$1"
 
@@ -296,7 +280,6 @@ ensure_private_compose_overlay() {
     copy_template_file "${example_file}" "${overlay_file}" 644
     log "Created private compose overlay from template: ${overlay_file}"
   fi
-  ensure_hermes_container_name_override "${overlay_file}"
   ensure_private_overlay_port_overrides "${overlay_file}"
 
   if [ "${overlay_file}" != "${DEPLOY_DIR}/compose/docker-compose.mytest.yml" ] && [ -z "${QUORVEX_OVERLAY_FILE:-}" ]; then
@@ -404,11 +387,8 @@ normalize_llm_provider() {
     anthropic|anthropic_compatible|anthropic-compatible|claude)
       printf 'anthropic'
       ;;
-    hermes|hermes_agent|hermes-agent)
-      printf 'hermes'
-      ;;
     *)
-      die "QUORVEX_ACTIVE_LLM_PROVIDER must be one of: zai, openrouter, openai, anthropic, hermes."
+      die "QUORVEX_ACTIVE_LLM_PROVIDER must be one of: zai, openrouter, openai, anthropic."
       ;;
   esac
 }
@@ -558,26 +538,12 @@ configure_llm_provider_env() {
   write_if_provided OPENROUTER_API_KEY "${env_file}"
   write_if_provided OPENAI_API_KEY "${env_file}"
   write_if_provided ANTHROPIC_API_KEY "${env_file}"
-  write_if_provided HERMES_API_KEY "${env_file}"
 
   active_provider="$(normalize_llm_provider "${QUORVEX_ACTIVE_LLM_PROVIDER:-$(env_file_value QUORVEX_ACTIVE_LLM_PROVIDER "${env_file}")}")"
   replace_or_append_env QUORVEX_ACTIVE_LLM_PROVIDER "${active_provider}" "${env_file}"
 
-  if [ "${active_provider}" = "hermes" ]; then
-    upstream_provider="$(normalize_llm_provider "${HERMES_UPSTREAM_PROVIDER:-$(env_file_value HERMES_UPSTREAM_PROVIDER "${env_file}")}")"
-    [ "${upstream_provider}" != "hermes" ] || die "HERMES_UPSTREAM_PROVIDER cannot be hermes."
-    replace_or_append_env HERMES_UPSTREAM_PROVIDER "${upstream_provider}" "${env_file}"
-    write_llm_provider_runtime "${env_file}" "${upstream_provider}"
-    replace_or_append_env QUORVEX_AGENT_RUNTIME "hermes" "${env_file}"
-    replace_or_append_env HERMES_ENABLED "true" "${env_file}"
-    replace_or_append_env HERMES_API_URL "${HERMES_API_URL:-http://hermes:8642}" "${env_file}"
-    replace_or_append_env HERMES_MODEL "${HERMES_MODEL:-hermes-agent}" "${env_file}"
-    return
-  fi
-
   write_llm_provider_runtime "${env_file}" "${active_provider}"
   replace_or_append_env QUORVEX_AGENT_RUNTIME "claude_sdk" "${env_file}"
-  replace_or_append_env HERMES_ENABLED "false" "${env_file}"
 }
 
 ensure_private_env() {
@@ -648,9 +614,6 @@ ensure_private_env() {
     MINIO_CONSOLE_BIND \
     TEMPORAL_BIND \
     TEMPORAL_UI_BIND \
-    HERMES_API_BIND \
-    HERMES_DASHBOARD_BIND \
-    HERMES_CONTAINER_NAME \
     ZAP_BIND; do
     write_if_provided "${key}" "${env_file}"
   done

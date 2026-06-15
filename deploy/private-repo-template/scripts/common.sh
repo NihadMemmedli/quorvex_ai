@@ -181,11 +181,8 @@ normalize_llm_provider() {
     anthropic|anthropic_compatible|anthropic-compatible|claude)
       printf 'anthropic'
       ;;
-    hermes|hermes_agent|hermes-agent)
-      printf 'hermes'
-      ;;
     *)
-      die "QUORVEX_ACTIVE_LLM_PROVIDER must be one of: zai, openrouter, openai, anthropic, hermes."
+      die "QUORVEX_ACTIVE_LLM_PROVIDER must be one of: zai, openrouter, openai, anthropic."
       ;;
   esac
 }
@@ -316,21 +313,8 @@ apply_llm_provider_mapping() {
   active_provider="$(normalize_llm_provider "${QUORVEX_ACTIVE_LLM_PROVIDER:-zai}")"
   set_env_value QUORVEX_ACTIVE_LLM_PROVIDER "${active_provider}"
 
-  if [ "${active_provider}" = "hermes" ]; then
-    upstream_provider="$(normalize_llm_provider "${HERMES_UPSTREAM_PROVIDER:-zai}")"
-    [ "${upstream_provider}" != "hermes" ] || die "HERMES_UPSTREAM_PROVIDER cannot be hermes."
-    apply_named_llm_provider "${upstream_provider}"
-    set_env_value HERMES_UPSTREAM_PROVIDER "${upstream_provider}"
-    set_env_value QUORVEX_AGENT_RUNTIME "hermes"
-    set_env_value HERMES_ENABLED "true"
-    set_env_value HERMES_API_URL "${HERMES_API_URL:-http://hermes:8642}"
-    set_env_value HERMES_MODEL "${HERMES_MODEL:-hermes-agent}"
-    return
-  fi
-
   apply_named_llm_provider "${active_provider}"
   set_env_value QUORVEX_AGENT_RUNTIME "claude_sdk"
-  set_env_value HERMES_ENABLED "false"
 }
 
 check_llm_provider_values() {
@@ -349,16 +333,6 @@ check_llm_provider_values() {
       ;;
     anthropic)
       key_name=ANTHROPIC_API_KEY
-      ;;
-    hermes)
-      upstream_provider="$(normalize_llm_provider "${HERMES_UPSTREAM_PROVIDER:-zai}")"
-      case "${upstream_provider}" in
-        zai) key_name=ZAI_API_KEY ;;
-        openrouter) key_name=OPENROUTER_API_KEY ;;
-        openai) key_name=OPENAI_API_KEY ;;
-        anthropic) key_name=ANTHROPIC_API_KEY ;;
-        *) die "Unsupported Hermes upstream provider: ${upstream_provider}" ;;
-      esac
       ;;
     *)
       die "Unsupported active LLM provider: ${active_provider}"
@@ -466,8 +440,6 @@ check_required_ports_available() {
   check_port_available minio-console "${MINIO_CONSOLE_BIND:-127.0.0.1:9001}" || failures=$((failures + 1))
   check_port_available temporal "${TEMPORAL_BIND:-127.0.0.1:7233}" || failures=$((failures + 1))
   check_port_available temporal-ui "${TEMPORAL_UI_BIND:-127.0.0.1:8233}" || failures=$((failures + 1))
-  check_port_available hermes-api "${HERMES_API_BIND:-127.0.0.1:8642}" || failures=$((failures + 1))
-  check_port_available hermes-dashboard "${HERMES_DASHBOARD_BIND:-127.0.0.1:9119}" || failures=$((failures + 1))
   check_port_available zap "${ZAP_BIND:-127.0.0.1:8090}" || failures=$((failures + 1))
   [ "${failures}" -eq 0 ] || die "Required app ports are already in use."
 }

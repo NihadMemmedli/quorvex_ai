@@ -20,20 +20,9 @@ ACTIVE_WORK_ITEM_STATUSES = {"queued", "running"}
 
 
 async def cancel_agent_task_id(task_id: str | None, *, runtime: str | None = None) -> dict[str, Any] | None:
-    """Cancel a Redis queue task or Hermes run by external task id."""
+    """Cancel a Redis queue task by external task id."""
     if not task_id:
         return None
-    if str(runtime or "").lower() in {"hermes", "hermes-agent", "hermes_agent"}:
-        result: dict[str, Any] = {"agent_task_id": task_id, "runtime": "hermes"}
-        try:
-            from orchestrator.services.agent_runtimes.hermes import HermesClient
-
-            result.update(await HermesClient().stop_run(str(task_id)))
-        except Exception as exc:
-            logger.warning("Failed to stop Hermes run %s: %s", task_id, exc)
-            result.update({"status": "error", "error": str(exc)})
-        return result
-
     result = {"agent_task_id": task_id, "runtime": runtime or "queue", "status": "not_active"}
     try:
         from orchestrator.services.agent_queue import get_agent_queue
@@ -60,7 +49,7 @@ async def cancel_agent_task_id(task_id: str | None, *, runtime: str | None = Non
 
 
 async def cancel_agent_run_by_id(run_id: str, session: Session, *, reason: str = "cancelled") -> dict[str, Any]:
-    """Cancel a standalone AgentRun and its underlying Temporal/queue/Hermes work."""
+    """Cancel a standalone AgentRun and its underlying Temporal/queue work."""
     run = session.get(AgentRun, run_id)
     if not run:
         return {"run_id": run_id, "status": "missing"}

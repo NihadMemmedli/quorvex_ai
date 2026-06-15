@@ -39,7 +39,7 @@ make dev      # Start full Docker stack
 
 `make dev` starts:
 
-1. PostgreSQL, Redis, MinIO, Temporal, Hermes, backend, frontend, and VNC/websockify
+1. PostgreSQL, Redis, MinIO, Temporal, backend, frontend, and VNC/websockify
 2. Local `orchestrator/` and `web/src/` mounts
 3. Frontend hot reload through `npm run dev`
 4. No repo-managed nginx and no ZAP unless `make zap-up` is run
@@ -132,8 +132,8 @@ make check-env
 ### Company/Server Runtime
 
 Runs the external-nginx app runtime: a single backend container with Playwright
-browsers and VNC/websockify, plus frontend, database, queue, storage, Temporal,
-and Hermes. Company DNS/TLS/nginx proxies to frontend port 3000 and
+browsers and VNC/websockify, plus frontend, database, queue, storage, and Temporal.
+Company DNS/TLS/nginx proxies to frontend port 3000 and
 `/websockify` on port 6080.
 
 ```bash

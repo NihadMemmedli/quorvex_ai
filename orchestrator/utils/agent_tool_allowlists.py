@@ -1,4 +1,4 @@
-"""Least-privilege tool profiles for Claude agents.
+"""Tool profiles for Claude agents.
 
 Profiles intentionally describe tool *roles* rather than call sites. Workflow
 code should ask for a named profile and let the helper apply the active MCP
@@ -26,87 +26,105 @@ class AgentToolProfile:
     disallowed_playwright_mcp_tools: tuple[str, ...] = ()
 
 
-EXPLORER_BASIC_MCP_TOOLS: tuple[str, ...] = (
+BROWSER_MCP_TOOLS: tuple[str, ...] = (
     "browser_click",
     "browser_close",
     "browser_console_messages",
-    "browser_handle_dialog",
-    "browser_navigate",
-    "browser_navigate_back",
-    "browser_network_requests",
-    "browser_press_key",
-    "browser_select_option",
-    "browser_snapshot",
-    "browser_take_screenshot",
-    "browser_type",
-    "browser_wait_for",
-)
-
-EXPLORER_ADVANCED_MCP_TOOLS: tuple[str, ...] = EXPLORER_BASIC_MCP_TOOLS + (
     "browser_drag",
     "browser_evaluate",
     "browser_file_upload",
-    "browser_hover",
-    "browser_start_video",
-    "browser_stop_video",
-    "browser_video_chapter",
-)
-
-EXPLORER_MCP_TOOLS: tuple[str, ...] = EXPLORER_ADVANCED_MCP_TOOLS
-
-PLANNER_MCP_TOOLS: tuple[str, ...] = EXPLORER_MCP_TOOLS + (
-    "planner_setup_page",
-    "planner_save_plan",
-    "test_debug",
-)
-
-PRD_LIVE_PLANNER_MCP_TOOLS: tuple[str, ...] = (
-    "planner_setup_page",
-    "planner_save_plan",
-    "browser_navigate",
-    "browser_snapshot",
-    "browser_click",
-    "browser_type",
-    "browser_wait_for",
-    "browser_handle_dialog",
-    "browser_take_screenshot",
-    "test_debug",
-)
-
-PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS: tuple[str, ...] = (
-    "browser_run_code",
-    "browser_evaluate",
-    "browser_file_upload",
-    "browser_drag",
-    "browser_hover",
-    "browser_close",
-    "browser_start_video",
-    "browser_stop_video",
-    "browser_video_chapter",
-    "browser_console_messages",
-)
-
-GENERATOR_MCP_TOOLS: tuple[str, ...] = (
-    "browser_click",
-    "browser_console_messages",
-    "browser_drag",
-    "browser_evaluate",
-    "browser_file_upload",
+    "browser_fill_form",
     "browser_generate_locator",
     "browser_handle_dialog",
     "browser_hover",
     "browser_navigate",
+    "browser_navigate_back",
     "browser_network_requests",
     "browser_press_key",
     "browser_resume",
+    "browser_resize",
+    "browser_run_code",
     "browser_select_option",
     "browser_snapshot",
+    "browser_start_tracing",
+    "browser_start_video",
+    "browser_stop_tracing",
+    "browser_stop_video",
+    "browser_take_screenshot",
     "browser_type",
     "browser_verify_element_visible",
     "browser_verify_list_visible",
     "browser_verify_text_visible",
     "browser_verify_value",
+    "browser_video_chapter",
     "browser_wait_for",
+)
+
+OBSERVE_BROWSER_MCP_TOOLS: tuple[str, ...] = (
+    "browser_snapshot",
+    "browser_take_screenshot",
+    "browser_console_messages",
+    "browser_network_requests",
+    "browser_wait_for",
+    "browser_resize",
+)
+
+INTERACT_BROWSER_MCP_TOOLS: tuple[str, ...] = OBSERVE_BROWSER_MCP_TOOLS + (
+    "browser_navigate",
+    "browser_navigate_back",
+    "browser_click",
+    "browser_type",
+    "browser_fill_form",
+    "browser_select_option",
+    "browser_press_key",
+    "browser_hover",
+    "browser_handle_dialog",
+)
+
+TEST_AUTHORING_BROWSER_MCP_TOOLS: tuple[str, ...] = INTERACT_BROWSER_MCP_TOOLS + (
+    "browser_generate_locator",
+    "browser_verify_element_visible",
+    "browser_verify_list_visible",
+    "browser_verify_text_visible",
+    "browser_verify_value",
+)
+
+DEBUG_BROWSER_MCP_TOOLS: tuple[str, ...] = TEST_AUTHORING_BROWSER_MCP_TOOLS + (
+    "browser_evaluate",
+    "browser_resume",
+    "browser_start_tracing",
+    "browser_stop_tracing",
+)
+
+ADVANCED_DEBUG_BROWSER_MCP_TOOLS: tuple[str, ...] = DEBUG_BROWSER_MCP_TOOLS + (
+    "browser_run_code",
+)
+
+EXPLORER_BASIC_MCP_TOOLS: tuple[str, ...] = INTERACT_BROWSER_MCP_TOOLS
+
+EXPLORER_ADVANCED_MCP_TOOLS: tuple[str, ...] = ADVANCED_DEBUG_BROWSER_MCP_TOOLS
+
+EXPLORER_MCP_TOOLS: tuple[str, ...] = EXPLORER_BASIC_MCP_TOOLS
+
+PLANNER_MCP_TOOLS: tuple[str, ...] = TEST_AUTHORING_BROWSER_MCP_TOOLS + (
+    "planner_setup_page",
+    "planner_save_plan",
+    "generator_write_test",
+    "test_debug",
+    "test_run",
+)
+
+PRD_LIVE_PLANNER_MCP_TOOLS: tuple[str, ...] = TEST_AUTHORING_BROWSER_MCP_TOOLS + (
+    "planner_setup_page",
+    "planner_save_plan",
+    "generator_write_test",
+    "test_debug",
+    "test_run",
+)
+
+PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS: tuple[str, ...] = ()
+
+GENERATOR_MCP_TOOLS: tuple[str, ...] = DEBUG_BROWSER_MCP_TOOLS + (
     "generator_read_log",
     "generator_setup_page",
     "generator_write_test",
@@ -114,49 +132,19 @@ GENERATOR_MCP_TOOLS: tuple[str, ...] = (
     "test_run",
 )
 
-HEALER_MCP_TOOLS: tuple[str, ...] = (
-    "browser_console_messages",
-    "browser_evaluate",
-    "browser_generate_locator",
-    "browser_handle_dialog",
-    "browser_network_requests",
-    "browser_resume",
-    "browser_snapshot",
-    "browser_start_tracing",
-    "browser_stop_tracing",
+GENERATOR_DISALLOWED_MCP_TOOLS: tuple[str, ...] = ()
+
+HEALER_MCP_TOOLS: tuple[str, ...] = DEBUG_BROWSER_MCP_TOOLS + (
     "test_debug",
     "test_list",
     "test_run",
 )
 
-TEST_VALIDATOR_MCP_TOOLS: tuple[str, ...] = (
-    "browser_close",
-    "browser_console_messages",
-    "browser_evaluate",
-    "browser_generate_locator",
-    "browser_handle_dialog",
-    "browser_navigate",
-    "browser_network_requests",
-    "browser_snapshot",
-    "browser_wait_for",
+TEST_VALIDATOR_MCP_TOOLS: tuple[str, ...] = DEBUG_BROWSER_MCP_TOOLS + (
     "test_run",
 )
 
-TEST_OPERATOR_MCP_TOOLS: tuple[str, ...] = (
-    "browser_click",
-    "browser_drag",
-    "browser_file_upload",
-    "browser_handle_dialog",
-    "browser_hover",
-    "browser_navigate",
-    "browser_navigate_back",
-    "browser_press_key",
-    "browser_select_option",
-    "browser_snapshot",
-    "browser_take_screenshot",
-    "browser_type",
-    "browser_wait_for",
-)
+TEST_OPERATOR_MCP_TOOLS: tuple[str, ...] = INTERACT_BROWSER_MCP_TOOLS
 
 
 AGENT_TOOL_PROFILES: dict[str, AgentToolProfile] = {
@@ -171,7 +159,11 @@ AGENT_TOOL_PROFILES: dict[str, AgentToolProfile] = {
         PRD_LIVE_PLANNER_MCP_TOOLS,
         PRD_LIVE_PLANNER_DISALLOWED_MCP_TOOLS,
     ),
-    "playwright-test-generator": AgentToolProfile(("Glob", "Grep", "Read", "LS"), GENERATOR_MCP_TOOLS),
+    "playwright-test-generator": AgentToolProfile(
+        ("Glob", "Grep", "Read", "LS"),
+        GENERATOR_MCP_TOOLS,
+        GENERATOR_DISALLOWED_MCP_TOOLS,
+    ),
     "playwright-test-healer": AgentToolProfile(
         ("Glob", "Grep", "Read", "LS", "Edit", "MultiEdit", "Write"),
         HEALER_MCP_TOOLS,
@@ -187,7 +179,7 @@ AGENT_TOOL_PROFILES: dict[str, AgentToolProfile] = {
     "load-test-generator": AgentToolProfile(("Glob", "Grep", "Read", "LS", "Write"), ()),
     "security-analyzer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), ()),
     "test-agent": AgentToolProfile(("Read",), ()),
-    "test-coverage-analyzer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), ()),
+    "test-coverage-analyzer": AgentToolProfile(("Glob", "Grep", "Read", "LS"), EXPLORER_MCP_TOOLS),
     "test-exporter": AgentToolProfile(("Write",), ()),
     "test-planner": AgentToolProfile(("Read",), ()),
     "text-analysis": AgentToolProfile((), ()),

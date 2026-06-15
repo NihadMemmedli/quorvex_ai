@@ -3,10 +3,11 @@
 # To regenerate: make deps-lock
 
 # Core AI
-claude-agent-sdk==0.2.95
+claude-agent-sdk==0.2.101
 
 # Utilities
 jsonschema==4.26.0
+PyYAML==6.0.3
 python-dotenv==1.2.1
 black==25.12.0
 pytest==9.0.2

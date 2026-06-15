@@ -63,6 +63,7 @@ out/
 site/
 scripts/demo-video/
 scripts/**/__pycache__/
+content/youtube/episodes/*/build/
 
 # Temporary files
 tmp/

@@ -377,8 +377,6 @@ export default function DiscoveryPage() {
     const [deleteFlowModalOpen, setDeleteFlowModalOpen] = useState(false);
     const [isDeletingFlow, setIsDeletingFlow] = useState(false);
     const [agentRuntime, setAgentRuntime] = useState('claude_sdk');
-    const [hermesReachable, setHermesReachable] = useState(false);
-    const [hermesStatusMessage, setHermesStatusMessage] = useState('');
     const pollInterval = useRef<NodeJS.Timeout | null>(null);
     const hasRunningRef = useRef(false);
 
@@ -393,8 +391,6 @@ export default function DiscoveryPage() {
             if (!res.ok) return;
             const data = await res.json();
             setAgentRuntime(data.agent_runtime || 'claude_sdk');
-            setHermesReachable(Boolean(data.hermes_reachable));
-            setHermesStatusMessage(data.hermes_status_message || '');
         } catch (e) {
             console.error('Failed to fetch runtime settings', e);
         }
@@ -2183,13 +2179,7 @@ export default function DiscoveryPage() {
                                     }}
                                 >
                                     <option value="claude_sdk">Claude SDK</option>
-                                    <option value="hermes">Hermes</option>
                                 </select>
-                                {agentRuntime === 'hermes' && (
-                                    <p style={{ fontSize: '0.75rem', color: hermesReachable ? 'var(--success)' : 'var(--warning)', margin: '0.5rem 0 0', lineHeight: 1.4 }}>
-                                        {hermesReachable ? 'Hermes API is reachable.' : hermesStatusMessage || 'Hermes API is not reachable yet.'}
-                                    </p>
-                                )}
                             </div>
 
                             <div style={{ marginBottom: '1rem' }}>

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -37,6 +39,8 @@ def _read_manifest(path: Path) -> dict[str, Any]:
             "updated_at": utc_timestamp(),
             "stages": {},
             "artifacts": {},
+            "artifact_history": {},
+            "attempt_history": [],
             "events": [],
         }
     try:
@@ -49,6 +53,8 @@ def _read_manifest(path: Path) -> dict[str, Any]:
     data.setdefault("created_at", utc_timestamp())
     data.setdefault("stages", {})
     data.setdefault("artifacts", {})
+    data.setdefault("artifact_history", {})
+    data.setdefault("attempt_history", [])
     data.setdefault("events", [])
     return data
 
@@ -57,7 +63,21 @@ def write_manifest(path: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     manifest["schema_version"] = SCHEMA_VERSION
     manifest["updated_at"] = utc_timestamp()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+    content = json.dumps(manifest, indent=2, sort_keys=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        tmp_name = handle.name
+        handle.write(content)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_name, path)
     return manifest
 
 
@@ -144,12 +164,60 @@ def record_artifact(
 
     data = _read_manifest(path)
     data.setdefault("artifacts", {})[artifact_id] = item
+    data.setdefault("artifact_history", {}).setdefault(artifact_id, []).append(item)
     data.setdefault("stages", {}).setdefault(producer_stage, {}).setdefault(
         "artifacts_produced", []
     )
     produced = data["stages"][producer_stage]["artifacts_produced"]
     if artifact_id not in produced:
         produced.append(artifact_id)
+    write_manifest(path, data)
+    return item
+
+
+def record_attempt(
+    manifest_file: Path | str,
+    stage: str,
+    *,
+    stage_attempt: int,
+    status: str,
+    attempt_id: str | None = None,
+    agent_session_id: str | None = None,
+    executor_mode: str | None = None,
+    model_tier: str | None = None,
+    timeout_seconds: int | None = None,
+    error_type: str | None = None,
+    tool_call_summary: dict[str, Any] | None = None,
+    input_artifact_hashes: dict[str, str | None] | None = None,
+    output_artifact_hash: str | None = None,
+    parent_attempt_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Append immutable attempt metadata for a stage run or retry."""
+    path = Path(manifest_file)
+    data = _read_manifest(path)
+    if not attempt_id:
+        attempt_id = f"{stage}-{stage_attempt}-{len(data.setdefault('attempt_history', [])) + 1}"
+    item: dict[str, Any] = {
+        "id": attempt_id,
+        "stage": stage,
+        "stage_attempt": stage_attempt,
+        "status": status,
+        "agent_session_id": agent_session_id,
+        "executor_mode": executor_mode,
+        "model_tier": model_tier,
+        "timeout_seconds": timeout_seconds,
+        "error_type": error_type,
+        "tool_call_summary": tool_call_summary or {},
+        "input_artifact_hashes": input_artifact_hashes or {},
+        "output_artifact_hash": output_artifact_hash,
+        "parent_attempt_id": parent_attempt_id,
+        "metadata": metadata or {},
+        "created_at": utc_timestamp(),
+    }
+    data.setdefault("attempt_history", []).append(item)
+    stage_data = data.setdefault("stages", {}).setdefault(stage, {})
+    stage_data.setdefault("attempts", []).append(attempt_id)
     write_manifest(path, data)
     return item
 
@@ -168,10 +236,11 @@ def record_consumption(
     stages = data.setdefault("stages", {})
     stage_data = stages.setdefault(stage, {})
     consumed = stage_data.setdefault("artifacts_consumed", {})
+    consumption_metadata = dict(metadata or {})
     consumed[artifact_id] = {
         "status": status,
         "reason": reason,
-        "metadata": metadata or {},
+        "metadata": consumption_metadata,
         "updated_at": utc_timestamp(),
     }
     artifact = data.setdefault("artifacts", {}).get(artifact_id)
@@ -179,6 +248,18 @@ def record_consumption(
         consumers = artifact.setdefault("consumers", [])
         if stage not in consumers:
             consumers.append(stage)
+        file_path = Path(str(artifact.get("path") or ""))
+        if status == "used" and file_path.exists() and file_path.is_file():
+            current_hash = artifact_hash(file_path)
+            recorded_hash = artifact.get("hash")
+            freshness = "valid"
+            if recorded_hash and recorded_hash != current_hash:
+                freshness = "stale"
+            artifact["current_hash"] = current_hash
+            artifact["consumed_validation_status"] = freshness
+            artifact["consumed_validated_at"] = utc_timestamp()
+            consumption_metadata.setdefault("artifact_hash", current_hash)
+            consumption_metadata.setdefault("freshness", freshness)
     write_manifest(path, data)
     return consumed[artifact_id]
 

@@ -1,7 +1,7 @@
 ---
 name: playwright-test-planner
 description: Use this agent when you need to create comprehensive test plan for a web application or website
-tools: Glob, Grep, Read, LS, mcp__playwright-test__browser_click, mcp__playwright-test__browser_close, mcp__playwright-test__browser_console_messages, mcp__playwright-test__browser_drag, mcp__playwright-test__browser_evaluate, mcp__playwright-test__browser_file_upload, mcp__playwright-test__browser_handle_dialog, mcp__playwright-test__browser_hover, mcp__playwright-test__browser_navigate, mcp__playwright-test__browser_navigate_back, mcp__playwright-test__browser_network_requests, mcp__playwright-test__browser_press_key, mcp__playwright-test__browser_select_option, mcp__playwright-test__browser_snapshot, mcp__playwright-test__browser_take_screenshot, mcp__playwright-test__browser_type, mcp__playwright-test__browser_wait_for, mcp__playwright-test__planner_setup_page, mcp__playwright-test__planner_save_plan, mcp__playwright-test__test_debug
+tools: Glob, Grep, Read, LS, mcp__playwright-test__browser_snapshot, mcp__playwright-test__browser_take_screenshot, mcp__playwright-test__browser_console_messages, mcp__playwright-test__browser_network_requests, mcp__playwright-test__browser_wait_for, mcp__playwright-test__browser_resize, mcp__playwright-test__browser_navigate, mcp__playwright-test__browser_navigate_back, mcp__playwright-test__browser_click, mcp__playwright-test__browser_type, mcp__playwright-test__browser_fill_form, mcp__playwright-test__browser_select_option, mcp__playwright-test__browser_press_key, mcp__playwright-test__browser_hover, mcp__playwright-test__browser_handle_dialog, mcp__playwright-test__browser_generate_locator, mcp__playwright-test__browser_verify_element_visible, mcp__playwright-test__browser_verify_list_visible, mcp__playwright-test__browser_verify_text_visible, mcp__playwright-test__browser_verify_value, mcp__playwright-test__planner_setup_page, mcp__playwright-test__planner_save_plan, mcp__playwright-test__generator_write_test, mcp__playwright-test__test_debug, mcp__playwright-test__test_run
 model: sonnet
 color: green
 ---
@@ -89,10 +89,21 @@ You will:
      `await expect(page).toHaveURL(...)`, or `await page.waitForResponse(...)`
    - Do not include `page.waitForTimeout()` or arbitrary sleeps
    - Keep credentials as placeholders such as `{{LOGIN_EMAIL}}`, never plaintext values
-   - Make the draft executable as a standalone Playwright spec; after the saved plan is accepted, the orchestrator
-     extracts it to a `.draft.spec.ts` file and runs `test_debug` on it before generator handoff.
+   - Make the draft executable as a standalone Playwright spec.
 
-6. **Create Documentation**
+6. **Draft Debug Discipline**
+
+   Use the correct MCP tools for the draft handoff: `generator_write_test` creates the `.draft.spec.ts` file, `test_debug`
+   runs it in paused debug mode when failure-state evidence is needed, and `test_run` provides final scoped pass/fail evidence.
+   Plan for that handoff:
+   - Prefer selectors and waits that can be inspected in a paused `test_debug` browser state.
+   - After `test_debug` pauses, inspect with `browser_snapshot`, `browser_console_messages`, `browser_network_requests`, `browser_generate_locator`, or `browser_evaluate`.
+   - Use `browser_resume` only after capturing paused-state evidence and only when the same debug run should continue to the next action, failure, or assertion.
+   - Include enough comments and assertions for the generator/healer to map a failure back to the planned step.
+   - Do not include cleanup steps that close the browser. The runner owns browser cleanup, and a paused debug state is useful evidence.
+   - If the draft is likely to fail on a known dynamic state, describe the expected paused-state evidence and how to verify it with `browser_snapshot`, `browser_console_messages`, `browser_network_requests`, or `browser_generate_locator`.
+
+7. **Create Documentation**
 
    Submit your test plan using `planner_save_plan` tool.
 

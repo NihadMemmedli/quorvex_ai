@@ -134,8 +134,6 @@ interface MissionForm {
     max_runtime_minutes: number;
     max_iterations: number;
     max_llm_budget_usd: number;
-    hermes_max_concurrent_children: number;
-    hermes_max_spawn_depth: number;
     environment: string;
     allowed_domains: string;
     tool_profile: string;
@@ -433,8 +431,6 @@ const DEFAULT_FORM: MissionForm = {
     max_runtime_minutes: 30,
     max_iterations: 0,
     max_llm_budget_usd: 5,
-    hermes_max_concurrent_children: 3,
-    hermes_max_spawn_depth: 1,
     environment: 'staging',
     allowed_domains: '',
     tool_profile: 'role_based',
@@ -1696,10 +1692,6 @@ export default function AutonomousMissionsPage() {
                 config: {
                     ...safetyConfig,
                     runtime: form.runtime || defaultMissionRuntime || 'claude_sdk',
-                    ...(form.runtime === 'hermes' ? {
-                        hermes_max_concurrent_children: form.hermes_max_concurrent_children,
-                        hermes_max_spawn_depth: form.hermes_max_spawn_depth,
-                    } : {}),
                     ...(isWholeAppTeam ? {
                         whole_app_team: true,
                         team_mode: 'whole_app',
@@ -3593,7 +3585,6 @@ export default function AutonomousMissionsPage() {
                                                 }}
                                             >
                                                 <option value="claude_sdk">Claude SDK</option>
-                                                <option value="hermes">Hermes</option>
                                             </select>
                                         </label>
                                     </div>
@@ -3719,32 +3710,6 @@ export default function AutonomousMissionsPage() {
                                                     onChange={event => setForm(prev => ({ ...prev, max_llm_budget_usd: Number(event.target.value) }))}
                                                 />
                                             </label>
-                                            {form.runtime === 'hermes' && (
-                                                <>
-                                                    <label className="am-field">
-                                                        <span>Hermes Children</span>
-                                                        <input
-                                                            name="mission-hermes-children"
-                                                            type="number"
-                                                            min={1}
-                                                            max={8}
-                                                            value={form.hermes_max_concurrent_children}
-                                                            onChange={event => setForm(prev => ({ ...prev, hermes_max_concurrent_children: Number(event.target.value) }))}
-                                                        />
-                                                    </label>
-                                                    <label className="am-field">
-                                                        <span>Hermes Depth</span>
-                                                        <input
-                                                            name="mission-hermes-depth"
-                                                            type="number"
-                                                            min={0}
-                                                            max={3}
-                                                            value={form.hermes_max_spawn_depth}
-                                                            onChange={event => setForm(prev => ({ ...prev, hermes_max_spawn_depth: Number(event.target.value) }))}
-                                                        />
-                                                    </label>
-                                                </>
-                                            )}
                                         </div>
                                     </div>
 

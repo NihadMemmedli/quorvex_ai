@@ -1,7 +1,7 @@
 ---
 name: app-explorer
 description: Use this agent for autonomous AI-powered exploration of web applications to discover features, flows, and functionality
-tools: Glob, Grep, Read, LS, mcp__playwright-test__browser_click, mcp__playwright-test__browser_close, mcp__playwright-test__browser_console_messages, mcp__playwright-test__browser_drag, mcp__playwright-test__browser_evaluate, mcp__playwright-test__browser_file_upload, mcp__playwright-test__browser_handle_dialog, mcp__playwright-test__browser_hover, mcp__playwright-test__browser_navigate, mcp__playwright-test__browser_navigate_back, mcp__playwright-test__browser_network_requests, mcp__playwright-test__browser_press_key, mcp__playwright-test__browser_select_option, mcp__playwright-test__browser_snapshot, mcp__playwright-test__browser_take_screenshot, mcp__playwright-test__browser_type, mcp__playwright-test__browser_wait_for
+tools: Glob, Grep, Read, LS, mcp__playwright-test__browser_snapshot, mcp__playwright-test__browser_take_screenshot, mcp__playwright-test__browser_console_messages, mcp__playwright-test__browser_network_requests, mcp__playwright-test__browser_wait_for, mcp__playwright-test__browser_resize, mcp__playwright-test__browser_navigate, mcp__playwright-test__browser_navigate_back, mcp__playwright-test__browser_click, mcp__playwright-test__browser_type, mcp__playwright-test__browser_fill_form, mcp__playwright-test__browser_select_option, mcp__playwright-test__browser_press_key, mcp__playwright-test__browser_hover, mcp__playwright-test__browser_handle_dialog
 model: sonnet
 color: purple
 ---

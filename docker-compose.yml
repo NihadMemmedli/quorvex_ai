@@ -63,10 +63,6 @@ services:
       - QUORVEX_EMBEDDING_MODEL=${QUORVEX_EMBEDDING_MODEL:-text-embedding-3-small}
       - API_TIMEOUT_MS=${API_TIMEOUT_MS:-3000000}
       - QUORVEX_AGENT_RUNTIME=${QUORVEX_AGENT_RUNTIME:-claude_sdk}
-      - HERMES_ENABLED=${HERMES_ENABLED:-false}
-      - HERMES_API_URL=${HERMES_API_URL:-http://hermes:8642}
-      - HERMES_API_KEY=${HERMES_API_KEY:-}
-      - HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
       # Memory System
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - MEMORY_ENABLED=${MEMORY_ENABLED:-true}
@@ -166,10 +162,6 @@ services:
       - QUORVEX_EMBEDDING_MODEL=${QUORVEX_EMBEDDING_MODEL:-text-embedding-3-small}
       - API_TIMEOUT_MS=${API_TIMEOUT_MS:-3000000}
       - QUORVEX_AGENT_RUNTIME=${QUORVEX_AGENT_RUNTIME:-claude_sdk}
-      - HERMES_ENABLED=${HERMES_ENABLED:-false}
-      - HERMES_API_URL=${HERMES_API_URL:-http://hermes:8642}
-      - HERMES_API_KEY=${HERMES_API_KEY:-}
-      - HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - MEMORY_ENABLED=${MEMORY_ENABLED:-true}
       - CHROMADB_PERSIST_DIRECTORY=/app/data/chromadb
@@ -232,10 +224,6 @@ services:
       - QUORVEX_EMBEDDING_MODEL=${QUORVEX_EMBEDDING_MODEL:-text-embedding-3-small}
       - API_TIMEOUT_MS=${API_TIMEOUT_MS:-3000000}
       - QUORVEX_AGENT_RUNTIME=${QUORVEX_AGENT_RUNTIME:-claude_sdk}
-      - HERMES_ENABLED=${HERMES_ENABLED:-false}
-      - HERMES_API_URL=${HERMES_API_URL:-http://hermes:8642}
-      - HERMES_API_KEY=${HERMES_API_KEY:-}
-      - HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - MEMORY_ENABLED=${MEMORY_ENABLED:-true}
       - CHROMADB_PERSIST_DIRECTORY=/app/data/chromadb
@@ -332,10 +320,6 @@ services:
       - QUORVEX_EMBEDDING_MODEL=${QUORVEX_EMBEDDING_MODEL:-text-embedding-3-small}
       - API_TIMEOUT_MS=${API_TIMEOUT_MS:-3000000}
       - QUORVEX_AGENT_RUNTIME=${QUORVEX_AGENT_RUNTIME:-claude_sdk}
-      - HERMES_ENABLED=${HERMES_ENABLED:-false}
-      - HERMES_API_URL=${HERMES_API_URL:-http://hermes:8642}
-      - HERMES_API_KEY=${HERMES_API_KEY:-}
-      - HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
     depends_on:
       db:
         condition: service_healthy
@@ -344,35 +328,6 @@ services:
       temporal:
         condition: service_started
     shm_size: '1gb'
-    networks:
-      - playwright-network
-    restart: unless-stopped
-
-  hermes:
-    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:latest}
-    container_name: quorvex-hermes
-    command: ${HERMES_COMMAND:-gateway run}
-    ports:
-      - "8642:8642"
-      - "9119:9119"
-    volumes:
-      - ./data/hermes:/opt/data
-      - ./runs:/workspace/runs
-      - ./specs:/workspace/specs
-      - ./tests:/workspace/tests
-    environment:
-      - API_SERVER_ENABLED=true
-      - API_SERVER_HOST=0.0.0.0
-      - API_SERVER_PORT=8642
-      - API_SERVER_KEY=${HERMES_API_KEY:-}
-      - HERMES_DASHBOARD=${HERMES_DASHBOARD:-1}
-      - HERMES_DASHBOARD_HOST=0.0.0.0
-      - HERMES_DASHBOARD_TUI=${HERMES_DASHBOARD_TUI:-1}
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}
-      - GLM_API_KEY=${GLM_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}
     networks:
       - playwright-network
     restart: unless-stopped
@@ -399,10 +354,6 @@ services:
       - NEXT_PUBLIC_API_URL=http://localhost:8001
       - QUORVEX_AGENT_RUNTIME=${QUORVEX_AGENT_RUNTIME:-claude_sdk}
       - QUORVEX_ASSISTANT_RUNTIME=${QUORVEX_ASSISTANT_RUNTIME:-claude_sdk}
-      - HERMES_ENABLED=${HERMES_ENABLED:-false}
-      - HERMES_API_URL=${HERMES_API_URL:-http://hermes:8642}
-      - HERMES_API_KEY=${HERMES_API_KEY:-}
-      - HERMES_MODEL=${HERMES_MODEL:-hermes-agent}
       - WATCHPACK_POLLING=true
       - NODE_OPTIONS=--max-old-space-size=2048
     depends_on:

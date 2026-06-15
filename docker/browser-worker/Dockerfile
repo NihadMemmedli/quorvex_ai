@@ -4,7 +4,7 @@
 # ============================================
 # Use a slim Node runtime and install only Chromium instead of carrying the
 # official all-browser Playwright image.
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 
 WORKDIR /app
 
@@ -24,7 +24,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && \
     mv package.json package.full.json && \
     mv package-lock.json package-lock.full.json && \
-    npm install --package-lock=false --no-save @playwright/test@1.57.0 && \
+    npm install --package-lock=false --no-save @playwright/test@1.61.0 && \
     mv package.full.json package.json && \
     mv package-lock.full.json package-lock.json && \
     npx playwright install --with-deps chromium && \

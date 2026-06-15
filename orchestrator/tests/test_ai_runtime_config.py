@@ -130,6 +130,26 @@ def test_runtime_selection_supports_canonical_key_pool(monkeypatch):
     assert selection.api_key_env == "QUORVEX_LLM_API_KEY"
 
 
+def test_runtime_selection_uses_first_canonical_key_pool_entry(monkeypatch):
+    monkeypatch.delenv("QUORVEX_LLM_API_KEY", raising=False)
+    monkeypatch.setenv("QUORVEX_LLM_API_KEYS", "pool-key-1,pool-key-2")
+
+    selection = resolve_runtime_ai_selection("tool_deep")
+
+    assert selection.api_key == "pool-key-1"
+    assert selection.api_key_env == "QUORVEX_LLM_API_KEYS"
+
+
+def test_runtime_selection_prefers_single_canonical_key_over_key_pool(monkeypatch):
+    monkeypatch.setenv("QUORVEX_LLM_API_KEY", "canonical-key")
+    monkeypatch.setenv("QUORVEX_LLM_API_KEYS", "pool-key-1,pool-key-2")
+
+    selection = resolve_runtime_ai_selection("tool_deep")
+
+    assert selection.api_key == "canonical-key"
+    assert selection.api_key_env == "QUORVEX_LLM_API_KEY"
+
+
 def test_zai_runtime_selection_accepts_provider_specific_key(monkeypatch):
     for key in (
         "QUORVEX_LLM_API_KEY",
@@ -391,21 +411,16 @@ def test_settings_update_uses_configured_writable_env_file(tmp_path, monkeypatch
             base_url="https://api.z.ai/api/anthropic",
             model_name="glm-5.1",
             agent_runtime="hermes",
-            hermes_enabled=True,
-            hermes_api_url="http://hermes:8642",
-            hermes_model="hermes-agent",
-            hermes_sync_provider=True,
         )
     )
 
     env_vars = settings_api._read_env_file()
-    assert response["settings"]["agent_runtime"] == "hermes"
+    assert response["settings"]["agent_runtime"] == "claude_sdk"
     assert runtime_env.exists()
     assert not (tmp_path / "unwritable-root" / ".env").exists()
-    assert env_vars["HERMES_ENABLED"] == "true"
-    assert env_vars["QUORVEX_AGENT_RUNTIME"] == "hermes"
-    assert env_vars["HERMES_API_URL"] == "http://hermes:8642"
-    assert (tmp_path / "runtime" / "hermes" / "config.yaml").exists()
+    assert env_vars["QUORVEX_AGENT_RUNTIME"] == "claude_sdk"
+    assert not (tmp_path / "runtime" / "hermes").exists()
+    assert not any(key.startswith("HERMES_") for key in env_vars)
 
 
 def test_settings_update_persists_openai_assistant_runtime(tmp_path, monkeypatch):
@@ -427,11 +442,6 @@ def test_settings_update_persists_openai_assistant_runtime(tmp_path, monkeypatch
             model_name="gpt-4o-mini",
             agent_runtime="claude_sdk",
             assistant_runtime="openai",
-            hermes_enabled=True,
-            hermes_api_url="http://hermes:8642",
-            hermes_api_key="local-hermes-key",
-            hermes_model="hermes-agent",
-            hermes_sync_provider=True,
         )
     )
 
@@ -442,53 +452,8 @@ def test_settings_update_persists_openai_assistant_runtime(tmp_path, monkeypatch
     assert env_vars["QUORVEX_ASSISTANT_RUNTIME"] == "openai"
     assert env_vars["OPENAI_API_KEY"] == "sk-openai-test"
     assert env_vars["OPENAI_BASE_URL"] == "https://api.openai.com/v1"
-    assert env_vars["HERMES_UPSTREAM_PROVIDER"] == "openai"
-    hermes_env = (tmp_path / "data" / "hermes" / ".env").read_text()
-    assert "OPENAI_API_KEY=sk-openai-test" in hermes_env
-
-
-@pytest.mark.asyncio
-async def test_settings_test_hermes_direct_reports_config(tmp_path, monkeypatch):
-    from orchestrator.api import settings as settings_api
-
-    hermes_home = tmp_path / "hermes"
-    hermes_home.mkdir()
-    (hermes_home / "config.yaml").write_text('model:\n  provider: "openai"\n  default: "gpt-4o-mini"\n')
-    (hermes_home / ".env").write_text("API_SERVER_KEY=local-hermes-key\nOPENAI_API_KEY=sk-openai-test\n")
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "\n".join(
-            [
-                "HERMES_ENABLED=true",
-                "HERMES_API_URL=http://hermes:8642",
-                "HERMES_API_KEY=local-hermes-key",
-                "HERMES_MODEL=hermes-agent",
-                f"HERMES_HOME={hermes_home}",
-                "HERMES_UPSTREAM_PROVIDER=openai",
-                "HERMES_UPSTREAM_MODEL=gpt-4o-mini",
-            ]
-        )
-        + "\n"
-    )
-    monkeypatch.setattr(settings_api, "ENV_FILE", env_file)
-    monkeypatch.setattr(
-        settings_api,
-        "_check_hermes_gateway",
-        lambda active=None: {
-            "reachable": True,
-            "status": "reachable",
-            "message": "Hermes API responded with HTTP 200.",
-        },
-    )
-
-    result = await settings_api.test_hermes_connection()
-
-    assert result.ok is True
-    assert result.reachable is True
-    assert result.upstream_provider == "openai"
-    assert result.upstream_model == "gpt-4o-mini"
-    assert result.config_exists is True
-    assert result.env_exists is True
+    assert not any(key.startswith("HERMES_") for key in env_vars)
+    assert not (tmp_path / "data" / "hermes").exists()
 
 
 @pytest.mark.asyncio

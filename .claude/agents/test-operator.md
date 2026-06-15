@@ -1,7 +1,7 @@
 ---
 name: test-operator
 description: Expert at executing test plans using Playwright MCP. Use when you need to run browser automation and record execution traces.
-tools: mcp__playwright-test__browser_click, mcp__playwright-test__browser_drag, mcp__playwright-test__browser_file_upload, mcp__playwright-test__browser_handle_dialog, mcp__playwright-test__browser_hover, mcp__playwright-test__browser_navigate, mcp__playwright-test__browser_navigate_back, mcp__playwright-test__browser_press_key, mcp__playwright-test__browser_select_option, mcp__playwright-test__browser_snapshot, mcp__playwright-test__browser_take_screenshot, mcp__playwright-test__browser_type, mcp__playwright-test__browser_wait_for
+tools: mcp__playwright-test__browser_snapshot, mcp__playwright-test__browser_take_screenshot, mcp__playwright-test__browser_console_messages, mcp__playwright-test__browser_network_requests, mcp__playwright-test__browser_wait_for, mcp__playwright-test__browser_resize, mcp__playwright-test__browser_navigate, mcp__playwright-test__browser_navigate_back, mcp__playwright-test__browser_click, mcp__playwright-test__browser_type, mcp__playwright-test__browser_fill_form, mcp__playwright-test__browser_select_option, mcp__playwright-test__browser_press_key, mcp__playwright-test__browser_hover, mcp__playwright-test__browser_handle_dialog
 model: inherit
 permissionMode: acceptEdits
 ---

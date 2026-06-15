@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -43,13 +44,23 @@ from orchestrator.services.agent_queue import AgentQueue, AgentTask, get_agent_q
 from orchestrator.services.api_key_rotator import (
     get_api_key_rotator,
     is_rate_limit_error,
+    is_transient_provider_error,
+    parse_api_error_status,
     parse_retry_after,
+    provider_retry_attempts,
+    provider_retry_delay_seconds,
 )
 from orchestrator.services.autonomous_events import create_event_for_work_item
 from orchestrator.services.agent_run_events import create_agent_run_event
 from orchestrator.services.browser_pool import OperationType as BrowserOpType
 from orchestrator.services.browser_pool import get_browser_pool
 from orchestrator.utils.browser_cleanup import kill_autopilot_process_tree, kill_test_run_process_tree
+from orchestrator.utils.claude_stream import (
+    event_content_items as _shared_event_content_items,
+    event_tool_results as _shared_event_tool_results,
+    event_tool_uses as _shared_event_tool_uses,
+    tool_result_text as _shared_tool_result_text,
+)
 from orchestrator.utils.token_budget import build_agent_token_telemetry, extract_provider_usage
 
 def _resolve_claude_cli_path() -> str:
@@ -96,59 +107,39 @@ def _short_tool_name(tool_name: str) -> str:
 
 def _tool_result_text(content: object) -> str:
     """Extract text from common Claude stream-json tool_result shapes."""
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict):
-        if content.get("type") == "text":
-            return str(content.get("text") or "")
-        if content.get("type") == "tool_result":
-            return _tool_result_text(content.get("content"))
-        for key in ("content", "text", "result"):
-            if key in content:
-                text = _tool_result_text(content.get(key))
-                if text:
-                    return text
-        return ""
-    if isinstance(content, list):
-        parts = [_tool_result_text(item) for item in content]
-        return "\n".join(part for part in parts if part)
-    return str(content)
+    return _shared_tool_result_text(content)
 
 
 def _event_content_items(evt: dict[str, object]) -> list[object]:
     """Return Claude stream content items across common event shapes."""
-    message = evt.get("message") if isinstance(evt.get("message"), dict) else {}
-    content = message.get("content") if isinstance(message, dict) else None
-    if content is None:
-        content = evt.get("content")
-    if isinstance(content, list):
-        return content
-    if isinstance(content, dict):
-        return [content]
-    return []
+    return _shared_event_content_items(evt)
 
 
 def _iter_items_by_type(value: object, item_type: str):
     """Yield nested dict items matching a Claude content block type."""
-    if isinstance(value, dict):
-        if value.get("type") == item_type:
-            yield value
-        for child in value.values():
-            if isinstance(child, (dict, list)):
-                yield from _iter_items_by_type(child, item_type)
-    elif isinstance(value, list):
-        for child in value:
-            yield from _iter_items_by_type(child, item_type)
+    for content in _event_content_items({"content": value}):
+        if item_type == "tool_use":
+            yield from _event_tool_uses({"content": content})
+        elif item_type == "tool_result":
+            yield from _event_tool_results({"content": content})
 
 
 def _event_tool_uses(evt: dict[str, object]) -> list[dict[str, object]]:
-    return [item for content in _event_content_items(evt) for item in _iter_items_by_type(content, "tool_use")]
+    return [
+        {"id": item.id, "name": item.name, "input": item.input}
+        for item in _shared_event_tool_uses(evt)
+    ]
 
 
 def _event_tool_results(evt: dict[str, object]) -> list[dict[str, object]]:
-    return [item for content in _event_content_items(evt) for item in _iter_items_by_type(content, "tool_result")]
+    return [
+        {
+            "tool_use_id": item.tool_use_id,
+            "content": item.content,
+            "is_error": item.is_error,
+        }
+        for item in _shared_event_tool_results(evt)
+    ]
 
 
 @dataclass
@@ -166,6 +157,40 @@ class _PendingBrowserInteraction:
     target: str
     from_state: object | None
     started_at: float = field(default_factory=time.time)
+
+
+class BrowserToolTimeoutError(TimeoutError):
+    """Raised when a browser MCP tool call does not return in time."""
+
+    def __init__(
+        self,
+        *,
+        tool_name: str,
+        tool_use_id: str | None,
+        elapsed_seconds: float,
+        timeout_seconds: float,
+    ):
+        self.tool_name = tool_name
+        self.tool_use_id = tool_use_id
+        self.elapsed_seconds = elapsed_seconds
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            "Browser tool timed out: "
+            f"{tool_name or 'unknown tool'}"
+            f"{f' ({tool_use_id})' if tool_use_id else ''} "
+            f"ran for {elapsed_seconds:.1f}s "
+            f"(limit {timeout_seconds:.1f}s)"
+        )
+
+    def telemetry(self) -> dict[str, object]:
+        return {
+            "error_type": "browser_tool_timeout",
+            "browser_tool_timeout": True,
+            "timed_out_tool_name": self.tool_name,
+            "timed_out_tool_use_id": self.tool_use_id,
+            "timed_out_tool_elapsed_seconds": self.elapsed_seconds,
+            "browser_tool_timeout_seconds": self.timeout_seconds,
+        }
 
 
 class BrowserObservationRecorder:
@@ -1000,7 +1025,9 @@ class AgentWorker:
                 os.environ[key] = value
             logger.info(f"Applied {len(task.env_vars)} env var(s) from task: {list(task.env_vars.keys())}")
 
-        max_retries = 3
+        rate_limit_max_retries = 3
+        provider_max_attempts = provider_retry_attempts()
+        max_retries = max(rate_limit_max_retries, provider_max_attempts)
         rotator = get_api_key_rotator()
         # Re-initialize rotator so it picks up any new tokens from task env vars
         if task.env_vars:
@@ -1240,6 +1267,52 @@ class AgentWorker:
                     _result_submitted = True
                     return
 
+                except BrowserToolTimeoutError as e:
+                    logger.error("Task %s browser tool timed out: %s", task.id, e)
+                    telemetry = {
+                        **self._build_task_telemetry(task, attempt, error_type="browser_tool_timeout"),
+                        **e.telemetry(),
+                    }
+                    with self._progress_lock:
+                        self._current_progress.update(
+                            {
+                                "status": "failed",
+                                "phase": "failed",
+                                "message": str(e),
+                                **e.telemetry(),
+                            }
+                        )
+                    self._emit_autonomous_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=str(e),
+                        payload={"telemetry": telemetry},
+                    )
+                    self._emit_agent_run_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=str(e),
+                        payload={"telemetry": telemetry},
+                    )
+                    self._emit_prd_generation_event(
+                        owner_type=task.owner_type,
+                        owner_id=task.owner_id,
+                        task_id=task.id,
+                        event_type="error",
+                        level="error",
+                        message=str(e),
+                        payload={"telemetry": telemetry},
+                    )
+                    await self.queue.submit_result(task.id, "", success=False, error=str(e), telemetry=telemetry)
+                    _result_submitted = True
+                    return
+
                 except asyncio.TimeoutError as e:
                     # Timeouts are not retryable
                     logger.error(f"Task {task.id} timed out: {e}")
@@ -1368,7 +1441,7 @@ class AgentWorker:
                             _result_submitted = True
                             return
 
-                        if attempt >= max_retries:
+                        if attempt >= rate_limit_max_retries:
                             break
 
                         wait_seconds = min(retry_after or 30, 120)
@@ -1413,6 +1486,111 @@ class AgentWorker:
                             )
                         await asyncio.sleep(wait_seconds)
                         continue  # retry with rotated key
+                    if is_transient_provider_error(e):
+                        api_error_status = parse_api_error_status(e) or self._last_execution_telemetry.get("api_error_status") or 529
+                        if attempt >= provider_max_attempts:
+                            telemetry = self._build_task_telemetry(
+                                task,
+                                attempt,
+                                error_type="provider_overloaded",
+                            )
+                            telemetry["api_error_status"] = api_error_status
+                            telemetry["retry_reason"] = "provider_overloaded"
+                            telemetry["retry_error_status"] = api_error_status
+                            message = (
+                                "LLM provider is temporarily unavailable after "
+                                f"{provider_max_attempts} attempt(s)."
+                            )
+                            logger.error("Task %s failed due to transient provider overload: %s", task.id, error_str)
+                            with self._progress_lock:
+                                self._current_progress.update(
+                                    {
+                                        "status": "failed",
+                                        "phase": "failed",
+                                        "message": message,
+                                        "retry_reason": "provider_overloaded",
+                                        "retry_error_status": api_error_status,
+                                    }
+                                )
+                            self._emit_agent_run_event(
+                                owner_type=task.owner_type,
+                                owner_id=task.owner_id,
+                                task_id=task.id,
+                                event_type="error",
+                                level="error",
+                                message=message,
+                                payload={
+                                    "telemetry": telemetry,
+                                    "provider_error": error_str[:2000],
+                                },
+                            )
+                            self._emit_prd_generation_event(
+                                owner_type=task.owner_type,
+                                owner_id=task.owner_id,
+                                task_id=task.id,
+                                event_type="error",
+                                level="error",
+                                message=message,
+                                payload={
+                                    "telemetry": telemetry,
+                                    "provider_error": error_str[:2000],
+                                },
+                            )
+                            await self.queue.submit_result(task.id, "", success=False, error=message, telemetry=telemetry)
+                            _result_submitted = True
+                            return
+
+                        wait_seconds = provider_retry_delay_seconds(attempt)
+                        logger.warning(
+                            "Task %s: transient provider error status=%s; retrying attempt %s/%s in %.1fs",
+                            task.id,
+                            api_error_status,
+                            attempt + 1,
+                            provider_max_attempts,
+                            wait_seconds,
+                        )
+                        self._emit_agent_run_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="retry",
+                            level="warning",
+                            message=f"Agent task provider overloaded; retrying attempt {attempt + 1}/{provider_max_attempts}.",
+                            payload={
+                                "retry_attempt": attempt + 1,
+                                "retry_wait_seconds": wait_seconds,
+                                "retry_error_status": api_error_status,
+                                "retry_reason": "provider_overloaded",
+                            },
+                        )
+                        self._emit_prd_generation_event(
+                            owner_type=task.owner_type,
+                            owner_id=task.owner_id,
+                            task_id=task.id,
+                            event_type="retry",
+                            level="warning",
+                            message=f"Agent task provider overloaded; retrying attempt {attempt + 1}/{provider_max_attempts}.",
+                            payload={
+                                "retry_attempt": attempt + 1,
+                                "retry_wait_seconds": wait_seconds,
+                                "retry_error_status": api_error_status,
+                                "retry_reason": "provider_overloaded",
+                            },
+                        )
+                        with self._progress_lock:
+                            self._current_progress.update(
+                                {
+                                    "phase": "llm_retry",
+                                    "status": "running",
+                                    "message": f"LLM provider is temporarily unavailable; retrying in {int(wait_seconds)}s.",
+                                    "retry_attempt": attempt + 1,
+                                    "retry_reason": "provider_overloaded",
+                                    "retry_error_status": api_error_status,
+                                    "retry_wait_seconds": wait_seconds,
+                                }
+                            )
+                        await asyncio.sleep(wait_seconds)
+                        continue
                     else:
                         # Non-429 RuntimeError or final attempt — fail
                         logger.error(f"Task {task.id} failed: {e}", exc_info=True)
@@ -1484,14 +1662,14 @@ class AgentWorker:
                     return
 
             # Exhausted all retries (shouldn't normally reach here)
-            telemetry = self._build_task_telemetry(task, max_retries, error_type="rate_limit_exhausted")
+            telemetry = self._build_task_telemetry(task, rate_limit_max_retries, error_type="rate_limit_exhausted")
             self._emit_autonomous_event(
                 owner_type=task.owner_type,
                 owner_id=task.owner_id,
                 task_id=task.id,
                 event_type="error",
                 level="error",
-                message=f"Agent task exhausted {max_retries} retries due to rate limiting.",
+                message=f"Agent task exhausted {rate_limit_max_retries} retries due to rate limiting.",
                 payload={"telemetry": telemetry},
             )
             self._emit_agent_run_event(
@@ -1500,7 +1678,7 @@ class AgentWorker:
                 task_id=task.id,
                 event_type="error",
                 level="error",
-                message=f"Agent task exhausted {max_retries} retries due to rate limiting.",
+                message=f"Agent task exhausted {rate_limit_max_retries} retries due to rate limiting.",
                 payload={"telemetry": telemetry},
             )
             self._emit_prd_generation_event(
@@ -1509,14 +1687,14 @@ class AgentWorker:
                 task_id=task.id,
                 event_type="error",
                 level="error",
-                message=f"Agent task exhausted {max_retries} retries due to rate limiting.",
+                message=f"Agent task exhausted {rate_limit_max_retries} retries due to rate limiting.",
                 payload={"telemetry": telemetry},
             )
             await self.queue.submit_result(
                 task.id,
                 "",
                 success=False,
-                error=f"Exhausted {max_retries} retries due to rate limiting",
+                error=f"Exhausted {rate_limit_max_retries} retries due to rate limiting",
                 telemetry=telemetry,
             )
             _result_submitted = True
@@ -1627,6 +1805,98 @@ class AgentWorker:
         if task.started_at:
             telemetry["duration_seconds"] = (time.time() - task.started_at.timestamp())
         return telemetry
+
+    def _timed_out_browser_tool_record(
+        self,
+        *,
+        timeout_seconds: float,
+        now: float | None = None,
+    ) -> tuple[dict[str, object], float] | None:
+        """Return the oldest pending browser tool record past the timeout."""
+        if timeout_seconds <= 0:
+            return None
+        now = time.time() if now is None else now
+        with self._progress_lock:
+            records = list(self._current_progress.get("tool_call_records") or [])
+        timed_out: tuple[dict[str, object], float] | None = None
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            if record.get("success") is not None:
+                continue
+            tool_name = str(record.get("name") or "")
+            short_name = _short_tool_name(tool_name)
+            if not (short_name.startswith("browser_") or tool_name.startswith("browser_")):
+                continue
+            try:
+                started_at = float(record.get("started_at") or 0)
+            except (TypeError, ValueError):
+                continue
+            if started_at <= 0:
+                continue
+            elapsed = max(0.0, now - started_at)
+            if elapsed < timeout_seconds:
+                continue
+            if timed_out is None or elapsed > timed_out[1]:
+                timed_out = (record, elapsed)
+        return timed_out
+
+    def _mark_browser_tool_timeout(
+        self,
+        *,
+        record: dict[str, object],
+        elapsed_seconds: float,
+        timeout_seconds: float,
+    ) -> BrowserToolTimeoutError:
+        tool_name = str(record.get("name") or "")
+        tool_use_id_value = record.get("tool_use_id")
+        tool_use_id = str(tool_use_id_value) if tool_use_id_value else None
+        error = BrowserToolTimeoutError(
+            tool_name=tool_name,
+            tool_use_id=tool_use_id,
+            elapsed_seconds=elapsed_seconds,
+            timeout_seconds=timeout_seconds,
+        )
+        with self._progress_lock:
+            records = self._current_progress.get("tool_call_records") or []
+            if isinstance(records, list):
+                for current in records:
+                    if not isinstance(current, dict):
+                        continue
+                    if current is record or (
+                        tool_use_id is not None and current.get("tool_use_id") == tool_use_id
+                    ):
+                        current["success"] = False
+                        current["error"] = str(error)
+                        current["duration_ms"] = int(elapsed_seconds * 1000)
+                        current["error_type"] = "browser_tool_timeout"
+                        break
+            self._current_progress.update(
+                {
+                    "status": "failed",
+                    "phase": "failed",
+                    "message": str(error),
+                    **error.telemetry(),
+                }
+            )
+            self._last_execution_telemetry = {
+                **dict(self._last_execution_telemetry),
+                **error.telemetry(),
+            }
+        return error
+
+    @staticmethod
+    def _kill_process_group(proc: subprocess.Popen, *, sig: int) -> None:
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except (ProcessLookupError, OSError):
+            try:
+                if sig == signal.SIGKILL:
+                    proc.kill()
+                else:
+                    proc.terminate()
+            except (ProcessLookupError, OSError):
+                pass
 
     async def _run_claude_cli(
         self,
@@ -1747,10 +2017,11 @@ class AgentWorker:
         logger.info(f"[CLI]   CWD: {effective_cwd}")
         logger.info(f"[CLI]   UID: {os.getuid()}, EUID: {os.geteuid()}")
         logger.info(f"[CLI]   HOME: {env.get('HOME', 'not set')}")
-        effective_allowed_tools = ["*"] if allowed_tools is None else allowed_tools
-        effective_permission_mode = permission_mode or ("dontAsk" if tools == [] else "bypassPermissions")
+        effective_allowed_tools = [] if allowed_tools is None else allowed_tools
+        effective_tools = [] if tools is None and allowed_tools is None else tools
+        effective_permission_mode = permission_mode or ("dontAsk" if effective_tools == [] else "bypassPermissions")
         logger.info(f"[CLI]   Allowed tools: {effective_allowed_tools}")
-        logger.info(f"[CLI]   Tools: {tools}")
+        logger.info(f"[CLI]   Tools: {effective_tools}")
         logger.info(f"[CLI]   Permission mode: {effective_permission_mode}")
 
         start_time = time.time()
@@ -1776,6 +2047,9 @@ class AgentWorker:
             if owner_type in {"exploration_session", "agent_run"} and owner_id
             else None
         )
+        browser_tool_timeout_seconds = float(
+            os.environ.get("AGENT_BROWSER_TOOL_TIMEOUT_SECONDS", "120")
+        )
 
         # Build CLI command
         cli_args = [
@@ -1786,12 +2060,12 @@ class AgentWorker:
             "--system-prompt",
             "",
         ]
-        if tools is not None:
-            if isinstance(tools, list):
-                builtin_tools = self._builtin_cli_tools(tools)
-                if builtin_tools or tools == []:
+        if effective_tools is not None:
+            if isinstance(effective_tools, list):
+                builtin_tools = self._builtin_cli_tools(effective_tools)
+                if builtin_tools or effective_tools == []:
                     cli_args.extend(["--tools", ",".join(builtin_tools)])
-            elif isinstance(tools, dict) and tools.get("preset") == "claude_code":
+            elif isinstance(effective_tools, dict) and effective_tools.get("preset") == "claude_code":
                 cli_args.extend(["--tools", "default"])
         if effective_allowed_tools:
             cli_args.extend(["--allowedTools", ",".join(effective_allowed_tools)])
@@ -1821,7 +2095,10 @@ class AgentWorker:
 
         mcp_config_path = Path(effective_cwd) / ".mcp.json"
         requested_tool_names = []
-        for tool_source in (effective_allowed_tools, tools if isinstance(tools, list) else []):
+        for tool_source in (
+            effective_allowed_tools,
+            effective_tools if isinstance(effective_tools, list) else [],
+        ):
             requested_tool_names.extend(str(tool) for tool in tool_source)
         if mcp_config_path.exists():
             self._validate_mcp_config(mcp_config_path, requested_tool_names)
@@ -2122,17 +2399,28 @@ class AgentWorker:
             # Wait for process with timeout
             while True:
                 elapsed = self._effective_elapsed_seconds(task_id, start_time)
+                timed_out_tool = self._timed_out_browser_tool_record(
+                    timeout_seconds=browser_tool_timeout_seconds
+                )
+                if timed_out_tool is not None:
+                    record, tool_elapsed = timed_out_tool
+                    error = self._mark_browser_tool_timeout(
+                        record=record,
+                        elapsed_seconds=tool_elapsed,
+                        timeout_seconds=browser_tool_timeout_seconds,
+                    )
+                    logger.warning("[CLI] %s; killing process group", error)
+                    if browser_recorder is not None:
+                        browser_recorder.flush_pending()
+                    self._kill_process_group(proc, sig=signal.SIGKILL)
+                    proc.wait()
+                    raise error
+
                 if elapsed > timeout_seconds:
                     logger.warning(f"[CLI] Timeout after {elapsed:.1f}s active runtime, killing process group")
                     if browser_recorder is not None:
                         browser_recorder.flush_pending()
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except (ProcessLookupError, OSError):
-                        try:
-                            proc.kill()
-                        except (ProcessLookupError, OSError):
-                            pass
+                    self._kill_process_group(proc, sig=signal.SIGKILL)
                     proc.wait()
                     raise asyncio.TimeoutError(f"CLI timed out after {elapsed:.1f}s")
 
@@ -2196,7 +2484,12 @@ class AgentWorker:
         stream_stats["paused_duration_seconds"] = paused_duration
         logger.info(f"[CLI] Completed in {elapsed:.1f}s, exit_code={exit_code}, collected {len(raw_output)} chars")
 
-        parsed_output = self._parse_cli_output(raw_output)
+        parsed_output = ""
+        parse_error: Exception | None = None
+        try:
+            parsed_output = self._parse_cli_output(raw_output)
+        except Exception as exc:
+            parse_error = exc
         with self._progress_lock:
             final_progress = dict(self._current_progress)
             self._last_execution_telemetry = {
@@ -2253,6 +2546,9 @@ class AgentWorker:
                     )
             except Exception as exc:
                 logger.debug("Failed to write agent artifacts for task %s: %s", task_id, exc)
+
+        if parse_error is not None:
+            raise parse_error
 
         if task_id in self._cancelled_task_ids:
             self._cancelled_task_ids.discard(task_id)

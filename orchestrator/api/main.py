@@ -7975,17 +7975,6 @@ async def _cancel_agent_run_queue_task(run: AgentRun) -> dict[str, Any] | None:
     if not run.agent_task_id:
         return None
 
-    if normalize_agent_runtime(getattr(run, "runtime", None) or run.config.get("runtime")) == "hermes":
-        result: dict[str, Any] = {"agent_task_id": run.agent_task_id, "runtime": "hermes"}
-        try:
-            from orchestrator.services.agent_runtimes.hermes import HermesClient
-
-            result.update(await HermesClient().stop_run(str(run.agent_task_id)))
-        except Exception as exc:
-            logger.warning("Failed to stop Hermes run %s for agent run %s: %s", run.agent_task_id, run.id, exc)
-            result.update({"status": "error", "error": str(exc)})
-        return result
-
     result: dict[str, Any] = {"agent_task_id": run.agent_task_id, "status": "not_active"}
     try:
         from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
@@ -9295,193 +9284,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             from orchestrator.agents.spec_writer_agent import SpecWriterAgent
 
             result = {}
-            if runtime_name == "hermes" and agent_type in {"exploratory", "writer", "spec-synthesis"}:
-                from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
-                from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span, record_tool_result_spans
-
-                runtime_session_dir = None
-                if agent_type == "exploratory":
-                    candidate_run_dir = RUNS_DIR / run_id
-                    storage_state_path = _resolve_agent_browser_auth_storage_path(
-                        run_id=run_id,
-                        project_id=config.get("project_id"),
-                        config=config,
-                        run_dir=candidate_run_dir,
-                    )
-                    runtime_session_dir = exploration._prepare_exploration_mcp_config(
-                        run_id,
-                        storage_state_path=storage_state_path,
-                    )
-                resolved_allowed_tools = _resolve_known_agent_allowed_tools(
-                    agent_type,
-                    config,
-                    mcp_config_dir=runtime_session_dir,
-                )
-                if resolved_allowed_tools is not None:
-                    config["allowed_tools"] = resolved_allowed_tools
-                effective_allowed_tools = config.get("allowed_tools") or []
-
-                test_data_refs = config.get("test_data_refs") if isinstance(config.get("test_data_refs"), list) else []
-                test_data_context = _resolve_agent_execution_test_data_context(
-                    project_id=config.get("project_id"),
-                    refs=test_data_refs,
-                    markdown=json.dumps(config, default=str),
-                )
-                prompt = _generic_agent_runtime_prompt(agent_type, config)
-                if test_data_context.get("prompt_markdown"):
-                    prompt = (
-                        f"{prompt}\n\n{test_data_context['prompt_markdown']}\n\n"
-                        "If you delegate work to subagents, copy the relevant test-data ref names and plaintext values needed for execution "
-                        "into each delegated prompt. Subagents do not automatically inherit this full parent context."
-                    )
-                trace_snapshot = ensure_trace_snapshot(
-                    run_id=run_id,
-                    prompt=prompt,
-                    context=test_data_context.get("prompt_markdown"),
-                    runtime=runtime_name,
-                    model=config.get("model"),
-                    model_tier=config.get("model_tier") or "tool_deep",
-                    allowed_tools=effective_allowed_tools,
-                    test_data_refs=test_data_refs,
-                    runtime_diagnostics={"runtime": runtime_name, "agent_type": agent_type},
-                )
-
-                def _on_runtime_task_enqueued(task_id: str) -> None:
-                    ensure_trace_snapshot(run_id=run_id, agent_task_id=task_id, runtime=runtime_name)
-                    _update_agent_run_progress(
-                        run_id,
-                        {
-                            "phase": "queued",
-                            "runtime": runtime_name,
-                            "message": "Hermes run started",
-                            "agent_task_id": task_id,
-                            "hermes_run_id": task_id,
-                        },
-                    )
-
-                def _on_runtime_progress(progress: dict[str, Any]) -> None:
-                    record_trace_span(
-                        run_id=run_id,
-                        trace_id=trace_snapshot.id if trace_snapshot else None,
-                        span_type="provider_event",
-                        name=str(progress.get("hermes_event_type") or progress.get("phase") or "runtime progress"),
-                        message=str(progress.get("message") or "Hermes runtime progress."),
-                        tool_name=str(progress.get("last_tool")) if progress.get("last_tool") else None,
-                        payload={"progress": progress, "runtime": runtime_name},
-                    )
-                    _update_agent_run_progress(
-                        run_id,
-                        {
-                            **progress,
-                            "runtime": runtime_name,
-                            "phase": progress.get("phase") or "running",
-                            "message": progress.get("message") or "Hermes agent is running",
-                        },
-                    )
-
-                def _on_runtime_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
-                    _record_agent_run_event(
-                        run_id,
-                        event_type="tool_call",
-                        message=f"Using {_short_tool_name(tool_name)}.",
-                        payload={
-                            "runtime": runtime_name,
-                            "tool_name": tool_name,
-                            "tool_label": _short_tool_name(tool_name),
-                            "tool_input": tool_input,
-                        },
-                    )
-
-                agent_result = await get_agent_runtime(runtime_name).run(
-                    prompt,
-                    AgentRuntimeContext(
-                        timeout_seconds=int(config.get("timeout_seconds") or 1800),
-                        allowed_tools=effective_allowed_tools,
-                        tools=effective_allowed_tools,
-                        session_dir=runtime_session_dir,
-                        cwd=runtime_session_dir,
-                        owner_type="agent_run",
-                        owner_id=run_id,
-                        owner_label=f"Agent run {run_id}",
-                        memory_project_id=config.get("project_id"),
-                        memory_agent_type=agent_type,
-                        memory_source_type="agent_run",
-                        memory_source_id=run_id,
-                        memory_stage="agent_run",
-                        model=config.get("model"),
-                        model_tier=config.get("model_tier") or "tool_deep",
-                        agent_name=agent_type,
-                        hermes_profile=config.get("agent_tool_profile"),
-                        hermes_conversation=run_id,
-                        metadata={"agent_type": agent_type, "run_id": run_id},
-                        trace_id=trace_snapshot.id if trace_snapshot else None,
-                        prompt_hash=trace_snapshot.prompt_hash if trace_snapshot else None,
-                        agent_run_id=run_id,
-                        env_vars=None,
-                        is_cancelled=_agent_run_cancelled,
-                        on_task_enqueued=_on_runtime_task_enqueued,
-                        on_tool_use=_on_runtime_tool_use,
-                        on_progress=_on_runtime_progress,
-                    ),
-                )
-                if agent_result.cancelled:
-                    raise asyncio.CancelledError("Agent run cancelled")
-                record_tool_result_spans(run_id, agent_result.tool_calls)
-                serialized_tool_calls = [
-                    {
-                        "name": call.name,
-                        "timestamp": call.timestamp.isoformat(),
-                        "duration_ms": call.duration_ms,
-                        "success": call.success,
-                        "error": call.error,
-                        "input": call.input,
-                    }
-                    for call in agent_result.tool_calls
-                ]
-                if agent_type == "exploratory":
-                    processor = ExploratoryAgent()
-                    processor.state = ExplorationState(
-                        start_time=time_module.time() - max(agent_result.duration_seconds or 0, 0)
-                    )
-                    result = processor._process_results(
-                        agent_result.output or "",
-                        {
-                            **config,
-                            "run_id": run_id,
-                            "_runtime_tool_calls": serialized_tool_calls,
-                            "_runtime_diagnostics": {
-                                "runtime": runtime_name,
-                                "session_id": agent_result.session_id,
-                                "tool_calls": len(agent_result.tool_calls),
-                                "messages_received": agent_result.messages_received,
-                                "text_blocks_received": agent_result.text_blocks_received,
-                                "timed_out": agent_result.timed_out,
-                                "total_cost_usd": agent_result.total_cost_usd,
-                                "error": agent_result.error,
-                            },
-                        },
-                    )
-                    result["runtime"] = runtime_name
-                    result["output"] = agent_result.output
-                    result["error"] = agent_result.error
-                    result["duration_seconds"] = agent_result.duration_seconds
-                    result["session_id"] = agent_result.session_id
-                    result["total_cost_usd"] = agent_result.total_cost_usd
-                    result["tool_calls"] = serialized_tool_calls
-                else:
-                    result = {
-                        "summary": (agent_result.output or agent_result.error or "")[:500],
-                        "output": agent_result.output,
-                        "error": agent_result.error,
-                        "duration_seconds": agent_result.duration_seconds,
-                        "runtime": runtime_name,
-                        "session_id": agent_result.session_id,
-                        "total_cost_usd": agent_result.total_cost_usd,
-                        "tool_calls": serialized_tool_calls,
-                    }
-                if not agent_result.success:
-                    raise RuntimeError(agent_result.error or "Hermes agent failed")
-            elif agent_type == "exploratory":
+            if agent_type == "exploratory":
                 agent = ExploratoryAgent()
                 agent.owner_type = "agent_run"
                 agent.owner_id = run_id
@@ -9738,17 +9541,12 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
 
                 def _on_custom_task_enqueued(task_id: str) -> None:
                     ensure_trace_snapshot(run_id=run_id, agent_task_id=task_id, runtime=runtime_name)
-                    queued_message = "Hermes run started" if runtime_name == "hermes" else "Agent task queued for worker"
+                    queued_message = "Agent task queued for worker"
                     runtime_metadata = runtime if has_browser_tools else {}
                     runtime_message = runtime_metadata.get(
                         "runtime_message",
                         "Browser execution is running in an agent worker. Screenshots are shown as fallback.",
                     )
-                    if runtime_name == "hermes":
-                        runtime_message = (
-                            "Custom agent execution is running through Hermes. "
-                            f"{runtime_message}" if has_browser_tools else "Custom agent execution is running through Hermes."
-                        )
                     _update_agent_run_progress(
                         run_id,
                         {
@@ -9757,7 +9555,6 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                             "runtime": runtime_name,
                             "message": queued_message,
                             "agent_task_id": task_id,
-                            "hermes_run_id": task_id if runtime_name == "hermes" else None,
                             "runtime_message": runtime_message,
                         },
                     )
@@ -9792,7 +9589,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                         run_id=run_id,
                         trace_id=trace_snapshot.id if trace_snapshot else None,
                         span_type="provider_event",
-                        name=str(progress.get("hermes_event_type") or progress.get("phase") or "runtime progress"),
+                        name=str(progress.get("phase") or "runtime progress"),
                         message=str(progress.get("message") or "Agent runtime progress."),
                         tool_name=str(last_tool) if last_tool else None,
                         payload={"progress": progress, "runtime": runtime_name},
@@ -9833,7 +9630,6 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                     model=config.get("model"),
                     model_tier=config.get("model_tier") or "tool_deep",
                     agent_name=config.get("agent_name") or "CustomAgent",
-                    hermes_conversation=run_id,
                     metadata={
                         "agent_type": "custom",
                         "agent_definition_id": config.get("agent_definition_id"),

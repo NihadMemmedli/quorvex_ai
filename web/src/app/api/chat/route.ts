@@ -2,12 +2,9 @@ import { streamText, stepCountIs, convertToModelMessages, createUIMessageStream,
 import {
   ChatRuntimeSettings,
   getActiveOpenAIProvider,
-  getActiveHermesProvider,
   getActiveProvider,
-  hasHermesChatRuntime,
   hasDirectAnthropicChatCredential,
   hasOpenAIChatCredential,
-  HERMES_MODEL_ID,
   MODEL_ID,
   OPENAI_MODEL_ID,
   reportRateLimit,
@@ -1034,22 +1031,17 @@ export async function POST(req: Request) {
   const authToken = authHeader?.replace('Bearer ', '') || undefined;
   const latestUserText = extractLatestUserText(messages);
   const runtimeSettings = await getChatRuntimeSettings(authToken);
-  const useHermes = hasHermesChatRuntime(runtimeSettings);
-  const useAnthropic = !useHermes && hasDirectAnthropicChatCredential(runtimeSettings);
-  const useOpenAI = !useHermes && !useAnthropic && hasOpenAIChatCredential(runtimeSettings);
+  const useAnthropic = hasDirectAnthropicChatCredential(runtimeSettings);
+  const useOpenAI = !useAnthropic && hasOpenAIChatCredential(runtimeSettings);
   let routedModelId: string | undefined;
 
-  if (useHermes || useAnthropic || useOpenAI) {
-    routedModelId = useHermes
-      ? runtimeSettings?.hermes_model || HERMES_MODEL_ID
-      : useAnthropic
-        ? await getRuntimeModelId(authToken, runtimeSettings)
-        : runtimeSettings?.chat_model || runtimeSettings?.model_tiers?.chat || runtimeSettings?.standard_model || OPENAI_MODEL_ID;
-    const { provider } = useHermes
-      ? getActiveHermesProvider(runtimeSettings)
-      : useAnthropic
-        ? getActiveProvider(runtimeSettings)
-        : getActiveOpenAIProvider(runtimeSettings);
+  if (useAnthropic || useOpenAI) {
+    routedModelId = useAnthropic
+      ? await getRuntimeModelId(authToken, runtimeSettings)
+      : runtimeSettings?.chat_model || runtimeSettings?.model_tiers?.chat || runtimeSettings?.standard_model || OPENAI_MODEL_ID;
+    const { provider } = useAnthropic
+      ? getActiveProvider(runtimeSettings)
+      : getActiveOpenAIProvider(runtimeSettings);
     const intentRoute = await routeAssistantIntent({
       messages,
       projectId,
@@ -1123,23 +1115,21 @@ export async function POST(req: Request) {
   const tools = createAssistantTools(authToken, projectId);
   const recentMessages = getRecentMessages(messages);
 
-  if (!useHermes && !useAnthropic && !useOpenAI) {
+  if (!useAnthropic && !useOpenAI) {
     return textToUIMessageResponse(
-      'AI chat tools are not configured. Save an API key in Settings first. If the backend settings service is unavailable, set QUORVEX_LLM_API_KEY, OPENAI_API_KEY, or Hermes env fallback values for this server.'
+      'AI chat tools are not configured. Save an API key in Settings first. If the backend settings service is unavailable, set QUORVEX_LLM_API_KEY or OPENAI_API_KEY for this server.'
     );
   }
 
   try {
     const modelMessages = await convertToModelMessages(recentMessages);
-    const { provider, selectedModelId, providerName } = useHermes
-      ? { ...getActiveHermesProvider(runtimeSettings), selectedModelId: runtimeSettings?.hermes_model || HERMES_MODEL_ID, providerName: 'Hermes' }
-      : useAnthropic
-        ? { ...getActiveProvider(runtimeSettings), selectedModelId: modelId, providerName: 'Anthropic' }
-        : {
-            ...getActiveOpenAIProvider(runtimeSettings),
-            selectedModelId: runtimeSettings?.chat_model || runtimeSettings?.model_tiers?.chat || runtimeSettings?.standard_model || OPENAI_MODEL_ID,
-            providerName: 'OpenAI',
-          };
+    const { provider, selectedModelId, providerName } = useAnthropic
+      ? { ...getActiveProvider(runtimeSettings), selectedModelId: modelId, providerName: 'Anthropic' }
+      : {
+          ...getActiveOpenAIProvider(runtimeSettings),
+          selectedModelId: runtimeSettings?.chat_model || runtimeSettings?.model_tiers?.chat || runtimeSettings?.standard_model || OPENAI_MODEL_ID,
+          providerName: 'OpenAI',
+        };
     const supportsThinking = useAnthropic && supportsExtendedThinking(selectedModelId);
 
     console.info(

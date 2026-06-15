@@ -60,7 +60,7 @@ async def test_native_healer_uses_agent_runner_with_tool_deep(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_healer_format_retry_reuses_session_without_browser_tools(
+async def test_healer_format_retry_uses_clean_artifact_turn_without_browser_tools(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("MEMORY_ENABLED", "false")
@@ -106,7 +106,8 @@ async def test_healer_format_retry_reuses_session_without_browser_tools(
     assert retry_kwargs["tools"] == []
     assert retry_kwargs["requires_live_browser"] is False
     assert retry_kwargs["force_direct_execution"] is True
-    assert retry_kwargs["resume_session_id"] == "heal-session-1"
+    assert retry_kwargs["resume_session_id"] is None
+    assert retry_kwargs["continue_conversation"] is False
 
 
 def test_truncate_middle_keeps_head_and_tail():
@@ -186,8 +187,8 @@ def test_healer_prompt_includes_failed_test_metadata(monkeypatch):
     assert "Title: `can submit form`" in prompt
     assert "call `test_debug` scoped to this file" in prompt
     assert "Only after `test_debug` has paused" in prompt
-    assert "Run the test again with `test_run`" in prompt
-    assert "browser_close" not in prompt
+    assert "`test_run` for final pass/fail confirmation" in prompt
+    assert "Do not call `browser_close`" in prompt
 
 
 def test_healer_prompt_uses_failed_code_frame_by_default(monkeypatch):

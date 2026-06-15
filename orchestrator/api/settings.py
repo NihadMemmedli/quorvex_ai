@@ -40,11 +40,6 @@ class Settings(BaseModel):
     model_tiers: dict[str, str] | None = None
     agent_runtime: str | None = None
     assistant_runtime: str | None = None
-    hermes_enabled: bool | None = None
-    hermes_api_url: str | None = None
-    hermes_api_key: str | None = None
-    hermes_model: str | None = None
-    hermes_sync_provider: bool | None = True
 
 
 class SettingsConnectionResult(BaseModel):
@@ -52,23 +47,6 @@ class SettingsConnectionResult(BaseModel):
     model_name: str
     base_url: str
     message: str
-    latency_ms: int | None = None
-
-
-class HermesConnectionResult(BaseModel):
-    ok: bool
-    reachable: bool
-    status: str
-    message: str
-    api_url: str
-    model: str
-    upstream_provider: str
-    upstream_model: str
-    hermes_home: str
-    config_path: str
-    env_path: str
-    config_exists: bool
-    env_exists: bool
     latency_ms: int | None = None
 
 
@@ -84,18 +62,16 @@ MODEL_ENV_KEYS = (
     *CANONICAL_MODEL_ENV.values(),
 )
 DEFAULT_ANTHROPIC_BASE_URL = DEFAULT_BASE_URL
-DEFAULT_HERMES_API_URL = "http://hermes:8642"
-DEFAULT_HERMES_MODEL = "hermes-agent"
-HERMES_RUNTIME_ALIASES = {
+RUNTIME_ALIASES = {
     "claude": "claude_sdk",
     "claude_sdk": "claude_sdk",
     "claude-agent-sdk": "claude_sdk",
-    "hermes": "hermes",
-    "hermes_agent": "hermes",
-    "hermes-agent": "hermes",
+    "hermes": "claude_sdk",
+    "hermes_agent": "claude_sdk",
+    "hermes-agent": "claude_sdk",
 }
 ASSISTANT_RUNTIME_ALIASES = {
-    **HERMES_RUNTIME_ALIASES,
+    **RUNTIME_ALIASES,
     "openai": "openai",
     "openai_sdk": "openai",
     "openai-sdk": "openai",
@@ -107,12 +83,6 @@ def _env_file_path() -> Path:
     if override:
         return Path(override)
     return ENV_FILE
-
-
-def _runtime_data_dir() -> Path:
-    if os.environ.get("QUORVEX_SETTINGS_ENV_FILE"):
-        return _env_file_path().parent
-    return ENV_FILE.parent / "data"
 
 
 def _read_env_file() -> dict:
@@ -217,31 +187,10 @@ def _infer_provider(base_url: str | None) -> str:
     return infer_display_provider(base_url)
 
 
-def _infer_hermes_provider(llm_provider: str, base_url: str | None) -> str:
-    if llm_provider == "openrouter":
-        return "openrouter"
-    if llm_provider == "zai":
-        return "zai"
-    if llm_provider == "anthropic":
-        return "anthropic"
-    if llm_provider == "openai":
-        return "openai"
-    base_url_lower = (base_url or "").lower()
-    if "openrouter.ai" in base_url_lower:
-        return "openrouter"
-    if "api.z.ai" in base_url_lower or "bigmodel.cn" in base_url_lower:
-        return "zai"
-    if "anthropic.com" in base_url_lower:
-        return "anthropic"
-    if "api.openai.com" in base_url_lower:
-        return "openai"
-    return "custom"
-
-
 def _normalize_runtime(value: str | None) -> str:
     if not value:
         return "claude_sdk"
-    return HERMES_RUNTIME_ALIASES.get(value.strip().lower(), "claude_sdk")
+    return RUNTIME_ALIASES.get(value.strip().lower(), "claude_sdk")
 
 
 def _normalize_assistant_runtime(value: str | None) -> str:
@@ -256,15 +205,6 @@ def _is_truthy(value: str | None, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _hermes_config_dir() -> Path:
-    return _runtime_data_dir() / "hermes"
-
-
-def _yaml_scalar(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
-
-
 def _chat_completions_url(base_url: str) -> str:
     base = base_url.rstrip("/")
     if base.endswith("/v1"):
@@ -272,113 +212,6 @@ def _chat_completions_url(base_url: str) -> str:
     return f"{base}/v1/chat/completions"
 
 
-def _write_hermes_provider_bundle(active: dict[str, str], env_vars: dict[str, str]) -> dict[str, str]:
-    """Write a Hermes home bundle that mirrors Quorvex's active model provider."""
-    provider = _infer_hermes_provider(active["llm_provider"], active["base_url"])
-    model_name = active.get("standard_model") or active["model_name"] or "glm-5.1"
-    api_key = active["api_key"]
-    base_url = (active["base_url"] or "").rstrip("/")
-    config_dir = _hermes_config_dir()
-    config_dir.mkdir(parents=True, exist_ok=True)
-
-    hermes_env: dict[str, str] = {
-        "API_SERVER_ENABLED": "true",
-        "API_SERVER_HOST": "127.0.0.1",
-        "API_SERVER_PORT": "8642",
-        "API_SERVER_KEY": env_vars.get("HERMES_API_KEY", ""),
-    }
-    if provider == "openrouter":
-        hermes_env["OPENROUTER_API_KEY"] = api_key
-    elif provider == "zai":
-        hermes_env["GLM_API_KEY"] = api_key
-    elif provider == "anthropic":
-        hermes_env["ANTHROPIC_API_KEY"] = api_key
-    elif provider == "openai":
-        hermes_env["OPENAI_API_KEY"] = api_key
-    else:
-        hermes_env["OPENAI_API_KEY"] = api_key
-        if base_url:
-            hermes_env["OPENAI_BASE_URL"] = base_url
-
-    env_lines = [f"{key}={value}" for key, value in hermes_env.items()]
-    (config_dir / ".env").write_text("\n".join(env_lines) + "\n")
-
-    config_lines = [
-        "model:",
-        f"  provider: {_yaml_scalar(provider)}",
-        f"  default: {_yaml_scalar(model_name)}",
-    ]
-    if provider == "custom" and base_url:
-        config_lines.append(f"  base_url: {_yaml_scalar(base_url)}")
-    config_lines.extend(
-        [
-            "mcp_servers:",
-            "  quorvex_playwright:",
-            "    command: npx",
-            "    args:",
-            "      - -y",
-            "      - '@playwright/mcp@0.0.75'",
-            "      - --browser",
-            "      - chromium",
-            "      - --isolated",
-            "    env:",
-            "      DISPLAY: ':99'",
-            "      HEADLESS: 'false'",
-            "terminal:",
-            "  backend: docker",
-            f"  cwd: {_yaml_scalar(str(_runtime_data_dir().parent))}",
-            "  docker_mount_cwd_to_workspace: true",
-        ]
-    )
-    (config_dir / "config.yaml").write_text("\n".join(config_lines) + "\n")
-
-    env_vars["HERMES_HOME"] = str(config_dir)
-    env_vars["HERMES_UPSTREAM_PROVIDER"] = provider
-    env_vars["HERMES_UPSTREAM_MODEL"] = model_name
-    return {
-        "provider": provider,
-        "model": model_name,
-        "home": str(config_dir),
-        "config_path": str(config_dir / "config.yaml"),
-        "env_path": str(config_dir / ".env"),
-    }
-
-
-def _check_hermes_gateway(active: dict[str, str] | None = None) -> dict[str, Any]:
-    active = active or _active_settings()
-    if not _is_truthy(active.get("hermes_enabled"), default=False):
-        return {
-            "reachable": False,
-            "status": "disabled",
-            "message": "Hermes is disabled.",
-        }
-
-    url = (active.get("hermes_api_url") or DEFAULT_HERMES_API_URL).rstrip("/")
-    headers = {}
-    if active.get("hermes_api_key"):
-        headers["Authorization"] = f"Bearer {active['hermes_api_key']}"
-
-    try:
-        with httpx.Client(timeout=1.5) as client:
-            response = client.get(f"{url}/v1/runs", headers=headers)
-        if response.status_code in {401, 403}:
-            return {
-                "reachable": False,
-                "status": "unauthorized",
-                "message": f"Hermes API rejected the configured bearer token with HTTP {response.status_code}.",
-            }
-        reachable = 200 <= response.status_code < 300
-        return {
-            "reachable": reachable,
-            "status": "reachable" if reachable else "error",
-            "message": f"Hermes API responded with HTTP {response.status_code}.",
-        }
-    except Exception as exc:
-        return {
-            "reachable": False,
-            "status": "unreachable",
-            "message": f"Hermes API is not reachable at {url}: {exc}",
-        }
 
 
 def _active_settings_from_env(env_vars: dict[str, str] | None = None) -> dict[str, str]:
@@ -389,7 +222,7 @@ def _active_settings_from_env(env_vars: dict[str, str] | None = None) -> dict[st
     base_url = selection.base_url or DEFAULT_ANTHROPIC_BASE_URL
     model_name = selection.model
     provider_label = env_vars.get("QUORVEX_LLM_PROVIDER") or ""
-    if provider_label in {"anthropic_compatible", "openai_compatible"}:
+    if provider_label in {"anthropic_compatible", "openai_compatible", "hermes", "hermes_agent", "hermes-agent"}:
         provider_label = _infer_provider(base_url)
     if selection.provider == "anthropic_compatible":
         model_name = (
@@ -436,28 +269,16 @@ def _active_settings_from_env(env_vars: dict[str, str] | None = None) -> dict[st
             or os.environ.get("QUORVEX_ASSISTANT_RUNTIME")
             or agent_runtime
         ),
-        "hermes_enabled": str(
-            _is_truthy(env_vars.get("HERMES_ENABLED") or os.environ.get("HERMES_ENABLED"), default=False)
-        ).lower(),
-        "hermes_api_url": env_vars.get("HERMES_API_URL")
-        or os.environ.get("HERMES_API_URL", DEFAULT_HERMES_API_URL),
-        "hermes_api_key": env_vars.get("HERMES_API_KEY") or os.environ.get("HERMES_API_KEY", ""),
-        "hermes_model": env_vars.get("HERMES_MODEL") or os.environ.get("HERMES_MODEL", DEFAULT_HERMES_MODEL),
-        "hermes_sync_provider": env_vars.get("HERMES_SYNC_PROVIDER")
-        or os.environ.get("HERMES_SYNC_PROVIDER", "true"),
-        "hermes_upstream_provider": env_vars.get("HERMES_UPSTREAM_PROVIDER")
-        or os.environ.get("HERMES_UPSTREAM_PROVIDER", ""),
-        "hermes_upstream_model": env_vars.get("HERMES_UPSTREAM_MODEL") or os.environ.get("HERMES_UPSTREAM_MODEL", ""),
-        "hermes_home": env_vars.get("HERMES_HOME") or os.environ.get("HERMES_HOME", ""),
     }
 
 
 def _settings_to_env_vars(settings: dict[str, Any]) -> dict[str, str]:
     env_vars: dict[str, str] = {}
     provider = str(settings.get("llm_provider") or "zai")
+    if provider in {"hermes", "hermes_agent", "hermes-agent"}:
+        provider = "zai"
     base_url = str(settings.get("base_url") or DEFAULT_ANTHROPIC_BASE_URL).rstrip("/")
     api_key = _decrypt_runtime_secret(str(settings.get("api_key_encrypted") or ""))
-    hermes_api_key = _decrypt_runtime_secret(str(settings.get("hermes_api_key_encrypted") or ""))
 
     env_vars["QUORVEX_LLM_PROVIDER"] = provider
     env_vars["QUORVEX_LLM_BASE_URL"] = base_url
@@ -505,19 +326,6 @@ def _settings_to_env_vars(settings: dict[str, Any]) -> dict[str, str]:
     env_vars["QUORVEX_ASSISTANT_RUNTIME"] = _normalize_assistant_runtime(
         str(settings.get("assistant_runtime") or env_vars["QUORVEX_AGENT_RUNTIME"])
     )
-    env_vars["HERMES_ENABLED"] = "true" if bool(settings.get("hermes_enabled")) else "false"
-    env_vars["HERMES_API_URL"] = str(settings.get("hermes_api_url") or DEFAULT_HERMES_API_URL).rstrip("/")
-    env_vars["HERMES_MODEL"] = str(settings.get("hermes_model") or DEFAULT_HERMES_MODEL)
-    env_vars["HERMES_SYNC_PROVIDER"] = "true" if bool(settings.get("hermes_sync_provider", True)) else "false"
-    if hermes_api_key:
-        env_vars["HERMES_API_KEY"] = hermes_api_key
-    for source_key, env_key in (
-        ("hermes_home", "HERMES_HOME"),
-        ("hermes_upstream_provider", "HERMES_UPSTREAM_PROVIDER"),
-        ("hermes_upstream_model", "HERMES_UPSTREAM_MODEL"),
-    ):
-        if settings.get(source_key):
-            env_vars[env_key] = str(settings[source_key])
     return env_vars
 
 
@@ -535,14 +343,6 @@ def _settings_from_active(active: dict[str, str]) -> dict[str, Any]:
         "api_key_encrypted": _encrypt_runtime_secret(active["api_key"]) if active.get("api_key") else "",
         "agent_runtime": active["agent_runtime"],
         "assistant_runtime": active["assistant_runtime"],
-        "hermes_enabled": _is_truthy(active["hermes_enabled"]),
-        "hermes_api_url": active["hermes_api_url"],
-        "hermes_api_key_encrypted": _encrypt_runtime_secret(active["hermes_api_key"]) if active.get("hermes_api_key") else "",
-        "hermes_model": active["hermes_model"],
-        "hermes_sync_provider": _is_truthy(active["hermes_sync_provider"], default=True),
-        "hermes_upstream_provider": active["hermes_upstream_provider"],
-        "hermes_upstream_model": active["hermes_upstream_model"],
-        "hermes_home": active["hermes_home"],
     }
 
 
@@ -645,14 +445,6 @@ def _apply_runtime_settings(env_vars: dict[str, str], new_api_key: str | None = 
     for key in (
         "QUORVEX_AGENT_RUNTIME",
         "QUORVEX_ASSISTANT_RUNTIME",
-        "HERMES_ENABLED",
-        "HERMES_API_URL",
-        "HERMES_API_KEY",
-        "HERMES_MODEL",
-        "HERMES_HOME",
-        "HERMES_SYNC_PROVIDER",
-        "HERMES_UPSTREAM_PROVIDER",
-        "HERMES_UPSTREAM_MODEL",
     ):
         if key in env_vars:
             os.environ[key] = env_vars[key]
@@ -668,8 +460,6 @@ def _apply_runtime_settings(env_vars: dict[str, str], new_api_key: str | None = 
 
 def _settings_response(env_vars: dict[str, str] | None = None) -> dict[str, Any]:
     active = _active_settings(env_vars)
-    hermes_home = active["hermes_home"] or str(_hermes_config_dir())
-    hermes_status = _check_hermes_gateway(active)
     return {
         "llm_provider": active["llm_provider"],
         "base_url": active["base_url"],
@@ -691,19 +481,6 @@ def _settings_response(env_vars: dict[str, str] | None = None) -> dict[str, Any]
         "api_key": _mask_api_key(active["api_key"]),
         "agent_runtime": active["agent_runtime"],
         "assistant_runtime": active["assistant_runtime"],
-        "hermes_enabled": _is_truthy(active["hermes_enabled"]),
-        "hermes_api_url": active["hermes_api_url"],
-        "hermes_api_key": _mask_api_key(active["hermes_api_key"]),
-        "hermes_model": active["hermes_model"],
-        "hermes_sync_provider": _is_truthy(active["hermes_sync_provider"], default=True),
-        "hermes_upstream_provider": active["hermes_upstream_provider"],
-        "hermes_upstream_model": active["hermes_upstream_model"],
-        "hermes_home": hermes_home,
-        "hermes_config_path": str(Path(hermes_home) / "config.yaml"),
-        "hermes_env_path": str(Path(hermes_home) / ".env"),
-        "hermes_reachable": hermes_status["reachable"],
-        "hermes_status": hermes_status["status"],
-        "hermes_status_message": hermes_status["message"],
     }
 
 
@@ -736,6 +513,8 @@ def _update_settings(new_settings: Settings, session: Session):
 
     runtime_settings = _settings_from_active(active)
     provider_value = new_settings.llm_provider or runtime_settings.get("llm_provider") or "zai"
+    if provider_value in {"hermes", "hermes_agent", "hermes-agent"}:
+        provider_value = "zai"
     runtime_settings["llm_provider"] = provider_value
 
     if new_settings.base_url:
@@ -790,15 +569,6 @@ def _update_settings(new_settings: Settings, session: Session):
         or str(runtime_settings.get("assistant_runtime") or runtime_settings["agent_runtime"])
     )
 
-    if new_settings.hermes_enabled is not None:
-        runtime_settings["hermes_enabled"] = new_settings.hermes_enabled
-    if new_settings.hermes_api_url:
-        runtime_settings["hermes_api_url"] = new_settings.hermes_api_url.rstrip("/")
-    if new_settings.hermes_model:
-        runtime_settings["hermes_model"] = new_settings.hermes_model
-    if new_settings.hermes_sync_provider is not None:
-        runtime_settings["hermes_sync_provider"] = new_settings.hermes_sync_provider
-
     new_api_key = None
     if new_settings.api_key and not _is_masked_api_key(new_settings.api_key):
         new_api_key = new_settings.api_key
@@ -806,97 +576,19 @@ def _update_settings(new_settings: Settings, session: Session):
     elif "api_key_encrypted" not in runtime_settings:
         runtime_settings["api_key_encrypted"] = ""
 
-    if new_settings.hermes_api_key and not _is_masked_api_key(new_settings.hermes_api_key):
-        runtime_settings["hermes_api_key_encrypted"] = _encrypt_runtime_secret(new_settings.hermes_api_key)
-    elif "hermes_api_key_encrypted" not in runtime_settings:
-        runtime_settings["hermes_api_key_encrypted"] = ""
-
     env_vars = _settings_to_env_vars(runtime_settings)
-    hermes_bundle = None
-    if _is_truthy(env_vars.get("HERMES_SYNC_PROVIDER"), default=True):
-        hermes_bundle = _write_hermes_provider_bundle(_active_settings_from_env(env_vars), env_vars)
-        runtime_settings["hermes_home"] = hermes_bundle["home"]
-        runtime_settings["hermes_upstream_provider"] = hermes_bundle["provider"]
-        runtime_settings["hermes_upstream_model"] = hermes_bundle["model"]
-        env_vars = _settings_to_env_vars(runtime_settings)
 
     _save_db_runtime_settings(session, runtime_settings)
     _write_env_file(env_vars)
     _apply_runtime_settings(env_vars, new_api_key=new_api_key)
 
     settings_response = _settings_response(env_vars)
-    if hermes_bundle:
-        settings_response.update(
-            {
-                "hermes_upstream_provider": hermes_bundle["provider"],
-                "hermes_upstream_model": hermes_bundle["model"],
-                "hermes_home": hermes_bundle["home"],
-                "hermes_config_path": hermes_bundle["config_path"],
-                "hermes_env_path": hermes_bundle["env_path"],
-            }
-        )
 
     return {
         "status": "success",
         "message": "Settings saved and applied.",
         "settings": settings_response,
     }
-
-
-@router.post("/settings/test-hermes", response_model=HermesConnectionResult)
-async def test_hermes_connection(session: Session = Depends(get_session)):
-    """Test the Hermes API server and generated Hermes home bundle."""
-    db_session, should_close = _coerce_session(session)
-    try:
-        active = _active_settings(session=db_session)
-    finally:
-        if should_close:
-            db_session.close()
-    hermes_home = active["hermes_home"] or str(_hermes_config_dir())
-    config_path = str(Path(hermes_home) / "config.yaml")
-    env_path = str(Path(hermes_home) / ".env")
-    started = time.monotonic()
-    gateway = _check_hermes_gateway(active)
-    latency_ms = int((time.monotonic() - started) * 1000)
-    config_exists = Path(config_path).exists()
-    env_exists = Path(env_path).exists()
-
-    if not _is_truthy(active["hermes_enabled"]):
-        message = "Hermes is disabled. Enable the Hermes backend before testing."
-    elif not gateway["reachable"]:
-        message = gateway["message"]
-    elif not config_exists or not env_exists:
-        missing = []
-        if not config_exists:
-            missing.append("config.yaml")
-        if not env_exists:
-            missing.append(".env")
-        message = f"Hermes API is reachable, but generated Hermes home is missing {', '.join(missing)}."
-    else:
-        upstream_model = active["hermes_upstream_model"]
-        upstream_suffix = f" ({upstream_model})" if upstream_model else ""
-        message = (
-            f"Hermes API is reachable and generated config is present for "
-            f"{active['hermes_upstream_provider'] or 'pending'}{upstream_suffix}."
-        )
-
-    ok = bool(_is_truthy(active["hermes_enabled"]) and gateway["reachable"] and config_exists and env_exists)
-    return HermesConnectionResult(
-        ok=ok,
-        reachable=bool(gateway["reachable"]),
-        status=str(gateway["status"]),
-        message=message,
-        api_url=(active["hermes_api_url"] or DEFAULT_HERMES_API_URL).rstrip("/"),
-        model=active["hermes_model"],
-        upstream_provider=active["hermes_upstream_provider"],
-        upstream_model=active["hermes_upstream_model"],
-        hermes_home=hermes_home,
-        config_path=config_path,
-        env_path=env_path,
-        config_exists=config_exists,
-        env_exists=env_exists,
-        latency_ms=latency_ms,
-    )
 
 
 @router.post("/settings/test-connection", response_model=SettingsConnectionResult)
@@ -1048,10 +740,7 @@ def get_runtime_chat_settings(
             db_session.close()
     active = _active_settings(env_vars)
     assistant_runtime = active["assistant_runtime"]
-    hermes_enabled = _is_truthy(active["hermes_enabled"])
-    if assistant_runtime == "hermes" and hermes_enabled:
-        route_provider = "hermes"
-    elif assistant_runtime == "openai" or active["llm_provider"] == "openai":
+    if assistant_runtime == "openai" or active["llm_provider"] == "openai":
         route_provider = "openai"
     else:
         route_provider = "anthropic"
@@ -1073,9 +762,5 @@ def get_runtime_chat_settings(
             "chat": active["chat_model"],
             "embedding": active["embedding_model"],
         },
-        "hermes_enabled": hermes_enabled,
-        "hermes_api_url": active["hermes_api_url"],
-        "hermes_api_key": active["hermes_api_key"],
-        "hermes_model": active["hermes_model"],
         "source": "settings",
     }

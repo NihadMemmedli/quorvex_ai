@@ -1,5 +1,6 @@
-claude-agent-sdk==0.2.95
+claude-agent-sdk==0.2.101
 jsonschema>=4.0.0
+PyYAML>=6.0.0
 python-dotenv>=1.0.0
 black
 pytest

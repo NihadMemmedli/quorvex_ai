@@ -111,7 +111,7 @@ def main() -> int:
     values.setdefault("ALLOW_REGISTRATION", "false")
     values["NEXT_PUBLIC_API_URL"] = ""
     values["QUORVEX_PUBLIC_API_URL"] = ""
-    values.setdefault("NO_PROXY", "localhost,127.0.0.1,db,redis,minio,zap,backend,frontend,temporal,hermes")
+    values.setdefault("NO_PROXY", "localhost,127.0.0.1,db,redis,minio,zap,backend,frontend,temporal")
 
     public_url = _company_url_from_env()
     if public_url:
@@ -127,7 +127,7 @@ def main() -> int:
         if _is_placeholder(values.get("VNC_PUBLIC_WS_URL")):
             values["VNC_PUBLIC_WS_URL"] = ""
 
-    for key in ("ZAI_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HERMES_API_KEY"):
+    for key in ("ZAI_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         if os.environ.get(key):
             values[key] = os.environ[key]
         elif _is_placeholder(values.get(key)):

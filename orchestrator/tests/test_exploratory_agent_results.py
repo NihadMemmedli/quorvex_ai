@@ -263,7 +263,7 @@ def test_process_results_keeps_valid_flow_candidates(monkeypatch):
     assert result["diagnostics"]["dedupe_stats"]["duplicate_flows_removed"] == 1
 
 
-def test_process_results_hermes_style_tool_calls_match_structured_result(monkeypatch):
+def test_process_results_runtime_tool_calls_match_structured_result(monkeypatch):
     monkeypatch.setenv("MEMORY_ENABLED", "false")
     agent = _agent()
 
@@ -273,7 +273,7 @@ def test_process_results_hermes_style_tool_calls_match_structured_result(monkeyp
             "url": "https://example.com",
             "time_limit_minutes": 1,
             "project_id": "default",
-            "_runtime_diagnostics": {"runtime": "hermes"},
+            "_runtime_diagnostics": {"runtime": "claude_sdk"},
             "_runtime_tool_calls": [
                 {"name": "browser_navigate", "success": True, "input": {"url": "https://example.com"}},
                 {"name": "browser_click", "success": True, "input": {"target": "Docs"}},
@@ -281,7 +281,7 @@ def test_process_results_hermes_style_tool_calls_match_structured_result(monkeyp
         },
     )
 
-    assert result["diagnostics"]["runtime"] == "hermes"
+    assert result["diagnostics"]["runtime"] == "claude_sdk"
     assert result["total_flows_discovered"] == 1
     assert result["coverage"]["flows_discovered"] == 1
 
