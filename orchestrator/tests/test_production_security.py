@@ -130,9 +130,9 @@ class TestFileUploadSecurity:
     """Test file upload security validations."""
 
     def test_upload_constants_defined(self):
-        """Upload security constants should be defined in main.py."""
-        main_py = Path(__file__).parent.parent / "api" / "main.py"
-        content = main_py.read_text()
+        """Upload security constants should be defined in the TestRail file router."""
+        testrail_files_py = Path(__file__).parent.parent / "api" / "testrail_files.py"
+        content = testrail_files_py.read_text()
 
         # Check for size limit
         assert "MAX_UPLOAD_SIZE_BYTES" in content
@@ -144,8 +144,8 @@ class TestFileUploadSecurity:
 
     def test_path_traversal_protection(self):
         """File names should be sanitized to prevent path traversal."""
-        main_py = Path(__file__).parent.parent / "api" / "main.py"
-        content = main_py.read_text()
+        testrail_files_py = Path(__file__).parent.parent / "api" / "testrail_files.py"
+        content = testrail_files_py.read_text()
 
         # Should use Path().name to strip directory components
         assert "Path(fname).name" in content or "path traversal" in content.lower()
