@@ -79,6 +79,7 @@ from utils.playwright_mcp import (
 from utils.project_utils import derive_project_id_from_url
 
 from . import (
+    agent_routes,
     analytics,
     api_testing,
     auth,
@@ -1240,7 +1241,6 @@ def _agent_run_queue_summary(run: AgentRun) -> dict[str, Any]:
     }
 
 
-@app.get("/api/agents/queue-status")
 async def get_agent_queue_status():
     """Get current agent queue status.
 
@@ -1427,7 +1427,6 @@ async def get_agent_queue_status():
     }
 
 
-@app.post("/api/agents/queue-flush")
 async def flush_agent_queue():
     """Flush the agent queue — cancel queued tasks and fail running ones.
 
@@ -1475,13 +1474,11 @@ async def _clean_stale_agent_queue_tasks() -> dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-@app.post("/api/agents/queue-clean-stale")
 async def clean_stale_agent_queue_tasks():
     """Cancel stale or orphaned agent queue tasks."""
     return await _clean_stale_agent_queue_tasks()
 
 
-@app.post("/api/agents/queue-clean-orphans")
 async def clean_orphaned_agent_queue_tasks():
     """Compatibility alias for stale/orphaned agent queue cleanup."""
     return await _clean_stale_agent_queue_tasks()
@@ -6637,7 +6634,6 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             raise
 
 
-@app.post("/api/agents/runs")
 async def run_agent(request: AgentRunRequest, session: Session = Depends(get_session)):
     """Run an autonomous agent through a durable Temporal workflow."""
     # Check resource availability
@@ -6718,7 +6714,6 @@ async def run_agent(request: AgentRunRequest, session: Session = Depends(get_ses
     return response
 
 
-@app.get("/api/agents/tools/catalog")
 def list_agent_tool_catalog(session: Session = Depends(get_session)):
     tools = _sync_agent_tool_catalog(session)
     serialized = [_serialize_agent_tool(tool) for tool in tools]
@@ -6728,7 +6723,6 @@ def list_agent_tool_catalog(session: Session = Depends(get_session)):
     return {"tools": serialized, "categories": categories}
 
 
-@app.get("/api/agents/definitions")
 def list_agent_definitions(
     project_id: str | None = Query(default=None),
     include_archived: bool = Query(default=False),
@@ -6747,7 +6741,6 @@ def list_agent_definitions(
     return [_serialize_agent_definition(item, tools_by_id) for item in session.exec(statement).all()]
 
 
-@app.post("/api/agents/definitions")
 async def create_agent_definition(
     request: AgentDefinitionRequest,
     session: Session = Depends(get_session),
@@ -6779,7 +6772,6 @@ async def create_agent_definition(
     return _serialize_agent_definition(definition)
 
 
-@app.get("/api/agents/definitions/{definition_id}")
 def get_agent_definition(
     definition_id: str,
     project_id: str | None = Query(default=None),
@@ -6790,7 +6782,6 @@ def get_agent_definition(
     return _serialize_agent_definition(_get_agent_definition_or_404(definition_id, project_id, session), tools_by_id)
 
 
-@app.put("/api/agents/definitions/{definition_id}")
 async def update_agent_definition(
     definition_id: str,
     request: AgentDefinitionUpdateRequest,
@@ -6835,7 +6826,6 @@ async def update_agent_definition(
     return _serialize_agent_definition(definition)
 
 
-@app.delete("/api/agents/definitions/{definition_id}")
 async def archive_agent_definition(
     definition_id: str,
     project_id: str | None = Query(default=None),
@@ -6851,7 +6841,6 @@ async def archive_agent_definition(
     return {"status": "archived", "id": definition.id}
 
 
-@app.post("/api/agents/definitions/{definition_id}/runs")
 async def run_agent_definition(
     definition_id: str,
     request: CustomAgentRunRequest,
@@ -6966,7 +6955,6 @@ async def run_agent_definition(
     return response
 
 
-@app.get("/api/agents/runs")
 def list_agent_runs(
     project_id: str | None = None,
     status: str | None = Query(default=None, description="Status filter: all, active, completed, failed, cancelled, paused, or exact status"),
@@ -7025,7 +7013,6 @@ def list_agent_runs(
     }
 
 
-@app.get("/api/agents/runs/{id}")
 async def get_agent_run(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7042,7 +7029,6 @@ async def get_agent_run(
     return payload
 
 
-@app.get("/api/agents/runs/{id}/coding/diff")
 def get_coding_agent_diff(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7079,7 +7065,6 @@ def get_coding_agent_diff(
     }
 
 
-@app.post("/api/agents/runs/{id}/coding/reject")
 async def reject_coding_agent_diff(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7117,7 +7102,6 @@ async def reject_coding_agent_diff(
     return {"status": "rejected", "run_id": id}
 
 
-@app.post("/api/agents/runs/{id}/coding/apply")
 async def apply_coding_agent_diff(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7183,7 +7167,6 @@ async def apply_coding_agent_diff(
     return {"status": "applied", "run_id": id, "affected_files": apply_result.get("affected_files") or []}
 
 
-@app.get("/api/agents/runs/{id}/events")
 def list_agent_run_events_api(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7211,7 +7194,6 @@ def list_agent_run_events_api(
     return [event_to_response(event) for event in events]
 
 
-@app.get("/api/agents/runs/{id}/events/stream")
 async def stream_agent_run_events_api(
     request: Request,
     id: str,
@@ -7256,7 +7238,6 @@ async def stream_agent_run_events_api(
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-@app.get("/api/agents/runs/{id}/trace")
 async def get_agent_run_trace_api(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7272,7 +7253,6 @@ async def get_agent_run_trace_api(
     return await trace_bundle_for_run(run=run, session=session)
 
 
-@app.get("/api/agents/runs/{id}/trace/spans")
 def list_agent_run_trace_spans_api(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7308,7 +7288,6 @@ def list_agent_run_trace_spans_api(
     return [serialize_span(span) for span in spans]
 
 
-@app.get("/api/agents/runs/{id}/trace/export")
 async def export_agent_run_trace_api(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7334,14 +7313,12 @@ async def export_agent_run_trace_api(
     return response
 
 
-@app.get("/api/agents/temporal/health")
 async def get_agent_temporal_health():
     from orchestrator.services.temporal_client import check_agent_run_temporal_health
 
     return await check_agent_run_temporal_health()
 
 
-@app.post("/api/agents/runs/{id}/pause")
 async def pause_agent_run(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7376,7 +7353,6 @@ async def pause_agent_run(
     return _serialize_agent_run(run, session)
 
 
-@app.post("/api/agents/runs/{id}/resume")
 async def resume_agent_run(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7419,7 +7395,6 @@ async def resume_agent_run(
     return _serialize_agent_run(run, session)
 
 
-@app.post("/api/agents/runs/{id}/cancel")
 async def cancel_agent_run(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7457,7 +7432,6 @@ async def cancel_agent_run(
     return _serialize_agent_run(run, session)
 
 
-@app.post("/api/agents/runs/{id}/retry")
 async def retry_agent_run(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -7565,7 +7539,6 @@ async def retry_agent_run(
     }
 
 
-@app.get("/api/agents/runs/{id}/report")
 def get_agent_run_report(
     id: str,
     project_id: str = Query(..., description="Project ID for filtering"),
@@ -7593,7 +7566,6 @@ def get_agent_run_report(
     }
 
 
-@app.patch("/api/agents/runs/{run_id}/report")
 def update_agent_run_report_overview(
     run_id: str,
     request: UpdateAgentReportOverviewRequest,
@@ -7623,7 +7595,6 @@ def update_agent_run_report_overview(
     }
 
 
-@app.patch("/api/agents/runs/{run_id}/report-items/{item_id}")
 def update_agent_run_report_item(
     run_id: str,
     item_id: str,
@@ -7660,7 +7631,6 @@ def update_agent_run_report_item(
     }
 
 
-@app.get("/api/agents/reports/search")
 def search_agent_reports(
     project_id: str | None = Query(default=None),
     query: str | None = Query(default=None),
@@ -7721,7 +7691,6 @@ def search_agent_reports(
     return {"items": results, "count": len(results)}
 
 
-@app.post("/api/agents/runs/{run_id}/report-requirements/import")
 def import_agent_report_requirements(
     run_id: str,
     request: ImportReportRequirementsRequest,
@@ -7842,7 +7811,6 @@ def import_agent_report_requirements(
 # ========= Enhanced Exploratory Testing Endpoints =========
 
 
-@app.post("/api/agents/exploratory")
 async def run_exploratory_agent(
     request: ExploratoryRunRequest, session: Session = Depends(get_session)
 ):
@@ -7930,7 +7898,6 @@ async def run_exploratory_agent(
     }
 
 
-@app.post("/api/agents/exploratory/{run_id}/synthesize")
 async def synthesize_specs(run_id: str, session: Session = Depends(get_session)):
     """
     Generate .md test specs from exploration results.
@@ -8037,7 +8004,6 @@ def _verify_exploration_run_project(run_id: str, project_id: str | None, session
     return exploration_run
 
 
-@app.get("/api/agents/exploratory/{run_id}/specs")
 async def get_exploration_specs(
     run_id: str,
     project_id: str | None = Query(default=None, description="Project ID for verification"),
@@ -8073,7 +8039,6 @@ async def get_exploration_specs(
     raise HTTPException(status_code=404, detail="No completed spec synthesis found")
 
 
-@app.get("/api/agents/exploratory/{run_id}/flows/{flow_id}")
 async def get_flow_details(
     run_id: str,
     flow_id: str,
@@ -8135,7 +8100,6 @@ async def get_flow_details(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.put("/api/agents/exploratory/{run_id}/flows/{flow_id}")
 async def update_flow(
     run_id: str,
     flow_id: str,
@@ -8211,7 +8175,6 @@ async def update_flow(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.delete("/api/agents/exploratory/{run_id}/flows/{flow_id}")
 async def delete_flow(
     run_id: str,
     flow_id: str,
@@ -8284,7 +8247,6 @@ async def delete_flow(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.post("/api/agents/exploratory/{run_id}/analyze-prerequisites")
 async def analyze_prerequisites(
     run_id: str,
     force_reanalyze: bool = False,
@@ -8388,7 +8350,6 @@ async def analyze_prerequisites(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.post("/api/agents/exploratory/{run_id}/flows/{flow_id}/spec")
 async def generate_flow_spec(
     run_id: str,
     flow_id: str,
@@ -9294,7 +9255,6 @@ async def _run_flow_spec_generation(
 
 
 # NOTE: Status endpoint must be defined BEFORE /{run_id} routes to avoid path conflicts
-@app.get("/api/agents/exploratory/flow-spec-jobs/{job_id}")
 async def get_flow_spec_job_status(job_id: str):
     """Get status of a flow spec generation job."""
     job = _flow_spec_jobs.get(job_id)
@@ -9317,7 +9277,6 @@ async def get_flow_spec_job_status(job_id: str):
     return response
 
 
-@app.post("/api/agents/runs/{run_id}/report-items/{item_id}/generate-spec")
 async def generate_report_item_spec(
     run_id: str,
     item_id: str,
@@ -9542,7 +9501,6 @@ async def generate_report_item_spec(
     }
 
 
-@app.post("/api/agents/exploratory/{run_id}/flows/{flow_id}/generate")
 async def generate_flow_test(
     run_id: str,
     flow_id: str,
@@ -9763,7 +9721,6 @@ async def generate_flow_test(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.get("/api/agents/sessions")
 async def list_sessions():
     """List saved authentication sessions."""
     from agents.auth_handler import AuthHandler
@@ -9774,7 +9731,6 @@ async def list_sessions():
     return {"sessions": sessions}
 
 
-@app.post("/api/agents/sessions/{session_id}")
 async def create_session(session_id: str, cookies: list[dict[str, Any]], storage: dict[str, Any]):
     """
     Save an authentication session for future use.
@@ -9793,7 +9749,6 @@ async def create_session(session_id: str, cookies: list[dict[str, Any]], storage
         raise HTTPException(status_code=400, detail=result.get("error"))
 
 
-@app.delete("/api/agents/sessions/{session_id}")
 async def delete_session(session_id: str):
     """Delete a saved authentication session."""
     from agents.auth_handler import AuthHandler
@@ -9803,6 +9758,10 @@ async def delete_session(session_id: str):
         return {"status": "deleted", "session_id": session_id}
     else:
         raise HTTPException(status_code=404, detail="Session not found")
+
+
+agent_routes.register_agent_routes(sys.modules[__name__])
+app.include_router(agent_routes.router)  # Agent queue, run, definition, report, and exploratory endpoints
 
 
 # ========= Database Backup API =========

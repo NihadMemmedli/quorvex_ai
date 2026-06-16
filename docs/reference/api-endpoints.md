@@ -777,7 +777,7 @@ Not intended for production use.
 
 ## Complete Route Coverage Index
 
-This generated index is used by `scripts/check_docs_drift.py` to keep the endpoint reference aligned with FastAPI decorators. The curated sections above explain the main product surfaces; this table provides full method/path coverage.
+This generated index is used by `scripts/check_docs_drift.py` to keep the endpoint reference aligned with FastAPI decorators and literal route tables. The curated sections above explain the main product surfaces; this table provides full method/path coverage.
 
 | Method | Path | Source |
 |--------|------|--------|
