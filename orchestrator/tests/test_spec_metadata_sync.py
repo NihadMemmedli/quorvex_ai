@@ -7,12 +7,28 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from orchestrator.api.main import sync_spec_metadata_from_file
 from orchestrator.api.models_db import SpecMetadata, get_spec_metadata
+from orchestrator.api.spec_metadata import clean_metadata_tags, merge_metadata_tags
 
 
 def _session():
     engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(engine)
     return Session(engine)
+
+
+def test_clean_metadata_tags_normalizes_values_without_reordering():
+    tags = [" Browser ", "smoke", "browser", "", None, "API"]
+
+    assert clean_metadata_tags(tags, lowercase=True) == ["browser", "smoke", "api"]
+    assert clean_metadata_tags(tags) == ["Browser", "smoke", "API"]
+    assert clean_metadata_tags("browser") == []
+
+
+def test_merge_metadata_tags_preserves_existing_case_and_appends_new_seed_tags():
+    existing_tags = ["Custom", "api"]
+    seed_tags = ["API", " smoke ", "Regression", "custom"]
+
+    assert merge_metadata_tags(existing_tags, seed_tags) == ["Custom", "api", "smoke", "regression"]
 
 
 def test_seed_sync_creates_missing_metadata_row(tmp_path):

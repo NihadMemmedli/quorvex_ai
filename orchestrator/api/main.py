@@ -147,6 +147,8 @@ from .models_db import SpecMetadata as DBSpecMetadata
 from .models_db import TestRun as DBTestRun
 from .models_db import get_or_create_spec_metadata, get_spec_metadata as get_db_spec_metadata, normalize_project_id
 from .process_manager import ProcessManager, get_process_manager
+from .spec_metadata import clean_metadata_tags as _clean_metadata_tags
+from .spec_metadata import merge_metadata_tags as _merge_metadata_tags
 
 # Initialize logging
 setup_logging(level="INFO", console=True)
@@ -196,40 +198,6 @@ _MAX_CODE_CACHE_SIZE = 200
 
 # Background task handles for graceful shutdown
 _BACKGROUND_TASKS: list[asyncio.Task] = []
-
-
-def _clean_metadata_tags(tags: Any, *, lowercase: bool = False) -> list[str]:
-    """Normalize seed/user tags while preserving first-seen ordering."""
-    if not isinstance(tags, list):
-        return []
-
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    for tag in tags:
-        if not isinstance(tag, str):
-            continue
-        value = tag.strip()
-        if not value:
-            continue
-        if lowercase:
-            value = value.lower()
-        key = value.casefold()
-        if key in seen:
-            continue
-        cleaned.append(value)
-        seen.add(key)
-    return cleaned
-
-
-def _merge_metadata_tags(existing_tags: list[str], seed_tags: list[str]) -> list[str]:
-    merged = _clean_metadata_tags(existing_tags)
-    seen = {tag.casefold() for tag in merged}
-    for tag in _clean_metadata_tags(seed_tags, lowercase=True):
-        if tag.casefold() in seen:
-            continue
-        merged.append(tag)
-        seen.add(tag.casefold())
-    return merged
 
 
 def sync_spec_metadata_from_file(session: Session, metadata_file: Path = METADATA_FILE) -> int:
