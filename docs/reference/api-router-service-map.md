@@ -39,6 +39,7 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | Assistant chat | `orchestrator/api/chat.py` | `/chat` | conversation models, memory context |
 | AutoPilot | `orchestrator/api/autopilot.py` | AutoPilot routes | AutoPilot pipeline |
 | Autonomous missions | `orchestrator/api/autonomous.py` | `/autonomous` | Temporal client, autonomous activities, agent queue |
+| Agent runs | `orchestrator/api/agent_routes.py` | `/api/agents` | `main.py` compatibility handlers, Temporal agent workflows, reports, exploratory agents |
 | Custom workflows | `orchestrator/api/workflows.py` | workflow routes | workflow runner, step registry, Temporal client |
 
 ## Boundary Rules
@@ -61,7 +62,6 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | Run execution | `/runs`, `/runs/{id}`, progress and log stream routes | Integrates process manager, run directories, and generated artifacts |
 | Queue control | `/queue-status`, `/queue/clear` | Handles in-process queue compatibility |
 | Browser pool control | `/api/browser-pool/*` | Operational status and manual cleanup |
-| Agent queue control | `/api/agents/queue-*` | Operational cleanup and queue status |
 | Static artifacts | `/artifacts/{run_id}/...` | Mounted from the runs directory |
 
 Prefer a dedicated router for new domains. Extend `main.py` only when the new behavior is part of an existing direct route family.

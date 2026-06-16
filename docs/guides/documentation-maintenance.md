@@ -54,7 +54,7 @@ Before opening a PR, check whether your code change affects any of these surface
 Use source files as the authority:
 
 ```bash
-rg -n "^@router\\.(get|post|put|patch|delete)|^@app\\.(get|post|put|patch|delete)" orchestrator/api
+rg -n "^@router\\.(get|post|put|patch|delete)|^@app\\.(get|post|put|patch|delete)|add_api_route" orchestrator/api
 rg -n "os\\.getenv|process\\.env|Field\\(.*env" orchestrator web --glob '!node_modules/**'
 rg -n "add_argument|click\\.option|typer\\.Option" orchestrator
 ```
