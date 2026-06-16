@@ -862,7 +862,7 @@ class TestSpecEndpoints:
 
     def test_split_spec_regex_returns_extraction_metadata(self, client, tmp_path, monkeypatch):
         """POST /specs/split should report regex extraction when explicitly selected."""
-        from orchestrator.api import main as main_module
+        from orchestrator.api import specs as specs_module
 
         specs_dir = tmp_path / "specs"
         specs_dir.mkdir()
@@ -893,7 +893,7 @@ Category: Happy Path
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
 
         response = client.post(
             "/specs/split",
@@ -909,7 +909,7 @@ Category: Happy Path
 
     def test_split_spec_rejects_regex_grouped_mode(self, client, tmp_path, monkeypatch):
         """Smart Groups require AI extraction."""
-        from orchestrator.api import main as main_module
+        from orchestrator.api import specs as specs_module
 
         specs_dir = tmp_path / "specs"
         specs_dir.mkdir()
@@ -928,7 +928,7 @@ Category: Happy Path
 """,
             encoding="utf-8",
         )
-        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
 
         response = client.post(
             "/specs/split",
@@ -940,13 +940,13 @@ Category: Happy Path
 
     def test_list_specs_excludes_templates_by_default_and_can_return_templates(self, client, tmp_path, monkeypatch):
         """GET /specs/list should keep templates separate unless templates_only=true."""
-        from orchestrator.api import main as main_module
+        from orchestrator.api import specs as specs_module
 
         specs_dir = tmp_path / "specs"
         (specs_dir / "templates").mkdir(parents=True)
         (specs_dir / "regular.md").write_text("# Regular\n", encoding="utf-8")
         (specs_dir / "templates" / "example.md").write_text("# Template\n", encoding="utf-8")
-        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
 
         response = client.get("/specs/list")
         assert response.status_code == 200
@@ -962,7 +962,7 @@ Category: Happy Path
 
     def test_list_templates_respects_project_filter(self, client, tmp_path, monkeypatch):
         """GET /specs/list?templates_only=true should preserve project filtering."""
-        from orchestrator.api import main as main_module
+        from orchestrator.api import specs as specs_module
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
         from orchestrator.api.models_db import get_spec_metadata
@@ -975,7 +975,7 @@ Category: Happy Path
         (specs_dir / "templates").mkdir(parents=True)
         (specs_dir / included_name).write_text("# Project Template\n", encoding="utf-8")
         (specs_dir / excluded_name).write_text("# Other Template\n", encoding="utf-8")
-        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
 
         with Session(engine) as session:
             session.add(DBSpecMetadata(spec_name=included_name, project_id=project_id, tags_json='["template"]'))
@@ -998,7 +998,7 @@ Category: Happy Path
 
     def test_list_specs_includes_autopilot_spec_only_for_registered_project(self, client, tmp_path, monkeypatch):
         """Autopilot specs are visible only through the project recorded in SpecMetadata."""
-        from orchestrator.api import main as main_module
+        from orchestrator.api import specs as specs_module
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import Project, SpecMetadata, get_spec_metadata
 
@@ -1008,7 +1008,7 @@ Category: Happy Path
         specs_dir = tmp_path / "specs"
         (specs_dir / "autopilot" / session_id).mkdir(parents=True)
         (specs_dir / spec_name).write_text("# Checkout Flow\n", encoding="utf-8")
-        monkeypatch.setattr(main_module, "SPECS_DIR", specs_dir)
+        monkeypatch.setattr(specs_module, "SPECS_DIR", specs_dir)
 
         with Session(engine) as session:
             session.add(Project(id=project_id, name="Wetravel Project"))
