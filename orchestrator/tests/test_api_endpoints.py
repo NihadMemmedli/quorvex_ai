@@ -380,6 +380,37 @@ class TestAgentRunHistoryEndpoints:
 class TestAgentDefinitionEndpoints:
     """Test UI-created custom agent definition endpoints."""
 
+    def test_agent_definition_routes_registered_from_agent_definitions_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        expected_module = "orchestrator.api.agent_definitions"
+        assert endpoints[("GET", "/api/agents/tools/catalog")] == expected_module
+        assert endpoints[("GET", "/api/agents/definitions")] == expected_module
+        assert endpoints[("POST", "/api/agents/definitions")] == expected_module
+        assert endpoints[("GET", "/api/agents/definitions/{definition_id}")] == expected_module
+        assert endpoints[("PUT", "/api/agents/definitions/{definition_id}")] == expected_module
+        assert endpoints[("DELETE", "/api/agents/definitions/{definition_id}")] == expected_module
+        assert endpoints[("POST", "/api/agents/definitions/{definition_id}/runs")] == expected_module
+
+    def test_agent_tool_catalog_groups_tools_by_category(self, client):
+        response = client.get("/api/agents/tools/catalog")
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert isinstance(data["tools"], list)
+        assert isinstance(data["categories"], dict)
+        assert data["tools"]
+        assert data["categories"]
+        for tool in data["tools"]:
+            assert tool in data["categories"][tool["category"]]
+
     def test_create_list_and_archive_agent_definition(self, client):
         """POST /api/agents/definitions should persist custom agents without server errors."""
         name = f"API Save Probe {uuid4().hex}"
@@ -413,6 +444,136 @@ class TestAgentDefinitionEndpoints:
         finally:
             archive_response = client.delete(f"/api/agents/definitions/{definition_id}?project_id=default")
             assert archive_response.status_code == 200, archive_response.text
+
+    def test_create_agent_definition_rejects_blank_name(self, client):
+        response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": "   ",
+                "system_prompt": "Inspect the target.",
+                "tool_ids": ["read_file"],
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Agent name is required"}
+
+    def test_create_agent_definition_rejects_blank_system_prompt(self, client):
+        response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": "Blank System Prompt Probe",
+                "system_prompt": "   ",
+                "tool_ids": ["read_file"],
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": "System prompt is required"}
+
+    @pytest.mark.parametrize(
+        ("tool_ids", "expected_detail"),
+        [
+            ([], "Select at least one tool for this agent"),
+            (["missing-tool"], "Unknown or disabled tools: missing-tool"),
+        ],
+    )
+    def test_create_agent_definition_preserves_invalid_tool_id_errors(self, client, tool_ids, expected_detail):
+        response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": "Invalid Tool Probe",
+                "system_prompt": "Inspect the target.",
+                "tool_ids": tool_ids,
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": expected_detail}
+
+    def test_run_agent_definition_creates_queued_temporal_agent_run(self, client, monkeypatch):
+        from orchestrator.api import main as main_module
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentDefinition, AgentRun, AgentRunEvent
+
+        class FakeAgentStatus:
+            active = 1
+            max_slots = 3
+            queued = 2
+
+        class FakeResourceManager:
+            def get_agent_status(self):
+                return FakeAgentStatus()
+
+        async def fake_get_resource_manager():
+            return FakeResourceManager()
+
+        async def fake_start_agent_run_temporal_or_fail(run, session, *, workflow_attempt=None):
+            run.temporal_workflow_id = f"agent-workflow-{run.id}"
+            run.temporal_run_id = "temporal-run-1"
+            session.add(run)
+            session.commit()
+
+        monkeypatch.setattr(main_module, "get_resource_manager", fake_get_resource_manager)
+        monkeypatch.setattr(main_module, "_start_agent_run_temporal_or_fail", fake_start_agent_run_temporal_or_fail)
+
+        create_response = client.post(
+            "/api/agents/definitions",
+            json={
+                "project_id": "default",
+                "name": f"Run Probe {uuid4().hex}",
+                "system_prompt": "Inspect the target and report findings.",
+                "runtime": "claude_sdk",
+                "model_tier": "tool_deep",
+                "tool_ids": ["read_file"],
+            },
+        )
+        assert create_response.status_code == 200, create_response.text
+        definition_id = create_response.json()["id"]
+        run_id = None
+
+        try:
+            run_response = client.post(
+                f"/api/agents/definitions/{definition_id}/runs",
+                json={"project_id": "default", "prompt": "Inspect https://example.com", "url": "https://example.com"},
+            )
+
+            assert run_response.status_code == 200, run_response.text
+            data = run_response.json()
+            run_id = data["run_id"]
+            assert data["status"] == "queued"
+            assert data["agent_definition_id"] == definition_id
+            assert data["temporal_workflow_id"] == f"agent-workflow-{run_id}"
+            assert data["temporal_run_id"] == "temporal-run-1"
+            assert data["agent_runtime"] == "claude_sdk"
+            assert data["queue_position"] == 3
+            assert data["agent_slots"] == {"active": 1, "max": 3, "queued": 3}
+
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                assert run is not None
+                assert run.agent_type == "custom"
+                assert run.status == "queued"
+                assert run.project_id == "default"
+                config = json.loads(run.config_json)
+                assert config["agent_definition_id"] == definition_id
+                assert config["allowed_tools"] == ["Read"]
+                assert config["selected_tools"][0]["id"] == "read_file"
+        finally:
+            with Session(engine) as session:
+                if run_id:
+                    for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
+                        session.delete(event)
+                    run = session.get(AgentRun, run_id)
+                    if run:
+                        session.delete(run)
+                definition = session.get(AgentDefinition, definition_id)
+                if definition:
+                    session.delete(definition)
+                session.commit()
 
     def test_get_run_includes_live_browser_metadata(self, client, monkeypatch):
         """GET /runs/{id} should expose runtime metadata for live browser view."""

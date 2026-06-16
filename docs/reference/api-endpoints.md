@@ -293,7 +293,7 @@ Prefix: `/api/prd` | Source: `orchestrator/api/prd.py`
 
 ## Agents
 
-Source: `orchestrator/api/agent_routes.py`
+Source: `orchestrator/api/agent_routes.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -826,12 +826,12 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/api-testing/specs/{name}` | `orchestrator/api/api_testing.py` |
 | PUT | `/api-testing/specs/{name}` | `orchestrator/api/api_testing.py` |
 | PUT | `/api-testing/specs/{name}/tags` | `orchestrator/api/api_testing.py` |
-| GET | `/api/agents/definitions` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/definitions` | `orchestrator/api/agent_routes.py` |
-| DELETE | `/api/agents/definitions/{definition_id}` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/definitions/{definition_id}` | `orchestrator/api/agent_routes.py` |
-| PUT | `/api/agents/definitions/{definition_id}` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/definitions/{definition_id}/runs` | `orchestrator/api/agent_routes.py` |
+| GET | `/api/agents/definitions` | `orchestrator/api/agent_definitions.py` |
+| POST | `/api/agents/definitions` | `orchestrator/api/agent_definitions.py` |
+| DELETE | `/api/agents/definitions/{definition_id}` | `orchestrator/api/agent_definitions.py` |
+| GET | `/api/agents/definitions/{definition_id}` | `orchestrator/api/agent_definitions.py` |
+| PUT | `/api/agents/definitions/{definition_id}` | `orchestrator/api/agent_definitions.py` |
+| POST | `/api/agents/definitions/{definition_id}/runs` | `orchestrator/api/agent_definitions.py` |
 | POST | `/api/agents/exploratory` | `orchestrator/api/agent_routes.py` |
 | GET | `/api/agents/exploratory/flow-spec-jobs/{job_id}` | `orchestrator/api/agent_routes.py` |
 | POST | `/api/agents/exploratory/{run_id}/analyze-prerequisites` | `orchestrator/api/agent_routes.py` |
@@ -868,7 +868,7 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/api/agents/sessions` | `orchestrator/api/agent_sessions.py` |
 | DELETE | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_sessions.py` |
 | POST | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_sessions.py` |
-| GET | `/api/agents/tools/catalog` | `orchestrator/api/agent_routes.py` |
+| GET | `/api/agents/tools/catalog` | `orchestrator/api/agent_definitions.py` |
 | POST | `/api/backup` | `orchestrator/api/backup_control.py` |
 | GET | `/api/backup/status` | `orchestrator/api/backup_control.py` |
 | POST | `/api/browser-pool/cleanup` | `orchestrator/api/runtime_ops.py` |
