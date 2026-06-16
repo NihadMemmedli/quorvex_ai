@@ -348,7 +348,7 @@ function makeTrackedJob(
     id = stringValue(data, ['session_id', 'sessionId', 'id']);
     statusPath = `/autopilot/${encodeURIComponent(id || '')}`;
     pagePath = '/autopilot';
-  } else if (['startExplorerAgent', 'startAdhocCustomAgent', 'startCustomAgentFromReport'].includes(toolName)) {
+  } else if (['startExplorerAgent', 'startAdhocCustomAgent', 'startCodingAgent', 'startCustomAgentFromReport'].includes(toolName)) {
     kind = 'agent';
     id = stringValue(data, ['run_id', 'runId', 'id']);
     statusPath = `/api/agents/runs/${encodeURIComponent(id || '')}${projectQuery(projectId)}`;

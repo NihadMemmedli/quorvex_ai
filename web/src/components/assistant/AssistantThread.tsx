@@ -1599,6 +1599,7 @@ const toolPageMap: Record<string, string> = {
   getAgentRunReport: '/agents',
   searchAgentReports: '/agents',
   startAdhocCustomAgent: '/agents',
+  startCodingAgent: '/agents',
   createCustomAgentDefinition: '/agents',
   startCustomAgentFromReport: '/agents',
   createTestSpecFromAgentReport: '/specs',
@@ -3553,6 +3554,7 @@ const toolFollowUps: Record<string, string[]> = {
   // Auto Pilot
   startAutoPilot: ['Check Auto Pilot status', 'List all Auto Pilot sessions', 'View Auto Pilot dashboard'],
   startAdhocCustomAgent: ['Review requirements in Agents', 'View agent run', 'Check agent status'],
+  startCodingAgent: ['View agent run', 'Review proposed diff', 'Check agent status'],
   createCustomAgentDefinition: ['Open agents dashboard', 'Run saved custom agent', 'Show custom agent reports'],
   createWorkflow: ['Open workflow dashboard', 'Start saved workflow', 'List workflow catalog'],
   startWorkflow: ['Check workflow status', 'Open workflow dashboard', 'Show workflow run steps'],

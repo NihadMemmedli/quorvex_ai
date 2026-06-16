@@ -50,6 +50,17 @@ from orchestrator.services.browser_auth_sessions import (
     resolve_browser_auth_session_row,
 )
 from orchestrator.services.agent_runtimes import normalize_agent_runtime
+from orchestrator.services.coding_agent import (
+    CODING_ARTIFACT_PATCH,
+    DEFAULT_REPO_ROOT,
+    apply_patch_to_repo,
+    build_coding_agent_prompt,
+    build_coding_tool_permission_guard,
+    coding_agent_allowed_tools,
+    coding_agent_subagents,
+    validate_patch_for_repo,
+    write_coding_artifacts,
+)
 from utils.agent_report import (
     CUSTOM_AGENT_REPORT_INSTRUCTIONS,
     _as_report_list,
@@ -9428,6 +9439,199 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 agent.owner_label = f"Agent run {run_id}"
                 agent.agent_tool_profile = _agent_tool_profile_for_run(agent_type, config)
                 result = await agent.run(config)
+            elif agent_type == "coding":
+                from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
+                from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span, record_tool_result_spans
+
+                repo_root = DEFAULT_REPO_ROOT
+                run_dir = RUNS_DIR / run_id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                task_prompt = str(config.get("prompt") or config.get("task") or "").strip()
+                if not task_prompt:
+                    raise ValueError("Coding agent prompt is required")
+
+                allowed_tools = coding_agent_allowed_tools()
+                final_prompt = build_coding_agent_prompt(task_prompt, repo_root)
+                trace_snapshot = ensure_trace_snapshot(
+                    run_id=run_id,
+                    prompt=final_prompt,
+                    context=None,
+                    runtime=runtime_name,
+                    model=config.get("model"),
+                    model_tier=config.get("model_tier") or "tool_deep",
+                    allowed_tools=allowed_tools,
+                    test_data_refs=[],
+                    runtime_diagnostics={
+                        "runtime": runtime_name,
+                        "agent_type": "coding",
+                        "repo_root": str(repo_root),
+                        "mode": "propose_diff_only",
+                    },
+                )
+
+                _update_agent_run_progress(
+                    run_id,
+                    {
+                        "phase": "starting",
+                        "message": "Starting coding agent in propose-diff-only mode",
+                        "runtime": runtime_name,
+                        "repo_root": str(repo_root),
+                        "autonomy_mode": "propose_diff_only",
+                    },
+                )
+
+                def _on_coding_tool_use(tool_name: str, tool_input: dict[str, Any]) -> None:
+                    _update_agent_run_progress(
+                        run_id,
+                        {
+                            "phase": "tool_use",
+                            "message": f"Using {_short_tool_name(tool_name)}",
+                            "runtime": runtime_name,
+                            "last_tool": tool_name,
+                            "last_tool_input": tool_input,
+                            "autonomy_mode": "propose_diff_only",
+                        },
+                    )
+                    _record_agent_run_event(
+                        run_id,
+                        event_type="tool_call",
+                        message=f"Using {_short_tool_name(tool_name)}.",
+                        payload={
+                            "tool_name": tool_name,
+                            "tool_label": _short_tool_name(tool_name),
+                        },
+                    )
+
+                def _on_coding_progress(progress: dict[str, Any]) -> None:
+                    last_tool = progress.get("last_tool")
+                    record_trace_span(
+                        run_id=run_id,
+                        trace_id=trace_snapshot.id if trace_snapshot else None,
+                        span_type="provider_event",
+                        name=str(progress.get("phase") or "coding progress"),
+                        message=str(progress.get("message") or "Coding agent runtime progress."),
+                        tool_name=str(last_tool) if last_tool else None,
+                        payload={"progress": progress, "runtime": runtime_name},
+                    )
+                    _update_agent_run_progress(
+                        run_id,
+                        {
+                            **progress,
+                            "runtime": runtime_name,
+                            "phase": progress.get("phase") or "running",
+                            "message": f"Using {_short_tool_name(str(last_tool))}" if last_tool else "Coding agent is running",
+                            "autonomy_mode": "propose_diff_only",
+                        },
+                    )
+
+                runtime_adapter = get_agent_runtime(runtime_name)
+                runtime_context = AgentRuntimeContext(
+                    timeout_seconds=int(config.get("timeout_seconds") or 1800),
+                    allowed_tools=allowed_tools,
+                    tools=allowed_tools,
+                    permission_mode=str(config.get("permission_mode") or "plan"),
+                    session_dir=run_dir,
+                    on_tool_use=_on_coding_tool_use,
+                    on_progress=_on_coding_progress,
+                    cwd=repo_root,
+                    owner_type="agent_run",
+                    owner_id=run_id,
+                    owner_label=f"Coding agent run {run_id}",
+                    memory_project_id=config.get("project_id"),
+                    memory_agent_type="CodingAgent",
+                    memory_source_type="coding_agent_run",
+                    memory_source_id=run_id,
+                    memory_stage="coding_agent",
+                    inject_memory=False,
+                    capture_memory=False,
+                    force_direct_execution=True,
+                    model=config.get("model"),
+                    model_tier=config.get("model_tier") or "tool_deep",
+                    enable_file_checkpointing=True,
+                    agents=coding_agent_subagents(),
+                    tool_permission_guard=build_coding_tool_permission_guard(),
+                    agent_name="CodingAgent",
+                    metadata={
+                        "agent_type": "coding",
+                        "run_id": run_id,
+                        "repo_root": str(repo_root),
+                        "autonomy_mode": "propose_diff_only",
+                    },
+                    trace_id=trace_snapshot.id if trace_snapshot else None,
+                    prompt_hash=trace_snapshot.prompt_hash if trace_snapshot else None,
+                    agent_run_id=run_id,
+                    is_cancelled=_agent_run_cancelled,
+                )
+                if not await _wait_if_agent_run_paused(run_id):
+                    return
+                agent_result = await runtime_adapter.run(final_prompt, runtime_context)
+                if agent_result.cancelled:
+                    raise asyncio.CancelledError("Agent run cancelled")
+                record_tool_result_spans(run_id, agent_result.tool_calls)
+                raw_output = agent_result.output or ""
+                (run_dir / "raw_output.txt").write_text(raw_output, encoding="utf-8")
+                artifact_info = write_coding_artifacts(run_dir, raw_output)
+                patch_text = _read_run_text_artifact(run_id, CODING_ARTIFACT_PATCH)
+                patch_valid = False
+                patch_validation_error = None
+                if patch_text:
+                    try:
+                        validate_patch_for_repo(patch_text, repo_root)
+                        patch_valid = True
+                    except Exception as validation_error:
+                        patch_validation_error = str(validation_error)
+
+                result = {
+                    "summary": artifact_info.get("summary") or (raw_output[:500] if raw_output else agent_result.error),
+                    "output": raw_output,
+                    "review": artifact_info.get("review"),
+                    "tests": artifact_info.get("tests"),
+                    "affected_files": artifact_info.get("affected_files") or [],
+                    "patch_artifact": artifact_info.get("patch_path"),
+                    "patch_bytes": artifact_info.get("patch_bytes") or 0,
+                    "patch_valid": patch_valid,
+                    "patch_validation_error": patch_validation_error,
+                    "autonomy_mode": "propose_diff_only",
+                    "repo_root": str(repo_root),
+                    "error": agent_result.error,
+                    "duration_seconds": agent_result.duration_seconds,
+                    "runtime": runtime_name,
+                    "session_id": agent_result.session_id,
+                    "total_cost_usd": agent_result.total_cost_usd,
+                    "tool_calls": [
+                        {
+                            "name": call.name,
+                            "timestamp": call.timestamp.isoformat(),
+                            "duration_ms": call.duration_ms,
+                            "success": call.success,
+                            "error": call.error,
+                            "input": call.input,
+                        }
+                        for call in agent_result.tool_calls
+                    ],
+                    "messages_received": agent_result.messages_received,
+                    "text_blocks_received": agent_result.text_blocks_received,
+                    "timed_out": agent_result.timed_out,
+                }
+                if not patch_valid:
+                    result["partial_results"] = True
+                if not agent_result.success:
+                    raise RuntimeError(agent_result.error or "Coding agent failed")
+                _update_agent_run_progress(
+                    run_id,
+                    {
+                        "phase": "completed" if patch_valid else AGENT_PARTIAL_STATUS,
+                        "status": "completed" if patch_valid else AGENT_PARTIAL_STATUS,
+                        "message": "Coding agent proposed a patch" if patch_valid else "Coding agent completed without a valid patch",
+                        "runtime": runtime_name,
+                        "tool_calls": len(agent_result.tool_calls),
+                        "interactions": len(agent_result.tool_calls),
+                        "affected_files": artifact_info.get("affected_files") or [],
+                        "patch_artifact": artifact_info.get("patch_path"),
+                        "patch_valid": patch_valid,
+                        "autonomy_mode": "propose_diff_only",
+                    },
+                )
             elif agent_type == "custom":
                 from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
                 from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span, record_tool_result_spans
@@ -10298,6 +10502,147 @@ async def get_agent_run(
     payload = await _serialize_agent_run_live(r, session)
     payload["temporal"] = await _agent_run_temporal_payload(r)
     return payload
+
+
+@app.get("/api/agents/runs/{id}/coding/diff")
+def get_coding_agent_diff(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    session: Session = Depends(get_session),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+    if run.agent_type != "coding":
+        raise HTTPException(status_code=400, detail="Run is not a coding agent run")
+
+    patch_text = _read_run_text_artifact(id, CODING_ARTIFACT_PATCH)
+    if not patch_text:
+        raise HTTPException(status_code=404, detail="Coding patch artifact not found")
+    try:
+        validation = validate_patch_for_repo(patch_text, DEFAULT_REPO_ROOT)
+        valid = True
+        validation_error = None
+        affected_files = list(validation.paths)
+    except Exception as exc:
+        valid = False
+        validation_error = str(exc)
+        affected_files = []
+    return {
+        "run_id": id,
+        "status": run.status,
+        "valid": valid,
+        "validation_error": validation_error,
+        "affected_files": affected_files,
+        "diff": patch_text,
+        "summary": _read_run_text_artifact(id, "summary.md", max_chars=20000),
+        "review": _read_run_text_artifact(id, "review.md", max_chars=20000),
+    }
+
+
+@app.post("/api/agents/runs/{id}/coding/reject")
+async def reject_coding_agent_diff(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(get_current_user_optional),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+    if run.agent_type != "coding":
+        raise HTTPException(status_code=400, detail="Run is not a coding agent run")
+    await _ensure_agent_write_access(run.project_id, current_user, session)
+
+    existing_result = run.result if isinstance(run.result, dict) else {}
+    run.result = {**existing_result, "patch_status": "rejected", "patch_rejected_at": datetime.utcnow().isoformat()}
+    run.progress = {
+        **(run.progress or {}),
+        "phase": "rejected",
+        "status": run.status,
+        "message": "Coding agent patch rejected.",
+        "patch_status": "rejected",
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    session.add(run)
+    session.commit()
+    _record_agent_run_event(
+        id,
+        event_type="coding_patch_rejected",
+        message="Coding agent patch rejected.",
+        payload={"status": run.status, "patch_status": "rejected"},
+        agent_task_id=run.agent_task_id,
+        session=session,
+    )
+    return {"status": "rejected", "run_id": id}
+
+
+@app.post("/api/agents/runs/{id}/coding/apply")
+async def apply_coding_agent_diff(
+    id: str,
+    project_id: str | None = Query(default=None, description="Project ID for filtering"),
+    session: Session = Depends(get_session),
+    current_user: Any = Depends(get_current_user_optional),
+):
+    run = session.get(AgentRun, id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    _filter_agent_run_project(run, project_id)
+    if run.agent_type != "coding":
+        raise HTTPException(status_code=400, detail="Run is not a coding agent run")
+    if run.status not in {"completed", AGENT_PARTIAL_STATUS}:
+        raise HTTPException(status_code=409, detail="Coding run must be completed before applying a patch")
+    await _ensure_agent_write_access(run.project_id, current_user, session)
+
+    existing_result = run.result if isinstance(run.result, dict) else {}
+    if existing_result.get("patch_status") == "applied":
+        raise HTTPException(status_code=409, detail="Coding patch has already been applied")
+    if existing_result.get("patch_status") == "rejected":
+        raise HTTPException(status_code=409, detail="Coding patch has been rejected")
+
+    patch_text = _read_run_text_artifact(id, CODING_ARTIFACT_PATCH)
+    if not patch_text:
+        raise HTTPException(status_code=404, detail="Coding patch artifact not found")
+    try:
+        apply_result = apply_patch_to_repo(patch_text, DEFAULT_REPO_ROOT)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    applied_at = datetime.utcnow().isoformat()
+    run.result = {
+        **existing_result,
+        "patch_status": "applied",
+        "patch_applied_at": applied_at,
+        "applied_files": apply_result.get("affected_files") or [],
+    }
+    run.progress = {
+        **(run.progress or {}),
+        "phase": "applied",
+        "status": run.status,
+        "message": "Coding agent patch applied.",
+        "patch_status": "applied",
+        "affected_files": apply_result.get("affected_files") or [],
+        "updated_at": applied_at,
+    }
+    session.add(run)
+    session.commit()
+    _record_agent_run_event(
+        id,
+        event_type="coding_patch_applied",
+        message="Coding agent patch applied.",
+        payload={
+            "status": run.status,
+            "patch_status": "applied",
+            "affected_files": apply_result.get("affected_files") or [],
+        },
+        agent_task_id=run.agent_task_id,
+        session=session,
+    )
+    return {"status": "applied", "run_id": id, "affected_files": apply_result.get("affected_files") or []}
 
 
 @app.get("/api/agents/runs/{id}/events")
