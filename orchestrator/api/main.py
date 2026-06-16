@@ -39,17 +39,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 
 from logging_config import get_logger, request_id_var, setup_logging
-from services.browser_pool import AbstractBrowserPool, get_browser_pool
-from services.browser_pool import OperationType as BrowserOpType
-from orchestrator.services.browser_slots import browser_operation_slot
-from services.resource_manager import ResourceManager, ResourceType, get_resource_manager
+from orchestrator.services.agent_runtimes import normalize_agent_runtime
 from orchestrator.services.browser_auth_sessions import (
     BrowserAuthSessionError,
     ensure_browser_auth_session_usable,
     resolve_browser_auth_for_run,
     resolve_browser_auth_session_row,
 )
-from orchestrator.services.agent_runtimes import normalize_agent_runtime
+from orchestrator.services.browser_slots import browser_operation_slot
 from orchestrator.services.coding_agent import (
     CODING_ARTIFACT_PATCH,
     DEFAULT_REPO_ROOT,
@@ -61,6 +58,9 @@ from orchestrator.services.coding_agent import (
     validate_patch_for_repo,
     write_coding_artifacts,
 )
+from services.browser_pool import AbstractBrowserPool, get_browser_pool
+from services.browser_pool import OperationType as BrowserOpType
+from services.resource_manager import ResourceManager, get_resource_manager
 from utils.agent_report import (
     CUSTOM_AGENT_REPORT_INSTRUCTIONS,
     _as_report_list,
@@ -69,22 +69,22 @@ from utils.agent_report import (
 )
 from utils.agent_tool_allowlists import get_agent_allowed_tools
 from utils.claude_config import copy_claude_project_config
-from utils.project_utils import derive_project_id_from_url
 from utils.playwright_mcp import (
     browser_live_worker_enabled,
     browser_runtime_status,
     live_browser_display_diagnostics,
     prepare_run_playwright_config_content,
     resolve_playwright_chromium_executable,
-    write_playwright_test_mcp_config,
     write_playwright_mcp_config,
+    write_playwright_test_mcp_config,
 )
+from utils.project_utils import derive_project_id_from_url
 
 from . import (
     analytics,
-    autonomous,
     api_testing,
     auth,
+    autonomous,
     autopilot,
     browser_auth_sessions,
     chat,
@@ -115,6 +115,8 @@ from . import (
     workflows,
 )
 from .db import engine, get_database_type, get_session, init_db, is_parallel_mode_available
+from .middleware.auth import get_current_user_optional
+from .middleware.permissions import ProjectRole, check_project_access
 from .middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from .models import (
     BulkRunRequest,
@@ -139,13 +141,21 @@ from .models import (
     UpdateMetadataRequest,
     UpdateSpecRequest,
 )
-from .middleware.auth import get_current_user_optional
-from .middleware.permissions import ProjectRole, check_project_access
-from .models_db import AgentDefinition, AgentRun, AgentRunEvent, AgentToolDefinition, ExplorationSession, RegressionBatch, TestrailCaseMapping
+from .models_db import (
+    AgentDefinition,
+    AgentRun,
+    AgentRunEvent,
+    AgentToolDefinition,
+    ExplorationSession,
+    RegressionBatch,
+    TestrailCaseMapping,
+    get_or_create_spec_metadata,
+    normalize_project_id,
+)
 from .models_db import ExecutionSettings as DBExecutionSettings
 from .models_db import SpecMetadata as DBSpecMetadata
 from .models_db import TestRun as DBTestRun
-from .models_db import get_or_create_spec_metadata, get_spec_metadata as get_db_spec_metadata, normalize_project_id
+from .models_db import get_spec_metadata as get_db_spec_metadata
 from .process_manager import ProcessManager, get_process_manager
 from .spec_metadata import clean_metadata_tags as _clean_metadata_tags
 from .spec_metadata import merge_metadata_tags as _merge_metadata_tags
@@ -3755,7 +3765,7 @@ def export_testrail(request: ExportTestrailRequest, session: Session = Depends(g
 
         # Load DB metadata for tags
         metadata = None
-        meta = get_db_spec_metadata(session, spec_name, project_id)
+        meta = get_db_spec_metadata(session, spec_name, request.project_id)
         if meta:
             metadata = {"tags": meta.tags}
 
@@ -7841,7 +7851,11 @@ def _record_agent_run_event(
 
 async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session, *, workflow_attempt: int | None = None) -> None:
     from orchestrator.config import settings as app_settings
-    from orchestrator.services.temporal_client import TemporalUnavailableError, describe_temporal_task_queue, start_agent_run_workflow
+    from orchestrator.services.temporal_client import (
+        TemporalUnavailableError,
+        describe_temporal_task_queue,
+        start_agent_run_workflow,
+    )
 
     task_queue = app_settings.temporal_workflow_task_queue
     if _agent_run_has_browser_tools(run.agent_type, run.config) and browser_live_worker_enabled():
@@ -8910,17 +8924,17 @@ def _playwright_chromium_probe_script(executable_path: str | None = None) -> str
         if executable_path
         else ""
     )
-    return """
-const { chromium } = require('playwright');
+    return f"""
+const {{ chromium }} = require('playwright');
 const headless = String(process.env.HEADLESS || 'true').toLowerCase() !== 'false';
-(async () => {
-  const browser = await chromium.launch({ headless%s });
+(async () => {{
+  const browser = await chromium.launch({{ headless{executable_option.strip()} }});
   await browser.close();
-})().catch((error) => {
+}})().catch((error) => {{
   console.error(error && error.stack ? error.stack : error);
   process.exit(1);
-});
-""" % executable_option.strip()
+}});
+"""
 
 
 def _probe_custom_agent_browser(timeout_seconds: int = 30) -> tuple[bool, str]:
@@ -9204,11 +9218,11 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
     """
     from sqlmodel import Session
 
-    from .db import engine
-    from .models_db import AgentRun
-
     # Block if a load test is running
     from orchestrator.services.load_test_lock import check_system_available
+
+    from .db import engine
+    from .models_db import AgentRun
 
     await check_system_available("agent run")
 
@@ -9258,7 +9272,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
             logger.info(f"Browser slot acquired for agent {run_id}")
 
             # Use relative imports since server runs from orchestrator/ directory
-            from orchestrator.agents.exploratory_agent import ExplorationState, ExploratoryAgent
+            from orchestrator.agents.exploratory_agent import ExploratoryAgent
             from orchestrator.agents.spec_synthesis_agent import SpecSynthesisAgent
             from orchestrator.agents.spec_writer_agent import SpecWriterAgent
 
@@ -9409,7 +9423,11 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 result = await agent.run(config)
             elif agent_type == "coding":
                 from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
-                from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span, record_tool_result_spans
+                from orchestrator.services.agent_trace import (
+                    ensure_trace_snapshot,
+                    record_tool_result_spans,
+                    record_trace_span,
+                )
 
                 repo_root = DEFAULT_REPO_ROOT
                 run_dir = RUNS_DIR / run_id
@@ -9602,7 +9620,11 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
                 )
             elif agent_type == "custom":
                 from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
-                from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span, record_tool_result_spans
+                from orchestrator.services.agent_trace import (
+                    ensure_trace_snapshot,
+                    record_tool_result_spans,
+                    record_trace_span,
+                )
 
                 allowed_tools = config.get("allowed_tools") or []
                 run_dir = None

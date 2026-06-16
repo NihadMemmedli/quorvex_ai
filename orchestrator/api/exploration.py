@@ -12,7 +12,6 @@ Resource Management:
 """
 
 import asyncio
-import json
 import logging
 import os
 
@@ -39,6 +38,7 @@ from .models_db import DiscoveredApiEndpoint, ExplorationSession
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from orchestrator.services.browser_auth_sessions import BrowserAuthSessionError, resolve_browser_auth_for_run
 from services.browser_pool import OperationType as BrowserOpType
 from services.browser_pool import get_browser_pool
 from services.exploration_policy import (
@@ -47,7 +47,6 @@ from services.exploration_policy import (
     policy_to_agent_instructions,
     validate_exploration_policy,
 )
-from orchestrator.services.browser_auth_sessions import BrowserAuthSessionError, resolve_browser_auth_for_run
 
 # Import MCP health checker
 from utils.mcp_health import verify_mcp_environment

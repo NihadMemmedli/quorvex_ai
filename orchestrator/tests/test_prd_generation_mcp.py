@@ -15,9 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-prd-generation-tests")
 
 import orchestrator.api.prd as prd_api
-from orchestrator.services import agent_queue as agent_queue_module
 from orchestrator.api.models_db import PrdGenerationEvent, PrdGenerationResult, Project, Requirement
 from orchestrator.api.prd import GenerateRequest, _prepare_prd_generation_mcp_workspace
+from orchestrator.services import agent_queue as agent_queue_module
 from orchestrator.services.agent_queue import AgentTask, AgentTaskStatus
 from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
 

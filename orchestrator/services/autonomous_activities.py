@@ -2153,6 +2153,26 @@ def _compact_json(value: Any, *, max_chars: int) -> str:
     return text[: max_chars - 3] + "..."
 
 
+def _safe_model_attr(model: Any, attr: str, default: Any = None) -> Any:
+    data = getattr(model, "__dict__", {}) or {}
+    if attr in data:
+        return data[attr]
+    try:
+        return getattr(model, attr)
+    except Exception:
+        pass
+    try:
+        from sqlalchemy import inspect as sqlalchemy_inspect
+
+        inspected = sqlalchemy_inspect(model)
+        key_names = [column.key for column in inspected.mapper.primary_key]
+        if attr in key_names and inspected.identity:
+            return inspected.identity[key_names.index(attr)]
+    except Exception:
+        return default
+    return default
+
+
 def _browser_owner_metadata(
     mission: AutonomousMission,
     item: AutonomousAgentWorkItem,
@@ -2160,13 +2180,14 @@ def _browser_owner_metadata(
     handoff_id: str | None = None,
     child_agent_id: str | None = None,
 ) -> dict[str, Any]:
+    item_id = _safe_model_attr(item, "id")
     return {
-        "mission_id": mission.id,
-        "run_id": item.run_id,
-        "work_item_id": item.id,
+        "mission_id": _safe_model_attr(mission, "id"),
+        "run_id": _safe_model_attr(item, "run_id"),
+        "work_item_id": item_id,
         "child_agent_id": child_agent_id,
-        "handoff_id": handoff_id or item.id,
-        "role": item.role,
+        "handoff_id": handoff_id or item_id,
+        "role": _safe_model_attr(item, "role"),
         "recorded_at": _utcnow().isoformat(),
     }
 
@@ -2263,19 +2284,29 @@ def _record_browser_observations_for_work_item(
     result: Any,
     browser_handoff: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    if not mission.project_id:
+    project_id = _safe_model_attr(mission, "project_id") or _safe_model_attr(item, "project_id")
+    mission_id = _safe_model_attr(mission, "id") or _safe_model_attr(item, "mission_id")
+    item_id = _safe_model_attr(item, "id")
+    if not project_id and mission_id:
+        try:
+            with Session(engine) as db:
+                db_mission = db.get(AutonomousMission, mission_id)
+                project_id = db_mission.project_id if db_mission else None
+        except Exception:
+            logger.debug("Unable to rehydrate autonomous mission project.", exc_info=True)
+    if not project_id:
         return {"states": 0, "transitions": 0, "app_map_states": 0}
-    session_id = f"autonomous:{mission.id}:{item.id}"
+    session_id = f"autonomous:{mission_id}:{item_id}"
     owner_metadata = _browser_owner_metadata(
         mission,
         item,
-        handoff_id=(browser_handoff or {}).get("mcp_config_path") or item.id,
+        handoff_id=(browser_handoff or {}).get("mcp_config_path") or item_id,
     )
     summary = {"states": 0, "transitions": 0, "app_map_states": 0, "session_id": session_id}
     try:
         from orchestrator.memory.browser_memory import get_exploration_memory_service
 
-        memory = get_exploration_memory_service(project_id=mission.project_id)
+        memory = get_exploration_memory_service(project_id=project_id)
         action_trace = [
             action
             for action in (
@@ -2284,13 +2315,16 @@ def _record_browser_observations_for_work_item(
             if action
         ]
         if action_trace:
-            seeded = memory.seed_from_action_trace(
-                session_id=session_id,
-                entry_url=str((browser_handoff or {}).get("start_url") or _default_target_url(mission)),
-                action_trace=action_trace,
-            )
-            summary["states"] += int(seeded.get("states", 0) or 0)
-            summary["transitions"] += int(seeded.get("transitions", 0) or 0)
+            try:
+                seeded = memory.seed_from_action_trace(
+                    session_id=session_id,
+                    entry_url=str((browser_handoff or {}).get("start_url") or _default_target_url(mission)),
+                    action_trace=action_trace,
+                )
+                summary["states"] += int(seeded.get("states", 0) or 0)
+                summary["transitions"] += int(seeded.get("transitions", 0) or 0)
+            except Exception:
+                logger.debug("Unable to seed autonomous browser action trace.", exc_info=True)
 
         structured = _extract_structured_agent_output(getattr(result, "output", "") or "") or {}
         for update in structured.get("app_map_updates") or []:
@@ -2304,11 +2338,12 @@ def _record_browser_observations_for_work_item(
                 snapshot_ref=f"autonomous:{item.id}",
                 source_fidelity="autonomous_agent_observation",
             )
+            summary["states"] += 1
             summary["app_map_states"] += 1
 
         if summary["states"] or summary["app_map_states"]:
             _attach_browser_owner_metadata(
-                project_id=mission.project_id,
+                project_id=project_id,
                 session_id=session_id,
                 owner_metadata=owner_metadata,
             )

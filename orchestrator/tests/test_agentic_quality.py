@@ -10,6 +10,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from orchestrator.utils.agent_runner import AgentResult
 from orchestrator.workflows.agentic_quality import (
     FailureTriageAgent,
     StabilityVerifier,
@@ -21,7 +22,6 @@ from orchestrator.workflows.agentic_quality import (
     normalize_test_critic,
     normalize_test_design,
 )
-from orchestrator.utils.agent_runner import AgentResult
 
 memory_stub = types.ModuleType("orchestrator.memory")
 memory_stub.get_memory_manager = lambda *args, **kwargs: None

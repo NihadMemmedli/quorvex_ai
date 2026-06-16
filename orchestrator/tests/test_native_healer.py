@@ -1,13 +1,13 @@
+import re
 import sys
 from pathlib import Path
-import re
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from orchestrator.workflows.native_healer import NativeHealer, truncate_middle
 from orchestrator.utils.agent_runner import AgentResult
+from orchestrator.workflows.native_healer import NativeHealer, truncate_middle
 
 
 @pytest.mark.asyncio

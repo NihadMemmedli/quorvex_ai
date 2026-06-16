@@ -1,7 +1,7 @@
-import sys
-import subprocess
-import types
 import json
+import subprocess
+import sys
+import types
 from pathlib import Path
 
 import pytest

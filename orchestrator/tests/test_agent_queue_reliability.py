@@ -4,8 +4,8 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.pool import StaticPool
@@ -22,8 +22,8 @@ from orchestrator.services.agent_worker import (
     BrowserToolTimeoutError,
     _event_tool_uses,
 )
-from orchestrator.utils.agent_runner import AgentRunner
 from orchestrator.utils import browser_cleanup
+from orchestrator.utils.agent_runner import AgentRunner
 
 UTC = timezone.utc
 

@@ -4,9 +4,9 @@ Embeddings Module
 Handles text embeddings using OpenAI's text-embedding-3-small model.
 """
 
-import os
 import hashlib
 import math
+import os
 
 from openai import OpenAI
 

@@ -1,6 +1,6 @@
+import asyncio
 import sys
 import types
-import asyncio
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,17 +17,21 @@ exploration_store_stub.get_exploration_store = lambda *args, **kwargs: None
 sys.modules.setdefault("memory", memory_stub)
 sys.modules.setdefault("memory.exploration_store", exploration_store_stub)
 
-from orchestrator.workflows.requirements_generator import (
-    GeneratedRequirement as _GeneratedRequirement,
-    RequirementsGenerator as _RequirementsGenerator,
-)
-from orchestrator.workflows.autopilot_pipeline import (
-    AutoPilotPipeline as _AutoPilotPipeline,
-)
 from orchestrator.ai.context import SOURCE_OBSERVED
+from orchestrator.utils import agent_runner as _agent_runner_module
+from orchestrator.utils.agent_runner import AgentRunner as _AgentRunner
 from orchestrator.workflows.app_explorer import AppExplorer as _AppExplorer
 from orchestrator.workflows.app_explorer import ExplorationConfig as _ExplorationConfig
 from orchestrator.workflows.app_explorer import PageRecord as _PageRecord
+from orchestrator.workflows.autopilot_pipeline import (
+    AutoPilotPipeline as _AutoPilotPipeline,
+)
+from orchestrator.workflows.requirements_generator import (
+    GeneratedRequirement as _GeneratedRequirement,
+)
+from orchestrator.workflows.requirements_generator import (
+    RequirementsGenerator as _RequirementsGenerator,
+)
 from orchestrator.workflows.spec_scenario_builder import (
     conservative_page_scenarios,
     render_scenario_markdown,
@@ -36,8 +40,6 @@ from orchestrator.workflows.spec_scenario_builder import (
 from orchestrator.workflows.test_idea_generator import (
     TestIdeaGenerator as _TestIdeaGenerator,
 )
-from orchestrator.utils import agent_runner as _agent_runner_module
-from orchestrator.utils.agent_runner import AgentRunner as _AgentRunner
 
 
 def test_parse_response_normalizes_valid_ai_output():
@@ -1368,17 +1370,16 @@ def test_agent_runner_accepts_matching_local_mcp_config(tmp_path):
     mcp_command = tmp_path / "mcp-server-playwright"
     mcp_command.write_text("#!/bin/sh\n")
     (tmp_path / ".mcp.json").write_text(
-        """
-{
-  "mcpServers": {
-    "playwright-test": {
-      "command": "%s",
+        f"""
+{{
+  "mcpServers": {{
+    "playwright-test": {{
+      "command": "{mcp_command}",
       "args": ["--browser", "chromium"]
-    }
-  }
-}
+    }}
+  }}
+}}
 """
-        % str(mcp_command)
     )
     runner = _AgentRunner(
         allowed_tools=["mcp__playwright-test__browser_navigate"],
@@ -1541,16 +1542,15 @@ def test_agent_runner_attaches_strict_local_mcp_config(tmp_path, monkeypatch):
     mcp_command = tmp_path / "mcp-server-playwright"
     mcp_command.write_text("#!/bin/sh\n")
     (tmp_path / ".mcp.json").write_text(
-        """
-{
-  "mcpServers": {
-    "playwright-test": {
-      "command": "%s"
-    }
-  }
-}
+        f"""
+{{
+  "mcpServers": {{
+    "playwright-test": {{
+      "command": "{mcp_command}"
+    }}
+  }}
+}}
 """
-        % str(mcp_command)
     )
     monkeypatch.chdir(tmp_path)
 

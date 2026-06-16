@@ -11,8 +11,8 @@ import os
 import re
 import threading
 import time
-from typing import Any
 from dataclasses import dataclass
+from typing import Any
 
 logger = logging.getLogger(__name__)
 

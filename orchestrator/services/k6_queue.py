@@ -94,7 +94,7 @@ class K6Task:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "K6Task":
+    def from_dict(cls, data: dict) -> K6Task:
         """Create from dictionary."""
         return cls(
             id=data["id"],

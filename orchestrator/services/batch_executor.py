@@ -18,9 +18,6 @@ from sqlmodel import Session, select
 
 from orchestrator.api.models_db import (
     RegressionBatch,
-)
-from orchestrator.api.models_db import (
-    SpecMetadata as DBSpecMetadata,
     get_spec_metadata,
 )
 from orchestrator.api.models_db import (

@@ -17,20 +17,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select
 
-from .credentials import decrypt_credential, encrypt_credential, mask_credential
-from .db import get_session
-from .middleware.auth import get_current_user_optional
-from .models_auth import User
-from .models_db import (
-    CiPipelineMapping,
-    PrImpactAnalysis,
-    PrQualityGateRun,
-    PrSelectedTest,
-    Project,
-    RegressionBatch,
-    RepoIndexSnapshot,
-    TestRun as DBTestRun,
-)
 from orchestrator.services.quality_gate import (
     DEFAULT_QUALITY_GATE_CONFIG,
     batch_payload,
@@ -42,6 +28,20 @@ from orchestrator.services.quality_gate import (
     quality_gate_status,
     serialize_quality_gate,
     sync_gate_run_state,
+)
+
+from .credentials import decrypt_credential, encrypt_credential, mask_credential
+from .db import get_session
+from .middleware.auth import get_current_user_optional
+from .models_auth import User
+from .models_db import (
+    CiPipelineMapping,
+    PrImpactAnalysis,
+    Project,
+    PrQualityGateRun,
+    PrSelectedTest,
+    RegressionBatch,
+    RepoIndexSnapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -1490,7 +1490,6 @@ async def handle_webhook(
     from sqlmodel import Session as _Session
 
     from ..services.github_client import verify_webhook_signature
-
     from .db import engine
 
     with _Session(engine) as session:

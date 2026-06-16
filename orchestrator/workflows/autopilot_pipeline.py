@@ -33,8 +33,7 @@ import logging
 import os
 import re
 import uuid
-from contextlib import asynccontextmanager
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -2485,12 +2484,6 @@ test.describe({suite}, () => {{
         """Store exploration results in the exploration store, mirroring
         the pattern from orchestrator/api/exploration.py."""
         from orchestrator.memory.exploration_store import get_exploration_store
-        from orchestrator.workflows.spec_scenario_builder import (
-            render_scenario_markdown,
-            sanitize_filename,
-            scenario_from_requirement,
-            scenario_from_test_idea,
-        )
 
         store = get_exploration_store(project_id=project_id)
 

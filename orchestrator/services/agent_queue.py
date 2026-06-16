@@ -152,7 +152,7 @@ class AgentTask:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "AgentTask":
+    def from_dict(cls, data: dict) -> AgentTask:
         """Create from dictionary."""
         return cls(
             id=data["id"],
@@ -1346,9 +1346,9 @@ class AgentQueue:
             from orchestrator.api.db import engine
             from orchestrator.api.models_db import (
                 AgentRun,
-                AutoPilotSession,
                 AutonomousAgentWorkItem,
                 AutonomousMission,
+                AutoPilotSession,
                 BrowserAuthSession,
                 PrdGenerationResult,
                 TestRun,

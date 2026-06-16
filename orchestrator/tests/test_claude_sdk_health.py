@@ -1,5 +1,6 @@
-import inspect
 import importlib.metadata as metadata
+import inspect
+
 from packaging.version import Version
 
 

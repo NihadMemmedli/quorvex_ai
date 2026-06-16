@@ -5,7 +5,6 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-
 RUN_LOCAL_CLAUDE_EXCLUDES = (
     Path("settings.local.json"),
     Path("settings.json"),

@@ -7,7 +7,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from orchestrator.utils.prd_spec_splitter import PRDSpecSplitter
 
-
 PARENT_TARGET_URL = "https://pre.wetravel.to/"
 PARENT_ORIGIN = "https://pre.wetravel.to"
 

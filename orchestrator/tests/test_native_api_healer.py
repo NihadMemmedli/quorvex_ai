@@ -3,8 +3,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from orchestrator.workflows.native_api_healer import NativeApiHealer
 from orchestrator.workflows.full_native_pipeline import FullNativePipeline
+from orchestrator.workflows.native_api_healer import NativeApiHealer
 
 
 def test_api_healer_prompt_includes_structured_failure_context():

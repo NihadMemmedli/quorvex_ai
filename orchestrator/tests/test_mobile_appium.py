@@ -1,13 +1,13 @@
 import json
 from pathlib import Path
 
+from orchestrator.utils.agent_runner import build_mcp_allowed_tools
 from orchestrator.workflows.mobile_appium import (
     MobileAppiumConfig,
     MobileAppiumWorkflow,
     build_appium_mcp_config,
     extract_target_url,
 )
-from orchestrator.utils.agent_runner import build_mcp_allowed_tools
 
 
 def test_extract_target_url_prefers_mobile_url():

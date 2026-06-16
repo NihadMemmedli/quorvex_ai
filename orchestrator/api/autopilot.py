@@ -23,13 +23,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from orchestrator.utils.playwright_mcp import browser_runtime_status, live_browser_display_diagnostics
 from orchestrator.services.browser_auth_sessions import (
     BrowserAuthSessionError,
     ensure_browser_auth_session_usable,
     resolve_browser_auth_session_row,
 )
 from orchestrator.services.test_data_resolver import resolve_test_data_refs
+from orchestrator.utils.playwright_mcp import browser_runtime_status, live_browser_display_diagnostics
 
 from .db import engine, get_session
 from .middleware.auth import get_current_user_optional

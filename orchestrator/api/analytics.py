@@ -20,7 +20,8 @@ from .dashboard import categorize_error
 from .db import get_database_type, get_session
 from .models_db import SpecMetadata as DBSpecMetadata
 from .models_db import TestRun as DBTestRun
-from .models_db import get_or_create_spec_metadata, get_spec_metadata as get_db_spec_metadata
+from .models_db import get_or_create_spec_metadata
+from .models_db import get_spec_metadata as get_db_spec_metadata
 from .project_filters import apply_project_filter
 from .projects import _count_all_specs_for_project
 

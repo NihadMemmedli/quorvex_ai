@@ -486,8 +486,8 @@ async def _prepare_requirement_spec_generation(
     planner_session_dir: Path | None = None,
     prepare_mcp: bool = False,
 ) -> RequirementSpecGenerationContext:
-    from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.api.db import get_session
+    from orchestrator.memory.exploration_store import get_exploration_store
     from utils.string_utils import slugify
 
     store = get_exploration_store(project_id=project_id)
@@ -663,10 +663,10 @@ async def _execute_requirement_spec_generation(
     job_id: str | None = None,
     agent_run_id: str | None = None,
 ) -> GenerateSpecFromRequirementResponse:
-    from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.api.db import get_session
-    from orchestrator.api.models_db import AgentRun, SpecMetadata as DBSpecMetadata
-    from orchestrator.api.models_db import get_spec_metadata
+    from orchestrator.api.models_db import AgentRun, get_spec_metadata
+    from orchestrator.api.models_db import SpecMetadata as DBSpecMetadata
+    from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.utils.playwright_mcp import browser_runtime_status
     from workflows.native_planner import NativePlanner
 
@@ -1182,6 +1182,51 @@ async def check_requirements_health():
         claude_sdk_available=claude_sdk_available,
         errors=errors,
     )
+
+
+@router.get("/generate-spec-jobs/{job_id}")
+async def get_generate_spec_job_status(job_id: str, project_id: str | None = Query(default=None)):
+    """Poll async requirement spec generation status."""
+    from orchestrator.api.db import get_session
+    from orchestrator.api.models_db import AgentRun
+
+    job = _req_spec_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if project_id:
+        project_id = _normalize_direct_project_id(project_id)
+        _ensure_job_project(job.get("project_id"), project_id)
+
+    response = {
+        "job_id": job_id,
+        "status": job.get("status"),
+        "message": job.get("message"),
+        "agent_run_id": job.get("agent_run_id"),
+        "agent_task_id": job.get("agent_task_id"),
+        "result": job.get("result"),
+    }
+    agent_run_id = job.get("agent_run_id")
+    if agent_run_id:
+        with next(get_session()) as db:
+            agent_run = db.get(AgentRun, agent_run_id)
+            if agent_run:
+                try:
+                    from orchestrator.api import main as main_api
+
+                    response["agent_run"] = main_api._serialize_agent_run(agent_run, db)
+                except Exception as exc:
+                    logger.debug("Failed to serialize requirement spec AgentRun %s: %s", agent_run_id, exc)
+                    response["agent_run"] = {
+                        "id": agent_run.id,
+                        "agent_type": agent_run.agent_type,
+                        "status": agent_run.status,
+                        "config": agent_run.config,
+                        "progress": agent_run.progress,
+                        "result": agent_run.result,
+                        "agent_task_id": agent_run.agent_task_id,
+                    }
+                response["agent_task_id"] = response.get("agent_task_id") or agent_run.agent_task_id
+    return response
 
 
 # Parameterized route must come AFTER specific routes
@@ -2232,9 +2277,9 @@ async def get_spec_status(req_id: int, project_id: str = Query(...)):
     """
     from sqlmodel import select
 
-    from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.api.db import get_session
     from orchestrator.api.models_db import RtmEntry
+    from orchestrator.memory.exploration_store import get_exploration_store
 
     store = get_exploration_store(project_id=project_id)
 
@@ -2280,9 +2325,9 @@ async def start_generate_spec_job(
     project_id: str = Query(...),
 ):
     """Start async browser-backed spec generation for the RTM/requirements modal."""
-    from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.api.db import get_session
     from orchestrator.api.models_db import AgentRun
+    from orchestrator.memory.exploration_store import get_exploration_store
     from orchestrator.utils.agent_tool_allowlists import get_agent_allowed_tools
     from orchestrator.utils.playwright_mcp import browser_runtime_status
 
@@ -2386,51 +2431,6 @@ async def start_generate_spec_job(
         "agent_run_id": agent_run_id,
         "message": "Spec generation started. Poll for status.",
     }
-
-
-@router.get("/generate-spec-jobs/{job_id}")
-async def get_generate_spec_job_status(job_id: str, project_id: str = Query(...)):
-    """Poll async requirement spec generation status."""
-    from orchestrator.api.db import get_session
-    from orchestrator.api.models_db import AgentRun
-
-    project_id = _normalize_direct_project_id(project_id)
-
-    job = _req_spec_jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    _ensure_job_project(job.get("project_id"), project_id)
-
-    response = {
-        "job_id": job_id,
-        "status": job.get("status"),
-        "message": job.get("message"),
-        "agent_run_id": job.get("agent_run_id"),
-        "agent_task_id": job.get("agent_task_id"),
-        "result": job.get("result"),
-    }
-    agent_run_id = job.get("agent_run_id")
-    if agent_run_id:
-        with next(get_session()) as db:
-            agent_run = db.get(AgentRun, agent_run_id)
-            if agent_run:
-                try:
-                    from orchestrator.api import main as main_api
-
-                    response["agent_run"] = main_api._serialize_agent_run(agent_run, db)
-                except Exception as exc:
-                    logger.debug("Failed to serialize requirement spec AgentRun %s: %s", agent_run_id, exc)
-                    response["agent_run"] = {
-                        "id": agent_run.id,
-                        "agent_type": agent_run.agent_type,
-                        "status": agent_run.status,
-                        "config": agent_run.config,
-                        "progress": agent_run.progress,
-                        "result": agent_run.result,
-                        "agent_task_id": agent_run.agent_task_id,
-                    }
-                response["agent_task_id"] = response.get("agent_task_id") or agent_run.agent_task_id
-    return response
 
 
 @router.post("/{req_id}/generate-spec", response_model=GenerateSpecFromRequirementResponse)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from datetime import datetime, timedelta
@@ -13,9 +12,9 @@ from sqlmodel import Session, select
 from orchestrator.api.credentials import decrypt_credential
 from orchestrator.api.models_db import (
     PrImpactAnalysis,
+    Project,
     PrQualityGateRun,
     PrSelectedTest,
-    Project,
     RegressionBatch,
 )
 from orchestrator.api.models_db import TestRun as DBTestRun

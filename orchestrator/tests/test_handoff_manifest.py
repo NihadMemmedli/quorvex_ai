@@ -80,7 +80,8 @@ def test_manifest_validation_reports_missing_invalid_stale_and_valid(tmp_path: P
     )
     stale.write_text("new")
 
-    validator = lambda path: ("# Test Plan:" in path.read_text(), "missing test plan header")
+    def validator(path):
+        return "# Test Plan:" in path.read_text(), "missing test plan header"
 
     assert validate_artifact(manifest_path, "missing")["validation_status"] == "missing"
     invalid_result = validate_artifact(manifest_path, "invalid", validator=validator)

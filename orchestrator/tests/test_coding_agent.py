@@ -11,7 +11,6 @@ from orchestrator.services.coding_agent import (
     write_coding_artifacts,
 )
 
-
 VALID_PATCH = """diff --git a/example.txt b/example.txt
 --- a/example.txt
 +++ b/example.txt

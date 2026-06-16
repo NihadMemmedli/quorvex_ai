@@ -26,7 +26,6 @@ from .middleware.permissions import EDIT_ROLES, VIEW_ROLES, check_project_access
 from .models_auth import User
 from .models_db import Project
 
-
 router = APIRouter(prefix="/projects/{project_id}/browser-auth-sessions", tags=["browser-auth-sessions"])
 
 

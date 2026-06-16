@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlmodel import SQLModel, Session, create_engine, select
+from sqlmodel import Session, SQLModel, create_engine, select
 
 pytestmark = [pytest.mark.project_isolation, pytest.mark.backend_negative]
 

@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel, Session, create_engine, select
+from sqlmodel import Session, SQLModel, create_engine, select
 
 
 def _stub_chromadb(monkeypatch):
@@ -604,7 +604,11 @@ def test_memory_graph_llm_risky_edges_require_review(monkeypatch):
     from orchestrator.memory import agent_memory as agent_memory_module
     from orchestrator.memory import knowledge_graph as knowledge_graph_module
     from orchestrator.memory.agent_memory import AgentMemoryService
-    from orchestrator.memory.knowledge_graph import ExtractedEntity, MemoryKnowledgeGraphService, get_memory_knowledge_graph_service
+    from orchestrator.memory.knowledge_graph import (
+        ExtractedEntity,
+        MemoryKnowledgeGraphService,
+        get_memory_knowledge_graph_service,
+    )
 
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     SQLModel.metadata.create_all(engine)
@@ -1744,9 +1748,9 @@ def test_agent_runner_explicit_memory_scope_overrides_env_and_records_telemetry(
 
 def test_custom_agent_report_memory_capture_is_review_required(monkeypatch):
     _stub_slowapi(monkeypatch)
+    from orchestrator.api.main import _capture_custom_agent_report_memory
     from orchestrator.memory import agent_memory as agent_memory_module
     from orchestrator.memory.agent_memory import AgentMemoryService
-    from orchestrator.api.main import _capture_custom_agent_report_memory
 
     engine = create_engine("sqlite:///:memory:")
     SQLModel.metadata.create_all(engine)
