@@ -15,7 +15,9 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | Users | `orchestrator/api/users.py` | `/users` | user and project membership models |
 | Projects | `orchestrator/api/projects.py` | `/projects` | project, credential, membership models |
 | Settings | `orchestrator/api/settings.py` | `/settings` | LLM and runtime settings validation |
-| Core specs and runs | `orchestrator/api/main.py` | `/specs`, `/runs`, queue routes | native planner, generator, healer, process manager |
+| Core specs | `orchestrator/api/main.py` | `/specs`, spec metadata routes | native planner, generator, healer, filesystem metadata |
+| Run lifecycle | `orchestrator/api/runs.py` | `/runs` | process manager, run directories, generated artifacts |
+| Runtime operations | `orchestrator/api/runtime_ops.py` | `/health`, `/queue-status`, `/api/browser-pool`, `/api/resources` | browser pool, resource manager, queue settings, emergency stop |
 | Dashboard analytics | `orchestrator/api/dashboard.py`, `analytics.py` | dashboard-specific prefixes | run, spec, coverage, analytics queries |
 | Memory | `orchestrator/api/memory.py` | `/api/memory` | `orchestrator/memory/*` |
 | PRD processing | `orchestrator/api/prd.py` | `/api/prd` | `orchestrator/workflows/prd_processor.py` |
@@ -35,7 +37,7 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | Security testing | `orchestrator/api/security_testing.py` | security testing routes | quick scanner, Nuclei, ZAP client |
 | Database testing | `orchestrator/api/database_testing.py` | database testing routes | database connector, schema analyzer, DB test generator |
 | LLM testing | `orchestrator/api/llm_testing.py` | LLM testing routes | LLM evaluator and test generator |
-| Storage health | `orchestrator/api/health.py` | `/health` | storage, MinIO, database checks |
+| Storage health | `orchestrator/api/health.py` | `/health/storage`, `/health/backup`, `/health/alerts` | storage, MinIO, database checks |
 | Assistant chat | `orchestrator/api/chat.py` | `/chat` | conversation models, memory context |
 | AutoPilot | `orchestrator/api/autopilot.py` | AutoPilot routes | AutoPilot pipeline |
 | Autonomous missions | `orchestrator/api/autonomous.py` | `/autonomous` | Temporal client, autonomous activities, agent queue |
@@ -59,9 +61,8 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | Area | Examples | Notes |
 |------|----------|-------|
 | Spec CRUD | `/specs`, `/specs/list`, `/specs/{name}` | Closely tied to filesystem and metadata sync |
-| Run execution | `/runs`, `/runs/{id}`, progress and log stream routes | Integrates process manager, run directories, and generated artifacts |
-| Queue control | `/queue-status`, `/queue/clear` | Handles in-process queue compatibility |
-| Browser pool control | `/api/browser-pool/*` | Operational status and manual cleanup |
+| TestRail file import/export | `/import/testrail`, `/export/testrail` | Legacy direct upload/download compatibility |
+| Backup control | `/api/backup`, `/api/backup/status` | Legacy direct database backup operations |
 | Static artifacts | `/artifacts/{run_id}/...` | Mounted from the runs directory |
 
 Prefer a dedicated router for new domains. Extend `main.py` only when the new behavior is part of an existing direct route family.
