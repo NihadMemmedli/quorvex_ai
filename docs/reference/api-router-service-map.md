@@ -15,7 +15,7 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | Users | `orchestrator/api/users.py` | `/users` | user and project membership models |
 | Projects | `orchestrator/api/projects.py` | `/projects` | project, credential, membership models |
 | Settings | `orchestrator/api/settings.py` | `/settings` | LLM and runtime settings validation |
-| Core specs | `orchestrator/api/main.py` | `/specs`, spec metadata routes | native planner, generator, healer, filesystem metadata |
+| Core specs | `orchestrator/api/specs.py` | `/specs`, spec metadata routes | native planner, generator, healer, filesystem metadata |
 | Run lifecycle | `orchestrator/api/runs.py` | `/runs` | process manager, run directories, generated artifacts |
 | Runtime operations | `orchestrator/api/runtime_ops.py` | `/health`, `/queue-status`, `/api/browser-pool`, `/api/resources` | browser pool, resource manager, queue settings, emergency stop |
 | Dashboard analytics | `orchestrator/api/dashboard.py`, `analytics.py` | dashboard-specific prefixes | run, spec, coverage, analytics queries |
@@ -28,6 +28,7 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | RTM | `orchestrator/api/rtm.py` | `/rtm` | RTM generator and requirement/spec links |
 | Scheduling | `orchestrator/api/scheduling.py` | `/scheduling` | `orchestrator/services/scheduler.py` |
 | TestRail | `orchestrator/api/testrail.py` | TestRail routes | `orchestrator/services/testrail_client.py` |
+| TestRail file import/export | `orchestrator/api/testrail_files.py` | `/import/testrail`, `/export/testrail` | legacy TestRail CSV/XML file compatibility |
 | Jira | `orchestrator/api/jira.py` | Jira routes | `orchestrator/services/jira_client.py` |
 | CI control | `orchestrator/api/ci_control.py` | `/projects/{project_id}/ci` | provider-neutral CI orchestration |
 | GitHub CI | `orchestrator/api/github_ci.py` | GitHub routes | GitHub client, PR advisor, quality gates |
@@ -56,12 +57,10 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 
 ## Direct Routes in `main.py`
 
-`orchestrator/api/main.py` still owns some direct app routes for legacy core behavior:
+`orchestrator/api/main.py` still owns the remaining legacy backup routes and static artifact mount:
 
 | Area | Examples | Notes |
 |------|----------|-------|
-| Spec CRUD | `/specs`, `/specs/list`, `/specs/{name}` | Closely tied to filesystem and metadata sync |
-| TestRail file import/export | `/import/testrail`, `/export/testrail` | Legacy direct upload/download compatibility |
 | Backup control | `/api/backup`, `/api/backup/status` | Legacy direct database backup operations |
 | Static artifacts | `/artifacts/{run_id}/...` | Mounted from the runs directory |
 

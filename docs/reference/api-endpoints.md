@@ -61,7 +61,7 @@ Prefix: `/projects` | Source: `orchestrator/api/projects.py`
 
 ## Specs
 
-Source: `orchestrator/api/main.py` (registered directly on app)
+Source: `orchestrator/api/specs.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -85,7 +85,7 @@ Source: `orchestrator/api/main.py` (registered directly on app)
 
 ## Spec Metadata
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/specs.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -752,7 +752,7 @@ AI assistant chat endpoints with conversation persistence and tool invocation.
 
 ## Import / Export
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/testrail_files.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -1069,7 +1069,7 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/exploration/{session_id}/issues` | `orchestrator/api/exploration.py` |
 | GET | `/exploration/{session_id}/results` | `orchestrator/api/exploration.py` |
 | POST | `/exploration/{session_id}/stop` | `orchestrator/api/exploration.py` |
-| POST | `/export/testrail` | `orchestrator/api/main.py` |
+| POST | `/export/testrail` | `orchestrator/api/testrail_files.py` |
 | POST | `/github/webhook/github` | `orchestrator/api/github_ci.py` |
 | DELETE | `/github/{project_id}/config` | `orchestrator/api/github_ci.py` |
 | GET | `/github/{project_id}/config` | `orchestrator/api/github_ci.py` |
@@ -1109,7 +1109,7 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/health/backup` | `orchestrator/api/health.py` |
 | GET | `/health/storage` | `orchestrator/api/health.py` |
 | POST | `/health/storage/record` | `orchestrator/api/health.py` |
-| POST | `/import/testrail` | `orchestrator/api/main.py` |
+| POST | `/import/testrail` | `orchestrator/api/testrail_files.py` |
 | GET | `/jira/{project_id}/bug-report-jobs/{job_id}` | `orchestrator/api/jira.py` |
 | DELETE | `/jira/{project_id}/config` | `orchestrator/api/jira.py` |
 | GET | `/jira/{project_id}/config` | `orchestrator/api/jira.py` |
@@ -1355,26 +1355,26 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/settings` | `orchestrator/api/settings.py` |
 | POST | `/settings` | `orchestrator/api/settings.py` |
 | POST | `/settings/test-connection` | `orchestrator/api/settings.py` |
-| GET | `/spec-metadata` | `orchestrator/api/main.py` |
-| GET | `/spec-metadata/{spec_name}` | `orchestrator/api/main.py` |
-| PUT | `/spec-metadata/{spec_name}` | `orchestrator/api/main.py` |
-| GET | `/specs` | `orchestrator/api/main.py` |
-| POST | `/specs` | `orchestrator/api/main.py` |
-| GET | `/specs/automated` | `orchestrator/api/main.py` |
-| POST | `/specs/create-folder` | `orchestrator/api/main.py` |
-| DELETE | `/specs/folder/{folder_path}` | `orchestrator/api/main.py` |
-| GET | `/specs/folders` | `orchestrator/api/main.py` |
-| GET | `/specs/list` | `orchestrator/api/main.py` |
-| POST | `/specs/move` | `orchestrator/api/main.py` |
-| POST | `/specs/register-folder` | `orchestrator/api/main.py` |
-| POST | `/specs/rename` | `orchestrator/api/main.py` |
-| POST | `/specs/split` | `orchestrator/api/main.py` |
-| DELETE | `/specs/{name}` | `orchestrator/api/main.py` |
-| GET | `/specs/{name}` | `orchestrator/api/main.py` |
-| PUT | `/specs/{name}` | `orchestrator/api/main.py` |
-| GET | `/specs/{name}/generated-code` | `orchestrator/api/main.py` |
-| PUT | `/specs/{name}/generated-code` | `orchestrator/api/main.py` |
-| GET | `/specs/{name}/info` | `orchestrator/api/main.py` |
+| GET | `/spec-metadata` | `orchestrator/api/specs.py` |
+| GET | `/spec-metadata/{spec_name}` | `orchestrator/api/specs.py` |
+| PUT | `/spec-metadata/{spec_name}` | `orchestrator/api/specs.py` |
+| GET | `/specs` | `orchestrator/api/specs.py` |
+| POST | `/specs` | `orchestrator/api/specs.py` |
+| GET | `/specs/automated` | `orchestrator/api/specs.py` |
+| POST | `/specs/create-folder` | `orchestrator/api/specs.py` |
+| DELETE | `/specs/folder/{folder_path}` | `orchestrator/api/specs.py` |
+| GET | `/specs/folders` | `orchestrator/api/specs.py` |
+| GET | `/specs/list` | `orchestrator/api/specs.py` |
+| POST | `/specs/move` | `orchestrator/api/specs.py` |
+| POST | `/specs/register-folder` | `orchestrator/api/specs.py` |
+| POST | `/specs/rename` | `orchestrator/api/specs.py` |
+| POST | `/specs/split` | `orchestrator/api/specs.py` |
+| DELETE | `/specs/{name}` | `orchestrator/api/specs.py` |
+| GET | `/specs/{name}` | `orchestrator/api/specs.py` |
+| PUT | `/specs/{name}` | `orchestrator/api/specs.py` |
+| GET | `/specs/{name}/generated-code` | `orchestrator/api/specs.py` |
+| PUT | `/specs/{name}/generated-code` | `orchestrator/api/specs.py` |
+| GET | `/specs/{name}/info` | `orchestrator/api/specs.py` |
 | POST | `/stop-all` | `orchestrator/api/runtime_ops.py` |
 | DELETE | `/testrail/{project_id}/config` | `orchestrator/api/testrail.py` |
 | GET | `/testrail/{project_id}/config` | `orchestrator/api/testrail.py` |
