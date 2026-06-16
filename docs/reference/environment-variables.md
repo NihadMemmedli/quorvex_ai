@@ -100,10 +100,17 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `AGENT_TIMEOUT_SECONDS` | `1800` | No | Default timeout for all agents (30 minutes) |
+| `AGENT_BROWSER_TOOL_TIMEOUT_SECONDS` | `120` | No | Timeout for browser tool calls made by agent workers |
 | `EXPLORATION_TIMEOUT_SECONDS` | `1800` | No | Timeout for the exploration agent |
 | `PRD_TIMEOUT_SECONDS` | `600` | No | Timeout for PRD processing jobs |
 | `PLANNER_TIMEOUT_SECONDS` | `1800` | No | Timeout for the planner agent |
 | `GENERATOR_TIMEOUT_SECONDS` | `1800` | No | Timeout for the generator agent |
+| `PLANNER_DRAFT_DEBUG_TIMEOUT_SECONDS` | `180` | No | Timeout for planner draft debug passes |
+| `GENERATION_REPAIR_TIMEOUT_SECONDS` | `180` | No | Timeout for generation repair passes |
+| `GENERATION_REPAIR_TOKEN_BUDGET` | `12000` | No | Token budget for generation repair prompts |
+| `GENERATOR_SCHEMA_RETRY_TIMEOUT_SECONDS` | `180` | No | Timeout for generator schema retry attempts |
+| `GENERATOR_SELF_HEAL_TIMEOUT_SECONDS` | `300` | No | Timeout for generator self-healing passes |
+| `HEALER_SCHEMA_RETRY_TIMEOUT_SECONDS` | `180` | No | Timeout for healer schema retry attempts |
 
 ## Agent Runtimes
 
@@ -112,6 +119,15 @@ Complete reference for all environment variables used by Quorvex AI. Configure i
 | `QUORVEX_AGENT_RUNTIME` | `claude_sdk` | No | Default runtime for agent runs. Supported value: `claude_sdk` |
 | `QUORVEX_ASSISTANT_RUNTIME` | `QUORVEX_AGENT_RUNTIME` | No | Optional dashboard assistant runtime override. Supported values: `claude_sdk`, `openai` |
 | `AGENT_COST_LOG` | -- | No | Optional JSONL path for appending agent usage and cost records during native pipeline runs |
+| `AGENT_PROVIDER_RETRY_ATTEMPTS` | `6` | No | Retry attempts for provider API key rotation |
+| `AGENT_PROVIDER_RETRY_BASE_SECONDS` | `2` | No | Base delay for provider retry backoff |
+| `AGENT_PROVIDER_RETRY_MAX_SECONDS` | `30` | No | Maximum delay for provider retry backoff |
+| `ENABLE_TOOL_SEARCH` | -- | No | Enable or configure tool-search support for agent runners |
+| `HERMES_API_KEY` | -- | Optional integration | API key for Hermes agent-provider integration |
+| `HERMES_API_URL` | `http://hermes:8642` in production example | Optional integration | Hermes agent-provider endpoint |
+| `HERMES_MODEL` | `hermes-agent` in production example | Optional integration | Hermes model name |
+| `HERMES_UPSTREAM_PROVIDER` | `zai` in production example | Optional integration | Upstream provider used by Hermes |
+| `QUORVEX_AGENT_TEMPORAL_ACTIVITY` | `false` | No | Marks execution inside a Temporal agent-run activity |
 
 Settings can manage backend agent runtime and dashboard assistant runtime separately. Backend agent runtime controls autonomous missions and custom agents. Assistant runtime controls dashboard chat routing.
 
@@ -120,6 +136,7 @@ Settings can manage backend agent runtime and dashboard assistant runtime separa
 | Variable | Default | Required | Description |
 |----------|---------|----------|-------------|
 | `AGENT_QUEUE_STALE_OWNERLESS_MINUTES` | internal default | No | Minutes before queued agent work without an owner is treated as stale and eligible for recovery |
+| `AUTONOMOUS_REQUIRE_EVIDENCE` | `1` | No | Require evidence before autonomous validation accepts a result |
 | `AUTONOMOUS_VALIDATION_BASE_URL` | proposal target URL, then local web app | No | Base URL used when validating autonomous test proposals |
 | `AUTONOMOUS_VALIDATION_DEV_SERVER_COMMAND` | `npm --prefix web run dev -- --hostname <host> --port <port>` | No | Command used to start a local validation server when the autonomous validator targets localhost and the app is not already reachable |
 | `AUTONOMOUS_VALIDATION_SERVER_READY_SECONDS` | `45` | No | Seconds to wait for the autonomous validation dev server to become reachable |
@@ -233,6 +250,7 @@ Temporal-backed missions, custom workflows, standalone agent runs, and domain jo
 | `INTERNAL_API_URL` | -- | No | Server-side backend URL used by Next.js routes and the backend proxy |
 | `NEXT_PUBLIC_TEMPORAL_UI_URL` | -- | No | Public Temporal UI URL displayed by frontend features |
 | `ALLOWED_ORIGINS` | `http://localhost:3000` | No | CORS allowed origins (comma-separated) |
+| `NODE_ENV` | framework default | No | Next.js/Node runtime mode used by frontend development checks |
 
 ## Test Credentials
 
@@ -353,6 +371,13 @@ These variables are used by specialized workflows, browser-auth helpers, generat
 | `OPENAPI_IMPORT_CODEGEN_CONCURRENCY` | feature default | No | Concurrent code-generation workers for OpenAPI import |
 | `OPENAPI_IMPORT_EXECUTION_CONCURRENCY` | feature default | No | Concurrent execution workers for OpenAPI import |
 | `OPENAPI_IMPORT_EXECUTION_TIMEOUT` | feature default | No | Execution timeout for OpenAPI import checks |
+| `GENERATOR_ENFORCE_SPEC_COVERAGE` | `0` | No | Require generator output to preserve spec coverage when enabled |
+| `GENERATOR_PLAN_EVIDENCE_MODE` | `summary` | No | Evidence detail level included in generator planning prompts |
+| `GENERATOR_SCHEMA_MAX_ATTEMPTS` | `2` | No | Maximum generator schema parsing attempts |
+| `GENERATOR_SELF_HEAL_MAX_ATTEMPTS` | feature default | No | Maximum generator self-healing attempts |
+| `HEALER_CODE_FRAME_RADIUS` | `35` | No | Number of surrounding lines included in healer code frames |
+| `HEALER_FULL_FILE_CONTEXT` | `0` | No | Include full file context in native healer prompts when enabled |
+| `HEALER_SCHEMA_MAX_ATTEMPTS` | `2` | No | Maximum healer schema parsing attempts |
 | `PLANNER_MAX_ATTEMPTS` | `5` | No | Maximum native planner attempts; values above 5 are capped |
 | `PLANNER_REPAIR_TIMEOUT_SECONDS` | feature default | No | Timeout for planner repair passes |
 | `PLAYWRIGHT_BROWSERS_PATH` | Playwright default | No | Browser binary path used by Playwright |
@@ -363,6 +388,7 @@ These variables are used by specialized workflows, browser-auth helpers, generat
 | `QUORVEX_BROWSER_AUTH_CONTEXT` | -- | No | Browser auth context ID/path passed to generated runs |
 | `QUORVEX_EMBEDDING_API_KEY` | -- | No | Embedding API key override |
 | `QUORVEX_EMBEDDING_BASE_URL` | -- | No | Embedding API base URL override |
+| `QUORVEX_GENERATED_PREFLIGHT_LIST` | `1` | No | Include generated preflight list output in native pipeline diagnostics |
 | `QUORVEX_OPENAI_MODEL` | provider default | No | OpenAI-compatible model override used by selected integrations |
 | `QUORVEX_RUN_MODEL_TIER` | `standard` | No | Model tier selected for a run |
 | `QUORVEX_SETTINGS_ENV_FILE` | app default | No | Settings env file path used for runtime provider persistence |
@@ -373,6 +399,7 @@ These variables are used by specialized workflows, browser-auth helpers, generat
 | `TESTDATA_WETRAVEL_AUTH_VALID_USER_PASSWORD` | -- | Demo only | Seeded WeTravel demo password test data |
 | `TESTDATA_WETRAVEL_AUTH_VALID_USER_USERNAME` | -- | Demo only | Seeded WeTravel demo username test data |
 | `TEST_RUN_STARTUP_IMPORT_RETRIES` | feature default | No | Import retry count for test-run subprocess startup |
+| `WORKFLOW_INTERPOLATION_MAX_CHARS` | `4000` | No | Maximum characters retained when interpolating workflow values |
 
 ## Headless Mode Resolution
 
