@@ -421,7 +421,7 @@ Prefix: `/health` | Sources: `orchestrator/api/runtime_ops.py` (`GET /health`), 
 
 ## Backup
 
-Source: `orchestrator/api/main.py`
+Source: `orchestrator/api/backup_control.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -860,8 +860,8 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | DELETE | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_routes.py` |
 | POST | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_routes.py` |
 | GET | `/api/agents/tools/catalog` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/backup` | `orchestrator/api/main.py` |
-| GET | `/api/backup/status` | `orchestrator/api/main.py` |
+| POST | `/api/backup` | `orchestrator/api/backup_control.py` |
+| GET | `/api/backup/status` | `orchestrator/api/backup_control.py` |
 | POST | `/api/browser-pool/cleanup` | `orchestrator/api/runtime_ops.py` |
 | GET | `/api/browser-pool/recent` | `orchestrator/api/runtime_ops.py` |
 | GET | `/api/browser-pool/status` | `orchestrator/api/runtime_ops.py` |

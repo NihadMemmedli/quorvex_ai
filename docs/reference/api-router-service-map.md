@@ -29,6 +29,7 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | Scheduling | `orchestrator/api/scheduling.py` | `/scheduling` | `orchestrator/services/scheduler.py` |
 | TestRail | `orchestrator/api/testrail.py` | TestRail routes | `orchestrator/services/testrail_client.py` |
 | TestRail file import/export | `orchestrator/api/testrail_files.py` | `/import/testrail`, `/export/testrail` | legacy TestRail CSV/XML file compatibility |
+| Backup control | `orchestrator/api/backup_control.py` | `/api/backup`, `/api/backup/status` | manual database backup operations |
 | Jira | `orchestrator/api/jira.py` | Jira routes | `orchestrator/services/jira_client.py` |
 | CI control | `orchestrator/api/ci_control.py` | `/projects/{project_id}/ci` | provider-neutral CI orchestration |
 | GitHub CI | `orchestrator/api/github_ci.py` | GitHub routes | GitHub client, PR advisor, quality gates |
@@ -57,11 +58,10 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 
 ## Direct Routes in `main.py`
 
-`orchestrator/api/main.py` still owns the remaining legacy backup routes and static artifact mount:
+`orchestrator/api/main.py` still owns the static artifact mount:
 
 | Area | Examples | Notes |
 |------|----------|-------|
-| Backup control | `/api/backup`, `/api/backup/status` | Legacy direct database backup operations |
 | Static artifacts | `/artifacts/{run_id}/...` | Mounted from the runs directory |
 
 Prefer a dedicated router for new domains. Extend `main.py` only when the new behavior is part of an existing direct route family.
