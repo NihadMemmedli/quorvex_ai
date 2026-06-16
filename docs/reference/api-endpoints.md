@@ -332,7 +332,7 @@ Agent types: `exploratory`, `writer`, `spec-synthesis`.
 
 ## Auth Sessions
 
-Source: `orchestrator/api/agent_routes.py`
+Source: `orchestrator/api/agent_sessions.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -856,9 +856,9 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/api/agents/runs/{id}/trace/spans` | `orchestrator/api/agent_routes.py` |
 | PATCH | `/api/agents/runs/{run_id}/report` | `orchestrator/api/agent_routes.py` |
 | PATCH | `/api/agents/runs/{run_id}/report-items/{item_id}` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/sessions` | `orchestrator/api/agent_routes.py` |
-| DELETE | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_routes.py` |
+| GET | `/api/agents/sessions` | `orchestrator/api/agent_sessions.py` |
+| DELETE | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_sessions.py` |
+| POST | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_sessions.py` |
 | GET | `/api/agents/tools/catalog` | `orchestrator/api/agent_routes.py` |
 | POST | `/api/backup` | `orchestrator/api/backup_control.py` |
 | GET | `/api/backup/status` | `orchestrator/api/backup_control.py` |

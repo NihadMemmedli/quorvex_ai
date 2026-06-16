@@ -44,6 +44,7 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | AutoPilot | `orchestrator/api/autopilot.py` | AutoPilot routes | AutoPilot pipeline |
 | Autonomous missions | `orchestrator/api/autonomous.py` | `/autonomous` | Temporal client, autonomous activities, agent queue |
 | Agent runs | `orchestrator/api/agent_routes.py` | `/api/agents` | `main.py` compatibility handlers, Temporal agent workflows, reports, exploratory agents |
+| Agent auth sessions | `orchestrator/api/agent_sessions.py` | `/api/agents/sessions` | persisted browser auth session files |
 | Custom workflows | `orchestrator/api/workflows.py` | workflow routes | workflow runner, step registry, Temporal client |
 
 ## Boundary Rules
