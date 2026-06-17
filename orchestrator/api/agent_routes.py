@@ -14,13 +14,6 @@ def register_agent_routes(runtime: Any) -> None:
 
     routes = [
         ("POST", "/api/agents/runs", runtime.run_agent),
-        ("GET", "/api/agents/tools/catalog", runtime.list_agent_tool_catalog),
-        ("GET", "/api/agents/definitions", runtime.list_agent_definitions),
-        ("POST", "/api/agents/definitions", runtime.create_agent_definition),
-        ("GET", "/api/agents/definitions/{definition_id}", runtime.get_agent_definition),
-        ("PUT", "/api/agents/definitions/{definition_id}", runtime.update_agent_definition),
-        ("DELETE", "/api/agents/definitions/{definition_id}", runtime.archive_agent_definition),
-        ("POST", "/api/agents/definitions/{definition_id}/runs", runtime.run_agent_definition),
         ("GET", "/api/agents/runs", runtime.list_agent_runs),
         ("GET", "/api/agents/runs/{id}", runtime.get_agent_run),
         ("GET", "/api/agents/runs/{id}/coding/diff", runtime.get_coding_agent_diff),
