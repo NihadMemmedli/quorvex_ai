@@ -49,8 +49,8 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | Agent coding patch review | `orchestrator/api/agent_coding_patch.py` | `/api/agents/runs/{id}/coding/*` | coding agent patch diff preview, rejection, and apply state transitions |
 | Agent run control | `orchestrator/api/agent_run_control.py` | `/api/agents/runs/{id}/pause`, `/resume`, `/cancel`, `/retry` | pause, resume, cancel, and retry state transitions |
 | Agent reports | `orchestrator/api/agent_reports.py` | `/api/agents/runs/{id}/report`, `/api/agents/reports/search`, report edit/import routes | custom agent report retrieval, editing, search, and requirement import |
-| Agent exploratory/spec generation | `orchestrator/api/agent_exploratory.py` | `/api/agents/exploratory/*`, `/api/agents/runs/{id}/report-items/{item_id}/generate-spec` | exploratory run launch, flow details, flow/report item spec generation, and flow test generation |
-| Agent runs | `orchestrator/api/agent_routes.py` | `/api/agents/runs`, flow edit routes | `main.py` compatibility handlers for Temporal run launch and remaining exploratory flow edits |
+| Agent exploratory/spec generation | `orchestrator/api/agent_exploratory.py` | `/api/agents/exploratory/*`, `/api/agents/runs/{id}/report-items/{item_id}/generate-spec` | exploratory run launch, flow details/editing, flow/report item spec generation, and flow test generation |
+| Agent runs | `orchestrator/api/agent_routes.py` | `/api/agents/runs` | `main.py` compatibility handler for Temporal run launch |
 | Agent auth sessions | `orchestrator/api/agent_sessions.py` | `/api/agents/sessions` | persisted browser auth session files |
 | Custom workflows | `orchestrator/api/workflows.py` | workflow routes | workflow runner, step registry, Temporal client |
 
