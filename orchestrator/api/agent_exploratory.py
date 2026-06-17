@@ -48,6 +48,12 @@ class ExploratoryRunRequest(BaseModel):
     record_video: bool = False
 
 
+class SpecSynthesisRequest(BaseModel):
+    """Spec synthesis request."""
+
+    exploration_run_id: str  # Run ID of exploration to synthesize
+
+
 class GenerateReportItemSpecRequest(BaseModel):
     browser_auth_session_id: str | None = None
     use_project_default_browser_auth: bool = False

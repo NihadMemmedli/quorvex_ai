@@ -24,7 +24,6 @@ from typing import Any
 from fastapi import BackgroundTasks, Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
 from slowapi.errors import RateLimitExceeded
 from sqlmodel import Session, select
 from starlette.requests import Request
@@ -1087,12 +1086,7 @@ AGENT_RISK_ORDER = agent_tool_catalog_support.AGENT_RISK_ORDER
 ExploratoryRunRequest = agent_exploratory.ExploratoryRunRequest
 
 
-class SpecSynthesisRequest(BaseModel):
-    """Spec synthesis request."""
-
-    exploration_run_id: str  # Run ID of exploration to synthesize
-
-
+SpecSynthesisRequest = agent_exploratory.SpecSynthesisRequest
 FlowUpdateRequest = agent_exploratory.FlowUpdateRequest
 GenerateReportItemSpecRequest = agent_exploratory.GenerateReportItemSpecRequest
 
