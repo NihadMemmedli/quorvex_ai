@@ -60,9 +60,6 @@ def register_agent_routes(runtime: Any) -> None:
             runtime.generate_report_item_spec,
         ),
         ("POST", "/api/agents/exploratory/{run_id}/flows/{flow_id}/generate", runtime.generate_flow_test),
-        ("GET", "/api/agents/sessions", runtime.list_sessions),
-        ("POST", "/api/agents/sessions/{session_id}", runtime.create_session),
-        ("DELETE", "/api/agents/sessions/{session_id}", runtime.delete_session),
     ]
     for method, path, endpoint in routes:
         router.add_api_route(path, endpoint, methods=[method])

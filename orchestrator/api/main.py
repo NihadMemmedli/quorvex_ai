@@ -80,6 +80,7 @@ from utils.project_utils import derive_project_id_from_url
 
 from . import (
     agent_routes,
+    agent_sessions,
     analytics,
     api_testing,
     auth,
@@ -241,6 +242,7 @@ app.include_router(runs.router)  # Test run lifecycle endpoints
 app.include_router(runtime_ops.router)  # Operational runtime, queue, health, and debug endpoints
 app.include_router(workflows.router)  # Custom workflow endpoints
 app.include_router(backup_control.router)  # Database backup control endpoints
+app.include_router(agent_sessions.router)  # Legacy agent authentication session endpoints
 app.mount("/artifacts", StaticFiles(directory=RUNS_DIR), name="artifacts")
 
 # CORS Configuration - restrict origins in production
@@ -9085,45 +9087,6 @@ async def generate_flow_test(
     except Exception as e:
         logger.error(f"Error generating test: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
-
-
-async def list_sessions():
-    """List saved authentication sessions."""
-    from agents.auth_handler import AuthHandler
-
-    auth_handler = AuthHandler()
-    sessions = auth_handler.list_sessions()
-
-    return {"sessions": sessions}
-
-
-async def create_session(session_id: str, cookies: list[dict[str, Any]], storage: dict[str, Any]):
-    """
-    Save an authentication session for future use.
-
-    This allows you to capture a logged-in session and reuse it
-    for future explorations.
-    """
-    from agents.auth_handler import AuthHandler
-
-    auth_handler = AuthHandler()
-    result = await auth_handler.save_session(session_id, cookies, storage)
-
-    if result.get("success"):
-        return result
-    else:
-        raise HTTPException(status_code=400, detail=result.get("error"))
-
-
-async def delete_session(session_id: str):
-    """Delete a saved authentication session."""
-    from agents.auth_handler import AuthHandler
-
-    auth_handler = AuthHandler()
-    if auth_handler.delete_session(session_id):
-        return {"status": "deleted", "session_id": session_id}
-    else:
-        raise HTTPException(status_code=404, detail="Session not found")
 
 
 agent_routes.register_agent_routes(sys.modules[__name__])
