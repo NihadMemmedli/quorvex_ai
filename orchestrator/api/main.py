@@ -117,6 +117,7 @@ from . import (
     spec_files,
     specs,
     test_data,
+    test_run_cleanup_support,
     test_run_read_model_support,
     test_run_runtime_support,
     testrail,
@@ -550,117 +551,21 @@ def cleanup_orphaned_runs():
 
     IMPORTANT: Preserves runs that already completed (status.txt has terminal status).
     """
-    logger.info("Cleaning up orphaned runs...")
-    cleaned_count = 0
-    preserved_count = 0
-
-    with Session(engine) as session:
-        stuck_runs = session.exec(
-            select(DBTestRun).where(DBTestRun.status.in_(["running", "in_progress", "queued"]))
-        ).all()
-
-        for run in stuck_runs:
-            if run.temporal_workflow_id:
-                continue
-            run_dir = RUNS_DIR / run.id
-
-            # Check if status.txt already has a terminal status
-            status_file = run_dir / "status.txt" if run_dir.exists() else None
-            if status_file and status_file.exists():
-                file_status = status_file.read_text().strip()
-                # Terminal statuses that indicate the run actually completed
-                if file_status in ("passed", "failed", "error", "completed"):
-                    # Update DB to match file status, don't mark as stopped
-                    run.status = file_status
-                    run.completed_at = run.completed_at or datetime.utcnow()
-                    run.queue_position = None
-                    session.add(run)
-                    preserved_count += 1
-                    logger.debug(f"Preserved run {run.id}: status={file_status}")
-                    continue
-
-            # Only mark as stopped if we don't have a terminal status
-            run.status = "stopped"
-            run.queue_position = None
-            session.add(run)
-            cleaned_count += 1
-
-            # Update status.txt file too (only for truly orphaned runs)
-            if run_dir.exists():
-                (run_dir / "status.txt").write_text("stopped")
-
-        session.commit()
-
-    if cleaned_count > 0:
-        logger.info(f"Cleaned up {cleaned_count} orphaned runs (marked as stopped)")
-    if preserved_count > 0:
-        logger.info(f"Preserved {preserved_count} runs with terminal status from files")
-    if cleaned_count == 0 and preserved_count == 0:
-        logger.info("No orphaned runs found")
+    return test_run_cleanup_support.cleanup_orphaned_runs(_test_run_runtime())
 
 
 async def _cleanup_test_run_runtime(run_id: str, reason: str = "cleanup requested") -> dict[str, object]:
     """Cancel agent tasks and browser process trees owned by one test run."""
-    cleanup: dict[str, object] = {
-        "run_id": run_id,
-        "reason": reason,
-        "agent_tasks": None,
-        "processes": None,
-    }
-
-    try:
-        from orchestrator.services.agent_queue import get_agent_queue
-
-        queue = get_agent_queue()
-        await queue.connect()
-        cleanup["agent_tasks"] = await queue.cancel_tasks_for_test_run(run_id)
-    except Exception as exc:
-        logger.warning("Failed to cancel agent tasks for test run %s: %s", run_id, exc)
-        cleanup["agent_tasks"] = {"error": str(exc)}
-
-    try:
-        from orchestrator.utils.browser_cleanup import kill_test_run_process_tree
-
-        cleanup["processes"] = await asyncio.to_thread(kill_test_run_process_tree, run_id)
-    except Exception as exc:
-        logger.warning("Failed to clean browser processes for test run %s: %s", run_id, exc)
-        cleanup["processes"] = {"error": str(exc)}
-
-    return cleanup
+    return await test_run_cleanup_support.cleanup_test_run_runtime(
+        _test_run_runtime(),
+        run_id,
+        reason,
+    )
 
 
 def cleanup_terminal_test_run_processes() -> int:
     """Kill browser process trees for test runs already marked terminal."""
-    try:
-        from orchestrator.utils.browser_cleanup import (
-            find_test_run_ids_in_processes,
-            kill_test_run_process_tree,
-        )
-    except Exception as exc:
-        logger.debug("Terminal test-run process cleanup unavailable: %s", exc)
-        return 0
-
-    terminal_statuses = {"passed", "failed", "error", "stopped", "cancelled", "completed"}
-    cleaned = 0
-    run_ids = find_test_run_ids_in_processes()
-    if not run_ids:
-        return 0
-
-    with Session(engine) as session:
-        for run_id in sorted(run_ids):
-            run = session.get(DBTestRun, run_id)
-            status = str(getattr(run, "status", "") or "")
-            if status not in terminal_statuses:
-                status_file = RUNS_DIR / run_id / "status.txt"
-                if status_file.exists():
-                    status = status_file.read_text(errors="replace").strip()
-            if status not in terminal_statuses:
-                continue
-            cleanup = kill_test_run_process_tree(run_id, grace_seconds=0.5)
-            if cleanup.get("matched"):
-                cleaned += int(cleanup.get("matched") or 0)
-                logger.info("Cleaned terminal test-run browser process tree for %s: %s", run_id, cleanup)
-    return cleaned
+    return test_run_cleanup_support.cleanup_terminal_test_run_processes(_test_run_runtime())
 
 
 def sync_data_from_files():
