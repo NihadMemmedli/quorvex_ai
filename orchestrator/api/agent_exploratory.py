@@ -45,6 +45,19 @@ class GenerateFlowTestRequest(BaseModel):
     inherit_browser_auth: bool = True
 
 
+class FlowUpdateRequest(BaseModel):
+    """Partial update request for a discovered flow."""
+
+    title: str | None = None
+    pages: list[str] | None = None
+    happy_path: str | None = None
+    edge_cases: list[str] | None = None
+    test_ideas: list[str] | None = None
+    entry_point: str | None = None
+    exit_point: str | None = None
+    complexity: str | None = None
+
+
 def _runtime() -> Any:
     return (
         sys.modules.get("orchestrator.api.main")
@@ -83,6 +96,27 @@ async def get_flow_details(
     session: Session = Depends(get_session),
 ):
     return await _runtime().get_flow_details(run_id, flow_id, project_id=project_id, session=session)
+
+
+@router.put("/api/agents/exploratory/{run_id}/flows/{flow_id}")
+async def update_flow(
+    run_id: str,
+    flow_id: str,
+    request: FlowUpdateRequest,
+    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    session: Session = Depends(get_session),
+):
+    return await _runtime().update_flow(run_id, flow_id, request, project_id=project_id, session=session)
+
+
+@router.delete("/api/agents/exploratory/{run_id}/flows/{flow_id}")
+async def delete_flow(
+    run_id: str,
+    flow_id: str,
+    project_id: str | None = Query(default=None, description="Project ID for verification"),
+    session: Session = Depends(get_session),
+):
+    return await _runtime().delete_flow(run_id, flow_id, project_id=project_id, session=session)
 
 
 @router.post("/api/agents/exploratory/{run_id}/analyze-prerequisites")

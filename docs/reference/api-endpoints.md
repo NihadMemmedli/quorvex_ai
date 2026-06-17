@@ -841,9 +841,9 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | POST | `/api/agents/exploratory` | `orchestrator/api/agent_exploratory.py` |
 | GET | `/api/agents/exploratory/flow-spec-jobs/{job_id}` | `orchestrator/api/agent_exploratory.py` |
 | POST | `/api/agents/exploratory/{run_id}/analyze-prerequisites` | `orchestrator/api/agent_exploratory.py` |
-| DELETE | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_routes.py` |
+| DELETE | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_exploratory.py` |
 | GET | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_exploratory.py` |
-| PUT | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_routes.py` |
+| PUT | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_exploratory.py` |
 | POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/generate` | `orchestrator/api/agent_exploratory.py` |
 | POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/spec` | `orchestrator/api/agent_exploratory.py` |
 | GET | `/api/agents/exploratory/{run_id}/specs` | `orchestrator/api/agent_exploratory.py` |
