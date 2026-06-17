@@ -83,8 +83,8 @@ from . import (
     agent_exploratory,
     agent_queue_ops,
     agent_reports,
-    agent_routes,
     agent_run_control,
+    agent_run_launch,
     agent_run_observability,
     agent_sessions,
     analytics,
@@ -7806,11 +7806,10 @@ async def generate_flow_test(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-agent_routes.register_agent_routes(sys.modules[__name__])
 app.include_router(agent_definitions.router)  # Custom agent tool catalog and definition endpoints
+app.include_router(agent_run_launch.router)  # Agent run launch endpoint
 app.include_router(agent_run_observability.router)  # Read-only agent run visibility endpoints
 app.include_router(agent_coding_patch.router)  # Coding agent patch review endpoints
 app.include_router(agent_run_control.router)  # Agent run pause, resume, cancel, and retry endpoints
 app.include_router(agent_reports.router)  # Custom agent report retrieval, editing, search, and import endpoints
 app.include_router(agent_exploratory.router)  # Exploratory agent and spec generation endpoints
-app.include_router(agent_routes.router)  # Agent run launch and remaining compatibility endpoints

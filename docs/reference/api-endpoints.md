@@ -293,7 +293,7 @@ Prefix: `/api/prd` | Source: `orchestrator/api/prd.py`
 
 ## Agents
 
-Source: `orchestrator/api/agent_routes.py`; exploratory/spec generation: `orchestrator/api/agent_exploratory.py`; run control: `orchestrator/api/agent_run_control.py`; reports: `orchestrator/api/agent_reports.py`; coding patch review: `orchestrator/api/agent_coding_patch.py`; read-only run visibility: `orchestrator/api/agent_run_observability.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
+Source: `orchestrator/api/agent_run_launch.py`; exploratory/spec generation: `orchestrator/api/agent_exploratory.py`; run control: `orchestrator/api/agent_run_control.py`; reports: `orchestrator/api/agent_reports.py`; coding patch review: `orchestrator/api/agent_coding_patch.py`; read-only run visibility: `orchestrator/api/agent_run_observability.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -854,7 +854,7 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/api/agents/queue-status` | `orchestrator/api/agent_queue_ops.py` |
 | GET | `/api/agents/reports/search` | `orchestrator/api/agent_reports.py` |
 | GET | `/api/agents/runs` | `orchestrator/api/agent_run_observability.py` |
-| POST | `/api/agents/runs` | `orchestrator/api/agent_routes.py` |
+| POST | `/api/agents/runs` | `orchestrator/api/agent_run_launch.py` |
 | GET | `/api/agents/runs/{id}` | `orchestrator/api/agent_run_observability.py` |
 | POST | `/api/agents/runs/{id}/cancel` | `orchestrator/api/agent_run_control.py` |
 | POST | `/api/agents/runs/{id}/coding/apply` | `orchestrator/api/agent_coding_patch.py` |

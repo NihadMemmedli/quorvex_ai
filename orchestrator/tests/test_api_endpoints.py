@@ -493,6 +493,32 @@ class TestAgentRunHistoryEndpoints:
         assert endpoints[("GET", "/api/agents/temporal/health")] == expected_module
 
 
+class TestAgentRunLaunchEndpoints:
+    """Test agent run launch route ownership."""
+
+    def test_agent_run_launch_route_registered_from_launch_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        assert endpoints[("POST", "/api/agents/runs")] == "orchestrator.api.agent_run_launch"
+
+    def test_agent_run_launch_docs_source_map_points_to_launch_router(self):
+        root = Path(__file__).resolve().parents[2]
+        endpoints_doc = (root / "docs/reference/api-endpoints.md").read_text(encoding="utf-8")
+        router_map = (root / "docs/reference/api-router-service-map.md").read_text(encoding="utf-8")
+
+        expected_source = "`orchestrator/api/agent_run_launch.py`"
+        assert f"| POST | `/api/agents/runs` | {expected_source} |" in endpoints_doc
+        assert "Agent run launch" in router_map
+        assert expected_source in router_map
+
+
 class TestAgentCodingPatchEndpoints:
     """Test coding-agent patch review endpoints."""
 
