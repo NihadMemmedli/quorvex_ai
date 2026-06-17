@@ -1787,12 +1787,8 @@ def _verify_exploration_run_project(run_id: str, project_id: str | None, session
     )
 
 
-def _build_single_flow_prompt(flow: dict[str, Any], base_url: str) -> str:
-    return agent_exploratory._build_single_flow_prompt(flow, base_url)
-
-
-def _generate_fallback_spec(flow: dict[str, Any], base_url: str) -> tuple[str, str]:
-    return agent_exploratory._generate_fallback_spec(flow, base_url)
+_build_single_flow_prompt = agent_exploratory._build_single_flow_prompt
+_generate_fallback_spec = agent_exploratory._generate_fallback_spec
 
 
 # =============================================================================
@@ -1800,24 +1796,11 @@ def _generate_fallback_spec(flow: dict[str, Any], base_url: str) -> tuple[str, s
 # =============================================================================
 
 
-def _requires_authentication(url: str) -> bool:
-    return agent_flow_spec_support._requires_authentication(url)
-
-
-def _detect_login_url(target_url: str) -> str:
-    return agent_flow_spec_support._detect_login_url(target_url)
-
-
-def _is_login_page(url: str) -> bool:
-    return agent_flow_spec_support._is_login_page(url)
-
-
-def _extract_domain_name(url: str) -> str:
-    return agent_flow_spec_support._extract_domain_name(url)
-
-
-def _slugify(text: str) -> str:
-    return agent_flow_spec_support._slugify(text)
+_requires_authentication = agent_flow_spec_support._requires_authentication
+_detect_login_url = agent_flow_spec_support._detect_login_url
+_is_login_page = agent_flow_spec_support._is_login_page
+_extract_domain_name = agent_flow_spec_support._extract_domain_name
+_slugify = agent_flow_spec_support._slugify
 
 
 # ========== Flow Spec Generation Job Tracking ==========
