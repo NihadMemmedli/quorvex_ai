@@ -9,6 +9,10 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlmodel import Session
 
+from orchestrator.services.agent_runtimes import normalize_agent_runtime
+from utils.playwright_mcp import browser_runtime_status
+
+from . import agent_run_runtime
 from .db import get_session
 from .models_db import AgentRun
 
@@ -48,7 +52,7 @@ async def run_agent(request: AgentRunRequest, session: Session = Depends(get_ses
 
     # Create DB Record
     run_id = str(uuid.uuid4())
-    runtime = runtime_module.normalize_agent_runtime(request.runtime or request.config.get("runtime"))
+    runtime = normalize_agent_runtime(request.runtime or request.config.get("runtime"))
     run_config = {**request.config, "runtime": runtime}
     if request.project_id and not run_config.get("project_id"):
         run_config["project_id"] = request.project_id
@@ -58,11 +62,7 @@ async def run_agent(request: AgentRunRequest, session: Session = Depends(get_ses
         run_config["browser_auth_session_id"] = request.browser_auth_session_id
     if request.use_project_default_browser_auth:
         run_config["use_project_default_browser_auth"] = True
-    browser_metadata = (
-        runtime_module.browser_runtime_status()
-        if runtime_module._agent_run_has_browser_tools(request.agent_type, run_config)
-        else {}
-    )
+    browser_metadata = browser_runtime_status() if agent_run_runtime.agent_run_has_browser_tools(request.agent_type, run_config) else {}
     run = AgentRun(
         id=run_id,
         agent_type=request.agent_type,
@@ -81,7 +81,7 @@ async def run_agent(request: AgentRunRequest, session: Session = Depends(get_ses
     }
     session.add(run)
     session.commit()
-    runtime_module._record_agent_run_event(
+    agent_run_runtime.record_agent_run_event(
         run_id,
         event_type="created",
         message=f"Agent run created with status {initial_status}.",
