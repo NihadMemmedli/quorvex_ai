@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -34,10 +34,10 @@ from starlette.responses import JSONResponse
 from logging_config import get_logger, request_id_var, setup_logging
 from orchestrator.services.agent_runtimes import normalize_agent_runtime
 from orchestrator.services.browser_auth_sessions import (
-    BrowserAuthSessionError,
-    ensure_browser_auth_session_usable,
-    resolve_browser_auth_for_run,
-    resolve_browser_auth_session_row,
+    BrowserAuthSessionError,  # noqa: F401
+    ensure_browser_auth_session_usable,  # noqa: F401
+    resolve_browser_auth_for_run,  # noqa: F401
+    resolve_browser_auth_session_row,  # noqa: F401
 )
 from orchestrator.services.browser_slots import browser_operation_slot  # noqa: F401
 from orchestrator.services.coding_agent import (  # noqa: F401
@@ -51,7 +51,7 @@ from orchestrator.services.coding_agent import (  # noqa: F401
     write_coding_artifacts,
 )
 from services.browser_pool import AbstractBrowserPool, get_browser_pool
-from services.browser_pool import OperationType as BrowserOpType
+from services.browser_pool import OperationType as BrowserOpType  # noqa: F401
 from services.resource_manager import (
     ResourceManager,
     get_resource_manager,  # noqa: F401
@@ -61,11 +61,11 @@ from utils.agent_report import (  # noqa: F401
     _build_custom_agent_structured_report,
 )
 from utils.agent_tool_allowlists import get_agent_allowed_tools
-from utils.claude_config import copy_claude_project_config
+from utils.claude_config import copy_claude_project_config  # noqa: F401
 from utils.playwright_mcp import (
     browser_runtime_status,
-    prepare_run_playwright_config_content,
-    write_playwright_test_mcp_config,
+    prepare_run_playwright_config_content,  # noqa: F401
+    write_playwright_test_mcp_config,  # noqa: F401
 )
 from utils.project_utils import derive_project_id_from_url  # noqa: F401
 
@@ -118,6 +118,7 @@ from . import (
     spec_files,
     specs,
     test_data,
+    test_run_runtime_support,
     testrail,
     testrail_files,
     users,
@@ -1785,43 +1786,21 @@ async def _log_startup_diagnostics():
 
 
 _STARTUP_IMPORT_FAILURE_MESSAGE = (
-    "Transient Docker bind-mount import failure while starting the test runner (Errno 35)."
+    test_run_runtime_support._STARTUP_IMPORT_FAILURE_MESSAGE
 )
 
 
-def _record_startup_import_failure(run_id: str, run_dir_path: Path, *, retrying: bool) -> None:
-    message = (
-        f"{_STARTUP_IMPORT_FAILURE_MESSAGE} Retrying test runner."
-        if retrying
-        else f"{_STARTUP_IMPORT_FAILURE_MESSAGE} Retry attempts exhausted."
-    )
-    try:
-        with Session(engine) as session:
-            run = session.get(DBTestRun, run_id)
-            if run:
-                if not retrying:
-                    run.status = "error"
-                    run.error_message = message
-                    run.completed_at = datetime.utcnow()
-                run.current_stage = "startup"
-                run.stage_message = message
-                session.add(run)
-                session.commit()
-    except Exception as exc:
-        logger.debug(
-            "Could not record startup import failure status for %s: %s",
-            run_id,
-            exc,
-        )
+def _test_run_runtime():
+    return sys.modules[__name__]
 
-    if not retrying:
-        try:
-            (run_dir_path / "status.txt").write_text("error")
-            (run_dir_path / "pipeline_error.json").write_text(
-                json.dumps({"stage": "startup", "error": message}, indent=2)
-            )
-        except OSError:
-            pass
+
+def _record_startup_import_failure(run_id: str, run_dir_path: Path, *, retrying: bool) -> None:
+    test_run_runtime_support.record_startup_import_failure(
+        _test_run_runtime(),
+        run_id,
+        run_dir_path,
+        retrying=retrying,
+    )
 
 
 def _run_test_cli_subprocess_with_retry(
@@ -1837,9 +1816,8 @@ def _run_test_cli_subprocess_with_retry(
     timeout_seconds: int = 3600,
 ) -> int | None:
     """Run the CLI subprocess, retrying only early Errno 35 import failures."""
-    from orchestrator.services.test_run_subprocess_retry import run_test_cli_subprocess_with_retry
-
-    return run_test_cli_subprocess_with_retry(
+    return test_run_runtime_support.run_test_cli_subprocess_with_retry(
+        _test_run_runtime(),
         cmd=cmd,
         cwd=cwd,
         env=env,
@@ -1848,11 +1826,6 @@ def _run_test_cli_subprocess_with_retry(
         spec_name=spec_name,
         batch_id=batch_id,
         append_workflow_log=append_workflow_log,
-        register_process=register_process,
-        unregister_process=unregister_process,
-        process_manager=PROCESS_MANAGER,
-        logger=logger,
-        record_startup_import_failure=_record_startup_import_failure,
         timeout_seconds=timeout_seconds,
     )
 
@@ -1883,129 +1856,24 @@ def execute_run_task(
 
     Process groups are used to ensure all child processes can be terminated together.
     """
-    global PROCESS_MANAGER
-
-    def _append_workflow_log(message: str, **payload: Any) -> None:
-        try:
-            run_dir_path = Path(run_dir)
-            run_dir_path.mkdir(parents=True, exist_ok=True)
-            entry = {
-                "ts": datetime.utcnow().isoformat() + "Z",
-                "message": message,
-                **payload,
-            }
-            with (run_dir_path / "workflow.log").open("a", encoding="utf-8") as log:
-                log.write(json.dumps(entry, default=str) + "\n")
-        except Exception:
-            pass
-
-    _append_workflow_log("Subprocess preparing.", run_id=run_id, spec_path=spec_path)
-
-    with Session(engine) as session:
-        run = session.get(DBTestRun, run_id)
-        if run and run.status in ("stopped", "cancelled"):
-            logger.info(f"Run {run_id} was {run.status} before subprocess start. Aborting.")
-            _append_workflow_log("Subprocess aborted before start.", status=run.status)
-            return
-
-    cmd = [sys.executable, "orchestrator/cli.py", spec_path, "--run-dir", run_dir, "--browser", browser]
-    if try_code_path:
-        cmd.extend(["--try-code", try_code_path])
-    if hybrid:
-        cmd.extend(["--hybrid", "--max-iterations", str(max_iterations)])
-
-    run_dir_path = Path(run_dir)
-    _write_run_browser_metadata(run_dir_path, _build_run_browser_metadata(headless=headless, phase="executing"))
-
-    # Copy reusable .claude/ project artifacts into the run sandbox.
-    # Local settings stay in the project config and are not copied per run.
-    copy_claude_project_config(BASE_DIR / ".claude", run_dir_path / ".claude")
-
-    # Copy Playwright config to run directory with absolute paths
-    # The workflow scripts change to CLAUDE_CONFIG_DIR for MCP config isolation,
-    # but Playwright needs its config file in the current directory with correct paths
-    playwright_config_src = BASE_DIR / "playwright.config.ts"
-    playwright_config_dst = run_dir_path / "playwright.config.ts"
-    if playwright_config_src.exists() and not playwright_config_dst.exists():
-        config_content = prepare_run_playwright_config_content(
-            playwright_config_src.read_text(),
-            base_dir=BASE_DIR,
-            run_dir=run_dir_path,
-            headless=headless,
-            storage_state_path=storage_state_path,
-        )
-        playwright_config_dst.write_text(config_content)
-
-    runtime_metadata = write_playwright_test_mcp_config(
-        run_dir=run_dir_path,
-        server_name="playwright-test",
-        config_path=playwright_config_dst,
-        headless=headless,
-        storage_state_path=storage_state_path,
-    )
-    _write_run_browser_metadata(
-        run_dir_path,
-        _merge_run_browser_metadata(
-            _build_run_browser_metadata(headless=headless, phase="executing"),
-            runtime_metadata,
-            headless=headless,
-            phase="executing",
-        ),
-    )
-    logger.info(
-        "Created Playwright Test MCP config for run %s (headless=%s, args=%s)",
+    return test_run_runtime_support.execute_run_task(
+        _test_run_runtime(),
+        spec_path,
+        run_dir,
         run_id,
+        try_code_path,
+        browser,
+        hybrid,
+        max_iterations,
         headless,
-        runtime_metadata.get("mcp_args"),
-    )
-
-    # The Playwright Test MCP setup tools resolve seed files relative to cwd.
-    # Generate a run-local seed from this spec so setup opens the target app
-    # instead of falling back to the MCP package's blank default seed.
-    target_url = _extract_run_target_url(spec_path)
-    seed_dst = _write_run_seed_spec(run_dir_path, target_url)
-    logger.debug(f"Wrote run seed file: {seed_dst} (target_url={target_url or 'about:blank'})")
-
-    # Set up environment with headless, memory, and config directory settings
-    env = os.environ.copy()
-    env["HEADLESS"] = "true" if headless else "false"
-    env["PLAYWRIGHT_HEADLESS"] = "true" if headless else "false"
-    if not headless:
-        env["CI"] = ""
-        env["PLAYWRIGHT_WORKERS"] = "1"
-    env["MEMORY_ENABLED"] = "true" if memory_enabled else "false"
-    env["QUORVEX_RUN_MODEL_TIER"] = model_tier or "tool_deep"
-    env["BROWSER_SLOT_PARENT_OWNER_TYPE"] = "test_run"
-    env["BROWSER_SLOT_PARENT_RUN_ID"] = run_id
-    # Tell workflows to use run-specific config directory
-    env["CLAUDE_CONFIG_DIR"] = str(run_dir_path)
-    # Pass project_id for credentials and memory isolation
-    if project_id:
-        env["PROJECT_ID"] = project_id
-        env["MEMORY_PROJECT_ID"] = project_id
-    if browser_auth_context:
-        env["QUORVEX_BROWSER_AUTH_CONTEXT"] = json.dumps(browser_auth_context)
-    normalized_test_data_refs = _normalize_request_test_data_refs(test_data_refs)
-    if normalized_test_data_refs:
-        env["QUORVEX_TEST_DATA_REFS"] = json.dumps(normalized_test_data_refs)
-
-    with Session(engine) as session:
-        run = session.get(DBTestRun, run_id)
-        if run and run.status in ("stopped", "cancelled"):
-            logger.info(f"Run {run_id} was {run.status} before process spawn. Aborting.")
-            _append_workflow_log("Subprocess aborted before process spawn.", status=run.status)
-            return
-
-    _run_test_cli_subprocess_with_retry(
-        cmd=cmd,
-        cwd=BASE_DIR,
-        env=env,
-        run_id=run_id,
-        run_dir_path=run_dir_path,
-        spec_name=spec_name,
-        batch_id=batch_id,
-        append_workflow_log=_append_workflow_log,
-        timeout_seconds=3600,
+        memory_enabled,
+        spec_name,
+        batch_id,
+        project_id,
+        model_tier,
+        storage_state_path,
+        browser_auth_context,
+        test_data_refs,
     )
 
 
@@ -2046,256 +1914,23 @@ async def execute_run_task_wrapper(
 
     Note: BROWSER_POOL is initialized at startup in startup_event().
     """
-    def _append_workflow_log(message: str, **payload: Any) -> None:
-        try:
-            run_dir_path = Path(run_dir)
-            run_dir_path.mkdir(parents=True, exist_ok=True)
-            entry = {
-                "ts": datetime.utcnow().isoformat() + "Z",
-                "message": message,
-                **payload,
-            }
-            with (run_dir_path / "workflow.log").open("a", encoding="utf-8") as log:
-                log.write(json.dumps(entry, default=str) + "\n")
-        except Exception:
-            pass
-
-    _append_workflow_log("Test run wrapper started.", run_id=run_id, spec_path=spec_path)
-
-    # Get execution settings for this run
-    headless = False
-    memory_enabled = True
-    with Session(engine) as session:
-        settings = session.get(DBExecutionSettings, 1)
-        if settings:
-            # Always respect headless setting (user can force headless for any run)
-            headless = settings.headless_in_parallel
-            memory_enabled = settings.memory_enabled
-    if os.environ.get("VNC_ENABLED", "").lower() == "true":
-        headless = False
-
-    # Use unified browser pool for slot management
-    pool = BROWSER_POOL or await get_browser_pool()
-    try:
-        stale_cleaned = await pool.cleanup_stale(max_age_minutes=60)
-        if stale_cleaned:
-            _append_workflow_log("Cleaned stale browser slots before acquisition.", cleaned_slots=stale_cleaned)
-    except Exception as exc:
-        _append_workflow_log("Browser slot cleanup before acquisition failed.", error=str(exc))
-
-    # Block if a load test is running
-    from orchestrator.services.load_test_lock import check_system_available
-
-    await check_system_available("test run")
-
-    try:
-        _append_workflow_log("Waiting for browser slot.", browser_slot_request_id=run_id)
-        async with pool.browser_slot(
-            request_id=run_id,
-            operation_type=BrowserOpType.TEST_RUN,
-            description=f"Test: {spec_name or spec_path}",
-            max_operation_duration=7200,  # 2 hours - matches realistic pipeline max
-        ) as acquired:
-            if not acquired:
-                # Timeout waiting for slot
-                logger.warning(f"Run {run_id} failed to acquire browser slot (timeout)")
-                with Session(engine) as session:
-                    run = session.get(DBTestRun, run_id)
-                    if run:
-                        run.status = "error"
-                        run.error_message = "Timeout waiting for browser slot"
-                        run.queue_position = None
-                        run.completed_at = datetime.utcnow()
-                        session.add(run)
-                        session.commit()
-                status_file = Path(run_dir) / "status.txt"
-                status_file.write_text("error")
-                if batch_id:
-                    update_batch_stats(batch_id)
-                return
-
-            _append_workflow_log("Browser slot acquired.", browser_slot_request_id=run_id)
-
-            # Update status to 'running' and set started_at
-            # Guard: check if the run was stopped/cancelled while waiting in queue
-            with Session(engine) as session:
-                run = session.get(DBTestRun, run_id)
-                if run:
-                    if run.status in ("stopped", "cancelled"):
-                        logger.info(f"Run {run_id} was {run.status} while queued. Aborting.")
-                        _append_workflow_log("Run aborted after browser slot acquisition.", status=run.status)
-                        if batch_id:
-                            update_batch_stats(batch_id)
-                        return  # Browser slot released by context manager
-                    run.status = "running"
-                    run.started_at = datetime.utcnow()
-                    run.queue_position = None  # No longer queued
-                    session.add(run)
-                    session.commit()
-
-            # Update batch stats (now running)
-            if batch_id:
-                update_batch_stats(batch_id)
-
-            # Execute the test
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                execute_run_task,
-                spec_path,
-                run_dir,
-                run_id,
-                try_code_path,
-                browser,
-                hybrid,
-                max_iterations,
-                headless,
-                memory_enabled,
-                spec_name,
-                batch_id,
-                project_id,
-                model_tier,
-                storage_state_path,
-                browser_auth_context,
-                test_data_refs,
-            )
-            _append_workflow_log("Native run executor returned.", run_id=run_id)
-
-            # Update DB Status after completion
-            with Session(engine) as session:
-                run = session.get(DBTestRun, run_id)
-                if run:
-                    try:
-                        # Primary source: status.txt (written by CLI)
-                        status_file = Path(run_dir) / "status.txt"
-                        if status_file.exists():
-                            file_status = status_file.read_text().strip()
-                            if file_status:  # Only update if not empty
-                                run.status = file_status
-                                logger.debug(f"[{run_id}] Status from status.txt: {file_status}")
-
-                        # Secondary source: run.json (legacy standard pipeline)
-                        run_file = Path(run_dir) / "run.json"
-                        if run_file.exists():
-                            try:
-                                run_data = json.loads(run_file.read_text())
-                                if "finalState" in run_data:
-                                    run.status = run_data["finalState"]
-                                run.steps_completed = len(run_data.get("steps", []))
-
-                                # Extract error message from failed steps
-                                if run.status == "failed":
-                                    for step in run_data.get("steps", []):
-                                        if step.get("error"):
-                                            run.error_message = step.get("error")[:500]
-                                            break
-                            except json.JSONDecodeError:
-                                pass  # Ignore malformed JSON
-
-                        # Get step count from plan.json
-                        plan_file = Path(run_dir) / "plan.json"
-                        if plan_file.exists():
-                            try:
-                                plan_data = json.loads(plan_file.read_text())
-                                if "testName" in plan_data:
-                                    run.test_name = plan_data["testName"]
-                                if "steps" in plan_data:
-                                    run.total_steps = len(plan_data["steps"])
-                            except json.JSONDecodeError:
-                                pass  # Ignore malformed JSON
-
-                        # Read pipeline error details (written by full_native_pipeline.py)
-                        error_file = Path(run_dir) / "pipeline_error.json"
-                        if error_file.exists():
-                            try:
-                                error_data = json.loads(error_file.read_text())
-                                if error_data.get("error"):
-                                    error_msg = str(error_data["error"])[:500]
-                                    stage = str(error_data.get("stage", "") or "")
-                                    if stage == "test_data_resolution":
-                                        run.stage_message = f"{stage}: {error_msg}"
-                                    if not run.error_message:
-                                        if stage:
-                                            run.error_message = f"[{stage}] {error_msg}"
-                                        else:
-                                            run.error_message = error_msg
-                            except json.JSONDecodeError:
-                                pass
-
-                        # Fallback: if subprocess completed but status is still non-terminal, force to 'error'
-                        if run.status in ("running", "queued"):
-                            logger.warning(
-                                f"[{run_id}] Process exited but status still '{run.status}'. Forcing to 'error'."
-                            )
-                            run.status = "error"
-                            if not run.error_message:
-                                run.error_message = (
-                                    "Process exited without writing status. Check execution.log for details."
-                                )
-                            # Also update status.txt so file and DB are consistent
-                            try:
-                                (Path(run_dir) / "status.txt").write_text("error")
-                            except Exception:
-                                pass
-
-                        # Set completed_at timestamp
-                        run.completed_at = datetime.utcnow()
-
-                        # Invalidate code path cache for this spec to pick up new generated code
-                        if run.status in ("passed", "completed"):
-                            invalidate_code_path_cache(run.spec_name)
-
-                    except Exception as e:
-                        # Log error but still try to commit what we have
-                        logger.warning(f"Error reading status files for {run_id}: {e}")
-
-                    session.add(run)
-                    session.commit()
-                    logger.info(f"[{run_id}] Final DB status: {run.status}")
-                    _append_workflow_log("Final DB status recorded.", status=run.status)
-
-            # Update batch stats after run completion
-            if batch_id:
-                update_batch_stats(batch_id)
-
-    except asyncio.CancelledError:
-        # Task was cancelled while waiting or running
-        logger.info(f"Run {run_id} cancelled")
-        _append_workflow_log("Run wrapper cancelled.")
-        with Session(engine) as session:
-            run = session.get(DBTestRun, run_id)
-            if run and run.status not in ("stopped", "cancelled", "passed", "failed", "error", "completed"):
-                run.status = "cancelled"
-                run.queue_position = None
-                run.completed_at = datetime.utcnow()
-                session.add(run)
-                session.commit()
-        # Update status file
-        status_file = Path(run_dir) / "status.txt"
-        status_file.write_text("cancelled")
-        # Update batch stats
-        if batch_id:
-            update_batch_stats(batch_id)
-        raise  # Re-raise to properly handle cancellation
-
-    except Exception as e:
-        # Handle all other exceptions - prevents silent failures
-        logger.error(f"Run {run_id} failed with exception: {e}", exc_info=True)
-        _append_workflow_log("Run wrapper failed.", error=str(e))
-        with Session(engine) as session:
-            run = session.get(DBTestRun, run_id)
-            if run:
-                run.status = "error"
-                run.error_message = str(e)[:500]
-                run.completed_at = datetime.utcnow()
-                session.add(run)
-                session.commit()
-        # Update status file
-        status_file = Path(run_dir) / "status.txt"
-        status_file.write_text("error")
-        # Update batch stats
-        if batch_id:
-            update_batch_stats(batch_id)
+    return await test_run_runtime_support.execute_run_task_wrapper(
+        _test_run_runtime(),
+        spec_path,
+        run_dir,
+        run_id,
+        try_code_path,
+        browser,
+        hybrid,
+        max_iterations,
+        batch_id,
+        spec_name,
+        project_id,
+        model_tier,
+        storage_state_path,
+        browser_auth_context,
+        test_data_refs,
+    )
 
 
 def execute_mobile_run_task(
@@ -2310,107 +1945,18 @@ def execute_mobile_run_task(
     project_id: str = None,
 ):
     """Execute the Appium mobile pipeline in an isolated subprocess."""
-    global PROCESS_MANAGER
-
-    from orchestrator.workflows.mobile_appium import MobileAppiumConfig, build_appium_mcp_config
-
-    with Session(engine) as session:
-        run = session.get(DBTestRun, run_id)
-        if run and run.status in ("stopped", "cancelled"):
-            logger.info(f"Mobile run {run_id} was {run.status} before subprocess start. Aborting.")
-            return
-
-    run_dir_path = Path(run_dir)
-    run_dir_path.mkdir(parents=True, exist_ok=True)
-
-    config = MobileAppiumConfig.from_env(
-        platform=platform,
-        appium_server_url=appium_server_url,
-        capabilities_file=capabilities_file,
-    )
-
-    mcp_output_dir = run_dir_path / "appium-mcp-output"
-    mcp_output_dir.mkdir(parents=True, exist_ok=True)
-    config.screenshots_dir = str(mcp_output_dir)
-    run_mcp_config_path = run_dir_path / ".mcp.json"
-    run_mcp_config_path.write_text(json.dumps(build_appium_mcp_config(config), indent=2))
-    logger.info(f"Created Appium MCP config for mobile run {run_id}")
-
-    copy_claude_project_config(BASE_DIR / ".claude", run_dir_path / ".claude")
-
-    cmd = [
-        sys.executable,
-        "orchestrator/cli.py",
+    return test_run_runtime_support.execute_mobile_run_task(
+        _test_run_runtime(),
         spec_path,
-        "--run-dir",
         run_dir,
-        "--target",
-        "mobile",
-        "--platform",
+        run_id,
         platform,
-    ]
-    if appium_server_url:
-        cmd.extend(["--appium-server-url", appium_server_url])
-    if capabilities_file:
-        cmd.extend(["--capabilities-file", capabilities_file])
-
-    env = os.environ.copy()
-    env["CLAUDE_CONFIG_DIR"] = str(run_dir_path)
-    env["APPIUM_SCREENSHOTS_DIR"] = str(mcp_output_dir)
-    if appium_server_url:
-        env["APPIUM_SERVER_URL"] = appium_server_url
-    if capabilities_file:
-        env["APPIUM_CAPABILITIES_CONFIG"] = capabilities_file
-    if project_id:
-        env["PROJECT_ID"] = project_id
-        env["MEMORY_PROJECT_ID"] = project_id
-
-    with Session(engine) as session:
-        run = session.get(DBTestRun, run_id)
-        if run and run.status in ("stopped", "cancelled"):
-            logger.info(f"Mobile run {run_id} was {run.status} before process spawn. Aborting.")
-            return
-
-    log_file = run_dir_path / "execution.log"
-    with open(log_file, "w") as f:
-        process = subprocess.Popen(
-            cmd,
-            cwd=BASE_DIR,
-            stdout=f,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,
-        )
-
-        try:
-            pgid = os.getpgid(process.pid)
-        except (ProcessLookupError, OSError):
-            pgid = process.pid
-
-        register_process(run_id, process)
-        if PROCESS_MANAGER:
-            PROCESS_MANAGER.register(run_id=run_id, pid=process.pid, pgid=pgid, spec_name=spec_name, batch_id=batch_id)
-
-        logger.info(f"Started mobile process for {run_id}: pid={process.pid}, pgid={pgid}")
-        try:
-            process.wait(timeout=1800)
-        except subprocess.TimeoutExpired:
-            logger.warning(f"Mobile process for {run_id} timed out after 1800s")
-            import signal as _signal
-
-            try:
-                os.killpg(os.getpgid(process.pid), _signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                try:
-                    process.kill()
-                except (ProcessLookupError, OSError):
-                    pass
-            process.wait(timeout=10)
-        finally:
-            unregister_process(run_id)
-            if PROCESS_MANAGER:
-                PROCESS_MANAGER.unregister(run_id)
-            logger.info(f"Mobile process completed for {run_id}: exit_code={process.returncode}")
+        appium_server_url,
+        capabilities_file,
+        spec_name,
+        batch_id,
+        project_id,
+    )
 
 
 async def execute_mobile_run_task_wrapper(
@@ -2425,105 +1971,18 @@ async def execute_mobile_run_task_wrapper(
     project_id: str = None,
 ):
     """Async wrapper for Appium mobile runs."""
-    try:
-        with Session(engine) as session:
-            run = session.get(DBTestRun, run_id)
-            if run:
-                if run.status in ("stopped", "cancelled"):
-                    return
-                run.status = "running"
-                run.started_at = datetime.utcnow()
-                run.queue_position = None
-                session.add(run)
-                session.commit()
-
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            execute_mobile_run_task,
-            spec_path,
-            run_dir,
-            run_id,
-            platform,
-            appium_server_url,
-            capabilities_file,
-            spec_name,
-            batch_id,
-            project_id,
-        )
-
-        with Session(engine) as session:
-            run = session.get(DBTestRun, run_id)
-            if run:
-                run_dir_path = Path(run_dir)
-                status_file = run_dir_path / "status.txt"
-                if status_file.exists():
-                    file_status = status_file.read_text().strip()
-                    if file_status:
-                        run.status = file_status
-
-                plan_file = run_dir_path / "plan.json"
-                if plan_file.exists():
-                    try:
-                        plan_data = json.loads(plan_file.read_text())
-                        run.test_name = plan_data.get("testName") or run.test_name
-                        run.total_steps = len(plan_data.get("steps", []))
-                    except json.JSONDecodeError:
-                        pass
-
-                error_file = run_dir_path / "pipeline_error.json"
-                if error_file.exists():
-                    try:
-                        error_data = json.loads(error_file.read_text())
-                        if error_data.get("error"):
-                            error_msg = str(error_data["error"])[:500]
-                            stage = str(error_data.get("stage", "") or "")
-                            if stage == "test_data_resolution":
-                                run.stage_message = f"{stage}: {error_msg}"
-                            if not run.error_message:
-                                run.error_message = f"[{stage}] {error_msg}" if stage else error_msg
-                    except json.JSONDecodeError:
-                        pass
-
-                if run.status in ("running", "queued"):
-                    run.status = "error"
-                    run.error_message = run.error_message or "Mobile process exited without writing status."
-                    try:
-                        status_file.write_text("error")
-                    except Exception:
-                        pass
-
-                run.completed_at = datetime.utcnow()
-                session.add(run)
-                session.commit()
-
-        if batch_id:
-            update_batch_stats(batch_id)
-
-    except asyncio.CancelledError:
-        with Session(engine) as session:
-            run = session.get(DBTestRun, run_id)
-            if run and run.status not in ("stopped", "cancelled", "passed", "failed", "error", "completed"):
-                run.status = "cancelled"
-                run.queue_position = None
-                run.completed_at = datetime.utcnow()
-                session.add(run)
-                session.commit()
-        Path(run_dir, "status.txt").write_text("cancelled")
-        raise
-    except Exception as e:
-        logger.error(f"Mobile run {run_id} failed with exception: {e}", exc_info=True)
-        with Session(engine) as session:
-            run = session.get(DBTestRun, run_id)
-            if run:
-                run.status = "error"
-                run.error_message = str(e)[:500]
-                run.completed_at = datetime.utcnow()
-                session.add(run)
-                session.commit()
-        Path(run_dir, "status.txt").write_text("error")
-        if batch_id:
-            update_batch_stats(batch_id)
+    return await test_run_runtime_support.execute_mobile_run_task_wrapper(
+        _test_run_runtime(),
+        spec_path,
+        run_dir,
+        run_id,
+        platform,
+        appium_server_url,
+        capabilities_file,
+        batch_id,
+        spec_name,
+        project_id,
+    )
 
 
 async def _start_test_run_temporal_or_fail(
@@ -2533,44 +1992,17 @@ async def _start_test_run_temporal_or_fail(
     *,
     task_queue: str | None = None,
 ) -> None:
-    from orchestrator.config import settings as app_settings
-    from orchestrator.services.temporal_client import TemporalUnavailableError, start_test_run_workflow
-
-    selected_task_queue = task_queue or app_settings.temporal_browser_workflow_task_queue
-    try:
-        temporal = await start_test_run_workflow(run.id, payload, task_queue=selected_task_queue)
-    except TemporalUnavailableError as exc:
-        run.status = "error"
-        run.queue_position = None
-        run.completed_at = datetime.utcnow()
-        run.error_message = f"Failed to start Temporal workflow: {exc}"
-        run.stage_message = str(exc)
-        session.add(run)
-        session.commit()
-        run_dir = RUNS_DIR / run.id
-        if run_dir.exists():
-            (run_dir / "status.txt").write_text("error")
-        if run.batch_id:
-            update_batch_stats(run.batch_id)
-        raise HTTPException(status_code=503, detail=f"Temporal is required for test runs: {exc}") from exc
-
-    run.temporal_workflow_id = temporal.workflow_id
-    run.temporal_run_id = temporal.run_id
-    session.add(run)
-    session.commit()
+    await test_run_runtime_support.start_test_run_temporal_or_fail(
+        _test_run_runtime(),
+        run,
+        payload,
+        session,
+        task_queue=task_queue,
+    )
 
 
 async def _signal_test_run_temporal(run: DBTestRun, signal_name: str, *args) -> None:
-    if not run.temporal_workflow_id:
-        return
-    from orchestrator.services.temporal_client import TemporalUnavailableError, signal_test_run_workflow
-
-    try:
-        await signal_test_run_workflow(run.temporal_workflow_id, signal_name, *args)
-    except TemporalUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=f"Temporal is unavailable for test run control: {exc}") from exc
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Failed to signal test run workflow: {exc}") from exc
+    await test_run_runtime_support.signal_test_run_temporal(_test_run_runtime(), run, signal_name, *args)
 
 
 def _has_browser_auth_selection(
@@ -2578,7 +2010,11 @@ def _has_browser_auth_selection(
     browser_auth_session_id: str | None,
     use_project_default_browser_auth: bool,
 ) -> bool:
-    return bool((browser_auth_session_id or "").strip() or use_project_default_browser_auth)
+    return test_run_runtime_support.has_browser_auth_selection(
+        _test_run_runtime(),
+        browser_auth_session_id=browser_auth_session_id,
+        use_project_default_browser_auth=use_project_default_browser_auth,
+    )
 
 
 def _validate_browser_auth_selection_for_project(
@@ -2588,26 +2024,13 @@ def _validate_browser_auth_selection_for_project(
     browser_auth_session_id: str | None,
     use_project_default_browser_auth: bool,
 ) -> None:
-    browser_auth_session_id = (browser_auth_session_id or "").strip() or None
-    if not _has_browser_auth_selection(
+    test_run_runtime_support.validate_browser_auth_selection_for_project(
+        _test_run_runtime(),
+        session,
+        project_id,
         browser_auth_session_id=browser_auth_session_id,
         use_project_default_browser_auth=use_project_default_browser_auth,
-    ):
-        return
-    if not project_id:
-        raise HTTPException(status_code=400, detail="Browser auth session selection requires a project")
-    try:
-        row = resolve_browser_auth_session_row(
-            session,
-            project_id,
-            browser_auth_session_id=browser_auth_session_id,
-            use_default=use_project_default_browser_auth,
-        )
-        if not row:
-            raise BrowserAuthSessionError("Project default browser auth session was not found")
-        ensure_browser_auth_session_usable(row)
-    except BrowserAuthSessionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    )
 
 
 def _resolve_browser_auth_storage_state_for_run(
@@ -2618,48 +2041,18 @@ def _resolve_browser_auth_storage_state_for_run(
     browser_auth_session_id: str | None,
     use_project_default_browser_auth: bool,
 ) -> tuple[str | None, dict[str, Any]]:
-    browser_auth_session_id = (browser_auth_session_id or "").strip() or None
-    intent: dict[str, Any] = {
-        "mode": "project_default" if use_project_default_browser_auth else ("session" if browser_auth_session_id else "none"),
-        "requested_browser_auth_session_id": browser_auth_session_id,
-        "browser_auth_session_id": None,
-        "browser_auth_session_name": None,
-        "use_project_default_browser_auth": bool(use_project_default_browser_auth),
-        "project_default_used": False,
-        "storage_state_attached": False,
-    }
-    if not _has_browser_auth_selection(
+    return test_run_runtime_support.resolve_browser_auth_storage_state_for_run(
+        _test_run_runtime(),
+        session,
+        project_id,
+        run_dir=run_dir,
         browser_auth_session_id=browser_auth_session_id,
         use_project_default_browser_auth=use_project_default_browser_auth,
-    ):
-        return None, intent
-    try:
-        resolved = resolve_browser_auth_for_run(
-            session,
-            project_id,
-            run_dir=run_dir,
-            browser_auth_session_id=browser_auth_session_id,
-            use_default=use_project_default_browser_auth,
-        )
-    except BrowserAuthSessionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not resolved:
-        return None, intent
-    intent.update(
-        {
-            "browser_auth_session_id": resolved.session_id,
-            "browser_auth_session_name": resolved.session_name,
-            "project_default_used": bool(use_project_default_browser_auth),
-            "storage_state_attached": True,
-        }
     )
-    return str(resolved.storage_state_path), intent
 
 
 def _normalize_request_test_data_refs(refs: list[str] | None) -> list[str]:
-    from orchestrator.services.test_data_resolver import extract_test_data_refs_from_sources
-
-    return extract_test_data_refs_from_sources(refs=refs or [])
+    return test_run_runtime_support.normalize_request_test_data_refs(_test_run_runtime(), refs)
 
 
 # ========= Agents =========
