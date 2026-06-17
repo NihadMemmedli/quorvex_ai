@@ -58,7 +58,10 @@ from orchestrator.services.coding_agent import (
 )
 from services.browser_pool import AbstractBrowserPool, get_browser_pool
 from services.browser_pool import OperationType as BrowserOpType
-from services.resource_manager import ResourceManager, get_resource_manager
+from services.resource_manager import (
+    ResourceManager,
+    get_resource_manager,  # noqa: F401
+)
 from utils.agent_report import (
     CUSTOM_AGENT_REPORT_INSTRUCTIONS,
     _as_report_list,
@@ -2669,14 +2672,7 @@ def _normalize_request_test_data_refs(refs: list[str] | None) -> list[str]:
 # ========= Agents =========
 
 
-class AgentRunRequest(BaseModel):
-    agent_type: str  # "exploratory", "writer", or "spec-synthesis"
-    config: dict[str, Any]
-    project_id: str | None = None  # Project isolation
-    runtime: str | None = None
-    model_tier: str | None = None
-    browser_auth_session_id: str | None = None
-    use_project_default_browser_auth: bool = False
+AgentRunRequest = agent_run_launch.AgentRunRequest
 
 
 def _agent_tool(
@@ -5685,83 +5681,7 @@ async def execute_agent_background(run_id: str, agent_type: str, config: dict):
 
 
 async def run_agent(request: AgentRunRequest, session: Session = Depends(get_session)):
-    """Run an autonomous agent through a durable Temporal workflow."""
-    # Check resource availability
-    resource_manager = await get_resource_manager()
-    agent_status = resource_manager.get_agent_status()
-
-    # Determine initial status based on slot availability
-    initial_status = "queued"
-    queue_position = None if initial_status == "running" else agent_status.queued + 1
-
-    # Create DB Record
-    run_id = str(uuid.uuid4())
-    runtime = normalize_agent_runtime(request.runtime or request.config.get("runtime"))
-    run_config = {**request.config, "runtime": runtime}
-    if request.project_id and not run_config.get("project_id"):
-        run_config["project_id"] = request.project_id
-    if request.model_tier:
-        run_config["model_tier"] = request.model_tier
-    if request.browser_auth_session_id:
-        run_config["browser_auth_session_id"] = request.browser_auth_session_id
-    if request.use_project_default_browser_auth:
-        run_config["use_project_default_browser_auth"] = True
-    browser_metadata = browser_runtime_status() if _agent_run_has_browser_tools(request.agent_type, run_config) else {}
-    run = AgentRun(
-        id=run_id,
-        agent_type=request.agent_type,
-        runtime=runtime,
-        config_json=json.dumps(run_config),
-        status=initial_status,
-        project_id=request.project_id,  # Project isolation
-    )
-    run.progress = {
-        **browser_metadata,
-        "phase": "queued",
-        "status": initial_status,
-        "runtime": runtime,
-        "message": "Agent run is queued for Temporal.",
-        "updated_at": datetime.utcnow().isoformat(),
-    }
-    session.add(run)
-    session.commit()
-    _record_agent_run_event(
-        run_id,
-        event_type="created",
-        message=f"Agent run created with status {initial_status}.",
-        payload={
-            "agent_type": request.agent_type,
-            "runtime": runtime,
-            "status": initial_status,
-            "queue_position": queue_position,
-        },
-        session=session,
-    )
-
-    await _start_agent_run_temporal_or_fail(run, session)
-    session.refresh(run)
-
-    response = {
-        "status": initial_status,
-        "run_id": run_id,
-        "temporal_workflow_id": run.temporal_workflow_id,
-        "temporal_run_id": run.temporal_run_id,
-        "browser_runtime": browser_metadata.get("browser_runtime", "temporal_worker"),
-        "live_view_available": bool(browser_metadata.get("live_view_available")),
-        "vnc_url": browser_metadata.get("vnc_url"),
-        "agent_runtime": runtime,
-        "agent_slots": {
-            "active": agent_status.active,
-            "max": agent_status.max_slots,
-            "queued": agent_status.queued + (1 if initial_status == "queued" else 0),
-        },
-    }
-
-    if queue_position:
-        response["queue_position"] = queue_position
-        response["message"] = f"Request queued at position {queue_position}. Will start when a slot becomes available."
-
-    return response
+    return await agent_run_launch.run_agent(request, session=session)
 
 
 async def pause_agent_run(
