@@ -82,6 +82,7 @@ from . import (
     agent_coding_patch,
     agent_definitions,
     agent_exploratory,
+    agent_flow_spec_support,
     agent_queue_ops,
     agent_reports,
     agent_run_control,
@@ -5694,111 +5695,32 @@ def _generate_fallback_spec(flow: dict[str, Any], base_url: str) -> tuple[str, s
 
 
 def _requires_authentication(url: str) -> bool:
-    """Check if URL pattern typically requires authentication."""
-    auth_patterns = [
-        "/user/",
-        "/admin/",
-        "/dashboard",
-        "/account/",
-        "/my_",
-        "/settings",
-        "/profile",
-        "/billing",
-        "/itinerary",
-        "/trips",
-        "/bookings",
-    ]
-    return any(pattern in url.lower() for pattern in auth_patterns)
+    return agent_flow_spec_support._requires_authentication(url)
 
 
 def _detect_login_url(target_url: str) -> str:
-    """Detect login URL based on target domain."""
-    from urllib.parse import urlparse
-
-    parsed = urlparse(target_url)
-    base = f"{parsed.scheme}://{parsed.netloc}"
-
-    # Map domains to login URLs
-    login_url_map = {
-        "myapp.example.com": "/users/sign_in",
-        "pre.myapp.example.com": "/users/sign_in",
-    }
-
-    for domain_pattern, login_path in login_url_map.items():
-        if domain_pattern in parsed.netloc:
-            return f"{base}{login_path}"
-
-    # Default: assume /login
-    return f"{base}/login"
+    return agent_flow_spec_support._detect_login_url(target_url)
 
 
 def _is_login_page(url: str) -> bool:
-    """Check if URL is a login page itself."""
-    login_patterns = ["/login", "/signin", "/sign_in", "/sign-in", "/auth"]
-    return any(pattern in url.lower() for pattern in login_patterns)
+    return agent_flow_spec_support._is_login_page(url)
 
 
 def _extract_domain_name(url: str) -> str:
-    """Extract a clean domain name from URL for folder naming."""
-    from urllib.parse import urlparse
-
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname or ""
-        # Remove common prefixes
-        hostname = re.sub(r"^(www\.|pre\.|staging\.|dev\.|test\.)", "", hostname)
-        # Get the main domain part (before TLD)
-        parts = hostname.split(".")
-        if len(parts) >= 2:
-            return parts[0]  # e.g., 'myapp' from 'myapp.example.com'
-        return hostname or "unknown"
-    except Exception as e:
-        logger.debug(f"URL parse failed for hostname extraction: {e}")
-        return "unknown"
+    return agent_flow_spec_support._extract_domain_name(url)
 
 
 def _slugify(text: str) -> str:
-    """Convert text to URL-friendly slug."""
-
-    # Convert to lowercase
-    slug = text.lower()
-    # Replace spaces and underscores with hyphens
-    slug = re.sub(r"[\s_]+", "-", slug)
-    # Remove special characters
-    slug = re.sub(r"[^\w\-]", "", slug)
-    # Remove multiple consecutive hyphens
-    slug = re.sub(r"-+", "-", slug)
-    # Trim hyphens from ends
-    slug = slug.strip("-")
-    # Limit length
-    return slug[:50] if len(slug) > 50 else slug
+    return agent_flow_spec_support._slugify(text)
 
 
 # ========== Flow Spec Generation Job Tracking ==========
-_flow_spec_jobs: dict[str, dict] = {}
-MAX_FLOW_SPEC_JOBS = 100
+_flow_spec_jobs = agent_flow_spec_support._flow_spec_jobs
+MAX_FLOW_SPEC_JOBS = agent_flow_spec_support.MAX_FLOW_SPEC_JOBS
 
 
 def _cleanup_flow_spec_jobs():
-    """Remove completed/failed jobs older than 1 hour, enforce cap."""
-    import time as _time
-
-    now = _time.time()
-    to_remove = []
-    for job_id, job in _flow_spec_jobs.items():
-        if job["status"] in ("completed", "failed"):
-            completed_at = job.get("completed_at", 0)
-            if now - completed_at > 3600:
-                to_remove.append(job_id)
-    for job_id in to_remove:
-        del _flow_spec_jobs[job_id]
-    if len(_flow_spec_jobs) > MAX_FLOW_SPEC_JOBS:
-        evictable = sorted(
-            [(jid, j) for jid, j in _flow_spec_jobs.items() if j["status"] != "running"],
-            key=lambda x: x[1].get("started_at", 0),
-        )
-        for job_id, _ in evictable[: len(_flow_spec_jobs) - MAX_FLOW_SPEC_JOBS]:
-            del _flow_spec_jobs[job_id]
+    return agent_flow_spec_support._cleanup_flow_spec_jobs(_flow_spec_jobs, MAX_FLOW_SPEC_JOBS)
 
 
 async def _run_flow_spec_generation(
