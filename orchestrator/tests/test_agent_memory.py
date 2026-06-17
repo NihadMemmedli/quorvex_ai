@@ -1,8 +1,11 @@
+import logging
 import os
 import sys
 import types
 from pathlib import Path
 from unittest.mock import Mock
+
+import pytest
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-agent-memory-tests")
 os.environ.setdefault("REQUIRE_AUTH", "false")
@@ -1826,3 +1829,57 @@ def test_find_navigation_path_uses_page_node_type(monkeypatch):
     finally:
         sys.modules.pop("orchestrator.memory.vector_store", None)
         sys.modules.pop("orchestrator.memory.manager", None)
+
+
+def test_index_memory_skips_optional_vector_backend_base_exception(monkeypatch, caplog):
+    from orchestrator.api.models_db import AgentMemory
+    from orchestrator.memory.agent_memory import AgentMemoryService
+
+    class VectorBackendPanic(BaseException):
+        pass
+
+    class FailingVectorStore:
+        def add_agent_memory(self, *args, **kwargs):
+            raise VectorBackendPanic("synthetic vector backend panic")
+
+    vector_store = types.ModuleType("orchestrator.memory.vector_store")
+    vector_store.get_vector_store = lambda project_id=None: FailingVectorStore()
+    monkeypatch.setitem(sys.modules, "orchestrator.memory.vector_store", vector_store)
+
+    memory = AgentMemory(
+        id="memory-panic",
+        kind="project_fact",
+        content="The dashboard route is /dashboard.",
+        project_id="project-a",
+    )
+
+    caplog.set_level(logging.WARNING, logger="orchestrator.memory.agent_memory")
+
+    AgentMemoryService()._index_memory(memory)
+
+    assert "Skipped optional vector indexing" in caplog.text
+    assert "memory-panic" in caplog.text
+    assert "project-a" in caplog.text
+
+
+def test_index_memory_reraises_process_control_base_exceptions(monkeypatch):
+    from orchestrator.api.models_db import AgentMemory
+    from orchestrator.memory.agent_memory import AgentMemoryService
+
+    class InterruptingVectorStore:
+        def add_agent_memory(self, *args, **kwargs):
+            raise KeyboardInterrupt
+
+    vector_store = types.ModuleType("orchestrator.memory.vector_store")
+    vector_store.get_vector_store = lambda project_id=None: InterruptingVectorStore()
+    monkeypatch.setitem(sys.modules, "orchestrator.memory.vector_store", vector_store)
+
+    memory = AgentMemory(
+        id="memory-interrupt",
+        kind="project_fact",
+        content="The dashboard route is /dashboard.",
+        project_id="project-a",
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        AgentMemoryService()._index_memory(memory)
