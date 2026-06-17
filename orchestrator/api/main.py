@@ -70,8 +70,6 @@ from utils.claude_config import copy_claude_project_config
 from utils.playwright_mcp import (
     browser_runtime_status,
     prepare_run_playwright_config_content,
-    resolve_playwright_chromium_executable,
-    write_playwright_mcp_config,
     write_playwright_test_mcp_config,
 )
 from utils.project_utils import derive_project_id_from_url
@@ -3686,30 +3684,10 @@ def _resolve_agent_tools(tool_ids: list[str], session: Session) -> tuple[list[st
 
 
 def _browser_auth_selection(config: dict[str, Any]) -> tuple[str | None, bool]:
-    auth_config = config.get("browser_auth") if isinstance(config.get("browser_auth"), dict) else {}
-    legacy_auth = config.get("auth") if isinstance(config.get("auth"), dict) else {}
-    browser_auth_session_id = (
-        config.get("browser_auth_session_id")
-        or auth_config.get("session_id")
-        or legacy_auth.get("browser_auth_session_id")
-        or legacy_auth.get("session_id")
-    )
-    use_default = bool(
-        config.get("use_project_default_browser_auth")
-        or auth_config.get("use_project_default")
-        or auth_config.get("use_project_default_browser_auth")
-        or legacy_auth.get("use_default")
-        or legacy_auth.get("use_project_default")
-        or legacy_auth.get("use_project_default_browser_auth")
-    )
-    return browser_auth_session_id, use_default
+    return agent_run_runtime_support._browser_auth_selection(config)
 
 
-class AgentBrowserAuthResolutionError(RuntimeError):
-    def __init__(self, message: str, *, browser_auth_session_id: str | None, use_default: bool):
-        super().__init__(message)
-        self.browser_auth_session_id = browser_auth_session_id
-        self.use_default = use_default
+AgentBrowserAuthResolutionError = agent_run_runtime_support.AgentBrowserAuthResolutionError
 
 
 def _browser_auth_request_fields_set(request: Any) -> set[str]:
@@ -3755,69 +3733,29 @@ def _resolve_agent_browser_auth_storage_path(
     config: dict[str, Any],
     run_dir: Path,
 ) -> Path | None:
-    browser_auth_session_id, use_default = _browser_auth_selection(config)
-    if not (browser_auth_session_id or use_default):
-        return None
-    try:
-        with Session(engine) as db_session:
-            resolved = resolve_browser_auth_for_run(
-                db_session,
-                project_id,
-                run_dir=run_dir,
-                browser_auth_session_id=browser_auth_session_id,
-                use_default=use_default,
-            )
-    except BrowserAuthSessionError as exc:
-        message = f"{exc}. Refresh browser auth session."
-        _update_agent_run_progress(
-            run_id,
-            {
-                "phase": "failed",
-                "status": "failed",
-                "message": message,
-            },
-        )
-        raise AgentBrowserAuthResolutionError(
-            message,
-            browser_auth_session_id=browser_auth_session_id,
-            use_default=use_default,
-        ) from exc
-    if resolved:
-        _update_agent_run_progress(
-            run_id,
-            {
-                "browser_auth_session_id": resolved.session_id,
-                "browser_auth_session_name": resolved.session_name,
-                "message": "Using project browser auth session.",
-            },
-        )
-    return resolved.storage_state_path if resolved else None
+    return agent_run_runtime_support._resolve_agent_browser_auth_storage_path(
+        run_id=run_id,
+        project_id=project_id,
+        config=config,
+        run_dir=run_dir,
+        resolve_browser_auth_for_run=resolve_browser_auth_for_run,
+        update_progress=_update_agent_run_progress,
+    )
 
 
 def _prepare_custom_agent_mcp_config(run_id: str, storage_state_path: Path | str | None = None) -> Path:
-    """Create run-local Playwright MCP config for UI-created custom agents."""
-    run_dir = RUNS_DIR / run_id
-    runtime = write_playwright_mcp_config(
-        run_dir=run_dir,
-        server_name="playwright-test",
-        project_root=BASE_DIR,
+    return agent_run_runtime_support._prepare_custom_agent_mcp_config(
+        run_id,
         storage_state_path=storage_state_path,
+        update_progress=_update_agent_run_progress,
     )
-    _update_agent_run_progress(run_id, runtime)
-    return run_dir
 
 
 def _prepare_spec_generation_mcp_config(
     run_dir: Path,
     storage_state_path: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Create run-local Playwright MCP config for browser-backed spec generation."""
-    return write_playwright_mcp_config(
-        run_dir=run_dir,
-        server_name="playwright-test",
-        project_root=BASE_DIR,
-        storage_state_path=storage_state_path,
-    )
+    return agent_run_runtime_support._prepare_spec_generation_mcp_config(run_dir, storage_state_path)
 
 
 def _safe_inherited_auth_config(value: Any) -> dict[str, Any]:
@@ -3876,54 +3814,18 @@ def _spec_generation_auth_metadata(config: dict[str, Any], *, inherited: bool = 
 
 
 def _resolve_playwright_chromium_executable() -> Path | None:
-    """Find a Chromium executable already installed in the backend image."""
-    return resolve_playwright_chromium_executable()
+    return agent_run_runtime_support._resolve_playwright_chromium_executable()
 
 
 def _playwright_chromium_probe_script(executable_path: str | None = None) -> str:
-    """Return a Node probe that launches and closes the installed Chromium."""
-    executable_option = (
-        f", executablePath: {json.dumps(executable_path)}"
-        if executable_path
-        else ""
-    )
-    return f"""
-const {{ chromium }} = require('playwright');
-const headless = String(process.env.HEADLESS || 'true').toLowerCase() !== 'false';
-(async () => {{
-  const browser = await chromium.launch({{ headless{executable_option.strip()} }});
-  await browser.close();
-}})().catch((error) => {{
-  console.error(error && error.stack ? error.stack : error);
-  process.exit(1);
-}});
-"""
+    return agent_run_runtime_support._playwright_chromium_probe_script(executable_path)
 
 
 def _probe_custom_agent_browser(timeout_seconds: int = 30) -> tuple[bool, str]:
-    """Check whether the installed Playwright Chromium can launch without installing it."""
-    env = os.environ.copy()
-    env.setdefault("PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT", "300000")
-    executable_path = _resolve_playwright_chromium_executable()
-    try:
-        result = subprocess.run(
-            ["node", "-e", _playwright_chromium_probe_script(str(executable_path) if executable_path else None)],
-            cwd=str(BASE_DIR),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
-        output = "\n".join(
-            str(value)
-            for value in (getattr(exc, "stdout", None), getattr(exc, "stderr", None))
-            if value
-        ).strip()
-        return False, output or f"Timed out after {timeout_seconds}s launching Playwright Chromium"
-
-    combined_output = f"{result.stdout}\n{result.stderr}".strip()
-    return result.returncode == 0, combined_output
+    return agent_run_runtime_support._probe_custom_agent_browser(
+        timeout_seconds,
+        resolve_chromium_executable=_resolve_playwright_chromium_executable,
+    )
 
 
 async def _probe_custom_agent_browser_with_slot(run_id: str, timeout_seconds: int = 30) -> tuple[bool, str]:
@@ -3951,18 +3853,15 @@ async def _probe_custom_agent_browser_with_slot(run_id: str, timeout_seconds: in
 
 
 def _custom_agent_uses_browser_tools(allowed_tools: list[Any]) -> bool:
-    return agent_run_runtime.custom_agent_uses_browser_tools(allowed_tools)
+    return agent_run_runtime_support._custom_agent_uses_browser_tools(allowed_tools)
 
 
 def _custom_agent_browser_runs_via_queue() -> bool:
-    return agent_run_runtime.custom_agent_browser_runs_via_queue()
+    return agent_run_runtime_support._custom_agent_browser_runs_via_queue()
 
 
 def _agent_run_has_browser_tools(agent_type: str, config: dict[str, Any]) -> bool:
-    """Return whether this agent run will need a Playwright browser."""
-    if agent_type == "custom":
-        return _custom_agent_uses_browser_tools(config.get("allowed_tools") or [])
-    return agent_type in ("exploratory", "spec_generation")
+    return agent_run_runtime_support._agent_run_has_browser_tools(agent_type, config)
 
 
 async def _ensure_custom_agent_browser_available(run_id: str, *, force_direct_execution: bool = False) -> None:
@@ -4032,57 +3931,14 @@ def _update_agent_run_progress(run_id: str, patch: dict[str, Any]) -> None:
 
 
 def _generic_agent_runtime_prompt(agent_type: str, config: dict[str, Any]) -> str:
-    """Build a Quorvex-owned prompt for non-Claude runtime adapters."""
-
-    if agent_type == "exploratory":
-        from orchestrator.agents.exploratory_agent import ExploratoryAgent
-
-        agent = ExploratoryAgent()
-        return agent._build_exploration_prompt(
-            url=config.get("url"),
-            instructions=config.get("instructions", ""),
-            time_limit_minutes=int(config.get("time_limit_minutes") or 15),
-            auth_config=config.get("auth") or {"type": "none"},
-            test_data=config.get("test_data") or {},
-            focus_areas=config.get("focus_areas") or [],
-            excluded_patterns=config.get("excluded_patterns") or [],
-            browser_memory_context=config.get("browser_memory_context") or "",
-            advanced_tools=bool(config.get("advanced_tools") or config.get("record_video") or config.get("capture_video")),
-        )
-    if agent_type == "spec-synthesis":
-        return "\n".join(
-            [
-                "You are a Quorvex test-spec synthesis agent.",
-                "Use the supplied exploration result to draft production-ready test scenarios. Return JSON with summary and specs.",
-                "Do not write repository files; propose content only.",
-                f"Config JSON:\n{json.dumps(config, indent=2, default=str)}",
-            ]
-        )
-    return "\n".join(
-        [
-            "You are a Quorvex QA automation agent.",
-            "Complete the requested task and return a concise factual report.",
-            f"Config JSON:\n{json.dumps(config, indent=2, default=str)}",
-        ]
-    )
+    return agent_run_runtime_support._generic_agent_runtime_prompt(agent_type, config)
 
 
-KNOWN_AGENT_TYPE_TOOL_PROFILES = {
-    "exploratory": "app-explorer-basic",
-    "writer": "app-explorer-basic",
-    "spec-synthesis": "text-analysis",
-}
+KNOWN_AGENT_TYPE_TOOL_PROFILES = agent_run_runtime_support.KNOWN_AGENT_TYPE_TOOL_PROFILES
 
 
 def _agent_tool_profile_for_run(agent_type: str, config: dict[str, Any]) -> str | None:
-    configured = str(config.get("agent_tool_profile") or "").strip()
-    if configured:
-        return configured
-    if agent_type == "exploratory" and bool(
-        config.get("advanced_tools") or config.get("record_video") or config.get("capture_video")
-    ):
-        return "app-explorer-advanced"
-    return KNOWN_AGENT_TYPE_TOOL_PROFILES.get(agent_type)
+    return agent_run_runtime_support._agent_tool_profile_for_run(agent_type, config)
 
 
 def _resolve_known_agent_allowed_tools(
@@ -4091,16 +3947,11 @@ def _resolve_known_agent_allowed_tools(
     *,
     mcp_config_dir: Path | str | None = None,
 ) -> list[str] | None:
-    """Resolve explicit tools for known built-in agent types.
-
-    Built-in agents must not inherit legacy wildcard access when callers omit
-    allowed_tools. Unknown/custom agents keep their existing behavior elsewhere.
-    """
-    profile_name = _agent_tool_profile_for_run(agent_type, config)
-    if not profile_name:
-        return None
-    config["agent_tool_profile"] = profile_name
-    return get_agent_allowed_tools(profile_name, mcp_config_dir=mcp_config_dir)
+    return agent_run_runtime_support._resolve_known_agent_allowed_tools(
+        agent_type,
+        config,
+        mcp_config_dir=mcp_config_dir,
+    )
 
 
 def _resolve_agent_execution_test_data_context(
