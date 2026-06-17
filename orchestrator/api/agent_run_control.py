@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from datetime import datetime
 from importlib import import_module
@@ -6,11 +7,19 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session
 
-from .db import get_session
+from logging_config import get_logger
+
+from . import agent_run_runtime
+from .db import engine, get_session
 from .middleware.auth import get_current_user_optional
 from .models_db import AgentRun
 
 router = APIRouter(tags=["agent-run-control"])
+logger = get_logger(__name__)
+
+AGENT_PARTIAL_STATUS = "completed_partial"
+AGENT_TERMINAL_STATUSES = {"completed", AGENT_PARTIAL_STATUS, "failed", "cancelled", "timeout"}
+AGENT_ACTIVE_STATUSES = {"queued", "pending", "running", "in_progress", "waiting", "paused"}
 
 
 def _runtime() -> Any:
@@ -19,6 +28,103 @@ def _runtime() -> Any:
         or sys.modules.get("api.main")
         or import_module("orchestrator.api.main")
     )
+
+
+async def _signal_agent_run_temporal(run: AgentRun, signal_name: str, *args) -> None:
+    if not run.temporal_workflow_id:
+        return
+    from orchestrator.services.temporal_client import TemporalUnavailableError, signal_agent_run_workflow
+
+    try:
+        await signal_agent_run_workflow(run.temporal_workflow_id, signal_name, *args)
+    except TemporalUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=f"Temporal is unavailable for agent control: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Failed to signal agent workflow: {exc}") from exc
+
+
+async def _cancel_agent_run_queue_task(run: AgentRun) -> dict[str, Any] | None:
+    """Cancel and finalize the Redis task linked to an already-cancelled agent run."""
+    if not run.agent_task_id:
+        return None
+
+    result: dict[str, Any] = {"agent_task_id": run.agent_task_id, "status": "not_active"}
+    try:
+        from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
+
+        if not REDIS_AVAILABLE or not should_use_agent_queue():
+            return result
+
+        queue = get_agent_queue()
+        await queue.connect()
+        before = await queue.get_task(str(run.agent_task_id))
+        cancelled = await queue.cancel_task(str(run.agent_task_id))
+        after = await queue.get_task(str(run.agent_task_id))
+        result.update(
+            {
+                "status": after.status.value if after else "missing",
+                "cancel_requested": bool(cancelled),
+                "previous_status": before.status.value if before else None,
+                "cleanup": await queue.cleanup_orphaned_and_stale_tasks(),
+            }
+        )
+    except Exception as exc:
+        logger.warning("Failed to cancel agent queue task %s for run %s: %s", run.agent_task_id, run.id, exc)
+        result.update({"status": "error", "error": str(exc)})
+    return result
+
+
+async def _wait_if_agent_run_paused(run_id: str, poll_interval: float = 0.5) -> bool:
+    """Block background execution while the user-visible run is paused.
+
+    Returns False if the run became terminal or disappeared while waiting.
+    """
+    while True:
+        with Session(engine) as session:
+            run = session.get(AgentRun, run_id)
+            if not run or run.status in AGENT_TERMINAL_STATUSES:
+                return False
+            if run.status != "paused":
+                return True
+        await asyncio.sleep(poll_interval)
+
+
+def _mark_agent_run_paused(run: AgentRun, message: str = "Agent is paused") -> None:
+    previous_status = run.status if run.status != "paused" else (run.progress or {}).get("paused_from")
+    run.status = "paused"
+    run.progress = {
+        **(run.progress or {}),
+        "phase": "paused",
+        "status": "paused",
+        "paused_from": previous_status if previous_status in AGENT_ACTIVE_STATUSES else "queued",
+        "message": message,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _mark_agent_run_resumed(run: AgentRun, message: str = "Agent resumed") -> None:
+    paused_from = (run.progress or {}).get("paused_from")
+    run.status = paused_from if paused_from in {"queued", "running", "pending"} else "queued"
+    run.progress = {
+        **(run.progress or {}),
+        "phase": "resumed",
+        "status": run.status,
+        "message": message,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _mark_agent_run_cancelled(run: AgentRun, message: str = "Agent cancelled") -> None:
+    previous_status = run.status
+    run.status = "cancelled"
+    run.progress = {
+        **(run.progress or {}),
+        "phase": "cancelled",
+        "status": "cancelled",
+        "cancelled_from": previous_status if previous_status in AGENT_ACTIVE_STATUSES else None,
+        "message": message,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
 
 
 @router.post("/api/agents/runs/{id}/pause")
@@ -35,18 +141,18 @@ async def pause_agent_run(
     rt._filter_agent_run_project(run, project_id)
     await rt._ensure_agent_write_access(run.project_id, current_user, session)
 
-    if run.status in rt.AGENT_TERMINAL_STATUSES:
+    if run.status in AGENT_TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail=f"Cannot pause a {run.status} run")
     if run.status == "paused":
         return rt._serialize_agent_run(run, session)
 
-    await rt._signal_agent_run_temporal(run, "pause", "manual_pause")
+    await _signal_agent_run_temporal(run, "pause", "manual_pause")
 
-    rt._mark_agent_run_paused(run)
+    _mark_agent_run_paused(run)
     session.add(run)
     session.commit()
     session.refresh(run)
-    rt._record_agent_run_event(
+    agent_run_runtime.record_agent_run_event(
         run.id,
         event_type="pause",
         message="Agent run paused.",
@@ -71,26 +177,18 @@ async def resume_agent_run(
     rt._filter_agent_run_project(run, project_id)
     await rt._ensure_agent_write_access(run.project_id, current_user, session)
 
-    if run.status in rt.AGENT_TERMINAL_STATUSES:
+    if run.status in AGENT_TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail=f"Cannot resume a {run.status} run")
     if run.status != "paused":
         return rt._serialize_agent_run(run, session)
 
-    await rt._signal_agent_run_temporal(run, "resume")
+    await _signal_agent_run_temporal(run, "resume")
 
-    paused_from = (run.progress or {}).get("paused_from")
-    run.status = paused_from if paused_from in {"queued", "running", "pending"} else "queued"
-    run.progress = {
-        **(run.progress or {}),
-        "phase": "resumed",
-        "status": run.status,
-        "message": "Agent resumed",
-        "updated_at": datetime.utcnow().isoformat(),
-    }
+    _mark_agent_run_resumed(run)
     session.add(run)
     session.commit()
     session.refresh(run)
-    rt._record_agent_run_event(
+    agent_run_runtime.record_agent_run_event(
         run.id,
         event_type="resume",
         message=f"Agent run resumed as {run.status}.",
@@ -115,17 +213,17 @@ async def cancel_agent_run(
     rt._filter_agent_run_project(run, project_id)
     await rt._ensure_agent_write_access(run.project_id, current_user, session)
 
-    if run.status in rt.AGENT_TERMINAL_STATUSES:
+    if run.status in AGENT_TERMINAL_STATUSES:
         raise HTTPException(status_code=409, detail=f"Cannot cancel a {run.status} run")
 
-    await rt._signal_agent_run_temporal(run, "cancel", "manual_cancel")
+    await _signal_agent_run_temporal(run, "cancel", "manual_cancel")
 
-    rt._mark_agent_run_cancelled(run)
+    _mark_agent_run_cancelled(run)
     session.add(run)
     session.commit()
     session.refresh(run)
-    queue_cancel_result = await rt._cancel_agent_run_queue_task(run)
-    rt._record_agent_run_event(
+    queue_cancel_result = await _cancel_agent_run_queue_task(run)
+    agent_run_runtime.record_agent_run_event(
         run.id,
         event_type="cancel",
         message="Agent run cancelled.",
