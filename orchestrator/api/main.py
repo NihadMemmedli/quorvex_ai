@@ -1097,18 +1097,9 @@ FlowUpdateRequest = agent_exploratory.FlowUpdateRequest
 GenerateReportItemSpecRequest = agent_exploratory.GenerateReportItemSpecRequest
 
 
-class ImportReportRequirementsRequest(BaseModel):
-    item_ids: list[str] | None = None
-    import_all: bool = False
-
-
-class UpdateAgentReportItemRequest(BaseModel):
-    patch: dict[str, Any]
-
-
-class UpdateAgentReportOverviewRequest(BaseModel):
-    summary: str | None = None
-    scope: str | None = None
+ImportReportRequirementsRequest = agent_reports.ImportReportRequirementsRequest
+UpdateAgentReportItemRequest = agent_reports.UpdateAgentReportItemRequest
+UpdateAgentReportOverviewRequest = agent_reports.UpdateAgentReportOverviewRequest
 
 
 GenerateFlowTestRequest = agent_exploratory.GenerateFlowTestRequest
