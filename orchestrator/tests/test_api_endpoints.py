@@ -1968,6 +1968,21 @@ class TestAISettings:
 class TestQueueEndpoints:
     """Test queue-related endpoints."""
 
+    def test_agent_queue_operation_routes_registered_from_agent_queue_ops(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        assert endpoints[("GET", "/api/agents/queue-status")] == "orchestrator.api.agent_queue_ops"
+        assert endpoints[("POST", "/api/agents/queue-flush")] == "orchestrator.api.agent_queue_ops"
+        assert endpoints[("POST", "/api/agents/queue-clean-stale")] == "orchestrator.api.agent_queue_ops"
+        assert endpoints[("POST", "/api/agents/queue-clean-orphans")] == "orchestrator.api.agent_queue_ops"
+
     def test_get_queue_status(self, client):
         """GET /queue-status should return queue information."""
         response = client.get("/queue-status")
@@ -2195,6 +2210,58 @@ class TestQueueEndpoints:
         assert data["cleaned"] == 1
         assert data["cancelled_orphaned"] == 1
         assert data["skipped_active"] == 2
+
+    def test_clean_orphaned_agent_queue_tasks_matches_stale_cleanup(
+        self, client, monkeypatch
+    ):
+        """POST /api/agents/queue-clean-orphans should remain a cleanup alias."""
+        import orchestrator.services.agent_queue as agent_queue_module
+
+        cleanup_result = {
+            "cancelled_orphaned": 0,
+            "timed_out": 1,
+            "terminal_owner": 2,
+            "orphaned_queued": 0,
+            "stale_ownerless_queued": 0,
+            "missing_task_refs": 0,
+            "skipped_active": 3,
+        }
+
+        class FakeQueue:
+            async def connect(self):
+                return None
+
+            async def cleanup_orphaned_and_stale_tasks(self):
+                return cleanup_result.copy()
+
+        monkeypatch.setattr(agent_queue_module, "REDIS_AVAILABLE", True)
+        monkeypatch.setattr(agent_queue_module, "should_use_agent_queue", lambda: True)
+        monkeypatch.setattr(agent_queue_module, "get_agent_queue", lambda: FakeQueue())
+
+        stale_response = client.post("/api/agents/queue-clean-stale")
+        orphan_response = client.post("/api/agents/queue-clean-orphans")
+
+        assert stale_response.status_code == 200
+        assert orphan_response.status_code == 200
+        assert orphan_response.json() == stale_response.json()
+        assert orphan_response.json()["cleaned"] == 3
+
+    def test_flush_agent_queue_skips_when_redis_queue_inactive(
+        self, client, monkeypatch
+    ):
+        """POST /api/agents/queue-flush should skip when Redis queue mode is inactive."""
+        import orchestrator.services.agent_queue as agent_queue_module
+
+        monkeypatch.setattr(agent_queue_module, "REDIS_AVAILABLE", False)
+        monkeypatch.setattr(agent_queue_module, "should_use_agent_queue", lambda: True)
+
+        response = client.post("/api/agents/queue-flush")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "status": "skipped",
+            "message": "Agent queue not active (no Redis)",
+        }
 
 
 class TestDashboardEndpoints:

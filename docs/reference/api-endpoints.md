@@ -325,10 +325,19 @@ Source: `orchestrator/api/agent_routes.py`
 | POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/spec` | Generate spec for one flow | Optional |
 | POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/generate` | Generate validated test via native pipeline | Optional |
 | GET | `/api/agents/exploratory/flow-spec-jobs/{id}` | Get exploratory flow-spec job status | Optional |
-| POST | `/api/agents/queue-flush` | Clear queued agent work | Optional |
-| POST | `/api/agents/queue-clean-orphans` | Clean orphaned agent queue entries | Optional |
 
 Agent types: `exploratory`, `writer`, `spec-synthesis`.
+
+## Agent Queue Operations
+
+Source: `orchestrator/api/agent_queue_ops.py`
+
+| Method | Path | Description | Auth Required |
+|--------|------|-------------|---------------|
+| GET | `/api/agents/queue-status` | Agent queue status and browser slot usage | Optional |
+| POST | `/api/agents/queue-flush` | Clear queued agent work | Optional |
+| POST | `/api/agents/queue-clean-stale` | Clean stale agent queue entries | Optional |
+| POST | `/api/agents/queue-clean-orphans` | Clean orphaned agent queue entries | Optional |
 
 ## Auth Sessions
 
@@ -390,12 +399,12 @@ Source: `orchestrator/api/runtime_ops.py`
 
 ## Resource Management
 
-Sources: `orchestrator/api/runtime_ops.py` (`/api/resources/*`), `orchestrator/api/agent_routes.py` (`/api/agents/queue-status`)
+Sources: `orchestrator/api/runtime_ops.py` (`/api/resources/*`), `orchestrator/api/agent_queue_ops.py` (`/api/agents/queue-status`)
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
 | GET | `/api/resources/status` | **DEPRECATED** -- use `/api/browser-pool/status` | Optional |
-| GET | `/api/agents/queue-status` | Agent queue status and browser slot usage | Optional; source: `orchestrator/api/agent_routes.py` |
+| GET | `/api/agents/queue-status` | Agent queue status and browser slot usage | Optional; source: `orchestrator/api/agent_queue_ops.py` |
 | POST | `/api/resources/cleanup` | Force cleanup of stale resources | Optional |
 
 ## Health
@@ -833,10 +842,10 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/spec` | `orchestrator/api/agent_routes.py` |
 | GET | `/api/agents/exploratory/{run_id}/specs` | `orchestrator/api/agent_routes.py` |
 | POST | `/api/agents/exploratory/{run_id}/synthesize` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/queue-clean-orphans` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/queue-clean-stale` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/queue-flush` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/queue-status` | `orchestrator/api/agent_routes.py` |
+| POST | `/api/agents/queue-clean-orphans` | `orchestrator/api/agent_queue_ops.py` |
+| POST | `/api/agents/queue-clean-stale` | `orchestrator/api/agent_queue_ops.py` |
+| POST | `/api/agents/queue-flush` | `orchestrator/api/agent_queue_ops.py` |
+| GET | `/api/agents/queue-status` | `orchestrator/api/agent_queue_ops.py` |
 | GET | `/api/agents/reports/search` | `orchestrator/api/agent_routes.py` |
 | GET | `/api/agents/runs` | `orchestrator/api/agent_routes.py` |
 | POST | `/api/agents/runs` | `orchestrator/api/agent_routes.py` |

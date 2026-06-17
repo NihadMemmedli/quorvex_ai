@@ -13,10 +13,6 @@ def register_agent_routes(runtime: Any) -> None:
         return
 
     routes = [
-        ("GET", "/api/agents/queue-status", runtime.get_agent_queue_status),
-        ("POST", "/api/agents/queue-flush", runtime.flush_agent_queue),
-        ("POST", "/api/agents/queue-clean-stale", runtime.clean_stale_agent_queue_tasks),
-        ("POST", "/api/agents/queue-clean-orphans", runtime.clean_orphaned_agent_queue_tasks),
         ("POST", "/api/agents/runs", runtime.run_agent),
         ("GET", "/api/agents/tools/catalog", runtime.list_agent_tool_catalog),
         ("GET", "/api/agents/definitions", runtime.list_agent_definitions),
