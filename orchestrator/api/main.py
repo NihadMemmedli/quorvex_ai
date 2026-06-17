@@ -14,7 +14,6 @@ if str(orchestrator_dir) not in sys.path:
     sys.path.insert(0, str(orchestrator_dir))
 
 import asyncio
-import json
 import shutil
 import subprocess
 import threading
@@ -118,6 +117,7 @@ from . import (
     spec_files,
     specs,
     test_data,
+    test_run_read_model_support,
     test_run_runtime_support,
     testrail,
     testrail_files,
@@ -665,112 +665,7 @@ def cleanup_terminal_test_run_processes() -> int:
 
 def sync_data_from_files():
     """Sync existing file-based runs and metadata to DB on startup."""
-    logger.info("Syncing data from files to DB...")
-    with Session(engine) as session:
-        # 0. Fix any existing runs with null test_name
-        runs_with_null_name = session.exec(
-            select(DBTestRun).where(DBTestRun.test_name == None)  # noqa: E711
-        ).all()
-        for run in runs_with_null_name:
-            run.test_name = run.spec_name
-        session.commit()
-        if runs_with_null_name:
-            logger.info(f"Fixed {len(runs_with_null_name)} runs with null test_name")
-
-        # 1. Sync Runs
-        if RUNS_DIR.exists():
-            for d in RUNS_DIR.iterdir():
-                if not d.is_dir():
-                    continue
-                run_id = d.name
-
-                # Check if exists
-                if session.get(DBTestRun, run_id):
-                    continue
-
-                # Derive info
-                plan_file = d / "plan.json"
-                run_file = d / "run.json"
-                status_file = d / "status.txt"
-                execution_log = d / "execution.log"
-
-                test_name = None
-                steps_completed = 0
-                total_steps = 0
-                browser = "chromium"
-                status = "unknown"
-
-                # Try to get Plan info
-                if plan_file.exists():
-                    try:
-                        plan_data = json.loads(plan_file.read_text())
-                        test_name = plan_data.get("testName")
-                        total_steps = len(plan_data.get("steps", []))
-                        browser = plan_data.get("browser", "chromium")
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON in plan file {plan_file}: {e}")
-                    except OSError as e:
-                        logger.warning(f"Cannot read plan file {plan_file}: {e}")
-
-                # Determine Status & Progress
-                if run_file.exists():
-                    try:
-                        run_data = json.loads(run_file.read_text())
-                        status = run_data.get("finalState", "completed")
-                        steps_completed = len(run_data.get("steps", []))
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON in run file {run_file}: {e}")
-                        status = "completed"
-                    except OSError as e:
-                        logger.warning(f"Cannot read run file {run_file}: {e}")
-                        status = "completed"
-                elif status_file.exists():
-                    status = status_file.read_text().strip()
-                elif plan_file.exists() or execution_log.exists():
-                    status = "failed"  # Assume failed if incomplete and old
-
-                # Check validation.json to override status if validation passed/failed
-                validation_file = d / "validation.json"
-                if validation_file.exists():
-                    try:
-                        val_data = json.loads(validation_file.read_text())
-                        if val_data.get("status") == "success":
-                            status = "passed"
-                        elif val_data.get("status") == "failed" and status not in ["passed"]:
-                            status = "failed"
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Invalid JSON in validation file {validation_file}: {e}")
-                    except OSError as e:
-                        logger.warning(f"Cannot read validation file {validation_file}: {e}")
-
-                # Spec Name from spec.md if available
-                spec_name = "unknown"
-                if (d / "spec.md").exists():
-                    # We don't easily know the original filename, but we can try to guess or leave it generic
-                    spec_name = "restored_run"
-                    # Try to find which spec it matches? Too expensive.
-
-                # Create DB Entry
-                # We use file modification time as creation time approximate
-                mtime = datetime.utcfromtimestamp(os.path.getmtime(d))
-
-                run = DBTestRun(
-                    id=run_id,
-                    spec_name=spec_name,
-                    status=status,
-                    created_at=mtime,
-                    test_name=test_name or spec_name,  # Use spec_name as fallback
-                    steps_completed=steps_completed,
-                    total_steps=total_steps,
-                    browser=browser,
-                )
-                session.add(run)
-
-        # 2. Sync Metadata
-        sync_spec_metadata_from_file(session)
-
-        session.commit()
-    logger.info("Sync complete.")
+    return test_run_read_model_support.sync_data_from_files(_test_run_runtime())
 
 
 @app.on_event("startup")
