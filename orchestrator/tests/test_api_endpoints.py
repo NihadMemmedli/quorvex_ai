@@ -493,6 +493,308 @@ class TestAgentRunHistoryEndpoints:
         assert endpoints[("GET", "/api/agents/temporal/health")] == expected_module
 
 
+class TestAgentCodingPatchEndpoints:
+    """Test coding-agent patch review endpoints."""
+
+    PATCH_TEXT = (
+        "diff --git a/docs/reference/coding-patch-test.md b/docs/reference/coding-patch-test.md\n"
+        "new file mode 100644\n"
+        "index 0000000..e69de29\n"
+        "--- /dev/null\n"
+        "+++ b/docs/reference/coding-patch-test.md\n"
+        "@@ -0,0 +1 @@\n"
+        "+hello\n"
+    )
+
+    def _endpoint(self, method: str, path: str):
+        from orchestrator.api.main import app
+
+        for route in app.routes:
+            if getattr(route, "path", None) == path and method in getattr(route, "methods", set()):
+                return route.endpoint
+        raise AssertionError(f"Route not registered: {method} {path}")
+
+    def _runs_dir(self) -> Path:
+        endpoint = self._endpoint("GET", "/api/agents/runs/{id}/coding/diff")
+        runs_dir = endpoint.__globals__.get("RUNS_DIR")
+        if runs_dir is not None:
+            return Path(runs_dir)
+        from orchestrator.api import main as main_module
+
+        return main_module.RUNS_DIR
+
+    def _patch_artifact_name(self) -> str:
+        endpoint = self._endpoint("GET", "/api/agents/runs/{id}/coding/diff")
+        return endpoint.__globals__.get("CODING_ARTIFACT_PATCH", "proposed.patch")
+
+    def _cleanup(self, run_id: str) -> None:
+        from orchestrator.api import main as main_module
+        from orchestrator.api import spec_files
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent
+
+        with Session(engine) as session:
+            for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
+                session.delete(event)
+            run = session.get(AgentRun, run_id)
+            if run:
+                session.delete(run)
+            session.commit()
+
+        for root in {self._runs_dir(), main_module.RUNS_DIR, spec_files.RUNS_DIR}:
+            if root:
+                shutil.rmtree(Path(root) / run_id, ignore_errors=True)
+
+    def _seed_run(
+        self,
+        run_id: str,
+        *,
+        agent_type: str = "coding",
+        status: str = "completed",
+        patch_text: str | None = PATCH_TEXT,
+        result: dict | None = None,
+    ) -> None:
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+
+        self._cleanup(run_id)
+        with Session(engine) as session:
+            run = AgentRun(
+                id=run_id,
+                agent_type=agent_type,
+                status=status,
+                config_json=json.dumps({"prompt": "patch checkout"}),
+            )
+            if result is not None:
+                run.result = result
+            session.add(run)
+            session.commit()
+
+        if patch_text is not None:
+            run_dir = self._runs_dir() / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / self._patch_artifact_name()).write_text(patch_text, encoding="utf-8")
+            (run_dir / "summary.md").write_text("Summary body\n", encoding="utf-8")
+            (run_dir / "review.md").write_text("Review body\n", encoding="utf-8")
+
+    def test_coding_patch_routes_registered_from_coding_patch_router(self):
+        from orchestrator.api.main import app
+
+        registered_routes = [
+            (method, route.path, route.endpoint.__module__)
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        ]
+
+        expected_module = "orchestrator.api.agent_coding_patch"
+        expected_routes = (
+            ("GET", "/api/agents/runs/{id}/coding/diff"),
+            ("POST", "/api/agents/runs/{id}/coding/reject"),
+            ("POST", "/api/agents/runs/{id}/coding/apply"),
+        )
+        for expected_route in expected_routes:
+            matches = [module for method, path, module in registered_routes if (method, path) == expected_route]
+            assert matches == [expected_module]
+
+    def test_coding_patch_docs_source_map_points_to_coding_patch_router(self):
+        root = Path(__file__).resolve().parents[2]
+        endpoints_doc = (root / "docs/reference/api-endpoints.md").read_text(encoding="utf-8")
+        router_map = (root / "docs/reference/api-router-service-map.md").read_text(encoding="utf-8")
+
+        expected_source = "`orchestrator/api/agent_coding_patch.py`"
+        for route in (
+            "/api/agents/runs/{id}/coding/diff",
+            "/api/agents/runs/{id}/coding/reject",
+            "/api/agents/runs/{id}/coding/apply",
+        ):
+            assert f"| GET | `{route}`" in endpoints_doc or f"| POST | `{route}`" in endpoints_doc
+            assert f"| GET | `{route}` | {expected_source} |" in endpoints_doc or f"| POST | `{route}` | {expected_source} |" in endpoints_doc
+        assert "Agent coding patch review" in router_map
+        assert expected_source in router_map
+
+    def test_get_coding_patch_diff_returns_diff_payload(self, client, monkeypatch):
+        run_id = f"coding-diff-{uuid4()}"
+        diff_endpoint = self._endpoint("GET", "/api/agents/runs/{id}/coding/diff")
+        monkeypatch.setitem(
+            diff_endpoint.__globals__,
+            "validate_patch_for_repo",
+            lambda _patch_text, _repo_root: types.SimpleNamespace(paths=("docs/reference/coding-patch-test.md",)),
+        )
+
+        self._seed_run(run_id)
+        try:
+            response = client.get(f"/api/agents/runs/{run_id}/coding/diff")
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert data["run_id"] == run_id
+            assert data["status"] == "completed"
+            assert data["valid"] is True
+            assert data["validation_error"] is None
+            assert data["affected_files"] == ["docs/reference/coding-patch-test.md"]
+            assert data["diff"] == self.PATCH_TEXT
+            assert data["summary"] == "Summary body\n"
+            assert data["review"] == "Review body\n"
+        finally:
+            self._cleanup(run_id)
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("get", "/api/agents/runs/{run_id}/coding/diff"),
+            ("post", "/api/agents/runs/{run_id}/coding/reject"),
+            ("post", "/api/agents/runs/{run_id}/coding/apply"),
+        ],
+    )
+    def test_coding_patch_endpoints_return_404_for_missing_run(self, client, method, path):
+        run_id = f"missing-coding-run-{uuid4()}"
+        response = getattr(client, method)(path.format(run_id=run_id))
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Run not found"
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("get", "/api/agents/runs/{run_id}/coding/diff"),
+            ("post", "/api/agents/runs/{run_id}/coding/reject"),
+            ("post", "/api/agents/runs/{run_id}/coding/apply"),
+        ],
+    )
+    def test_coding_patch_endpoints_reject_non_coding_run(self, client, method, path):
+        run_id = f"non-coding-run-{uuid4()}"
+        self._seed_run(run_id, agent_type="custom")
+        try:
+            response = getattr(client, method)(path.format(run_id=run_id))
+            assert response.status_code == 400
+            assert response.json()["detail"] == "Run is not a coding agent run"
+        finally:
+            self._cleanup(run_id)
+
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("get", "/api/agents/runs/{run_id}/coding/diff"),
+            ("post", "/api/agents/runs/{run_id}/coding/apply"),
+        ],
+    )
+    def test_coding_patch_endpoints_return_404_for_missing_patch_artifact(self, client, method, path):
+        run_id = f"missing-patch-{uuid4()}"
+        self._seed_run(run_id, patch_text=None)
+        try:
+            response = getattr(client, method)(path.format(run_id=run_id))
+            assert response.status_code == 404
+            assert response.json()["detail"] == "Coding patch artifact not found"
+        finally:
+            self._cleanup(run_id)
+
+    def test_reject_coding_patch_persists_status_and_event(self, client):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent
+
+        run_id = f"reject-coding-patch-{uuid4()}"
+        self._seed_run(run_id, status="running")
+        try:
+            response = client.post(f"/api/agents/runs/{run_id}/coding/reject")
+            assert response.status_code == 200, response.text
+            assert response.json() == {"status": "rejected", "run_id": run_id}
+
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                assert run is not None
+                assert run.result["patch_status"] == "rejected"
+                assert run.progress["phase"] == "rejected"
+                assert run.progress["patch_status"] == "rejected"
+                event = session.exec(
+                    select(AgentRunEvent).where(
+                        AgentRunEvent.run_id == run_id,
+                        AgentRunEvent.event_type == "coding_patch_rejected",
+                    )
+                ).one()
+                assert event.message == "Coding agent patch rejected."
+                assert event.payload["patch_status"] == "rejected"
+        finally:
+            self._cleanup(run_id)
+
+    def test_apply_coding_patch_requires_completed_or_partial_run(self, client):
+        run_id = f"running-coding-patch-{uuid4()}"
+        self._seed_run(run_id, status="running")
+        try:
+            response = client.post(f"/api/agents/runs/{run_id}/coding/apply")
+            assert response.status_code == 409
+            assert response.json()["detail"] == "Coding run must be completed before applying a patch"
+        finally:
+            self._cleanup(run_id)
+
+    @pytest.mark.parametrize("status", ["completed", "completed_partial"])
+    def test_apply_coding_patch_uses_patched_helper_for_completed_and_partial_runs(self, client, monkeypatch, status):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent
+
+        run_id = f"apply-coding-patch-{status}-{uuid4()}"
+        calls = []
+
+        def fake_apply_patch_to_repo(patch_text: str, repo_root):
+            calls.append((patch_text, repo_root))
+            return {"affected_files": ["docs/reference/coding-patch-test.md"], "stdout": "ok"}
+
+        apply_endpoint = self._endpoint("POST", "/api/agents/runs/{id}/coding/apply")
+        monkeypatch.setitem(apply_endpoint.__globals__, "apply_patch_to_repo", fake_apply_patch_to_repo)
+
+        self._seed_run(run_id, status=status)
+        try:
+            response = client.post(f"/api/agents/runs/{run_id}/coding/apply")
+            assert response.status_code == 200, response.text
+            assert response.json() == {
+                "status": "applied",
+                "run_id": run_id,
+                "affected_files": ["docs/reference/coding-patch-test.md"],
+            }
+            assert calls and calls[0][0] == self.PATCH_TEXT
+
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_id)
+                assert run is not None
+                assert run.result["patch_status"] == "applied"
+                assert run.result["applied_files"] == ["docs/reference/coding-patch-test.md"]
+                assert run.progress["phase"] == "applied"
+                assert run.progress["patch_status"] == "applied"
+                event = session.exec(
+                    select(AgentRunEvent).where(
+                        AgentRunEvent.run_id == run_id,
+                        AgentRunEvent.event_type == "coding_patch_applied",
+                    )
+                ).one()
+                assert event.payload["affected_files"] == ["docs/reference/coding-patch-test.md"]
+        finally:
+            self._cleanup(run_id)
+
+    @pytest.mark.parametrize(
+        ("patch_status", "expected_detail"),
+        [
+            ("applied", "Coding patch has already been applied"),
+            ("rejected", "Coding patch has been rejected"),
+        ],
+    )
+    def test_apply_coding_patch_rejects_already_applied_or_rejected_state(
+        self, client, monkeypatch, patch_status, expected_detail
+    ):
+        run_id = f"conflict-coding-patch-{patch_status}-{uuid4()}"
+
+        def fail_if_called(*_args, **_kwargs):
+            raise AssertionError("apply_patch_to_repo should not run for conflicting patch state")
+
+        apply_endpoint = self._endpoint("POST", "/api/agents/runs/{id}/coding/apply")
+        monkeypatch.setitem(apply_endpoint.__globals__, "apply_patch_to_repo", fail_if_called)
+
+        self._seed_run(run_id, result={"patch_status": patch_status})
+        try:
+            response = client.post(f"/api/agents/runs/{run_id}/coding/apply")
+            assert response.status_code == 409
+            assert response.json()["detail"] == expected_detail
+        finally:
+            self._cleanup(run_id)
+
+
 class TestAgentDefinitionEndpoints:
     """Test UI-created custom agent definition endpoints."""
 

@@ -46,6 +46,7 @@ Backend ownership map for FastAPI routers and their primary service boundaries.
 | Agent queue operations | `orchestrator/api/agent_queue_ops.py` | `/api/agents/queue-*` | Redis agent queue status, cleanup, flush, Temporal/browser pool fallback status |
 | Agent definitions | `orchestrator/api/agent_definitions.py` | `/api/agents/tools/catalog`, `/api/agents/definitions` | custom agent tool catalog, definition CRUD, custom definition run launch |
 | Agent run observability | `orchestrator/api/agent_run_observability.py` | `/api/agents/runs`, `/api/agents/temporal/health` | read-only run history, live run details, events, traces, Temporal health |
+| Agent coding patch review | `orchestrator/api/agent_coding_patch.py` | `/api/agents/runs/{id}/coding/*` | coding agent patch diff preview, rejection, and apply state transitions |
 | Agent runs | `orchestrator/api/agent_routes.py` | `/api/agents` | `main.py` compatibility handlers, Temporal agent workflows, reports, exploratory agents |
 | Agent auth sessions | `orchestrator/api/agent_sessions.py` | `/api/agents/sessions` | persisted browser auth session files |
 | Custom workflows | `orchestrator/api/workflows.py` | workflow routes | workflow runner, step registry, Temporal client |
