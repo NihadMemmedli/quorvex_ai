@@ -10,6 +10,14 @@ from typing import Any
 
 from sqlmodel import Session
 
+from orchestrator.api.agent_run_runtime_support import (
+    _exploratory_result_has_usable_evidence,
+    _merge_agent_failure_into_result,
+    _recover_custom_agent_partial_result,
+    _recover_exploratory_partial_result,
+    _run_artifact_counts,
+    update_agent_run_progress,
+)
 from orchestrator.api.db import engine
 from orchestrator.api.models_db import AgentRun
 from orchestrator.services.agent_run_events import create_agent_run_event
@@ -18,81 +26,10 @@ PARTIAL_STATUS = "completed_partial"
 TERMINAL_STATUSES = {"completed", PARTIAL_STATUS, "failed", "cancelled", "timeout"}
 
 
-def _short_tool_name(tool_name: str | None) -> str:
-    if not tool_name:
-        return ""
-    return str(tool_name).rsplit("__", 1)[-1] if "__" in str(tool_name) else str(tool_name)
-
-
-def _coerce_progress_int(value: Any, default: int = 0) -> int:
-    try:
-        if value is None or value == "":
-            return default
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _normalize_progress(progress: dict[str, Any] | None) -> dict[str, Any]:
-    normalized = dict(progress or {})
-    for key in ("tool_calls", "browser_tool_calls", "interactions"):
-        if key in normalized:
-            normalized[key] = _coerce_progress_int(normalized.get(key))
-
-    last_tool = normalized.get("last_tool") or normalized.get("current_tool")
-    if last_tool:
-        normalized["last_tool"] = str(last_tool)
-        normalized["current_tool"] = str(last_tool)
-
-    label = normalized.get("last_tool_label") or normalized.get("current_tool_label")
-    if not label and last_tool:
-        label = _short_tool_name(str(last_tool))
-    if label:
-        normalized["last_tool_label"] = str(label)
-        normalized["current_tool_label"] = str(label)
-
-    return normalized
-
-
 def _persist_agent_run_progress(run_id: str, agent_task_id: str, patch: dict[str, Any]) -> None:
     if not patch:
         return
-    with Session(engine) as session:
-        run = session.get(AgentRun, run_id)
-        if not run or run.status in TERMINAL_STATUSES:
-            return
-
-        progress_patch = dict(patch)
-        last_tool = progress_patch.get("last_tool") or progress_patch.get("current_tool")
-        if not last_tool:
-            progress_patch.pop("last_tool", None)
-            progress_patch.pop("current_tool", None)
-            last_tool = (run.progress or {}).get("last_tool") or (run.progress or {}).get("current_tool")
-
-        existing = run.progress or {}
-        recent_tools = list(existing.get("recent_tools") or [])
-        if last_tool and (not recent_tools or recent_tools[-1].get("name") != last_tool):
-            recent_tools.append(
-                {
-                    "name": str(last_tool),
-                    "label": _short_tool_name(str(last_tool)),
-                    "at": datetime.utcnow().isoformat(),
-                }
-            )
-            recent_tools = recent_tools[-12:]
-
-        run.progress = _normalize_progress(
-            {
-                **existing,
-                **progress_patch,
-                "agent_task_id": agent_task_id,
-                "recent_tools": recent_tools,
-                "updated_at": datetime.utcnow().isoformat(),
-            }
-        )
-        run.agent_task_id = agent_task_id
-        session.add(run)
-        session.commit()
+    update_agent_run_progress(run_id, patch, agent_task_id=agent_task_id, skip_terminal=True)
 
 
 @contextmanager
@@ -268,19 +205,11 @@ async def _reattach_agent_task(run_id: str, agent_task_id: str) -> dict[str, Any
                 recovered = None
                 if run.agent_type == "custom":
                     try:
-                        from orchestrator.api.main import _recover_custom_agent_partial_result
-
                         recovered = _recover_custom_agent_partial_result(run, exc)
                     except Exception:
                         recovered = None
                 elif run.agent_type == "exploratory":
                     try:
-                        from orchestrator.api.main import (
-                            _exploratory_result_has_usable_evidence,
-                            _merge_agent_failure_into_result,
-                            _recover_exploratory_partial_result,
-                        )
-
                         if _exploratory_result_has_usable_evidence(run.result):
                             recovered = _merge_agent_failure_into_result(
                                 run.result,
@@ -468,14 +397,6 @@ def finalize_agent_run_workflow(payload: dict[str, Any]) -> dict[str, Any]:
             recovered = None
             if run.agent_type in {"custom", "exploratory"}:
                 try:
-                    from orchestrator.api.main import (
-                        _exploratory_result_has_usable_evidence,
-                        _merge_agent_failure_into_result,
-                        _recover_custom_agent_partial_result,
-                        _recover_exploratory_partial_result,
-                        _run_artifact_counts,
-                    )
-
                     if run.agent_type == "custom":
                         recovered = _recover_custom_agent_partial_result(run, error_message)
                     elif _exploratory_result_has_usable_evidence(run.result):
