@@ -19,7 +19,7 @@ import subprocess
 import threading
 import uuid
 from datetime import datetime, timedelta  # noqa: F401
-from typing import Any, Optional
+from typing import Any
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -122,6 +122,7 @@ from . import (
     test_run_cleanup_support,
     test_run_maintenance_loop_support,
     test_run_process_registry_support,
+    test_run_queue_manager_support,
     test_run_read_model_support,
     test_run_runtime_support,
     test_run_schedule_watchdog_support,
@@ -130,7 +131,13 @@ from . import (
     users,
     workflows,
 )
-from .db import engine, get_database_type, get_session, init_db, is_parallel_mode_available
+from .db import (
+    engine,
+    get_database_type,  # noqa: F401
+    get_session,
+    init_db,
+    is_parallel_mode_available,  # noqa: F401
+)
 from .middleware.auth import get_current_user_optional
 from .middleware.permissions import ProjectRole, check_project_access  # noqa: F401
 from .middleware.rate_limit import limiter, rate_limit_exceeded_handler
@@ -373,159 +380,7 @@ def clear_all_processes() -> dict[str, subprocess.Popen]:
 PROCESS_MANAGER: ProcessManager | None = None
 
 
-class QueueManager:
-    """Manages test execution queue with configurable parallelism."""
-
-    _instance: Optional["QueueManager"] = None
-    _lock: asyncio.Lock | None = None
-
-    def __init__(self):
-        self._semaphore: asyncio.Semaphore | None = None
-        self._parallelism: int = 2
-        self._parallel_mode_enabled: bool = False
-
-    @classmethod
-    async def get_instance(cls) -> "QueueManager":
-        """Get or create the singleton QueueManager instance."""
-        if cls._instance is None:
-            cls._instance = QueueManager()
-            await cls._instance.initialize()
-        return cls._instance
-
-    async def initialize(self):
-        """Initialize the queue manager from database settings or environment defaults."""
-        # Read environment defaults
-        env_parallelism = int(os.environ.get("DEFAULT_PARALLELISM", "4"))
-        env_parallel_enabled = os.environ.get("PARALLEL_MODE_ENABLED", "false").lower() == "true"
-
-        with Session(engine) as session:
-            settings = session.get(DBExecutionSettings, 1)
-            if settings:
-                self._parallelism = settings.parallelism
-                self._parallel_mode_enabled = settings.parallel_mode_enabled
-            else:
-                # Use environment defaults when no DB settings exist
-                self._parallelism = max(1, min(10, env_parallelism))
-                self._parallel_mode_enabled = env_parallel_enabled and is_parallel_mode_available()
-                logger.info(
-                    f"Using environment defaults: parallelism={self._parallelism}, enabled={self._parallel_mode_enabled}"
-                )
-
-        self._semaphore = asyncio.Semaphore(self._parallelism)
-        logger.info(f"QueueManager initialized: parallelism={self._parallelism}, enabled={self._parallel_mode_enabled}")
-
-    async def reload_settings(self):
-        """Reload settings from database and update semaphore if needed."""
-        with Session(engine) as session:
-            settings = session.get(DBExecutionSettings, 1)
-            if settings:
-                new_parallelism = settings.parallelism
-                self._parallel_mode_enabled = settings.parallel_mode_enabled
-
-                # Only recreate semaphore if parallelism changed
-                if new_parallelism != self._parallelism:
-                    self._parallelism = new_parallelism
-                    self._semaphore = asyncio.Semaphore(self._parallelism)
-                    logger.info(f"QueueManager updated: parallelism={self._parallelism}")
-
-    @property
-    def parallelism(self) -> int:
-        return self._parallelism
-
-    @property
-    def parallel_mode_enabled(self) -> bool:
-        return self._parallel_mode_enabled
-
-    async def acquire(self):
-        """Acquire a slot for test execution."""
-        if self._semaphore:
-            await self._semaphore.acquire()
-
-    def release(self):
-        """Release a slot after test execution."""
-        if self._semaphore:
-            self._semaphore.release()
-
-    def get_queue_position(self, run_id: str) -> int | None:
-        """Get the queue position for a run (based on waiting count)."""
-        with Session(engine) as session:
-            # Count runs that are queued (status='queued') and were queued before this run
-            run = session.get(DBTestRun, run_id)
-            if not run or run.status != "queued":
-                return None
-
-            statement = select(DBTestRun).where(DBTestRun.status == "queued", DBTestRun.queued_at < run.queued_at)
-            earlier_runs = session.exec(statement).all()
-            return len(earlier_runs) + 1  # 1-indexed position
-
-    def get_queue_status(self) -> dict[str, Any]:
-        """Get current queue status with orphan detection and auto-cleanup."""
-        ORPHAN_AGE_SECONDS = 120
-
-        with Session(engine) as session:
-            running = session.exec(select(DBTestRun).where(DBTestRun.status.in_(["running", "in_progress"]))).all()
-            queued = session.exec(select(DBTestRun).where(DBTestRun.status == "queued")).all()
-
-            # Detect orphaned runs: in DB as running but no active process
-            orphaned_running = [r for r in running if not r.temporal_workflow_id and not is_process_active(r.id)]
-
-            # Auto-clean orphans that have been orphaned for >120 seconds
-            auto_cleaned_count = 0
-            batch_ids_to_update = set()
-            now = datetime.utcnow()
-            for r in orphaned_running:
-                age_ref = r.started_at or r.queued_at
-                if age_ref and (now - age_ref).total_seconds() > ORPHAN_AGE_SECONDS:
-                    r.status = "stopped"
-                    r.completed_at = now
-                    r.queue_position = None
-                    session.add(r)
-
-                    run_dir = RUNS_DIR / r.id
-                    if run_dir.exists():
-                        (run_dir / "status.txt").write_text("stopped")
-
-                    if r.batch_id:
-                        batch_ids_to_update.add(r.batch_id)
-
-                    auto_cleaned_count += 1
-                    logger.warning(f"Auto-cleaned orphaned run {r.id} (age={int((now - age_ref).total_seconds())}s)")
-
-            if auto_cleaned_count > 0:
-                session.commit()
-                for batch_id in batch_ids_to_update:
-                    try:
-                        update_batch_stats(batch_id)
-                    except Exception as e:
-                        logger.error(f"Failed to update batch stats for {batch_id} after orphan cleanup: {e}")
-
-            # Detect orphaned queued entries: queued in DB but no backing asyncio task
-            orphaned_queued = [
-                r
-                for r in queued
-                if not (
-                    r.temporal_workflow_id
-                    or (
-                    PROCESS_MANAGER
-                    and r.id in PROCESS_MANAGER._asyncio_tasks
-                    and not PROCESS_MANAGER._asyncio_tasks[r.id].done()
-                    )
-                )
-                and r.queued_at
-                and (datetime.utcnow() - r.queued_at).total_seconds() > 60
-            ]
-
-            return {
-                "running_count": len(running) - len(orphaned_running),
-                "queued_count": len(queued),
-                "parallelism_limit": self._parallelism,
-                "database_type": get_database_type(),
-                "parallel_mode_enabled": self._parallel_mode_enabled,
-                "orphaned_running_count": len(orphaned_running),
-                "active_process_count": get_active_process_count(),
-                "orphaned_queued_count": len(orphaned_queued),
-                "auto_cleaned_count": auto_cleaned_count,
-            }
+QueueManager = test_run_queue_manager_support.QueueManager
 
 
 # Global queue manager instance
@@ -949,6 +804,9 @@ _STARTUP_IMPORT_FAILURE_MESSAGE = (
 
 def _test_run_runtime():
     return sys.modules[__name__]
+
+
+test_run_queue_manager_support.configure_runtime(_test_run_runtime)
 
 
 def _record_startup_import_failure(run_id: str, run_dir_path: Path, *, retrying: bool) -> None:
