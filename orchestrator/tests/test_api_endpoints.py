@@ -277,10 +277,14 @@ class TestRunEndpoints:
 class TestAgentRunHistoryEndpoints:
     def _cleanup(self, run_ids: list[str]) -> None:
         from orchestrator.api.db import engine
-        from orchestrator.api.models_db import AgentRun, AgentRunEvent
+        from orchestrator.api.models_db import AgentRun, AgentRunEvent, AgentTraceSnapshot, AgentTraceSpan
 
         with Session(engine) as session:
             for run_id in run_ids:
+                for span in session.exec(select(AgentTraceSpan).where(AgentTraceSpan.run_id == run_id)).all():
+                    session.delete(span)
+                for snapshot in session.exec(select(AgentTraceSnapshot).where(AgentTraceSnapshot.run_id == run_id)).all():
+                    session.delete(snapshot)
                 for event in session.exec(select(AgentRunEvent).where(AgentRunEvent.run_id == run_id)).all():
                     session.delete(event)
                 run = session.get(AgentRun, run_id)
@@ -375,6 +379,118 @@ class TestAgentRunHistoryEndpoints:
             assert data["health"]["event_count"] >= 1
         finally:
             self._cleanup(run_ids)
+
+    def test_agent_run_events_endpoint_filters_and_preserves_project_scope(self, client):
+        from orchestrator.api.db import engine
+        from orchestrator.api.models_db import AgentRun
+        from orchestrator.services.agent_run_events import create_agent_run_event
+
+        marker = f"events-{uuid4().hex[:8]}"
+        run_ids = self._seed_history_runs(marker)
+        try:
+            with Session(engine) as session:
+                run = session.get(AgentRun, run_ids[0])
+                assert run is not None
+                run.project_id = "default"
+                session.add(run)
+                session.commit()
+
+            event = create_agent_run_event(
+                run_id=run_ids[0],
+                event_type="tool_call",
+                level="debug",
+                message="Using Read",
+                payload={"tool_name": "Read"},
+            )
+            assert event is not None
+
+            response = client.get(f"/api/agents/runs/{run_ids[0]}/events?event_type=tool_call&level=debug")
+            assert response.status_code == 200
+            data = response.json()
+            assert len(data) == 1
+            assert data[0]["event_type"] == "tool_call"
+            assert data[0]["payload"] == {"tool_name": "Read"}
+
+            forbidden = client.get(f"/api/agents/runs/{run_ids[0]}/events?project_id=other-project")
+            assert forbidden.status_code == 404
+        finally:
+            self._cleanup(run_ids)
+
+    def test_agent_run_events_stream_emits_complete_frame_for_terminal_run(self, client):
+        marker = f"stream-{uuid4().hex[:8]}"
+        run_ids = self._seed_history_runs(marker)
+        try:
+            with client.stream("GET", f"/api/agents/runs/{run_ids[0]}/events/stream?after_sequence=1") as response:
+                assert response.status_code == 200
+                assert response.headers["content-type"].startswith("text/event-stream")
+                body = next(response.iter_text())
+            assert "event: complete" in body
+            assert f'"run_id": "{run_ids[0]}"' in body
+        finally:
+            self._cleanup(run_ids)
+
+    def test_agent_run_trace_endpoints_preserve_spans_and_export_header(self, client):
+        from orchestrator.services.agent_trace import ensure_trace_snapshot, record_trace_span
+
+        marker = f"trace-{uuid4().hex[:8]}"
+        run_ids = self._seed_history_runs(marker)
+        try:
+            snapshot = ensure_trace_snapshot(
+                run_id=run_ids[0],
+                prompt="Inspect checkout with Bearer abc.def.ghi",
+                runtime="claude_sdk",
+                allowed_tools=["Read"],
+            )
+            span = record_trace_span(
+                run_id=run_ids[0],
+                span_type="tool_result",
+                name="Read result",
+                tool_name="Read",
+                success=True,
+                output_preview={"content": "ok"},
+            )
+            assert snapshot is not None
+            assert span is not None
+
+            spans_response = client.get(f"/api/agents/runs/{run_ids[0]}/trace/spans?tool=Read&q=result")
+            assert spans_response.status_code == 200
+            spans = spans_response.json()
+            assert any(item["id"] == span.id for item in spans)
+
+            trace_response = client.get(f"/api/agents/runs/{run_ids[0]}/trace")
+            assert trace_response.status_code == 200
+            trace = trace_response.json()
+            assert trace["snapshot"]["trace_id"] == snapshot.id
+            assert trace["correlation"]["run_id"] == run_ids[0]
+
+            export_response = client.get(f"/api/agents/runs/{run_ids[0]}/trace/export")
+            assert export_response.status_code == 200
+            assert export_response.headers["content-disposition"] == f'attachment; filename="agent-trace-{run_ids[0]}.json"'
+            exported = export_response.json()
+            assert exported["schema"] == "quorvex.agent_trace_export.v1"
+            assert exported["snapshot"]["trace_id"] == snapshot.id
+        finally:
+            self._cleanup(run_ids)
+
+    def test_agent_run_observability_routes_registered_from_observability_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        expected_module = "orchestrator.api.agent_run_observability"
+        assert endpoints[("GET", "/api/agents/runs")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}/events")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}/events/stream")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}/trace")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}/trace/spans")] == expected_module
+        assert endpoints[("GET", "/api/agents/runs/{id}/trace/export")] == expected_module
+        assert endpoints[("GET", "/api/agents/temporal/health")] == expected_module
 
 
 class TestAgentDefinitionEndpoints:

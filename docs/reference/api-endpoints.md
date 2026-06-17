@@ -293,7 +293,7 @@ Prefix: `/api/prd` | Source: `orchestrator/api/prd.py`
 
 ## Agents
 
-Source: `orchestrator/api/agent_routes.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
+Source: `orchestrator/api/agent_routes.py`; read-only run visibility: `orchestrator/api/agent_run_observability.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -302,6 +302,9 @@ Source: `orchestrator/api/agent_routes.py`; tool catalog and custom agent defini
 | GET | `/api/agents/runs/{id}` | Get agent run details | Optional |
 | GET | `/api/agents/runs/{id}/events` | List persisted lifecycle events for an agent run | Optional |
 | GET | `/api/agents/runs/{id}/events/stream` | Stream agent run lifecycle events over SSE | Optional |
+| GET | `/api/agents/runs/{id}/trace` | Get an agent run trace bundle | Optional |
+| GET | `/api/agents/runs/{id}/trace/spans` | List spans recorded for an agent run trace | Optional |
+| GET | `/api/agents/runs/{id}/trace/export` | Export an agent run trace bundle | Optional |
 | GET | `/api/agents/temporal/health` | Check Temporal readiness for standalone agent runs | Optional |
 | POST | `/api/agents/runs/{id}/pause` | Pause an agent run | Optional |
 | POST | `/api/agents/runs/{id}/resume` | Resume an agent run | Optional |
@@ -847,27 +850,28 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | POST | `/api/agents/queue-flush` | `orchestrator/api/agent_queue_ops.py` |
 | GET | `/api/agents/queue-status` | `orchestrator/api/agent_queue_ops.py` |
 | GET | `/api/agents/reports/search` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/runs` | `orchestrator/api/agent_routes.py` |
+| GET | `/api/agents/runs` | `orchestrator/api/agent_run_observability.py` |
 | POST | `/api/agents/runs` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/runs/{id}` | `orchestrator/api/agent_routes.py` |
+| GET | `/api/agents/runs/{id}` | `orchestrator/api/agent_run_observability.py` |
 | POST | `/api/agents/runs/{id}/cancel` | `orchestrator/api/agent_routes.py` |
 | POST | `/api/agents/runs/{id}/coding/apply` | `orchestrator/api/agent_routes.py` |
 | GET | `/api/agents/runs/{id}/coding/diff` | `orchestrator/api/agent_routes.py` |
 | POST | `/api/agents/runs/{id}/coding/reject` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/runs/{id}/events` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/runs/{id}/events/stream` | `orchestrator/api/agent_routes.py` |
+| GET | `/api/agents/runs/{id}/events` | `orchestrator/api/agent_run_observability.py` |
+| GET | `/api/agents/runs/{id}/events/stream` | `orchestrator/api/agent_run_observability.py` |
 | POST | `/api/agents/runs/{id}/pause` | `orchestrator/api/agent_routes.py` |
 | GET | `/api/agents/runs/{id}/report` | `orchestrator/api/agent_routes.py` |
 | POST | `/api/agents/runs/{id}/retry` | `orchestrator/api/agent_routes.py` |
 | POST | `/api/agents/runs/{id}/resume` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/runs/{id}/trace` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/runs/{id}/trace/export` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/runs/{id}/trace/spans` | `orchestrator/api/agent_routes.py` |
+| GET | `/api/agents/runs/{id}/trace` | `orchestrator/api/agent_run_observability.py` |
+| GET | `/api/agents/runs/{id}/trace/export` | `orchestrator/api/agent_run_observability.py` |
+| GET | `/api/agents/runs/{id}/trace/spans` | `orchestrator/api/agent_run_observability.py` |
 | PATCH | `/api/agents/runs/{run_id}/report` | `orchestrator/api/agent_routes.py` |
 | PATCH | `/api/agents/runs/{run_id}/report-items/{item_id}` | `orchestrator/api/agent_routes.py` |
 | GET | `/api/agents/sessions` | `orchestrator/api/agent_sessions.py` |
 | DELETE | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_sessions.py` |
 | POST | `/api/agents/sessions/{session_id}` | `orchestrator/api/agent_sessions.py` |
+| GET | `/api/agents/temporal/health` | `orchestrator/api/agent_run_observability.py` |
 | GET | `/api/agents/tools/catalog` | `orchestrator/api/agent_definitions.py` |
 | POST | `/api/backup` | `orchestrator/api/backup_control.py` |
 | GET | `/api/backup/status` | `orchestrator/api/backup_control.py` |
