@@ -14,11 +14,6 @@ def register_agent_routes(runtime: Any) -> None:
 
     routes = [
         ("POST", "/api/agents/runs", runtime.run_agent),
-        ("GET", "/api/agents/runs/{id}/report", runtime.get_agent_run_report),
-        ("PATCH", "/api/agents/runs/{run_id}/report", runtime.update_agent_run_report_overview),
-        ("PATCH", "/api/agents/runs/{run_id}/report-items/{item_id}", runtime.update_agent_run_report_item),
-        ("GET", "/api/agents/reports/search", runtime.search_agent_reports),
-        ("POST", "/api/agents/runs/{run_id}/report-requirements/import", runtime.import_agent_report_requirements),
         ("POST", "/api/agents/exploratory", runtime.run_exploratory_agent),
         ("POST", "/api/agents/exploratory/{run_id}/synthesize", runtime.synthesize_specs),
         ("GET", "/api/agents/exploratory/{run_id}/specs", runtime.get_exploration_specs),

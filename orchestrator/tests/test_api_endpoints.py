@@ -795,6 +795,66 @@ class TestAgentCodingPatchEndpoints:
             self._cleanup(run_id)
 
 
+class TestAgentReportEndpoints:
+    """Test custom agent report API endpoints."""
+
+    REPORT_ROUTES = (
+        ("GET", "/api/agents/runs/{id}/report"),
+        ("PATCH", "/api/agents/runs/{run_id}/report"),
+        ("PATCH", "/api/agents/runs/{run_id}/report-items/{item_id}"),
+        ("GET", "/api/agents/reports/search"),
+        ("POST", "/api/agents/runs/{run_id}/report-requirements/import"),
+    )
+
+    def test_agent_report_routes_registered_from_report_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        expected_module = "orchestrator.api.agent_reports"
+        for route in self.REPORT_ROUTES:
+            assert endpoints[route] == expected_module
+
+    def test_agent_report_docs_source_map_points_to_report_router(self):
+        root = Path(__file__).resolve().parents[2]
+        endpoints_doc = (root / "docs/reference/api-endpoints.md").read_text(encoding="utf-8")
+        router_map = (root / "docs/reference/api-router-service-map.md").read_text(encoding="utf-8")
+
+        expected_source = "`orchestrator/api/agent_reports.py`"
+        for method, route in self.REPORT_ROUTES:
+            assert f"| {method} | `{route}` | {expected_source} |" in endpoints_doc
+        assert "Agent reports" in router_map
+        assert expected_source in router_map
+
+    @pytest.mark.parametrize(
+        ("method", "path", "payload"),
+        [
+            ("get", "/api/agents/runs/missing-report-run/report?project_id=default", None),
+            ("patch", "/api/agents/runs/missing-report-run/report?project_id=default", {"summary": "Updated"}),
+            (
+                "patch",
+                "/api/agents/runs/missing-report-run/report-items/F-001?item_type=finding&project_id=default",
+                {"patch": {"title": "Updated"}},
+            ),
+            (
+                "post",
+                "/api/agents/runs/missing-report-run/report-requirements/import?project_id=default",
+                {"item_ids": ["R-001"]},
+            ),
+        ],
+    )
+    def test_agent_report_missing_run_returns_404(self, client, method, path, payload):
+        response = getattr(client, method)(path, json=payload) if payload is not None else getattr(client, method)(path)
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Run not found"
+
+
 class TestAgentDefinitionEndpoints:
     """Test UI-created custom agent definition endpoints."""
 
