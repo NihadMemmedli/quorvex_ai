@@ -63,6 +63,96 @@ def _browser_auth_selection(config: dict[str, Any]) -> tuple[str | None, bool]:
     return browser_auth_session_id, use_default
 
 
+def _browser_auth_request_fields_set(request: Any) -> set[str]:
+    fields = getattr(request, "model_fields_set", None)
+    if fields is None:
+        fields = getattr(request, "__fields_set__", set())
+    return set(fields or set())
+
+
+def _without_spec_generation_auth(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in config.items()
+        if key not in {"auth", "browser_auth", "browser_auth_session_id", "use_project_default_browser_auth"}
+    }
+
+
+def _apply_report_spec_browser_auth_request(
+    inherited_config: dict[str, Any],
+    request: Any | None,
+) -> tuple[dict[str, Any], bool]:
+    if request is None:
+        return inherited_config, True
+
+    fields_set = _browser_auth_request_fields_set(request)
+    browser_auth_session_id = str(request.browser_auth_session_id or "").strip()
+    if request.skip_browser_auth:
+        return _without_spec_generation_auth(inherited_config), False
+    if browser_auth_session_id:
+        return {**_without_spec_generation_auth(inherited_config), "browser_auth_session_id": browser_auth_session_id}, False
+    if request.use_project_default_browser_auth:
+        return {**_without_spec_generation_auth(inherited_config), "use_project_default_browser_auth": True}, False
+    if request.inherit_browser_auth or not fields_set:
+        return inherited_config, True
+    return _without_spec_generation_auth(inherited_config), False
+
+
+def _safe_inherited_auth_config(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    safe_keys = {
+        "browser_auth_session_id",
+        "session_id",
+        "session_name",
+        "use_default",
+        "use_project_default",
+        "use_project_default_browser_auth",
+    }
+    return {key: value[key] for key in safe_keys if key in value and value[key] is not None}
+
+
+def _build_spec_generation_source_config(
+    source_config: dict[str, Any],
+    *,
+    target_url: str,
+    project_id: str | None,
+) -> dict[str, Any]:
+    """Carry only non-secret context needed by browser-backed spec generation."""
+    inherited: dict[str, Any] = {
+        "url": str(source_config.get("url") or target_url or "").strip(),
+    }
+    if project_id:
+        inherited["project_id"] = project_id
+    elif source_config.get("project_id"):
+        inherited["project_id"] = source_config.get("project_id")
+
+    if source_config.get("browser_auth_session_id"):
+        inherited["browser_auth_session_id"] = source_config.get("browser_auth_session_id")
+    if source_config.get("use_project_default_browser_auth"):
+        inherited["use_project_default_browser_auth"] = True
+
+    auth_config = _safe_inherited_auth_config(source_config.get("auth"))
+    if auth_config:
+        inherited["auth"] = auth_config
+    browser_auth_config = _safe_inherited_auth_config(source_config.get("browser_auth"))
+    if browser_auth_config:
+        inherited["browser_auth"] = browser_auth_config
+    return inherited
+
+
+def _spec_generation_auth_metadata(config: dict[str, Any], *, inherited: bool = True) -> dict[str, Any]:
+    browser_auth_session_id, use_default = _browser_auth_selection(config)
+    metadata: dict[str, Any] = {}
+    if browser_auth_session_id:
+        metadata["browser_auth_session_id"] = browser_auth_session_id
+    if use_default:
+        metadata["use_project_default_browser_auth"] = True
+    if metadata and inherited:
+        metadata["browser_auth_inherited"] = True
+    return metadata
+
+
 class AgentBrowserAuthResolutionError(RuntimeError):
     def __init__(self, message: str, *, browser_auth_session_id: str | None, use_default: bool):
         super().__init__(message)
