@@ -80,6 +80,7 @@ from utils.project_utils import derive_project_id_from_url
 from . import (
     agent_coding_patch,
     agent_definitions,
+    agent_exploratory,
     agent_queue_ops,
     agent_reports,
     agent_routes,
@@ -7811,4 +7812,5 @@ app.include_router(agent_run_observability.router)  # Read-only agent run visibi
 app.include_router(agent_coding_patch.router)  # Coding agent patch review endpoints
 app.include_router(agent_run_control.router)  # Agent run pause, resume, cancel, and retry endpoints
 app.include_router(agent_reports.router)  # Custom agent report retrieval, editing, search, and import endpoints
-app.include_router(agent_routes.router)  # Agent run launch, report spec generation, and exploratory endpoints
+app.include_router(agent_exploratory.router)  # Exploratory agent and spec generation endpoints
+app.include_router(agent_routes.router)  # Agent run launch and remaining compatibility endpoints

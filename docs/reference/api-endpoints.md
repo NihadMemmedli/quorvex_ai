@@ -293,7 +293,7 @@ Prefix: `/api/prd` | Source: `orchestrator/api/prd.py`
 
 ## Agents
 
-Source: `orchestrator/api/agent_routes.py`; run control: `orchestrator/api/agent_run_control.py`; reports: `orchestrator/api/agent_reports.py`; coding patch review: `orchestrator/api/agent_coding_patch.py`; read-only run visibility: `orchestrator/api/agent_run_observability.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
+Source: `orchestrator/api/agent_routes.py`; exploratory/spec generation: `orchestrator/api/agent_exploratory.py`; run control: `orchestrator/api/agent_run_control.py`; reports: `orchestrator/api/agent_reports.py`; coding patch review: `orchestrator/api/agent_coding_patch.py`; read-only run visibility: `orchestrator/api/agent_run_observability.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -838,16 +838,16 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/api/agents/definitions/{definition_id}` | `orchestrator/api/agent_definitions.py` |
 | PUT | `/api/agents/definitions/{definition_id}` | `orchestrator/api/agent_definitions.py` |
 | POST | `/api/agents/definitions/{definition_id}/runs` | `orchestrator/api/agent_definitions.py` |
-| POST | `/api/agents/exploratory` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/exploratory/flow-spec-jobs/{job_id}` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/exploratory/{run_id}/analyze-prerequisites` | `orchestrator/api/agent_routes.py` |
+| POST | `/api/agents/exploratory` | `orchestrator/api/agent_exploratory.py` |
+| GET | `/api/agents/exploratory/flow-spec-jobs/{job_id}` | `orchestrator/api/agent_exploratory.py` |
+| POST | `/api/agents/exploratory/{run_id}/analyze-prerequisites` | `orchestrator/api/agent_exploratory.py` |
 | DELETE | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_routes.py` |
+| GET | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_exploratory.py` |
 | PUT | `/api/agents/exploratory/{run_id}/flows/{flow_id}` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/generate` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/spec` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/exploratory/{run_id}/specs` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/exploratory/{run_id}/synthesize` | `orchestrator/api/agent_routes.py` |
+| POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/generate` | `orchestrator/api/agent_exploratory.py` |
+| POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/spec` | `orchestrator/api/agent_exploratory.py` |
+| GET | `/api/agents/exploratory/{run_id}/specs` | `orchestrator/api/agent_exploratory.py` |
+| POST | `/api/agents/exploratory/{run_id}/synthesize` | `orchestrator/api/agent_exploratory.py` |
 | POST | `/api/agents/queue-clean-orphans` | `orchestrator/api/agent_queue_ops.py` |
 | POST | `/api/agents/queue-clean-stale` | `orchestrator/api/agent_queue_ops.py` |
 | POST | `/api/agents/queue-flush` | `orchestrator/api/agent_queue_ops.py` |
@@ -1461,7 +1461,7 @@ These routes are included in the generated public-route drift check and are grou
 | GET | `/api/prd/generation/{generation_id}/events` | `orchestrator/api/prd.py` |
 | GET | `/api/prd/generation/{generation_id}/events/stream` | `orchestrator/api/prd.py` |
 | POST | `/api/prd/{prd_project_id}/import-requirements` | `orchestrator/api/prd.py` |
-| POST | `/api/agents/runs/{run_id}/report-items/{item_id}/generate-spec` | `orchestrator/api/agent_routes.py` |
+| POST | `/api/agents/runs/{run_id}/report-items/{item_id}/generate-spec` | `orchestrator/api/agent_exploratory.py` |
 | POST | `/api/agents/runs/{run_id}/report-requirements/import` | `orchestrator/api/agent_reports.py` |
 | GET | `/autonomous/{project_id}/missions/{mission_id}/artifacts` | `orchestrator/api/autonomous.py` |
 | POST | `/autopilot/recover-orphans` | `orchestrator/api/autopilot.py` |

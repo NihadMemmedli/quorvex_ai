@@ -855,6 +855,47 @@ class TestAgentReportEndpoints:
         assert response.json()["detail"] == "Run not found"
 
 
+class TestAgentExploratoryEndpoints:
+    """Test exploratory and spec generation API route ownership."""
+
+    EXPLORATORY_ROUTES = (
+        ("POST", "/api/agents/exploratory"),
+        ("GET", "/api/agents/exploratory/flow-spec-jobs/{job_id}"),
+        ("POST", "/api/agents/exploratory/{run_id}/analyze-prerequisites"),
+        ("GET", "/api/agents/exploratory/{run_id}/flows/{flow_id}"),
+        ("POST", "/api/agents/exploratory/{run_id}/flows/{flow_id}/generate"),
+        ("POST", "/api/agents/exploratory/{run_id}/flows/{flow_id}/spec"),
+        ("GET", "/api/agents/exploratory/{run_id}/specs"),
+        ("POST", "/api/agents/exploratory/{run_id}/synthesize"),
+        ("POST", "/api/agents/runs/{run_id}/report-items/{item_id}/generate-spec"),
+    )
+
+    def test_agent_exploratory_routes_registered_from_exploratory_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        expected_module = "orchestrator.api.agent_exploratory"
+        for route in self.EXPLORATORY_ROUTES:
+            assert endpoints[route] == expected_module
+
+    def test_agent_exploratory_docs_source_map_points_to_exploratory_router(self):
+        root = Path(__file__).resolve().parents[2]
+        endpoints_doc = (root / "docs/reference/api-endpoints.md").read_text(encoding="utf-8")
+        router_map = (root / "docs/reference/api-router-service-map.md").read_text(encoding="utf-8")
+
+        expected_source = "`orchestrator/api/agent_exploratory.py`"
+        for method, route in self.EXPLORATORY_ROUTES:
+            assert f"| {method} | `{route}` | {expected_source} |" in endpoints_doc
+        assert "Agent exploratory/spec generation" in router_map
+        assert expected_source in router_map
+
+
 class TestAgentDefinitionEndpoints:
     """Test UI-created custom agent definition endpoints."""
 
