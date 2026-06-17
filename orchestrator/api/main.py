@@ -123,6 +123,7 @@ from . import (
     test_run_process_registry_support,
     test_run_read_model_support,
     test_run_runtime_support,
+    test_run_schedule_watchdog_support,
     testrail,
     testrail_files,
     users,
@@ -137,7 +138,7 @@ from .models_db import (
     AgentRun,
     AgentToolDefinition,
     ExplorationSession,  # noqa: F401
-    RegressionBatch,
+    RegressionBatch,  # noqa: F401
 )
 from .models_db import ExecutionSettings as DBExecutionSettings
 from .models_db import SpecMetadata as DBSpecMetadata
@@ -927,109 +928,7 @@ async def _schedule_execution_watchdog():
     syncs their status from the linked RegressionBatch records.
     Also cleans up stale executions that have no batch or are too old.
     """
-    from .models_db import CronSchedule, ScheduleExecution
-
-    # On first run, clean up stale executions from previous server instances
-    try:
-        from orchestrator.services.scheduler import (
-            cleanup_stale_executions,
-            reconcile_workflow_schedule_executions,
-        )
-
-        await cleanup_stale_executions()
-        await reconcile_workflow_schedule_executions()
-    except Exception as e:
-        logger.debug(f"Stale execution cleanup on startup: {e}")
-
-    while True:
-        try:
-            await asyncio.sleep(30)
-            try:
-                from orchestrator.services.scheduler import reconcile_workflow_schedule_executions
-
-                await reconcile_workflow_schedule_executions()
-            except Exception as e:
-                logger.debug(f"Workflow schedule reconciliation skipped: {e}")
-
-            now = datetime.utcnow()
-
-            with Session(engine) as session:
-                # Find running/pending executions
-                running_execs = session.exec(
-                    select(ScheduleExecution).where(ScheduleExecution.status.in_(["pending", "running"]))
-                ).all()
-
-                for execution in running_execs:
-                    # Handle executions without a batch (stuck in pending)
-                    if not execution.batch_id:
-                        # If pending for more than 5 minutes with no batch, mark failed
-                        age_seconds = (now - execution.created_at).total_seconds() if execution.created_at else 0
-                        if age_seconds > 300:
-                            execution.status = "failed"
-                            execution.error_message = "No batch was created for this execution"
-                            execution.completed_at = now
-                            session.add(execution)
-                        continue
-
-                    batch = session.get(RegressionBatch, execution.batch_id)
-                    if not batch:
-                        execution.status = "failed"
-                        execution.error_message = "Linked batch no longer exists"
-                        execution.completed_at = now
-                        session.add(execution)
-                        continue
-
-                    if batch.status == "completed":
-                        execution.status = "pass" if batch.failed == 0 and batch.passed > 0 else "failed"
-                        execution.passed = batch.passed
-                        execution.failed = batch.failed
-                        execution.total_tests = batch.total_tests
-                        execution.completed_at = batch.completed_at or now
-                        if batch.started_at and execution.completed_at:
-                            execution.duration_seconds = int(
-                                (execution.completed_at - batch.started_at).total_seconds()
-                            )
-
-                        # Update schedule stats
-                        schedule = session.get(CronSchedule, execution.schedule_id)
-                        if schedule:
-                            schedule.last_run_status = "passed" if batch.failed == 0 else "failed"
-                            if batch.failed == 0:
-                                schedule.successful_executions += 1
-                            else:
-                                schedule.failed_executions += 1
-                            # Update avg duration
-                            if execution.duration_seconds:
-                                if schedule.avg_duration_seconds:
-                                    schedule.avg_duration_seconds = (
-                                        schedule.avg_duration_seconds * 0.8 + execution.duration_seconds * 0.2
-                                    )
-                                else:
-                                    schedule.avg_duration_seconds = float(execution.duration_seconds)
-                            session.add(schedule)
-
-                        session.add(execution)
-
-                    elif batch.status == "running" and execution.status == "pending":
-                        execution.status = "running"
-                        execution.started_at = batch.started_at
-                        session.add(execution)
-
-                    elif batch.status not in ("running", "pending", "completed"):
-                        # Batch is in an unexpected terminal state (e.g., cancelled)
-                        execution.status = "failed"
-                        execution.error_message = f"Batch ended with status: {batch.status}"
-                        execution.completed_at = now
-                        session.add(execution)
-
-                session.commit()
-
-        except asyncio.CancelledError:
-            logger.info("Schedule execution watchdog cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Schedule execution watchdog error: {e}", exc_info=True)
-            await asyncio.sleep(30)
+    return await test_run_schedule_watchdog_support._schedule_execution_watchdog(_test_run_runtime())
 
 
 async def _run_db_maintenance():
