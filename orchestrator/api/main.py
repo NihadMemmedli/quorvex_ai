@@ -49,7 +49,6 @@ from orchestrator.services.browser_slots import browser_operation_slot
 from orchestrator.services.coding_agent import (
     CODING_ARTIFACT_PATCH,
     DEFAULT_REPO_ROOT,
-    apply_patch_to_repo,
     build_coding_agent_prompt,
     build_coding_tool_permission_guard,
     coding_agent_allowed_tools,
@@ -79,6 +78,7 @@ from utils.playwright_mcp import (
 from utils.project_utils import derive_project_id_from_url
 
 from . import (
+    agent_coding_patch,
     agent_definitions,
     agent_queue_ops,
     agent_routes,
@@ -5761,144 +5761,6 @@ async def run_agent(request: AgentRunRequest, session: Session = Depends(get_ses
     return response
 
 
-def get_coding_agent_diff(
-    id: str,
-    project_id: str | None = Query(default=None, description="Project ID for filtering"),
-    session: Session = Depends(get_session),
-):
-    run = session.get(AgentRun, id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    _filter_agent_run_project(run, project_id)
-    if run.agent_type != "coding":
-        raise HTTPException(status_code=400, detail="Run is not a coding agent run")
-
-    patch_text = _read_run_text_artifact(id, CODING_ARTIFACT_PATCH)
-    if not patch_text:
-        raise HTTPException(status_code=404, detail="Coding patch artifact not found")
-    try:
-        validation = validate_patch_for_repo(patch_text, DEFAULT_REPO_ROOT)
-        valid = True
-        validation_error = None
-        affected_files = list(validation.paths)
-    except Exception as exc:
-        valid = False
-        validation_error = str(exc)
-        affected_files = []
-    return {
-        "run_id": id,
-        "status": run.status,
-        "valid": valid,
-        "validation_error": validation_error,
-        "affected_files": affected_files,
-        "diff": patch_text,
-        "summary": _read_run_text_artifact(id, "summary.md", max_chars=20000),
-        "review": _read_run_text_artifact(id, "review.md", max_chars=20000),
-    }
-
-
-async def reject_coding_agent_diff(
-    id: str,
-    project_id: str | None = Query(default=None, description="Project ID for filtering"),
-    session: Session = Depends(get_session),
-    current_user: Any = Depends(get_current_user_optional),
-):
-    run = session.get(AgentRun, id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    _filter_agent_run_project(run, project_id)
-    if run.agent_type != "coding":
-        raise HTTPException(status_code=400, detail="Run is not a coding agent run")
-    await _ensure_agent_write_access(run.project_id, current_user, session)
-
-    existing_result = run.result if isinstance(run.result, dict) else {}
-    run.result = {**existing_result, "patch_status": "rejected", "patch_rejected_at": datetime.utcnow().isoformat()}
-    run.progress = {
-        **(run.progress or {}),
-        "phase": "rejected",
-        "status": run.status,
-        "message": "Coding agent patch rejected.",
-        "patch_status": "rejected",
-        "updated_at": datetime.utcnow().isoformat(),
-    }
-    session.add(run)
-    session.commit()
-    _record_agent_run_event(
-        id,
-        event_type="coding_patch_rejected",
-        message="Coding agent patch rejected.",
-        payload={"status": run.status, "patch_status": "rejected"},
-        agent_task_id=run.agent_task_id,
-        session=session,
-    )
-    return {"status": "rejected", "run_id": id}
-
-
-async def apply_coding_agent_diff(
-    id: str,
-    project_id: str | None = Query(default=None, description="Project ID for filtering"),
-    session: Session = Depends(get_session),
-    current_user: Any = Depends(get_current_user_optional),
-):
-    run = session.get(AgentRun, id)
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    _filter_agent_run_project(run, project_id)
-    if run.agent_type != "coding":
-        raise HTTPException(status_code=400, detail="Run is not a coding agent run")
-    if run.status not in {"completed", AGENT_PARTIAL_STATUS}:
-        raise HTTPException(status_code=409, detail="Coding run must be completed before applying a patch")
-    await _ensure_agent_write_access(run.project_id, current_user, session)
-
-    existing_result = run.result if isinstance(run.result, dict) else {}
-    if existing_result.get("patch_status") == "applied":
-        raise HTTPException(status_code=409, detail="Coding patch has already been applied")
-    if existing_result.get("patch_status") == "rejected":
-        raise HTTPException(status_code=409, detail="Coding patch has been rejected")
-
-    patch_text = _read_run_text_artifact(id, CODING_ARTIFACT_PATCH)
-    if not patch_text:
-        raise HTTPException(status_code=404, detail="Coding patch artifact not found")
-    try:
-        apply_result = apply_patch_to_repo(patch_text, DEFAULT_REPO_ROOT)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    applied_at = datetime.utcnow().isoformat()
-    run.result = {
-        **existing_result,
-        "patch_status": "applied",
-        "patch_applied_at": applied_at,
-        "applied_files": apply_result.get("affected_files") or [],
-    }
-    run.progress = {
-        **(run.progress or {}),
-        "phase": "applied",
-        "status": run.status,
-        "message": "Coding agent patch applied.",
-        "patch_status": "applied",
-        "affected_files": apply_result.get("affected_files") or [],
-        "updated_at": applied_at,
-    }
-    session.add(run)
-    session.commit()
-    _record_agent_run_event(
-        id,
-        event_type="coding_patch_applied",
-        message="Coding agent patch applied.",
-        payload={
-            "status": run.status,
-            "patch_status": "applied",
-            "affected_files": apply_result.get("affected_files") or [],
-        },
-        agent_task_id=run.agent_task_id,
-        session=session,
-    )
-    return {"status": "applied", "run_id": id, "affected_files": apply_result.get("affected_files") or []}
-
-
 async def pause_agent_run(
     id: str,
     project_id: str | None = Query(default=None, description="Project ID for filtering"),
@@ -8304,4 +8166,5 @@ async def generate_flow_test(
 agent_routes.register_agent_routes(sys.modules[__name__])
 app.include_router(agent_definitions.router)  # Custom agent tool catalog and definition endpoints
 app.include_router(agent_run_observability.router)  # Read-only agent run visibility endpoints
+app.include_router(agent_coding_patch.router)  # Coding agent patch review endpoints
 app.include_router(agent_routes.router)  # Agent queue, run, report, and exploratory endpoints

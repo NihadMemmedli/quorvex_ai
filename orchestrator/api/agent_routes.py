@@ -14,9 +14,6 @@ def register_agent_routes(runtime: Any) -> None:
 
     routes = [
         ("POST", "/api/agents/runs", runtime.run_agent),
-        ("GET", "/api/agents/runs/{id}/coding/diff", runtime.get_coding_agent_diff),
-        ("POST", "/api/agents/runs/{id}/coding/reject", runtime.reject_coding_agent_diff),
-        ("POST", "/api/agents/runs/{id}/coding/apply", runtime.apply_coding_agent_diff),
         ("POST", "/api/agents/runs/{id}/pause", runtime.pause_agent_run),
         ("POST", "/api/agents/runs/{id}/resume", runtime.resume_agent_run),
         ("POST", "/api/agents/runs/{id}/cancel", runtime.cancel_agent_run),

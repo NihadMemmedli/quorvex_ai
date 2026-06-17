@@ -293,7 +293,7 @@ Prefix: `/api/prd` | Source: `orchestrator/api/prd.py`
 
 ## Agents
 
-Source: `orchestrator/api/agent_routes.py`; read-only run visibility: `orchestrator/api/agent_run_observability.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
+Source: `orchestrator/api/agent_routes.py`; coding patch review: `orchestrator/api/agent_coding_patch.py`; read-only run visibility: `orchestrator/api/agent_run_observability.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -309,6 +309,9 @@ Source: `orchestrator/api/agent_routes.py`; read-only run visibility: `orchestra
 | POST | `/api/agents/runs/{id}/pause` | Pause an agent run | Optional |
 | POST | `/api/agents/runs/{id}/resume` | Resume an agent run | Optional |
 | POST | `/api/agents/runs/{id}/cancel` | Cancel an agent run | Optional |
+| GET | `/api/agents/runs/{id}/coding/diff` | Preview a coding agent patch diff and validation status | Optional |
+| POST | `/api/agents/runs/{id}/coding/reject` | Mark a coding agent patch as rejected | Optional |
+| POST | `/api/agents/runs/{id}/coding/apply` | Apply a completed coding agent patch to the repository | Optional |
 | GET | `/api/agents/runs/{id}/report` | Get an agent run report | Optional |
 | GET | `/api/agents/reports/search` | Search generated agent reports | Optional |
 | GET | `/api/agents/tools/catalog` | List available agent tools | Optional |
@@ -329,7 +332,7 @@ Source: `orchestrator/api/agent_routes.py`; read-only run visibility: `orchestra
 | POST | `/api/agents/exploratory/{run_id}/flows/{flow_id}/generate` | Generate validated test via native pipeline | Optional |
 | GET | `/api/agents/exploratory/flow-spec-jobs/{id}` | Get exploratory flow-spec job status | Optional |
 
-Agent types: `exploratory`, `writer`, `spec-synthesis`.
+Agent types: `coding`, `exploratory`, `writer`, `spec-synthesis`.
 
 ## Agent Queue Operations
 
@@ -854,9 +857,9 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | POST | `/api/agents/runs` | `orchestrator/api/agent_routes.py` |
 | GET | `/api/agents/runs/{id}` | `orchestrator/api/agent_run_observability.py` |
 | POST | `/api/agents/runs/{id}/cancel` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/runs/{id}/coding/apply` | `orchestrator/api/agent_routes.py` |
-| GET | `/api/agents/runs/{id}/coding/diff` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/runs/{id}/coding/reject` | `orchestrator/api/agent_routes.py` |
+| POST | `/api/agents/runs/{id}/coding/apply` | `orchestrator/api/agent_coding_patch.py` |
+| GET | `/api/agents/runs/{id}/coding/diff` | `orchestrator/api/agent_coding_patch.py` |
+| POST | `/api/agents/runs/{id}/coding/reject` | `orchestrator/api/agent_coding_patch.py` |
 | GET | `/api/agents/runs/{id}/events` | `orchestrator/api/agent_run_observability.py` |
 | GET | `/api/agents/runs/{id}/events/stream` | `orchestrator/api/agent_run_observability.py` |
 | POST | `/api/agents/runs/{id}/pause` | `orchestrator/api/agent_routes.py` |
