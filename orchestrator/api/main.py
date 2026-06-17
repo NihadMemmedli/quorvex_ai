@@ -19,7 +19,6 @@ import shutil
 import subprocess
 import threading
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -28,7 +27,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from slowapi.errors import RateLimitExceeded
-from sqlalchemy import or_
 from sqlmodel import Session, select
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -41,8 +39,8 @@ from orchestrator.services.browser_auth_sessions import (
     resolve_browser_auth_for_run,
     resolve_browser_auth_session_row,
 )
-from orchestrator.services.browser_slots import browser_operation_slot
-from orchestrator.services.coding_agent import (
+from orchestrator.services.browser_slots import browser_operation_slot  # noqa: F401
+from orchestrator.services.coding_agent import (  # noqa: F401
     CODING_ARTIFACT_PATCH,
     DEFAULT_REPO_ROOT,
     build_coding_agent_prompt,
@@ -58,15 +56,9 @@ from services.resource_manager import (
     ResourceManager,
     get_resource_manager,  # noqa: F401
 )
-from utils.agent_report import (
+from utils.agent_report import (  # noqa: F401
     CUSTOM_AGENT_REPORT_INSTRUCTIONS,
     _build_custom_agent_structured_report,
-)
-from utils.agent_report import (
-    _as_report_list as _agent_report_as_report_list,
-)
-from utils.agent_report import (
-    _clean_text as _agent_report_clean_text,
 )
 from utils.agent_tool_allowlists import get_agent_allowed_tools
 from utils.claude_config import copy_claude_project_config
@@ -75,11 +67,12 @@ from utils.playwright_mcp import (
     prepare_run_playwright_config_content,
     write_playwright_test_mcp_config,
 )
-from utils.project_utils import derive_project_id_from_url
+from utils.project_utils import derive_project_id_from_url  # noqa: F401
 
 from . import (
     agent_background_runner_support,
     agent_coding_patch,
+    agent_compat_support,
     agent_definitions,
     agent_exploratory,
     agent_flow_spec_support,
@@ -89,7 +82,6 @@ from . import (
     agent_run_launch,
     agent_run_observability,
     agent_run_report_support,
-    agent_run_runtime,
     agent_run_runtime_support,
     agent_sessions,
     analytics,
@@ -133,7 +125,7 @@ from . import (
 )
 from .db import engine, get_database_type, get_session, init_db, is_parallel_mode_available
 from .middleware.auth import get_current_user_optional
-from .middleware.permissions import ProjectRole, check_project_access
+from .middleware.permissions import ProjectRole, check_project_access  # noqa: F401
 from .middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from .models_db import (
     AgentDefinition,
@@ -3016,89 +3008,81 @@ class UpdateAgentReportOverviewRequest(BaseModel):
 GenerateFlowTestRequest = agent_exploratory.GenerateFlowTestRequest
 
 
+def _agent_compat_runtime():
+    return sys.modules[__name__]
+
+
 def _sync_agent_run_observability_runs_dir() -> None:
-    agent_run_observability.RUNS_DIR = RUNS_DIR
-    agent_run_runtime_support.RUNS_DIR = RUNS_DIR
+    agent_compat_support.sync_agent_run_observability_runs_dir(_agent_compat_runtime())
 
 
 def _collect_agent_run_artifacts(run_id: str) -> list[dict[str, Any]]:
-    return agent_run_observability._collect_agent_run_artifacts(run_id)
+    return agent_compat_support.collect_agent_run_artifacts(_agent_compat_runtime(), run_id)
 
 
 def _read_run_text_artifact(run_id: str, name: str, max_chars: int | None = None) -> str:
-    _sync_agent_run_observability_runs_dir()
-    return agent_run_observability._read_run_text_artifact(run_id, name, max_chars)
+    return agent_compat_support.read_run_text_artifact(_agent_compat_runtime(), run_id, name, max_chars)
 
 
 def _read_run_json_artifact(run_id: str, name: str) -> Any:
-    _sync_agent_run_observability_runs_dir()
-    return agent_run_observability._read_run_json_artifact(run_id, name)
+    return agent_compat_support.read_run_json_artifact(_agent_compat_runtime(), run_id, name)
 
 
 def _run_artifact_counts(run_id: str, artifacts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    _sync_agent_run_observability_runs_dir()
-    return agent_run_observability._run_artifact_counts(run_id, artifacts)
+    return agent_compat_support.run_artifact_counts(_agent_compat_runtime(), run_id, artifacts)
 
 
 def _jsonl_latest_url(path: Path) -> str | None:
-    return agent_run_observability._jsonl_latest_url(path)
+    return agent_compat_support.jsonl_latest_url(_agent_compat_runtime(), path)
 
 
 def _latest_observed_url_for_run(run: AgentRun) -> str | None:
-    _sync_agent_run_observability_runs_dir()
-    return agent_run_observability._latest_observed_url_for_run(run)
+    return agent_compat_support.latest_observed_url_for_run(_agent_compat_runtime(), run)
 
 
 def _recover_custom_agent_partial_result(run: AgentRun, error: Exception | str) -> dict[str, Any] | None:
-    agent_run_runtime_support.RUNS_DIR = RUNS_DIR
-    return agent_run_runtime_support._recover_custom_agent_partial_result(run, error)
+    return agent_compat_support.recover_custom_agent_partial_result(_agent_compat_runtime(), run, error)
 
 
 def _agent_run_summary(run: AgentRun) -> str | None:
-    return agent_run_runtime_support._agent_run_summary(run)
+    return agent_compat_support.agent_run_summary(_agent_compat_runtime(), run)
 
 
 def _exploratory_result_is_zero_evidence_failure(result: Any) -> bool:
-    return agent_run_runtime_support._exploratory_result_is_zero_evidence_failure(result)
+    return agent_compat_support.exploratory_result_is_zero_evidence_failure(_agent_compat_runtime(), result)
 
 
 def _exploratory_result_is_terminal_failure(result: Any) -> bool:
-    return agent_run_runtime_support._exploratory_result_is_terminal_failure(result)
+    return agent_compat_support.exploratory_result_is_terminal_failure(_agent_compat_runtime(), result)
 
 
 def _exploratory_result_has_usable_evidence(result: Any) -> bool:
-    return agent_run_runtime_support._exploratory_result_has_usable_evidence(result)
+    return agent_compat_support.exploratory_result_has_usable_evidence(_agent_compat_runtime(), result)
 
 
 def _merge_agent_failure_into_result(result: Any, error: Exception | str, *, failure_reason: str) -> dict[str, Any]:
-    return agent_run_runtime_support._merge_agent_failure_into_result(result, error, failure_reason=failure_reason)
+    return agent_compat_support.merge_agent_failure_into_result(
+        _agent_compat_runtime(),
+        result,
+        error,
+        failure_reason=failure_reason,
+    )
 
 
 def _recover_exploratory_partial_result(run_id: str, config: dict[str, Any], error: Exception | str) -> dict[str, Any] | None:
-    agent_run_runtime_support.RUNS_DIR = RUNS_DIR
-    return agent_run_runtime_support._recover_exploratory_partial_result(run_id, config, error)
+    return agent_compat_support.recover_exploratory_partial_result(_agent_compat_runtime(), run_id, config, error)
 
 
 def _filter_agent_run_project(run: AgentRun, project_id: str | None) -> None:
-    agent_run_observability._filter_agent_run_project(run, project_id)
+    agent_compat_support.filter_agent_run_project(_agent_compat_runtime(), run, project_id)
 
 
 def _agent_report_project_filter(project_id: str):
-    if project_id == "default":
-        return or_(AgentRun.project_id == None, AgentRun.project_id == "default")
-    return or_(AgentRun.project_id == None, AgentRun.project_id == project_id)
+    return agent_compat_support.agent_report_project_filter(_agent_compat_runtime(), project_id)
 
 
 def _get_agent_report_run(session: Session, run_id: str, project_id: str) -> AgentRun:
-    run = session.exec(
-        select(AgentRun).where(
-            AgentRun.id == run_id,
-            _agent_report_project_filter(project_id),
-        )
-    ).first()
-    if not run:
-        raise HTTPException(status_code=404, detail="Run not found")
-    return run
+    return agent_compat_support.get_agent_report_run(_agent_compat_runtime(), session, run_id, project_id)
 
 
 AGENT_PARTIAL_STATUS = agent_run_observability.AGENT_PARTIAL_STATUS
@@ -3107,11 +3091,11 @@ AGENT_ACTIVE_STATUSES = agent_run_observability.AGENT_ACTIVE_STATUSES
 
 
 def _coerce_progress_int(value: Any, default: int = 0) -> int:
-    return agent_run_observability._coerce_progress_int(value, default)
+    return agent_compat_support.coerce_progress_int(_agent_compat_runtime(), value, default)
 
 
 def _normalize_agent_run_progress(progress: dict[str, Any] | None) -> dict[str, Any]:
-    return agent_run_observability._normalize_agent_run_progress(progress)
+    return agent_compat_support.normalize_agent_run_progress(_agent_compat_runtime(), progress)
 
 
 def _record_agent_run_event(
@@ -3124,7 +3108,8 @@ def _record_agent_run_event(
     agent_task_id: str | None = None,
     session: Session | None = None,
 ) -> None:
-    agent_run_runtime.record_agent_run_event(
+    agent_compat_support.record_agent_run_event(
+        _agent_compat_runtime(),
         run_id,
         event_type=event_type,
         message=message,
@@ -3136,7 +3121,8 @@ def _record_agent_run_event(
 
 
 async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session, *, workflow_attempt: int | None = None) -> None:
-    await agent_run_runtime.start_agent_run_temporal_or_fail(
+    await agent_compat_support.start_agent_run_temporal_or_fail(
+        _agent_compat_runtime(),
         run,
         session,
         workflow_attempt=workflow_attempt,
@@ -3144,71 +3130,71 @@ async def _start_agent_run_temporal_or_fail(run: AgentRun, session: Session, *, 
 
 
 async def _agent_run_temporal_payload(run: AgentRun) -> dict[str, Any]:
-    return await agent_run_observability._agent_run_temporal_payload(run)
+    return await agent_compat_support.agent_run_temporal_payload(_agent_compat_runtime(), run)
 
 
 async def _signal_agent_run_temporal(run: AgentRun, signal_name: str, *args) -> None:
-    await agent_run_control._signal_agent_run_temporal(run, signal_name, *args)
+    await agent_compat_support.signal_agent_run_temporal(_agent_compat_runtime(), run, signal_name, *args)
 
 
 async def _cancel_agent_run_queue_task(run: AgentRun) -> dict[str, Any] | None:
-    return await agent_run_control._cancel_agent_run_queue_task(run)
+    return await agent_compat_support.cancel_agent_run_queue_task(_agent_compat_runtime(), run)
 
 
 async def _wait_if_agent_run_paused(run_id: str, poll_interval: float = 0.5) -> bool:
-    return await agent_run_control._wait_if_agent_run_paused(run_id, poll_interval)
+    return await agent_compat_support.wait_if_agent_run_paused(_agent_compat_runtime(), run_id, poll_interval)
 
 
 def _mark_agent_run_paused(run: AgentRun, message: str = "Agent is paused") -> None:
-    agent_run_control._mark_agent_run_paused(run, message)
+    agent_compat_support.mark_agent_run_paused(_agent_compat_runtime(), run, message)
 
 
 def _mark_agent_run_cancelled(run: AgentRun, message: str = "Agent cancelled") -> None:
-    agent_run_control._mark_agent_run_cancelled(run, message)
+    agent_compat_support.mark_agent_run_cancelled(_agent_compat_runtime(), run, message)
 
 
 def _agent_run_health(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
-    return agent_run_observability._agent_run_health(run, session)
+    return agent_compat_support.agent_run_health(_agent_compat_runtime(), run, session)
 
 
 def _serialize_agent_run(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
-    return agent_run_observability._serialize_agent_run(run, session)
+    return agent_compat_support.serialize_agent_run(_agent_compat_runtime(), run, session)
 
 
 def _safe_json_dict(value: str | None) -> dict[str, Any]:
-    return agent_run_observability._safe_json_dict(value)
+    return agent_compat_support.safe_json_dict(_agent_compat_runtime(), value)
 
 
 def _compact_agent_run_config(config: dict[str, Any]) -> dict[str, Any]:
-    return agent_run_observability._compact_agent_run_config(config)
+    return agent_compat_support.compact_agent_run_config(_agent_compat_runtime(), config)
 
 
 def _compact_agent_run_summary(progress: dict[str, Any]) -> str | None:
-    return agent_run_observability._compact_agent_run_summary(progress)
+    return agent_compat_support.compact_agent_run_summary(_agent_compat_runtime(), progress)
 
 
 def _encode_agent_run_cursor(created_at: datetime, run_id: str) -> str:
-    return agent_run_observability._encode_agent_run_cursor(created_at, run_id)
+    return agent_compat_support.encode_agent_run_cursor(_agent_compat_runtime(), created_at, run_id)
 
 
 def _decode_agent_run_cursor(cursor: str | None) -> tuple[datetime, str] | None:
-    return agent_run_observability._decode_agent_run_cursor(cursor)
+    return agent_compat_support.decode_agent_run_cursor(_agent_compat_runtime(), cursor)
 
 
 def _agent_run_project_filters(project_id: str | None) -> list[Any]:
-    return agent_run_observability._agent_run_project_filters(project_id)
+    return agent_compat_support.agent_run_project_filters(_agent_compat_runtime(), project_id)
 
 
 def _agent_run_search_filter(q: str | None) -> Any | None:
-    return agent_run_observability._agent_run_search_filter(q)
+    return agent_compat_support.agent_run_search_filter(_agent_compat_runtime(), q)
 
 
 def _agent_run_status_filter(status: str | None) -> Any | None:
-    return agent_run_observability._agent_run_status_filter(status)
+    return agent_compat_support.agent_run_status_filter(_agent_compat_runtime(), status)
 
 
 def _agent_run_type_filter(agent_type: str | None) -> Any | None:
-    return agent_run_observability._agent_run_type_filter(agent_type)
+    return agent_compat_support.agent_run_type_filter(_agent_compat_runtime(), agent_type)
 
 
 def _agent_run_history_filters(
@@ -3218,7 +3204,8 @@ def _agent_run_history_filters(
     agent_type: str | None = None,
     q: str | None = None,
 ) -> list[Any]:
-    return agent_run_observability._agent_run_history_filters(
+    return agent_compat_support.agent_run_history_filters(
+        _agent_compat_runtime(),
         project_id=project_id,
         status=status,
         agent_type=agent_type,
@@ -3227,27 +3214,27 @@ def _agent_run_history_filters(
 
 
 def _agent_run_history_counts(session: Session, *, project_id: str | None, q: str | None) -> dict[str, Any]:
-    return agent_run_observability._agent_run_history_counts(session, project_id=project_id, q=q)
+    return agent_compat_support.agent_run_history_counts(_agent_compat_runtime(), session, project_id=project_id, q=q)
 
 
 def _serialize_agent_run_summary_row(row: Any) -> dict[str, Any]:
-    return agent_run_observability._serialize_agent_run_summary_row(row)
+    return agent_compat_support.serialize_agent_run_summary_row(_agent_compat_runtime(), row)
 
 
 async def _live_agent_queue_progress(run: AgentRun) -> dict[str, Any]:
-    return await agent_run_observability._live_agent_queue_progress(run)
+    return await agent_compat_support.live_agent_queue_progress(_agent_compat_runtime(), run)
 
 
 async def _serialize_agent_run_live(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
-    return await agent_run_observability._serialize_agent_run_live(run, session)
+    return await agent_compat_support.serialize_agent_run_live(_agent_compat_runtime(), run, session)
 
 
 def _clean_text(value: Any, max_len: int = 2000) -> str:
-    return _agent_report_clean_text(value, max_len)
+    return agent_compat_support.clean_text(_agent_compat_runtime(), value, max_len)
 
 
 def _as_report_list(value: Any) -> list[Any]:
-    return _agent_report_as_report_list(value)
+    return agent_compat_support.as_report_list(_agent_compat_runtime(), value)
 
 
 REPORT_ITEM_COLLECTIONS = agent_run_report_support.REPORT_ITEM_COLLECTIONS
@@ -3257,43 +3244,43 @@ REPORT_ITEM_PROTECTED_FIELDS = agent_run_report_support.REPORT_ITEM_PROTECTED_FI
 
 
 def _report_confidence(value: str | None) -> float:
-    return agent_run_report_support._report_confidence(value)
+    return agent_compat_support.report_confidence(_agent_compat_runtime(), value)
 
 
 def _report_importance(value: str | None) -> float:
-    return agent_run_report_support._report_importance(value)
+    return agent_compat_support.report_importance(_agent_compat_runtime(), value)
 
 
 def _report_requirement_confidence(value: Any) -> float:
-    return agent_run_report_support._report_requirement_confidence(value)
+    return agent_compat_support.report_requirement_confidence(_agent_compat_runtime(), value)
 
 
 def _report_requirement_acceptance_criteria(item: dict[str, Any]) -> list[str]:
-    return agent_run_report_support._report_requirement_acceptance_criteria(item)
+    return agent_compat_support.report_requirement_acceptance_criteria(_agent_compat_runtime(), item)
 
 
 def _requirement_create_body_from_report_item(item: dict[str, Any]) -> dict[str, Any]:
-    return agent_run_report_support._requirement_create_body_from_report_item(item)
+    return agent_compat_support.requirement_create_body_from_report_item(_agent_compat_runtime(), item)
 
 
 def _normalize_report_item_type(item_type: str | None) -> str:
-    return agent_run_report_support._normalize_report_item_type(item_type)
+    return agent_compat_support.normalize_report_item_type(_agent_compat_runtime(), item_type)
 
 
 def _stored_custom_agent_report(run: AgentRun) -> tuple[dict[str, Any], dict[str, Any]]:
-    return agent_run_report_support._stored_custom_agent_report(run)
+    return agent_compat_support.stored_custom_agent_report(_agent_compat_runtime(), run)
 
 
 def _normalize_report_patch_value(field: str, value: Any) -> Any:
-    return agent_run_report_support._normalize_report_patch_value(field, value)
+    return agent_compat_support.normalize_report_patch_value(_agent_compat_runtime(), field, value)
 
 
 def _editable_report_item_patch(item_type: str, patch: dict[str, Any]) -> dict[str, Any]:
-    return agent_run_report_support._editable_report_item_patch(item_type, patch)
+    return agent_compat_support.editable_report_item_patch(_agent_compat_runtime(), item_type, patch)
 
 
 def _find_report_item(report: dict[str, Any], item_type: str, item_id: str) -> dict[str, Any]:
-    return agent_run_report_support._find_report_item(report, item_type, item_id)
+    return agent_compat_support.find_report_item(_agent_compat_runtime(), report, item_type, item_id)
 
 
 def _capture_custom_agent_report_memory(
@@ -3303,7 +3290,8 @@ def _capture_custom_agent_report_memory(
     structured_report: dict[str, Any],
     config: dict[str, Any],
 ) -> list[str]:
-    return agent_run_report_support._capture_custom_agent_report_memory(
+    return agent_compat_support.capture_custom_agent_report_memory(
+        _agent_compat_runtime(),
         run_id=run_id,
         project_id=project_id,
         structured_report=structured_report,
@@ -3312,40 +3300,11 @@ def _capture_custom_agent_report_memory(
 
 
 def _sync_agent_tool_catalog(session: Session) -> list[AgentToolDefinition]:
-    """Upsert the built-in selectable tool catalog."""
-    now = datetime.utcnow()
-    for item in AGENT_TOOL_CATALOG:
-        tool = session.get(AgentToolDefinition, item["id"])
-        if not tool:
-            tool = AgentToolDefinition(id=item["id"], tool_name=item["tool_name"])
-        tool.label = item["label"]
-        tool.description = item["description"]
-        tool.category = item["category"]
-        tool.tool_name = item["tool_name"]
-        tool.risk = item["risk"]
-        tool.enabled = True
-        tool.requires_mcp_server = item.get("requires_mcp_server")
-        tool.updated_at = now
-        session.add(tool)
-    session.commit()
-    return session.exec(
-        select(AgentToolDefinition)
-        .where(AgentToolDefinition.enabled == True)
-        .order_by(AgentToolDefinition.category, AgentToolDefinition.label)
-    ).all()
+    return agent_compat_support.sync_agent_tool_catalog(_agent_compat_runtime(), session)
 
 
 def _serialize_agent_tool(tool: AgentToolDefinition) -> dict[str, Any]:
-    return {
-        "id": tool.id,
-        "label": tool.label,
-        "description": tool.description,
-        "category": tool.category,
-        "tool_name": tool.tool_name,
-        "risk": tool.risk,
-        "enabled": tool.enabled,
-        "requires_mcp_server": tool.requires_mcp_server,
-    }
+    return agent_compat_support.serialize_agent_tool(_agent_compat_runtime(), tool)
 
 
 AGENT_RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "destructive": 3}
@@ -3355,97 +3314,50 @@ def _serialize_agent_definition(
     definition: AgentDefinition,
     tools_by_id: dict[str, AgentToolDefinition] | None = None,
 ) -> dict[str, Any]:
-    selected_tools: list[dict[str, Any]] = []
-    if tools_by_id is not None:
-        selected_tools = [
-            _serialize_agent_tool(tools_by_id[tool_id])
-            for tool_id in definition.tool_ids
-            if tool_id in tools_by_id
-        ]
-    risk_level = "low"
-    if selected_tools:
-        risk_level = max(
-            (str(tool.get("risk") or "low") for tool in selected_tools),
-            key=lambda risk: AGENT_RISK_ORDER.get(risk, 0),
-        )
-    return {
-        "id": definition.id,
-        "project_id": definition.project_id,
-        "name": definition.name,
-        "description": definition.description,
-        "system_prompt": definition.system_prompt,
-        "runtime": getattr(definition, "runtime", "claude_sdk") or "claude_sdk",
-        "model": definition.model,
-        "model_tier": getattr(definition, "model_tier", None),
-        "timeout_seconds": definition.timeout_seconds,
-        "tool_ids": definition.tool_ids,
-        "test_data_refs": getattr(definition, "test_data_refs", []),
-        "tools": selected_tools,
-        "risk_level": risk_level,
-        "status": definition.status,
-        "created_at": definition.created_at.isoformat(),
-        "updated_at": definition.updated_at.isoformat(),
-    }
+    return agent_compat_support.serialize_agent_definition(_agent_compat_runtime(), definition, tools_by_id)
 
 
 def _get_agent_definition_or_404(definition_id: str, project_id: str | None, session: Session) -> AgentDefinition:
-    definition = session.get(AgentDefinition, definition_id)
-    if not definition or definition.status == "archived":
-        raise HTTPException(status_code=404, detail="Agent definition not found")
-    if project_id:
-        if project_id == "default":
-            if definition.project_id not in (None, "default"):
-                raise HTTPException(status_code=404, detail="Agent definition not found")
-        elif definition.project_id != project_id:
-            raise HTTPException(status_code=404, detail="Agent definition not found")
-    return definition
+    return agent_compat_support.get_agent_definition_or_404(
+        _agent_compat_runtime(),
+        definition_id,
+        project_id,
+        session,
+    )
 
 
 async def _ensure_agent_write_access(project_id: str | None, current_user: Any, session: Session) -> None:
-    if project_id:
-        await check_project_access(project_id, current_user, [ProjectRole.ADMIN, ProjectRole.EDITOR], session)
+    await agent_compat_support.ensure_agent_write_access(_agent_compat_runtime(), project_id, current_user, session)
 
 
 def _resolve_agent_tools(tool_ids: list[str], session: Session) -> tuple[list[str], list[dict[str, Any]]]:
-    _sync_agent_tool_catalog(session)
-    if not tool_ids:
-        raise HTTPException(status_code=400, detail="Select at least one tool for this agent")
-
-    tools: list[AgentToolDefinition] = []
-    unknown: list[str] = []
-    for tool_id in tool_ids:
-        tool = session.get(AgentToolDefinition, tool_id)
-        if not tool or not tool.enabled:
-            unknown.append(tool_id)
-        else:
-            tools.append(tool)
-    if unknown:
-        raise HTTPException(status_code=400, detail=f"Unknown or disabled tools: {', '.join(unknown)}")
-
-    allowed_tools = sorted({tool.tool_name for tool in tools})
-    return allowed_tools, [_serialize_agent_tool(tool) for tool in tools]
+    return agent_compat_support.resolve_agent_tools(_agent_compat_runtime(), tool_ids, session)
 
 
 def _browser_auth_selection(config: dict[str, Any]) -> tuple[str | None, bool]:
-    return agent_run_runtime_support._browser_auth_selection(config)
+    return agent_compat_support.browser_auth_selection(_agent_compat_runtime(), config)
 
 
 AgentBrowserAuthResolutionError = agent_run_runtime_support.AgentBrowserAuthResolutionError
 
 
 def _browser_auth_request_fields_set(request: Any) -> set[str]:
-    return agent_run_runtime_support._browser_auth_request_fields_set(request)
+    return agent_compat_support.browser_auth_request_fields_set(_agent_compat_runtime(), request)
 
 
 def _without_spec_generation_auth(config: dict[str, Any]) -> dict[str, Any]:
-    return agent_run_runtime_support._without_spec_generation_auth(config)
+    return agent_compat_support.without_spec_generation_auth(_agent_compat_runtime(), config)
 
 
 def _apply_report_spec_browser_auth_request(
     inherited_config: dict[str, Any],
     request: GenerateReportItemSpecRequest | None,
 ) -> tuple[dict[str, Any], bool]:
-    return agent_run_runtime_support._apply_report_spec_browser_auth_request(inherited_config, request)
+    return agent_compat_support.apply_report_spec_browser_auth_request(
+        _agent_compat_runtime(),
+        inherited_config,
+        request,
+    )
 
 
 def _resolve_agent_browser_auth_storage_path(
@@ -3455,21 +3367,20 @@ def _resolve_agent_browser_auth_storage_path(
     config: dict[str, Any],
     run_dir: Path,
 ) -> Path | None:
-    return agent_run_runtime_support._resolve_agent_browser_auth_storage_path(
+    return agent_compat_support.resolve_agent_browser_auth_storage_path(
+        _agent_compat_runtime(),
         run_id=run_id,
         project_id=project_id,
         config=config,
         run_dir=run_dir,
-        resolve_browser_auth_for_run=resolve_browser_auth_for_run,
-        update_progress=_update_agent_run_progress,
     )
 
 
 def _prepare_custom_agent_mcp_config(run_id: str, storage_state_path: Path | str | None = None) -> Path:
-    return agent_run_runtime_support._prepare_custom_agent_mcp_config(
+    return agent_compat_support.prepare_custom_agent_mcp_config(
+        _agent_compat_runtime(),
         run_id,
         storage_state_path=storage_state_path,
-        update_progress=_update_agent_run_progress,
     )
 
 
@@ -3477,11 +3388,15 @@ def _prepare_spec_generation_mcp_config(
     run_dir: Path,
     storage_state_path: Path | str | None = None,
 ) -> dict[str, Any]:
-    return agent_run_runtime_support._prepare_spec_generation_mcp_config(run_dir, storage_state_path)
+    return agent_compat_support.prepare_spec_generation_mcp_config(
+        _agent_compat_runtime(),
+        run_dir,
+        storage_state_path,
+    )
 
 
 def _safe_inherited_auth_config(value: Any) -> dict[str, Any]:
-    return agent_run_runtime_support._safe_inherited_auth_config(value)
+    return agent_compat_support.safe_inherited_auth_config(_agent_compat_runtime(), value)
 
 
 def _build_spec_generation_source_config(
@@ -3490,7 +3405,8 @@ def _build_spec_generation_source_config(
     target_url: str,
     project_id: str | None,
 ) -> dict[str, Any]:
-    return agent_run_runtime_support._build_spec_generation_source_config(
+    return agent_compat_support.build_spec_generation_source_config(
+        _agent_compat_runtime(),
         source_config,
         target_url=target_url,
         project_id=project_id,
@@ -3498,135 +3414,70 @@ def _build_spec_generation_source_config(
 
 
 def _spec_generation_auth_metadata(config: dict[str, Any], *, inherited: bool = True) -> dict[str, Any]:
-    return agent_run_runtime_support._spec_generation_auth_metadata(config, inherited=inherited)
+    return agent_compat_support.spec_generation_auth_metadata(_agent_compat_runtime(), config, inherited=inherited)
 
 
 def _resolve_playwright_chromium_executable() -> Path | None:
-    return agent_run_runtime_support._resolve_playwright_chromium_executable()
+    return agent_compat_support.resolve_playwright_chromium_executable(_agent_compat_runtime())
 
 
 def _playwright_chromium_probe_script(executable_path: str | None = None) -> str:
-    return agent_run_runtime_support._playwright_chromium_probe_script(executable_path)
+    return agent_compat_support.playwright_chromium_probe_script(_agent_compat_runtime(), executable_path)
 
 
 def _probe_custom_agent_browser(timeout_seconds: int = 30) -> tuple[bool, str]:
-    return agent_run_runtime_support._probe_custom_agent_browser(
-        timeout_seconds,
-        resolve_chromium_executable=_resolve_playwright_chromium_executable,
-    )
+    return agent_compat_support.probe_custom_agent_browser(_agent_compat_runtime(), timeout_seconds)
 
 
 async def _probe_custom_agent_browser_with_slot(run_id: str, timeout_seconds: int = 30) -> tuple[bool, str]:
-    async def _run_probe() -> tuple[bool, str]:
-        loop = asyncio.get_running_loop()
-        if timeout_seconds == 30:
-            return await loop.run_in_executor(None, _probe_custom_agent_browser)
-        return await loop.run_in_executor(None, _probe_custom_agent_browser, timeout_seconds)
-
-    try:
-        pool = BROWSER_POOL or await get_browser_pool()
-        if await pool.is_running(run_id):
-            return await _run_probe()
-    except Exception as exc:
-        logger.debug("Could not verify existing agent browser slot for %s: %s", run_id, exc)
-
-    async with browser_operation_slot(
-        request_id=f"agent-probe:{run_id}",
-        operation_type=BrowserOpType.AGENT,
-        description=f"Custom agent browser readiness probe {run_id}",
-        timeout=timeout_seconds,
-        max_operation_duration=timeout_seconds + 15,
-    ):
-        return await _run_probe()
+    return await agent_compat_support.probe_custom_agent_browser_with_slot(
+        _agent_compat_runtime(),
+        run_id,
+        timeout_seconds,
+    )
 
 
 def _custom_agent_uses_browser_tools(allowed_tools: list[Any]) -> bool:
-    return agent_run_runtime_support._custom_agent_uses_browser_tools(allowed_tools)
+    return agent_compat_support.custom_agent_uses_browser_tools(_agent_compat_runtime(), allowed_tools)
 
 
 def _custom_agent_browser_runs_via_queue() -> bool:
-    return agent_run_runtime_support._custom_agent_browser_runs_via_queue()
+    return agent_compat_support.custom_agent_browser_runs_via_queue(_agent_compat_runtime())
 
 
 def _agent_run_has_browser_tools(agent_type: str, config: dict[str, Any]) -> bool:
-    return agent_run_runtime_support._agent_run_has_browser_tools(agent_type, config)
+    return agent_compat_support.agent_run_has_browser_tools(_agent_compat_runtime(), agent_type, config)
 
 
 async def _ensure_custom_agent_browser_available(run_id: str, *, force_direct_execution: bool = False) -> None:
-    """Fail fast if the Playwright browser required by @playwright/mcp is unavailable."""
-    if _custom_agent_browser_runs_via_queue() and not force_direct_execution:
-        _update_agent_run_progress(
-            run_id,
-            {
-                **browser_runtime_status(),
-                "phase": "browser_delegated",
-                "message": "Browser execution delegated to agent worker",
-            },
-        )
-        return
-
-    _update_agent_run_progress(
+    await agent_compat_support.ensure_custom_agent_browser_available(
+        _agent_compat_runtime(),
         run_id,
-        {
-            "phase": "browser_setup",
-            "message": "Checking local Playwright browser availability",
-        },
-    )
-    _update_agent_run_progress(run_id, browser_runtime_status())
-
-    available, output = await _probe_custom_agent_browser_with_slot(run_id)
-    if not available:
-        _update_agent_run_progress(
-            run_id,
-            {
-                "phase": "failed",
-                "message": "Playwright Chromium is not installed or cannot launch in the local execution container",
-                "browser_probe_output": output[-2000:],
-            },
-        )
-        raise RuntimeError(
-            "Playwright Chromium is not installed or cannot launch in the local execution container. "
-            "Custom agent browser tools require Chromium to be present before a direct run starts. "
-            "For `make start`, rebuild/recreate the backend image so Dockerfile's "
-            "`npx playwright install chromium` step runs, or enable USE_AGENT_QUEUE=true "
-            "to delegate browser execution to an agent worker. "
-            f"Browser probe output: {output[-1000:]}"
-        )
-
-    _update_agent_run_progress(
-        run_id,
-        {
-            "phase": "browser_ready",
-            "message": "Local Playwright browser is ready",
-        },
+        force_direct_execution=force_direct_execution,
     )
 
 
-@asynccontextmanager
-async def _worker_managed_agent_browser_slot():
-    """No-op slot context for queued agents that acquire browser slots in workers."""
-    yield True
+def _worker_managed_agent_browser_slot():
+    return agent_compat_support.worker_managed_agent_browser_slot(_agent_compat_runtime())
 
 
 def _short_tool_name(tool_name: str | None) -> str:
-    if not tool_name:
-        return ""
-    return str(tool_name).rsplit("__", 1)[-1] if "__" in str(tool_name) else str(tool_name)
+    return agent_compat_support.short_tool_name(_agent_compat_runtime(), tool_name)
 
 
 def _update_agent_run_progress(run_id: str, patch: dict[str, Any]) -> None:
-    agent_run_runtime_support.update_agent_run_progress(run_id, patch)
+    agent_compat_support.update_agent_run_progress(_agent_compat_runtime(), run_id, patch)
 
 
 def _generic_agent_runtime_prompt(agent_type: str, config: dict[str, Any]) -> str:
-    return agent_run_runtime_support._generic_agent_runtime_prompt(agent_type, config)
+    return agent_compat_support.generic_agent_runtime_prompt(_agent_compat_runtime(), agent_type, config)
 
 
 KNOWN_AGENT_TYPE_TOOL_PROFILES = agent_run_runtime_support.KNOWN_AGENT_TYPE_TOOL_PROFILES
 
 
 def _agent_tool_profile_for_run(agent_type: str, config: dict[str, Any]) -> str | None:
-    return agent_run_runtime_support._agent_tool_profile_for_run(agent_type, config)
+    return agent_compat_support.agent_tool_profile_for_run(_agent_compat_runtime(), agent_type, config)
 
 
 def _resolve_known_agent_allowed_tools(
@@ -3635,7 +3486,8 @@ def _resolve_known_agent_allowed_tools(
     *,
     mcp_config_dir: Path | str | None = None,
 ) -> list[str] | None:
-    return agent_run_runtime_support._resolve_known_agent_allowed_tools(
+    return agent_compat_support.resolve_known_agent_allowed_tools(
+        _agent_compat_runtime(),
         agent_type,
         config,
         mcp_config_dir=mcp_config_dir,
@@ -3648,92 +3500,16 @@ def _resolve_agent_execution_test_data_context(
     refs: list[Any] | None = None,
     markdown: str | None = None,
 ) -> dict[str, Any]:
-    try:
-        from orchestrator.services.test_data_resolver import (
-            resolve_test_data_execution_context,
-        )
-
-        with Session(engine) as session:
-            return resolve_test_data_execution_context(
-                session,
-                project_id=project_id or "default",
-                refs=[str(ref) for ref in (refs or [])],
-                markdown=markdown or "",
-            )
-    except Exception as exc:
-        logger.warning("Failed to resolve agent execution test data: %s", exc)
-        return {}
+    return agent_compat_support.resolve_agent_execution_test_data_context(
+        _agent_compat_runtime(),
+        project_id=project_id,
+        refs=refs,
+        markdown=markdown,
+    )
 
 
 def _agent_background_runner_dependencies() -> agent_background_runner_support.AgentBackgroundRunnerDependencies:
-    from orchestrator.services.agent_cancellation import owner_is_cancelled_sync
-    from orchestrator.services.agent_run_finalizer import AgentRunFinalizer
-    from orchestrator.services.agent_runtimes import AgentRuntimeContext, get_agent_runtime
-    from orchestrator.services.agent_trace import (
-        ensure_trace_snapshot,
-        record_tool_result_spans,
-        record_trace_span,
-    )
-    from orchestrator.services.load_test_lock import check_system_available
-
-    return agent_background_runner_support.AgentBackgroundRunnerDependencies(
-        runs_dir=RUNS_DIR,
-        browser_pool=BROWSER_POOL,
-        get_browser_pool=get_browser_pool,
-        browser_op_type=BrowserOpType,
-        worker_managed_agent_browser_slot=_worker_managed_agent_browser_slot,
-        db_session_factory=Session,
-        db_engine=engine,
-        agent_run_model=AgentRun,
-        logger=logger,
-        check_system_available=check_system_available,
-        normalize_agent_runtime=normalize_agent_runtime,
-        wait_if_agent_run_paused=_wait_if_agent_run_paused,
-        owner_is_cancelled_sync=owner_is_cancelled_sync,
-        agent_run_has_browser_tools=_agent_run_has_browser_tools,
-        custom_agent_browser_runs_via_queue=_custom_agent_browser_runs_via_queue,
-        custom_agent_uses_browser_tools=_custom_agent_uses_browser_tools,
-        update_agent_run_progress=_update_agent_run_progress,
-        record_agent_run_event=_record_agent_run_event,
-        short_tool_name=_short_tool_name,
-        resolve_agent_browser_auth_storage_path=_resolve_agent_browser_auth_storage_path,
-        prepare_custom_agent_mcp_config=_prepare_custom_agent_mcp_config,
-        ensure_custom_agent_browser_available=_ensure_custom_agent_browser_available,
-        resolve_known_agent_allowed_tools=_resolve_known_agent_allowed_tools,
-        resolve_agent_execution_test_data_context=_resolve_agent_execution_test_data_context,
-        agent_tool_profile_for_run=_agent_tool_profile_for_run,
-        derive_project_id_from_url=derive_project_id_from_url,
-        browser_runtime_status=browser_runtime_status,
-        exploration_module=exploration,
-        custom_agent_report_instructions=CUSTOM_AGENT_REPORT_INSTRUCTIONS,
-        build_custom_agent_structured_report=_build_custom_agent_structured_report,
-        capture_custom_agent_report_memory=_capture_custom_agent_report_memory,
-        collect_agent_run_artifacts=_collect_agent_run_artifacts,
-        read_run_text_artifact=_read_run_text_artifact,
-        run_artifact_counts=_run_artifact_counts,
-        agent_partial_status=AGENT_PARTIAL_STATUS,
-        agent_terminal_statuses=AGENT_TERMINAL_STATUSES,
-        exploratory_result_is_terminal_failure=_exploratory_result_is_terminal_failure,
-        exploratory_result_has_usable_evidence=_exploratory_result_has_usable_evidence,
-        recover_custom_agent_partial_result=_recover_custom_agent_partial_result,
-        recover_exploratory_partial_result=_recover_exploratory_partial_result,
-        merge_agent_failure_into_result=_merge_agent_failure_into_result,
-        agent_run_summary=_agent_run_summary,
-        agent_run_finalizer_factory=AgentRunFinalizer,
-        default_repo_root=DEFAULT_REPO_ROOT,
-        coding_artifact_patch=CODING_ARTIFACT_PATCH,
-        build_coding_agent_prompt=build_coding_agent_prompt,
-        build_coding_tool_permission_guard=build_coding_tool_permission_guard,
-        coding_agent_allowed_tools=coding_agent_allowed_tools,
-        coding_agent_subagents=coding_agent_subagents,
-        validate_patch_for_repo=validate_patch_for_repo,
-        write_coding_artifacts=write_coding_artifacts,
-        agent_runtime_context_class=AgentRuntimeContext,
-        get_agent_runtime=get_agent_runtime,
-        ensure_trace_snapshot=ensure_trace_snapshot,
-        record_trace_span=record_trace_span,
-        record_tool_result_spans=record_tool_result_spans,
-    )
+    return agent_compat_support.agent_background_runner_dependencies(_agent_compat_runtime())
 
 
 async def execute_agent_background(run_id: str, agent_type: str, config: dict):
