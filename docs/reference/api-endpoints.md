@@ -302,6 +302,9 @@ Source: `orchestrator/api/agent_routes.py`; read-only run visibility: `orchestra
 | GET | `/api/agents/runs/{id}` | Get agent run details | Optional |
 | GET | `/api/agents/runs/{id}/events` | List persisted lifecycle events for an agent run | Optional |
 | GET | `/api/agents/runs/{id}/events/stream` | Stream agent run lifecycle events over SSE | Optional |
+| GET | `/api/agents/runs/{id}/trace` | Get an agent run trace bundle | Optional |
+| GET | `/api/agents/runs/{id}/trace/spans` | List spans recorded for an agent run trace | Optional |
+| GET | `/api/agents/runs/{id}/trace/export` | Export an agent run trace bundle | Optional |
 | GET | `/api/agents/temporal/health` | Check Temporal readiness for standalone agent runs | Optional |
 | POST | `/api/agents/runs/{id}/pause` | Pause an agent run | Optional |
 | POST | `/api/agents/runs/{id}/resume` | Resume an agent run | Optional |
