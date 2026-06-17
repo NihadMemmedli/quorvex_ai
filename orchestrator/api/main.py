@@ -14,7 +14,7 @@ if str(orchestrator_dir) not in sys.path:
     sys.path.insert(0, str(orchestrator_dir))
 
 import asyncio
-import shutil
+import shutil  # noqa: F401
 import subprocess
 import threading
 import uuid
@@ -116,6 +116,7 @@ from . import (
     settings,
     spec_files,
     specs,
+    startup_diagnostics_support,
     test_data,
     test_run_batch_watchdog_support,
     test_run_cleanup_support,
@@ -938,67 +939,7 @@ async def _run_db_maintenance():
 
 async def _log_startup_diagnostics():
     """Log system diagnostics at startup for early problem detection."""
-    diagnostics = []
-
-    # Database
-    db_type = get_database_type()
-    diagnostics.append(f"Database: {db_type}")
-    if db_type == "postgresql":
-        diagnostics.append("  Pool: size=30, max_overflow=60, timeout=30s, statement_timeout=30s")
-
-    # Redis
-    redis_status = "unavailable"
-    try:
-        from orchestrator.services.agent_queue import REDIS_AVAILABLE
-
-        if REDIS_AVAILABLE:
-            redis_status = "connected"
-    except Exception:
-        pass
-    diagnostics.append(f"Redis: {redis_status}")
-
-    # MinIO
-    minio_status = "not configured"
-    try:
-        minio_endpoint = os.environ.get("MINIO_ENDPOINT")
-        if minio_endpoint:
-            from orchestrator.services.storage import StorageService
-
-            storage = StorageService()
-            if await asyncio.to_thread(storage.health_check):
-                minio_status = f"connected ({minio_endpoint})"
-            else:
-                minio_status = f"unhealthy ({minio_endpoint})"
-    except Exception:
-        minio_status = "error"
-    diagnostics.append(f"MinIO: {minio_status}")
-
-    # Disk space
-    try:
-        stat = shutil.disk_usage(str(RUNS_DIR))
-        free_gb = stat.free / (1024**3)
-        total_gb = stat.total / (1024**3)
-        pct_free = (stat.free / stat.total) * 100
-        level = "OK" if pct_free > 10 else "LOW" if pct_free > 5 else "CRITICAL"
-        diagnostics.append(f"Disk: {free_gb:.1f}GB free / {total_gb:.1f}GB total ({pct_free:.0f}% free) [{level}]")
-    except Exception:
-        diagnostics.append("Disk: unknown")
-
-    # Browser pool
-    max_browsers = int(os.environ.get("MAX_BROWSER_INSTANCES", "5"))
-    diagnostics.append(f"Browser pool: max_instances={max_browsers}")
-
-    # Missing env vars that affect functionality
-    optional_vars = {
-        "OPENAI_API_KEY": "memory system embeddings",
-        "MINIO_ENDPOINT": "artifact archival",
-        "REDIS_URL": "distributed queue/rate limiting",
-    }
-    missing = [f"{k} ({v})" for k, v in optional_vars.items() if not os.environ.get(k)]
-    if missing:
-        diagnostics.append(f"Optional env vars not set: {', '.join(missing)}")
-
-    logger.info("=== Startup Diagnostics ===\n  " + "\n  ".join(diagnostics))
+    return await startup_diagnostics_support._log_startup_diagnostics(_test_run_runtime())
 
 
 _STARTUP_IMPORT_FAILURE_MESSAGE = (
