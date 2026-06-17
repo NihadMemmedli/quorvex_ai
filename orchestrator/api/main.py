@@ -118,6 +118,7 @@ from . import (
     specs,
     test_data,
     test_run_cleanup_support,
+    test_run_process_registry_support,
     test_run_read_model_support,
     test_run_runtime_support,
     testrail,
@@ -331,46 +332,37 @@ _processes_lock = threading.Lock()
 
 def register_process(run_id: str, proc: subprocess.Popen) -> None:
     """Thread-safe registration of an active process."""
-    with _processes_lock:
-        ACTIVE_PROCESSES[run_id] = proc
+    return test_run_process_registry_support.register_process(_test_run_runtime(), run_id, proc)
 
 
 def unregister_process(run_id: str) -> subprocess.Popen | None:
     """Thread-safe removal of an active process. Returns the process if found."""
-    with _processes_lock:
-        return ACTIVE_PROCESSES.pop(run_id, None)
+    return test_run_process_registry_support.unregister_process(_test_run_runtime(), run_id)
 
 
 def get_process(run_id: str) -> subprocess.Popen | None:
     """Thread-safe retrieval of an active process."""
-    with _processes_lock:
-        return ACTIVE_PROCESSES.get(run_id)
+    return test_run_process_registry_support.get_process(_test_run_runtime(), run_id)
 
 
 def is_process_active(run_id: str) -> bool:
     """Thread-safe check if a process is active."""
-    with _processes_lock:
-        return run_id in ACTIVE_PROCESSES
+    return test_run_process_registry_support.is_process_active(_test_run_runtime(), run_id)
 
 
 def get_active_process_count() -> int:
     """Thread-safe count of active processes."""
-    with _processes_lock:
-        return len(ACTIVE_PROCESSES)
+    return test_run_process_registry_support.get_active_process_count(_test_run_runtime())
 
 
 def list_active_process_ids() -> list:
     """Thread-safe list of active process IDs."""
-    with _processes_lock:
-        return list(ACTIVE_PROCESSES.keys())
+    return test_run_process_registry_support.list_active_process_ids(_test_run_runtime())
 
 
 def clear_all_processes() -> dict[str, subprocess.Popen]:
     """Thread-safe clear of all processes. Returns the old dict."""
-    with _processes_lock:
-        old = dict(ACTIVE_PROCESSES)
-        ACTIVE_PROCESSES.clear()
-        return old
+    return test_run_process_registry_support.clear_all_processes(_test_run_runtime())
 
 
 # Process manager for persistent tracking and graceful termination
