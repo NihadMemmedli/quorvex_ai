@@ -3378,9 +3378,9 @@ def _get_agent_report_run(session: Session, run_id: str, project_id: str) -> Age
     return run
 
 
-AGENT_PARTIAL_STATUS = "completed_partial"
-AGENT_TERMINAL_STATUSES = {"completed", AGENT_PARTIAL_STATUS, "failed", "cancelled", "timeout"}
-AGENT_ACTIVE_STATUSES = {"queued", "pending", "running", "in_progress", "waiting", "paused"}
+AGENT_PARTIAL_STATUS = agent_run_control.AGENT_PARTIAL_STATUS
+AGENT_TERMINAL_STATUSES = agent_run_control.AGENT_TERMINAL_STATUSES
+AGENT_ACTIVE_STATUSES = agent_run_control.AGENT_ACTIVE_STATUSES
 
 
 def _coerce_progress_int(value: Any, default: int = 0) -> int:
@@ -3480,88 +3480,23 @@ async def _agent_run_temporal_payload(run: AgentRun) -> dict[str, Any]:
 
 
 async def _signal_agent_run_temporal(run: AgentRun, signal_name: str, *args) -> None:
-    if not run.temporal_workflow_id:
-        return
-    from orchestrator.services.temporal_client import TemporalUnavailableError, signal_agent_run_workflow
-
-    try:
-        await signal_agent_run_workflow(run.temporal_workflow_id, signal_name, *args)
-    except TemporalUnavailableError as exc:
-        raise HTTPException(status_code=503, detail=f"Temporal is unavailable for agent control: {exc}") from exc
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Failed to signal agent workflow: {exc}") from exc
+    await agent_run_control._signal_agent_run_temporal(run, signal_name, *args)
 
 
 async def _cancel_agent_run_queue_task(run: AgentRun) -> dict[str, Any] | None:
-    """Cancel and finalize the Redis task linked to an already-cancelled agent run."""
-    if not run.agent_task_id:
-        return None
-
-    result: dict[str, Any] = {"agent_task_id": run.agent_task_id, "status": "not_active"}
-    try:
-        from orchestrator.services.agent_queue import REDIS_AVAILABLE, get_agent_queue, should_use_agent_queue
-
-        if not REDIS_AVAILABLE or not should_use_agent_queue():
-            return result
-
-        queue = get_agent_queue()
-        await queue.connect()
-        before = await queue.get_task(str(run.agent_task_id))
-        cancelled = await queue.cancel_task(str(run.agent_task_id))
-        after = await queue.get_task(str(run.agent_task_id))
-        result.update(
-            {
-                "status": after.status.value if after else "missing",
-                "cancel_requested": bool(cancelled),
-                "previous_status": before.status.value if before else None,
-                "cleanup": await queue.cleanup_orphaned_and_stale_tasks(),
-            }
-        )
-    except Exception as exc:
-        logger.warning("Failed to cancel agent queue task %s for run %s: %s", run.agent_task_id, run.id, exc)
-        result.update({"status": "error", "error": str(exc)})
-    return result
+    return await agent_run_control._cancel_agent_run_queue_task(run)
 
 
 async def _wait_if_agent_run_paused(run_id: str, poll_interval: float = 0.5) -> bool:
-    """Block background execution while the user-visible run is paused.
-
-    Returns False if the run became terminal or disappeared while waiting.
-    """
-    while True:
-        with Session(engine) as session:
-            run = session.get(AgentRun, run_id)
-            if not run or run.status in AGENT_TERMINAL_STATUSES:
-                return False
-            if run.status != "paused":
-                return True
-        await asyncio.sleep(poll_interval)
+    return await agent_run_control._wait_if_agent_run_paused(run_id, poll_interval)
 
 
 def _mark_agent_run_paused(run: AgentRun, message: str = "Agent is paused") -> None:
-    previous_status = run.status if run.status != "paused" else (run.progress or {}).get("paused_from")
-    run.status = "paused"
-    run.progress = {
-        **(run.progress or {}),
-        "phase": "paused",
-        "status": "paused",
-        "paused_from": previous_status if previous_status in AGENT_ACTIVE_STATUSES else "queued",
-        "message": message,
-        "updated_at": datetime.utcnow().isoformat(),
-    }
+    agent_run_control._mark_agent_run_paused(run, message)
 
 
 def _mark_agent_run_cancelled(run: AgentRun, message: str = "Agent cancelled") -> None:
-    previous_status = run.status
-    run.status = "cancelled"
-    run.progress = {
-        **(run.progress or {}),
-        "phase": "cancelled",
-        "status": "cancelled",
-        "cancelled_from": previous_status if previous_status in AGENT_ACTIVE_STATUSES else None,
-        "message": message,
-        "updated_at": datetime.utcnow().isoformat(),
-    }
+    agent_run_control._mark_agent_run_cancelled(run, message)
 
 
 def _agent_run_health(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
