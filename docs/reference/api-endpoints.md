@@ -293,7 +293,7 @@ Prefix: `/api/prd` | Source: `orchestrator/api/prd.py`
 
 ## Agents
 
-Source: `orchestrator/api/agent_routes.py`; coding patch review: `orchestrator/api/agent_coding_patch.py`; read-only run visibility: `orchestrator/api/agent_run_observability.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
+Source: `orchestrator/api/agent_routes.py`; run control: `orchestrator/api/agent_run_control.py`; coding patch review: `orchestrator/api/agent_coding_patch.py`; read-only run visibility: `orchestrator/api/agent_run_observability.py`; tool catalog and custom agent definitions: `orchestrator/api/agent_definitions.py`
 
 | Method | Path | Description | Auth Required |
 |--------|------|-------------|---------------|
@@ -856,16 +856,16 @@ This generated index is used by `scripts/check_docs_drift.py` to keep the endpoi
 | GET | `/api/agents/runs` | `orchestrator/api/agent_run_observability.py` |
 | POST | `/api/agents/runs` | `orchestrator/api/agent_routes.py` |
 | GET | `/api/agents/runs/{id}` | `orchestrator/api/agent_run_observability.py` |
-| POST | `/api/agents/runs/{id}/cancel` | `orchestrator/api/agent_routes.py` |
+| POST | `/api/agents/runs/{id}/cancel` | `orchestrator/api/agent_run_control.py` |
 | POST | `/api/agents/runs/{id}/coding/apply` | `orchestrator/api/agent_coding_patch.py` |
 | GET | `/api/agents/runs/{id}/coding/diff` | `orchestrator/api/agent_coding_patch.py` |
 | POST | `/api/agents/runs/{id}/coding/reject` | `orchestrator/api/agent_coding_patch.py` |
 | GET | `/api/agents/runs/{id}/events` | `orchestrator/api/agent_run_observability.py` |
 | GET | `/api/agents/runs/{id}/events/stream` | `orchestrator/api/agent_run_observability.py` |
-| POST | `/api/agents/runs/{id}/pause` | `orchestrator/api/agent_routes.py` |
+| POST | `/api/agents/runs/{id}/pause` | `orchestrator/api/agent_run_control.py` |
 | GET | `/api/agents/runs/{id}/report` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/runs/{id}/retry` | `orchestrator/api/agent_routes.py` |
-| POST | `/api/agents/runs/{id}/resume` | `orchestrator/api/agent_routes.py` |
+| POST | `/api/agents/runs/{id}/retry` | `orchestrator/api/agent_run_control.py` |
+| POST | `/api/agents/runs/{id}/resume` | `orchestrator/api/agent_run_control.py` |
 | GET | `/api/agents/runs/{id}/trace` | `orchestrator/api/agent_run_observability.py` |
 | GET | `/api/agents/runs/{id}/trace/export` | `orchestrator/api/agent_run_observability.py` |
 | GET | `/api/agents/runs/{id}/trace/spans` | `orchestrator/api/agent_run_observability.py` |

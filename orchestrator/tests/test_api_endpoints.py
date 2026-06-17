@@ -1234,6 +1234,45 @@ class TestAgentDefinitionEndpoints:
 class TestAgentRunControlEndpoints:
     """Test autonomous agent pause/resume API endpoints."""
 
+    CONTROL_ROUTES = (
+        ("POST", "/api/agents/runs/{id}/pause"),
+        ("POST", "/api/agents/runs/{id}/resume"),
+        ("POST", "/api/agents/runs/{id}/cancel"),
+        ("POST", "/api/agents/runs/{id}/retry"),
+    )
+
+    def test_agent_run_control_routes_registered_from_control_router(self):
+        from orchestrator.api.main import app
+
+        endpoints = {
+            (method, route.path): route.endpoint.__module__
+            for route in app.routes
+            if hasattr(route, "methods")
+            for method in route.methods
+        }
+
+        expected_module = "orchestrator.api.agent_run_control"
+        for route in self.CONTROL_ROUTES:
+            assert endpoints[route] == expected_module
+
+    def test_agent_run_control_docs_source_map_points_to_control_router(self):
+        root = Path(__file__).resolve().parents[2]
+        endpoints_doc = (root / "docs/reference/api-endpoints.md").read_text(encoding="utf-8")
+        router_map = (root / "docs/reference/api-router-service-map.md").read_text(encoding="utf-8")
+
+        expected_source = "`orchestrator/api/agent_run_control.py`"
+        for method, route in self.CONTROL_ROUTES:
+            assert f"| {method} | `{route}` | {expected_source} |" in endpoints_doc
+        assert "Agent run control" in router_map
+        assert expected_source in router_map
+
+    @pytest.mark.parametrize("action", ["pause", "resume", "cancel", "retry"])
+    def test_agent_run_control_missing_run_returns_404(self, client, action):
+        response = client.post(f"/api/agents/runs/missing-run/{action}")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == "Run not found"
+
     def test_get_agent_run_merges_and_normalizes_live_queue_progress(self, client, monkeypatch):
         from orchestrator.api.db import engine
         from orchestrator.api.models_db import AgentRun
