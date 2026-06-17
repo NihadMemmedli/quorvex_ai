@@ -117,6 +117,7 @@ from . import (
     spec_files,
     specs,
     test_data,
+    test_run_batch_watchdog_support,
     test_run_cleanup_support,
     test_run_process_registry_support,
     test_run_read_model_support,
@@ -856,115 +857,18 @@ def update_batch_stats(batch_id: str):
     Uses explicit transaction with rollback on failure to ensure data integrity.
     Locks the batch row to prevent race conditions when multiple runs complete simultaneously.
     """
-    if not batch_id:
-        return
-
-    with Session(engine) as session:
-        try:
-            # Use SELECT FOR UPDATE to lock the batch row and prevent race conditions
-            # This ensures only one concurrent update can happen at a time
-            from sqlalchemy import text
-
-            from .db import get_database_type
-
-            batch = session.get(RegressionBatch, batch_id)
-            if not batch:
-                return
-            previous_status = batch.status
-
-            # For PostgreSQL, use row-level locking to prevent race conditions
-            # For SQLite, the database-level locking handles this
-            if get_database_type() == "postgresql":
-                session.execute(
-                    text("SELECT id FROM regression_batches WHERE id = :batch_id FOR UPDATE"), {"batch_id": batch_id}
-                )
-                # Refresh to get locked row
-                session.refresh(batch)
-
-            # Get all runs for this batch (within the same transaction)
-            runs = session.exec(select(DBTestRun).where(DBTestRun.batch_id == batch_id)).all()
-
-            # Recalculate counts (total_tests from actual runs, not original spec count)
-            batch.total_tests = len(runs)
-            batch.passed = sum(1 for r in runs if r.status in ("passed", "completed"))
-            batch.failed = sum(1 for r in runs if r.status in ("failed", "error"))
-            batch.stopped = sum(1 for r in runs if r.status in ("stopped", "cancelled"))
-            batch.running = sum(1 for r in runs if r.status in ("running", "in_progress"))
-            batch.queued = sum(1 for r in runs if r.status == "queued")
-
-            # Update batch status
-            if batch.running > 0 or batch.queued > 0:
-                batch.status = "running"
-                if not batch.started_at:
-                    # Find earliest started run
-                    started_runs = [r for r in runs if r.started_at]
-                    if started_runs:
-                        batch.started_at = min(r.started_at for r in started_runs)
-            elif batch.total_tests > 0 and (batch.passed + batch.failed + batch.stopped) == batch.total_tests:
-                batch.status = "completed"
-                # Find latest completed run
-                completed_runs = [r for r in runs if r.completed_at]
-                if completed_runs:
-                    batch.completed_at = max(r.completed_at for r in completed_runs)
-                else:
-                    batch.completed_at = datetime.utcnow()
-
-                # Cache actual test counts on completion
-                try:
-                    from .regression import _calculate_actual_test_counts
-
-                    actual_total, actual_passed, actual_failed = _calculate_actual_test_counts(runs)
-                    batch.actual_total_tests = actual_total
-                    batch.actual_passed = actual_passed
-                    batch.actual_failed = actual_failed
-                except Exception as count_err:
-                    logger.warning(f"Failed to cache actual test counts for {batch_id}: {count_err}")
-            elif batch.total_tests == 0:
-                batch.status = "completed"
-                if not batch.completed_at:
-                    batch.completed_at = datetime.utcnow()
-
-            session.add(batch)
-            session.commit()
-
-            if previous_status != "completed" and batch.status == "completed":
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(_finalize_quality_gate_for_batch_safe(batch_id))
-                except RuntimeError:
-                    logger.debug("No running event loop available to finalize quality gate for batch %s", batch_id)
-
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Failed to update batch stats for {batch_id}: {e}", exc_info=True)
-            raise
+    return test_run_batch_watchdog_support.update_batch_stats(_test_run_runtime(), batch_id)
 
 
 async def _finalize_quality_gate_for_batch_safe(batch_id: str):
-    try:
-        from orchestrator.services.quality_gate import finalize_quality_gate_for_batch
-
-        finalized = await finalize_quality_gate_for_batch(batch_id)
-        if finalized:
-            logger.info("Finalized %d quality gate(s) for batch %s", finalized, batch_id)
-    except Exception as e:
-        logger.warning("Failed to finalize quality gate feedback for batch %s: %s", batch_id, e)
+    return await test_run_batch_watchdog_support._finalize_quality_gate_for_batch_safe(
+        _test_run_runtime(), batch_id
+    )
 
 
 async def _quality_gate_finalizer_loop():
     """Periodically publish missed final PR quality gate feedback."""
-    while True:
-        try:
-            await asyncio.sleep(60)
-            from orchestrator.services.quality_gate import finalize_stale_quality_gates
-
-            finalized = await finalize_stale_quality_gates()
-            if finalized:
-                logger.info("Quality gate finalizer published %d stale final update(s)", finalized)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.warning("Quality gate finalizer loop error: %s", e)
+    return await test_run_batch_watchdog_support._quality_gate_finalizer_loop(_test_run_runtime())
 
 
 async def _batch_watchdog():
@@ -974,144 +878,7 @@ async def _batch_watchdog():
     active process, >120s old). Then checks for runs stuck beyond MAX_RUN_AGE_MINUTES
     (default 120, configurable via env). Skips runs with recently-updated log files.
     """
-    MAX_RUN_AGE_MINUTES = int(os.environ.get("MAX_RUN_AGE_MINUTES", "120"))
-    ORPHAN_AGE_SECONDS = 120
-
-    while True:
-        try:
-            await asyncio.sleep(60)
-
-            # --- Orphan cleanup (belt-and-suspenders with get_queue_status) ---
-            with Session(engine) as session:
-                running_runs = session.exec(
-                    select(DBTestRun).where(DBTestRun.status.in_(["running", "in_progress"]))
-                ).all()
-
-                now = datetime.utcnow()
-                orphan_batch_ids = set()
-                orphan_cleaned = 0
-                for r in running_runs:
-                    if r.temporal_workflow_id:
-                        continue
-                    if is_process_active(r.id):
-                        continue
-                    age_ref = r.started_at or r.queued_at
-                    if not age_ref or (now - age_ref).total_seconds() <= ORPHAN_AGE_SECONDS:
-                        continue
-
-                    r.status = "stopped"
-                    r.completed_at = now
-                    r.queue_position = None
-                    session.add(r)
-
-                    run_dir = RUNS_DIR / r.id
-                    if run_dir.exists():
-                        (run_dir / "status.txt").write_text("stopped")
-
-                    if r.batch_id:
-                        orphan_batch_ids.add(r.batch_id)
-
-                    orphan_cleaned += 1
-                    logger.warning(
-                        f"Watchdog: Orphaned run {r.id} (no active process, "
-                        f"age={int((now - age_ref).total_seconds())}s). Marked stopped."
-                    )
-
-                if orphan_cleaned > 0:
-                    session.commit()
-                    logger.info(f"Watchdog: Cleaned {orphan_cleaned} orphaned runs")
-                    for bid in orphan_batch_ids:
-                        try:
-                            update_batch_stats(bid)
-                        except Exception as e:
-                            logger.error(f"Watchdog: Failed to update batch {bid} after orphan cleanup: {e}")
-
-            # --- Stuck run check ---
-            with Session(engine) as session:
-                now = datetime.utcnow()
-                cutoff = now - timedelta(minutes=MAX_RUN_AGE_MINUTES)
-
-                # Find runs stuck in running for too long, or running with no started_at
-                stuck_runs = session.exec(
-                    select(DBTestRun).where(
-                        DBTestRun.status.in_(["running", "in_progress"]),
-                        (DBTestRun.started_at < cutoff) | (DBTestRun.started_at == None),
-                    )
-                ).all()
-                # For runs with no started_at, only include if queued_at is also old
-                stuck_runs = [
-                    r
-                    for r in stuck_runs
-                    if not r.temporal_workflow_id
-                    and (r.started_at is not None or (r.queued_at and r.queued_at < cutoff))
-                ]
-
-                if not stuck_runs:
-                    continue
-
-                batch_ids_to_update = set()
-                killed_runs = []
-                for run in stuck_runs:
-                    # Check if run is still making progress (log file recently modified)
-                    run_dir = RUNS_DIR / run.id
-                    log_file = run_dir / "execution.log"
-                    if log_file.exists():
-                        log_age = (now - datetime.utcfromtimestamp(log_file.stat().st_mtime)).total_seconds()
-                        if log_age < 300:  # Log updated in last 5 minutes = still active
-                            logger.info(
-                                f"Watchdog: Run {run.id} still active (log updated {int(log_age)}s ago), skipping"
-                            )
-                            continue
-
-                    logger.warning(
-                        f"Watchdog: Run {run.id} stuck in '{run.status}' since {run.started_at}. Forcing to 'error'."
-                    )
-                    run.status = "error"
-                    run.error_message = f"Watchdog: Run stuck for >{MAX_RUN_AGE_MINUTES} minutes"
-                    run.completed_at = datetime.utcnow()
-                    session.add(run)
-
-                    # Write status file
-                    if run_dir.exists():
-                        (run_dir / "status.txt").write_text("error")
-
-                    if run.batch_id:
-                        batch_ids_to_update.add(run.batch_id)
-
-                    killed_runs.append(run)
-
-                session.commit()
-                if killed_runs:
-                    logger.info(f"Watchdog: Force-errored {len(killed_runs)} stuck runs")
-
-                # Kill associated processes
-                for run in killed_runs:
-                    proc = get_process(run.id)
-                    if proc:
-                        try:
-                            import signal as _signal
-
-                            os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
-                        except (ProcessLookupError, OSError):
-                            try:
-                                proc.kill()
-                            except (ProcessLookupError, OSError):
-                                pass
-                        unregister_process(run.id)
-
-                # Update batch stats
-                for batch_id in batch_ids_to_update:
-                    try:
-                        update_batch_stats(batch_id)
-                    except Exception as e:
-                        logger.error(f"Watchdog: Failed to update batch {batch_id}: {e}")
-
-        except asyncio.CancelledError:
-            logger.info("Batch watchdog cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Batch watchdog error: {e}", exc_info=True)
-            await asyncio.sleep(30)
+    return await test_run_batch_watchdog_support._batch_watchdog(_test_run_runtime())
 
 
 async def _queue_watchdog():
@@ -1121,75 +888,7 @@ async def _queue_watchdog():
     and has no backing asyncio task in PROCESS_MANAGER, it's marked as 'stopped'.
     This catches the case where uvicorn reloads kill asyncio tasks silently.
     """
-    GRACE_PERIOD_SECONDS = 60
-
-    while True:
-        try:
-            await asyncio.sleep(30)
-
-            with Session(engine) as session:
-                queued_runs = session.exec(select(DBTestRun).where(DBTestRun.status == "queued")).all()
-
-                if not queued_runs:
-                    continue
-
-                cutoff = datetime.utcnow() - timedelta(seconds=GRACE_PERIOD_SECONDS)
-                batch_ids_to_update = set()
-                cleaned = 0
-
-                for run in queued_runs:
-                    if run.temporal_workflow_id:
-                        continue
-                    # Grace period: skip recently queued entries
-                    if run.queued_at and run.queued_at > cutoff:
-                        continue
-
-                    # Check if there's a backing asyncio task
-                    has_task = (
-                        PROCESS_MANAGER
-                        and run.id in PROCESS_MANAGER._asyncio_tasks
-                        and not PROCESS_MANAGER._asyncio_tasks[run.id].done()
-                    )
-                    if has_task:
-                        continue
-
-                    # Orphaned: queued in DB but no asyncio task backing it
-                    logger.warning(
-                        f"Queue watchdog: Run {run.id} orphaned in 'queued' status "
-                        f"(queued_at={run.queued_at}). Marking as stopped."
-                    )
-                    run.status = "stopped"
-                    run.queue_position = None
-                    run.error_message = "Orphaned: server restarted while queued"
-                    run.completed_at = datetime.utcnow()
-                    session.add(run)
-
-                    # Update status.txt file
-                    run_dir = RUNS_DIR / run.id
-                    if run_dir.exists():
-                        (run_dir / "status.txt").write_text("stopped")
-
-                    if run.batch_id:
-                        batch_ids_to_update.add(run.batch_id)
-                    cleaned += 1
-
-                if cleaned > 0:
-                    session.commit()
-                    logger.info(f"Queue watchdog: Cleaned {cleaned} orphaned queued runs")
-
-                    # Update batch stats
-                    for batch_id in batch_ids_to_update:
-                        try:
-                            update_batch_stats(batch_id)
-                        except Exception as e:
-                            logger.error(f"Queue watchdog: Failed to update batch {batch_id}: {e}")
-
-        except asyncio.CancelledError:
-            logger.info("Queue watchdog cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Queue watchdog error: {e}", exc_info=True)
-            await asyncio.sleep(30)
+    return await test_run_batch_watchdog_support._queue_watchdog(_test_run_runtime())
 
 
 async def _exploration_cleanup_loop():
