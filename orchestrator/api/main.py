@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import threading
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta  # noqa: F401
 from typing import Any, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Query
@@ -119,6 +119,7 @@ from . import (
     test_data,
     test_run_batch_watchdog_support,
     test_run_cleanup_support,
+    test_run_maintenance_loop_support,
     test_run_process_registry_support,
     test_run_read_model_support,
     test_run_runtime_support,
@@ -135,7 +136,7 @@ from .models_db import (
     AgentDefinition,
     AgentRun,
     AgentToolDefinition,
-    ExplorationSession,
+    ExplorationSession,  # noqa: F401
     RegressionBatch,
 )
 from .models_db import ExecutionSettings as DBExecutionSettings
@@ -898,78 +899,7 @@ async def _exploration_cleanup_loop():
     their configured timeout as "failed". Also sweeps the in-memory tracking dict
     and cleans up stale browser pool slots.
     """
-    CLEANUP_INTERVAL = 300  # 5 minutes
-    DEFAULT_TIMEOUT_MINUTES = 60  # Max exploration timeout
-
-    while True:
-        try:
-            await asyncio.sleep(CLEANUP_INTERVAL)
-
-            # 1. Sweep done tasks from exploration tracking dict
-            from .exploration import _running_explorations, _sweep_done_tasks
-
-            _sweep_done_tasks()
-
-            # 2. Mark stuck explorations in database as failed
-            with Session(engine) as session:
-                cutoff = datetime.utcnow() - timedelta(minutes=DEFAULT_TIMEOUT_MINUTES)
-
-                stuck_explorations = session.exec(
-                    select(ExplorationSession).where(
-                        ExplorationSession.status.in_(["running", "queued"]), ExplorationSession.created_at < cutoff
-                    )
-                ).all()
-
-                for exp in stuck_explorations:
-                    # Parse config to get actual timeout
-                    timeout = DEFAULT_TIMEOUT_MINUTES
-                    try:
-                        import json
-
-                        config = json.loads(exp.config_json or "{}")
-                        timeout = config.get("timeout_minutes", DEFAULT_TIMEOUT_MINUTES)
-                    except Exception:
-                        pass
-
-                    exp_cutoff = datetime.utcnow() - timedelta(minutes=timeout)
-                    if exp.created_at < exp_cutoff:
-                        logger.warning(
-                            f"Exploration cleanup: {exp.id} stuck in '{exp.status}' "
-                            f"since {exp.created_at}. Marking as failed."
-                        )
-                        exp.status = "failed"
-                        exp.error_message = f"Cleanup: stuck for >{timeout} minutes"
-                        exp.completed_at = datetime.utcnow()
-                        session.add(exp)
-
-                        # Cancel the task if tracked in memory
-                        entry = _running_explorations.pop(exp.id, None)
-                        if entry:
-                            task, _ = entry
-                            task.cancel()
-
-                if stuck_explorations:
-                    session.commit()
-                    logger.info(f"Exploration cleanup: processed {len(stuck_explorations)} stuck sessions")
-
-            # 3. Clean up stale browser pool slots
-            if BROWSER_POOL:
-                stale_cleaned = await BROWSER_POOL.cleanup_stale(max_age_minutes=DEFAULT_TIMEOUT_MINUTES)
-                if stale_cleaned:
-                    logger.info(f"Exploration cleanup: cleaned {len(stale_cleaned)} stale browser slots")
-
-                # Also clean completed slot history
-                try:
-                    await BROWSER_POOL.cleanup_old_completed()
-                except Exception:
-                    pass
-
-        except asyncio.CancelledError:
-            logger.info("Exploration cleanup loop cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Exploration cleanup loop error: {e}", exc_info=True)
-            await asyncio.sleep(60)  # Backoff on error
+    return await test_run_maintenance_loop_support._exploration_cleanup_loop(_test_run_runtime())
 
 
 async def _browser_pool_cleanup_loop():
@@ -978,22 +908,7 @@ async def _browser_pool_cleanup_loop():
     If a browser slot crashes mid-operation, it stays "acquired" forever
     until the next restart. This loop prevents that leak.
     """
-    while True:
-        try:
-            await asyncio.sleep(600)  # 10 minutes
-            if BROWSER_POOL:
-                stale = await BROWSER_POOL.cleanup_stale(max_age_minutes=120)
-                old = await BROWSER_POOL.cleanup_old_completed(max_age_hours=24)
-                if stale:
-                    logger.info(f"Periodic cleanup: freed {len(stale)} stale browser slots")
-                if old:
-                    logger.info(f"Periodic cleanup: removed {old} old completed slot records")
-        except asyncio.CancelledError:
-            logger.info("Browser pool cleanup loop cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Browser pool cleanup error: {e}")
-            await asyncio.sleep(60)
+    return await test_run_maintenance_loop_support._browser_pool_cleanup_loop(_test_run_runtime())
 
 
 async def _infrastructure_maintenance_loop():
@@ -1002,57 +917,7 @@ async def _infrastructure_maintenance_loop():
     Runs every 15 minutes for orphan/temp cleanup.
     Runs DB maintenance every 24 hours.
     """
-    import glob
-    import time as time_module
-
-    iteration = 0
-    DB_MAINTENANCE_ITERATIONS = 96  # 96 * 15 min = 24 hours
-
-    while True:
-        try:
-            await asyncio.sleep(900)  # 15 minutes
-            iteration += 1
-
-            # --- Process PID file cleanup (every 15 min) ---
-            # Only remove stale PID files for dead processes, don't kill anything.
-            # cleanup_orphans() (which kills) is only called once at startup.
-            if PROCESS_MANAGER:
-                stale = PROCESS_MANAGER.cleanup_stale_pid_files()
-                if stale > 0:
-                    logger.info(f"Infrastructure: removed {stale} stale PID files")
-
-            # --- Temp directory cleanup (every 15 min) ---
-            try:
-                tmp_cleaned = 0
-                for d in glob.glob("/tmp/tmp*"):
-                    if os.path.isdir(d) and (time_module.time() - os.path.getmtime(d)) > 7200:
-                        shutil.rmtree(d, ignore_errors=True)
-                        tmp_cleaned += 1
-                if tmp_cleaned:
-                    logger.info(f"Infrastructure: removed {tmp_cleaned} stale temp directories")
-            except Exception as e:
-                logger.debug(f"Temp cleanup error: {e}")
-
-            # --- Rate limiter cleanup (every 15 min) ---
-            try:
-                from .middleware.rate_limit import cleanup_expired_entries
-
-                cleaned = cleanup_expired_entries()
-                if cleaned > 0:
-                    logger.info(f"Infrastructure: cleaned {cleaned} expired rate limit entries")
-            except Exception as e:
-                logger.debug(f"Rate limiter cleanup error: {e}")
-
-            # --- Database maintenance (every ~24 hours) ---
-            if iteration % DB_MAINTENANCE_ITERATIONS == 0:
-                await _run_db_maintenance()
-
-        except asyncio.CancelledError:
-            logger.info("Infrastructure maintenance loop cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Infrastructure maintenance error: {e}", exc_info=True)
-            await asyncio.sleep(60)
+    return await test_run_maintenance_loop_support._infrastructure_maintenance_loop(_test_run_runtime())
 
 
 async def _schedule_execution_watchdog():
@@ -1169,46 +1034,7 @@ async def _schedule_execution_watchdog():
 
 async def _run_db_maintenance():
     """Run periodic database maintenance: ANALYZE and old data pruning."""
-    from sqlalchemy import text
-
-    db_type = get_database_type()
-    if db_type != "postgresql":
-        return
-
-    try:
-        with engine.connect() as conn:
-            # ANALYZE heavily-written tables for query plan optimization
-            for table in ["testrun", "exploration_sessions", "requirements", "agentrun"]:
-                try:
-                    conn.execute(text(f"ANALYZE {table}"))
-                except Exception:
-                    pass
-
-            # Prune storage_stats older than 90 days
-            try:
-                result = conn.execute(text("DELETE FROM storage_stats WHERE recorded_at < NOW() - INTERVAL '90 days'"))
-                if result.rowcount:
-                    logger.info(f"DB maintenance: pruned {result.rowcount} old storage_stats rows")
-            except Exception:
-                pass
-
-            # Prune completed archive_jobs older than 90 days
-            try:
-                result = conn.execute(
-                    text(
-                        "DELETE FROM archive_jobs WHERE status = 'completed' "
-                        "AND created_at < NOW() - INTERVAL '90 days'"
-                    )
-                )
-                if result.rowcount:
-                    logger.info(f"DB maintenance: pruned {result.rowcount} old archive_jobs rows")
-            except Exception:
-                pass
-
-            conn.commit()
-            logger.info("DB maintenance: ANALYZE and pruning complete")
-    except Exception as e:
-        logger.error(f"DB maintenance error: {e}")
+    return await test_run_maintenance_loop_support._run_db_maintenance(_test_run_runtime())
 
 
 async def _log_startup_diagnostics():
