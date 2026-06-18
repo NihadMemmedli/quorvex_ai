@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timedelta  # noqa: F401
 from typing import Any
 
-from fastapi import Depends, FastAPI, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from slowapi.errors import RateLimitExceeded
@@ -131,11 +131,9 @@ from . import (
 from .db import (
     engine,
     get_database_type,  # noqa: F401
-    get_session,
     init_db,
     is_parallel_mode_available,  # noqa: F401
 )
-from .middleware.auth import get_current_user_optional
 from .middleware.permissions import ProjectRole, check_project_access  # noqa: F401
 from .middleware.rate_limit import limiter, rate_limit_exceeded_handler
 from .models_db import (
@@ -1302,137 +1300,18 @@ _agent_background_runner_dependencies = agent_compat_alias_support._agent_backgr
 execute_agent_background = agent_compat_alias_support.execute_agent_background
 
 
-async def run_agent(request: AgentRunRequest, session: Session = Depends(get_session)):
-    return await agent_run_launch.run_agent(request, session=session)
+run_agent = agent_run_launch.run_agent
+pause_agent_run = agent_run_control.pause_agent_run
+resume_agent_run = agent_run_control.resume_agent_run
+cancel_agent_run = agent_run_control.cancel_agent_run
+retry_agent_run = agent_run_control.retry_agent_run
 
 
-async def pause_agent_run(
-    id: str,
-    project_id: str | None = Query(default=None, description="Project ID for filtering"),
-    session: Session = Depends(get_session),
-    current_user: Any = Depends(get_current_user_optional),
-):
-    return await agent_run_control.pause_agent_run(
-        id,
-        project_id=project_id,
-        session=session,
-        current_user=current_user,
-    )
-
-
-async def resume_agent_run(
-    id: str,
-    project_id: str | None = Query(default=None, description="Project ID for filtering"),
-    session: Session = Depends(get_session),
-    current_user: Any = Depends(get_current_user_optional),
-):
-    return await agent_run_control.resume_agent_run(
-        id,
-        project_id=project_id,
-        session=session,
-        current_user=current_user,
-    )
-
-
-async def cancel_agent_run(
-    id: str,
-    project_id: str | None = Query(default=None, description="Project ID for filtering"),
-    session: Session = Depends(get_session),
-    current_user: Any = Depends(get_current_user_optional),
-):
-    return await agent_run_control.cancel_agent_run(
-        id,
-        project_id=project_id,
-        session=session,
-        current_user=current_user,
-    )
-
-
-async def retry_agent_run(
-    id: str,
-    project_id: str | None = Query(default=None, description="Project ID for filtering"),
-    session: Session = Depends(get_session),
-    current_user: Any = Depends(get_current_user_optional),
-):
-    return await agent_run_control.retry_agent_run(
-        id,
-        project_id=project_id,
-        session=session,
-        current_user=current_user,
-    )
-
-
-def get_agent_run_report(
-    id: str,
-    project_id: str = Query(..., description="Project ID for filtering"),
-    session: Session = Depends(get_session),
-):
-    return agent_reports.get_agent_run_report(id, project_id=project_id, session=session)
-
-
-def update_agent_run_report_overview(
-    run_id: str,
-    request: UpdateAgentReportOverviewRequest,
-    project_id: str = Query(..., description="Project ID for verification"),
-    session: Session = Depends(get_session),
-):
-    return agent_reports.update_agent_run_report_overview(
-        run_id,
-        request,
-        project_id=project_id,
-        session=session,
-    )
-
-
-def update_agent_run_report_item(
-    run_id: str,
-    item_id: str,
-    request: UpdateAgentReportItemRequest,
-    item_type: str = Query(..., description="finding, test_idea, or requirement"),
-    project_id: str = Query(..., description="Project ID for verification"),
-    session: Session = Depends(get_session),
-):
-    return agent_reports.update_agent_run_report_item(
-        run_id,
-        item_id,
-        request,
-        item_type=item_type,
-        project_id=project_id,
-        session=session,
-    )
-
-
-def search_agent_reports(
-    project_id: str | None = Query(default=None),
-    query: str | None = Query(default=None),
-    severity: str | None = Query(default=None),
-    item_type: str | None = Query(default=None, description="finding, test_idea, requirement, page, evidence, or action"),
-    limit: int = Query(default=50, ge=1, le=200),
-    session: Session = Depends(get_session),
-):
-    return agent_reports.search_agent_reports(
-        project_id=project_id,
-        query=query,
-        severity=severity,
-        item_type=item_type,
-        limit=limit,
-        session=session,
-    )
-
-
-def import_agent_report_requirements(
-    run_id: str,
-    request: ImportReportRequirementsRequest,
-    project_id: str = Query(..., description="Project ID for verification"),
-    session: Session = Depends(get_session),
-):
-    """Import reviewed custom-agent report requirements as candidate requirements."""
-    return agent_reports.import_agent_report_requirements(
-        run_id,
-        request,
-        project_id=project_id,
-        session=session,
-    )
+get_agent_run_report = agent_reports.get_agent_run_report
+update_agent_run_report_overview = agent_reports.update_agent_run_report_overview
+update_agent_run_report_item = agent_reports.update_agent_run_report_item
+search_agent_reports = agent_reports.search_agent_reports
+import_agent_report_requirements = agent_reports.import_agent_report_requirements
 
 
 # ========= Enhanced Exploratory Testing Compatibility Wrappers =========
