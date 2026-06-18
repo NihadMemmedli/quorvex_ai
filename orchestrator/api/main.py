@@ -1107,8 +1107,7 @@ def _sync_agent_run_observability_runs_dir() -> None:
     agent_compat_support.sync_agent_run_observability_runs_dir(_agent_compat_runtime())
 
 
-def _collect_agent_run_artifacts(run_id: str) -> list[dict[str, Any]]:
-    return agent_compat_support.collect_agent_run_artifacts(_agent_compat_runtime(), run_id)
+_collect_agent_run_artifacts = agent_run_observability._collect_agent_run_artifacts
 
 
 def _read_run_text_artifact(run_id: str, name: str, max_chars: int | None = None) -> str:
@@ -1123,8 +1122,7 @@ def _run_artifact_counts(run_id: str, artifacts: list[dict[str, Any]] | None = N
     return agent_compat_support.run_artifact_counts(_agent_compat_runtime(), run_id, artifacts)
 
 
-def _jsonl_latest_url(path: Path) -> str | None:
-    return agent_compat_support.jsonl_latest_url(_agent_compat_runtime(), path)
+_jsonl_latest_url = agent_run_observability._jsonl_latest_url
 
 
 def _latest_observed_url_for_run(run: AgentRun) -> str | None:
@@ -1135,37 +1133,28 @@ def _recover_custom_agent_partial_result(run: AgentRun, error: Exception | str) 
     return agent_compat_support.recover_custom_agent_partial_result(_agent_compat_runtime(), run, error)
 
 
-def _agent_run_summary(run: AgentRun) -> str | None:
-    return agent_compat_support.agent_run_summary(_agent_compat_runtime(), run)
+_agent_run_summary = agent_run_runtime_support._agent_run_summary
 
 
-def _exploratory_result_is_zero_evidence_failure(result: Any) -> bool:
-    return agent_compat_support.exploratory_result_is_zero_evidence_failure(_agent_compat_runtime(), result)
+_exploratory_result_is_zero_evidence_failure = (
+    agent_run_runtime_support._exploratory_result_is_zero_evidence_failure
+)
 
 
-def _exploratory_result_is_terminal_failure(result: Any) -> bool:
-    return agent_compat_support.exploratory_result_is_terminal_failure(_agent_compat_runtime(), result)
+_exploratory_result_is_terminal_failure = agent_run_runtime_support._exploratory_result_is_terminal_failure
 
 
-def _exploratory_result_has_usable_evidence(result: Any) -> bool:
-    return agent_compat_support.exploratory_result_has_usable_evidence(_agent_compat_runtime(), result)
+_exploratory_result_has_usable_evidence = agent_run_runtime_support._exploratory_result_has_usable_evidence
 
 
-def _merge_agent_failure_into_result(result: Any, error: Exception | str, *, failure_reason: str) -> dict[str, Any]:
-    return agent_compat_support.merge_agent_failure_into_result(
-        _agent_compat_runtime(),
-        result,
-        error,
-        failure_reason=failure_reason,
-    )
+_merge_agent_failure_into_result = agent_run_runtime_support._merge_agent_failure_into_result
 
 
 def _recover_exploratory_partial_result(run_id: str, config: dict[str, Any], error: Exception | str) -> dict[str, Any] | None:
     return agent_compat_support.recover_exploratory_partial_result(_agent_compat_runtime(), run_id, config, error)
 
 
-def _filter_agent_run_project(run: AgentRun, project_id: str | None) -> None:
-    agent_compat_support.filter_agent_run_project(_agent_compat_runtime(), run, project_id)
+_filter_agent_run_project = agent_run_observability._filter_agent_run_project
 
 
 def _agent_report_project_filter(project_id: str):
@@ -1181,12 +1170,10 @@ AGENT_TERMINAL_STATUSES = agent_run_observability.AGENT_TERMINAL_STATUSES
 AGENT_ACTIVE_STATUSES = agent_run_observability.AGENT_ACTIVE_STATUSES
 
 
-def _coerce_progress_int(value: Any, default: int = 0) -> int:
-    return agent_compat_support.coerce_progress_int(_agent_compat_runtime(), value, default)
+_coerce_progress_int = agent_run_observability._coerce_progress_int
 
 
-def _normalize_agent_run_progress(progress: dict[str, Any] | None) -> dict[str, Any]:
-    return agent_compat_support.normalize_agent_run_progress(_agent_compat_runtime(), progress)
+_normalize_agent_run_progress = agent_run_observability._normalize_agent_run_progress
 
 
 def _record_agent_run_event(
@@ -1224,100 +1211,67 @@ async def _agent_run_temporal_payload(run: AgentRun) -> dict[str, Any]:
     return await agent_compat_support.agent_run_temporal_payload(_agent_compat_runtime(), run)
 
 
-async def _signal_agent_run_temporal(run: AgentRun, signal_name: str, *args) -> None:
-    await agent_compat_support.signal_agent_run_temporal(_agent_compat_runtime(), run, signal_name, *args)
+_signal_agent_run_temporal = agent_run_control._signal_agent_run_temporal
 
 
-async def _cancel_agent_run_queue_task(run: AgentRun) -> dict[str, Any] | None:
-    return await agent_compat_support.cancel_agent_run_queue_task(_agent_compat_runtime(), run)
+_cancel_agent_run_queue_task = agent_run_control._cancel_agent_run_queue_task
 
 
-async def _wait_if_agent_run_paused(run_id: str, poll_interval: float = 0.5) -> bool:
-    return await agent_compat_support.wait_if_agent_run_paused(_agent_compat_runtime(), run_id, poll_interval)
+_wait_if_agent_run_paused = agent_run_control._wait_if_agent_run_paused
 
 
-def _mark_agent_run_paused(run: AgentRun, message: str = "Agent is paused") -> None:
-    agent_compat_support.mark_agent_run_paused(_agent_compat_runtime(), run, message)
+_mark_agent_run_paused = agent_run_control._mark_agent_run_paused
 
 
-def _mark_agent_run_cancelled(run: AgentRun, message: str = "Agent cancelled") -> None:
-    agent_compat_support.mark_agent_run_cancelled(_agent_compat_runtime(), run, message)
+_mark_agent_run_cancelled = agent_run_control._mark_agent_run_cancelled
 
 
-def _agent_run_health(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
-    return agent_compat_support.agent_run_health(_agent_compat_runtime(), run, session)
+_agent_run_health = agent_run_observability._agent_run_health
 
 
-def _serialize_agent_run(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
-    return agent_compat_support.serialize_agent_run(_agent_compat_runtime(), run, session)
+_serialize_agent_run = agent_run_observability._serialize_agent_run
 
 
-def _safe_json_dict(value: str | None) -> dict[str, Any]:
-    return agent_compat_support.safe_json_dict(_agent_compat_runtime(), value)
+_safe_json_dict = agent_run_observability._safe_json_dict
 
 
-def _compact_agent_run_config(config: dict[str, Any]) -> dict[str, Any]:
-    return agent_compat_support.compact_agent_run_config(_agent_compat_runtime(), config)
+_compact_agent_run_config = agent_run_observability._compact_agent_run_config
 
 
-def _compact_agent_run_summary(progress: dict[str, Any]) -> str | None:
-    return agent_compat_support.compact_agent_run_summary(_agent_compat_runtime(), progress)
+_compact_agent_run_summary = agent_run_observability._compact_agent_run_summary
 
 
-def _encode_agent_run_cursor(created_at: datetime, run_id: str) -> str:
-    return agent_compat_support.encode_agent_run_cursor(_agent_compat_runtime(), created_at, run_id)
+_encode_agent_run_cursor = agent_run_observability._encode_agent_run_cursor
 
 
-def _decode_agent_run_cursor(cursor: str | None) -> tuple[datetime, str] | None:
-    return agent_compat_support.decode_agent_run_cursor(_agent_compat_runtime(), cursor)
+_decode_agent_run_cursor = agent_run_observability._decode_agent_run_cursor
 
 
-def _agent_run_project_filters(project_id: str | None) -> list[Any]:
-    return agent_compat_support.agent_run_project_filters(_agent_compat_runtime(), project_id)
+_agent_run_project_filters = agent_run_observability._agent_run_project_filters
 
 
-def _agent_run_search_filter(q: str | None) -> Any | None:
-    return agent_compat_support.agent_run_search_filter(_agent_compat_runtime(), q)
+_agent_run_search_filter = agent_run_observability._agent_run_search_filter
 
 
-def _agent_run_status_filter(status: str | None) -> Any | None:
-    return agent_compat_support.agent_run_status_filter(_agent_compat_runtime(), status)
+_agent_run_status_filter = agent_run_observability._agent_run_status_filter
 
 
-def _agent_run_type_filter(agent_type: str | None) -> Any | None:
-    return agent_compat_support.agent_run_type_filter(_agent_compat_runtime(), agent_type)
+_agent_run_type_filter = agent_run_observability._agent_run_type_filter
 
 
-def _agent_run_history_filters(
-    *,
-    project_id: str | None,
-    status: str | None = None,
-    agent_type: str | None = None,
-    q: str | None = None,
-) -> list[Any]:
-    return agent_compat_support.agent_run_history_filters(
-        _agent_compat_runtime(),
-        project_id=project_id,
-        status=status,
-        agent_type=agent_type,
-        q=q,
-    )
+_agent_run_history_filters = agent_run_observability._agent_run_history_filters
 
 
-def _agent_run_history_counts(session: Session, *, project_id: str | None, q: str | None) -> dict[str, Any]:
-    return agent_compat_support.agent_run_history_counts(_agent_compat_runtime(), session, project_id=project_id, q=q)
+_agent_run_history_counts = agent_run_observability._agent_run_history_counts
 
 
-def _serialize_agent_run_summary_row(row: Any) -> dict[str, Any]:
-    return agent_compat_support.serialize_agent_run_summary_row(_agent_compat_runtime(), row)
+_serialize_agent_run_summary_row = agent_run_observability._serialize_agent_run_summary_row
 
 
-async def _live_agent_queue_progress(run: AgentRun) -> dict[str, Any]:
-    return await agent_compat_support.live_agent_queue_progress(_agent_compat_runtime(), run)
+_live_agent_queue_progress = agent_run_observability._live_agent_queue_progress
 
 
-async def _serialize_agent_run_live(run: AgentRun, session: Session | None = None) -> dict[str, Any]:
-    return await agent_compat_support.serialize_agent_run_live(_agent_compat_runtime(), run, session)
+_serialize_agent_run_live = agent_run_observability._serialize_agent_run_live
 
 
 def _clean_text(value: Any, max_len: int = 2000) -> str:
