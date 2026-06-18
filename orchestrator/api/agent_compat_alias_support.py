@@ -10,6 +10,9 @@ from sqlmodel import Session
 
 from . import (
     agent_compat_support,
+    agent_dependency_support,
+    agent_exploratory,
+    agent_flow_spec_support,
     agent_run_observability,
     agent_run_report_support,
     agent_run_runtime_support,
@@ -472,3 +475,33 @@ def _resolve_agent_execution_test_data_context(
         refs=refs,
         markdown=markdown,
     )
+
+
+def _agent_exploratory_dependencies() -> agent_exploratory.AgentExploratoryDependencies:
+    return agent_dependency_support.agent_exploratory_dependencies(_runtime())
+
+
+def _verify_exploration_run_project(run_id: str, project_id: str | None, session: Session) -> Any:
+    return agent_exploratory._verify_exploration_run_project(
+        run_id,
+        project_id,
+        session,
+        _agent_exploratory_dependencies(),
+    )
+
+
+_build_single_flow_prompt = agent_exploratory._build_single_flow_prompt
+_generate_fallback_spec = agent_exploratory._generate_fallback_spec
+
+_requires_authentication = agent_flow_spec_support._requires_authentication
+_detect_login_url = agent_flow_spec_support._detect_login_url
+_is_login_page = agent_flow_spec_support._is_login_page
+_extract_domain_name = agent_flow_spec_support._extract_domain_name
+_slugify = agent_flow_spec_support._slugify
+
+_flow_spec_jobs = agent_flow_spec_support._flow_spec_jobs
+MAX_FLOW_SPEC_JOBS = agent_flow_spec_support.MAX_FLOW_SPEC_JOBS
+
+
+def _cleanup_flow_spec_jobs() -> None:
+    return agent_exploratory._cleanup_flow_spec_jobs(_agent_exploratory_dependencies())
