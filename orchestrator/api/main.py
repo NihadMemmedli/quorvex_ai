@@ -1148,52 +1148,52 @@ _mark_agent_run_paused = agent_run_control._mark_agent_run_paused
 _mark_agent_run_cancelled = agent_run_control._mark_agent_run_cancelled
 
 
-_agent_run_health = agent_run_observability._agent_run_health
+_agent_run_health = agent_compat_alias_support._agent_run_health
 
 
-_serialize_agent_run = agent_run_observability._serialize_agent_run
+_serialize_agent_run = agent_compat_alias_support._serialize_agent_run
 
 
-_safe_json_dict = agent_run_observability._safe_json_dict
+_safe_json_dict = agent_compat_alias_support._safe_json_dict
 
 
-_compact_agent_run_config = agent_run_observability._compact_agent_run_config
+_compact_agent_run_config = agent_compat_alias_support._compact_agent_run_config
 
 
-_compact_agent_run_summary = agent_run_observability._compact_agent_run_summary
+_compact_agent_run_summary = agent_compat_alias_support._compact_agent_run_summary
 
 
-_encode_agent_run_cursor = agent_run_observability._encode_agent_run_cursor
+_encode_agent_run_cursor = agent_compat_alias_support._encode_agent_run_cursor
 
 
-_decode_agent_run_cursor = agent_run_observability._decode_agent_run_cursor
+_decode_agent_run_cursor = agent_compat_alias_support._decode_agent_run_cursor
 
 
-_agent_run_project_filters = agent_run_observability._agent_run_project_filters
+_agent_run_project_filters = agent_compat_alias_support._agent_run_project_filters
 
 
-_agent_run_search_filter = agent_run_observability._agent_run_search_filter
+_agent_run_search_filter = agent_compat_alias_support._agent_run_search_filter
 
 
-_agent_run_status_filter = agent_run_observability._agent_run_status_filter
+_agent_run_status_filter = agent_compat_alias_support._agent_run_status_filter
 
 
-_agent_run_type_filter = agent_run_observability._agent_run_type_filter
+_agent_run_type_filter = agent_compat_alias_support._agent_run_type_filter
 
 
-_agent_run_history_filters = agent_run_observability._agent_run_history_filters
+_agent_run_history_filters = agent_compat_alias_support._agent_run_history_filters
 
 
-_agent_run_history_counts = agent_run_observability._agent_run_history_counts
+_agent_run_history_counts = agent_compat_alias_support._agent_run_history_counts
 
 
-_serialize_agent_run_summary_row = agent_run_observability._serialize_agent_run_summary_row
+_serialize_agent_run_summary_row = agent_compat_alias_support._serialize_agent_run_summary_row
 
 
-_live_agent_queue_progress = agent_run_observability._live_agent_queue_progress
+_live_agent_queue_progress = agent_compat_alias_support._live_agent_queue_progress
 
 
-_serialize_agent_run_live = agent_run_observability._serialize_agent_run_live
+_serialize_agent_run_live = agent_compat_alias_support._serialize_agent_run_live
 
 
 REPORT_ITEM_COLLECTIONS = agent_compat_alias_support.REPORT_ITEM_COLLECTIONS
