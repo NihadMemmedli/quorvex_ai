@@ -30,7 +30,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from logging_config import get_logger, request_id_var, setup_logging
-from orchestrator.services.agent_runtimes import normalize_agent_runtime
+from orchestrator.services.agent_runtimes import normalize_agent_runtime  # noqa: F401
 from orchestrator.services.browser_auth_sessions import (
     BrowserAuthSessionError,  # noqa: F401
     ensure_browser_auth_session_usable,  # noqa: F401
@@ -60,10 +60,10 @@ from utils.agent_report import (  # noqa: F401
     _build_custom_agent_structured_report,
     _clean_text,
 )
-from utils.agent_tool_allowlists import get_agent_allowed_tools
+from utils.agent_tool_allowlists import get_agent_allowed_tools  # noqa: F401
 from utils.claude_config import copy_claude_project_config  # noqa: F401
 from utils.playwright_mcp import (
-    browser_runtime_status,
+    browser_runtime_status,  # noqa: F401
     prepare_run_playwright_config_content,  # noqa: F401
     write_playwright_test_mcp_config,  # noqa: F401
 )
@@ -75,6 +75,7 @@ from . import (
     agent_compat_support,
     agent_definition_support,
     agent_definitions,
+    agent_dependency_support,
     agent_exploratory,
     agent_flow_spec_support,
     agent_queue_ops,
@@ -151,9 +152,9 @@ from .models_db import (
     RegressionBatch,  # noqa: F401
 )
 from .models_db import ExecutionSettings as DBExecutionSettings
-from .models_db import SpecMetadata as DBSpecMetadata
+from .models_db import SpecMetadata as DBSpecMetadata  # noqa: F401
 from .models_db import TestRun as DBTestRun
-from .models_db import get_spec_metadata as get_db_spec_metadata
+from .models_db import get_spec_metadata as get_db_spec_metadata  # noqa: F401
 from .process_manager import ProcessManager, get_process_manager
 
 # Initialize logging
@@ -1385,7 +1386,7 @@ _resolve_agent_execution_test_data_context = agent_runtime_alias_support._resolv
 
 
 def _agent_background_runner_dependencies() -> agent_background_runner_support.AgentBackgroundRunnerDependencies:
-    return agent_compat_support.agent_background_runner_dependencies(_agent_compat_runtime())
+    return agent_dependency_support.agent_background_runner_dependencies(_agent_compat_runtime())
 
 
 async def execute_agent_background(run_id: str, agent_type: str, config: dict):
@@ -1534,36 +1535,7 @@ def import_agent_report_requirements(
 
 
 def _agent_exploratory_dependencies() -> agent_exploratory.AgentExploratoryDependencies:
-    project_root = Path(__file__).parent.parent.parent
-    return agent_exploratory.AgentExploratoryDependencies(
-        agent_run_model=AgentRun,
-        db_session_factory=Session,
-        db_engine=engine,
-        runs_dir=RUNS_DIR,
-        project_root=project_root,
-        flow_spec_jobs=_flow_spec_jobs,
-        max_flow_spec_jobs=MAX_FLOW_SPEC_JOBS,
-        agent_partial_status=AGENT_PARTIAL_STATUS,
-        agent_browser_auth_resolution_error=AgentBrowserAuthResolutionError,
-        browser_runtime_status=browser_runtime_status,
-        record_agent_run_event=_record_agent_run_event,
-        start_agent_run_temporal_or_fail=_start_agent_run_temporal_or_fail,
-        get_agent_report_run=_get_agent_report_run,
-        serialize_agent_run=_serialize_agent_run,
-        build_spec_generation_source_config=_build_spec_generation_source_config,
-        apply_report_spec_browser_auth_request=_apply_report_spec_browser_auth_request,
-        spec_generation_auth_metadata=_spec_generation_auth_metadata,
-        resolve_agent_browser_auth_storage_path=_resolve_agent_browser_auth_storage_path,
-        prepare_spec_generation_mcp_config=_prepare_spec_generation_mcp_config,
-        update_agent_run_progress=_update_agent_run_progress,
-        get_spec_metadata=get_db_spec_metadata,
-        spec_metadata_model=DBSpecMetadata,
-        short_tool_name=_short_tool_name,
-        run_flow_spec_generation=_run_flow_spec_generation,
-        normalize_agent_runtime=normalize_agent_runtime,
-        get_agent_allowed_tools=get_agent_allowed_tools,
-        logger_override=logger,
-    )
+    return agent_dependency_support.agent_exploratory_dependencies(_agent_compat_runtime())
 
 
 def _verify_exploration_run_project(run_id: str, project_id: str | None, session: Session) -> AgentRun:
