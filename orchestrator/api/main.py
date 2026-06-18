@@ -84,6 +84,7 @@ from . import (
     agent_run_observability,
     agent_run_report_support,
     agent_run_runtime_support,
+    agent_runtime_alias_support,
     agent_sessions,
     agent_tool_catalog_support,
     analytics,
@@ -1302,178 +1303,85 @@ _ensure_agent_write_access = agent_definition_support._ensure_agent_write_access
 _resolve_agent_tools = agent_definition_support._resolve_agent_tools
 
 
-def _browser_auth_selection(config: dict[str, Any]) -> tuple[str | None, bool]:
-    return agent_compat_support.browser_auth_selection(_agent_compat_runtime(), config)
+_browser_auth_selection = agent_run_runtime_support._browser_auth_selection
 
 
 AgentBrowserAuthResolutionError = agent_run_runtime_support.AgentBrowserAuthResolutionError
 
 
-def _browser_auth_request_fields_set(request: Any) -> set[str]:
-    return agent_compat_support.browser_auth_request_fields_set(_agent_compat_runtime(), request)
+_browser_auth_request_fields_set = agent_run_runtime_support._browser_auth_request_fields_set
 
 
-def _without_spec_generation_auth(config: dict[str, Any]) -> dict[str, Any]:
-    return agent_compat_support.without_spec_generation_auth(_agent_compat_runtime(), config)
+_without_spec_generation_auth = agent_run_runtime_support._without_spec_generation_auth
 
 
-def _apply_report_spec_browser_auth_request(
-    inherited_config: dict[str, Any],
-    request: GenerateReportItemSpecRequest | None,
-) -> tuple[dict[str, Any], bool]:
-    return agent_compat_support.apply_report_spec_browser_auth_request(
-        _agent_compat_runtime(),
-        inherited_config,
-        request,
-    )
+_apply_report_spec_browser_auth_request = agent_run_runtime_support._apply_report_spec_browser_auth_request
 
 
-def _resolve_agent_browser_auth_storage_path(
-    *,
-    run_id: str,
-    project_id: str | None,
-    config: dict[str, Any],
-    run_dir: Path,
-) -> Path | None:
-    return agent_compat_support.resolve_agent_browser_auth_storage_path(
-        _agent_compat_runtime(),
-        run_id=run_id,
-        project_id=project_id,
-        config=config,
-        run_dir=run_dir,
-    )
+_resolve_agent_browser_auth_storage_path = agent_runtime_alias_support._resolve_agent_browser_auth_storage_path
 
 
-def _prepare_custom_agent_mcp_config(run_id: str, storage_state_path: Path | str | None = None) -> Path:
-    return agent_compat_support.prepare_custom_agent_mcp_config(
-        _agent_compat_runtime(),
-        run_id,
-        storage_state_path=storage_state_path,
-    )
+_prepare_custom_agent_mcp_config = agent_runtime_alias_support._prepare_custom_agent_mcp_config
 
 
-def _prepare_spec_generation_mcp_config(
-    run_dir: Path,
-    storage_state_path: Path | str | None = None,
-) -> dict[str, Any]:
-    return agent_compat_support.prepare_spec_generation_mcp_config(
-        _agent_compat_runtime(),
-        run_dir,
-        storage_state_path,
-    )
+_prepare_spec_generation_mcp_config = agent_run_runtime_support._prepare_spec_generation_mcp_config
 
 
-def _safe_inherited_auth_config(value: Any) -> dict[str, Any]:
-    return agent_compat_support.safe_inherited_auth_config(_agent_compat_runtime(), value)
+_safe_inherited_auth_config = agent_run_runtime_support._safe_inherited_auth_config
 
 
-def _build_spec_generation_source_config(
-    source_config: dict[str, Any],
-    *,
-    target_url: str,
-    project_id: str | None,
-) -> dict[str, Any]:
-    return agent_compat_support.build_spec_generation_source_config(
-        _agent_compat_runtime(),
-        source_config,
-        target_url=target_url,
-        project_id=project_id,
-    )
+_build_spec_generation_source_config = agent_run_runtime_support._build_spec_generation_source_config
 
 
-def _spec_generation_auth_metadata(config: dict[str, Any], *, inherited: bool = True) -> dict[str, Any]:
-    return agent_compat_support.spec_generation_auth_metadata(_agent_compat_runtime(), config, inherited=inherited)
+_spec_generation_auth_metadata = agent_run_runtime_support._spec_generation_auth_metadata
 
 
-def _resolve_playwright_chromium_executable() -> Path | None:
-    return agent_compat_support.resolve_playwright_chromium_executable(_agent_compat_runtime())
+_resolve_playwright_chromium_executable = agent_run_runtime_support._resolve_playwright_chromium_executable
 
 
-def _playwright_chromium_probe_script(executable_path: str | None = None) -> str:
-    return agent_compat_support.playwright_chromium_probe_script(_agent_compat_runtime(), executable_path)
+_playwright_chromium_probe_script = agent_run_runtime_support._playwright_chromium_probe_script
 
 
-def _probe_custom_agent_browser(timeout_seconds: int = 30) -> tuple[bool, str]:
-    return agent_compat_support.probe_custom_agent_browser(_agent_compat_runtime(), timeout_seconds)
+_probe_custom_agent_browser = agent_runtime_alias_support._probe_custom_agent_browser
 
 
-async def _probe_custom_agent_browser_with_slot(run_id: str, timeout_seconds: int = 30) -> tuple[bool, str]:
-    return await agent_compat_support.probe_custom_agent_browser_with_slot(
-        _agent_compat_runtime(),
-        run_id,
-        timeout_seconds,
-    )
+_probe_custom_agent_browser_with_slot = agent_runtime_alias_support._probe_custom_agent_browser_with_slot
 
 
-def _custom_agent_uses_browser_tools(allowed_tools: list[Any]) -> bool:
-    return agent_compat_support.custom_agent_uses_browser_tools(_agent_compat_runtime(), allowed_tools)
+_custom_agent_uses_browser_tools = agent_run_runtime_support._custom_agent_uses_browser_tools
 
 
-def _custom_agent_browser_runs_via_queue() -> bool:
-    return agent_compat_support.custom_agent_browser_runs_via_queue(_agent_compat_runtime())
+_custom_agent_browser_runs_via_queue = agent_run_runtime_support._custom_agent_browser_runs_via_queue
 
 
-def _agent_run_has_browser_tools(agent_type: str, config: dict[str, Any]) -> bool:
-    return agent_compat_support.agent_run_has_browser_tools(_agent_compat_runtime(), agent_type, config)
+_agent_run_has_browser_tools = agent_run_runtime_support._agent_run_has_browser_tools
 
 
-async def _ensure_custom_agent_browser_available(run_id: str, *, force_direct_execution: bool = False) -> None:
-    await agent_compat_support.ensure_custom_agent_browser_available(
-        _agent_compat_runtime(),
-        run_id,
-        force_direct_execution=force_direct_execution,
-    )
+_ensure_custom_agent_browser_available = agent_runtime_alias_support._ensure_custom_agent_browser_available
 
 
-def _worker_managed_agent_browser_slot():
-    return agent_compat_support.worker_managed_agent_browser_slot(_agent_compat_runtime())
+_worker_managed_agent_browser_slot = agent_runtime_alias_support._worker_managed_agent_browser_slot
 
 
-def _short_tool_name(tool_name: str | None) -> str:
-    return agent_compat_support.short_tool_name(_agent_compat_runtime(), tool_name)
+_short_tool_name = agent_run_runtime_support._short_tool_name
 
 
-def _update_agent_run_progress(run_id: str, patch: dict[str, Any]) -> None:
-    agent_compat_support.update_agent_run_progress(_agent_compat_runtime(), run_id, patch)
+_update_agent_run_progress = agent_run_runtime_support.update_agent_run_progress
 
 
-def _generic_agent_runtime_prompt(agent_type: str, config: dict[str, Any]) -> str:
-    return agent_compat_support.generic_agent_runtime_prompt(_agent_compat_runtime(), agent_type, config)
+_generic_agent_runtime_prompt = agent_run_runtime_support._generic_agent_runtime_prompt
 
 
 KNOWN_AGENT_TYPE_TOOL_PROFILES = agent_run_runtime_support.KNOWN_AGENT_TYPE_TOOL_PROFILES
 
 
-def _agent_tool_profile_for_run(agent_type: str, config: dict[str, Any]) -> str | None:
-    return agent_compat_support.agent_tool_profile_for_run(_agent_compat_runtime(), agent_type, config)
+_agent_tool_profile_for_run = agent_run_runtime_support._agent_tool_profile_for_run
 
 
-def _resolve_known_agent_allowed_tools(
-    agent_type: str,
-    config: dict[str, Any],
-    *,
-    mcp_config_dir: Path | str | None = None,
-) -> list[str] | None:
-    return agent_compat_support.resolve_known_agent_allowed_tools(
-        _agent_compat_runtime(),
-        agent_type,
-        config,
-        mcp_config_dir=mcp_config_dir,
-    )
+_resolve_known_agent_allowed_tools = agent_run_runtime_support._resolve_known_agent_allowed_tools
 
 
-def _resolve_agent_execution_test_data_context(
-    *,
-    project_id: str | None,
-    refs: list[Any] | None = None,
-    markdown: str | None = None,
-) -> dict[str, Any]:
-    return agent_compat_support.resolve_agent_execution_test_data_context(
-        _agent_compat_runtime(),
-        project_id=project_id,
-        refs=refs,
-        markdown=markdown,
-    )
+_resolve_agent_execution_test_data_context = agent_runtime_alias_support._resolve_agent_execution_test_data_context
 
 
 def _agent_background_runner_dependencies() -> agent_background_runner_support.AgentBackgroundRunnerDependencies:

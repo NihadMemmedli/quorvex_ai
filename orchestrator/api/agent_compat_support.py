@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,6 +21,7 @@ from . import (
     agent_run_report_support,
     agent_run_runtime,
     agent_run_runtime_support,
+    agent_runtime_alias_support,
 )
 
 
@@ -390,13 +389,12 @@ def resolve_agent_browser_auth_storage_path(
     config: dict[str, Any],
     run_dir: Path,
 ) -> Path | None:
-    return agent_run_runtime_support._resolve_agent_browser_auth_storage_path(
+    return agent_runtime_alias_support._resolve_agent_browser_auth_storage_path(
         run_id=run_id,
         project_id=project_id,
         config=config,
         run_dir=run_dir,
-        resolve_browser_auth_for_run=runtime.resolve_browser_auth_for_run,
-        update_progress=runtime._update_agent_run_progress,
+        runtime=runtime,
     )
 
 
@@ -405,10 +403,10 @@ def prepare_custom_agent_mcp_config(
     run_id: str,
     storage_state_path: Path | str | None = None,
 ) -> Path:
-    return agent_run_runtime_support._prepare_custom_agent_mcp_config(
+    return agent_runtime_alias_support._prepare_custom_agent_mcp_config(
         run_id,
         storage_state_path=storage_state_path,
-        update_progress=runtime._update_agent_run_progress,
+        runtime=runtime,
     )
 
 
@@ -451,32 +449,7 @@ def playwright_chromium_probe_script(runtime: Any, executable_path: str | None =
 
 
 def probe_custom_agent_browser(runtime: Any, timeout_seconds: int = 30) -> tuple[bool, str]:
-    env = runtime.os.environ.copy()
-    env.setdefault("PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT", "300000")
-    executable_path = runtime._resolve_playwright_chromium_executable()
-    try:
-        result = runtime.subprocess.run(
-            [
-                "node",
-                "-e",
-                runtime._playwright_chromium_probe_script(str(executable_path) if executable_path else None),
-            ],
-            cwd=str(runtime.BASE_DIR),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except runtime.subprocess.TimeoutExpired as exc:
-        output = "\n".join(
-            str(value)
-            for value in (getattr(exc, "stdout", None), getattr(exc, "stderr", None))
-            if value
-        ).strip()
-        return False, output or f"Timed out after {timeout_seconds}s launching Playwright Chromium"
-
-    combined_output = f"{result.stdout}\n{result.stderr}".strip()
-    return result.returncode == 0, combined_output
+    return agent_runtime_alias_support._probe_custom_agent_browser(timeout_seconds, runtime=runtime)
 
 
 async def probe_custom_agent_browser_with_slot(
@@ -484,27 +457,11 @@ async def probe_custom_agent_browser_with_slot(
     run_id: str,
     timeout_seconds: int = 30,
 ) -> tuple[bool, str]:
-    async def _run_probe() -> tuple[bool, str]:
-        loop = asyncio.get_running_loop()
-        if timeout_seconds == 30:
-            return await loop.run_in_executor(None, runtime._probe_custom_agent_browser)
-        return await loop.run_in_executor(None, runtime._probe_custom_agent_browser, timeout_seconds)
-
-    try:
-        pool = runtime.BROWSER_POOL or await runtime.get_browser_pool()
-        if await pool.is_running(run_id):
-            return await _run_probe()
-    except Exception as exc:
-        runtime.logger.debug("Could not verify existing agent browser slot for %s: %s", run_id, exc)
-
-    async with runtime.browser_operation_slot(
-        request_id=f"agent-probe:{run_id}",
-        operation_type=runtime.BrowserOpType.AGENT,
-        description=f"Custom agent browser readiness probe {run_id}",
-        timeout=timeout_seconds,
-        max_operation_duration=timeout_seconds + 15,
-    ):
-        return await _run_probe()
+    return await agent_runtime_alias_support._probe_custom_agent_browser_with_slot(
+        run_id,
+        timeout_seconds,
+        runtime=runtime,
+    )
 
 
 def custom_agent_uses_browser_tools(runtime: Any, allowed_tools: list[Any]) -> bool:
@@ -525,59 +482,15 @@ async def ensure_custom_agent_browser_available(
     *,
     force_direct_execution: bool = False,
 ) -> None:
-    """Fail fast if the Playwright browser required by @playwright/mcp is unavailable."""
-    if runtime._custom_agent_browser_runs_via_queue() and not force_direct_execution:
-        runtime._update_agent_run_progress(
-            run_id,
-            {
-                **runtime.browser_runtime_status(),
-                "phase": "browser_delegated",
-                "message": "Browser execution delegated to agent worker",
-            },
-        )
-        return
-
-    runtime._update_agent_run_progress(
+    await agent_runtime_alias_support._ensure_custom_agent_browser_available(
         run_id,
-        {
-            "phase": "browser_setup",
-            "message": "Checking local Playwright browser availability",
-        },
-    )
-    runtime._update_agent_run_progress(run_id, runtime.browser_runtime_status())
-
-    available, output = await runtime._probe_custom_agent_browser_with_slot(run_id)
-    if not available:
-        runtime._update_agent_run_progress(
-            run_id,
-            {
-                "phase": "failed",
-                "message": "Playwright Chromium is not installed or cannot launch in the local execution container",
-                "browser_probe_output": output[-2000:],
-            },
-        )
-        raise RuntimeError(
-            "Playwright Chromium is not installed or cannot launch in the local execution container. "
-            "Custom agent browser tools require Chromium to be present before a direct run starts. "
-            "For `make start`, rebuild/recreate the backend image so Dockerfile's "
-            "`npx playwright install chromium` step runs, or enable USE_AGENT_QUEUE=true "
-            "to delegate browser execution to an agent worker. "
-            f"Browser probe output: {output[-1000:]}"
-        )
-
-    runtime._update_agent_run_progress(
-        run_id,
-        {
-            "phase": "browser_ready",
-            "message": "Local Playwright browser is ready",
-        },
+        force_direct_execution=force_direct_execution,
+        runtime=runtime,
     )
 
 
-@asynccontextmanager
-async def worker_managed_agent_browser_slot(runtime: Any):
-    """No-op slot context for queued agents that acquire browser slots in workers."""
-    yield True
+def worker_managed_agent_browser_slot(runtime: Any):
+    return agent_runtime_alias_support._worker_managed_agent_browser_slot(runtime=runtime)
 
 
 def short_tool_name(runtime: Any, tool_name: str | None) -> str:
@@ -619,21 +532,12 @@ def resolve_agent_execution_test_data_context(
     refs: list[Any] | None = None,
     markdown: str | None = None,
 ) -> dict[str, Any]:
-    try:
-        from orchestrator.services.test_data_resolver import (
-            resolve_test_data_execution_context,
-        )
-
-        with runtime.Session(runtime.engine) as session:
-            return resolve_test_data_execution_context(
-                session,
-                project_id=project_id or "default",
-                refs=[str(ref) for ref in (refs or [])],
-                markdown=markdown or "",
-            )
-    except Exception as exc:
-        runtime.logger.warning("Failed to resolve agent execution test data: %s", exc)
-        return {}
+    return agent_runtime_alias_support._resolve_agent_execution_test_data_context(
+        project_id=project_id,
+        refs=refs,
+        markdown=markdown,
+        runtime=runtime,
+    )
 
 
 def agent_background_runner_dependencies(runtime: Any) -> agent_background_runner_support.AgentBackgroundRunnerDependencies:
