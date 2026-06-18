@@ -117,6 +117,26 @@ async def _agent_run_temporal_payload(run: Any) -> dict[str, Any]:
     return await agent_compat_support.agent_run_temporal_payload(_runtime(), run)
 
 
+async def _signal_agent_run_temporal(run: Any, signal_name: str, *args: Any) -> None:
+    await agent_compat_support.signal_agent_run_temporal(_runtime(), run, signal_name, *args)
+
+
+async def _cancel_agent_run_queue_task(run: Any) -> dict[str, Any] | None:
+    return await agent_compat_support.cancel_agent_run_queue_task(_runtime(), run)
+
+
+async def _wait_if_agent_run_paused(run_id: str, poll_interval: float = 0.5) -> bool:
+    return await agent_compat_support.wait_if_agent_run_paused(_runtime(), run_id, poll_interval)
+
+
+def _mark_agent_run_paused(run: Any, message: str = "Agent is paused") -> None:
+    agent_compat_support.mark_agent_run_paused(_runtime(), run, message)
+
+
+def _mark_agent_run_cancelled(run: Any, message: str = "Agent cancelled") -> None:
+    agent_compat_support.mark_agent_run_cancelled(_runtime(), run, message)
+
+
 def _agent_run_health(run: Any, session: Session | None = None) -> dict[str, Any]:
     return agent_compat_support.agent_run_health(_runtime(), run, session)
 
