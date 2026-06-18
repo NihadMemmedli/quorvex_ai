@@ -6,7 +6,12 @@ from typing import Any
 
 from sqlmodel import Session
 
-from . import agent_compat_support, agent_run_observability, agent_run_runtime_support
+from . import (
+    agent_compat_support,
+    agent_run_observability,
+    agent_run_report_support,
+    agent_run_runtime_support,
+)
 
 
 def _runtime() -> Any:
@@ -109,3 +114,89 @@ async def _start_agent_run_temporal_or_fail(run: Any, session: Session, *, workf
 
 async def _agent_run_temporal_payload(run: Any) -> dict[str, Any]:
     return await agent_compat_support.agent_run_temporal_payload(_runtime(), run)
+
+
+REPORT_ITEM_COLLECTIONS = agent_run_report_support.REPORT_ITEM_COLLECTIONS
+REPORT_ITEM_EDITABLE_FIELDS = agent_run_report_support.REPORT_ITEM_EDITABLE_FIELDS
+REPORT_ITEM_LIST_FIELDS = agent_run_report_support.REPORT_ITEM_LIST_FIELDS
+REPORT_ITEM_PROTECTED_FIELDS = agent_run_report_support.REPORT_ITEM_PROTECTED_FIELDS
+
+
+def _report_confidence(value: str | None) -> float:
+    return agent_compat_support.report_confidence(_runtime(), value)
+
+
+def _report_importance(value: str | None) -> float:
+    return agent_compat_support.report_importance(_runtime(), value)
+
+
+def _report_requirement_confidence(value: Any) -> float:
+    return agent_compat_support.report_requirement_confidence(_runtime(), value)
+
+
+def _report_requirement_acceptance_criteria(item: dict[str, Any]) -> list[str]:
+    return agent_compat_support.report_requirement_acceptance_criteria(_runtime(), item)
+
+
+def _requirement_create_body_from_report_item(item: dict[str, Any]) -> dict[str, Any]:
+    return agent_compat_support.requirement_create_body_from_report_item(_runtime(), item)
+
+
+def _normalize_report_item_type(item_type: str | None) -> str:
+    return agent_compat_support.normalize_report_item_type(_runtime(), item_type)
+
+
+def _stored_custom_agent_report(run: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    return agent_compat_support.stored_custom_agent_report(_runtime(), run)
+
+
+def _normalize_report_patch_value(field: str, value: Any) -> Any:
+    return agent_compat_support.normalize_report_patch_value(_runtime(), field, value)
+
+
+def _editable_report_item_patch(item_type: str, patch: dict[str, Any]) -> dict[str, Any]:
+    return agent_compat_support.editable_report_item_patch(_runtime(), item_type, patch)
+
+
+def _find_report_item(report: dict[str, Any], item_type: str, item_id: str) -> dict[str, Any]:
+    return agent_compat_support.find_report_item(_runtime(), report, item_type, item_id)
+
+
+def _capture_custom_agent_report_memory(
+    *,
+    run_id: str,
+    project_id: str | None,
+    structured_report: dict[str, Any],
+    config: dict[str, Any],
+) -> list[str]:
+    return agent_compat_support.capture_custom_agent_report_memory(
+        _runtime(),
+        run_id=run_id,
+        project_id=project_id,
+        structured_report=structured_report,
+        config=config,
+    )
+
+
+def _sync_agent_tool_catalog(session: Session) -> list[Any]:
+    return agent_compat_support.sync_agent_tool_catalog(_runtime(), session)
+
+
+def _serialize_agent_tool(tool: Any) -> dict[str, Any]:
+    return agent_compat_support.serialize_agent_tool(_runtime(), tool)
+
+
+def _serialize_agent_definition(definition: Any, tools_by_id: dict[str, Any] | None = None) -> dict[str, Any]:
+    return agent_compat_support.serialize_agent_definition(_runtime(), definition, tools_by_id)
+
+
+def _get_agent_definition_or_404(definition_id: str, project_id: str | None, session: Session) -> Any:
+    return agent_compat_support.get_agent_definition_or_404(_runtime(), definition_id, project_id, session)
+
+
+async def _ensure_agent_write_access(project_id: str | None, current_user: Any, session: Session) -> None:
+    await agent_compat_support.ensure_agent_write_access(_runtime(), project_id, current_user, session)
+
+
+def _resolve_agent_tools(tool_ids: list[str], session: Session) -> tuple[list[str], list[dict[str, Any]]]:
+    return agent_compat_support.resolve_agent_tools(_runtime(), tool_ids, session)

@@ -73,7 +73,6 @@ from . import (
     agent_background_runner_support,
     agent_coding_patch,
     agent_compat_alias_support,
-    agent_definition_support,
     agent_definitions,
     agent_dependency_support,
     agent_exploratory,
@@ -83,7 +82,6 @@ from . import (
     agent_run_control,
     agent_run_launch,
     agent_run_observability,
-    agent_run_report_support,
     agent_run_runtime_support,
     agent_runtime_alias_support,
     agent_sessions,
@@ -1198,31 +1196,31 @@ _live_agent_queue_progress = agent_run_observability._live_agent_queue_progress
 _serialize_agent_run_live = agent_run_observability._serialize_agent_run_live
 
 
-REPORT_ITEM_COLLECTIONS = agent_run_report_support.REPORT_ITEM_COLLECTIONS
-REPORT_ITEM_EDITABLE_FIELDS = agent_run_report_support.REPORT_ITEM_EDITABLE_FIELDS
-REPORT_ITEM_LIST_FIELDS = agent_run_report_support.REPORT_ITEM_LIST_FIELDS
-REPORT_ITEM_PROTECTED_FIELDS = agent_run_report_support.REPORT_ITEM_PROTECTED_FIELDS
+REPORT_ITEM_COLLECTIONS = agent_compat_alias_support.REPORT_ITEM_COLLECTIONS
+REPORT_ITEM_EDITABLE_FIELDS = agent_compat_alias_support.REPORT_ITEM_EDITABLE_FIELDS
+REPORT_ITEM_LIST_FIELDS = agent_compat_alias_support.REPORT_ITEM_LIST_FIELDS
+REPORT_ITEM_PROTECTED_FIELDS = agent_compat_alias_support.REPORT_ITEM_PROTECTED_FIELDS
 
 
-_report_confidence = agent_run_report_support._report_confidence
-_report_importance = agent_run_report_support._report_importance
-_report_requirement_confidence = agent_run_report_support._report_requirement_confidence
-_report_requirement_acceptance_criteria = agent_run_report_support._report_requirement_acceptance_criteria
-_requirement_create_body_from_report_item = agent_run_report_support._requirement_create_body_from_report_item
-_normalize_report_item_type = agent_run_report_support._normalize_report_item_type
-_stored_custom_agent_report = agent_run_report_support._stored_custom_agent_report
-_normalize_report_patch_value = agent_run_report_support._normalize_report_patch_value
-_editable_report_item_patch = agent_run_report_support._editable_report_item_patch
-_find_report_item = agent_run_report_support._find_report_item
-_capture_custom_agent_report_memory = agent_run_report_support._capture_custom_agent_report_memory
+_report_confidence = agent_compat_alias_support._report_confidence
+_report_importance = agent_compat_alias_support._report_importance
+_report_requirement_confidence = agent_compat_alias_support._report_requirement_confidence
+_report_requirement_acceptance_criteria = agent_compat_alias_support._report_requirement_acceptance_criteria
+_requirement_create_body_from_report_item = agent_compat_alias_support._requirement_create_body_from_report_item
+_normalize_report_item_type = agent_compat_alias_support._normalize_report_item_type
+_stored_custom_agent_report = agent_compat_alias_support._stored_custom_agent_report
+_normalize_report_patch_value = agent_compat_alias_support._normalize_report_patch_value
+_editable_report_item_patch = agent_compat_alias_support._editable_report_item_patch
+_find_report_item = agent_compat_alias_support._find_report_item
+_capture_custom_agent_report_memory = agent_compat_alias_support._capture_custom_agent_report_memory
 
 
-_sync_agent_tool_catalog = agent_definition_support._sync_agent_tool_catalog
-_serialize_agent_tool = agent_definition_support._serialize_agent_tool
-_serialize_agent_definition = agent_definition_support._serialize_agent_definition
-_get_agent_definition_or_404 = agent_definition_support._get_agent_definition_or_404
-_ensure_agent_write_access = agent_definition_support._ensure_agent_write_access
-_resolve_agent_tools = agent_definition_support._resolve_agent_tools
+_sync_agent_tool_catalog = agent_compat_alias_support._sync_agent_tool_catalog
+_serialize_agent_tool = agent_compat_alias_support._serialize_agent_tool
+_serialize_agent_definition = agent_compat_alias_support._serialize_agent_definition
+_get_agent_definition_or_404 = agent_compat_alias_support._get_agent_definition_or_404
+_ensure_agent_write_access = agent_compat_alias_support._ensure_agent_write_access
+_resolve_agent_tools = agent_compat_alias_support._resolve_agent_tools
 
 
 _browser_auth_selection = agent_run_runtime_support._browser_auth_selection
