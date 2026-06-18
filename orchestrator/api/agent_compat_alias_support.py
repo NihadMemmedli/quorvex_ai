@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from sqlmodel import Session
@@ -114,6 +115,82 @@ async def _start_agent_run_temporal_or_fail(run: Any, session: Session, *, workf
 
 async def _agent_run_temporal_payload(run: Any) -> dict[str, Any]:
     return await agent_compat_support.agent_run_temporal_payload(_runtime(), run)
+
+
+def _agent_run_health(run: Any, session: Session | None = None) -> dict[str, Any]:
+    return agent_compat_support.agent_run_health(_runtime(), run, session)
+
+
+def _serialize_agent_run(run: Any, session: Session | None = None) -> dict[str, Any]:
+    return agent_compat_support.serialize_agent_run(_runtime(), run, session)
+
+
+def _safe_json_dict(value: str | None) -> dict[str, Any]:
+    return agent_compat_support.safe_json_dict(_runtime(), value)
+
+
+def _compact_agent_run_config(config: dict[str, Any]) -> dict[str, Any]:
+    return agent_compat_support.compact_agent_run_config(_runtime(), config)
+
+
+def _compact_agent_run_summary(progress: dict[str, Any]) -> str | None:
+    return agent_compat_support.compact_agent_run_summary(_runtime(), progress)
+
+
+def _encode_agent_run_cursor(created_at: datetime, run_id: str) -> str:
+    return agent_compat_support.encode_agent_run_cursor(_runtime(), created_at, run_id)
+
+
+def _decode_agent_run_cursor(cursor: str | None) -> tuple[datetime, str] | None:
+    return agent_compat_support.decode_agent_run_cursor(_runtime(), cursor)
+
+
+def _agent_run_project_filters(project_id: str | None) -> list[Any]:
+    return agent_compat_support.agent_run_project_filters(_runtime(), project_id)
+
+
+def _agent_run_search_filter(q: str | None) -> Any | None:
+    return agent_compat_support.agent_run_search_filter(_runtime(), q)
+
+
+def _agent_run_status_filter(status: str | None) -> Any | None:
+    return agent_compat_support.agent_run_status_filter(_runtime(), status)
+
+
+def _agent_run_type_filter(agent_type: str | None) -> Any | None:
+    return agent_compat_support.agent_run_type_filter(_runtime(), agent_type)
+
+
+def _agent_run_history_filters(
+    *,
+    project_id: str | None,
+    status: str | None = None,
+    agent_type: str | None = None,
+    q: str | None = None,
+) -> list[Any]:
+    return agent_compat_support.agent_run_history_filters(
+        _runtime(),
+        project_id=project_id,
+        status=status,
+        agent_type=agent_type,
+        q=q,
+    )
+
+
+def _agent_run_history_counts(session: Session, *, project_id: str | None, q: str | None) -> dict[str, Any]:
+    return agent_compat_support.agent_run_history_counts(_runtime(), session, project_id=project_id, q=q)
+
+
+def _serialize_agent_run_summary_row(row: Any) -> dict[str, Any]:
+    return agent_compat_support.serialize_agent_run_summary_row(_runtime(), row)
+
+
+async def _live_agent_queue_progress(run: Any) -> dict[str, Any]:
+    return await agent_compat_support.live_agent_queue_progress(_runtime(), run)
+
+
+async def _serialize_agent_run_live(run: Any, session: Session | None = None) -> dict[str, Any]:
+    return await agent_compat_support.serialize_agent_run_live(_runtime(), run, session)
 
 
 REPORT_ITEM_COLLECTIONS = agent_run_report_support.REPORT_ITEM_COLLECTIONS
