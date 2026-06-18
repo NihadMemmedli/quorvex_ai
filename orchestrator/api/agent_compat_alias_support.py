@@ -9,6 +9,7 @@ from typing import Any
 from sqlmodel import Session
 
 from . import (
+    agent_background_runner_support,
     agent_compat_support,
     agent_dependency_support,
     agent_exploratory,
@@ -16,6 +17,7 @@ from . import (
     agent_run_observability,
     agent_run_report_support,
     agent_run_runtime_support,
+    agent_tool_catalog_support,
 )
 
 
@@ -477,6 +479,25 @@ def _resolve_agent_execution_test_data_context(
     )
 
 
+_agent_tool = agent_tool_catalog_support.agent_tool
+AGENT_TOOL_CATALOG = agent_tool_catalog_support.AGENT_TOOL_CATALOG
+AGENT_RISK_ORDER = agent_tool_catalog_support.AGENT_RISK_ORDER
+KNOWN_AGENT_TYPE_TOOL_PROFILES = agent_run_runtime_support.KNOWN_AGENT_TYPE_TOOL_PROFILES
+
+
+def _agent_background_runner_dependencies() -> agent_background_runner_support.AgentBackgroundRunnerDependencies:
+    return agent_dependency_support.agent_background_runner_dependencies(_runtime())
+
+
+async def execute_agent_background(run_id: str, agent_type: str, config: dict[str, Any]) -> Any:
+    return await agent_background_runner_support.execute_agent_background(
+        run_id,
+        agent_type,
+        config,
+        deps=_agent_background_runner_dependencies(),
+    )
+
+
 def _agent_exploratory_dependencies() -> agent_exploratory.AgentExploratoryDependencies:
     return agent_dependency_support.agent_exploratory_dependencies(_runtime())
 
@@ -505,3 +526,28 @@ MAX_FLOW_SPEC_JOBS = agent_flow_spec_support.MAX_FLOW_SPEC_JOBS
 
 def _cleanup_flow_spec_jobs() -> None:
     return agent_exploratory._cleanup_flow_spec_jobs(_agent_exploratory_dependencies())
+
+
+async def _run_flow_spec_generation(
+    job_id: str,
+    run_id: str,
+    flow_id: str,
+    flow: dict[str, Any],
+    flows: list[Any],
+    flows_file_path: str,
+    run_project_id: str | None,
+    run_config: dict[str, Any],
+    spec_agent_run_id: str | None = None,
+) -> None:
+    await agent_exploratory._run_flow_spec_generation_impl(
+        job_id=job_id,
+        run_id=run_id,
+        flow_id=flow_id,
+        flow=flow,
+        flows=flows,
+        flows_file_path=flows_file_path,
+        run_project_id=run_project_id,
+        run_config=run_config,
+        spec_agent_run_id=spec_agent_run_id,
+        deps=_agent_exploratory_dependencies(),
+    )

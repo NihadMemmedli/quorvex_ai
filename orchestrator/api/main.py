@@ -70,20 +70,16 @@ from utils.playwright_mcp import (
 from utils.project_utils import derive_project_id_from_url  # noqa: F401
 
 from . import (
-    agent_background_runner_support,
     agent_coding_patch,
     agent_compat_alias_support,
     agent_definitions,
-    agent_dependency_support,
     agent_exploratory,
     agent_queue_ops,
     agent_reports,
     agent_run_control,
     agent_run_launch,
     agent_run_observability,
-    agent_run_runtime_support,
     agent_sessions,
-    agent_tool_catalog_support,
     analytics,
     api_testing,
     auth,
@@ -1075,11 +1071,11 @@ def _normalize_request_test_data_refs(refs: list[str] | None) -> list[str]:
 AgentRunRequest = agent_run_launch.AgentRunRequest
 
 
-_agent_tool = agent_tool_catalog_support.agent_tool
+_agent_tool = agent_compat_alias_support._agent_tool
 
 
-AGENT_TOOL_CATALOG = agent_tool_catalog_support.AGENT_TOOL_CATALOG
-AGENT_RISK_ORDER = agent_tool_catalog_support.AGENT_RISK_ORDER
+AGENT_TOOL_CATALOG = agent_compat_alias_support.AGENT_TOOL_CATALOG
+AGENT_RISK_ORDER = agent_compat_alias_support.AGENT_RISK_ORDER
 
 
 ExploratoryRunRequest = agent_exploratory.ExploratoryRunRequest
@@ -1290,7 +1286,7 @@ _update_agent_run_progress = agent_compat_alias_support._update_agent_run_progre
 _generic_agent_runtime_prompt = agent_compat_alias_support._generic_agent_runtime_prompt
 
 
-KNOWN_AGENT_TYPE_TOOL_PROFILES = agent_run_runtime_support.KNOWN_AGENT_TYPE_TOOL_PROFILES
+KNOWN_AGENT_TYPE_TOOL_PROFILES = agent_compat_alias_support.KNOWN_AGENT_TYPE_TOOL_PROFILES
 
 
 _agent_tool_profile_for_run = agent_compat_alias_support._agent_tool_profile_for_run
@@ -1302,17 +1298,8 @@ _resolve_known_agent_allowed_tools = agent_compat_alias_support._resolve_known_a
 _resolve_agent_execution_test_data_context = agent_compat_alias_support._resolve_agent_execution_test_data_context
 
 
-def _agent_background_runner_dependencies() -> agent_background_runner_support.AgentBackgroundRunnerDependencies:
-    return agent_dependency_support.agent_background_runner_dependencies(_agent_compat_runtime())
-
-
-async def execute_agent_background(run_id: str, agent_type: str, config: dict):
-    return await agent_background_runner_support.execute_agent_background(
-        run_id,
-        agent_type,
-        config,
-        deps=_agent_background_runner_dependencies(),
-    )
+_agent_background_runner_dependencies = agent_compat_alias_support._agent_background_runner_dependencies
+execute_agent_background = agent_compat_alias_support.execute_agent_background
 
 
 async def run_agent(request: AgentRunRequest, session: Session = Depends(get_session)):
@@ -1475,30 +1462,7 @@ MAX_FLOW_SPEC_JOBS = agent_compat_alias_support.MAX_FLOW_SPEC_JOBS
 _cleanup_flow_spec_jobs = agent_compat_alias_support._cleanup_flow_spec_jobs
 
 
-async def _run_flow_spec_generation(
-    job_id: str,
-    run_id: str,
-    flow_id: str,
-    flow: dict,
-    flows: list,
-    flows_file_path: str,
-    run_project_id: str | None,
-    run_config: dict,
-    spec_agent_run_id: str | None = None,
-):
-    """Compatibility wrapper for the support-owned background runner."""
-    await agent_exploratory._run_flow_spec_generation_impl(
-        job_id=job_id,
-        run_id=run_id,
-        flow_id=flow_id,
-        flow=flow,
-        flows=flows,
-        flows_file_path=flows_file_path,
-        run_project_id=run_project_id,
-        run_config=run_config,
-        spec_agent_run_id=spec_agent_run_id,
-        deps=_agent_exploratory_dependencies(),
-    )
+_run_flow_spec_generation = agent_compat_alias_support._run_flow_spec_generation
 
 
 run_exploratory_agent = agent_exploratory.run_exploratory_agent
